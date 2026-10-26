@@ -314,3 +314,62 @@ def test_lane_calls_without_usage_disclosed():
     assert lane["priced"] is False
     assert lane["reason"] == "usage_present_false"
     assert usd == 0.0
+
+
+def test_openrouter_bare_alias_of_a_measured_id_is_priced():
+    """#8486 F1 (review). The openrouter lane RECORDS the bare model id (the
+    meter's id is the adapter's ``id``, and ``OpenRouterModel`` stores the
+    spec's model part verbatim — the ``gpt-4o-2024-08-06`` entry documents the
+    same fact), so a ``PRICING_MAP`` row that exists only under the
+    vendor-prefixed spelling leaves the served id UNPRICED.
+
+    RED before the fix: ``lookup_rate("openrouter", "deepseek-flash")``
+    returned None — the bare-form fallback only rewrites a PREFIXED id, so it
+    never fired here — and an armed ceiling (now the DEFAULT) therefore
+    refused the whole measurement lane at ``arm()`` with
+    ``UnpricedModelRefused``. That is a fail-closed outcome, but it makes the
+    lane unrunnable while the map claims the hole is closed."""
+    for model in ("deepseek/deepseek-flash", "deepseek-flash"):
+        entry = lookup_rate("openrouter", model)
+        assert entry is not None, f"openrouter/{model} is unpriced"
+        assert entry["prompt_per_1m"] == 0.14
+        assert entry["completion_per_1m"] == 0.28
+        assert entry["cache_read_per_1m"] == 0.028
+    # the direct lane is the one that carries the MEASURED cache rate
+    assert lookup_rate("deepseek", "deepseek-flash")["cache_read_per_1m"] == (
+        0.0028)
+
+
+def test_the_pilot_arithmetic_the_alias_rows_claim_is_the_one_they_price():
+    """#8486 F1 (review). Each alias row's NOTE claims a provenance, and a
+    claim an auditor cannot reproduce is exactly what the
+    source/verified_on/estimated triple exists to prevent. The measured pilot
+    envelope is 437,253 prompt (60,928 cache-hit) / 2,330 completion.
+
+    RED before the fix: the openrouter row's note said the envelope priced to
+    $0.0535085 "to the cent" while its OWN cache rate (0.028) prices it at
+    $0.055044 — the $0.0535085 reproduction only holds at the direct lane's
+    0.0028 cache rate."""
+    usage = {"prompt_tokens": 437_253, "completion_tokens": 2_330,
+             "prompt_cache_hit_tokens": 60_928, "calls": 1,
+             "usage_present": True}
+
+    def _usd(provider, model):
+        usd, priced, _ = price_usage_envelope(_env({
+            ("reader", provider, model): dict(usage),
+        }))
+        assert priced is True
+        return usd
+
+    # the direct lane reproduces the measured spend to the cent
+    assert _usd("deepseek", "deepseek-flash") == pytest.approx(
+        0.0535085, abs=1e-6)
+    # the openrouter rows price the same envelope at their own cache rate,
+    # and the note says so — an estimate that is 2.9% high, never low
+    assert _usd("openrouter", "deepseek-flash") == pytest.approx(
+        0.055044, abs=1e-6)
+    assert _usd("openrouter", "deepseek/deepseek-flash") == pytest.approx(
+        0.055044, abs=1e-6)
+    assert "0.055044" in PRICING_MAP["openrouter"]["deepseek/deepseek-flash"][
+        "note"]
+    assert "0.055044" in PRICING_MAP["openrouter"]["deepseek-flash"]["note"]

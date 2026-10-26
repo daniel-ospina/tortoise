@@ -80,7 +80,21 @@ from . import measurement_posture
 
 #: Receipt schema keys mandated by plan §6.6 (same vocabulary as the
 #: W2/W3 harness receipts).
-RUN_STATUS_VALUES = ("completed", "partial", "failed", "skipped")
+#:
+#: #8486 F4 (review): this tuple is SHARED — ``measure_ask_distilled``
+#: imports it for the ask-lane receipt validator. Widening it to carry
+#: ``"partial"`` widened THAT validator too, where a status the ask lane can
+#: never produce would pass its schema check and then take its
+#: non-``completed`` early return, skipping the completed-run identity gates.
+#: The W7 extension therefore lives in ``W7_RUN_STATUS_VALUES`` below — a
+#: lane's vocabulary is extended where the lane is, never by editing the
+#: tuple another lane also trusts.
+RUN_STATUS_VALUES = ("completed", "failed", "skipped")
+
+#: The W7 receipt vocabulary — the shared statuses plus ``partial``, which a
+#: retrieval-only W7 run records (#8486 F4: the official retrieval metric was
+#: measured, QA accuracy was not, by design).
+W7_RUN_STATUS_VALUES = (*RUN_STATUS_VALUES, "partial")
 VERDICT_VALUES = ("pass", "regression", "inconclusive")
 FAILURE_ORIGIN_VALUES = (None, "config_mismatch", "hash_mismatch",
                          "runner_error", "gate_regression")
@@ -475,7 +489,7 @@ def validate_receipt(receipt: dict) -> list[str]:
         elif not isinstance(value, str) or not value.strip():
             issues.append(
                 f"receipt.{key}: expected a non-empty string, got {value!r}")
-    if receipt.get("run_status") not in RUN_STATUS_VALUES:
+    if receipt.get("run_status") not in W7_RUN_STATUS_VALUES:
         issues.append(
             f"receipt.run_status: unexpected {receipt.get('run_status')!r}")
     if receipt.get("verdict") not in VERDICT_VALUES:

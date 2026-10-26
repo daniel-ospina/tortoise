@@ -713,3 +713,31 @@ def test_variant_rows_carry_the_by_category_block():
     # the same non-_abs set (one projection implementation)
     assert rows["by_category"]["rows"]["full_mix"][
         "official_recall_all@5"] == rows["official_recall_all@5"]["value"]
+
+
+def test_partial_is_a_w7_only_status_never_a_widened_shared_vocabulary():
+    """#8486 F4 (review). ``RUN_STATUS_VALUES`` is SHARED: the ask-lane receipt
+    validator (``measure_ask_distilled.validate_ask_receipt``) imports it.
+    Widening the shared tuple therefore widened THAT validator too — an ask
+    receipt naming ``"partial"`` (a status no ask-lane code path can produce)
+    passed its schema check and then took its non-``completed`` early return,
+    skipping the completed-run identity gates. The W7 extension is local to
+    W7: the shared vocabulary is not the place to add a lane's status."""
+    from tools.longmem_eval.measure_ask_distilled import validate_ask_receipt
+    from tools.longmem_eval.w7_publish import (
+        RUN_STATUS_VALUES,
+        W7_RUN_STATUS_VALUES,
+        validate_receipt,
+    )
+
+    assert "partial" not in RUN_STATUS_VALUES
+    assert "partial" in W7_RUN_STATUS_VALUES
+
+    # W7 accepts its own status …
+    w7_issues = validate_receipt({"run_status": "partial"})
+    assert not any("run_status" in i for i in w7_issues)
+
+    # … and the ask lane still refuses it, at the schema check (not silently
+    # by an early return past the identity gates)
+    ask_issues = validate_ask_receipt({"run_status": "partial"})
+    assert any("run_status" in i for i in ask_issues), ask_issues

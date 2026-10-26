@@ -54,6 +54,7 @@ from tortoise.model_adapters import (
 # LLMReader.ping stay on the exact shipped text.
 from tortoise.reader import PROBE_SYSTEM
 
+from . import spend_guard
 from .reader import _parse_model_spec
 
 PROBE_USER = (
@@ -131,7 +132,14 @@ def ping_model(model: Any, *, what: str) -> dict[str, Any]:
     ``ping_model(provider_adapter, what="capture-extraction")`` — a
     fatal-class result surfaces through P1's fail-closed contract, never
     retried as transient, never ignored.
+
+    #8486 F1: a ping IS a real, billed completion, so the hard spend stop is
+    checked before it exactly as it is before a question's call — the arm
+    site states the ceiling is in force "before the first paid call (the
+    preflight pings included)", and this is what makes that true. ``check``
+    is a no-op when the ceiling is disarmed.
     """
+    spend_guard.check(f"preflight ping ({what})")
     t0 = time.monotonic()
     try:
         if hasattr(model, "ping"):

@@ -7144,3 +7144,152 @@ def test_hard_stop_abort_keeps_the_in_flight_questions_spend(
                                "--checkpoint", str(cp), "--output", str(out2),
                                "--hard-stop-usd", "5"])
     assert report["hard_stop"]["spend_usd"] > abort_spend + 0.03
+
+
+def test_declared_lanes_over_a_real_adapter_arm_without_refusing():
+    """#8486 F1 (review). The eager refusal is decided by ``declared_lanes``:
+    the lane set the run is about to bill. Until now it was only ever asserted
+    over a HAND-BUILT tuple, so the wiring that decides whether a run starts at
+    all was untested in both directions — a provider that reaches the guard as
+    ``None``/``"unknown"`` would refuse EVERY default-ceiling run with a
+    message blaming a price entry that exists, and a lane the collector bills
+    but ``declared_lanes`` misses would be caught only after its first paid
+    call.
+
+    Green here is what makes ``--hard-stop-usd``'s default of
+    ``HARD_STOP_USD`` runnable with a real ``OpenRouterModel`` (the adapter the
+    reader/judge lanes are built over)."""
+    from tortoise.model_adapters import OpenRouterModel
+
+    spend_guard.reset()
+    try:
+        # the spelling the openrouter lane records: the bare model id
+        model = OpenRouterModel("deepseek-flash")
+        lanes = lme_usage.declared_lanes(model, stage="reader")
+        assert lanes == [("reader", "openrouter", "deepseek-flash")]
+        # the arm the ceiling's default takes for a real lane — no refusal
+        assert spend_guard.arm(10.0, declared_lanes=lanes) == 10.0
+        spend_guard.check("reader for q1")      # priced, under the ceiling
+
+        # the direct-lane adapter carries its own provider on the CLASS
+        from tortoise.model_adapters import DeepSeekDirectModel
+        direct = lme_usage.declared_lanes(DeepSeekDirectModel("deepseek-flash"),
+                                          stage="reader")
+        assert direct == [("reader", "deepseek-direct", "deepseek-flash")]
+        assert spend_guard.arm(10.0, declared_lanes=direct) == 10.0
+
+        # the negative: a lane whose model has no entry still REFUSES
+        spend_guard.reset()
+        spend_guard.arm(10.0)
+        unknown = OpenRouterModel("a-model-nobody-priced")
+        with pytest.raises(spend_guard.UnpricedModelRefused):
+            spend_guard.arm(
+                10.0,
+                declared_lanes=lme_usage.declared_lanes(unknown, stage="reader"))
+    finally:
+        spend_guard.reset()
+
+
+def test_a_usage_block_with_no_known_keys_is_unknown_spend_not_zero():
+    """#8486 F1 (review). ``usage_present`` is the provider's "a usage block
+    came back" flag, NOT "the priced tokens are known". A block whose keys the
+    sanitizer does not recognise is dropped to ``{}`` (loudly, by design), and
+    feeding that to the guard as *present* prices the lane at $0.00 while
+    marking it PRICED — unknown spend read as zero, which is the one thing the
+    guard promises never to do.
+
+    RED before the fix: the lane priced at $0.0, ``check()`` passed, and the
+    run sailed past ``HARD_STOP_USD`` green — the 2026-10-25 pilot failure
+    moved from the price map into the sanitizer."""
+    spend_guard.reset()
+    lme_usage.get_collector().reset()
+    try:
+        spend_guard.arm(10.0)
+        # a real, billed completion whose usage block speaks a dialect the
+        # sanitizer does not know (no prompt/completion token keys)
+        lme_usage.get_collector().record(
+            stage="reader", provider="deepseek", model_id="deepseek-flash",
+            usage={"input_tokens": 900_000, "output_tokens": 40_000},
+            usage_present=True)
+        usd, priced, breakdown = spend_guard.spend()
+        assert priced is False, "unknown tokens were priced as a known $0"
+        assert usd == 0.0
+        assert breakdown["unpriced"][0]["reason"] == "unknown_model" or (
+            breakdown["unpriced"][0]["reason"] == "usage_present_false")
+        with pytest.raises(spend_guard.HardStopExceeded) as ei:
+            spend_guard.check("reader for q1")
+        assert ei.value.reason == "unpriced_spend"
+    finally:
+        spend_guard.reset()
+        lme_usage.get_collector().reset()
+
+
+def test_preflight_ping_is_checked_before_it_spends(monkeypatch):
+    """#8486 F1 (review). A preflight ping is a REAL billed completion, and the
+    arm site states the ceiling is in force "before the first paid call (the
+    preflight pings included)". It was not: only ``arm()``'s eager unpriced
+    refusal ran before the pings, so N pings could each spend past a low
+    ceiling unchecked.
+
+    RED before the fix: the ping went out and the model was called."""
+    from tools.longmem_eval.preflight import ping_model
+
+    called: list[str] = []
+
+    class _Model:
+        id = "deepseek-flash"
+        provider = "deepseek"
+
+        def complete(self, *, system, user):
+            called.append(user)
+            return "ok"
+
+    spend_guard.reset()
+    lme_usage.get_collector().reset()
+    try:
+        spend_guard.arm(0.01)
+        # a previous call already crossed the ceiling
+        lme_usage.get_collector().record(
+            stage="reader", provider="deepseek", model_id="deepseek-flash",
+            usage={"prompt_tokens": 400_000, "completion_tokens": 2_000},
+            usage_present=True)
+        with pytest.raises(spend_guard.HardStopExceeded):
+            ping_model(_Model(), what="reader")
+        assert called == [], "the paid ping went out past a crossed ceiling"
+    finally:
+        spend_guard.reset()
+        lme_usage.get_collector().reset()
+
+
+def test_a_preflight_hard_stop_exits_on_the_spend_code_not_a_traceback(
+        monkeypatch, tmp_path):
+    """#8486 F1 (review). With the ping checked, the stop can now be raised
+    from inside ``run_preflight`` — and ``_run_main`` caught only
+    ``PreflightError`` there, so a ``HardStopExceeded`` would have escaped as a
+    bare traceback with exit 1 and no ``HARD_STOP_EXIT``: the wrapper confusion
+    the dedicated exit code exists to prevent (nothing executed, so there is no
+    checkpoint to preserve and no report to write)."""
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None:
+                                     _FakeEmbedder384()))
+    monkeypatch.setattr(run_mod, "build_reader",
+                        lambda *a, **kw: _SpendingReader())
+    monkeypatch.setattr(run_mod, "build_judge", lambda *a, **kw: MockJudge())
+
+    def _stop(*a, **kw):
+        raise spend_guard.HardStopExceeded(
+            ceiling_usd=0.01, spend_usd=0.02, where="preflight ping (reader)",
+            reason="ceiling_reached")
+
+    monkeypatch.setattr(run_mod, "run_preflight", _stop)
+    out = tmp_path / "report.json"
+    with pytest.raises(SystemExit) as ei:
+        run_mod.run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
+                          "--output", str(out), "--checkpoint",
+                          str(tmp_path / "state.json")])
+    assert ei.value.code == run_mod.HARD_STOP_EXIT
+    assert not out.exists()

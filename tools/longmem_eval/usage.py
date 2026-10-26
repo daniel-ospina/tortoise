@@ -285,9 +285,21 @@ class UsageCollector:
         # spend the run already paid for, and the ceiling would creep upward
         # with every completed question. ``observe`` re-prices from these raw
         # tokens through PRICING_MAP; it never reads the ``cost.usd`` meter.
+        # #8486 F1 (review): the guard must be told whether the PRICED tokens
+        # are KNOWN. ``usage_present`` is the provider's "a usage block came
+        # back" flag; a block whose keys the sanitizer does not recognise
+        # yields ``{}`` (``_sanitize_usage`` warns), and feeding that as
+        # present would price the row at $0.00 as a *priced* lane — unknown
+        # spend read as zero, the exact failure the guard exists to refuse.
+        # Only a row carrying a priced input (prompt or completion tokens)
+        # is priceable; anything else is UNKNOWN and REFUSED. The bucket's own
+        # ``usage_present`` stays the raw provider fact (disclosure only).
+        priced_inputs_known = ("prompt_tokens" in sanitized
+                               or "completion_tokens" in sanitized)
         spend_guard.observe(stage=stage, provider=provider,
                             model_id=model_id, tokens=sanitized,
-                            usage_present=usage_present)
+                            usage_present=(usage_present
+                                           and priced_inputs_known))
 
     # ── attach (A6: wires usage_sink on walked members) ───────────────────
 

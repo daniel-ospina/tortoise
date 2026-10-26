@@ -125,10 +125,31 @@ PRICING_MAP: dict[str, dict[str, dict]] = {
                        "the retired id DeepSeek still accepts and bills at "
                        "the Flash price — measured #8486 pilot 2026-10-25"),
             "verified_on": "2026-10-25", "estimated": True,
-            "note": ("ALIAS, not a vendor-published row: the rate is the "
-                     "v4-flash table applied to the measured pilot "
-                     "(437,253 prompt / 60,928 cache-hit / 2,330 "
-                     "completion = $0.0535085, the Flash card to the cent)")},
+            "note": ("ALIAS, not a vendor-published row: rates copied from "
+                     "the v4-flash row above. This row is NOT the one that "
+                     "reproduces the measured pilot — at THIS table's cache "
+                     "rate (0.028/1M) the pilot envelope (437,253 prompt / "
+                     "60,928 cache-hit / 2,330 completion) prices to "
+                     "$0.055044; the measured $0.0535085 is the 0.0028 "
+                     "cache rate the DIRECT lane row carries")},
+        # The BARE id — the spelling the openrouter lane actually RECORDS
+        # (the meter's model id is the adapter's ``id``, and
+        # ``OpenRouterModel`` stores the spec's model part verbatim, exactly
+        # as the gpt-4o row below documents). Without this row
+        # ``lookup_rate("openrouter", "deepseek-flash")`` returned None, and
+        # an ARMED ceiling then REFUSED the run at ``arm()``
+        # (``UnpricedModelRefused``) — so the very lane this entry exists for
+        # could not start. Same rates as the slash-prefixed row it mirrors.
+        "deepseek-flash": {
+            "prompt_per_1m": 0.14, "completion_per_1m": 0.28,
+            "cache_read_per_1m": 0.028,
+            "source": ("openrouter lane, bare-id alias of "
+                       "deepseek/deepseek-flash (the id the lane records)"),
+            "verified_on": "2026-10-25", "estimated": True,
+            "note": ("ALIAS of the row above — same rate, same caveat: at "
+                     "this table's cache rate the measured pilot prices to "
+                     "$0.055044, and the $0.0535085 reproduction belongs "
+                     "to the direct lane's 0.0028 cache rate")},
         "gpt-4o-2024-08-06": {
             "prompt_per_1m": 2.625, "completion_per_1m": 10.5,
             "cache_read_per_1m": None,

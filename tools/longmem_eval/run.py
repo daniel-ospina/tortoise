@@ -6381,8 +6381,10 @@ def _build_parser() -> argparse.ArgumentParser:
     # explicitly (recorded as armed: false; nothing is silent).
     p.add_argument("--hard-stop-usd", type=float, default=None,
                    metavar="USD",
-                   help="abort before the call that would cross this spend "
-                        "ceiling and leave a resumable checkpoint "
+                   help="abort the run before the NEXT paid call once actual "
+                        "spend REACHES this ceiling (the call that crosses "
+                        "it is already paid — nothing can un-spend it) and "
+                        "leave a resumable checkpoint "
                         f"(default ${spend_guard.HARD_STOP_USD:,.2f} — the "
                         "pre-registered HARD_STOP_USD; an unpriced model "
                         "REFUSES to run under an armed ceiling; 0 disarms "
@@ -7453,6 +7455,17 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 preflight = run_preflight(
                     reader=reader, judge=judge, extractor_model=extractor_model,
                     retrieval_only=args.retrieval_only)
+            except spend_guard.SpendGuardError as e:
+                # #8486 F1: the preflight pings are REAL completions and
+                # ``ping_model`` now checks the ceiling before each one, so a
+                # stop raised there must exit on the SAME code as a mid-run
+                # stop — not as a bare traceback with exit 1. No question has
+                # executed yet, so there is no checkpoint to preserve.
+                print("[longmem_eval] HARD SPEND STOP during pre-flight — "
+                      "aborting before the run starts (no questions "
+                      "executed):", file=sys.stderr)
+                print(f"[longmem_eval] {e}", file=sys.stderr)
+                raise SystemExit(HARD_STOP_EXIT) from e
             except PreflightError as e:
                 print("[longmem_eval] PRE-FLIGHT GATE FAILED — aborting before "
                       "the run starts (no questions executed):", file=sys.stderr)
