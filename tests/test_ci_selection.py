@@ -4901,7 +4901,14 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
     )
     small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
     old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
-    assert small == WATCHDOG_FLOOR_MIN == 15, small
+    # The FLOOR is a DERIVED value, not a taste: 2.9× the largest single fast file
+    # (the derivation `tools/ci_selection.py`'s constant block states). It was 15
+    # while the largest was 310.7 s; the 2026-10-26 sweep measured
+    # `test_calibration.py` at 390.0 s, so 15 no longer clears the 2.5× asserted
+    # below and the floor moved to the value its own derivation requires —
+    # ceil(390.0 × 2.9 / 60) = 19. The pin stays a pin: it names the number the
+    # derivation produced, so the NEXT move has to be argued here too.
+    assert small == WATCHDOG_FLOOR_MIN == 19, small
     assert small < old_two, "the smaller shard must not inherit the old budget"
     assert old_two == WATCHDOG_CEILING_MIN == 55
     # the floor must clear the #6133 floor (the largest single fast file) with
@@ -5476,6 +5483,88 @@ def test_flat_default_claim_check_is_not_vacuous():
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
         ("test_a.py", 2.2), ("test_b.py", 3.7)]
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
+
+
+_DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
+
+
+def _durations_row_comments(text: str):
+    """`(key, joined comment)` for every row of the `durations` map, wraps joined.
+
+    A row's comment is the tail after its value PLUS its indented `#` continuation
+    lines. The map's long notes are wrapped across lines, so reading only the row
+    line both misses damage that sits on a continuation line and reads a pair that
+    wraps as unbalanced. Continuations are unambiguous here: the block carries no
+    standalone comment line (`durations:` is followed by rows and wrap lines only).
+    """
+    out = []
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return out
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    current = None
+    for i in range(start + 1, end):
+        m = _DURATIONS_ROW_RE.match(lines[i])
+        if m is not None:
+            current = [m.group("key"), [m.group("tail")]]
+            out.append(current)
+            continue
+        stripped = lines[i].strip()
+        if current is not None and stripped.startswith("#"):
+            current[1].append(stripped.lstrip("#"))
+        elif stripped:
+            current = None
+    return [(key, " ".join(chunks)) for key, chunks in out]
+
+
+def _durations_rows_with_unbalanced_parens(text: str):
+    """Rows whose note carries a `(` or `)` whose partner is nowhere in the note."""
+    return [(key, note.strip()) for key, note in _durations_row_comments(text)
+            if note.count("(") != note.count(")")]
+
+
+def test_no_durations_row_keeps_half_a_parenthesis():
+    """#10055 review (P3): a clause cut may not orphan a parenthesis.
+
+    `tools/ci_timing.py`'s clause cutters drop a stale clause whole; when that
+    clause carried one half of a paren pair the survivor kept the other half, e.g.
+    `test_url_keyed_source_write_4649.py` -> `#4649: 169.5s wall for the whole file)`
+    and `test_7951_enforce_atomic_write.py` -> `#7951: … 7.39s wall (measured at the
+    rebase head — ci-timing …` with no closer. Measured on the refresh head: 18 rows
+    against 2 on main. Every surviving claim is still TRUE (that is why this is P3
+    and not a behaviour defect), but a dangling half reads as a typo and hides that
+    a sentence was cut — this map treats a damaged note as a defect, not cosmetics.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_with_unbalanced_parens(text)
+    assert offenders == [], (
+        "a durations row's note keeps half a parenthesis — a clause was cut without "
+        f"its partner (#10055 review, P3): {[k for k, _ in offenders]}. Drop the "
+        "orphaned half (`tools/ci_timing._balance_cut_parens` does this on every cut).")
+
+
+def test_the_paren_guard_is_not_vacuous():
+    """The guard above must bite on a cut casualty and stay quiet on its siblings."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 4.3  # #4649: 169.5s wall for the whole file); the floor "
+        "fails by construction.\n"
+        "  test_b.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head "
+        "— ci-timing junit 2026-10-26; was 7.4\n"
+        "surfaces: []\n")
+    legitimate = (
+        "durations:\n"
+        "  test_c.py: 1.0  # a note with no parens at all.\n"
+        "  test_d.py: 2.0  # says (a balanced thing) and nothing else.\n"
+        "  test_e.py: 3.0  # a pair that WRAPS across lines (opened here\n"
+        "      # and closed on the continuation line).\n"
+        "surfaces: []\n")
+    assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
+        "test_a.py", "test_b.py"]
+    assert _durations_rows_with_unbalanced_parens(legitimate) == []
 
 
 def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():

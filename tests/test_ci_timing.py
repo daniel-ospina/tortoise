@@ -1246,7 +1246,14 @@ def test_a_dated_refresh_claim_inside_a_rationale_loses_only_that_clause() -> No
     row = next(ln for ln in text.split("\n")
                if ln.strip().startswith("test_rationale.py:"))
     assert "since the 2026-10-17 refresh" not in row
-    assert "#2350: a file ADDED BY A PR" in row
+    # The UNMEASURED-state half goes too (#10026): this render ADOPTED a reading, so
+    # "a file ADDED BY A PR has no CI record of its own" is false about a row that
+    # now carries one. It is cut with the other stale claims — the note keeps what
+    # survives (the issue anchor and the #4348 instruction below), which is the
+    # #9134 (P2) requirement this test exists for. Before #10026 this phrase was
+    # preserved verbatim and the row asserted a basis its value contradicted.
+    assert "a file ADDED BY A PR" not in row
+    assert "#2350:" in row, "the note lost its issue anchor"
     assert "(#4348 trap — do not drop the row without re-deriving the floor at that head)" in row
     assert row.strip().endswith("was 3.7")
     assert yaml.safe_load(text)["durations"]["test_rationale.py"] == 5.6
@@ -5849,3 +5856,208 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
         sample_label="CI junit census 2026-10-22 (run 39782493641)")
     assert stats["kept_as_lower_bound"] == 0
     assert yaml.safe_load(text)["durations"]["test_alpha.py"] == 5.0
+
+
+# ── #10026 fallout: a refresh may not write a measured value under the note of ──
+# an UNMEASURED row. The map's own rule above `durations:` is "a row's comment is
+# kept only while the value AND its stated basis are unchanged"; the writer kept it
+# verbatim on every row it re-based, so the 2026-10-26 sweep shipped rows asserting
+# that a file with a CI reading has no CI reading (`test_hermetic_egress_guard.py`
+# 2.0 -> 0.1 still saying "it takes the #3400 flat 2.0s default"), which reddened
+# tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
+# and tests/test_tool_risk_tiers.py::...::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it.
+_UNMEASURED_NOTE_MANIFEST = """\
+surfaces:
+  core:
+    - test_flat.py
+    - test_local.py
+    - test_stays.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal:
+  test_pinned.py: test_measured.py
+surfaces_x: []
+durations:
+  test_flat.py: 2.0  # #4387: no CI junit measurement exists for this file yet, so it takes the #3400 flat 2.0s default. Refresh from the first post-merge run that includes it. Do NOT drop the row without re-deriving the 90% floor (#4348 trap). Without this row the file packs at the flat 2.0s default.
+  test_local.py: 2.0  # unmeasured — #4122 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement, so it carries the flat default. LOCAL reading, recorded as provenance and NOT adopted: 8.71s over 25 cases. Required for the coverage half (#4348).
+  test_stays.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default. Without this row the file packs at the flat 2.0s default.
+  test_measured.py: 3.0  # a note that is still true
+  test_pinned.py: 3.0  # held equal to test_measured.py (the pin declares it)
+  test_carried.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default. LOCAL reading kept as provenance and NOT adopted.
+"""
+
+
+def _rendered_note(text: str, key: str) -> str:
+    for line in text.splitlines():
+        if line.startswith(f"  {key}: "):
+            return line
+    raise AssertionError(f"{key} is missing from the rendered manifest")
+
+
+def test_a_refresh_cannot_write_a_measured_value_under_an_unmeasured_note() -> None:
+    """#10026: ADOPTING a reading falsifies the note, so the note goes with it."""
+    text, _ = ci_timing.render_refreshed_manifest(
+        _UNMEASURED_NOTE_MANIFEST,
+        {"test_flat.py": 0.1, "test_local.py": 7.8},
+        "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
+
+    flat = _rendered_note(text, "test_flat.py")
+    assert flat.startswith("  test_flat.py: 0.1"), flat
+    assert "takes the #3400 flat 2.0s default" not in flat, (
+        "the row carries a 0.1 s reading and still states the flat 2.0 s default as "
+        f"its basis — the stale-basis rot #10026 re-created: {flat}")
+    assert "no CI junit measurement exists" not in flat, flat
+    assert "Do NOT drop the row without re-deriving the 90% floor (#4348 trap)" in flat, (
+        "the repair cut the #4348 do-not-drop instruction with the stale claim — a "
+        f"tool output must not delete a record: {flat}")
+    assert "#4387" in flat, "the note lost its issue anchor"
+    assert "was 2.0" in flat, f"the adopted value did not record its basis: {flat}"
+
+    local = _rendered_note(text, "test_local.py")
+    assert local.startswith("  test_local.py: 7.8"), local
+    for stale in ("LOCAL reading", "NOT adopted", "ADDED BY A PR", "unmeasured"):
+        assert stale not in local, (
+            f"a MEASURED row still carries the unmeasured-state claim {stale!r}: {local}")
+    assert "Required for the coverage half (#4348)" in local, (
+        f"the repair dropped the surviving #4348 instruction: {local}")
+    assert "#4122" in local, f"the note lost its issue anchor: {local}"
+
+
+def test_the_unmeasured_note_repair_is_not_vacuous() -> None:
+    """A row still carrying the flat default KEEPS its note, counterfactual and all.
+
+    Without this arm a "fix" that cleared every tail whenever a value moved would
+    pass the test above while deleting the record of every unmeasured row, and it
+    would also destroy the legitimate COUNTERFACTUAL ("without this row the file
+    packs at the flat 2.0s default"), which states what the row buys rather than
+    what its value is.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _UNMEASURED_NOTE_MANIFEST,
+        {"test_flat.py": 0.1, "test_local.py": 7.8},  # the two ADOPTED rows only
+        "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
+    # a row the sweep did not collect keeps its unmeasured marker AND its claim
+    carried = _rendered_note(text, "test_carried.py")
+    assert "unmeasured" in carried and "no sweep has collected it" in carried, carried
+    assert "LOCAL reading kept as provenance" in carried, carried
+    # …and the counterfactual on a RE-BASED row is not stale provenance: it states
+    # what the row buys, not what its value is, so the repair must leave it alone.
+    flat = _rendered_note(text, "test_flat.py")
+    assert "packs at the flat 2.0s default" in flat, (
+        f"the legitimate counterfactual was cut with the stale claim: {flat}")
+
+
+def test_the_held_equal_pin_takes_the_larger_reading_for_both_rows() -> None:
+    """#3400: a declared pin survives a sweep that measures the two rows apart.
+
+    `test_mcp_rename_table.py` and `test_bridge_table.py` must carry ONE weight
+    (tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite);
+    re-basing each from its own reading is what wrote 21.2 and 2.2 on 2026-10-26.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _UNMEASURED_NOTE_MANIFEST,
+        {"test_measured.py": 21.2, "test_pinned.py": 2.2},
+        "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
+    assert "  test_measured.py: 21.2" in text
+    assert "  test_pinned.py: 21.2" in text, (
+        "the pinned row kept its own reading instead of borrowing the larger one — "
+        "the pin the map declares was not honoured")
+
+
+def test_no_pin_means_each_row_keeps_its_own_reading() -> None:
+    """The pin is data, not a blanket rule: without it the rows stay independent."""
+    manifest = _UNMEASURED_NOTE_MANIFEST.replace(
+        "durations_held_equal:\n  test_pinned.py: test_measured.py\n", "")
+    text, _ = ci_timing.render_refreshed_manifest(
+        manifest, {"test_measured.py": 21.2, "test_pinned.py": 2.2},
+        "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
+    assert "  test_pinned.py: 2.2" in text, (
+        "a row was re-based from a sibling's reading with no pin declaring it")
+
+
+# ── …and a cut may not leave HALF a parenthesis behind ────────────────────
+#
+# `_repair_adopted_note` bounds a clause by ` — `/`; `/`. ` and drops it whole. When
+# the dropped clause carried one half of a paren pair, the survivor kept the other
+# half: `#4649: 169.5s wall for the whole file)` (the `(` went with the clause) or
+# `#7951: … 7.39s wall (measured at the rebase head` (the `)` went with it). One
+# refresh left 16 rows like this — 1 on main before it — reported as P3 on #10055's
+# review: provenance-text damage, not a behaviour defect, but still a record that
+# reads as though a sentence was truncated, because it was.
+#
+# The pair is punctuation, not a claim, so the orphaned HALF is dropped and the
+# surviving claims are left exactly as they are.
+_PAREN_CUT_MANIFEST = """\
+surfaces:
+  core:
+    - test_orphan_closer.py
+    - test_orphan_opener.py
+    - test_spanning_pair.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_orphan_closer.py: 2.0  # #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here because the sweep only samples push-to-main runs. Do NOT drop the row (#4348 trap).
+  test_orphan_opener.py: 2.0  # #7951: 19 tests, 7.39s wall (measured at the rebase head; locally measured on the private lane at 8.0s). Keep this row.
+  test_spanning_pair.py: 2.0  # #7766: a pair (that spans two clauses; the closer lands in a kept one) is not a cut casualty.
+"""
+
+
+def _balanced(note: str) -> bool:
+    return note.count("(") == note.count(")")
+
+
+def test_a_cut_note_does_not_keep_half_a_parenthesis() -> None:
+    """#10055 review (P3): dropping a clause must not orphan its paren.
+
+    The reviewer measured 17 rows on the refresh head carrying an unbalanced `)`
+    against 1 on main, e.g. `test_url_keyed_source_write_4649.py`
+    (`#4649: 169.5s wall for the whole file); …`) whose `(` sat in the clause the
+    repair cut — and 4 more whose `(` was orphaned the other way round.
+
+    Non-vacuity (measured by making `_balance_cut_parens` the identity, i.e. the
+    pre-fix behaviour): `test_orphan_closer.py` rendered
+    `…169.5s wall for the whole file). Needed here…` and `test_orphan_opener.py`
+    rendered `…7.39s wall (measured at the rebase head; Keep this row…` — both
+    fail the balance assertion below.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _PAREN_CUT_MANIFEST,
+        {"test_orphan_closer.py": 4.3, "test_orphan_opener.py": 7.4},
+        "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
+
+    closer = _rendered_note(text, "test_orphan_closer.py")
+    assert _balanced(closer), f"the cut orphaned a `)` — half a pair is not a record: {closer}"
+    assert "169.5s wall for the whole file. Needed here" in closer, (
+        f"the surviving claim was re-worded instead of just losing its paren: {closer}")
+    assert "Do NOT drop the row (#4348 trap)" in closer, (
+        f"the #4348 do-not-drop instruction was cut with the stale claim: {closer}")
+
+    opener = _rendered_note(text, "test_orphan_opener.py")
+    assert _balanced(opener), f"the cut orphaned a `(` — half a pair is not a record: {opener}"
+    assert "7.39s wall measured at the rebase head" in opener, (
+        f"the surviving claim was re-worded instead of just losing its paren: {opener}")
+
+    # …and a pair that legitimately SPANS two kept clauses is not a cut casualty:
+    # the scan is over the whole survivor, so a closer in a later clause still pairs
+    # with the opener in an earlier one and nothing is dropped.
+    spanning = _rendered_note(text, "test_spanning_pair.py")
+    assert spanning == "  test_spanning_pair.py: 2.0  # #7766: a pair (that spans two clauses; the closer lands in a kept one) is not a cut casualty.", spanning
+
+
+def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
+    """The SIBLING cutter has the same obligation (`_strip_stale_basis_claim`).
+
+    Non-vacuity: pre-fix this returns the note unchanged apart from the cut, ending
+    `… private lane); required for …` / opening `… (measured on …` with no partner.
+    """
+    stripped = ci_timing._strip_stale_basis_claim(
+        "  # #2350: this value is a CI measurement since the 2026-10-17 refresh "
+        "(measured on the private lane); required for the durations coverage half")
+    assert _balanced(stripped), stripped
+    assert "required for the durations coverage half" in stripped, stripped
