@@ -3344,7 +3344,9 @@ why the two recipes above are the verification and the deploy status is not.
    **unless the process has declared the single-tenant pair** — see the #9192
    cross-tenant note below for what that declaration may and may not cover.
    Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
-   only when the capture ran **unbound**, or when item 1's row did not appear.
+   only when the capture ran **unbound**, when item 1's row did not appear, or
+   when the capture's own tenant resolution faulted (recipe 1 logs *could not
+   resolve the record tenant*).
    ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a

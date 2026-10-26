@@ -2467,8 +2467,15 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # "The capture's OWN" is load-bearing: item 2 is the bar a reader sees first,
     # and an unqualified "none at all for `no_tenant`" reds a healthy deployment on
     # the ordinary unbound traffic the ⚠️ bound below excuses — the two statements
-    # would contradict each other inside one section (#10071 review F1).
-    assert re.search(r"none at all for `no_tenant` \(the capture's OWN", flat), (
+    # would contradict each other inside one section (#10071 review F1). The pin
+    # covers the WHOLE clause, `no_tenant` through `circuit_open`: pinning only the
+    # qualifier left the other two always-fail reasons deletable with nothing red
+    # (#10083 review F2).
+    assert re.search(
+        r"none at all for `no_tenant` \(the capture's OWN[^)]*\) / "
+        r"`malformed_dsn` / `circuit_open`",
+        flat,
+    ), (
         "the bar reads absolute on `no_tenant` while the ⚠️ bound below says the "
         "growth is a fail-and-fix only for an unbound capture — a reader who "
         "stops at item 2 fails a healthy deployment on its default traffic"
@@ -2578,33 +2585,39 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
     # "fail-and-fix whether or not the capture ran **unbound**" — the arm inverted
     # with the pin still green (#10071 review P1). `only when` is load-bearing —
-    # and so is the DISJUNCTION: dropping `, or when item 1's row did not appear`
+    # and so is the DISJUNCTION: dropping `, when item 1's row did not appear`
     # leaves every other pin green while the paragraph stops covering the bound
-    # capture whose row never landed (#10071 review F2), so pin all three parts.
+    # capture whose row never landed (#10071 review F2), and the third disjunct is
+    # what keeps item 2 (`the capture's OWN` — see above) from contradicting a bound
+    # capture whose tenant RESOLUTION faulted, since such a write does count
+    # `no_tenant` (#10083 review F3). Pin all three parts.
     assert re.search(
-        r"fail-and-fix only when the capture ran \*\*unbound\*\*, or when item "
-        r"1's row did not appear",
+        r"fail-and-fix only when the capture ran \*\*unbound\*\*, when item 1's "
+        r"row did not appear, or when the capture's own tenant resolution faulted",
         flat,
     ), (
         "the section gives no executable discriminator for `no_tenant` growth — "
-        "an unbound capture is the one state that makes the growth the capture's, "
-        "and a bound capture whose item-1 row never appeared is the other"
+        "an unbound capture makes the growth the capture's, a bound capture whose "
+        "item-1 row never appeared is the second case, and a failed tenant "
+        "resolution is the third"
     )
     # ⛔ The two pins above are NOT enough on their own: they survive an
     # inverted prohibition, because a section can say "the line carries **no**
     # request identity" and "**Do** attribute that growth per request from the
     # log" at the same time — self-contradictory, and green. Pin the ⛔ clause
     # itself, which is the sentence that carries the ruling (#10071 review P2).
-    # Anchored on the CLAUSE, with the ⛔ marker asserted separately: a stronger
-    # rewording ("⛔ **Never** try to attribute…") is the same ruling, and a pin
-    # that reds on it blames wording that weakened nothing (#10071 review F3).
-    assert re.search(r"Do not try to attribute that growth per request", flat), (
+    # The ⛔ marker is pinned WITH the clause, not by a bare `⛔` search: this section
+    # carries 10 ⛔ markers, so a bare search is satisfied by any of them and leaves
+    # the ruling unmarked-and-green (#10083 review F1 — the first attempt did exactly
+    # that, making the pin weaker than the one it replaced). The `(?:Do not|Never)`
+    # alternation admits the equivalent rewording while still requiring the marker;
+    # only the WRAP is neutralised by `flat` (#10071 review F3).
+    assert re.search(
+        r"⛔ \*\*(?:Do not|Never)\*{0,2} try to attribute that growth per request",
+        flat,
+    ), (
         "the section does not forbid the impossible step it describes — "
         "per-request attribution from a line that carries no request identity"
-    )
-    assert re.search(r"⛔", flat), (
-        "the ruling is unmarked — the ⛔ prefix is how this runbook flags a step "
-        "a reader must not act past"
     )
 
 
