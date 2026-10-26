@@ -79,11 +79,17 @@ def test_a_duplicate_index_is_reported_not_silently_overwritten() -> None:
 # ── the event shapes ───────────────────────────────────────────────────────
 
 def test_session_event_never_invents_a_timestamp() -> None:
-    """A backfilled `now` is indistinguishable from a real creation time, so a
-    session without one carries a PRESENT null instead."""
+    """A backfilled `now` is indistinguishable from a real creation time.
+
+    A session without one carries NO `created_at` key at all. Not a present
+    null, which is what this test used to pin: the column's upsert is
+    `DO UPDATE SET created_at = EXCLUDED.created_at`, so a present null BLANKS
+    a real time the record already holds when the copy re-runs — while omitting
+    the key still writes NULL on a first insert.
+    """
     event = copy_mod.build_session_event("s1", {}, turn_count=0, max_index=-1,
                                          event_id="E1")
-    assert "created_at" in event and event["created_at"] is None
+    assert "created_at" not in event
     assert event["turn_count"] == 0 and event["turn_max_index"] == -1
     assert event["is_episodic"] is True
 
@@ -293,7 +299,8 @@ def test_copy_emits_the_empty_session_too_and_counts_what_landed() -> None:
         event_id=lambda: "E")
     assert sorted(sent) == ["s1", "s2"]           # the empty session is filed
     assert [e["type"] for e in sent["s2"]] == ["SessionRecorded"]
-    assert sent["s2"][0]["turn_count"] == 0 and sent["s2"][0]["created_at"] is None
+    assert sent["s2"][0]["turn_count"] == 0
+    assert "created_at" not in sent["s2"][0]   # no key, not a present null
     assert stats["sessions"] == 2 and stats["turns"] == 1
     assert stats["empty_sessions"] == 1
     assert stats["created_at_absent"] == ["s2"]
@@ -541,7 +548,7 @@ def test_a_duplicate_turn_key_refuses_the_whole_copy() -> None:
         turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
                (2, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])])
     with pytest.raises(copy_mod.CopyRefused,
-                       match="more than one node for one turn key"):
+                       match="held by more than one node"):
         copy_mod.copy_phase(graph, lambda sid, events: 1, event_id=lambda: "E")
 
 
@@ -601,3 +608,63 @@ def test_a_dry_run_measures_no_position_and_says_so(monkeypatch, capsys) -> None
     report = json.loads(capsys.readouterr().out)
     assert report["positions_measured"] is None
     assert "positioned" not in report
+
+
+# ── the exit code is a verdict, not a guess ─────────────────────────────
+
+def test_a_usage_error_exits_1_not_the_refusal_code(monkeypatch) -> None:
+    """`2` means REFUSED. argparse's default is `2`, so a forgotten `--org-id`
+    would read as "the record can never hold these nodes" to any caller keying on
+    the exit code — `turn_parity_census` reserves `1` for usage for this reason."""
+    monkeypatch.setenv("FALKORDB_CLOUD_URI", "bogus")
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g"])
+    assert excinfo.value.code == 1
+
+
+def test_a_mid_loop_refusal_still_writes_the_artifact_reporting_what_landed(
+        monkeypatch, tmp_path) -> None:
+    """A refusal at session 2 of 2 leaves session 1 copied.
+
+    The artifact's stated job is "what DID land", and the one remedy it must not
+    require is a re-run — which re-appends the journal (the documented retry
+    bound). So the partial stats ride the exception out to the writer.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+
+    def _fake_journal_emit(journal_path, dsn, org_id, graph_id):
+        def emit(sid, events):
+            if sid == "s2":
+                raise copy_mod.CopyRefused("record refused at s2")
+            return 5
+        return emit
+
+    monkeypatch.setattr(copy_mod, "_journal_emit", _fake_journal_emit)
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(journal), "--out", str(out)])
+    assert excinfo.value.code == 2
+    report = json.loads(out.read_text())
+    assert report["sessions"] == 1 and report["turns"] == 1
+    assert report["refused"] == "record refused at s2"
+    assert report["record_tenant"] == {"org_id": "o", "graph_id": "gid"}
+
+
+# ── the parity gate's own population split, measured on the copy side ────
+
+def test_an_operator_flagged_turn_is_copied_and_reported() -> None:
+    """`turn_parity_census` refuses on `operator_flagged`; a copy that reported
+    zeros over it would be measuring a different population than the gate it
+    feeds — the same rule `not_point_kind_event` already follows."""
+    by_session, anomalies = copy_mod.classify_copy(
+        [(1, "s1_t0", {"id": "s1_t0", "pointKind": "event",
+                       "is_operator": True}, ["s1"])])
+    assert list(by_session) == ["s1"]            # copied …
+    assert anomalies["operator_flagged"] == ["s1_t0"]   # … and named

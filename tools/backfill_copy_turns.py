@@ -47,10 +47,15 @@ left nodes the record can never hold:
   ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
   store), or the copy stopped on a write it could not prove: a truncated read, an
   unproven journal position, a non-contiguous segment, a record that was not
-  armed, or a record that executed statements nobody committed. A blocking class
-  is reported IN the artifact (the copy ran, so the JSON says what did land); a
-  refusal raised before the loop (a duplicate turn key, a truncated read) writes
-  no artifact, because nothing was copied.
+  A blocking class is reported IN the artifact (the copy ran, so the JSON says what did land), and so
+  is a refusal that lands part of the copy (a write whose position could not be proven at session N of
+  M — the artifact carries the sessions that completed). A refusal raised before the loop (a duplicate
+  turn key, a truncated read) writes no artifact, because nothing was copied.
+* ``1``  the tool cannot START: an environment variable it was pointed at is not
+  set, a flag received a pasted URI/DSN, `--journal` is missing on a run that
+  would write, or argparse rejected the invocation. This is why `main` uses
+  ``_UsageParser``: argparse's default is ``2``, which would make a typo
+  indistinguishable from a refusal.
 
 Honest bounds, stated rather than implied:
 
@@ -127,12 +132,29 @@ class CopyRefused(RuntimeError):
 #: Anomaly classes whose nodes the RECORD CAN NEVER HOLD, so a nonzero count is
 #: a refusal (exit 2) and not just a note: `off_shape`/`orphan` have no key the
 #: record could store, `session_mismatch` would be filed under a session it does
-#: not belong to, and `duplicate_index` cannot be represented at all. The two
-#: remaining classes are COPIES-and-reported (`cross_wired` shares one key;
-#: `not_point_kind_event` is copied and refused by the parity gate from its own
-#: side), so neither turns this phase into a hard stop.
+#: not belong to, and `duplicate_index` cannot be represented at all. The
+#: remaining classes are COPIES-and-reported: `cross_wired` shares one key,
+#: `operator_flagged` and `not_point_kind_event` are nodes the record CAN hold —
+#: and `tools/turn_parity_census.py` refuses on all three from its own side, so a
+#: copy that reported zeros over them would be measuring a different population
+#: than the gate it feeds.
 _BLOCKING_ANOMALIES = ("off_shape", "orphan", "session_mismatch",
                        "duplicate_index")
+
+
+class _UsageParser(argparse.ArgumentParser):
+    """Usage errors exit ``1`` — ``2`` is reserved for a REFUSED copy.
+
+    argparse's default is ``2``, which would make "you forgot --org-id"
+    indistinguishable from "the record can never hold these nodes" to any caller
+    keying on the exit code — the same rule ``tools/turn_parity_census.py``
+    (``_UsageParser``) and ``tools/graph_census.py`` state.
+    """
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def classify_copy(rows) -> tuple[dict, dict]:
@@ -146,7 +168,7 @@ def classify_copy(rows) -> tuple[dict, dict]:
     anomalies: dict[str, list] = {
         "off_shape": [], "orphan": [], "cross_wired": [],
         "session_mismatch": [], "duplicate_index": [],
-        "not_point_kind_event": [],
+        "not_point_kind_event": [], "operator_flagged": [],
     }
     # `orphan` cannot occur through this phase's read (it starts at
     # `(s:Session)-[:CONTAINS]->`), but the class is kept and reported with its
@@ -185,6 +207,13 @@ def classify_copy(rows) -> tuple[dict, dict]:
             # from its purge set — so the divergence is measured here instead of
             # this phase quietly claiming a different population.
             anomalies["not_point_kind_event"].append(pid)
+        if props.get("is_operator"):
+            # COPIED and reported for the same reason, and this is the OTHER
+            # half of the parity gate's population split: that gate refuses on
+            # `operator_flagged` from its own side, so a copy artifact reporting
+            # zeros over it would measure a different population than the gate it
+            # feeds.
+            anomalies["operator_flagged"].append(pid)
         bucket = by_session.setdefault(derived, {})
         if index in bucket:
             anomalies["duplicate_index"].append(
@@ -214,7 +243,12 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
         # A session fact, not a constant of this phase.
         "is_episodic": props.get("is_episodic", True),
     })
-    event.setdefault("created_at", None)  # PRESENT and null, never "now"
+    # A session with no `created_at` in the graph gets NO key — never a timestamp
+    # (a backfilled `now` is indistinguishable from a real creation time), and
+    # NOT a present null either: `created_at` is a record COLUMN and the upsert
+    # is `DO UPDATE SET created_at = EXCLUDED.created_at`, so a present null
+    # BLANKS a real time the record already holds on a re-run. Omitting the key
+    # leaves an existing value alone and still writes NULL on a first insert.
     # ⛔ The record's bookkeeping NEVER goes DOWN. `turn_count` is a COLUMN and
     # `turn_max_index` rides the props tail; the record's upsert is
     # `ON CONFLICT … DO UPDATE SET` and its tail merge is
@@ -254,14 +288,13 @@ def build_turn_event(session_id: str, props: dict, *, event_id: str) -> dict:
 def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
     """File every accepted turn into the record. Additive, re-runnable.
 
-    ``emit(session_id, events)`` is the only side effect; it returns the journal
-    position of ``events[0]`` or ``None`` when no position could be proven, and
-    it RAISES when the record write did not land. Re-running is safe for the
-    RECORD — its ``point`` key is ``(org_id, graph_id, node_key)`` and every
-    write is an absolute-value upsert — but NOT for the journal: the append is
-    the commit point (`record_writer` §17.1), so a run that refuses after
-    appending leaves those events durably in the graph's own journal, and a
-    retry appends every one of them again. See the module docstring's bounds.
+    ``emit(session_id, events)`` is the only side effect. The PRODUCTION emitter
+    never returns ``None``: an unproven journal position RAISES ``CopyRefused``
+    (`position=False` does not omit the rows — it omits only the `journal_event`
+    position row, so writing there would file unnumbered turns, #9190). ``None``
+    is the DRY-RUN spelling only, meaning "no position was measured". A refusal
+    carries the partial ``stats`` on the exception so the caller can still write
+    an artifact saying what landed.
     """
     if page_size is None:
         page_size = census._PAGE_SIZE
@@ -290,10 +323,11 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
             f"{d['session']}_t{d['index']} ({d['id']})"
             for d in anomalies["duplicate_index"][:5])
         raise CopyRefused(
-            "the graph holds more than one node for one turn key, so the record "
-            f"can hold only one of them and the rest can never be filed: {dupes}"
+            f"{len(anomalies['duplicate_index'])} turn key(s) are held by more "
+            f"than one node, so the record can hold only one of each and the "
+            f"rest can never be filed: {dupes}"
             f"{' …' if len(anomalies['duplicate_index']) > 5 else ''}. Resolve the "
-            "duplicate before copying")
+            "duplicates before copying")
     stats = {
         "sessions": 0, "turns": 0, "positioned": 0, "empty_sessions": 0,
         "created_at_absent": [],
@@ -318,7 +352,16 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
             max_index=indexes[-1] if indexes else -1, event_id=event_id())]
         events += [build_turn_event(sid, bucket[i], event_id=event_id())
                    for i in indexes]
-        if emit(sid, events) is not None:
+        try:
+            positioned = emit(sid, events)
+        except CopyRefused as exc:
+            # The artifact must still say what LANDED. A refusal at session 500
+            # of 600 leaves 499 copied, and "re-run to find out how far it got"
+            # is the one remedy this tool must not require — a re-run re-appends
+            # the journal (see the retry bound in the module docstring).
+            exc.stats = dict(stats)
+            raise
+        if positioned is not None:
             stats["positioned"] += 1
         stats["sessions"] += 1
         stats["turns"] += len(indexes)
@@ -439,7 +482,7 @@ def _commit_or_refuse(write, applied, session_id: str, *,
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
+    ap = _UsageParser(
         description="#10017 — copy the legacy graph turns into the record.")
     ap.add_argument("--graph", required=True)
     ap.add_argument("--uri-env", default="FALKORDB_CLOUD_URI")
@@ -502,6 +545,16 @@ def main(argv: list[str] | None = None) -> int:
         # A refusal is a VERDICT, not a crash: exit 2 with the reason, so the
         # operator (or a CI chain) reads what happened instead of a traceback —
         # the code the census uses for the same class (exit 2, no artifact).
+        partial = getattr(exc, "stats", None)
+        if partial is not None:
+            partial.update({"graph": shown, "dry_run": args.dry_run,
+                            "record_tenant": {"org_id": args.org_id,
+                                              "graph_id": args.graph_id},
+                            "refused": str(exc)})
+            if args.out:
+                Path(args.out).write_text(
+                    json.dumps(partial, indent=2, sort_keys=True))
+            print(json.dumps(partial, indent=2, sort_keys=True))
         print(f"copy: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
     if args.dry_run:
