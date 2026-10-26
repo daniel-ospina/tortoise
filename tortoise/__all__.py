@@ -47,10 +47,14 @@ THE GATE
     cannot make it approved.
 """
 
-# ruff: noqa: F822, RUF022  — `__all__` here names CLASS MEMBERS of `TortoiseSDK`,
-# not module-level bindings (F822's assumption: this module is a DECLARATION, not a
-# namespace — see WHY A MODULE AND NOT THE PACKAGE `__all__` above), and its order IS
-# the owner's document order (`docs/product/beta-sdk-surface.md` rows 1-40), so
+# F822/RUF022 are exempted for this ONE file in `pyproject.toml` →
+# `[tool.ruff.lint.per-file-ignores]` (`"tortoise/__all__.py" = ["F822", "RUF022"]`),
+# which is the mechanism ruff documents for `__all__` entries with no module binding and
+# the one `origin/main` documents (#10056). Kept as prose rather than as a second in-file
+# exemption directive, so one exemption has one home: `__all__` here names CLASS
+# MEMBERS of `TortoiseSDK` (F822's assumption is the opposite — this module is a
+# DECLARATION, not a namespace, see WHY A MODULE AND NOT THE PACKAGE `__all__` above), and
+# its order IS the owner's document order (`docs/product/beta-sdk-surface.md` rows 1-40), so
 # sorting it (RUF022) would rewrite the transcription the gate compares against.
 # The set is reconciled by `tools/sdk_surface_declaration.py`, never by `import *`.
 

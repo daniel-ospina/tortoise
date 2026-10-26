@@ -231,6 +231,9 @@ def test_the_writers_precision_is_the_one_this_check_assumes() -> None:
     # and this assertion redded a writer that was still rendering one decimal
     # place. Asserting the whole field equal to `1.2` keeps the pin strict:
     # a three-decimal `1.235` fails it just as an end-of-line probe would.
+    # (`fix/mainred-ci-surfaces` reached the same conclusion with an anchored
+    # regex; this field-reading form landed on main first, so it is the one that
+    # survives the merge — both pin the VALUE, which is the point.)
     prefix = "  test_bridge_table.py: "
     rows = [ln for ln in rendered.splitlines() if ln.startswith(prefix)]
     assert rows, "the writer no longer renders the row at all"

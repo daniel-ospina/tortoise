@@ -193,18 +193,21 @@ SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
 # The rule is the empirically-validated headroom, not a fresh guess: the 30m
 # budget was hit by a ~30m shard (factor ~1.0 too tight — #798), and 55m for a
 # ~30m shard (factor 1.8) has held since. 2.0 is that factor with a small
-# margin. The FLOOR clears the largest single fast file with headroom, so the
-# watchdog can never kill a shard below the #6133 floor: it was 2.9× the then
-# largest file (`310.7 s`), and the 2026-10-26 durations refresh (#10026) raised
-# the largest fast file to `test_calibration.py` at `390.0 s`. The floor is a
-# DERIVATION, not a preference, so it moved to the number its own stated factor
-# requires — `ceil(390.0 × 2.9 / 60) = 19` min, 1140 s / 390.0 s = 2.92× — not to
-# a value hand-picked to clear the 2.5× the `test-slow` proof pins
-# (`test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`,
-# which DERIVES the largest file from this manifest rather than trusting this
-# comment). A refresh that pushes the largest file past ~456 s reds that test on
-# purpose. Raising the floor further is a CI-budget decision (#9172), not
-# something a weight refresh smuggles in.
+# margin. The FLOOR is 2.9× the largest single fast file, so the watchdog can
+# never kill a shard below the #6133 floor.
+#
+# ⛔ THE FLOOR MOVES WITH THE MEASUREMENT, not with a feeling (#10026 fallout).
+# It was 15m = 2.9× the then-largest fast file (310.7 s), and by the 2026-10-26
+# sweep the committed map's largest was 355.0 s (`test_lane_stash.py`) — 2.54×,
+# i.e. the pin was passing on 0.04 of margin. That sweep then MEASURED
+# `test_calibration.py` at 390.0 s (it had carried the flat 2.0 s default, so no
+# sweep had ever weighed it), which puts 15m at 2.31× and reds
+# `test_watchdog_is_per_shard_and_scales_with_the_shard`. 19m = ceil(390.0 ×
+# 2.9 / 60) restores the stated derivation (1140 s / 390.0 s = 2.92×).
+# ⚠️ The alternative — moving that file to `slow_files` — is a SELECTIVITY
+# decision (a change to it would stop running the fast shards), so it is left to
+# its owner rather than taken here; the floor is the mechanical fix that keeps
+# the derivation true whichever way that lands.
 #
 # ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
 # `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
