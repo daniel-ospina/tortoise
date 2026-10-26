@@ -57,7 +57,7 @@ class _Cur:
         pass
 
 
-def _read_view(monkeypatch, point_rows):
+def _read_view(monkeypatch, point_rows, labels=("Point",)):
     sqls: list[str] = []
 
     def _rows(cur, sql, params):
@@ -73,7 +73,7 @@ def _read_view(monkeypatch, point_rows):
     monkeypatch.setattr(cp, "_rows", _rows)
     monkeypatch.setattr(cp._rp, "scope_connection", lambda conn, org: conn)
     view = cp.read_record_view(object(), org_id="o1", graph_id="g1",
-                               labels=("Point",))
+                               labels=labels)
     return view, sqls
 
 
@@ -92,11 +92,20 @@ def test_a_record_only_row_is_not_planned_into_the_graph(monkeypatch) -> None:
 
 def test_the_filter_is_never_applied_to_a_table_without_the_column(monkeypatch) -> None:
     """A `cache_tier` predicate on any other node table is a SQL error on every
-    rebuild of every tenant, so where it may appear is part of the contract."""
-    _v, sqls = _read_view(monkeypatch, [])
-    for sql in sqls:
-        if "cache_tier" in sql:
-            assert "public.point" in sql, sql
+    rebuild of every tenant (`42703`), so where it may appear is the contract.
+
+    ⛔ Read EVERY node table here, not just `Point`: with `labels=("Point",)` the
+    only statements mentioning the tier are the point read and the relation
+    subquery, so applying the predicate to every table — the exact reversal this
+    test names — left it green (round-2 review, measured)."""
+    _v, sqls = _read_view(monkeypatch, [], labels=tuple(cp.NODE_TABLES))
+    node_reads = {f"SELECT * FROM public.{t}" for t in cp.NODE_TABLES.values()}
+    other_tables = [sq for sq in sqls
+                    if any(sq.startswith(p) for p in node_reads)
+                    and not sq.startswith("SELECT * FROM public.point")]
+    assert other_tables, "no non-point node read was exercised — test is blind"
+    for sql in other_tables:
+        assert "cache_tier" not in sql, sql
 
 
 def test_a_tiered_turns_edge_is_not_planned_either(monkeypatch) -> None:
@@ -104,10 +113,13 @@ def test_a_tiered_turns_edge_is_not_planned_either(monkeypatch) -> None:
     `relations_not_written`, making the operator-facing "declared partial"
     signal permanently non-empty — and therefore worthless."""
     _v, sqls = _read_view(monkeypatch, [])
-    relation_sql = [sq for sq in sqls if "public.relation" in sq]
+    relation_sql = [sq for sq in sqls
+                    if sq.startswith("SELECT * FROM public.relation")]
     assert relation_sql, "the relation read is missing"
-    assert "src_key NOT IN" in relation_sql[0]
-    assert "tgt_key NOT IN" in relation_sql[0]
+    # Scoped to POINT endpoints, not to every key: another label may legally
+    # carry the same key string (node_identity is keyed by label too).
+    assert "src_label = 'Point' AND src_key IN" in relation_sql[0]
+    assert "tgt_label = 'Point' AND tgt_key IN" in relation_sql[0]
     # …and the exclusion is of the record-only keys, not of every key.
     assert "cache_tier <> 'graph'" in relation_sql[0]
 

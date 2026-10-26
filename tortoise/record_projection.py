@@ -1310,17 +1310,15 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # is what keeps that distinction honest.
     "agent_id",
     # #10017 R2: a PLACEMENT declaration, not a derived value.
-    # ⚠️ The RECORD is already protected without this entry: the schema refuses
-    # `cache_tier` as a `props` key, so `_props_from_row` drops it by name. What
-    # this entry adds is the GRAPH half — the fold's own strip set — so a
-    # `PointAdded` carrying the tier cannot set it as a node property that a
-    # journal replay never writes.
-    # ⛔ Consequence, deliberate and load-bearing for the NEXT step: a record's
-    # tier can NOT be set through an event's payload (it is stripped before the
-    # insert, so the row lands the DEFAULT `graph` and the turn would be
-    # materialised again). The tier must be written by its own column statement
-    # — which is why `cache_tier` ships inert in this change and step 7 owns
-    # turning it on.
+    # ⛔ This is the RECORD's strip set, and that is ALL it is: it stops the
+    # record storing the tier as a `props` key. The GRAPH half is
+    # `projection/entities.py::_META_KEYS` (the `agent_id` precedent — the record
+    # strip alone was never sufficient for that key either), which is what stops
+    # a `PointAdded` carrying the tier from setting it on a node.
+    # ⛔ And because this strips it, the tier can NOT be set through an event
+    # payload: it is dropped before the insert, so the row lands the DEFAULT
+    # `graph` and the turn would be materialised again. Step 7 must write it as
+    # its own column statement.
     "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
