@@ -113,18 +113,34 @@ class AclStatus(StrEnum):
 
 
 class FalkorProbe(StrEnum):
-    """Tri-state ``MODULE LIST``/capability probe (#8617).
+    """Four-state ``MODULE LIST``/capability probe (#8617).
 
-    ``ABSENT`` — the layer is not there (bare redis without the graph module,
-    or the server is unreachable). ``DENIED`` — the server ANSWERED and
-    refused the probe: the credential lacks ``+MODULE|LIST``, which is a fact
-    about the CREDENTIAL, not about the server. Conflating the two was the
-    silent-degradation class #8617 paid for.
+    ``ABSENT`` — the server ANSWERED and has no graph module (bare redis):
+    nothing to protect, a boundary. ``UNREACHABLE`` — the probe could not
+    complete (down, timeout, connection reset): a TRANSIENT FAULT, and calling
+    it "absent" would certify an outage as a deployment fact. ``DENIED`` — the
+    server ANSWERED and refused the probe: the credential lacks
+    ``+MODULE|LIST``, which is a fact about the CREDENTIAL, not about the
+    server. Conflating these was the silent-degradation class #8617 paid for.
     """
 
     PRESENT = "present"
     ABSENT = "absent"
+    UNREACHABLE = "unreachable"
     DENIED = "denied"
+
+
+# The absence REASONS (#10093): what the reconcile report breaks the ``absent``
+# bucket into. Each one implies a DIFFERENT operator action — "declared off" is
+# a boundary, "bare redis" means there is nothing to protect, "no_uri" means
+# this deployment has no server at all, "probe_denied" is an under-privileged
+# credential, "layer_down" is an incident. One number cannot say which.
+REASON_DECLARED_OFF = "declared_off"
+REASON_NO_URI = "no_uri"
+REASON_NO_GRAPH_MODULE = "no_graph_module"
+REASON_PROBE_DENIED = "probe_denied"
+REASON_LAYER_DOWN = "layer_down"
+REASON_SETUSER_DENIED = "setuser_denied"
 
 
 @dataclass(frozen=True)
@@ -138,6 +154,7 @@ class AclProvisionResult:
     password: str | None = None
     graph: str | None = None
     detail: str = ""
+    reason: str = ""
 
     @property
     def provisioned(self) -> bool:
@@ -301,7 +318,11 @@ def _falkordb_present(client) -> FalkorProbe:
                 "MODULE LIST refused by the server (%s) — the ACL credential "
                 "lacks +MODULE|LIST (#8617): %s", type(e).__name__, e)
             return FalkorProbe.DENIED
-        return FalkorProbe.ABSENT  # down/unreachable — fail-soft, never a SPOF
+        # down/timeout/reset — fail-soft, never a SPOF, but NOT "absent": an
+        # outage must not be reported as a deployment boundary (#10093).
+        logger.warning("MODULE LIST could not complete (%s) — the server is "
+                       "unreachable: %s", type(e).__name__, e)
+        return FalkorProbe.UNREACHABLE
     tokens: list = []
     for row in rows:
         if not isinstance(row, (list, tuple)):
@@ -496,7 +517,7 @@ def create_acl_user(graph_id: str, org_id: str) -> AclProvisionResult:
     if not layer_provisionable():
         return AclProvisionResult(
             status=AclStatus.ABSENT_BY_DESIGN, username=username,
-            graph=graph_name,
+            graph=graph_name, reason=REASON_DECLARED_OFF,
             detail=(f"{ACL_LAYER_ENV}={layer_mode()} — the per-graph ACL "
                     "layer is declared unavailable in this deployment "
                     "(#8617: FalkorDB Cloud grants no credential +ACL)"))
@@ -504,16 +525,25 @@ def create_acl_user(graph_id: str, org_id: str) -> AclProvisionResult:
     if client is None:
         return AclProvisionResult(
             status=AclStatus.ABSENT, username=username, graph=graph_name,
+            reason=REASON_NO_URI,
             detail="no server URI (embedded store) — no ACL layer to write")
     probe = _falkordb_present(client)
     if probe is not FalkorProbe.PRESENT:
+        if probe is FalkorProbe.DENIED:
+            status, reason = (AclStatus.DENIED,
+                             "MODULE LIST refused — the credential cannot read "
+                             "the server's capability")
+        elif probe is FalkorProbe.UNREACHABLE:
+            status, reason = (AclStatus.ABSENT, REASON_LAYER_DOWN)
+        else:
+            status, reason = (AclStatus.ABSENT, REASON_NO_GRAPH_MODULE)
         return AclProvisionResult(
-            status=(AclStatus.DENIED if probe is FalkorProbe.DENIED
-                    else AclStatus.ABSENT),
-            username=username, graph=graph_name,
+            status=status, username=username, graph=graph_name, reason=reason,
             detail=("MODULE LIST refused — the credential cannot read the "
                     "server's capability" if probe is FalkorProbe.DENIED
-                    else "server has no graph module (bare redis) or is down"))
+                    else "the server could not be reached mid-op"
+                    if probe is FalkorProbe.UNREACHABLE
+                    else "server has no graph module (bare redis)"))
     _ensure_default_user_secured(client)
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
@@ -549,10 +579,12 @@ def _setuser_result(client, username: str, graph_name: str, password: str,
         ok = _setuser(client, username, graph_name, password)
     except AclLayerDenied as e:
         return AclProvisionResult(status=AclStatus.DENIED, username=username,
-                                  graph=graph_name, detail=str(e))
+                                  graph=graph_name,
+                                  reason=REASON_SETUSER_DENIED, detail=str(e))
     if not ok:
         return AclProvisionResult(
             status=AclStatus.ABSENT, username=username, graph=graph_name,
+            reason=REASON_LAYER_DOWN,
             detail="connection failure mid-op — the ACL layer went away")
     if store is not None:
         store()

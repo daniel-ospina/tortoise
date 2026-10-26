@@ -244,8 +244,12 @@ downtime so far.
    at `origin/main@fffcc7c0` — see #8617). With the layer
    declared off, `create_acl_user()` answers `absent_by_design` *before* it
    contacts the server, the graph mints, and the absence is **recorded**: one
-   log line per process, and distinct `absent_by_design` / `denied` / `absent`
-   / `provisioned` counters in `POST /v1/internal/backups/acl-reconcile`.
+   log line per process per absence kind, and distinct `absent_by_design` /
+   `denied` / `absent` / `provisioned` counters in
+   `POST /v1/internal/backups/acl-reconcile`, with `absent_reasons`
+   (`no_uri` / `no_graph_module` / `layer_down`, summing to `absent`) naming
+   WHICH absence the bare `absent` total would otherwise hide. On this lane the
+   only reachable value is `absent_by_design`, for every custom graph.
 
    **What that costs, stated plainly:** on the hosted product there is **no
    database-level second wall** between graphs. What isolates a graph there is
@@ -254,18 +258,52 @@ downtime so far.
    describe the hosted lane as having the per-graph ACL layer — it does not.
 
    **So the credential in `FALKORDB_CLOUD_URI` must satisfy the app's DATA path
-   only:** `+MODULE|LIST` (the capability probe) and the graph verbs the data
-   plane runs (`GRAPH.QUERY` / `GRAPH.RO_QUERY` / `PING`). It does **not** need
-   `+ACL` — that is the one grant the platform refuses, and requiring it is what
-   broke graph creation.
+   only.** The console's **`Write`** preset already covers it — its ACL string
+   contains `+GRAPH.QUERY +GRAPH.RO_QUERY +GRAPH.EXPLAIN +GRAPH.PROFILE
+   +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING` (plus the key verbs `DEL` /
+   `RESTORE` / `RENAME` need) — so `Write` is sufficient and `Admin` is **not**
+   needed. What it does **not** need:
+
+   - `+ACL` — the one grant the platform refuses; requiring it is what broke
+     graph creation.
+   - `+MODULE|LIST` — **optional, and not worth `Admin`.** The ACL capability
+     probe does not run on this lane at all (the layer is declared off, so
+     `create_acl_user` returns before any server contact). Two other probes DO
+     read `MODULE LIST`, and a refusal degrades them *safely*, not wrongly:
+     `cypher_guard`'s engine-version probe reads UNKNOWN on `NOPERM` and then
+     takes the conservative `WITH *` barrier (a measured no-op on the engines
+     that already bind, re-probed after a TTL), and the projection's version
+     probe falls back to `INFO server` and then to "undetermined" (no version
+     gate). `+MODULE|LIST` exists only in the `Admin` preset, which would hand a
+     production data-plane credential `+FLUSHALL +GRAPH.CONFIG +MEMORY
+     +MONITOR +SLOWLOG` — a larger blast radius than the conservative barrier.
+     Stay on `Write`.
+
+   A hand-written ACL narrower than `Write` must include the graph verbs above
+   **plus `+GRAPH.COPY`**: restore/drill swaps issue it on this lane
+   (`hosted_backup.restore_backup`), so an ACL that looks complete for query
+   traffic but omits it turns every restore into a failure.
 
    **Self-hosted is unchanged** (#8617 ruling 2). `TORTOISE_ACL_LAYER` unset
    (the default, `strict`) still creates the per-graph user on every graph
-   mint, and *there* the credential genuinely needs `_GRAPH_COMMANDS` **plus
-   `+MODULE|LIST` and `+ACL`** — the requirement's home is
-   `tortoise/acl_graph_users.py` (`_GRAPH_COMMANDS`, `_falkordb_present`,
-   `layer_provisionable`). A `Write`-preset user is still not enough for a
-   self-hosted server.
+   mint, and *there* the **app** credential genuinely needs:
+
+   - the whole data-plane command set (the same one the Cloud bullet lists,
+     including `+GRAPH.COPY`) — **not** `_GRAPH_COMMANDS`, which is the
+     allowlist granted to each per-graph **tenant** user (`+GRAPH.QUERY
+     +GRAPH.RO_QUERY +PING`). Reading that constant as the app's requirement is
+     how a self-hosted credential ends up unable to run `GRAPH.LIST`,
+     `GRAPH.DELETE` or the restore path;
+   - **`+ACL`** — to create and rotate per-graph users at all;
+   - `+MODULE|LIST` is *optional*: without it the ACL probe reports
+     `probe_denied` (an under-privileged credential, recorded, never a
+     boundary) and the mint still succeeds — and the two version probes degrade
+     as described in the Cloud bullet above.
+
+   There are no console presets on a self-hosted server — that vocabulary is
+   FalkorDB Cloud's; write the ACL from the list above. The requirement's home
+   is `tortoise/acl_graph_users.py` (`_GRAPH_COMMANDS`, `_falkordb_present`,
+   `layer_mode`).
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.
