@@ -1774,8 +1774,11 @@ def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatc
     assert record_writer._breaker_is_open() is False, (
         "a refused record tripped the breaker — the connection was fine")
 
-    # The breaker also HEALS: a success closes it, so a recovered record writes
-    # again without a restart.
+    # The breaker also HEALS: it is a monotonic DEADLINE
+    # (`LIVE_WRITE_BREAKER_SECONDS`), so the window expiring re-opens the door —
+    # and while it is open the door refuses BEFORE attempting a write, so a
+    # success cannot be what opens it inside one test. `_close_live_breaker()`
+    # stands in for that expiry (it is also what a real success calls).
     monkeypatch.setattr(record_writer, "write_records",
                         lambda records, **kwargs: record_writer.RecordWrite(
                             outcome=record_writer.RecordWriteOutcome.APPLIED,
@@ -1788,7 +1791,14 @@ def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatc
     assert _open_refused.refusal == "circuit_open", _open_refused
     record_writer._close_live_breaker()
     with use_record_tenant(ORG, GRAPH):
-        assert record_writer.write_live_record({"type": "PointAdded"}) is not None
+        _healed = record_writer.write_live_record({"type": "PointAdded"})
+    # ⛔ `is not None` is NO LONGER this leg's claim (#8447, review cycle 2):
+    # every refusal arm returns a REFUSED `RecordWrite`, so a non-None value no
+    # longer distinguishes a write that HAPPENED from one that was REFUSED —
+    # such an assertion passes on a mutant that leaves the breaker open and
+    # refuses every write. `applied` is the one check that means "the row
+    # exists", and it is what "a recovered record writes again" claims.
+    assert _healed is not None and _healed.applied is True, _healed
     assert record_writer._breaker_is_open() is False
 
 

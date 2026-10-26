@@ -458,9 +458,18 @@ class RecordWrite:
         if self.outcome is RecordWriteOutcome.NOT_ARMED:
             return status_vocabulary.classify(configured=False, reached=False)
         if self.outcome is RecordWriteOutcome.REFUSED:
-            # ARMED and not written: configured, not reached ⇒ `degraded`.
-            # Never `available` — a refusal that reads as the healthy term is
-            # exactly the #8447 shape (`APPLIED` is the only `available` here).
+            # ARMED and nothing written. For the four `record_write_failures`
+            # tokens this is literally "configured, not reached" ⇒ `degraded`.
+            # It is NOT literally that for `no_durable_journal`: that decline
+            # (the healthy M2 capture lane) never asks the store at all, so
+            # `degraded` — which `status_vocabulary` defines as "off by OUTAGE"
+            # — is the nearest of the four recorded terms, not a measured
+            # outage. There is deliberately no fifth term ("do not add a fifth
+            # term… a condition the four do not cover is a contract change"),
+            # so `.status` alone cannot tell a decline from an outage: a
+            # consumer MUST read :attr:`refusal` first (see :attr:`applied`).
+            # Never `available` either way — a refusal that reads as the healthy
+            # term is exactly the #8447 shape (`APPLIED` is the only `available`).
             return status_vocabulary.classify(configured=True, reached=False)
         # APPLIED ⇒ `available` BY CONSTRUCTION, not from an observation: the
         # classifier's rule is `hits is None or hits > 0` → available, so no
