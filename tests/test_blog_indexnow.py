@@ -344,6 +344,12 @@ CASES: dict[str, dict] = {
     "direct_publish_create": {
         "post": {"title": "Created published", "body": "body text", "slug": "indexnow-slug", "status": "published"},
     },
+    # The other half of that pair: a DRAFT create makes nothing public, so it must
+    # submit nothing. Together the two cases pin "the trigger is the row being
+    # live", not "a create happened".
+    "draft_create": {
+        "post": {"title": "Created draft", "body": "body text", "slug": "indexnow-slug", "status": "draft"},
+    },
 }
 
 # Fixed `shouldSubmit` probes: driven through the REAL exported function, so the
@@ -1085,20 +1091,29 @@ def test_a_failed_submission_still_burns_the_window(results) -> None:
     assert res["stamp"], "the attempt must be recorded even when it failed"
 
 
-# ── The create path is NOT instrumented (a disclosed gap, pinned) ─────────
-def test_a_direct_publish_create_does_not_notify(results) -> None:
-    """``POST`` with ``status: "published"`` publishes but submits nothing.
+# ── The create path IS instrumented (#9803: "became live" is the trigger) ──
+def test_a_direct_publish_create_notifies(results) -> None:
+    """``POST`` with ``status: "published"`` puts a row live, so it submits.
 
-    #9680 names the PATCH transition as the trigger, so this is deliberate — and
-    it is disclosed in ``docs/blog-authoring.md`` rather than left implicit. The
-    case exists so the gap cannot change in EITHER direction without a test
-    changing with it: instrument the create path and this reds; drop the doc line
-    and the doc test reds.
+    #9680 put the trigger on the PATCH alone, which left one write that makes a
+    page publicly readable and submitted nothing — a disclosed gap, deliberately
+    pinned at the time. #9803's ruling is that the trigger is "the post became
+    live", whichever write did it, so this case now asserts the opposite: the
+    create submits exactly once, and a draft create still submits nothing
+    (``draft_create``).
+
+    Both directions stay pinned: remove the notification from the create handler
+    and this reds; make a draft create notify and ``draft_create`` reds.
     """
     res = results["direct_publish_create"]
     assert res["statuses"] == [201], f"the create itself must still succeed: {res['statuses']}"
-    assert res["submissions"] == [], (
-        f"the create path must not notify (#9680 names the PATCH transition) — got "
-        f"{_submitted_urls(res)}. If this is now intended, wire it deliberately and "
-        "update this test and the doc together"
+    assert len(res["submissions"]) == 1, (
+        "a create born published is a publish transition and must submit ONCE — got "
+        f"{len(res['submissions'])}: {_submitted_urls(res)}"
+    )
+
+    draft = results["draft_create"]
+    assert draft["statuses"] == [201], draft["statuses"]
+    assert draft["submissions"] == [], (
+        f"a draft create makes nothing public and must submit nothing — got {_submitted_urls(draft)}"
     )
