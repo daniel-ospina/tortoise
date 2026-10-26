@@ -428,9 +428,23 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
     assert r1.status_code == 200, r1.text
 
     real_query = _GuardedGraph.query
+    # ⛔ THE NEEDLE NAMES THE READ'S OWN RETURN CLAUSE, NOT THE OLD QUERY'S TEXT
+    # (#10000). This leg injects the failure by matching the prior-count read's
+    # cypher, so it must name what that read is TODAY: #10000 rewrote it to
+    # `coalesce(s.turn_max_index, s.turn_count, 0), count(t)` (the meter reads the
+    # session's own turn account, not a node walk, or an armed deployment reads 0
+    # for every session and a replay is billed as a write). The previous needle
+    # (`is_episodic = true RETURN count(t)`) stopped occurring, the fault stopped
+    # firing, the read succeeded, `prior == len(windowed)` and the meter was
+    # CORRECTLY skipped — so the leg reddened on its own disarmed trigger while
+    # the behaviour it defends still held. Re-point the needle when the read's
+    # query changes; never delete the leg.
+    needle = "RETURN coalesce(s.turn_max_index, s.turn_count, 0)"
+    fired: list[str] = []
 
     def flaky(self, cypher, *a, **kw):
-        if "is_episodic = true RETURN count(t)" in cypher:
+        if needle in cypher:
+            fired.append(cypher)
             raise RuntimeError("transient graph error (test)")
         return real_query(self, cypher, *a, **kw)
 
@@ -440,6 +454,10 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
         "conversation": conv, "session_id": "s-priorread"})
     assert r2.status_code == 200, r2.text
     assert r2.json()["extraction_mode"] == "no-provider", r2.json()
+    assert fired, (
+        "the injected failure never fired — the prior-count read's cypher moved "
+        f"and `{needle}` no longer names it; re-point this needle, do not delete "
+        "the leg (without it this leg pins nothing)")
     assert meter, (
         "the failed prior-count read must fall back to 0 and let the meter "
         "OVER-count — never 500 and never silently skip"
