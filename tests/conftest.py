@@ -225,14 +225,29 @@ _projection_mod.install_thread_stamp()
 # frame-keyed carve-out exemption cannot see worker-thread stacks.
 
 
+from tests import _live_gate  # noqa: E402
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Record the running test module's stem on the current thread (#1686)."""
+    """Record the running test module's stem on the current thread (#1686),
+    then refuse a live-storage SKIP (#1869).
+
+    tryfirst, and both jobs share this hook, because the ordering IS the fix:
+    pytest resolves skip/skipif marks in the skipping plugin's tryfirst
+    `pytest_runtest_setup`, before any fixture is set up — so a gate that lived
+    in a session fixture (the shape `_p4_uri_required` uses) is never reached by
+    a module whose tests are all mark-skipped. Measured on this box: an
+    identical URI-less run reds 18 hermetic tests and reports "14 skipped",
+    rc=0, for a live file. See tests/_live_gate.py.
+    """
     try:
         stem = (item.module.__name__.rsplit(".", 1)[-1]
                 if item.module is not None else None)
     except AttributeError:
         stem = None
     _projection_mod._record_current_test_stem(stem)
+    _live_gate.refuse_live_skip(item)
 
 
 def pytest_runtest_teardown(item, nextitem):
