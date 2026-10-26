@@ -135,14 +135,13 @@ class FalkorProbe(StrEnum):
 # credential fault (`probe_denied`, `setuser_denied`) or an INCIDENT
 # (`layer_down`, `probe_unreadable`). One number cannot say which.
 #
-# There are SEVEN, and they do not all land in the same place. Only
-# ``no_uri`` / ``no_graph_module`` / ``layer_down`` populate the reconcile
-# report's ``absent_reasons`` histogram — that histogram decomposes the
-# ``absent`` STATUS. ``declared_off`` is counted in ``absent_by_design``, and
-# ``probe_denied`` / ``setuser_denied`` in ``denied``. ``probe_unreadable``
-# exists so a probe state with no mapping is a visible fault, never a boundary.
-# Do not document all seven as histogram keys (round-2 review: the docs and
-# this comment disagreed on the count).
+# There are SEVEN, and they do not all land in the same counter. The reconcile
+# report's ``absent_reasons`` histogram decomposes the ``absent`` STATUS, so
+# ``no_uri`` / ``no_graph_module`` / ``layer_down`` reach it — and so do
+# ``probe_unreadable`` and the ``unknown`` fallback, which exist precisely so a
+# probe state with no mapping is a VISIBLE fault rather than a boundary.
+# ``declared_off`` is counted in ``absent_by_design``; ``probe_denied`` and
+# ``setuser_denied`` in ``denied``.
 REASON_DECLARED_OFF = "declared_off"
 REASON_NO_URI = "no_uri"
 REASON_NO_GRAPH_MODULE = "no_graph_module"
@@ -263,8 +262,8 @@ def _admin_client():
     failure". A failure inside :func:`_falkordb_present` no longer vanishes:
     since #8617 a permission refusal there logs the refusal (it is the
     ``denied`` state, a fact about the credential), while an unreachable
-    server still answers ``absent`` silently — the connection-failure text
-    below is the arm that speaks for an outage. The HEDGE arm is the one this
+    server answers ``unreachable`` and LOGS the outage — so an outage is never
+    reported as ``absent`` (a boundary). The HEDGE arm is the one this
     channel gets, deliberately:
     every verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
     ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
@@ -546,7 +545,7 @@ def create_acl_user(graph_id: str, org_id: str) -> AclProvisionResult:
             status, reason = AclStatus.ABSENT, REASON_LAYER_DOWN
         elif probe is FalkorProbe.ABSENT:
             status, reason = AclStatus.ABSENT, REASON_NO_GRAPH_MODULE
-        else:  # pragma: no cover - a probe state added later without a mapping
+        else:  # a probe state added later with no mapping — pinned by a test
             # NEVER fall through to "bare redis, nothing to protect": a state we
             # cannot classify is an UNREADABLE probe, not a boundary. This arm
             # exists so the next enum member cannot silently become the boundary

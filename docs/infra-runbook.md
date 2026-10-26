@@ -313,10 +313,12 @@ downtime so far.
      that constant as the app's requirement is how a self-hosted credential ends
      up unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
    - **`+ACL`** — to create and rotate per-graph users at all;
-   - `+MODULE|LIST` is *optional*: without it the ACL probe reports
-     `probe_denied` (an under-privileged credential, recorded, never a
-     boundary) and the mint still succeeds — and the two version probes degrade
-     as described in the Cloud bullet above.
+   - `+MODULE|LIST` is *optional*: without it the probe refusal is recorded as
+     `denied` (an under-privileged CREDENTIAL, never a boundary) and the mint
+     still succeeds. Read it from the `denied` counter plus its log line
+     (`MODULE LIST refused …`) — the reconcile breaks down `absent` by reason,
+     not `denied`. The two version probes degrade as described in the Cloud
+     bullet above.
 
    There are no console presets on a self-hosted server — that vocabulary is
    FalkorDB Cloud's; write the ACL from the list above. The requirement's home
