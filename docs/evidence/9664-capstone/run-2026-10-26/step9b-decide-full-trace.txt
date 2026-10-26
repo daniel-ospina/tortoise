@@ -1,0 +1,326 @@
+Run the decide protocol now for this real decision: "the #9664 capstone stays a manual run that must be re-executed after any change to the onboarding path, versus making it a scheduled CI gate". File the decision point with at least two options, criteria and confidence. Then re-read tortoise_onboarding_state and tell me whether decide-completed closed. Show the raw tool calls and results.
+Worked for 1m 36s
+ChatGPT said:
+decide-completed: PASS
+
+The decision protocol succeeded. Tortoise created the decision record, both options, criteria, evidence, and five reasoning operators. Confidence computation converged, and the final onboarding read confirms:
+
+JSON
+{
+  "status": "complete",
+  "onboarding_complete": true,
+  "completed_steps": [
+    "team-named",
+    "harness-connected",
+    "first-points-filed",
+    "decide-completed"
+  ]
+}
+1. Decision result
+
+Option A: Manual re-execution
+
+60.80%
+
+Option B: Scheduled CI gate
+
+58.08%
+EP posterior confidence, not statistically established success probabilities.
+
+The modeled ranking narrowly favors manual re-execution, primarily because it directly follows onboarding changes and avoids the maintenance requirements of automated live connector tests. Scheduled CI is more repeatable but may leave a gap between a change and its next scheduled run.
+
+The difference is only 2.71 percentage points. These are modeled results using default priors and judgments, not empirical reliability measurements. They do not establish a decisive winner.
+
+2. Point creation: raw call arguments and results
+
+Eight tortoise_create_point calls succeeded. Below are their submitted arguments and returned IDs, kinds, and statuses. The connector also returned timestamps, content hashes, default calibration metadata, embedding vectors, and no_source advisories, omitted here to keep the audit readable.
+
+Point creation arguments
+
+JSON
+
+[
+  {
+    "kind": "decision",
+    "content": "Manual re-execution: #9664 capstone remains a manual acceptance run and must be re-executed after every change to the onboarding path",
+    "props": {"title": "#9664 option A — manual on every onboarding change"}
+  },
+  {
+    "kind": "decision",
+    "content": "Scheduled CI gate: #9664 capstone is implemented as a scheduled automated CI gate",
+    "props": {"title": "#9664 option B — scheduled CI gate"}
+  },
+  {
+    "kind": "criterion",
+    "content": "Regression detection after changes to the onboarding path",
+    "props": {"title": "#9664 criterion — change-coupled regression detection"}
+  },
+  {
+    "kind": "criterion",
+    "content": "Repeatable unattended execution and reduced human omission",
+    "props": {"title": "#9664 criterion — repeatability"}
+  },
+  {
+    "kind": "criterion",
+    "content": "Implementation and maintenance effort of live connector acceptance testing",
+    "props": {"title": "#9664 criterion — cost and fragility"}
+  },
+  {
+    "kind": "evidence",
+    "content": "A scheduled CI gate runs on its schedule; without change-triggered execution, it does not guarantee a check immediately after each onboarding-path change",
+    "props": {"title": "#9664 finding — schedule latency"}
+  },
+  {
+    "kind": "evidence",
+    "content": "Manual re-execution after every onboarding-path change can validate live OAuth and connector behavior, but depends on people remembering to run it",
+    "props": {"title": "#9664 finding — manual dependence"}
+  },
+  {
+    "kind": "statement",
+    "content": "Decision under evaluation: keep #9664 as mandatory manual re-execution after any onboarding-path change, or make it a scheduled CI gate",
+    "props": {
+      "title": "#9664 capstone decision",
+      "domain": "#9664-capstone-onboarding-verification"
+    }
+  }
+]
+  
+
+Returned IDs
+
+Point
+
+ID
+
+Status
+Option A
+
+1a1796ae7c1-2337daccbccb
+
+live
+Option B
+
+1a1796af058-dd7e3951c809
+
+live
+Criterion: Regression
+
+1a1796af788-c16c641524ed
+
+live
+Criterion: Repeatability
+
+1a1796affdf-61ec86f09b08
+
+live
+Criterion: Cost
+
+1a1796b0880-5a5d82112c36
+
+live
+Evidence: Schedule latency
+
+1a1796b10cd-6113a0232dd0
+
+live
+Evidence: Manual dependence
+
+1a1796b19ae-b6d9fe46e5a4
+
+live
+Decision record
+
+1a1796b2233-3bcee9b7f511
+
+live
+3. Operators: raw calls and results
+
+The first attempt used direction:"forward", which the connector rejected on all five calls:
+
+JSON
+{
+  "error": "direction must be one of -, ->, <-, <->, bidirectional, unidirectional, got 'forward'"
+}
+
+The corrected calls used direction:"->" and all succeeded.
+
+JSON
+
+[
+  {
+    "args": {
+      "op_type": "IMPL",
+      "source_id": "1a1796af788-c16c641524ed",
+      "target_ids": ["1a1796ae7c1-2337daccbccb"],
+      "direction": "->"
+    },
+    "result": {
+      "id": "1a1796b85fc-3c9c6d5a8b57",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "direction": "->",
+      "direction_basis": "explicit",
+      "status": "live"
+    }
+  },
+  {
+    "args": {
+      "op_type": "IMPL",
+      "source_id": "1a1796affdf-61ec86f09b08",
+      "target_ids": ["1a1796af058-dd7e3951c809"],
+      "direction": "->"
+    },
+    "result": {
+      "id": "1a1796b8e28-eefbe287780a",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "direction": "->",
+      "direction_basis": "explicit",
+      "status": "live"
+    }
+  },
+  {
+    "args": {
+      "op_type": "IMPL",
+      "source_id": "1a1796b0880-5a5d82112c36",
+      "target_ids": ["1a1796ae7c1-2337daccbccb"],
+      "direction": "->"
+    },
+    "result": {
+      "id": "1a1796b9751-bdf1dd922d88",
+      "is_operator": true,
+      "op_type": "IMPL",
+      "direction": "->",
+      "direction_basis": "explicit",
+      "status": "live"
+    }
+  },
+  {
+    "args": {
+      "op_type": "NAND",
+      "source_id": "1a1796b10cd-6113a0232dd0",
+      "target_ids": ["1a1796af058-dd7e3951c809"],
+      "direction": "->"
+    },
+    "result": {
+      "id": "1a1796b9ed0-890882aaea01",
+      "is_operator": true,
+      "op_type": "NAND",
+      "direction": "->",
+      "direction_basis": "explicit",
+      "status": "live"
+    }
+  },
+  {
+    "args": {
+      "op_type": "NAND",
+      "source_id": "1a1796b19ae-b6d9fe46e5a4",
+      "target_ids": ["1a1796ae7c1-2337daccbccb"],
+      "direction": "->"
+    },
+    "result": {
+      "id": "1a1796ba533-113ddba9d682",
+      "is_operator": true,
+      "op_type": "NAND",
+      "direction": "->",
+      "direction_basis": "explicit",
+      "status": "live"
+    }
+  }
+]
+  
+4. Confidence computation
+
+Raw arguments
+
+JSON
+{
+  "anchors": [
+    "1a1796ae7c1-2337daccbccb",
+    "1a1796af058-dd7e3951c809"
+  ],
+  "max_hops": 1
+}
+
+Raw result
+
+JSON
+
+{
+  "iterations": 15,
+  "converged": true,
+  "confidences": {
+    "1a1796b10cd-6113a0232dd0": {
+      "mean": 0.75,
+      "variance": 0.0375,
+      "alpha": 3,
+      "beta": 1,
+      "effective_n": 4
+    },
+    "1a1796b19ae-b6d9fe46e5a4": {
+      "mean": 0.75,
+      "variance": 0.0375,
+      "alpha": 3,
+      "beta": 1,
+      "effective_n": 4
+    },
+    "1a1796ae7c1-2337daccbccb": {
+      "mean": 0.6079619014361448,
+      "variance": 0.04885335731625592,
+      "alpha": 2.35814356015679,
+      "beta": 1.52062508404002,
+      "effective_n": 3.8787686441968097
+    },
+    "1a1796af058-dd7e3951c809": {
+      "mean": 0.5808183067318844,
+      "variance": 0.05427740404929439,
+      "alpha": 2.02451824281291,
+      "beta": 1.46111266679866,
+      "effective_n": 3.4856309096115696
+    },
+    "1a1796af788-c16c641524ed": {
+      "mean": 0.75,
+      "variance": 0.0375,
+      "alpha": 3,
+      "beta": 1,
+      "effective_n": 4
+    },
+    "1a1796affdf-61ec86f09b08": {
+      "mean": 0.75,
+      "variance": 0.0375,
+      "alpha": 3,
+      "beta": 1,
+      "effective_n": 4
+    },
+    "1a1796b0880-5a5d82112c36": {
+      "mean": 0.75,
+      "variance": 0.0375,
+      "alpha": 3,
+      "beta": 1,
+      "effective_n": 4
+    }
+  },
+  "truncated": false,
+  "operators_seen": 5,
+  "operators_used": 5
+}
+5. Structure validation
+
+Call
+
+JSON
+tortoise_check_structure({})
+
+Raw result
+
+JSON
+{
+  "result": []
+}
+
+No structural issues were
+
+ChatGPT can make mistakes. Check important info.
+Latest response
+Thinking effort
+Medium

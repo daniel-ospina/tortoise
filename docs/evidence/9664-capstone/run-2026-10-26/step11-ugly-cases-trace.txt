@@ -1,0 +1,118 @@
+Now the deliberate ugly cases, with raw arguments and raw results so I can see the refusal shapes. Attempt each: (1) create a point against an explicit NON-DEFAULT graph named "capstone-9664-missing" (a graph that does not exist); (2) scope a read to a graph id that is not mine, "org_000000000000000000000000"; (3) create a point against the graph name "default". For each tell me: refused or accepted, the exact error code and message, and which argument carried the graph.
+Worked for 13s
+ChatGPT said:
+#9664 Graph-routing refusal tests
+
+All three calls were attempted. One reached the Tortoise connector and returned a graph-resolution error; two were blocked by OpenAI's safety checks before a Tortoise result was available.
+
+Test
+
+Outcome
+
+Error code
+1. Write to nonexistent graph
+
+Blocked by OpenAI
+
+Not provided
+2. Read from foreign graph
+
+Refused by Tortoise
+
+INVALID_ARGUMENT
+3. Write to default
+
+Blocked by OpenAI
+
+Not provided
+1. Create point in nonexistent graph
+
+Tool: tortoise_create_point
+
+Raw arguments:
+
+JSON
+{
+  "kind": "fact",
+  "content": "capstone-9664 negative graph probe: missing graph",
+  "graph": "capstone-9664-missing"
+}
+
+Raw error:
+
+Plain text
+This tool call was blocked by OpenAI's safety checks. Please double check what you are sending.
+
+Outcome: Blocked. No Tortoise-side refusal code or message was returned.
+
+Graph-carrying argument: graph.
+
+2. Read from foreign graph
+
+Tool: tortoise_search
+
+Raw arguments:
+
+JSON
+{
+  "query": "capstone-9664",
+  "graph": "org_000000000000000000000000"
+}
+
+Raw error:
+
+Plain text
+INVALID_ARGUMENT: Error code: INVALID_ARGUMENT; Error: RuntimeException: Error calling MCP tool: [TextContent(type='text', text="No graph 'org_000000000000000000000000' is reachable from this workspace. Reachable graphs: 'default' (default).", annotations=None, meta=None)]
+
+Outcome: Refused by the connector.
+
+Exact error code: INVALID_ARGUMENT
+
+Exact underlying message:
+
+Plain text
+No graph 'org_000000000000000000000000' is reachable from this workspace. Reachable graphs: 'default' (default).
+
+Graph-carrying argument: graph.
+
+3. Create point in explicit default graph
+
+Tool: tortoise_create_point
+
+Raw arguments:
+
+JSON
+{
+  "kind": "fact",
+  "content": "capstone-9664 default graph routing probe 2026-10-26",
+  "graph": "default"
+}
+
+Raw error:
+
+Plain text
+This tool call was blocked by OpenAI's safety checks. Please double check what you are sending.
+
+Outcome: Blocked. No Tortoise-side acceptance or refusal was observed.
+
+Graph-carrying argument: graph.
+
+Interpretation
+
+The important distinction is between connector refusal and host-level blocking.
+
+Test 1: Inconclusive for Tortoise's nonexistent-graph handling.
+
+Test 2: Confirmed that the foreign graph is unreachable from this workspace, with an explicit INVALID_ARGUMENT error.
+
+Test 3: Inconclusive for explicit graph:"default" acceptance.
+
+The connector's tool documentation states that graph:"default" should behave like omitting the graph argument, but this attempt did not establish that behavior.
+
+Result: 1 confirmed connector refusal, 2 host-level blocks, 0 confirmed writes. No point creation was confirmed during these tests.
+
+ChatGPT can make mistakes. Check important info.
+Latest response
+Thinking effort
+Medium
+

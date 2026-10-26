@@ -1,0 +1,71 @@
+Overview loaded
+Settings
+Setup guide
+Where your Organization is in setup — Resume reopens the setup wizard and walks you through what's left (your Organization and fork choice are already saved).
+0/3
+Setup guide · next: Connect your agent
+· Connect your agent
+· Seed your first memory
+· Make your first decision
+✓ Capture disclosure (info)
+Resume setup →
+GitHub connect
+Connected — 8 repos available. Issues and docs index to this Organization's graph. Manage scope and re-index under Memory sources below.
+Disconnect GitHub
+Memory sources
+Choose what Tortoise remembers — sources you switch on index to this Organization's graph. Session recording is permission for this Organization: it is on unless you switch it off, but each machine's Claude Code, Codex or Cursor hooks still opt in separately (TORTOISE_CAPTURE=1) before they file anything — on a Pi machine, installing the extension is the opt-in. Turning this on grants the permission; it is not the switch.
+S
+Agent session recording
+Sessions from your agent are filed to your Organization as memory sources.
+Manage
+G
+GitHub issues
+Issues become work items with a lifecycle record.
+Manage
+G
+GitHub documents
+Your repos' docs/ folders are indexed as Sources.
+Manage
+S
+Supabase
+Bring Supabase org data in as a memory source.
+Coming soon
+S
+Slack
+Messages and threads become memory sources.
+Coming soon
+L
+Linear
+Issues and cycles become memory sources.
+Coming soon
+Captured sessions are filed to your Organization's graph. View or delete them any time in Settings → Captured sessions.
+Agent session recording
+When on, sessions from machines that opted in — Claude Code, Codex and Cursor via TORTOISE_CAPTURE=1, or a Pi machine with the extension installed — are filed to your Organization's graph as memory sources; whether they are also extracted into memory is controlled below.
+Claude Code
+· harness reported by your agent
+active
+Install manually
+Claude Desktop
+backfill import only — no live install path yet
+Claude Web
+session capture for web is in progress — not available yet
+Codex
+· harness reported by your agent
+active
+Install manually
+Cursor
+· harness reported by your agent
+active
+Install manually
+Last attempt — Team points limit reached: 24956 in use + 48 estimated for this capture exceeds 25000. Upgrade your plan.
+Pi
+· harness reported by your agent
+active
+Install manually
+Last attempt — Team points limit reached: 25000 in use + 393 estimated for this capture exceeds 25000. Upgrade your plan. Need more? Contact support@premiselabs.co.
+ChatGPT
+ChatGPT connects from its own cloud — session capture isn't available for it
+Extract sessions into memory
+When on, each session captured through this service is also extracted into memories once a provider key is configured. When off, those sessions are stored only — their turns stay searchable, but nothing is extracted, and captures made through this service while this is off stay unextracted until extraction is turned back on and they are captured again.
+Captured sessions
+Whe
