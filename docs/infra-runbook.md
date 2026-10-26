@@ -3328,7 +3328,8 @@ happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
-   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
+   `no_tenant` is ALSO the designed outcome for a credential that names no graph
+   **the record can key on**:
    an org-wide / session / legacy / OAuth key, the self-host registry lane
    (`record_writer.record_tenant_for` returns `None` by design), and the
    onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
@@ -3346,8 +3347,11 @@ why the two recipes above are the verification and the deploy status is not.
    cross-tenant note below for what that declaration may and may not cover.
    Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
    only when the capture ran **unbound**, when item 1's row did not appear, or
-   when the capture's own tenant resolution faulted (recipe 1 logs *could not
-   resolve the record tenant*).
+   when the capture's own tenant resolution faulted — a `tortoise.hosted_api`
+   WARN (`could not resolve the record tenant for this request`) that
+   **recipe 1's grep does NOT match** (it greps
+   `the record write did not happen`), so read it with
+   `fly logs -a tortoise-y4mjjq | grep "could not resolve the record tenant"`.
    ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
