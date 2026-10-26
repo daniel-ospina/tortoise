@@ -598,9 +598,12 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
     propagation). Two lanes, one answer: a divergence here files one request's
     rows under another graph.
 
-    ``org`` is the dict an auth seam resolved (``org_id`` + the credential's
-    ``graph_id``). ``None`` is returned — never a guess — for the two shapes
-    this seam must NOT name:
+    ``org`` is the dict an auth seam resolved: ``org_id``, plus the
+    credential's ``graph_id`` (``None`` for an org-wide key), plus — for an
+    org-wide key only, and only since #10025 — ``default_graph_id``.
+
+    ``None`` is returned — never a guess — for every shape this seam must NOT
+    name:
 
     * ``control_plane_ids`` is False. It is the caller's statement that the
       resolution did not come from the control plane (``is_supabase_enabled()``
@@ -613,14 +616,30 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
       single-tenant pair with a value the FK cannot satisfy, turning a
       recording deployment into ``write_failed`` on every write with a cause
       nobody could attribute.
-    * the credential named no graph (org-wide key, session/JWT auth). The
-      default graph **need not have a** ``public.graphs`` row
-      (``supabase_control.delete_graph_row``: *"no row exists for the default
-      graph"* — it is derived from ``organizations.graph_name``), so naming it
-      is a control-plane decision (#9188's open question), not a constant this
-      function may invent. Omitting it keeps the write REFUSED and counted
-      (``no_tenant``) — the fail-closed direction — rather than filing the row
-      under a tenant nobody chose.
+    * no usable ``org_id``, or a ``graph_id`` that IS present and is not a
+      usable id (wrong type, empty). A credential that named a graph is
+      answered by that graph or not at all — it must never fall through to the
+      default tenant, which would widen a graph-bound credential into an
+      org-wide one.
+    * an org-wide credential whose default graph the control plane could not
+      name: no row, no ``default_graph_id`` on the dict, a field of the wrong
+      type, or the literal ``"default"`` sentinel (see below).
+
+    HOW AN ORG-WIDE CREDENTIAL IS NAMED (#10025). Its tenant is the org's
+    **default graph**, and it is read from ``default_graph_id`` — the id of the
+    org's active ``kind='default'`` ``public.graphs`` row, which the control
+    plane resolved and put on the credential. Never derived from the name,
+    never a constant, and never resolved here: an unresolvable default leaves
+    the write REFUSED and counted (``no_tenant``) — the fail-closed direction —
+    rather than filing the row under a tenant nobody chose.
+
+    ⚠️ Two different things are called ``default_graph_id`` in this codebase,
+    and only ONE of them is an id. The credential field READ HERE is a real
+    ``public.graphs.id`` (``g_<16hex>``). The org-list payload's field of the
+    same name (``hosted_api``'s graphs listing) carries the ``"default"``
+    SENTINEL from :func:`tortoise.supabase_control.graph_metadata`, which is
+    not an id and cannot satisfy the record's FK — so the sentinel is refused
+    here explicitly. Do not hand an org-list row to this function.
 
     ⛔ This is not a fallback chain and must not grow into one: it reads the
     credential the caller already resolved, and nothing else. The env pair is a
@@ -629,10 +648,25 @@ def record_tenant_for(org: Mapping[str, Any] | None, *,
     if not control_plane_ids or not isinstance(org, Mapping):
         return None
     org_id = org.get("org_id")
+    if not (isinstance(org_id, str) and org_id):
+        return None
     graph_id = org.get("graph_id")
-    if (isinstance(org_id, str) and org_id
-            and isinstance(graph_id, str) and graph_id):
-        return (org_id, graph_id)
+    if graph_id is not None:
+        # A PRESENT graph_id answers or refuses — it never falls through to the
+        # org-wide default below (that would widen a graph-bound credential).
+        return (org_id, graph_id) if (isinstance(graph_id, str) and graph_id) else None
+    # The org-wide case (#10025): the default graph's id, READ from the
+    # control-plane row the resolver put on this dict — never derived from its
+    # name and never a constant, so a rename cannot move a write to another
+    # tenant, and an org whose default row does not exist keeps refusing.
+    default_graph_id = org.get("default_graph_id")
+    if isinstance(default_graph_id, str) and default_graph_id:
+        # The `"default"` sentinel is NOT an id (see the docstring): a
+        # `public.graphs.id` is `g_<16hex>`, so filing under the sentinel would
+        # produce a row the record's FK rejects. Refuse rather than fail later.
+        if default_graph_id == "default":
+            return None
+        return (org_id, default_graph_id)
     return None
 
 
