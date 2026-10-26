@@ -502,18 +502,21 @@ def test_a_truncated_read_is_refused_and_never_written(monkeypatch,
     assert not out.exists(), "a refused census must not leave an artifact"
 
 
-#: A `pointKind` EQUALITY in a WHERE clause, which would narrow the census to a
-#: strict SUBSET of the delete set. Matching is on the operator, never on the
-#: name: `p.pointKind` is legitimately present in the turns query's RETURN list
-#: (that is how the divergence is MEASURED), so a presence check cannot tell
-#: "measured" from "filtered on" (#10017 decision relay, 2026-10-26T08:44:26Z).
-_KIND_FILTER_RE = re.compile(r"pointKind\s*=")
-
 #: The census population's POLARITY. `assert "is_episodic" in q` accepts
 #: `= false`, which measures the COMPLEMENT of the delete set and would hand
 #: `verify` a baseline of every point the sweep does NOT remove (measured: the
 #: shipped test passed 33/33 with all four statements flipped).
 _EPISODIC_RE = re.compile(r"p\.is_episodic\s*=\s*(true|false)")
+
+
+#: Split a statement at its PROJECTION. Everything before `RETURN` decides the
+#: population (MATCH pattern, WHERE, WITH); everything after it only MEASURES.
+#: The `pointKind` arm below needs that split, because the column is legitimately
+#: in the turns query's RETURN list — that is how the divergence is measured —
+#: while any mention of it in the population clauses is a NARROWING.
+def _population_of(query: str) -> str:
+    """The pre-projection clauses of *query*, lowercased, or `""` if none."""
+    return query.split("RETURN", 1)[0].lower()
 
 
 def test_the_statements_measure_what_the_report_claims() -> None:
@@ -531,25 +534,34 @@ def test_the_statements_measure_what_the_report_claims() -> None:
     orphan_q = next(q for q in graph.queries if "NOT (:Session)" in q)
     assert "s.turn_count" in sessions_q and "s.turn_max_index" in sessions_q
     assert "is_episodic" in turns_q and ":CONTAINS]" in turns_q
-    assert "p.pointKind" in turns_q, "the pointKind divergence would be invisible"
+    assert "p.pointKind" in turns_q.split("RETURN", 1)[1], (
+        "the pointKind divergence would be invisible")
     assert "is_episodic" in orphan_q and "NOT (:Session)-[:CONTAINS]->(p)" in orphan_q
 
     # #10017 decision relay: the graph leg READS the delete set — `is_episodic =
     # true` and NO kind filter — and the turn SHAPE decides the PURGE set. A
-    # narrowing `AND p.pointKind = 'event'` is a strict SUBSET of what the delete
-    # sweep removes, so a census that carried it would report a subset CLEAN and
+    # narrowing to `pointKind = 'event'` is a strict SUBSET of what the delete
+    # sweep removes, so a census carrying it would report a subset CLEAN and
     # authorise an irreversible delete over nodes nothing had compared.
     #
-    # The assertion above cannot see that narrowing: `p.pointKind` rides the
-    # turns query's RETURN list, so it is present whether selected or filtered
-    # on. Narrowing the paged read ALONE trips the per-leg cross-check, but
-    # narrowing BOTH legs (read + aggregate — what a careful author does) agrees
-    # with itself, so the shape is pinned over EVERY statement the census issues.
+    # Pinned by the NAME in the population clauses, never by the operator: the
+    # first cut of this arm matched `pointKind\s*=`, which is silent for a
+    # node-pattern property map — `(p:Point {pointKind:'event'})` has no `=` at
+    # all (a canonical FalkorDB/Cypher spelling, used in 101 files of this repo)
+    # — and silent for `IN`, for a backticked identifier and for any casing. A
+    # name check covers every one of those with no operator list to keep current.
+    # `p.pointKind` stays allowed where it belongs: AFTER `RETURN`, as the column
+    # that measures the divergence.
+    #
+    # Narrowing the paged read ALONE trips the per-leg cross-check; narrowing
+    # BOTH legs (read + aggregate — what a careful author does) agrees with
+    # itself, so every statement the census issues is pinned, and a future
+    # statement is covered without touching this test.
     assert graph.queries, "the census must issue statements to be pinned"
     for stmt in graph.queries:
-        assert not _KIND_FILTER_RE.search(stmt), (
-            "a pointKind filter narrows the census to a subset of the delete "
-            f"set, so CLEAN would no longer mean parity: {stmt}"
+        assert "pointkind" not in _population_of(stmt), (
+            "a pointKind predicate narrows the census to a subset of the "
+            f"delete set, so CLEAN would no longer mean parity: {stmt}"
         )
 
     # POLARITY, by VALUE — not by the presence of the name. The four statements
