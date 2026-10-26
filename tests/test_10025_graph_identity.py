@@ -23,6 +23,8 @@ NOT retired under existing consumers, and a rename cannot move identity.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tortoise.record_writer import record_tenant_for
@@ -749,6 +751,44 @@ def test_the_mint_retry_window_survives_a_concurrent_insert(monkeypatch) -> None
     with pytest.raises(RuntimeError, match="changed size during iteration"):
         for _oid, ts in witness.items():          # the PRE-FIX shape
             _ = now - ts
+
+
+def test_the_prune_snapshot_is_taken_under_the_cache_guard(
+        monkeypatch) -> None:
+    """The EXCLUSION half of the fix, so the two cannot drift apart.
+
+    The test above pins the SNAPSHOT; this one pins EXCLUSION, so the two
+    halves cannot drift apart. A snapshot alone does not exclude a peer thread
+    — building it still walks the mapping, so a concurrent insert can raise
+    inside the walk itself. This asserts the snapshot is taken while
+    `_DEFAULT_ROW_MINT_RETRY_GUARD` is held, which is what stops a SECOND
+    thread's record interleaving with this one's read-modify-write. Delete the
+    `with` block and keep `copy()` — the plausible half-fix — and this goes
+    red while the test above stays green (measured).
+
+    Observed from inside the walk deliberately: the guard is process state, so
+    the only honest witness is the state at the moment the snapshot is taken.
+    """
+    from tortoise import supabase_control as sc
+
+    seen: dict[str, bool] = {}
+
+    class _WatchesTheGuard(dict):
+        def copy(self):  # type: ignore[override]
+            seen["guard_locked"] = sc._DEFAULT_ROW_MINT_RETRY_GUARD.locked()
+            return dict.copy(self)
+
+    cache = _WatchesTheGuard()
+    stale = time.monotonic() - sc._DEFAULT_ROW_MINT_RETRY_S - 1.0
+    for n in range(sc._DEFAULT_ROW_MINT_RETRY_MAX + 1):
+        dict.__setitem__(cache, f"org-stale-{n:04d}", stale)
+    monkeypatch.setattr(sc, "_DEFAULT_ROW_MINT_RETRY", cache)
+
+    sc._record_default_row_mint_failure("org-new", time.monotonic())
+
+    assert seen.get("guard_locked") is True, (
+        "the prune walk took its snapshot with the cache guard UNHELD — a "
+        "concurrent record can interleave with the read-modify-write")
 
 
 # ── The migration's two structural guarantees (#10025 review, at-head) ──────

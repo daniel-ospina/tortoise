@@ -4186,6 +4186,20 @@ def ensure_default_graph_row(cp, org_id: str,
 #: a mint the org provably could not get.
 _DEFAULT_ROW_MINT_RETRY_S = 300.0
 _DEFAULT_ROW_MINT_RETRY: dict[str, float] = {}
+#: Prune the cache above this many orgs (see `_record_default_row_mint_failure`).
+_DEFAULT_ROW_MINT_RETRY_MAX = 1024
+#: Serialises every access to `_DEFAULT_ROW_MINT_RETRY` (#10027 review F1).
+#: The dict is PROCESS state, and this mint runs on three executors in the same
+#: process — the auth pool (`resolve_api_key`, up to
+#: `monitoring.CONTROL_PLANE_WORKERS` threads), the org pool (`provision_org`),
+#: and the MCP loop thread — so a bare read-modify-write over it is not safe:
+#: CPython documents that "iterating views while adding or deleting entries in
+#: the dictionary may raise a RuntimeError or fail to iterate over all
+#: entries", and a raise here is not a lost cache entry, it is an exception out
+#: of a helper whose contract is "never fail the caller" (a 500 on the
+#: org-wide-key auth lane, or an account lost after the provision RPC has
+#: committed). Same shape as `hosted_api._DREAM_LOCKS_GUARD`.
+_DEFAULT_ROW_MINT_RETRY_GUARD = threading.Lock()
 
 
 def _mint_default_graph_row_best_effort(cp, org_id: str,
@@ -4211,9 +4225,15 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
     ``default``; an empty ``organizations.graph_name``) and a broken table is
     not fixed by the next request either, so the auth path must not pay and log
     the attempt per request. The row is still READ on every request.
+
+    ⛔ Neither the read nor the write of that cache may raise: this runs on the
+    auth lane and after a committed provision RPC, so the whole point of the
+    seam is that a cache problem cannot fail the caller (see
+    :data:`_DEFAULT_ROW_MINT_RETRY_GUARD`).
     """
     now = time.monotonic()
-    last_attempt = _DEFAULT_ROW_MINT_RETRY.get(org_id)
+    with _DEFAULT_ROW_MINT_RETRY_GUARD:
+        last_attempt = _DEFAULT_ROW_MINT_RETRY.get(org_id)
     if last_attempt is not None and (now - last_attempt) < _DEFAULT_ROW_MINT_RETRY_S:
         _logger.debug(
             "default graphs row for org %s: not re-attempting (%s) — last "
@@ -4243,7 +4263,8 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
         # org, and the mint itself already logged the reason at WARNING.
         _record_default_row_mint_failure(org_id, now)
     else:
-        _DEFAULT_ROW_MINT_RETRY.pop(org_id, None)
+        with _DEFAULT_ROW_MINT_RETRY_GUARD:
+            _DEFAULT_ROW_MINT_RETRY.pop(org_id, None)
     return row_id
 
 
@@ -4266,15 +4287,25 @@ def _record_default_row_mint_failure(org_id: str, now: float) -> None:
     provisioning wrappers AFTER their RPC has committed. It would therefore
     escape a helper whose whole contract is "never fail the caller": an auth
     500 on the org-wide-key lane, and a costed account on the signup lane.
-    A snapshot is the fix rather than a lock — every other access here is a
-    single dict operation (atomic under the GIL), so the iteration was the only
-    multi-step read; a lock would serialise the auth hot path to protect it.
+
+    ⛔ A snapshot ALONE does not exclude a peer thread: building it still walks
+    the mapping, so a concurrent insert can raise inside the walk itself. The
+    record-and-prune therefore also runs under
+    :data:`_DEFAULT_ROW_MINT_RETRY_GUARD` — that is what actually excludes a
+    second thread — while the snapshot (``dict.copy()``, a C-level copy of the
+    table, and NOT ``dict.items()``, which is a live view) means the walk is
+    never a view of the live mapping. The guard is uncontended on the common
+    path, where nothing is written at all, so it does not serialise the auth
+    hot path; and this function must never raise, because it is called from
+    inside an ``except`` arm and after a committed provision RPC.
     """
-    _DEFAULT_ROW_MINT_RETRY[org_id] = now
-    if len(_DEFAULT_ROW_MINT_RETRY) > 1024:
-        for stale in [oid for oid, ts in list(_DEFAULT_ROW_MINT_RETRY.items())
-                      if (now - ts) >= _DEFAULT_ROW_MINT_RETRY_S]:
-            _DEFAULT_ROW_MINT_RETRY.pop(stale, None)
+    with _DEFAULT_ROW_MINT_RETRY_GUARD:
+        _DEFAULT_ROW_MINT_RETRY[org_id] = now
+        if len(_DEFAULT_ROW_MINT_RETRY) > _DEFAULT_ROW_MINT_RETRY_MAX:
+            stale = [oid for oid, ts in _DEFAULT_ROW_MINT_RETRY.copy().items()
+                     if (now - ts) >= _DEFAULT_ROW_MINT_RETRY_S]
+            for oid in stale:
+                _DEFAULT_ROW_MINT_RETRY.pop(oid, None)
 
 
 def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
