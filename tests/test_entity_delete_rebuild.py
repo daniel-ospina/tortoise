@@ -35,10 +35,10 @@ from datetime import UTC, datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from _node_ids import node_id
 
 from tortoise.ids import ulid
 from tortoise.log import EventLog
-from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 
 # The one journaled write-contract record type (#3299). The ``op`` field

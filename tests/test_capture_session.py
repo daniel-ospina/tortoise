@@ -2901,8 +2901,9 @@ def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
     the JSONL branch early-returned and the GraphEvent payload became {}
     — the event journaled NOWHERE (silent drop, the M2 provenance gap)
     and the live status never flipped."""
-    from tortoise.commit_ops import apply_supersessions
     from _node_ids import node_id
+
+    from tortoise.commit_ops import apply_supersessions
 
     proj = sdk._get_proj()
     # successor must be visible (the payload-entities equivalent)
@@ -2941,8 +2942,9 @@ def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
     sdk._emit_event early-returned (``if point is None and id is None``) and
     the legacy Object's supersession left NO journal line — a wipe+rebuild
     could never restore (or even show) the fold."""
-    from tortoise.commit_ops import apply_supersessions
     from _node_ids import node_id
+
+    from tortoise.commit_ops import apply_supersessions
 
     events = tmp_path / "events"
     events.mkdir()
@@ -3341,8 +3343,9 @@ def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     forces the fold-order pre-pass to resolve BOTH sides against the graph
     (id-form ref + name-form successor) — raw string comparison would miss
     the edge (name != id string)."""
-    from tortoise.commit_ops import apply_supersessions
     from _node_ids import node_id
+
+    from tortoise.commit_ops import apply_supersessions
 
     proj = sdk._get_proj()
     sdk.create_entity("object", "mx-A", objectKind="core:strategy")

@@ -19630,8 +19630,8 @@ class TortoiseSDK:
     ) -> tuple[bool, str | None, str | None, str | None, int, bool,
                str | None]:
         """``(exists_by_name, terminal_holder_id, operator_holder_id,
-        unevaluable_status_holder_id, carrier_count, merges, target_id)`` for a
-        bundle-local entity ref (#7925) — the entity sibling of
+        unevaluable_status_holder_id, live_carrier_count, merges, target_id)``
+        for a bundle-local entity ref (#7925) — the entity sibling of
         :meth:`_find_terminal_dedup_hit`, and it exists for the same reason:
         the bundle-local endpoint guard has to resolve the endpoint the WRITER
         will use, or the guard fails open and the endpoint becomes a mid-write
@@ -19644,12 +19644,20 @@ class TortoiseSDK:
 
           * **no carrier** — the item MINTS a fresh opaque id, inherits NO
             holder axis, and its declared status is what gets stored;
-          * **one carrier** — the item RESOLVES to that holder (idempotent
+          * **one LIVE carrier** — the item RESOLVES to that holder (idempotent
             re-mention), so THAT node's axes decide; a declared status is
             dropped by the ``ON CREATE``-only status write;
-          * **2+ carriers** — the create REFUSES
+          * **2+ LIVE carriers** — the create REFUSES
             (``AmbiguousEntityName``); no carrier is the target and no holder
             axis applies.
+
+        ⛔ ``LIVE`` is load-bearing (#3590 round-5 review F1): a TERMINAL
+        carrier, or a live one carrying no ``id``, does NOT block the create —
+        it is a different incarnation (R5) or unaddressable — so such a name
+        MINTs. Reading the axes off it described a node the write never touches,
+        which is both a fail-open (the ``#7925`` arms skipped a write that does
+        store its status, then step 4 died with the earlier items committed) and
+        a false "resolves to terminal" refusal.
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -19659,13 +19667,19 @@ class TortoiseSDK:
 
         So the axes returned here are the MERGE TARGET's, and are ``None`` when
         the item mints; ``merges`` says which of the two happened, and
-        ``target_id`` is that node's STORED id — which is NOT always
-        ``entity_name_id(label, name)``: with one carrier, and with a carrier
-        whose id a legacy/foreign writer left non-canonical, the fold MERGEs by
-        name onto the node that exists and its ``ON MATCH`` clause rewrites the
-        stored ``id`` to the canonical one. Anything predicting the endpoint the
-        write addresses must therefore use ``target_id`` when it is set. Callers
-        must branch on ``merges`` rather than on ``carrier_count``.
+        ``target_id`` is that node's STORED id (never derived from the name any
+        more — #3590 retired the name→id function). Anything predicting the
+        endpoint the write addresses must therefore use ``target_id`` when it is
+        set. Callers must branch on ``merges`` rather than on
+        ``live_carrier_count``.
+
+        ⛔ ``live_carrier_count`` counts the LIVE set, NOT every row
+        (#3590 round-5 review F1c): the two differ exactly where the create's
+        disposition differs — a terminal-only name is ``exists_by_name=True``
+        with ``live_carrier_count == 0``, and it MINTS. A caller that needs
+        "does the create REFUSE?" must ask ``live_carrier_count > 1``; reading
+        ``exists_by_name`` there skips the landing id for a name whose write
+        does land somewhere (the endpoint-collision guard did, measured).
 
         ``operator_holder_id`` is the same test on the OTHER axis (#7925 review
         round 3): an operator-shaped merge target is not a connection endpoint
@@ -19695,13 +19709,25 @@ class TortoiseSDK:
         ).result_set
         if not rows:
             return False, None, None, None, 0, False, None
-        # #3590: the node the item lands on. A shared name has NO target — the
-        # create refuses rather than picking one, so no holder axis applies (the
-        # previous "the carrier holding the derived canonical id" answer existed
-        # only because the id was a function of the name).
-        if len(rows) > 1:
-            return True, None, None, None, len(rows), False, None
-        target = rows[0]
+        # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
+        # ON, and the write now resolves over **LIVE** carriers only
+        # (`entity_identity.resolve_or_mint`): a TERMINAL or id-less sole carrier
+        # does not block a create, so the create MINTS a fresh live node.
+        # Reading the three axes off such a carrier described a different node
+        # than the writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip
+        # a bundle item whose status IS stored, then the write dies in step 4
+        # with the earlier items committed) and a false "resolves to terminal"
+        # refusal in the opposite direction. `merges`/`target_id` are therefore
+        # computed from the LIVE holder set, the same predicate the create uses,
+        # so the guard and `resolve_or_mint` cannot disagree.
+        _live = [r for r in rows if not r[1] and r[0]]
+        if len(_live) != 1:
+            # 0: terminal-only / id-less-only ⇒ the write MINTS (`merges=False`).
+            # 2+: same-name coexistence, which the create REFUSES rather than
+            # picking a carrier ⇒ no target either (#8864 / D2). The two are
+            # told apart by the COUNT, which is why it is the live one.
+            return True, None, None, None, len(_live), False, None
+        target = _live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
@@ -19714,7 +19740,7 @@ class TortoiseSDK:
             _holder_id if _term else None,
             _holder_id if _op else None,
             _holder_id if _status_is_stored_unhashable(_status) else None,
-            len(rows),
+            len(_live),
             True,
             _holder_id,
         )
@@ -20345,17 +20371,25 @@ class TortoiseSDK:
                     # item; the connection is left to the per-item refusal).
                     _h = _name_holders(ep_label, ep_name)
                     if _h[6] is None:
-                        if _h[0]:
-                            # 2+ live carriers: the create REFUSES this item
+                        if _h[4] > 1:
+                            # 2+ LIVE carriers: the create REFUSES this item
                             # (`AmbiguousEntityName`), so it has no landing id.
                             # The per-item refusal reports it; this guard must
                             # not invent a target.
+                            #
+                            # ⛔ `_h[4]`, NOT `_h[0]` (#3590 round-5 review
+                            # F1c): `exists_by_name` is true for ONE carrier
+                            # too — including a TERMINAL one, which the create
+                            # does not merge onto, it MINTS past. Reading it
+                            # here skipped the landing id for exactly the
+                            # shape whose write lands on a fresh node.
                             continue
-                        # No carrier: the item MINTS. Two minting refs naming
-                        # the SAME name resolve to ONE node (the first create
-                        # makes the holder, the second resolves to it), so the
-                        # name is still a valid endpoint-collision key here —
-                        # it is the node's landing identity, not an id.
+                        # Zero LIVE carriers (none at all, or terminal-only /
+                        # id-less-only): the item MINTS. Two minting refs
+                        # naming the SAME name resolve to ONE node (the first
+                        # create makes the holder, the second resolves to it),
+                        # so the name is still a valid endpoint-collision key
+                        # here — it is the node's landing identity, not an id.
                         lid = f"mint\x00{ep_name}"
                     else:
                         lid = _h[6]
@@ -35466,19 +35500,23 @@ class TortoiseSDK:
         from .entity_identity import live_name_holder_ids
         from .exceptions import NameAlreadyHeld
         g = self._get_proj().g
-        rows = g.query(
-            "MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) "
-            "RETURN DISTINCT labels(n)",
-            params={"id": id_val}).result_set
-        for row in rows:
-            labels = row[0] if isinstance(row[0], list) else [row[0]]
-            for label in labels:
-                if label not in ("Object", "Subject"):
-                    continue
-                holders = [h for h in live_name_holder_ids(g, label, new_name)
-                           if h and str(h) != str(id_val)]
-                if holders:
-                    raise NameAlreadyHeld(label, new_name, holders, id_val)
+        # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
+        # (n:Object OR n:Subject)` (#3590 review round 5, finding 2). FalkorDB
+        # indexes are label-scoped, so a pattern with no label in it can use no
+        # label's `id` index and degrades to a whole-node scan — on a write path
+        # that previously touched an index only, and that a `:Point` update
+        # (the common `update_entity(name=…)` case) pays for a set that is
+        # provably empty. Two index-servable probes answer the same question.
+        for label in ("Object", "Subject"):
+            rows = g.query(
+                f"MATCH (n:{label} {{id: $id}}) RETURN 1",
+                params={"id": id_val}).result_set
+            if not rows:
+                continue
+            holders = [h for h in live_name_holder_ids(g, label, new_name)
+                       if h and str(h) != str(id_val)]
+            if holders:
+                raise NameAlreadyHeld(label, new_name, holders, id_val)
 
     def _register_referenced_entity(self, label: str, name) -> None:
         """D9: REGISTER an entity a JOURNALED write references by name.
@@ -35497,14 +35535,29 @@ class TortoiseSDK:
           predicate the fold uses to decide a value addresses a node; treating
           an already-minted id as a NAME would mint a second entity *named* the
           id, and journal it.
-        * **a name with live holders is not re-registered.** `create_entity` is
-          the #452 idempotent re-mention, but it still APPENDS a registration
+        * **a name ANY carrier already holds is not registered.** `create_entity`
+          is the #452 idempotent re-mention, but it still APPENDS a registration
           record, so calling it for an already-known name would grow the journal
-          by one line per mention. The resolve is the same primitive the fold
-          uses (`live_name_holder_ids`), so "already registered" means exactly
-          what the fold means by it. A name held by TWO OR MORE live entities is
-          the legal same-name coexistence (#8864 / D2) — nothing to register,
-          and the reference cascade addresses the whole list.
+          by one line per mention. So the probe asks ``all_name_holder_ids`` and
+          not the LIVE set only (#3590 round-5 review F2): a name whose only
+          carriers are TERMINAL is already a registered entity — a different
+          incarnation (R5) — and this door is a MENTION. Registering it would
+          mint a NEW LIVE entity out of a mere reference, journal the mint, and
+          fold the attribution onto the ghost, which is both unbounded growth
+          over a capture loop and a resurrection of a superseded name (the next
+          ``create_entity("object", …)`` would resolve to the ghost). Whether a
+          bare mention should ever create an entity is D1 on #3590 — OPEN — so
+          this door does not adopt the stronger arm. A name held by TWO OR MORE
+          live entities is the legal same-name coexistence (#8864 / D2) — nothing
+          to register either, and the reference cascade addresses the whole
+          list.
+          ⚠️ The consequence on the state-moving use is the RECORDED one, not a
+          new hazard: an EventRecorded's EXPLICIT `object` naming a
+          terminal-only incarnation is not registered here, so the status fold
+          re-resolves it non-exemptly and its miss fails the run — the
+          `unfolded-mention` exemption's bound ("a fold that must MOVE an
+          entity's state can never take this exemption"). Pinned by
+          ``tests/test_3590_minted_identity_acceptance.py::test_a_lifecycle_event_on_an_unresolvable_object_is_not_a_green_run``.
         * **`AmbiguousEntityName` is not an error here.** It is a CREATE-door
           refusal (a create may not pick one carrier); a REFERENCE is not a
           create, and the consumer (`resolve_about_link`, `resolve_fold_name`)
@@ -35517,8 +35570,8 @@ class TortoiseSDK:
             return
         if _is_entity_id(name):
             return
-        from .entity_identity import AmbiguousEntityName, live_name_holder_ids
-        if live_name_holder_ids(self._get_proj().g, label, name):
+        from .entity_identity import AmbiguousEntityName, all_name_holder_ids
+        if all_name_holder_ids(self._get_proj().g, label, name):
             return
         try:
             self.create_entity(label.lower(), name)
@@ -35539,6 +35592,12 @@ class TortoiseSDK:
         Raises :class:`~tortoise.entity_identity.AmbiguousEntityName` when two or
         more LIVE entities already hold the name: a create may not pick one for
         the caller (route-then-refuse, R8).
+
+        ⛔ The returned id is not yet visible as a holder — that happens at the
+        caller's ``MERGE``. A caller MUST therefore run this call and the write
+        it feeds inside :func:`tortoise.entity_identity.entity_create_lock`, or
+        the empty-holder check is a TOCTOU window rather than a guard (#3590
+        review, finding 1). ``create_entity`` does.
         """
         from .entity_identity import resolve_or_mint
         return resolve_or_mint(self._get_proj().g, label, name,
@@ -36108,8 +36167,8 @@ class TortoiseSDK:
                 if not keys or not res.result_set:
                     continue
                 if isinstance(props.get(match_prop), str):
-                    # Same re-key case as the `name` branch above: the matched
-                    # key is one this write rewrote.
+                    # Same re-key case as the `id`-addressed branch above: the
+                    # matched key is one this write rewrote.
                     post_write_id = props[match_prop]
                 vals = list(res.result_set[0][0])
                 if len(vals) != len(keys):
@@ -36254,19 +36313,30 @@ class TortoiseSDK:
                     f"Must be one of: "
                     f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                 )
-            node = self._create_entity(
-                "Subject",
-                self._entity_identity_for("Subject", name,
-                                          explicit_id=_server_id),
-                _entity_door_props("subjectKind", name, props),
-                "SubjectAdded", is_episodic=is_episodic)
+            # ⛔ #3590 review (finding 1): resolve AND write under ONE lock.
+            # `resolve_or_mint` only closes the check-then-act window if the
+            # write that makes the holder visible happens before the lock is
+            # released — otherwise two threads both see zero live holders, both
+            # mint, and both write (two live carriers of one name, which then
+            # create-poisons the name). Same shape as the source merge lock
+            # (`_source_merge_locks` + `create_source`).
+            from .entity_identity import entity_create_lock
+            with entity_create_lock("Subject", name):
+                node = self._create_entity(
+                    "Subject",
+                    self._entity_identity_for("Subject", name,
+                                              explicit_id=_server_id),
+                    _entity_door_props("subjectKind", name, props),
+                    "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
-            node = self._create_entity(
-                "Object",
-                self._entity_identity_for("Object", name,
-                                          explicit_id=_server_id),
-                _entity_door_props("objectKind", name, props),
-                "ObjectRegistered", is_episodic=is_episodic)
+            from .entity_identity import entity_create_lock
+            with entity_create_lock("Object", name):
+                node = self._create_entity(
+                    "Object",
+                    self._entity_identity_for("Object", name,
+                                              explicit_id=_server_id),
+                    _entity_door_props("objectKind", name, props),
+                    "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
             # stripped HERE, at the Event door, because ``event`` is the
@@ -39306,20 +39376,30 @@ class TortoiseSDK:
                     # skipping the item is that contract.
                     from .entity_identity import (
                         AmbiguousEntityName,
+                        entity_create_lock,
                         resolve_or_mint,
                     )
                     try:
-                        oid, _created = resolve_or_mint(proj.g, "Object", name)
+                        # ⛔ #3590 review (finding 1): resolve AND write under ONE
+                        # lock, or the empty-holder check is a TOCTOU window —
+                        # two writers both mint and the name ends up with two
+                        # live carriers. Same critical section the SDK create
+                        # door uses.
+                        with entity_create_lock("Object", name):
+                            oid, _created = resolve_or_mint(
+                                proj.g, "Object", name)
+                            self._create_entity(
+                                "Object", oid,
+                                {"name": name, "objectKind": okind,
+                                 "repo": repo,
+                                 "issue_number": issue_number,
+                                 "url": url},
+                                "ObjectRegistered")
                     except AmbiguousEntityName as exc:
                         _logger.debug(
                             "_connect_issue_objects: skipping reference %r — "
                             "%s", name, exc)
                         continue
-                    self._create_entity(
-                        "Object", oid,
-                        {"name": name, "objectKind": okind, "repo": repo,
-                         "issue_number": issue_number, "url": url},
-                        "ObjectRegistered")
                 # #3574: store the name VERBATIM — never `name[:200]`.
                 #
                 # `name` is the Object's natural key and the value every

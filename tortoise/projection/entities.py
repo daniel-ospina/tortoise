@@ -4718,7 +4718,8 @@ class _EntityHandlers:
         return self._event_guarded_merge(inner, eid, props, guard_source_file)
 
     def _fold_object_status(self, name: str | None, event_kind: str, *,
-                            about_names=(), object_id: str | None = None) -> None:
+                            about_names=(), object_id: str | None = None,
+                            object_is_entity: bool = True) -> None:
         """#2729 — THE ONE Object-status fold dispatcher.
 
         Two halves, applied in this order:
@@ -4758,19 +4759,34 @@ class _EntityHandlers:
 
         ⚠️ **#3590 narrowed when that signal can fire.** The report rides on the
         resolved ID: an explicit target whose name resolves to no single live
-        entity is not folded AND is not reported here, because the resolver
-        (`entity_identity.resolve_fold_name`) already recorded it as a
-        ``unregistered-reference`` / ``ambiguous-entity-name`` non-fold. So a
-        name that matches TWO carriers (the #8864 shape) — which the pre-#3590
-        name-keyed probe used to report — now produces the resolver's record
-        instead of a ``status_fold_unapplied`` violation. An id-less legacy
-        carrier is likewise unreported for the same reason.
+        entity is not folded AND is not reported through
+        ``_emit_fold_violation``, because the resolver
+        (`entity_identity.resolve_fold_name`) records it instead — as the
+        NON-exempt ``unregistered-reference`` / ``ambiguous-entity-name``
+        identity miss (see the re-resolve below). So a name that matches TWO
+        carriers (the #8864 shape) — which the pre-#3590 name-keyed probe used
+        to report — now produces the resolver's record instead of a
+        ``status_fold_unapplied`` violation, and the run still fails.
+
+        ⛔ **The two targets are classified in OPPOSITE directions (#3590
+        review F1/F2), and the distinction is the fold's own contract:**
+
+        * the explicit ``object`` is the fold's DECLARED target, and the fold
+          may MOVE its state, so an unresolved one is a NON-exempt identity
+          miss — it fails the run. Taking the attribution exemption here would
+          leave a lifecycle event that folded nothing behind a green run;
+        * ``about_entities`` is a LOOSE list ("a non-match is NOT a
+          violation" — the extraction pipeline emits events with
+          ``about_entities`` and no ``object``), so an unresolved entry keeps
+          the EXEMPT ``unfolded-mention`` shape: the miss is recorded and
+          named, and a journal that replays on ``main`` stays rebuildable.
         """
         index = _status_fold_index()
         from tortoise.status_folds import builtin_fold_status
 
         excluded = _terminal_object_statuses()
         declared = index.folds_for_event(event_kind)
+        builtin_status = builtin_fold_status(event_kind)
         # #3590: the fold addresses an ENTITY, so it addresses the entity's id.
         # `object_id` is the id `_event_plain_merge` resolved for the event's
         # explicit `object`; `about_entities` are loose names, resolved here to
@@ -4796,32 +4812,35 @@ class _EntityHandlers:
             for about in about_names or ():
                 if not (isinstance(about, str) and about and about != name):
                     continue
-                # #3590 review P1: NO `mention=True` here. The exemption's
-                # recorded bound is "attribution only … a fold that must MOVE an
-                # entity's state can never take this exemption"
-                # (`nonfolded.EXEMPT_SHAPES`), and this resolved id is used two
-                # lines later to `SET o.status` — entity state. Taking the
-                # exempt shape made a miss a silent no-op behind a GREEN run
-                # (no write, no `status_fold_unapplied`, no refusal), where the
-                # pre-#3590 name-keyed read at least applied it. As a
-                # non-exempt identity miss it is recorded and fails the run,
-                # which is what the bound promises.
+                # #3590 review F2: `mention=True` IS right here, and round 3's
+                # removal of it is reverted. `about_entities` is the LOOSE list
+                # — this fold's own contract says "a non-match is NOT a
+                # violation (the extraction pipeline emits events with
+                # `about_entities` and no `object`)" — so a miss is a producer
+                # omission on a best-effort list, not the record's identity.
+                # A non-exempt record here made `rebuild_all` REFUSE journals
+                # that replay on `main` (one extracted event naming an
+                # unregistered subject was enough), which is the durable-copy
+                # regression the exemption exists to prevent. The miss stays
+                # visible: it is recorded and named by the run boundary.
+                # The EXPLICIT `object` above is the opposite case — see the
+                # re-resolve below.
                 about_id = resolve_fold_name(self.g, "Object", about,
-                                             context="status fold about")
+                                             context="status fold about",
+                                             mention=True)
                 if about_id:
                     out.append(("id", about_id, False, about))
             return out
 
+        matched_any = False
         if declared:
             # The explicit target is REPORTED on a miss — as long as it has a
-            # resolved id to miss on (#3590): an unresolved name was already
-            # recorded by `resolve_fold_name`, and `_targets()` drops it rather
+            # resolved id to miss on (#3590): an unresolved name is recorded by
+            # the non-exempt re-resolve below, and `_targets()` drops it rather
             # than reporting twice. A RESOLVED `about_entities` target is folded
-            # silently (`report=False`); an UNRESOLVED one is no longer exempt,
-            # so the resolver's own non-fold fails the run (#3590 review P1 —
-            # the exemption is attribution only, and this fold moves state).
-            # `name` wins when it is also present in the list — one write, one
-            # report.
+            # silently (`report=False`); an unresolved one keeps the exempt
+            # mention shape (`mention=True` there). `name` wins when it is also
+            # present in the list — one write, one report.
             targets = _targets()
             # #2729 review P2: the event-kind key is form-widened (namespaced
             # AND bare), so two packs that declare the same bare event name
@@ -4830,7 +4849,6 @@ class _EntityHandlers:
             # event folded anything — otherwise it is a false
             # `status_fold_unapplied` for a correctly-folding write (the other
             # pack's kind simply is not this Object's kind).
-            matched_any = False
             missed: list[tuple[str, str]] = []
             for _key_prop, key_value, report, target_name in targets:
                 for target_kind, status in declared:
@@ -4863,15 +4881,67 @@ class _EntityHandlers:
             if not matched_any:
                 for target_kind, target_name in missed:
                     _emit_fold_violation(target_kind, event_kind, target_name)
-        builtin_status = builtin_fold_status(event_kind)
+        # ── the EXPLICIT target's own disposition (#3590 review F1) ──
+        # `_event_plain_merge` resolved this name with `mention=True` for the
+        # `produces` edge — ATTRIBUTION, where the exemption is correct — and
+        # handed us the id, or its absence. The same name is this fold's
+        # DECLARED target, and the fold MOVES its state, so an absence may not
+        # ride on that exempt record: `EXEMPT_SHAPES[SHAPE_UNFOLDED_MENTION]`'s
+        # recorded bound is "attribution only … a fold that must MOVE an
+        # entity's state can never take this exemption". Re-resolving WITHOUT
+        # `mention=True` re-classifies the SAME name for THIS use, so a miss is
+        # recorded as the non-exempt `unregistered-reference` /
+        # `ambiguous-entity-name` identity miss and the run fails — instead of a
+        # lifecycle event that moved nothing behind a GREEN run (the pre-#3590
+        # fold minted a name stub, so this arm was reachable and at least
+        # wrote).
+        #
+        # Gated three ways, because a refusal is a real cost:
+        #   * `object_is_entity` — the `objectType='Document'` arm carries a
+        #     :Source URL, not an entity name; resolving it would manufacture an
+        #     `unregistered-reference` for a document on every such event;
+        #   * `declared or builtin_status` — a kind that declares NO status fold
+        #     has no state to move, and refusing there would turn every event
+        #     that merely mentions an unregistered object into a failed run;
+        #   * `not matched_any` — the #2729 rule above: a target missing while
+        #     ANOTHER target folded is not a real signal.
+        #
+        # ⛔ …and the miss is classified by WHY it missed (#3590 round-5 review
+        # F2), because the two causes are different defects with different
+        # owners:
+        #   * **no carrier at all** — the producer referenced a name nothing
+        #     registered. The non-exempt `unregistered-reference` is right, and
+        #     the run fails: the SDK doors register before appending (D9), so
+        #     such a journal is a producer bug, and a green pass would fold
+        #     nothing while claiming success.
+        #   * **carriers exist, none LIVE** (superseded / id-less) — the entity
+        #     IS registered; the incarnation it names is simply buried, and this
+        #     fold may not resurrect it (R5). That is a deliberate, bounded
+        #     NO-OP, not a missing creation event, so it takes the recorded
+        #     `unfolded-mention` exemption with `cause=no-live-holder`: still
+        #     recorded and named by the run boundary, and — the reason it must
+        #     not be fatal — the door CANNOT make it resolvable without minting
+        #     a ghost (that was review F2), so a non-exempt class here would
+        #     turn every journal with a post-supersede lifecycle event into one
+        #     `rebuild_all` refuses. Measured before this split: such a journal
+        #     raised `NonFoldedEventsError` on replay while replaying cleanly on
+        #     the tree that minted the ghost.
+        if (name and object_is_entity and not object_id and not matched_any
+                and (declared or builtin_status is not None)):
+            from tortoise.entity_identity import all_name_holder_ids
+            _held = all_name_holder_ids(self.g, "Object", name)
+            object_id = resolve_fold_name(self.g, "Object", name,
+                                         context="status fold object",
+                                         mention=bool(_held))
         if builtin_status is not None and object_id:
             # Guarded on the RESOLVED ID, not on `name` (#3590). A name is not an
             # identity any more, so a name-keyed write here would move EVERY
             # carrier's status — the harm class the identity change exists to
             # remove. `object_id` is None in two reachable shapes: the event's
             # `object` is a Document rather than an entity (the caller passes
-            # None deliberately), and an unresolved name (already recorded as a
-            # non-fold by the `resolve_fold_name` that produced the None).
+            # None deliberately), and an unresolved name (recorded just above —
+            # NON-exempt when nothing holds it, the bounded `no-live-holder`
+            # exemption when every holder is terminal).
             # Guarding on `name` instead would issue this query with the literal
             # string "None" as the id — a silent no-op that looks like a fold.
             # `toStringOrNull` (not `toLower` on the raw property) so a
@@ -4969,6 +5039,10 @@ class _EntityHandlers:
         # #7369: `subj`/`obj`/`use_name` are MERGE keys; function-local import
         # (no module-level binding — the cycle-avoidance pattern this file uses).
         from tortoise.projection import _log_identity_skip, _writable_id
+        # The RESOLVED performer id, reused by the `participatesIn` fallback
+        # below (#3590 round-5 review F2) so one reference cannot be refused in
+        # one arm and broadcast to every same-name carrier in another.
+        _performer_id: str | None = None
         if not _writable_id(subj):
             _log_identity_skip("Event subject", subj, "subject (MERGE key)")
         else:
@@ -4984,6 +5058,7 @@ class _EntityHandlers:
                                         context="EventRecorded.subject",
                                         mention=True)
             if stub_id:
+                _performer_id = stub_id
                 self.g.query(
                     "MATCH (s:Subject {id:$id}), (e:Event {eventId:$eid}) "
                     "MERGE (s)-[:performs]->(e)",
@@ -5152,20 +5227,24 @@ class _EntityHandlers:
         if _wk and (_obj_name or _about):
             # #3590: pass the RESOLVED id of the event's explicit `object`, so
             # the status fold addresses one entity rather than every carrier of
-            # a name (an unresolved name keeps the name path, and the fold then
-            # records the ambiguity instead of writing).
-            # ⛔ The Document arm is the ONLY arm without an id: its `object` is
-            # a :Source url, not an entity (the branch above writes the Source),
-            # and `stub_id` is None there by construction. Keying this on
-            # `not object_type` instead — as an earlier revision did — discarded
-            # the id for a DECLARED `objectType='Object'`: both halves of
-            # `_fold_object_status` are guarded on the id, so the work-item
+            # a name. An unresolved name is NOT silently dropped: `object_is_entity`
+            # tells the fold that this arm carried an entity NAME at all (a
+            # Document carries a :Source url), and the fold re-resolves a
+            # missing id itself, NON-exemptly, so the state-moving miss is
+            # recorded as the identity miss and fails the run (#3590 review F1).
+            # ⛔ The Document arm is the ONLY arm without an entity name: its
+            # `object` is a :Source url, not an entity (the branch above writes
+            # the Source), and `stub_id` is None there by construction. Keying
+            # this on `not object_type` instead — as an earlier revision did —
+            # discarded the id for a DECLARED `objectType='Object'`: both halves
+            # of `_fold_object_status` are guarded on the id, so the work-item
             # status fold silently stopped and reported nothing (fail-open, the
             # opposite direction to the rest of the change). `objectType` is
             # reachable from a public door (`EventAPI.add_event(object_type=…)`).
-            self._fold_object_status(_obj_name, _wk, about_names=_about,
-                                     object_id=(None if object_type == "Document"
-                                                else stub_id))
+            self._fold_object_status(
+                _obj_name, _wk, about_names=_about,
+                object_id=(None if object_type == "Document" else stub_id),
+                object_is_entity=(object_type != "Document"))
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:
@@ -5225,11 +5304,20 @@ class _EntityHandlers:
                     params={"sid": pid, "eid": eid},
                 )
         elif subj:
-            # Fallback: performer is an implicit participant
+            # Fallback: performer is an implicit participant, wired on the SAME
+            # resolved id as the `performs` arm (#3590 round-5 review F2).
+            # ⛔ The retired form was `MATCH (s:Subject {name: $name}) … MERGE`
+            # — a NAME-keyed write that wired EVERY live carrier of the name from
+            # one reference, and that contradicted the arm above, which refuses
+            # to guess between carriers (route-then-refuse, D2/#8864). One
+            # reference must not be simultaneously refused and broadcast.
+            # Unresolved (`_performer_id is None`) ⇒ nothing is wired, and the
+            # resolver's own non-fold record already names the miss (D9: the
+            # producer registers what it references; the fold never mints).
             self.g.query(
-                "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) "
+                "MATCH (s:Subject {id: $sid}), (e:Event {eventId: $eid}) "
                 "MERGE (s)-[:participatesIn]->(e)",
-                params={"name": subj, "eid": eid},
+                params={"sid": _performer_id, "eid": eid},
             )
 
         # #228: persist arbitrary caller-supplied props (iterate inner dict

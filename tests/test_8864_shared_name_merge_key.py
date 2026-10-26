@@ -29,8 +29,8 @@ sys_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
-
 from _node_ids import node_id  # noqa: E402
+
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 

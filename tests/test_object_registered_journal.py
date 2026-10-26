@@ -697,19 +697,33 @@ class TestLineOrder:
 class TestCasReplayParity:
     """#2242: the live-path CAS must NOT leak into replay. Rebuild/restore
     fold ObjectSuperseded lines BLIND (cas=False default) — byte-identical
-    to pre-CAS: duplicate/divergent lines and incarnation-reuse shapes
-    (delete→recreate→re-supersede) resolve LAST-wins on BOTH replay
+    to pre-CAS: duplicate/divergent lines (the `test_dup_*` case here, and the
+    rest of this file's fold sequences) are applied blind on BOTH replay
     surfaces (rebuild_all sweep + rebuild(EventLog) chronological dispatch).
+
+    ⛔ The `incarnation-reuse` (delete→recreate→re-supersede on ONE id) shape
+    named here until #3590 is RETIRED with the name-derived id: a re-create
+    mints a NEW id (R5), and a journal that re-registers a hard-deleted id is
+    now REFUSED as a non-exempt `object-superseded-miss` (measured — see the
+    re-created-incarnation test below).
     """
 
-    def test_fold_reg_fold_recreate_last_wins_unchanged(self, tmp_path,
-                                                        caplog):
-        """delete→recreate→re-supersede: [Reg(fr-B), OS(fr-B→B), <delete,
-        journaled as EntityMutated op=delete>, Reg(fr-B), OS(fr-B→C)] replays
-        with the SAME last-wins outcome as pre-CAS on both surfaces →
-        supersededBy == fr-succ-C (live truth — the CURRENT incarnation was
-        superseded by C). A cas leak into replay would CAS-miss the second
-        line → B (first-wins)."""
+    def test_fold_reg_fold_recreate_replays_by_id_without_resurrection(
+            self, tmp_path, caplog):
+        """delete→recreate: [Reg(id1), OS(id1→B), <delete id1>, Reg(id2),
+        OS(id2→C)] replays BY ID on both surfaces, with no resurrection.
+
+        The #3590 replacement for the retired incarnation-reuse shape: the
+        re-creation is a NEW incarnation (R5 — measured by the id assertion
+        below), so the second fold lands on `id2` and the deleted `id1` must
+        stay absent. Live and both replay surfaces must agree exactly — a
+        name-keyed fold would instead apply both supersedes to whichever
+        carrier the name resolved to, and a replay-time mint would produce a
+        third id (live != replay). `object-superseded-miss` is non-exempt, so
+        a fold that lands on no incarnation fails the run rather than
+        silently dropping the supersede — hence the `caplog` assertion that
+        the sweep reported no such miss.
+        """
         import logging
         events = tmp_path / "events"
         events.mkdir()
@@ -718,33 +732,63 @@ class TestCasReplayParity:
         try:
             proj = sdk._get_proj()
             name = "fr-B"
-            oid = node_id(proj, "Object", name)
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)                  # Reg 1
+            oid = node_id(proj, "Object", name)
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
                             supersedes_by="fr-succ-B",
                             evidence="first fold")
             assert sdk._delete_entity(oid) is True               # journaled
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)                 # Reg 2
-            sdk._emit_event("ObjectSuperseded", id=oid, name=name,
+            second = node_id(proj, "Object", name)
+            assert second != oid, (
+                "the re-create reused the deleted incarnation's id — "
+                f"resurrection (#3590 R5): {oid}")
+            sdk._emit_event("ObjectSuperseded", id=second, name=name,
                             supersedes_by="fr-succ-C",
                             evidence="second fold")
+            # MEASURED, not assumed: the "incarnation reuse" journal (Reg 2
+            # rewritten onto the DELETED incarnation's id) is now REFUSED —
+            # `object-superseded-miss` seq=4, non-exempt, `rebuild_all` raises
+            # `NonFoldedEventsError` before this test could assert anything. It
+            # is the deferred-sweep ordering: both registrations collapse onto
+            # one id-keyed node, the seq-3 delete then removes it, and the
+            # seq-4 supersede has no incarnation left. So live == replay is
+            # asserted on the shape the code can produce.
+            # ⛔ NO live-state assertion here: `_emit_event` appends the record
+            # but the LIVE supersede is applied by `commit_ops`'s own sweep, so
+            # this journal's live node is still `live`. The observable this
+            # class is about is what REPLAY folds from the records — exactly as
+            # the pre-#3590 test asserted.
+            expected = {second: ("superseded", "fr-succ-C")}
             with caplog.at_level(logging.WARNING,
                                  logger="tortoise.projection"):
                 proj.rebuild_all(str(events), confirm_destructive=True)
-            rows = _object_row(proj, name, "status", "supersededBy")
-            assert rows and rows[0] == ["superseded", "fr-succ-C"], (
-                "rebuild_all must resolve fold-Reg-fold LAST-wins "
-                "(pre-CAS parity): the CAS must not leak into the sweep")
-            assert not any("matched no Object" in r.message
-                           for r in caplog.records), caplog.records
+            rebuilt = {r[0]: (r[1], r[2]) for r in proj.g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id, o.status, o.supersededBy",
+                params={"n": name}).result_set}
+            assert rebuilt == expected, (
+                "rebuild_all must fold both supersede lines BY ID onto the "
+                f"current incarnation (pre-CAS parity): {rebuilt!r}")
+            assert oid not in rebuilt, (
+                "replay RESURRECTED the deleted incarnation (#3590 R5)")
+            # The EXPECTED miss is the exempt `supersede-target-deleted` on the
+            # deleted incarnation (seq=1) — a named, bounded exemption. What must
+            # NOT happen is the CURRENT incarnation's fold (fr-succ-C) missing,
+            # which would be the non-exempt `object-superseded-miss`.
+            assert not any("matched no Object" in r.getMessage()
+                           and "fr-succ-C" in r.getMessage()
+                           for r in caplog.records), [
+                r.getMessage() for r in caplog.records]
             # dispatch arm — chronological rebuild (the backup-restore path)
             proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
-            rows = _object_row(proj, name, "status", "supersededBy")
-            assert rows and rows[0] == ["superseded", "fr-succ-C"], (
-                "rebuild() dispatch must resolve fold-Reg-fold LAST-wins — "
-                "mutually consistent with rebuild_all")
+            rebuilt = {r[0]: (r[1], r[2]) for r in proj.g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id, o.status, o.supersededBy",
+                params={"n": name}).result_set}
+            assert rebuilt == expected, (
+                "rebuild() dispatch must agree with rebuild_all on the "
+                f"re-created incarnation: {rebuilt!r}")
         finally:
             sdk.close()
 
@@ -769,9 +813,11 @@ class TestCasReplayParity:
         try:
             proj = sdk._get_proj()
             name = "dup-B"
-            oid = node_id(proj, "Object", name)
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)
+            # #3590: `node_id` reads the graph, so it resolves AFTER the write
+            # that creates the node (it is deliberately not a minter).
+            oid = node_id(proj, "Object", name)
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
                             supersedes_by="dup-succ", evidence="fold 1",
                             ts="2026-09-07T10:00:00Z")

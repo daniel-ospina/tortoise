@@ -983,7 +983,11 @@ _ALLOWED_KEYED = {
         # `live` uses for Points (`TERMINAL_EXCLUDED_STATUSES` also carries
         # `outdated`), so it does not make this predicate drift-free against
         # the resolver. Do not restate it as "the same constant".
-        'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
+        # ⛔ RETIRED (#3590 round-5 review F2): the `participatesIn` fallback no
+        # longer MERGEs by name. `_event_plain_merge` now wires it on the SAME
+        # resolved performer id as the `performs` arm, so there is no name-keyed
+        # site left here to disposition — and leaving the entry would make the
+        # sweep clear a pattern that no longer exists.
     },
     'tortoise/near_dup_merge.py': {
         # Twin of sdk.py's local `about_entities` claim loop (entry "E" below),

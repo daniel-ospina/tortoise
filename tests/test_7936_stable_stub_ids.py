@@ -36,15 +36,15 @@ import json
 from pathlib import Path
 
 import pytest
+from _node_ids import node_id
 
 from tortoise.consistency import _graph_entities
 from tortoise.log import EventLog
-from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 
 #: A journal whose ONLY record is the event — no `ObjectRegistered` /
-#: `SubjectAdded` ever registers the names, so the stubs are the whole
-#: non-Point node set. This is the shape the issue's last comment measures.
+#: `SubjectAdded` ever registers the names. It is the shape the issue's last
+#: comment measures, and it is the shape the fold used to MINT stubs for.
 _STUB_EVENT = {
     "type": "EventRecorded",
     "id": "evt-7936-stub",
@@ -56,9 +56,11 @@ _STUB_EVENT = {
     "uses": [{"name": "stub-use", "kind": "tool"}],
 }
 
-#: The three stub mint sites in `_event_plain_merge`: the Subject of
+#: The three names `_event_plain_merge` USED to mint a stub for: the Subject of
 #: `EventRecorded.subject`, the Object of `EventRecorded.object`, and one
-#: Object per `EventRecorded.uses[]`.
+#: Object per `EventRecorded.uses[]`. ⛔ #3590 retired all three mints (the
+#: projection is not the minter, D9), so this matrix now asserts the INVERSE
+#: property: replaying the journal creates NO node for any of them.
 _STUB_TARGETS = (
     ("Subject", "stub-subject"),
     ("Object", "stub-object"),
@@ -90,13 +92,28 @@ def _rebuild(sdk: TortoiseSDK, events: Path) -> None:
 
 
 @pytest.mark.parametrize("label,name", _STUB_TARGETS)
-def test_a_name_stub_id_is_a_pure_function_of_the_journal(
+def test_the_entity_view_is_stable_across_replays_of_one_journal(
         tmp_path: Path, label: str, name: str):
-    """RED before the fix: replaying ONE journal re-mints a random stub id.
+    """#7936, re-based on #3590: replay is STABLE *because* it mints nothing.
 
-    Three consecutive `rebuild_all`s of the SAME journal must yield the SAME
-    id for the same name. Randomness here is what makes a digest over the
-    entity view unstable, which is the measured `(label, id)` re-key blocker.
+    ⛔ This test's predecessor (`test_a_name_stub_id_is_a_pure_function_of_the
+    _journal`) asserted `(label, name) in ids` three times over — i.e. that the
+    fold MINTED a node for an unregistered mention, which #3590 retired
+    (the projection is not the minter, D9). Kept as a RED-before-fix pin it
+    would only pin the absence of the change.
+
+    The property the file exists for survives, in the form the change leaves it:
+    three consecutive `rebuild_all`s of ONE journal must produce the SAME entity
+    view. Randomness in that view is what made a digest over it unstable (the
+    measured `(label, id)` re-key blocker) — and the only fold-time source of it
+    was the name-derived stub mint, so the first assertion below is the guard:
+    restoring any mint (the retired `entity_name_id` or a `ulid()` stub) puts a
+    node here and reds this test, while the drift assertion catches a mint whose
+    id is not deterministic.
+
+    The recorded half of the same property — that the dropped mention is NAMED
+    at the run boundary rather than swallowed — is
+    `test_a_mention_stub_is_not_minted_by_the_fold`.
     """
     sdk, events = _journal(tmp_path, _STUB_EVENT)
     try:
@@ -104,14 +121,16 @@ def test_a_name_stub_id_is_a_pure_function_of_the_journal(
         for _ in range(3):
             _rebuild(sdk, events)
             ids = _stub_ids(sdk)
-            assert (label, name) in ids, ids
-            seen.append(ids[(label, name)])
-        assert len(set(seen)) == 1, (
-            f"the {label} stub id for {name!r} MOVED across replays of ONE "
-            f"journal ({seen}): the mint is not a function of the journal, so "
-            f"a digest over the entity view would report a false "
-            f"`unrecorded-mutation` on a graph `rebuild_all` itself produced "
-            f"(#7936)"
+            assert (label, name) not in ids, (
+                f"replay MINTED a {label} for the unregistered mention "
+                f"{name!r} — the fold is the minter again (#3590 D9), and a "
+                "fold-time mint is not replay-deterministic")
+            seen.append(_graph_entities(sdk._get_proj())[0])
+        assert seen[0] == seen[1] == seen[2], (
+            "the graph's entity view MOVED across replays of ONE journal: "
+            f"{seen} — a digest over it would report a false "
+            "`unrecorded-mutation` on a graph `rebuild_all` itself produced "
+            "(#7936)"
         )
     finally:
         sdk.close()
@@ -240,9 +259,18 @@ def test_a_late_subject_stub_does_not_clobber_a_foreign_id(tmp_path: Path):
 # from a journal that lacks the registration → node loss on rebuild, and a
 # live != replay drift the presence/status comparison cannot see).
 #
-# `_event_plain_merge` marks its stubs `_stub=true` ON CREATE; the probe excludes
-# marked stubs; `_upsert_object`/`_upsert_subject` clear the mark on adoption.
-# These guards are RED before that discriminator exists.
+# ⛔ #3590 RETIRED THE FIRST-REGISTRATION PROBE ENTIRELY (#2194/#2295/#3590):
+# `_create_entity` now EMITS `ObjectRegistered`/`SubjectAdded` on EVERY
+# Object/Subject create — "the probe existed to avoid a duplicate … and it could
+# only be honest because the id was a FUNCTION of the name". With a minted id the
+# duplicate is the PRICE of the guarantee, is documented at the emit site
+# ("the journal grows with CREATE-CALL count, not entity count"), and is
+# replay-idempotent (`test_duplicate_registration_lines_replay_idempotently`).
+# So the property these tests guard is now stronger and unconditional: NO node
+# state can silence a registration — not a legacy `_stub` mark, not an
+# already-live holder. The assertions therefore look for the registration that
+# CARRIES the create's declared props, not for a single line.
+# These guards are RED before that discriminator/emit ever existed.
 
 _EVENT_RECORD = {
     "type": "EventRecorded",
@@ -271,12 +299,25 @@ def _regs(events: Path, event_type: str, name: str) -> list:
             if e.get("type") == event_type and e.get("name") == name]
 
 
+def _registration_with(regs: list, **props) -> list:
+    """The registration line(s) carrying every one of ``props``.
+
+    With the probe retired a name can hold more than one registration line —
+    the event door's D9 registration (minimal props) and the caller's
+    `create_entity` (its declared kind) — so a test must name the one whose
+    CONTENT it is asserting instead of indexing `regs[0]` (backend row order,
+    the silent-pick class this whole change removes).
+    """
+    return [r for r in regs if all(r.get(k) == v for k, v in props.items())]
+
+
 class TestStubAdoptionDurability:
-    """#7936 P1: a canonical-id stub must still journal its registration."""
+    """#7936 P1: a create is ALWAYS journaled, whatever node state precedes it."""
 
     def test_stub_adoption_journals_object_registration(self, tmp_path: Path):
-        """An event-path Object stub, then `create_entity`, must journal
-        `ObjectRegistered` and rebuild byte-identically (live == replay)."""
+        """An event-path Object, then `create_entity`, must journal
+        `ObjectRegistered` carrying the declared kind, and rebuild
+        byte-identically (live == replay)."""
         sdk, events = _journal(tmp_path)
         try:
             sdk.create_event(
@@ -286,11 +327,12 @@ class TestStubAdoptionDurability:
             sdk.create_entity("object", "probe-object",
                               objectKind="core:task", is_episodic=False)
             regs = _regs(events, "ObjectRegistered", "probe-object")
-            assert len(regs) == 1, (
-                "the canonical-id event stub defeated the first-registration "
-                "probe — ObjectRegistered was never journaled, so rebuild "
-                f"drops the node: {regs}")
-            assert regs[0]["id"] == node_id(sdk, "Object", "probe-object")
+            adopted = _registration_with(regs, objectKind="core:task")
+            assert adopted, (
+                "the create's registration was never journaled — nothing but "
+                "node state may decide that, so a rebuild drops the node: "
+                f"{regs}")
+            assert adopted[0]["id"] == node_id(sdk, "Object", "probe-object")
             live = _node_props(sdk, "Object", "probe-object")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Object", "probe-object")
@@ -312,9 +354,10 @@ class TestStubAdoptionDurability:
             sdk.create_entity("subject", "probe-subject",
                               subjectKind="core:person")
             regs = _regs(events, "SubjectAdded", "probe-subject")
-            assert len(regs) == 1, (
-                "the canonical-id event stub defeated the SubjectAdded "
-                f"probe — the Subject is live-only: {regs}")
+            adopted = _registration_with(regs, subjectKind="core:person")
+            assert adopted, (
+                "the create's SubjectAdded was never journaled — the Subject "
+                f"is live-only and a rebuild drops it: {regs}")
             live = _node_props(sdk, "Subject", "probe-subject")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Subject", "probe-subject")
@@ -341,12 +384,16 @@ class TestStubAdoptionDurability:
                               objectKind="core:task", is_episodic=False)
             regs = _regs(events, "ObjectRegistered", "probe-object")
             assert regs, (
-                "no ObjectRegistered line for a stubbed name — the probe "
-                "hit the canonical-id stub and skipped the registration")
-            # Rebuild from a journal holding ONLY the registration line.
+                "no ObjectRegistered line for a name the caller created — "
+                "node state silenced the registration")
+            # Rebuild from a journal holding ONLY the create's own line (the
+            # one carrying the kind), which is what a second producer's
+            # journal-less write leaves behind.
+            adopted = _registration_with(regs, objectKind="core:task")
+            assert adopted, f"the create's registration carries no kind: {regs}"
             other = tmp_path / "events_other"
             other.mkdir()
-            EventLog(str(other / "events.jsonl")).append(regs[0])
+            EventLog(str(other / "events.jsonl")).append(adopted[0])
             sdk._get_proj().rebuild_all(str(other), confirm_destructive=True)
             props = _node_props(sdk, "Object", "probe-object")
             assert props.get("objectKind") == "core:task", props
@@ -372,11 +419,11 @@ class TestStubAdoptionDurability:
             sdk.create_entity("object", "probe-use",
                               objectKind="core:task", is_episodic=False)
             regs = _regs(events, "ObjectRegistered", "probe-use")
-            assert len(regs) == 1, (
-                "the canonical-id `uses[]` stub defeated the "
-                "first-registration probe — ObjectRegistered was never "
-                f"journaled, so rebuild drops the node: {regs}")
-            assert regs[0]["id"] == node_id(sdk, "Object", "probe-use")
+            adopted = _registration_with(regs, objectKind="core:task")
+            assert adopted, (
+                "the `uses[]` create's registration was never journaled — "
+                f"nothing but node state may decide that: {regs}")
+            assert adopted[0]["id"] == node_id(sdk, "Object", "probe-use")
             live = _node_props(sdk, "Object", "probe-use")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Object", "probe-use")
@@ -442,9 +489,9 @@ class TestStubDiscriminatorIsNotCallerWritable:
             sdk.create_entity("object", "probe-object",
                               objectKind="core:task", is_episodic=False)
             regs = _regs(events, "ObjectRegistered", "probe-object")
-            assert len(regs) == 1, (
-                "an attempted `_stub` forge silenced the first-registration "
-                f"probe: {regs}")
+            assert _registration_with(regs, objectKind="core:task"), (
+                "an attempted `_stub` forge silenced the registration — a "
+                f"rebuild would drop the node: {regs}")
             live = _node_props(sdk, "Object", "probe-object")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Object", "probe-object")

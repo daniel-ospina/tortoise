@@ -2329,7 +2329,7 @@ def _entities_from_view(graph_view: dict) -> tuple[dict, dict]:
     return out, by_name
 
 
-def _compare_entities(journal_entities, graph_entities, graph_names,
+def _compare_entities(journal_entities, graph_entities,
                       deleted, ambiguous) -> tuple[list, int, list]:
     """Field-aware non-Point comparison.
 
@@ -2345,29 +2345,27 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
     for key, rec in journal_entities.items():
         label, eid = key
         # #3585 re-review: the ambiguity bound applies to the STATUS leg only.
-        # Presence is decidable by name (the graph MERGEs Object/Subject by
-        # name), so excluding it too could hide a genuine burial — and a
-        # name-only supersede with NO carrier no longer marks ambiguity at all.
+        # Presence is decidable by ID (#3590 retired the name-keyed MERGE, so a
+        # journal id has exactly one carrier), so excluding it too could hide a
+        # genuine burial — and a name-only supersede with NO carrier no longer
+        # marks ambiguity at all.
         ambiguous_status = label == "Object" and rec.get("name") in ambiguous
         if ambiguous_status:
             excluded_ambiguous.append((label, eid, rec.get("name")))
+        # ⛔ PRESENCE IS AN IDENTITY QUESTION, AND THE NAME FALLBACK IS RETIRED
+        # (#3590 round-5 review). The fallback that used to sit here resolved a
+        # journal id the graph does not carry onto a SAME-NAME node under a
+        # DIFFERENT id, justified by "the graph MERGEs these labels by NAME".
+        # That premise is exactly what this change removes: `_upsert_object` /
+        # `_upsert_subject` now merge on `id` (projection/entities.py), so a
+        # second registration of one name under a fresh id is TWO nodes. Keeping
+        # the fallback made the presence leg compare the STATUS of the wrong
+        # incarnation and report a faithful graph — a false GREEN on the "the
+        # faithful node is buried, an impostor of the same name survives" shape,
+        # which is the one failure mode this file must never produce (the `:Event`
+        # leg above was hardened for the identical reason).
+        # An id absent from the graph is ABSENT; no name can stand in for it.
         g = graph_entities.get(key)
-        if g is None and label in _NAME_MERGE_LABELS:
-            # The graph MERGEs these labels by NAME, so a second registration
-            # of the same name under a fresh id is ONE node carrying the LAST
-            # id — resolve by name before declaring a burial (#3585 review).
-            #
-            # This is the PRESENCE leg's name resolution, not the STATUS leg, so it
-            # reads `_NAME_MERGE_LABELS` — the home whose declared meaning is exactly
-            # the sentence above. Round 2 hoisted the status pair and pointed BOTH
-            # `_compare_entities` sites at it; the two constants coincide in value
-            # today, which is why the mis-wiring was invisible. When a reference-fold
-            # label becomes name-MERGE'd (forced into `_NAME_MERGE_LABELS` by
-            # `test_the_name_merge_label_sets_have_one_home`) while the status set
-            # stays Object/Subject, this site would miss the name resolution and
-            # report `absent-from-graph` on a FAITHFUL graph — measured. There is no
-            # live verdict change today (#8859 follow-up review round 3, P2).
-            g = graph_names.get((label, rec.get("name")))
         if g is None:
             count += 1
             if len(mismatches) < _MAX_DIVERGENT_POINTS:
@@ -2589,11 +2587,10 @@ def check_consistency(log_path: str, projection, *,
     # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
     # Point-only, so an Object/Subject burial would be invisible; this compares
     # the journal's entity reference against the graph's entity nodes.
-    graph_entities, graph_entity_names = _entities_from_view(graph_view)
+    graph_entities, _graph_entity_names = _entities_from_view(graph_view)
     entity_mismatches, entity_divergent_count, entity_ambiguous_excluded = (
         _compare_entities(journal_entities, graph_entities,
-                          graph_entity_names, entity_deleted,
-                          entity_ambiguous))
+                          entity_deleted, entity_ambiguous))
     entities_ok = not entity_mismatches
     # `db_hash` is a pure function of the GRAPH — the fields the verdict covers
     # PLUS the embedding, so a vector-only rewrite of an otherwise-identical

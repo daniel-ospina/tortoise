@@ -55,10 +55,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from _node_ids import node_id
+
 from tests import _live_utils
 from tortoise.embeddings import EMBEDDING_DIM
 from tortoise.log import EventLog
-from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import (
     reset_circuit_breakers,

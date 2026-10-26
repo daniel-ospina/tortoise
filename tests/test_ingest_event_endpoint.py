@@ -1304,6 +1304,46 @@ def test_direct_route_name_merged_self_edge_rejected_phase1(sdk):
     assert _count(sdk, "MATCH (n:Object) RETURN count(n)") == 0
 
 
+def test_direct_route_self_edge_rejected_when_the_name_is_only_terminal(sdk):
+    """#3590 round-5 review F1c: a MINTING name still has a landing identity.
+
+    `_entity_name_holders` decides the `#7925` Phase-1 axes, and the create now
+    resolves over LIVE carriers only — so a name whose sole carrier is TERMINAL
+    is a MINT, not a merge. The endpoint-collision guard gated on
+    `exists_by_name`, which is TRUE for one carrier as well, so it took the
+    "the create refuses this item" branch and computed NO landing id: two
+    distinct bundle refs naming that name were never compared, although they
+    land on ONE node (the first item mints, the second resolves to it) — the
+    collision is then written by `create_direct_edge` after steps 2-3
+    committed. Gating on the LIVE COUNT is what tells "refuses" (2+) from
+    "mints" (0) apart.
+
+    Mutation that must red this: restoring `if _h[0]:` in the guard.
+    """
+    sub = sdk.create_subject("Gamma")["id"]
+    sdk.update_entity(sub, status="superseded")
+    bundle = {
+        "points": [{"ref": "pX", "kind": "statement",
+                    "content": "must-not-commit"}],
+        "entities": [{"ref": "s1", "type": "subject", "name": "Gamma"},
+                     {"ref": "s2", "type": "subject", "name": "Gamma"}],
+        "connections": [{"from": "s1", "to": "s2", "operator": "IMPL"}],
+    }
+    viols = sdk._validate_bundle(bundle)
+    msgs = [v["message"] for v in viols]
+    assert any("'s1' and 's2' both resolve to the Subject" in m
+               and "address the same endpoint" in m for m in msgs), msgs
+    # The buried carrier is NOT the endpoint: no "resolves to terminal" arm may
+    # fire for a name the write mints past.
+    assert not any("resolves to terminal" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError,
+                       match="from and to address the same endpoint"):
+        sdk.ingest(bundle)
+    # ZERO mutation — counted on the graph, not inferred from the exception
+    assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 1
+
+
 @pytest.mark.parametrize("reify", [False, True])
 def test_external_endpoint_tainted_by_operator_shaped_name_rejected_phase1(
         sdk, reify):

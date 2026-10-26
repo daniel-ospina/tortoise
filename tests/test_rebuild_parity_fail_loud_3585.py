@@ -40,6 +40,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from _node_ids import node_id
+
 from tortoise.backup import restore
 from tortoise.consistency import (
     _ENTITY_CREATION,
@@ -60,7 +62,6 @@ from tortoise.projection.nonfolded import (
     collect_non_folded,
     refused_events,
 )
-from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 
 
@@ -455,12 +456,14 @@ class TestReferenceFoldMirrorsTheWriters:
         assert buried == {"evt-flat", "evt-nested"}, r["divergent_entities"]
 
     def test_second_registration_of_one_name_is_not_a_divergence(self, env):
-        """FAILS IF: the entity leg keys Object/Subject by id ONLY.
+        """FAILS IF: the entity leg resolves presence by NAME (#3590).
 
-        The graph MERGEs those labels by NAME, so the same name registered
-        twice under different ids is ONE node carrying the LAST id. An id-only
-        key reported the older id `absent-from-graph` and reddened a CORRECTLY
-        replayed graph.
+        A second registration of one name under a fresh id is TWO nodes — the
+        writers merge on `id`, not on `name` — so both ids are present and the
+        verdict is clean for that reason. The name-resolution fallback this pin
+        used to justify ("the graph MERGEs these labels by NAME, so the name is
+        ONE node carrying the LAST id") was retired by #3590: it made a buried
+        id resolve onto an impostor of the same name and report CLEAN.
         REACHABLE: a second `ObjectRegistered` for the same name (the
         `EventAPI.add_object` shape mints a fresh id per call)."""
         sdk, events = env

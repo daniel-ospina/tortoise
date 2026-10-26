@@ -52,6 +52,7 @@ and a hand-rolled ``LIMIT 1`` is the silent-pick variant of it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from typing import NamedTuple
@@ -218,22 +219,55 @@ def live_name_holder_ids(g, label: str, name: str, *,
 
 
 #: One lock per ``(label, name)`` for the CREATE-side resolve-or-mint
-#: (:func:`resolve_or_mint`). The resolve is check-then-act and D2 legalises
-#: same-name coexistence, so no unique index can close the race — the lock
-#: closes it WITHIN A PROCESS. The registry is module-level (mirroring
-#: ``sdk._source_merge_locks``), so two processes can still each see zero live
-#: holders and each mint; that residual is named in the issue and is bounded by
-#: the pre-beta premise (no production Object/Subject graph).
-_holder_locks: dict[tuple, threading.Lock] = {}
+#: (:func:`resolve_or_mint`) **and the write it authorises**. The resolve is
+#: check-then-act and D2 legalises same-name coexistence, so no unique index can
+#: close the race — the lock closes it WITHIN A PROCESS. The registry is
+#: module-level (mirroring ``sdk._source_merge_locks``), so two processes can
+#: still each see zero live holders and each mint; that residual is named in the
+#: issue and is bounded by the pre-beta premise (no production Object/Subject
+#: graph).
+#:
+#: ⛔ It is an ``RLock`` because the critical section is **resolve AND write**, not
+#: the resolve alone (#3590 review, finding 1): ``sdk.create_entity`` holds
+#: :func:`entity_create_lock` across ``resolve_or_mint`` and the ``MERGE`` that
+#: makes the holder visible, so a second thread cannot pass the empty-holder
+#: check while the first is still between its resolve and its write. A plain
+#: ``Lock`` would deadlock there, because the resolve re-enters for the same key.
+#:
+#: ⚠️ DECLARED RESIDUAL (same family as ``sdk._source_merge_locks``): the
+#: registry gains one lock per distinct ``(label, name)`` and nothing prunes it,
+#: so a long-lived hosted process keeps every entity name it has ever created.
+#: Pruning is deliberately NOT done here: removing an entry another thread has
+#: already fetched but not yet acquired would let a third thread mint a SECOND
+#: lock for the same key, which reopens the very race this closes. Bounded
+#: memory here is a name-key-lifecycle question, not a lock-plumbing one.
+_holder_locks: dict[tuple, threading.RLock] = {}
 _holder_locks_guard = threading.Lock()
 
 
-def _holder_lock(label: str, name: str) -> threading.Lock:
+def _holder_lock(label: str, name: str) -> threading.RLock:
     with _holder_locks_guard:
         lock = _holder_locks.get((label, name))
         if lock is None:
-            lock = _holder_locks[(label, name)] = threading.Lock()
+            lock = _holder_locks[(label, name)] = threading.RLock()
         return lock
+
+
+@contextlib.contextmanager
+def entity_create_lock(label: str, name: str):
+    """Hold the ``(label, name)`` create lock across resolve **and** write.
+
+    #3590 review (finding 1): :func:`resolve_or_mint` alone closes nothing — it
+    returns a minted id and then RELEASES the lock, so two threads both see zero
+    live holders, both mint, and both write a node of their own. The holder
+    becomes visible only at the caller's ``MERGE``, so the guard has to span
+    that write. ``RLock`` makes the nesting legal for the resolve inside it.
+
+    Reentrant for the same thread, so a writer that calls :func:`resolve_or_mint`
+    inside the block (or a helper that re-enters) behaves exactly as before.
+    """
+    with _holder_lock(label, name):
+        yield
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -276,6 +310,12 @@ def resolve_or_mint(g, label: str, name: str, *,
         # Zero live holders, or one LIVE holder that carries no id (a legacy /
         # foreign row) — that row cannot be addressed, so it cannot BE the
         # identity: mint.
+        #
+        # ⛔ The returned id is only half of the contract: the WRITE that makes
+        # it visible must happen before this lock is released, or a concurrent
+        # create passes the same empty-holder check (#3590 review, finding 1).
+        # A caller that cannot write under the lock must wrap resolve+write in
+        # :func:`entity_create_lock` — ``sdk.create_entity`` does.
         from .ids import ulid
         return ulid(), True
 
@@ -305,11 +345,23 @@ def resolve_fold_name(g, label: str, name: str, *,
     live/replay divergence. The IDENTITY shapes stay NON-exempt: a record whose
     own target cannot be resolved (an id-less ``ObjectSuperseded``, a rename/
     delete/restatus miss) must still fail the run rather than silently not
-    apply. ⛔ A caller whose resolved id is then used to WRITE entity state —
-    ``_fold_object_status``'s ``about_entities`` target (``SET o.status``) —
-    must therefore NOT pass ``mention=True``: the exemption is attribution only,
-    and taking it there turned a miss into a silent no-op behind a green run
-    (#3590 review P1).
+    apply.
+
+    ⛔ **The classification is per USE, not per field** (#3590 review F1/F2).
+    The same event field can be both, and the two uses must be resolved
+    separately:
+
+    * ``_fold_object_status``'s ``about_entities`` target DOES pass
+      ``mention=True``: the fold's own contract says a non-match on that LOOSE
+      list is not a violation, and a non-exempt record there made
+      ``rebuild_all`` refuse journals that replay on ``main`` — one extracted
+      event naming an unregistered subject was enough (the durable-copy
+      regression this exemption exists to prevent).
+    * the event's EXPLICIT ``object``, once it reaches the same fold, must NOT:
+      it is the fold's declared target and the fold ``SET o.status`` on it, so
+      its miss is re-resolved WITHOUT ``mention=True`` and fails the run.
+      Taking the exemption there left a lifecycle event that folded nothing
+      behind a green run.
 
     Why the mention exemption exists at all: this repo's own journal writer
     (``EventAPI.add_event``, and pre-#3590 journals generally) references names

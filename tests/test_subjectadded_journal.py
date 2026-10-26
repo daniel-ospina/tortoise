@@ -36,10 +36,10 @@ import sys  # noqa: E402
 sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
+from _node_ids import node_id  # noqa: E402
 
 from tortoise.ids import ulid  # noqa: E402
 from tortoise.log import EventLog  # noqa: E402
-from _node_ids import node_id  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 

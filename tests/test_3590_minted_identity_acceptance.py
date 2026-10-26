@@ -334,43 +334,76 @@ def test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not(sdk):
         "state can be skipped with a green run")
 
 
-def test_an_unresolvable_status_fold_target_may_not_take_the_mention_exemption(sdk):
-    """#3590 review P1: a fold that MOVES entity state is not a mention.
+def test_an_unresolvable_about_target_keeps_the_mention_exemption_and_replays(
+        sdk, tmp_path: Path):
+    """#3590 review F2: ``about_entities`` is the LOOSE list — a miss is EXEMPT.
 
-    ``_fold_object_status`` resolves an ``about_entities`` target and then
-    ``SET o.status`` on it — entity state. ``nonfolded.EXEMPT_SHAPES`` records
-    the exemption's bound as *"a fold that must MOVE an entity's state can
-    never take this exemption"*, so this site may not resolve with
-    ``mention=True``: doing so made an unresolvable target a silent no-op
-    behind a GREEN run (nothing written, nothing reported, nothing refused)
-    where the pre-#3590 name-keyed read at least applied it.
+    ⛔ This test's predecessor asserted the OPPOSITE (a non-exempt record for an
+    unresolved ``about_entities`` target) and was the round-3 fix. That choice
+    made ``rebuild_all`` REFUSE journals that replay on ``main``: the extraction
+    pipeline emits ``about_entities`` with no ``object`` as a matter of course
+    (the capture door passes the payload list straight through —
+    ``sdk.py::create_event(..., about_entities=…)``), so a single extracted
+    event naming an unregistered subject raised ``NonFoldedEventsError`` after
+    the graph had already been wiped. That is the durable-copy regression the
+    ``unfolded-mention`` exemption exists to prevent, and this fold's own
+    contract says a non-match on that list is NOT a violation (*"reporting
+    per-non-match would spam every unrelated entity"*).
 
-    Mutation that must red this: adding ``mention=True`` back to the
+    So the two targets are classified in opposite directions: this one keeps the
+    exemption (the miss is still recorded and named at the run boundary), while
+    the event's EXPLICIT ``object`` — the fold's declared target — is
+    re-resolved non-exemptly and fails the run
+    (``test_a_lifecycle_event_on_an_unresolvable_object_is_not_a_green_run``).
+
+    Mutation that must red this: dropping ``mention=True`` from the
     ``resolve_fold_name`` call in ``_fold_object_status._targets`` — the record
-    becomes the EXEMPT ``unfolded-mention`` and the run stops failing.
+    becomes a NON-exempt ``unregistered-reference`` and the replay below raises
+    for a journal that replays on ``main``.
     """
     from tortoise.projection import _replay_write_scope
     from tortoise.projection.nonfolded import (
         SHAPE_UNFOLDED_MENTION,
         collect_non_folded,
+        refused_events,
     )
 
     client, _events = sdk
     proj = client._get_proj()
+    event = {"eventId": "ev-status-fold",
+             "eventKind": "venture:disbursement",
+             # a DECLARED lifecycle kind whose target is named only here, and
+             # is registered nowhere
+             "aboutEntities": ["Nothing Registered"]}
+
+    # 1. The miss is RECORDED (not silently swallowed) and it is EXEMPT.
     with _replay_write_scope(), collect_non_folded() as entries:
         proj.apply({"type": "EventRecorded", "eventId": "ev-status-fold",
-                    "event": {"eventId": "ev-status-fold",
-                              "eventKind": "venture:disbursement",
-                              # a DECLARED lifecycle kind whose target is named
-                              # only here, and is registered nowhere
-                              "aboutEntities": ["Nothing Registered"]}})
+                    "event": event})
     shapes = [e.shape for e in entries]
-    assert shapes, (
-        "the declared fold resolved an unregistered target and recorded "
-        "NOTHING — a state-moving miss must be recorded")
-    assert SHAPE_UNFOLDED_MENTION not in shapes, (
-        "a state-moving status fold took the ATTRIBUTION exemption — an "
-        f"unresolvable target is now a silent no-op behind a green run: {shapes}")
+    assert SHAPE_UNFOLDED_MENTION in shapes, (
+        "the declared fold resolved an unregistered about_entities target and "
+        f"did not record it as the mention shape: {shapes}")
+    assert not refused_events(entries), (
+        "an unresolved about_entities target FAILED THE RUN — a journal that "
+        "replays on `main` is now un-rebuildable (the durable-copy "
+        f"regression): {[str(e) for e in refused_events(entries)]}")
+
+    # 2. …and the journal really is rebuildable (this is the assertion that
+    #    fails on the pre-fix code: `rebuild_all` raised NonFoldedEventsError).
+    journal = tmp_path / "about"
+    journal.mkdir()
+    (journal / "events.jsonl").write_text(
+        json.dumps({"type": "EventRecorded", "id": "ev-status-fold",
+                    "name": "about-only event",
+                    "startedAt": "2026-01-01T00:00:00Z", **event}) + "\n")
+    proj.rebuild_all(str(journal), confirm_destructive=True)
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'ev-status-fold'}) RETURN e.eventKind"
+    ).result_set
+    assert rows and rows[0][0] == "venture:disbursement", (
+        "the rebuild did not replay the journal it refused to refuse")
+
 
 
 def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
@@ -465,27 +498,379 @@ def test_the_event_door_registers_every_name_its_record_mentions(sdk):
         return {
             "performs": {r[0] for r in proj.g.query(
                 "MATCH (s:Subject)-[:performs]->(e:Event {eventId:'ev-mentions'}) "
-                "RETURN s.name").result_set},
+                "RETURN s.id").result_set},
             "produces": {r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventId:'ev-mentions'})-[:produces]->(o:Object) "
-                "RETURN o.name").result_set},
+                "RETURN o.id").result_set},
             "uses": {r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventId:'ev-mentions'})-[:uses]->(o:Object) "
-                "RETURN o.name").result_set},
+                "RETURN o.id").result_set},
         }
 
     live = _edges()
-    assert live == {"performs": {"Agent Pi"},
-                    "produces": {"Docs Thing"},
-                    "uses": {"Tool X"}}, live
+    # IDs, not names: comparing names alone let a rebuild that re-minted a
+    # DIFFERENT id for the same name satisfy the assertion (#3590 round-5
+    # review — that half was identity-blind, i.e. vacuous).
+    assert {kind: len(ids) for kind, ids in live.items()} == {
+        "performs": 1, "produces": 1, "uses": 1}, live
 
     # An id-shaped name would be the pre-#3590 derivation sneaking back in; the
     # registration must MINT (and the mention must resolve to that minted id).
-    for name in ("Docs Thing", "Tool X"):
-        ids = _name_ids(proj, "Object", name)
+    for name in ("Agent Pi", "Docs Thing", "Tool X"):
+        ids = _name_ids(proj,
+                        "Subject" if name == "Agent Pi" else "Object", name)
         assert len(ids) == 1 and ids[0] != name, (name, ids)
+
+    # ⛔ MUTATE LIVE STATE the journal cannot reproduce, BEFORE the rebuild. A
+    # `rebuild_all` stubbed to a no-op leaves the live graph untouched, so
+    # without this the replay half passes on a no-op (the round-2 P1 class this
+    # file records; tests 3 and 4 already carry the same mutation).
+    proj.g.query(
+        "MATCH (o:Object {name:'Docs Thing'}) SET o.name='live-drift'")
 
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert _edges() == live, (
         "the mention edges did not survive replay — the door referenced names "
         "its journal never registered (#3590 D9)")
+    assert not _name_ids(proj, "Object", "live-drift"), (
+        "the live-only mutation survived the rebuild — `rebuild_all` did not "
+        "re-derive the graph from the journal, so `_edges()` equality proves "
+        "nothing about replay")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Round-5 review pins — each is RED on the tree the review reported against
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_create_resolves_and_writes_under_one_holder_lock(sdk, monkeypatch):
+    """#3590 review (finding 1): the lock must span the WRITE, not only the read.
+
+    ``resolve_or_mint`` is check-then-act: it looks for live holders and, when
+    there are none, mints an id. The holder becomes visible only at the caller's
+    ``MERGE``, so releasing the lock before that write leaves the exact window
+    the lock claims to close — two threads both see zero live holders, both
+    mint, and one name ends up with two live carriers (after which every later
+    create of it raises ``AmbiguousEntityName`` and there is no by-name repair
+    path).
+
+    ASSERTED as the invariant itself — the write executes INSIDE the
+    ``(label, name)`` critical section — rather than by racing two threads, so
+    the pin is deterministic. On the pre-fix tree the lock is already released
+    when ``_create_entity`` runs, so ``locked()`` is False and this fails.
+    """
+    from tortoise.entity_identity import _holder_lock
+
+    client, _ = sdk
+    seen: dict = {}
+    original = TortoiseSDK._create_entity
+
+    def _spy(self, label, entity_id, *args, **kwargs):
+        lock = _holder_lock(label, "Locked Name")
+        # `RLock.locked()` only exists from 3.14; `_is_owned()` is the same-thread
+        # question this pin asks (the spike runs on the creating thread).
+        seen["locked"] = (lock._is_owned() if hasattr(lock, "_is_owned")
+                          else lock.locked())
+        seen["entity_id"] = entity_id
+        return original(self, label, entity_id, *args, **kwargs)
+
+    monkeypatch.setattr(TortoiseSDK, "_create_entity", _spy)
+    client.create_entity("object", "Locked Name", objectKind="core:strategy",
+                         is_episodic=False)
+    assert seen.get("locked") is True, (
+        "the mint and the write that makes it visible are not ONE critical "
+        "section — a concurrent create can pass the same empty-holder check "
+        "(#3590 review, finding 1)")
+
+
+def test_a_rename_onto_a_held_name_is_refused(sdk):
+    """#3590 review (finding 2): the new public refusal had no pin at all.
+
+    ``NameAlreadyHeld`` is a NEW publicly-observable refusal on
+    ``update_entity``: a rename onto a name another live entity holds would make
+    the natural key ambiguous with no by-name repair path, so it is refused
+    before anything is written. Nothing pinned it (``git grep
+    NameAlreadyHeld`` found no test), and an unpinned refusal is one refactor
+    away from silently disappearing.
+    """
+    from tortoise.exceptions import NameAlreadyHeld
+
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Held", objectKind="core:strategy",
+                         _server_id="id-held", is_episodic=False)
+    mover = client.create_entity("object", "Mover", objectKind="core:strategy",
+                                 _server_id="id-mover",
+                                 is_episodic=False)["node"]["id"]
+
+    with pytest.raises(NameAlreadyHeld):
+        client.update_entity(mover, name="Held")
+
+    # The refusal wrote NOTHING: the mover keeps its own name.
+    assert _name_ids(proj, "Object", "Mover") == [mover], (
+        "the refused rename still moved the name")
+    assert _name_ids(proj, "Object", "Held") == ["id-held"]
+
+    # …and the guard is not a blanket block: a rename onto a FREE name works.
+    client.update_entity(mover, name="Freed")
+    assert _name_ids(proj, "Object", "Freed") == [mover]
+
+
+def test_a_participants_fallback_wires_only_the_resolved_performer(sdk):
+    """#3590 review (F2): one mention may not be refused AND broadcast.
+
+    The ``performs`` arm resolves the event's ``subject`` to ONE live holder and
+    refuses to guess between carriers; the ``participatesIn`` fallback wired
+    EVERY same-name carrier from the same reference. Two live carriers therefore
+    produced two links from a reference the fold had just declined to resolve —
+    inside the fold this change rewrote.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    # Two live carriers of one name: the reference is unresolvable by design.
+    client.create_entity("subject", "Twinned", _server_id="sub-a",
+                         is_episodic=False)
+    client.create_entity("subject", "Twinned", _server_id="sub-b",
+                         is_episodic=False)
+    client.create_event("standup", "meeting", subject="Twinned",
+                        _server_id="ev-twinned", is_episodic=False)
+    assert {r[0] for r in proj.g.query(
+        "MATCH (s:Subject)-[:participatesIn]->(e:Event {eventId:'ev-twinned'})"
+        " RETURN s.id").result_set} == set(), (
+        "the participants fallback guessed between carriers — the same "
+        "reference is refused by `performs` and broadcast here")
+
+    # One live carrier: the edge is wired on THAT id, never re-derived by name.
+    client.create_entity("subject", "Solo", _server_id="sub-solo",
+                         is_episodic=False)
+    client.create_event("solo standup", "meeting", subject="Solo",
+                        _server_id="ev-solo", is_episodic=False)
+    assert {r[0] for r in proj.g.query(
+        "MATCH (s:Subject)-[:participatesIn]->(e:Event {eventId:'ev-solo'})"
+        " RETURN s.id").result_set} == {"sub-solo"}
+
+
+def test_the_bundle_guard_reads_the_live_holder_not_a_terminal_one(sdk):
+    """#3590 review (F1): the guard must read the node the WRITE lands on.
+
+    ``_entity_name_holders`` decides the ``#7925`` Phase-1 axes. The create now
+    resolves over LIVE carriers only, so a name whose sole carrier is TERMINAL
+    mints a fresh live node — reading the axes off the terminal carrier skipped
+    arms that exist to catch a write which DOES store its status (fail-open) and
+    refused legal direct edges ("resolves to terminal") in the other direction.
+    """
+    client, _ = sdk
+    obj = client.create_entity("object", "Ghost", objectKind="core:strategy",
+                               _server_id="id-ghost",
+                               is_episodic=False)["node"]["id"]
+    client.update_entity(obj, status="superseded")
+
+    _exists, hit, _op, _bad, _carriers, merges, target = \
+        client._entity_name_holders("Object", "Ghost")
+    assert merges is False, (
+        "the guard thinks the write MERGEs onto the terminal carrier, but the "
+        "create mints a fresh live node (#3590 review F1)")
+    assert target is None and hit is None, (target, hit)
+
+
+def test_a_buried_id_with_a_same_name_impostor_is_reported(sdk):
+    """#3590 review: the presence leg may not resolve a journal id by NAME.
+
+    The retired fallback resolved a journal id the graph does not carry onto a
+    SAME-NAME node under a DIFFERENT id, because the graph used to MERGE these
+    labels by name. Under the id-keyed model that node is a different
+    incarnation, so resolving it reported a faithful graph while the faithful
+    node was buried — a false GREEN, the one failure mode ``consistency`` must
+    never produce.
+    """
+    from tortoise.consistency import check_consistency
+
+    client, events = sdk
+    proj = client._get_proj()
+    journaled = client.create_entity("object", "Twin",
+                                     objectKind="core:strategy",
+                                     is_episodic=False)["node"]["id"]
+    # Bury the journaled id and leave a same-name impostor (a different id) —
+    # the exact shape the name fallback used to call CLEAN.
+    proj.g.query("MATCH (o:Object {id:$id}) SET o.id='impostor-id'",
+                 params={"id": journaled})
+
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    presence = {(d["label"], d["id"]) for d in r["divergent_entities"]
+                if d["field"] == "presence"}
+    assert ("Object", journaled) in presence, (
+        "the buried id was resolved by NAME onto the impostor and reported "
+        f"CLEAN — presence must be an identity question: {r}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Round-5 review, second batch — the MENTION may not mint (F2)
+# ══════════════════════════════════════════════════════════════════════
+
+def _status_of(proj, label: str, entity_id: str):
+    rows = proj.g.query(
+        f"MATCH (n:{label} {{id:$id}}) RETURN n.status",
+        params={"id": entity_id}).result_set
+    return rows[0][0] if rows else None
+
+
+def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
+    """#3590 round-5 review F2: attribution may not CREATE an entity.
+
+    ``_register_referenced_entity`` probed LIVE holders only, so an event that
+    merely mentioned a name whose only carrier is TERMINAL ran a user-level
+    create: it minted a new LIVE incarnation, JOURNALED the registration, and
+    folded the attribution onto the ghost. Pre-#3590 the fold's
+    ``MERGE (o:Object {name:$name})`` matched the terminal carrier (MERGE matches
+    on the pattern's properties only) and created nothing, so this is a
+    behaviour CHANGE, not a refactor — and it resurrects a superseded name,
+    grows the journal by one record per mention, and makes the next
+    ``create_entity`` resolve to the ghost instead of the real incarnation.
+
+    Whether a bare mention should ever create an entity is **D1 on #3590, OPEN**;
+    this door takes the weaker arm. The attribution is then dropped as the
+    EXEMPT ``unfolded-mention``, so the journal still replays.
+
+    Mutation that must red this: restoring ``live_name_holder_ids`` (instead of
+    ``all_name_holder_ids``) in ``_register_referenced_entity``.
+    """
+    client, events = sdk
+    proj = client._get_proj()
+    buried = client.create_entity("object", "Retired",
+                                  objectKind="core:strategy",
+                                  _server_id="id-retired",
+                                  is_episodic=False)["node"]["id"]
+    client.update_entity(buried, status="superseded")
+    registrations_before = [r for r in _journal(events)
+                            if r.get("type") in ("ObjectRegistered",
+                                                 "SubjectAdded")]
+
+    client.create_event("ev-after-retire", "meeting", uses=["Retired"],
+                        _server_id="ev-after-retire", is_episodic=False)
+
+    # 1. NO second incarnation — live or otherwise.
+    assert _name_ids(proj, "Object", "Retired") == [buried], (
+        "a MENTION minted a new incarnation of a superseded name — the door "
+        "created an entity from attribution (D1 is open)")
+    assert _status_of(proj, "Object", buried) == "superseded", (
+        "the mention moved the buried incarnation's state")
+
+    # 2. Nothing was journaled for the mention: a registration record per
+    #    mention is unbounded journal growth over a capture loop.
+    registrations_after = [r for r in _journal(events)
+                           if r.get("type") in ("ObjectRegistered",
+                                                "SubjectAdded")]
+    assert registrations_after == registrations_before, (
+        "the mention JOURNALED an entity registration it should not have "
+        f"created: {registrations_after[len(registrations_before):]}")
+
+    # 3. The link was DROPPED (recorded), never fabricated onto a ghost.
+    assert proj.g.query(
+        "MATCH (e:Event {eventId:'ev-after-retire'})-[:uses]->(o) "
+        "RETURN o.id").result_set == [], (
+        "the attribution edge was wired to an entity the record never named")
+
+    # 4. …and the journal still replays: the drop is the EXEMPT mention shape.
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _name_ids(proj, "Object", "Retired") == [buried], (
+        "replay disagreed with the live pass on the mention")
+    assert _status_of(proj, "Object", buried) == "superseded"
+
+
+def test_a_lifecycle_event_on_an_unresolvable_object_is_not_a_green_run(sdk):
+    """#3590: a STATE-MOVING fold miss with no carrier at all fails the run.
+
+    The ``unfolded-mention`` exemption's recorded bound is that a fold which must
+    MOVE an entity's state can never take it. ``about_entities`` is the loose
+    list (see the test above); the event's EXPLICIT ``object`` is the fold's
+    declared target, so when nothing at all holds that name the miss is the
+    NON-exempt ``unregistered-reference``: the producer violated D9 (the doors
+    register before appending) and a green pass would report success over a fold
+    that wrote nothing.
+
+    Mutation that must red this: passing ``mention=True`` unconditionally at the
+    status fold's explicit-target re-resolve (``_fold_object_status``).
+    """
+    from tortoise.projection import _replay_write_scope
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNREGISTERED_REFERENCE,
+        collect_non_folded,
+        refused_events,
+    )
+
+    client, _ = sdk
+    proj = client._get_proj()
+    with _replay_write_scope(), collect_non_folded() as entries:
+        proj.apply({"type": "EventRecorded", "eventId": "ev-life-miss",
+                    "event": {"eventId": "ev-life-miss",
+                              "eventKind": "venture:disbursement",
+                              "object": "Nothing Registered Anywhere"}})
+    shapes = [e.shape for e in entries]
+    assert SHAPE_UNREGISTERED_REFERENCE in shapes, (
+        "a lifecycle event whose declared target no entity holds was not "
+        f"recorded as the non-exempt identity miss: {shapes}")
+    assert refused_events(entries), (
+        "a state-moving fold miss FAILED to fail the run — a lifecycle event "
+        "that moved nothing passed: "
+        f"{[str(e) for e in entries]}")
+
+
+def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
+        sdk, tmp_path: Path):
+    """#3590 round-5 review F2 (the other half): a BURIED target is not a miss.
+
+    The door may not register a mention of a name an existing carrier holds
+    (above), and the fold may not resurrect a superseded incarnation (R5) — so
+    the two together must NOT make the journal un-rebuildable. They would if the
+    fold classified this as the non-exempt ``unregistered-reference``: the entity
+    IS registered, the incarnation is merely buried, which is a deliberate no-op
+    rather than a missing creation event. Measured before the split: a journal
+    containing ``ObjectRegistered → EntityMutated(status=superseded) →
+    EventRecorded(lifecycle, object=<that name>)`` raised
+    ``NonFoldedEventsError`` on ``rebuild_all`` — the durable-copy regression
+    this framework exists to prevent — while replaying cleanly on the tree that
+    minted the ghost instead. It is recorded (``cause=no-live-holder``) and named
+    by the run boundary, so the no-op is not silent.
+
+    Mutation that must red this: dropping the ``all_name_holder_ids`` probe at
+    the status fold's explicit-target re-resolve (making every miss non-exempt).
+    """
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNFOLDED_MENTION,
+        collect_non_folded,
+        refused_events,
+    )
+
+    client, events = sdk
+    proj = client._get_proj()
+    buried = client.create_entity("object", "Buried",
+                                  objectKind="core:strategy",
+                                  _server_id="id-buried",
+                                  is_episodic=False)["node"]["id"]
+    client.update_entity(buried, status="superseded")
+
+    # The DOOR writes the event (no ghost minted, nothing registered) and the
+    # miss it records is the bounded, reported one.
+    with collect_non_folded() as entries:
+        client.create_event("ev-life-buried", "venture:disbursement",
+                            object="Buried", _server_id="ev-life-buried",
+                            is_episodic=False)
+    shapes = [e.shape for e in entries]
+    assert SHAPE_UNFOLDED_MENTION in shapes, (
+        f"the buried target was not recorded as the bounded no-op: {shapes}")
+    assert not refused_events(entries), (
+        "a buried (not missing) target was classified as a producer omission "
+        f"and failed the run: {[str(e) for e in entries]}")
+    assert any("no-live-holder" in str(e.detail) for e in entries), (
+        "the record does not name WHY it missed — a terminal-only holder reads "
+        f"the same as an absent one: {[str(e) for e in entries]}")
+    assert _name_ids(proj, "Object", "Buried") == [buried], (
+        "the lifecycle target's mention minted a ghost incarnation")
+    assert _status_of(proj, "Object", buried) == "superseded", (
+        "the fold MOVED a superseded incarnation's state — that is a "
+        "resurrection, which the identity model forbids (R5)")
+
+    # The property that matters: the journal REPLAYS.
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _name_ids(proj, "Object", "Buried") == [buried], (
+        "replay disagreed with the live pass on the buried target")
+    assert _status_of(proj, "Object", buried) == "superseded"
