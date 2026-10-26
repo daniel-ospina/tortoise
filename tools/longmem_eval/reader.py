@@ -50,6 +50,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import os
 
 from tortoise.ingest import _PROVIDERS
+from tortoise.models import OpenAICompatModel
 
 # The product owns the reader (prompt constants + LLMReader + protocol +
 # PROBE_SYSTEM). Re-exported verbatim — the private prompt constants are
@@ -99,6 +100,49 @@ READER_MODEL = "openrouter:deepseek/deepseek-v4-flash"
 # Provider priority for the READER when multiple keys are set — reuse the
 # session-extraction order (sdk._SESSION_LLM_PROVIDER_PRIORITY).
 _PROVIDER_PRIORITY = _SESSION_LLM_PROVIDER_PRIORITY
+
+#: Providers whose models reason by DEFAULT, keyed by the env var that names the
+#: provider (the eval's transports already hold it). Shared with the judge
+#: (``judge.py`` imports it from here — the judge must disable thinking for the
+#: same reason, and the fact belongs in ONE place).
+#:
+#: WHY — measured 2026-10-25 on api.deepseek.com, the only provider this box has
+#: a key for (OPENAI_API_KEY / OPENROUTER_API_KEY absent):
+#:
+#:   judge  (official shape, max_tokens=10):  content='' finish=length,
+#:           reasoning_tokens=10  -> label rule ``'yes' in ''`` grades EVERY
+#:           question WRONG.
+#:   reader (official shape, max_tokens=500): one 11,352-prompt-token
+#:           multi-session question burned completion_tokens=500 with an EMPTY
+#:           answer, was recorded ``valid: True`` with no error class, and
+#:           scored 0 — a starved answer counted as a wrong one.
+#:
+#:     both with ``thinking:{"type":"disabled"}`` -> 'yes' / a real answer,
+#:     finish=stop, 1 completion token for the judge.
+#:
+#: So a reasoning-by-default model must have thinking disabled to make the
+#: benchmark's fixed completion budgets mean what they mean on a non-reasoning
+#: model. Same mechanism as ``tortoise/analyze.py``'s #1790 deepseek gate; the
+#: OFFICIAL judge (``openai:gpt-4o-2024-08-06``) and every other provider are
+#: untouched — their request stays byte-identical to the official shape.
+THINKING_BY_DEFAULT_KEY_ENVS = frozenset({"DEEPSEEK_API_KEY"})
+
+
+class _ThinkingDisabledTransport(OpenAICompatModel):
+    """``OpenAICompatModel`` + ``thinking:{type:disabled}``.
+
+    The ONLY difference from the official gen.py reader call shape: without it a
+    reasoning-by-default provider spends the whole completion budget on hidden
+    reasoning and returns empty ``content``, and an empty reader answer is
+    graded as a wrong answer — so the accuracy would measure the transport, not
+    the retrieval or the reader (measured 2026-10-25; see
+    ``THINKING_BY_DEFAULT_KEY_ENVS``).
+    """
+
+    def build_request(self, system: str, user: str) -> dict:
+        req = super().build_request(system, user)
+        req["thinking"] = {"type": "disabled"}
+        return req
 
 
 class MockReader:
@@ -210,10 +254,20 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
     # Official reader call shape: temperature 0, bounded max_tokens, NO
     # response_format (JSON mode) — the answer is free text, and forcing
     # json_object mangles free-form answers on several providers.
-    model = OpenAICompatModel(
+    transport = (_ThinkingDisabledTransport
+                 if key_env in THINKING_BY_DEFAULT_KEY_ENVS
+                 else OpenAICompatModel)
+    model = transport(
         id=model_id, base_url=base_url, api_key_env=key_env,
         response_format=None, max_tokens=DEFAULT_READER_MAX_TOKENS,
     )
+    if transport is _ThinkingDisabledTransport:
+        print("[longmem_eval] reader transport sends thinking:{\"type\":"
+              "\"disabled\"}: this provider reasons by DEFAULT and would "
+              "otherwise spend the whole 500-token answer budget on hidden "
+              "reasoning (measured 2026-10-25 — an 11,352-token prompt came "
+              "back with completion_tokens=500 and an EMPTY answer, recorded "
+              "valid with no error class and scored 0)", file=sys.stderr)
     return LLMReader(model, model_id=model_id, model_spec=raw_spec,
                      provider=provider_name,
                      pinned=(raw_spec == READER_MODEL))
