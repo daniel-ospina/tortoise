@@ -305,7 +305,8 @@ bearer path untouched); step 4 is where the flow changes.
 `tests/test_oauth_consent_bridge.py`. Two conditions an operator must know, both recorded there:
 
 - the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API **and is a dedicated
-  value** (§2.3; a value equal to a service-role key the process can see is treated as
+  value** (§2.3; a value equal to a service-role key or to `SUPABASE_ANON_KEY` — both are in this
+  process's environment, and the anon key is the one the consent page publishes — is treated as
   unprovisioned). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
   and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
 - single-use is **per process** until §2.3's shared `jti` store (step 1) lands. The register is the
