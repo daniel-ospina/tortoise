@@ -328,6 +328,8 @@ The general rule:
 > **⇒ The rebuild path is REPLAY, never re-extraction.** The only thing that makes the derived tables regenerable is that the journal **stores the resulting rows**. A journal entry saying *"a point was created"* with just an id regenerates nothing.
 >
 > **And the payoff is identity, not just recoverability:** replay reproduces the graph **exactly**, so a v3 rebuild can be **diffed against** a v2 graph. A recompute-everything rebuild would silently produce a *different* graph each time — no stable baseline, and no reproducible audit.
+>
+> ⚠️ **"Exactly" is bounded by a declared exception: the journal may carry entries whose replay materialises NO graph node.** Two do, and both are §9.1 placements rather than omissions — `SessionNarrated` (the narrative, #9555) and `TurnRecorded` (a captured turn while the record holds the turns, #10017 R2). Both are declared in `projection._NO_PROJECTION_FOLD`, so the exception is a *decision the dispatcher states*, never a silent skip; and both still carry their text into the record, so a rebuild loses nothing that a read can see. ⛔ The exception does not extend to REMOVALS: a `EntityMutated` op=delete that a replayed journal drops is a resurrection, not an exception (#3316), which is why `tortoise/log.py`'s torn-tail tolerance is an allow-list of additive types.
 
 **✅ The schema test this gives you, for any type or field:**
 > **If the journal does not carry it, it is not derived — it is PRIMARY, and belongs in a truth-layer table.**
@@ -517,6 +519,22 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 **Why:** the narrative is **derived from** the source, not a document a connector discovered. Making it a graph node would (a) double the anchor count for the same input, (b) create a second thing to keep in sync, and (c) **put prose into the RAM-resident layer** — paying memory prices forever for text that is only ever *read*, never *argued about*. **The narrative is a searchable string, not a belief**: it has no confidence, is not `NAND`-able, and takes part in no operator. It is stored because it is **cheap and useful for search**, and it is given no topological weight.
 
 ⚠️ **The same rule applies to raw turns** (owner, 2026-09-23): *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in supabase."* **Both of the two non-entity tiers live outside the graph.** The `Source` anchor is a **truth-layer record — Postgres-authoritative, not a cache entry (§3)** — and the heavy text sits behind it in the same store. **⚠️ "supabase" here means the DATABASE, not the object bucket — see the box above.**
+
+**Where that placement is now EXECUTABLE** (it was prose until #10000/#10017):
+
+- **The write.** The capture writer stores turns in the graph **only** when the record cannot hold
+  them (no journal, or no `TORTOISE_RECORD_DSN`) — the capability decides, never a policy flag
+  (#10000, `sdk._write_capture_turns`).
+- **The journal.** On the record-held lane the turn is journalled as `TurnRecorded`, whose replay
+  materialises **no node** (#10017 R2) — a `PointAdded` there re-created the turn nodes on every
+  rebuild, i.e. a rebuild that *undid* this placement (#10067).
+- **The row.** A turn row declares itself: `public.point.cache_tier = 'record_only'`. The tier is
+  **in the data**, not in a reader's predicate, so `cache_projection.read_record_view` skips it and
+  `rebuild_from_record` cannot node-ify it either — otherwise the two rebuild routes produce two
+  different graphs.
+- **The removal.** Deleting a legacy turn from the graph is journalled
+  (`EntityMutated` op=delete, `cache_tier: 'record_only'`), and its record effect is a **tier demote, not
+  a row delete** — the transcript stays (#10017 R1).
 
 ### 9.2 A GitHub PR is an **`Object` + an `Event` + a `Source`** — never a `Source`-per-event (D2, decided)
 

@@ -2703,18 +2703,31 @@ def _write_capture_turns(
                 what="capture stale-turn sweep",
             )
 
-    # #3947: journal the turn writes so a rebuild can recreate them.
-    # `contains_session` rides the EVENT ENVELOPE, not the point payload —
-    # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
-    # restored by the projection's edge fold without inventing a node
-    # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (a hosted SDK when
-    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
-    # no-op and the `:GraphEvent` half is not a rebuild source —
-    # `ensure_event_schema` + `next_seq` + `append_event` per turn
-    # there buys no durability on the very lane #3086 measures.
+    # #3947/#10017: journal the turn writes so a rebuild recreates EXACTLY what
+    # the graph holds — and WHICH record does that is decided by the same
+    # capability that decided the write above (#10067).
+    #
+    # `PointAdded` is a NODE-CREATING record, so it is the honest record only
+    # when the graph is the store holding the turn. On a record-armed deployment
+    # the graph write above was skipped, and journaling `PointAdded` anyway made
+    # `rebuild()` re-create every turn the running graph deliberately does not
+    # have: a rebuild that is a regression, not a recovery (§9.1/D1 — raw turns
+    # live outside the graph). Once #10017's purge has removed the legacy turns,
+    # the same replay re-creates them, undoing the migration within a day
+    # (#10067).
+    #
+    # `TurnRecorded` is that record for this lane: the same `public.point` row
+    # (the same snapshot, the same `record_read` turn read, the same
+    # `{session}_t{i}` key) and NO graph fold
+    # (`projection._NO_PROJECTION_FOLD`), with `cache_tier = 'record_only'` on
+    # the snapshot so the row's own DATA tells `rebuild_from_record` the same
+    # thing. Both rebuild routes then agree, which is the whole point: one
+    # journal, one record, one graph.
     if sdk._get_event_log() is None:
         return redacted_total
+    from tortoise.record_projection import RECORD_ONLY_TIER, TURN_RECORD_TYPE
+    _turn_record_type = (TURN_RECORD_TYPE if _record_holds_turns
+                         else "PointAdded")
     # #1920 (durability half): the stale-turn delete above is a hard delete,
     # so it needs the SAME honest JSONL record ``delete_point`` emits —
     # ``EntityMutated`` op=delete, whose fold (``_delete_entity_by_id``) is
@@ -2757,6 +2770,14 @@ def _write_capture_turns(
             "status": status if status is not None else "draft",
             "createdAt": created_at if created_at is not None else now,
         }
+        if _record_holds_turns:
+            # #10017 R2: the ROW declares which store it is for, so every
+            # reader — `rebuild_from_record` today, an export or a sibling
+            # projection tomorrow — gets the placement without being taught
+            # an "except turns" predicate. It lands the `public.point`
+            # COLUMN (the schema refuses it as a props key, so it can never
+            # become a node property).
+            _turn_snapshot["cache_tier"] = RECORD_ONLY_TIER
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
         # #5004 round-3: when THIS capture encoded nothing, what rides the
@@ -2773,7 +2794,16 @@ def _write_capture_turns(
             # `point` snapshot, which `_emit_event` strips it from
             # (`content_hash` is derived, and the replay recomputes it in
             # `_upsert_point_props`).
-            "PointAdded",
+            #
+            # ⚠️ `contains_session` rides the ENVELOPE for both types — it is
+            # a capture-write structural fact (ONTOLOGY §4.5), never a node
+            # property. The graph fold reads it for `PointAdded` only and the
+            # record's `_ENVELOPE_RELATIONS` is keyed the same way, so on the
+            # carrier it is carried for the reader and materialises nothing in
+            # either store: a record-sourced `relation` row for a row the graph
+            # deliberately does not hold would be the record richer than the
+            # graph — the one direction Interface A forbids.
+            _turn_record_type,
             {"id": turn_id, "kind": "event",
              "content_hash": turn_hashes[i]},
             point=_turn_snapshot,
@@ -35416,7 +35446,8 @@ class TortoiseSDK:
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
                                  name: str | None = None,
-                                 provenance: dict | None = None) -> bool | None:
+                                 provenance: dict | None = None,
+                                 cache_tier: str | None = None) -> bool | None:
         # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD. No producer passes it
         # (the rename op is deferred to #4769), and `_fold_entity_mutation` does
         # NOT read it — the fold's `rename` arm applies `state`, so a record
@@ -35475,6 +35506,18 @@ class TortoiseSDK:
         consumer was ``delete_point``; #9207 reversed that door's ordering, so
         the delete gates its RECORD on the cache write instead and reads this
         value to decide whether the destruction it just performed is recorded.
+
+        ``cache_tier``
+            #10017 R1 only, and only on a DELETE: the TIER the removal applies
+            to. Absent — every producer before #10017 — the entity leaves both
+            stores. ``record_only`` states that the GRAPH-tier copy is what is
+            being removed and the record keeps the row (the record's effect is
+            the demote, `record_projection._tier_demote_statement`), because
+            the entity is one the record is the HOME for (§9.1's turn tier) and
+            a delete there would destroy the transcript the removal exists to
+            preserve. It is NOT put in ``state``: ``state`` is re-applied as
+            node properties by the fold's ``SET n += $state``, and a tier is
+            never graph state.
         """
         from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
         if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:
@@ -35487,6 +35530,8 @@ class TortoiseSDK:
         record: dict = {"id": id_val, "op": op, "label": label}
         if state is not None:
             record["state"] = state
+        if cache_tier is not None:
+            record["cache_tier"] = cache_tier
         if name is not None:
             record["name"] = name
         if provenance:
@@ -35508,6 +35553,53 @@ class TortoiseSDK:
         # `_emit_event` call itself, its payload and its best-effort failure
         # handling are unchanged.
         return self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
+
+    def _journal_turn_removal(self, turn_ids) -> dict[str, bool | None]:
+        """#10017 R1 — the GRAPH-tier removal of captured turns, JOURNALED.
+
+        The problem it exists for. §9.1 puts raw turns outside the graph, so
+        #10017's purge deletes the legacy turn nodes the record now holds — and
+        a graph delete that is not journaled is a RESURRECTION (`log.py`'s own
+        name, #3316): the journal still carries the `PointAdded` that created
+        each turn, so a later `rebuild()` replays a history that never contained
+        the removal and re-materialises every turn the delete phase removed,
+        while reporting success.
+
+        Contract, and it is the `delete_point` shape (#9207/#7951) rather than
+        an invention:
+
+          * **After** the delete has proven it landed, never before. A record
+            that outlives a failed destroy claims a state nobody verified.
+          * Called with the ids the DELETE STATEMENT ITSELF returned — not an
+            earlier gather. The gather-then-delete shape left a TOCTOU window
+            in which a concurrent capture's turn was removed live and never
+            journaled (#7951 review P2-c).
+          * ``cache_tier='record_only'``, because the record KEEPS the row: the
+            turn's home is Postgres, and this record says so. The graph fold
+            hard-deletes the node; the record fold demotes the tier
+            (`record_projection._tier_demote_statement`).
+
+        One record per id, through the ONE `EntityMutated` builder — no second
+        event shape, no second bus. Returns ``{turn_id: outcome}`` so the caller
+        can refuse to report a removal it could not record (the #7951
+        per-call commit signal; `False` means a configured journal's append
+        RAISED, `None` means no journal is configured and nothing was recorded).
+
+        ⛔ It does NOT delete anything. The destructive half — the census gate
+        (`tools/turn_parity_census.py` exit 0), the `DETACH DELETE`, the
+        preview-then-token confirmation — is a separate, separately-gated
+        artefact; this is the half that makes the removal REPLAYABLE.
+        """
+        from tortoise.record_projection import RECORD_ONLY_TIER
+
+        if isinstance(turn_ids, str):
+            raise ValueError(
+                "_journal_turn_removal takes an iterable of turn ids, not one "
+                "id: a bare string would be journalled one CHARACTER at a time "
+                "and every one of those records would match nothing")
+        return {tid: self._journal_entity_mutation(
+                    "Point", tid, "delete", cache_tier=RECORD_ONLY_TIER)
+                for tid in (turn_ids or ())}
 
     @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:

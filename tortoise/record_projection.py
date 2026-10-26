@@ -143,16 +143,19 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 __all__ = [
+    "GRAPH_TIER",
     "JOURNAL_EVENT_TYPES",
     "NARRATIVE_RECORD_TYPE",
     "NARRATIVE_TABLE",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
+    "RECORD_ONLY_TIER",
     "ROLE_POSTURE_SQL",
     "TENANT_GUC",
     "TENANT_GUC_SQL",
     "TENANT_SCOPE_SQL",
     "THE_RECORD_TABLES",
+    "TURN_RECORD_TYPE",
     "RecordProjectionError",
     "RefusedJournalOperation",
     "ReplayReport",
@@ -244,7 +247,7 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # pre-move contract (`Object -> name`) while the database enforced the
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
-    "20261029000001_point_cache_tier.sql",
+    "20261029000001_record_point_cache_tier.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -447,6 +450,34 @@ ENVELOPE_KEYS: frozenset[str] = frozenset({
 #: `create_document(type="SourceCreated")` journal nothing at all.
 NARRATIVE_RECORD_TYPE = "SessionNarrated"
 
+#: #10017 R2 — the record-carrier for a CAPTURED TURN. The live capture writer
+#: uses it instead of `PointAdded` whenever the record is the store that holds
+#: the turns, because `PointAdded` is a NODE-CREATING record: journalling a turn
+#: as one on a deployment whose graph deliberately holds no turn nodes makes a
+#: journal rebuild produce a graph the running deployment does not have (and,
+#: after #10017's purge, re-create every turn the delete phase removed — #10067).
+#:
+#: It is `PointAdded` on the RECORD side (the same `point` snapshot, the same
+#: `public.point` row, the same `record_read` turn read) and NOTHING on the graph
+#: side (`projection._NO_PROJECTION_FOLD`). Named for what it is rather than for
+#: what it replaces: a turn is a record row here, not a graph node (§9.1/D1 —
+#: raw turns live outside the graph, owner 2026-09-23).
+TURN_RECORD_TYPE = "TurnRecorded"
+
+#: The `public.point.cache_tier` domain (#10017 R2). The column's own CHECK
+#: (`supabase/migrations/20261029000001_record_point_cache_tier.sql`) is the authority
+#: the database enforces; this pair is the value the PROJECTION writes, and
+#: `tests/test_10017_turn_carrier_replay.py` pins the two declarations together
+#: so a domain change cannot land on one side only.
+#:
+#:   * ``graph``       — the record and the cache both hold the row (the default,
+#:                       and every row written before the tier existed).
+#:   * ``record_only`` — the record holds it, the graph must not (§9.1's tier).
+#:                       `cache_projection.read_record_view` skips these rows, so
+#:                       `rebuild_from_record` and a journal rebuild agree.
+GRAPH_TIER = "graph"
+RECORD_ONLY_TIER = "record_only"
+
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
 #: dispatch (`tortoise/projection/`) and the producers' emit sites, and pinned
 #: by `tests/test_record_projection.py` against both. A type that appears in a
@@ -474,6 +505,7 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
     "DocumentCreated",
     "SessionRecorded",
     NARRATIVE_RECORD_TYPE,
+    TURN_RECORD_TYPE,
     "SessionDeleted",
     "EntityLinked",
     "DirectEdgeCreated",
@@ -979,6 +1011,39 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
              "'fix' one side to match the other without deciding which "
              "projection is authoritative.",
     ),
+    # ── §9.1's RAW-TURN carrier (#10017 R2, from #10067) ─────────────────────
+    TURN_RECORD_TYPE: Mutation(
+        # The record effect is `PointAdded`'s — the SAME `point` snapshot, the
+        # same row, the same `record_read` turn read — and the GRAPH effect is
+        # NOTHING (`projection/__init__.py::_NO_PROJECTION_FOLD`). That asymmetry
+        # IS the type: §9.1 places raw turns outside the graph, so a turn
+        # journals a row and no node.
+        #
+        # ⚠️ `path="point"`, NOT `NoRecordEffect`. A declared no-effect would
+        # lose the row as well as the node, and the row is the whole point of
+        # the migration (#10017's purge deletes graph turns because the record
+        # holds them). The graph half is stated where the graph folds — the
+        # `_NO_PROJECTION_FOLD` membership — because that is the dispatcher that
+        # has to decline it.
+        #
+        # `cache_tier` rides the snapshot and lands the COLUMN: it is the row's
+        # own declaration that the graph must not hold it, and it is what makes
+        # `rebuild_from_record` skip the row (`read_record_view`'s tier
+        # predicate). Without it the journal route is repaired and the record
+        # route is not — two rebuild routes, two different graphs.
+        #
+        # ⛔ The key set is EXACTLY the writer's payload (the `_turn_snapshot`
+        # built by `sdk._write_capture_turns`), never a superset: a
+        # `Point`-shaped key the writer never emits becomes a phantom node
+        # property on replay (the #9078 defect class, 3 rows in one capture),
+        # and a key the writer emits but the record refuses silently drops
+        # data. `tests/test_10017_turn_carrier_replay.py` drives the real
+        # writer and asserts the two declarations agree key-for-key.
+        NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
+        note="#10017 R2 — a captured turn is a RECORD row and no graph node "
+             "(§9.1/D1); the record effect mirrors `PointAdded` exactly, the "
+             "graph effect is declared nowhere-folding.",
+    ),
     # ── §9.1's narrative carrier (#9555, R7) ─────────────────────────────────
     NARRATIVE_RECORD_TYPE: Mutation(
         NoRecordEffect(
@@ -1303,12 +1368,19 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # cache is the projection). `test_record_projection`'s storable-primary leg
     # is what keeps that distinction honest.
     "agent_id",
-    # #10017 R2: a PLACEMENT declaration, not a derived value. The cache tier
-    # says which store a row is for; a node must never carry it, and
-    # `cache_projection._props_from_row` copies the tail VERBATIM — so without
-    # this, a record-sourced rebuild would write a props key a journal replay
-    # never does, and the two rebuild paths would diverge on every turn row.
-    "cache_tier",
+    # ⛔ `cache_tier` is DELIBERATELY NOT here (#10017 R2), and the entry that
+    # once listed it was removed for a measured reason. This set is stripped
+    # BEFORE `_split_properties` sees a key, so listing the tier dropped it
+    # ahead of the COLUMN split: `public.point.cache_tier` then kept its
+    # `DEFAULT 'graph'` on every replayed turn row, `read_record_view` kept
+    # selecting it, and `rebuild_from_record` re-created the very turn nodes the
+    # tier exists to keep out of the graph — the resurrection, restored by the
+    # guard meant to prevent it. The tier must reach its COLUMN.
+    #
+    # The intent behind that entry is served where it belongs, by the schema:
+    # the migration refuses `cache_tier` as a `props` key
+    # (`chk_point_props_no_derived`), so `cache_projection._props_from_row` drops
+    # it by name and a node can never carry it as a property.
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -1737,15 +1809,74 @@ def _delete_statements(
     node: Node,
     key: str,
     match: tuple[str, ...] = ("node_key",),
+    cache_tier: Any = None,
 ) -> list[Statement]:
     """A hard delete: the identity parent FIRST (so the subquery sees the node
     row), then the node row. The identity delete cascades the incident edges,
     matching the graph's `DETACH DELETE`; the explicit node delete is the
-    child-first form and a no-op once the cascade has run."""
+    child-first form and a no-op once the cascade has run.
+
+    ``cache_tier`` is the #10017 R1 discriminator, and it exists because ONE op
+    cannot mean two end-states (#3300). Absent — every producer before #10017,
+    and every producer whose removal is real — the entity leaves BOTH stores.
+    ``record_only`` says the graph-tier copy is what is being removed and the
+    RECORD keeps the row: the graph fold still hard-deletes the node (it never
+    reads this key), and the record DEMOTES the row's tier instead of deleting
+    it.
+
+    ⛔ Why the demote and not the delete (`delete_point`'s `DELETE FROM
+    public.point` is the wrong shape here, and not by a little): the turns
+    #10017's purge removes from the graph are the SAME rows the copy phase just
+    put in the record, verified row-for-row by `tools/turn_parity_census.py`
+    BEFORE the delete is allowed. Deleting them would destroy the transcript the
+    purge exists to preserve — and it would happen immediately, not only on a
+    later replay, because `_emit_event` feeds every appended record straight to
+    `record_writer.write_records`. The demote is also what keeps the two
+    REBUILD routes agreeing: leave the row at its `graph` default and
+    `rebuild_from_record` re-creates the node the journal rebuild correctly
+    omits (`cache_projection.read_record_view`'s tier predicate is the other
+    half).
+
+    ``record_only`` is the only value a DELETE may carry: `graph` would name a
+    tier the row is not being left in, and the column exists only on
+    `public.point`, so a tier-scoped delete of any other label is refused rather
+    than emitted as SQL against a column that is not there.
+    """
+    if cache_tier is not None:
+        if cache_tier != RECORD_ONLY_TIER or node.table != "point":
+            raise RefusedJournalOperation(
+                f"EntityMutated op='delete' on {node.label!r} carries "
+                f"cache_tier={cache_tier!r}: the only tier-scoped removal is "
+                f"`{RECORD_ONLY_TIER}` on a `Point` (the one table with the "
+                "tier column). A `graph`-tier delete names a state the row is "
+                "not left in, and any other label has no column to demote.")
+        return [_tier_demote_statement(org_id, graph_id, key, match)]
     return [
         _identity_delete_statement(org_id, graph_id, node, key, match),
         _delete_statement(org_id, graph_id, node, key, match),
     ]
+
+
+def _tier_demote_statement(
+    org_id: str,
+    graph_id: str,
+    key: str,
+    match: tuple[str, ...] = ("node_key",),
+) -> Statement:
+    """The record's half of a graph-tier removal: the row STAYS, its tier moves.
+
+    A 0-row no-op when the record does not hold the row, which is the same
+    verdict the graph fold reaches for a delete of an absent node — a removal
+    record is never a creating record.
+    """
+    predicate = " OR ".join(f"{c} = %s" for c in match)
+    if len(match) > 1:
+        predicate = f"({predicate})"
+    return Statement(
+        "UPDATE public.point SET cache_tier = %s "
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}",
+        (RECORD_ONLY_TIER, org_id, graph_id, *([key] * len(match))),
+    )
 
 
 def _relation_coordinates(
@@ -2151,7 +2282,8 @@ def _op_dispatch_statements(
         raise RecordProjectionError(f"EntityMutated op={op!r} carries no key")
     match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
     if op in dispatch.delete_ops:
-        return _delete_statements(org_id, graph_id, node, key, match=match)
+        return _delete_statements(org_id, graph_id, node, key, match=match,
+                                  cache_tier=payload.get("cache_tier"))
     if op in dispatch.patch_ops:
         # #9881 — `state` is the write's FULL applied map, and for a rename that
         # map contains the new `name`. It used to be filtered out of the patch

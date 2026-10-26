@@ -201,6 +201,20 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # itself: the live row was written before the tear, and a torn line
     # could not be replayed anyway.
     "SessionNarrated",
+    # #10017 R2: §9.1's raw-turn carrier, in `_NO_PROJECTION_FOLD` for the same
+    # reason — no dispatcher folds it, so a torn final line loses a record the
+    # graph never materialised: a proof-carrying NO-OP on the graph. The
+    # polarity above is what makes this entry necessary rather than tidy: a NEW
+    # type defaults to REFUSED, so omitting it would make `rebuild`,
+    # `recover_from_log` and `backup.restore` refuse an otherwise intact journal
+    # whose last append was a capture cut off mid-line.
+    #
+    # ⛔ NOT the #10017 R1 removal record (`EntityMutated` op=delete, tier
+    # `record_only`). A tolerated torn DELETE is a resurrection — the record's
+    # removal would be lost and the replayed `PointAdded`/`TurnRecorded` would
+    # stand. That asymmetry is the whole reason this list is an ALLOW-list of
+    # additive types rather than a deny-list of removals.
+    "TurnRecorded",
     # Additive edge / prop writes (MERGE + SET only).
     "EntityLinked",
 })

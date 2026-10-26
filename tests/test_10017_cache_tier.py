@@ -21,7 +21,12 @@ and would break cache projection for every tenant.
 from __future__ import annotations
 
 from tortoise import cache_projection as cp
-from tortoise.record_projection import _RECORD_ONLY_KEYS, refused_props_names, table_columns
+from tortoise.record_projection import (
+    _RECORD_ONLY_KEYS,
+    RECORD_ONLY_TIER,
+    refused_props_names,
+    table_columns,
+)
 
 # ── the schema half ────────────────────────────────────────────────────────
 
@@ -35,11 +40,38 @@ def test_the_tier_is_refused_as_a_props_key() -> None:
     assert "cache_tier" in refused_props_names()["point"]
 
 
-def test_the_tier_never_reaches_a_node_as_a_property() -> None:
-    """The cache copies the props tail VERBATIM, so a record-only key that was
-    not stripped would make a record-sourced rebuild disagree with a journal
-    replay on every turn row."""
-    assert "cache_tier" in _RECORD_ONLY_KEYS
+def test_the_tier_reaches_the_column_and_never_a_node_property() -> None:
+    """⛔ `cache_tier` must NOT be in `_RECORD_ONLY_KEYS`, and this reverses the
+    first draft of this file (#10070) for a measured reason.
+
+    That set is stripped BEFORE `_split_properties` — i.e. before the
+    column-vs-`props`-tail split — so listing the tier there dropped it ahead of
+    the COLUMN: every replayed turn row kept its `DEFAULT 'graph'`, the cache
+    projection kept selecting it, and `rebuild_from_record` re-created exactly
+    the turn nodes the tier exists to keep out of the graph. The guard restored
+    the resurrection it was added to prevent.
+
+    The intent is served where it belongs — by the schema, which refuses
+    `cache_tier` as a `props` key, so `_props_from_row` drops it by name and no
+    node can carry it.
+    """
+    assert "cache_tier" not in _RECORD_ONLY_KEYS
+    assert "cache_tier" in table_columns()["point"]
+    assert "cache_tier" in refused_props_names()["point"]
+
+    # The property, not the call site: a carrier record's tier lands the COLUMN
+    # and leaves the props tail empty.
+    from tortoise import record_projection as rp
+
+    statements = rp.mutations_for(
+        {"type": "TurnRecorded",
+         "point": {"id": "s1_t0", "content": "c", "is_episodic": True,
+                   "cache_tier": RECORD_ONLY_TIER}},
+        org_id="o", graph_id="g")
+    insert = next(s for s in statements
+                  if s.sql.startswith("INSERT INTO public.point"))
+    assert "cache_tier" in insert.sql, insert.sql
+    assert RECORD_ONLY_TIER in insert.params, insert.params
 
 
 # ── the read half: the property, not the call site ─────────────────────────

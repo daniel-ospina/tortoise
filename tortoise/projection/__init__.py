@@ -7511,6 +7511,20 @@ _NO_PROJECTION_FOLD = frozenset({
     # (tests/test_record_projection.py) the only thing standing between a new
     # producer and a warning storm.
     "SessionNarrated",
+    # #10017 R2 (§9.1/D1, from #10067): the RAW-TURN carrier. The capture writer
+    # journals a captured turn as `PointAdded` only when the graph is the store
+    # that holds it; when the record holds the turns it journals this type
+    # instead. Its RECORD effect is `PointAdded`'s (the same `public.point` row,
+    # the same `record_read` turn read) and its GRAPH effect is NONE — §9.1 puts
+    # raw turns outside the graph, so a replay must materialise no node.
+    #
+    # ⛔ Do NOT give it a fold branch "so the graph can hold turns again": a
+    # journal rebuild that re-creates them is #10067 (a rebuild that undoes
+    # #10017's purge within a day), and it is the defect this membership states.
+    # Declared here so both engines (`apply()` and `rebuild_all` pass 1b) treat
+    # the type as recognized-and-intentionally-not-folded instead of logging an
+    # "unrecognized event type" warning per captured turn.
+    "TurnRecorded",
 })
 
 # #3305: the Point-lifecycle terminalizers whose replay fold is a per-event

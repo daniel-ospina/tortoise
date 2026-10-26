@@ -238,6 +238,13 @@ _MINIMAL_RECORDS: dict[str, dict] = {
                        "story_arc": "the session, told as prose",
                        "summary": "one line"},
     "SessionDeleted": {"id": "sess1"},
+    # #10017 R2: the RAW-TURN carrier's producer shape — the same `point`
+    # snapshot `PointAdded` carries, plus the tier the row declares. It is the
+    # record effect of `PointAdded` with NO graph fold, so the totality leg
+    # below must see statements here (an empty set would mean the turn never
+    # reaches the record, which is the migration's whole point).
+    "TurnRecorded": {"point": dict(_SNAPSHOT, is_episodic=True,
+                                    cache_tier="record_only")},
     "EntityLinked": {"id": "p1", "source_label": "Point", "source_id": "p1",
                      "target_label": "Object", "target_id": "o1",
                      "edge_type": "aboutObject"},

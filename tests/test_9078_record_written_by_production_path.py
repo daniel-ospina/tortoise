@@ -259,6 +259,18 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # the constraints, `DROP COLUMN IF EXISTS` on the generated column).
     (REPO_ROOT / "supabase" / "migrations"
      / "20261027000001_record_semantic_id_key.sql", None),
+    # #10017 R2's `public.point.cache_tier`. A COLUMN on a landed table, which is
+    # why it needs an entry rather than the CREATE-exists shortcut — and why the
+    # entry matters beyond tidiness: `table_columns()` reads the FILES, so the
+    # projection emits `cache_tier` in a turn row's INSERT while a container
+    # migrated by a pre-#10017 tree has no such column, and the row is lost to
+    # `42703 UndefinedColumn` with the capture receipt still reporting ok (the
+    # #2782 class, one migration later). Re-apply safe by construction:
+    # `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT`
+    # (the CHECK and the props refusal both), the `COMMENT ON`, and
+    # `CREATE INDEX IF NOT EXISTS`.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261029000001_record_point_cache_tier.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in

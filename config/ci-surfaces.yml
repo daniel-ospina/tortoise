@@ -1607,6 +1607,10 @@ surfaces:
   - test_vector_write_seam_4520.py
   core:
   - test_10017_cache_tier.py
+  # #10017 R1/R2: the carrier + journaled removal. It drives the capture writer,
+  # both replay engines and `record_projection`, so a change to any of
+  # `sdk.py`/`projection/`/`record_projection.py`/`log.py` must run it.
+  - test_10017_turn_carrier_replay.py
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
