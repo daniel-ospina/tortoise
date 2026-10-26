@@ -12,9 +12,9 @@ WHAT IT CHECKS
          the declaration the owner's list rather than a re-derivation.
       2. THE LIVE CLASS (`dir(TortoiseSDK)`, executed) — the migration gap.
          * a public SDK method that is NOT in `__all__`  ->  an ADDITION or backlog that the
-           approved surface does not cover (147 live − 9 approved-and-live = 138 today);
+           approved surface does not cover (150 live − 12 approved-and-live = 138 today);
          * a name in `__all__` with NO `def` on the class   ->  an approved method that does
-           not exist yet (30 today; `Tortoise` is the constructor and always resolves).
+           not exist yet (27 today; `Tortoise` is the constructor and always resolves).
 
 WHY BOTH DIRECTION-2 CHECKS FAIL, HONESTLY (#10034 rework)
     An earlier draft of this gate carried two extra ledger blocks — an `OFF_SURFACE`
@@ -27,8 +27,8 @@ WHY BOTH DIRECTION-2 CHECKS FAIL, HONESTLY (#10034 rework)
     approved target has to be the 40 alone, and the gap has to be REPORTED, not absorbed.
 
     So today this gate is RED — by design, with every offender named. That is the true
-    state of #4282: 40 approved, 147 live. It goes green when Phase 2 removes the surplus
-    and implements the 30 approved-but-absent methods, not before.
+    state of #4282: 40 approved, 150 live. It goes green when Phase 2 removes the surplus
+    and implements the 27 approved-but-absent methods, not before.
 
 WHAT RUNS IN REQUIRED CI (`check --contract-only`)
     `tools/surface_manifest.py check` runs in the required `surface-guard` job and calls
@@ -322,7 +322,13 @@ def rendered_baseline(
         "to `TortoiseSDK` (the only constructible entry point); it is not a method on it.",
         "",
         "`docs/product/beta-sdk-surface.md` states \"only four of the 40 exist in the current SDK\".",
-        "That sentence is STALE: nine exist, plus the constructor. It is recorded here rather than",
+        # DERIVED, never a literal (#4282). The literal used to say `nine` while this
+        # same table said 13 — and because `baseline --check` compares committed vs
+        # rendered, both sides said nine and the gate stayed green over a document
+        # that contradicted itself one paragraph above. Row 1 is the constructor, so
+        # the METHOD count is the implemented row minus one.
+        f"That sentence is STALE: {len(approved_live) - 1} exist, plus the constructor."
+        " It is recorded here rather than",
         "edited there, because the approved document is the owner's ruling and this baseline is not",
         "the place to amend it (#10044).",
         "",
