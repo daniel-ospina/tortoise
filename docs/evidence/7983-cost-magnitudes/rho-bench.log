@@ -2,6 +2,17 @@ planted tenant rho7983-org-0: 89701 points (40% with a 384-d vector)
 planted tenant rho7983-org-1: 89701 points (40% with a 384-d vector)
 
 ── measured ────────────────────────────────────────────────
+
+  > ⚠️ **BASIS (2026-10-26, #10017):** these figures were cut on a schema WITHOUT
+  > `public.point.cache_tier` and its partial index `idx_point_graph_tier`. The
+  > probe's migration list is pinned EQUAL to `record_projection.RECORD_MIGRATIONS`,
+  > so a re-run today INCLUDES both: the column adds ~6 B/row, and the partial index
+  > is inside `pg_total_relation_size`, which is what the per-tenant footprint is
+  > summed from. Measured direction ≈ **+3-4%**, i.e. ≈2,200 B/node rather than
+  > 2,136 - not re-measured here. The figures below are a correct measurement of the
+  > schema that existed on the date they were cut, not of the schema today; re-run
+  > the probe before quoting them as current.
+
 planted content width          : 1133 B mean over the 49.0% of Points that CARRY content, 555 B over ALL of them (dogfood: 1,121.4 B / 549.1 B at the same two bases)
   ⚠️ the dogfood's 19,061 B content TAIL is NOT planted — no TOAST regime — so the footprint below is a LOWER BOUND for a tenant that hits it
 record row width                : 1263 B median, 1423 B mean (n=2000 rows, 40% with a 384-d vector)

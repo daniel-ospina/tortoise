@@ -73,13 +73,19 @@ MIGRATIONS = [
     # read binds `id`. Applied here for the same reason as the tenancy file.
     "20261027000001_record_semantic_id_key.sql",
     # #10017's cache tier: `ALTER TABLE public.point ADD COLUMN cache_tier` plus
-    # a forward re-declaration of the `props_no_derived` refusal. This is the
-    # migration that makes the omission CATASTROPHIC rather than merely unequal:
-    # `_props_from_row` has three destinations and "no fourth", so the shipped
-    # cache projection raises `UnknownRecordColumn` on a Postgres that has the
-    # COLUMN but not the REFUSAL — the refusal is what tells the reader the
-    # column is placed, not unplaceable. A probe without this file therefore
-    # fails inside the shipped reader, not at a diff.
+    # a forward re-declaration of the `props_no_derived` refusal.
+    #
+    # ⛔ Omitted, this probe does not fail at a diff — it fails INSIDE the shipped
+    # reader, which is what makes the entry load-bearing rather than cosmetic:
+    # `read_record_view` emits `AND cache_tier = 'graph'` for `point`
+    # unconditionally (`cache_projection.py`), so a probe Postgres without the
+    # column answers the shipped read with `UndefinedColumn` (42703).
+    #
+    # ⚠️ NOT via `_props_from_row`: its `refused`/`projected` sets come from
+    # `refused_props_names()`/`table_columns()`, which parse these FILES and never
+    # the connection, so no Postgres state can change the reader's classification
+    # of a column. What the file's re-declaration buys is that the tier is a
+    # DECLARED column (dropped by name on the way out) rather than an unknown one.
     "20261029000001_record_point_cache_tier.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
