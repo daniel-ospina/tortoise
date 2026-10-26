@@ -4,8 +4,13 @@
 # because the required `surface-guard` job compares the live class against them and is run
 # from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The
 # APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row
-# with `approved: false` is migration backlog, not consent. An unapproved addition reds
-# `tools/sdk_surface_declaration.py check` and the `approved` flag on a re-cut row.
+# with `approved: false` is migration backlog, not consent. `approved` is a DERIVED row
+# key, so a re-cut over a grown surface writes `approved: false` for the new method and
+# property 12 compares two identical derived values — green by construction. What reds an
+# unapproved addition in required CI is the `high_water_counts` growth pin below, enforced
+# INDEPENDENTLY by the BASE-REF-pinned `tools/surface-guard.py` (its step 7); the full
+# `tools/sdk_surface_declaration.py check` names the addition too, but its gap half is
+# report-only in the required job.
 #
 # The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by
 # `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.

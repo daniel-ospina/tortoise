@@ -574,6 +574,38 @@ def test_the_capacity_guards_derived_source_selects_the_guard():
     )
 
 
+def test_the_declaration_gate_selects_its_own_proofs():
+    """#10044 review F1: a change to the APPROVED-surface gate must select its proofs.
+
+    `tools/sdk_surface_declaration.py` is executed by the REQUIRED `surface-guard`
+    job (from the PR's own tree) and its proofs live in
+    `tests/test_sdk_surface_declaration.py`, registered `api` + `core`. Both
+    registrations were unreachable for the diff that can neuter the gate: `tools/`
+    is in `NON_PYTHON_PREFIXES` and no `SOURCE_PATTERNS` row claimed this module, so
+    the changed set emptied (`surfaces: []`, `full: false`) and the required job ran
+    an edited gate whose 17 proofs never executed — the #1349/#3332/#3616
+    silent-drop class, and the one bypass the "residual bypass, stated" paragraph in
+    `tools/surface_manifest.py` does not cover.
+
+    Asserted on the SURFACE and on the PROOF FILE, not on non-emptiness: a bare
+    "surfaces is non-empty" check passes for a `tests/`-relative path on its own.
+    Watched RED before the `SOURCE_PATTERNS["api"]` entry (`surfaces == []`),
+    GREEN after.
+    """
+    changed = "tools/sdk_surface_declaration.py"
+    assert (REPO / changed).exists(), f"the declaration gate is gone: {changed}"
+    r = _sel([changed])
+    assert "api" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the gate's own proofs are not "
+        "selected, so a gate-only PR can make `contract_problems()` return [] and "
+        "merge with every required check green and none of its tests run (#10044 F1)"
+    )
+    assert "test_sdk_surface_declaration.py" in r["test_files"], (
+        f"{changed} does not select test_sdk_surface_declaration.py — the gate "
+        "that holds the owner's 40 has no proof on the diff that edits it"
+    )
+
+
 def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
     """#9085 review P1: a revert of the engine pin must run the guard that pins it.
 
@@ -4901,7 +4933,7 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
     )
     small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
     old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
-    assert small == WATCHDOG_FLOOR_MIN == 15, small
+    assert small == WATCHDOG_FLOOR_MIN == 17, small
     assert small < old_two, "the smaller shard must not inherit the old budget"
     assert old_two == WATCHDOG_CEILING_MIN == 55
     # the floor must clear the #6133 floor (the largest single fast file) with
