@@ -36,31 +36,35 @@ def test_the_tier_is_refused_as_a_props_key() -> None:
 
 
 def test_the_tier_never_reaches_a_node_as_a_property() -> None:
-    """The cache copies the props tail VERBATIM, so a record-only key that was
-    not stripped would make a record-sourced rebuild disagree with a journal
-    replay on every turn row."""
+    """The RECORD half is the schema refusal (test above). This is the GRAPH
+    half: the fold's strip set, so a `PointAdded` carrying the tier cannot set a
+    node property a journal replay never writes.
+
+    ⛔ Which is also why the tier CANNOT be set through an event payload — it is
+    stripped before the insert, so the row lands the DEFAULT `graph`. Step 7
+    must write it as its own column statement; a test that assumed otherwise
+    would pass here and materialise turns in production."""
     assert "cache_tier" in _RECORD_ONLY_KEYS
 
 
-# ── the read half: the property, not the call site ─────────────────────────
+# ── the read half
+# `read_record_view` reads NODE tables and (now) the relation table. The fake
+# keys on the MAIN table so the relation query's `public.point` SUBQUERY — the
+# record-only key set — is not mistaken for a node read.
 
-def test_a_record_only_row_is_not_planned_into_the_graph(monkeypatch) -> None:
-    """Two rows, one of each tier. Only the graph-tier row becomes a node — and
-    the turn row (id shape + is_episodic) is exactly the one that must vanish.
-    The reader's own SQL carries the filter, so the test asserts the SQL as
-    well as the result: a future edit that drops the predicate fails here."""
-    point_rows = [
-        {"id": "s1_t0", "is_episodic": True, "cache_tier": "record_only",
-         "props": {"id": "s1_t0"}},
-        {"id": "p-real", "is_episodic": False, "cache_tier": "graph",
-         "props": {"id": "p-real"}},
-    ]
+class _Cur:
+    def execute(self, sql, params=None):
+        pass
+
+
+def _read_view(monkeypatch, point_rows):
     sqls: list[str] = []
 
     def _rows(cur, sql, params):
         sqls.append(sql)
-        if "public.point " in sql:
-            # Honour the reader's own filter rather than restating the answer.
+        if sql.startswith("SELECT * FROM public.point"):
+            # Honour the reader's own predicate rather than restating the answer:
+            # delete the filter from the reader and this returns both rows.
             if "cache_tier = 'graph'" in sql:
                 return [r for r in point_rows if r["cache_tier"] == "graph"]
             return list(point_rows)
@@ -68,24 +72,72 @@ def test_a_record_only_row_is_not_planned_into_the_graph(monkeypatch) -> None:
 
     monkeypatch.setattr(cp, "_rows", _rows)
     monkeypatch.setattr(cp._rp, "scope_connection", lambda conn, org: conn)
-
     view = cp.read_record_view(object(), org_id="o1", graph_id="g1",
                                labels=("Point",))
-    keys = [node.key for node in view.nodes]
-    assert keys == ["p-real"], keys
+    return view, sqls
+
+
+def test_a_record_only_row_is_not_planned_into_the_graph(monkeypatch) -> None:
+    """Two rows, one of each tier. Only the graph-tier row becomes a node — and
+    the turn row (id shape + is_episodic) is exactly the one that must vanish."""
+    view, sqls = _read_view(monkeypatch, [
+        {"id": "s1_t0", "is_episodic": True, "cache_tier": "record_only",
+         "props": {"id": "s1_t0"}},
+        {"id": "p-real", "is_episodic": False, "cache_tier": "graph",
+         "props": {"id": "p-real"}},
+    ])
+    assert [node.key for node in view.nodes] == ["p-real"]
     assert any("cache_tier = 'graph'" in sql for sql in sqls)
 
 
-def test_the_filter_is_applied_to_point_only(monkeypatch) -> None:
-    """Other tables have no such column; a filter added to them would be a
-    SQL error on every rebuild, so it is exquisitely important that it is not."""
-    sqls: list[str] = []
+def test_the_filter_is_never_applied_to_a_table_without_the_column(monkeypatch) -> None:
+    """A `cache_tier` predicate on any other node table is a SQL error on every
+    rebuild of every tenant, so where it may appear is part of the contract."""
+    _v, sqls = _read_view(monkeypatch, [])
+    for sql in sqls:
+        if "cache_tier" in sql:
+            assert "public.point" in sql, sql
 
-    def _rows(cur, sql, params):
-        sqls.append(sql)
-        return []
 
-    monkeypatch.setattr(cp, "_rows", _rows)
-    monkeypatch.setattr(cp._rp, "scope_connection", lambda conn, org: conn)
-    cp.read_record_view(object(), org_id="o1", graph_id="g1")
-    assert all("cache_tier" not in sq for sq in sqls if "public.point " not in sq)
+def test_a_tiered_turns_edge_is_not_planned_either(monkeypatch) -> None:
+    """A CONTAINS edge to a `record_only` turn would MATCH nothing and land in
+    `relations_not_written`, making the operator-facing "declared partial"
+    signal permanently non-empty — and therefore worthless."""
+    _v, sqls = _read_view(monkeypatch, [])
+    relation_sql = [sq for sq in sqls if "public.relation" in sq]
+    assert relation_sql, "the relation read is missing"
+    assert "src_key NOT IN" in relation_sql[0]
+    assert "tgt_key NOT IN" in relation_sql[0]
+    # …and the exclusion is of the record-only keys, not of every key.
+    assert "cache_tier <> 'graph'" in relation_sql[0]
+
+def test_the_forward_re_definition_cannot_shrink_the_refusal_set() -> None:
+    """`refused_props_names()` UNIONS the CREATE with the forward ALTERs, so a
+    re-declaration that names FEWER keys is invisible to the parser while the
+    DATABASE stops refusing them — the silent-shrink class `subject` already has
+    a leg for. `point` is now a re-declaration site, so it gets one too."""
+    import re
+
+    from tortoise.record_projection import RECORD_MIGRATIONS, _migrations_dir
+
+    base = _migrations_dir()
+    sql = "\n".join((base / n).read_text(encoding="utf-8")
+                     for n in RECORD_MIGRATIONS if (base / n).exists())
+    create = set()
+    for table, body in re.findall(
+            r"CREATE TABLE IF NOT EXISTS public\.(\w+)\s*\((.*?)\n\);", sql, re.S):
+        if table != "point":
+            continue
+        for arr in re.findall(r"NOT \(props \?\| ARRAY\[(.*?)\]", body, re.S):
+            create |= {n.strip().strip("'") for n in arr.split(",") if n.strip()}
+    alters = [set(n.strip().strip("'") for n in arr.split(",") if n.strip())
+              for table, arr in re.findall(
+                  r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.(\w+)\b"
+                  r"[^;]*?ADD\s+CONSTRAINT\s+chk_\w+_props_no_derived\s+CHECK"
+                  r"\s*\(\s*NOT\s*\(\s*props\s*\?\|"
+                  r"\s*ARRAY\[(.*?)\]\s*::text\[\]", sql, re.S)
+              if table == "point"]
+    assert alters, "no forward re-declaration found for point — the pin is blind"
+    lost = create - alters[-1]
+    assert not lost, f"the forward re-declaration dropped {sorted(lost)}"
+    assert "cache_tier" in alters[-1]

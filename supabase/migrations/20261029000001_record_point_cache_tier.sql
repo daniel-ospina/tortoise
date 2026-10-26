@@ -59,18 +59,25 @@ ALTER TABLE public.point
     'reason', 'version'
   ]::text[]));
 
--- 3. The read this column exists for: a tenant's graph-tier points. Partial, so
---    the `record_only` rows (the highest-volume rows in the table) do not cost
---    the cache projection a scan.
+-- 3. The read this column exists for: a tenant's graph-tier points.
 --
--- ⚠️ THE READER'S SPELLING IS PART OF THIS INDEX. `cache_projection.
---    read_record_view` filters `cache_tier = 'graph'` — NOT `<> 'record_only'` —
---    because PostgreSQL uses a partial index only when the query's predicate
---    IMPLIES the index predicate (measured on postgres:16: `= 'graph'` plans as
---    `Index Scan using idx_point_graph_tier` with no filter; `<> 'record_only'`
---    plans as `idx_point_scope` + `Filter: (cache_tier <> 'record_only')`).
---    Re-spelling the reader's predicate to `<>` leaves this index unused and
---    reads every row of the record's highest-volume table instead.
+-- ⛔ THE READER'S PREDICATE IS SPELLED `cache_tier = 'graph'`, NOT
+-- `<> 'record_only'`, AND THIS INDEX IS WHY. PostgreSQL uses a partial index
+-- only where the query's predicate IMPLIES the index predicate, so `<>` cannot
+-- use this one. Measured on postgres:16 against a throwaway copy of the record
+-- schema (2 graph rows, 1 record_only row, one tenant):
+--
+--   `= 'graph'`         -> Index Scan using idx_point_graph_tier   (no Filter)
+--   `<> 'record_only'`  -> Index Scan using idx_point_scope
+--                          + Filter: (cache_tier <> 'record_only')
+--
+-- i.e. the `<>` spelling reads every row of `public.point` — the record's
+-- highest-volume table — and discards the record_only ones, which is exactly the
+-- population this index exists to skip. The peer-reviewed claim that the index
+-- was unjustified (`SELECT *` cannot go index-only) was right about the covering
+-- question and wrong about the scan: the index narrows the scan, which is the
+-- win. An earlier draft of this branch dropped the index; the measurement above
+-- is why it is back.
 CREATE INDEX IF NOT EXISTS idx_point_graph_tier
   ON public.point (org_id, graph_id, node_key)
   WHERE cache_tier = 'graph';
