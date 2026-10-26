@@ -554,6 +554,45 @@ def test_cmd_run_records_resume_quality_scan(tmp_path, monkeypatch, capsys):
         "single-session-user": 2, "temporal-reasoning": 1}
 
 
+def test_cmd_run_reports_a_spend_stop_as_resumable(tmp_path, monkeypatch):
+    """#8486 F1 (review round 4, finding 3). ``HARD_STOP_EXIT``'s own comment
+    says it exists "so a wrapper can tell 'stopped on purpose' from 'the host
+    is broken'" and that the two remedies are OPPOSITE. The only wrapper — the
+    protocol launcher, which this PR makes inject the ceiling into every run
+    step — ignored the code and told the operator ``fix (M4) and re-run``.
+    That is wrong advice on the EXPECTED outcome: the mandated full pipeline is
+    measured at $8.09-$13.86 against a $10.00 ceiling, so step 5 is expected to
+    stop here, and the correct action is to raise the ceiling and re-run the
+    SAME command to resume (the completed questions are on the checkpoint).
+
+    RED mutation: drop the ``HARD_STOP_EXIT`` branch → the message says
+    ``fix (M4)`` and neither the reason nor the resume instruction appears.
+    """
+    from tools.longmem_eval import run as run_mod
+
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
+    state = _fresh_state(tmp_path)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    monkeypatch.setattr(rp, "DEFAULT_RUN_DIR", run_dir)
+    monkeypatch.setattr(rp.subprocess, "run", lambda cmd, env: type(
+        "R", (), {"returncode": run_mod.HARD_STOP_EXIT})())
+
+    with pytest.raises(SystemExit) as ei:
+        rp.cmd_run(state, argparse_namespace(
+            step="3", owner_approve=None, dry_run=False, extra=[],
+            expected_direction=None))
+    msg = str(ei.value)
+    # the resume remedy, not the fix-the-host one
+    assert "--hard-stop-usd" in msg and "resume" in msg
+    assert "fix (M4)" not in msg
+    # and the gate failure records WHY, not a generic exit code
+    assert state.data["steps"]["3"]["status"] == "failed"
+    assert "spend-hard-stop" in state.data["notes"]["3"]
+
+
 def test_checkpoint_resume_quality_guard_rails(tmp_path):
     """#1764: the pre-resume scan returns None (nothing to scan) for empty,
     null, or missing outcomes — never crashes and never prints a false

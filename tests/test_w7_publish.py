@@ -406,6 +406,106 @@ def test_retrieval_only_run_records_partial_not_failed(tmp_path):
     assert receipt["metrics"]["official_recall_all@5"] == 0.5
     assert receipt["verdict"] == "inconclusive"
     assert any("retrieval-only" in n for n in receipt["notes"])
+    # and the receipt the derived status produced validates clean
+    assert validate_receipt(receipt) == []
+
+
+def _retrieval_only_report(outcomes: list[dict], retrieval: dict) -> dict:
+    """The report shape ``run.py`` emits for a retrieval-only run (#8486 F3):
+    ``accuracy: None``, the retrieval-only methodology record, valid integrity.
+    """
+    return {
+        "outcomes": outcomes,
+        "retrieval": retrieval,
+        "methodology": {"judge_model": "n/a (retrieval-only)",
+                        "judge_rubric_id_hash": "hash",
+                        "reader_model_spec": "",
+                        "reader_pinned": None, "ingest_mode": "deterministic",
+                        "retrieval_only": True,
+                        "run_at_utc": "2026-10-25T00:00:00Z",
+                        "measurement_posture": _posture("deterministic"),
+                        "dataset_semantics_audit": {"verdict": "trusted"}},
+        "integrity": {"valid": True}, "accuracy": None,
+        "split": "s", "updated_at_utc": "2026-10-25T00:00:00Z",
+    }
+
+
+def _publish(tmp_path, report: dict) -> dict:
+    from tools.longmem_eval.w7_publish import _main
+    rp = tmp_path / "report.json"
+    rp.write_text(json.dumps(report), encoding="utf-8")
+    ds = tmp_path / "data.json"
+    ds.write_text(json.dumps(
+        [{"question_id": "q1", "answer": "a",
+          "answer_session_ids": ["s1"]}]), encoding="utf-8")
+    out = tmp_path / "artifact.json"
+    _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
+           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "0.0",
+           "--out", str(out)])
+    return json.loads(out.read_text(encoding="utf-8"))["receipt"]
+
+
+def test_null_turn_recall_values_do_not_crash_the_publish_cli(tmp_path):
+    """#8486 F4 (review round 4, finding 1). ``report.py`` emits the turn-level
+    retrieval keys PRESENT with value ``None`` when no question carried a
+    turn-level value, and ``_main`` did ``retrieval[k].get("5")`` guarded only
+    by ``k in retrieval`` — so publishing exactly the retrieval-only artifact
+    F4 exists to make publishable raised ``AttributeError: 'NoneType' object
+    has no attribute 'get'`` and produced NO receipt at all.
+
+    RED mutation: restore ``if k in retrieval and rows.get(k) is not None:`` →
+    this test raises instead of asserting.
+    """
+    receipt = _publish(tmp_path, _retrieval_only_report(
+        [_outcome("q1", 1.0), _outcome("q2", 0.0)],
+        {"session_recall@k": {"5": 0.5},
+         "turn_recall@k": None,
+         "turn_recall_paper@k": None,
+         "session_recall_paper@k": None,
+         "retrieval_by_category": {"population": {"reader_ran": False}}}))
+    assert receipt["run_status"] == "partial"
+    # nothing was invented for a value the report did not carry
+    assert receipt["metrics"]["variants"]["turn_recall_paper@k"][
+        "value"] is None
+
+
+def test_retrieval_only_run_with_no_official_number_is_failed_not_partial(
+        tmp_path):
+    """#8486 F4 (review round 4, finding 2). ``partial`` claims the OFFICIAL
+    retrieval metric WAS measured, so it must require the number the way
+    ``completed`` requires an accuracy. Without that predicate a report whose
+    non-``_abs`` population is empty (official ``value`` is ``None``, ``n == 0``)
+    was minted ``partial`` with ``receipt_valid: True`` — 'disowned' traded for
+    'valid but empty', i.e. a receipt that LOOKS like a measurement.
+
+    RED mutation: drop ``and official_measured`` from the derivation → status is
+    ``partial`` here (and the hand-built receipt below validates clean).
+    """
+    receipt = _publish(tmp_path, _retrieval_only_report(
+        [_abs_outcome()],
+        {"session_recall@k": {"5": 0.5},
+         "retrieval_by_category": {"population": {"reader_ran": False}}}))
+    assert receipt["metrics"]["official_recall_all@5"] is None
+    assert receipt["run_status"] == "failed", (
+        "a retrieval-only run that measured NOTHING must stay 'failed' — "
+        "'partial' asserts the official metric exists")
+
+    # defence in depth: a HAND-BUILT partial receipt is refused the claim
+    hand = dict(
+        run_id="r", date="d", commit="c", corpus_hash="sha256:x",
+        judge_pin=judge_pin_for("n/a (retrieval-only)"),
+        judge_model="n/a (retrieval-only)",
+        judge_rubric_id_hash="h", reader_model_spec="s", reader_pinned=True,
+        ingest_mode="det", run_status="partial", verdict="inconclusive",
+        failure_origin=None, cost_usd=1.0,
+        metrics={"official_recall_all@5": None}, resolved_config={},
+        notes=[])
+    assert any("partial run requires a numeric official_recall_all@5" in i
+               for i in validate_receipt(hand)), (
+        "a partial receipt with no official number must be refused")
+    assert validate_receipt(dict(
+        hand,
+        metrics={"official_recall_all@5": 0.81})) == []
 
 
 @pytest.mark.parametrize("run_status", ["failed", "skipped"])

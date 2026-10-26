@@ -1049,6 +1049,23 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     )
     rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
+        # #8486 F1 (review round 4, finding 3): a SPEND STOP is not a broken
+        # host, and the two remedies are opposites — this wrapper is the one
+        # ``HARD_STOP_EXIT`` exists for. Telling an operator to "fix (M4) and
+        # re-run" after a deliberately armed ceiling fired is wrong advice on
+        # the EXPECTED outcome: the #8486 arithmetic (mandated full pipeline,
+        # measured floor $8.09 / 1.8x estimate $13.86) against a $10.00
+        # ceiling means step 5 is expected to stop here.
+        from .run import HARD_STOP_EXIT  # lazy — protocol CLI stays light
+        if rc.returncode == HARD_STOP_EXIT:
+            state.fail_gate(
+                step.number, f"spend-hard-stop (exit {rc.returncode})")
+            raise SystemExit(
+                f"run stopped on the hard spend ceiling (exit "
+                f"{rc.returncode}) — nothing is broken and there is nothing to "
+                f"fix: the completed questions are on the checkpoint, so raise "
+                f"the ceiling and re-run the SAME command to resume "
+                f"(`--hard-stop-usd N`, 0 disarms)")
         state.fail_gate(step.number, f"run exited {rc.returncode}")
         raise SystemExit(f"run exited {rc.returncode} — fix (M4) and re-run")
     print(f"\nstep {step.number} run complete. Inspect the report, then: "

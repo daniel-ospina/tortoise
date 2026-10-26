@@ -174,6 +174,14 @@ def _reports_retrieval_only(methodology: dict, retrieval: dict) -> bool:
     ``methodology.reader_model == "n/a (retrieval-only)"`` (what ``run.py``
     renders when no reader was built — #8486 F3), and
     ``retrieval.retrieval_by_category.population.reader_ran is False``.
+
+    They are three RECORDS of the same flag (``report.py`` writes all three
+    from one ``retrieval_only`` value — ``reader_ran`` is ``not
+    retrieval_only``, not an independent observation), so the OR is a
+    tolerance for a report missing any one of them, NOT corroboration of the
+    claim. Called out because the first version of this docstring described
+    them as independent signals and a reader reasoning about a forged or
+    foreign report would have over-trusted them (#8486 F4, review round 4).
     """
     if methodology.get("retrieval_only") is True:
         return True
@@ -486,6 +494,19 @@ def validate_receipt(receipt: dict) -> list[str]:
         issues.append(
             "receipt.metrics: completed run missing the "
             "official_recall_all@k metric key")
+    elif receipt.get("run_status") == "partial":
+        # #8486 F4 (review round 4, finding 2), defence in depth for receipts
+        # that are HAND-BUILT rather than derived in ``_main``: a ``partial``
+        # run publishes because the OFFICIAL retrieval metric WAS measured, so
+        # it must carry that number. Non-empty ``metrics`` is not enough —
+        # ``official_recall_all@5`` is always PRESENT and may be ``None``.
+        official = metrics.get("official_recall_all@5")
+        if isinstance(official, bool) or not isinstance(
+                official, (int, float)):
+            issues.append(
+                "receipt.metrics: partial run requires a numeric "
+                "official_recall_all@5 — 'partial' claims the official "
+                f"retrieval metric was measured, got {official!r}")
     elif receipt.get("run_status") == "completed":
         # #2516 (C1): a sealed run that cannot report the TYPE TAIL cannot
         # gate the #2513 levers (the measured loss is category-specific and
@@ -649,7 +670,14 @@ def _main(argv: list[str] | None = None) -> None:
     retrieval = report.get("retrieval") or {}
     for k in ("turn_recall_paper@k", "turn_recall@k",
               "session_recall_paper@k"):
-        if k in retrieval and rows.get(k) is not None:
+        # #8486 F4 (review round 4, finding 1): ``report.py`` emits these keys
+        # PRESENT with value ``None`` when no question carried a turn-level
+        # value, so ``k in retrieval`` alone is not enough — ``.get("5")`` on
+        # ``None`` raised AttributeError and the whole publish CLI died with no
+        # receipt at all, on exactly the retrieval-only artifact this PR makes
+        # publishable. Guard the VALUE, mirroring the two ``in (… or {})``
+        # guards below.
+        if isinstance(retrieval.get(k), dict) and rows.get(k) is not None:
             rows[k]["value"] = retrieval[k].get("5")
     # pull the paper-fraction + legacy values from the report too
     if "session_recall_paper@k" in retrieval and "5" in (
@@ -683,11 +711,21 @@ def _main(argv: list[str] | None = None) -> None:
     # ``completed`` (which would claim an accuracy) and never ``failed`` (which
     # would disown a measurement that is valid).
     retrieval_only = _reports_retrieval_only(methodology, retrieval)
+    # #8486 F4 (review round 4, finding 2): ``partial`` CLAIMS the official
+    # retrieval metric was measured, so it must require the number the way
+    # ``completed`` requires an accuracy. Without this predicate a report with
+    # no measurable official value (n == 0 — e.g. an all-``_abs`` slice) was
+    # minted ``partial`` with ``receipt_valid: True``: 'disowned' was traded
+    # for 'valid but empty', i.e. a receipt that LOOKS like a measurement.
+    official_all5 = rows["official_recall_all@5"].get("value")
+    official_measured = (isinstance(official_all5, (int, float))
+                         and not isinstance(official_all5, bool))
     run_status = ("completed"
                   if integrity.get("valid") is True
                   and report.get("accuracy") is not None
                   else "partial"
                   if integrity.get("valid") is True and retrieval_only
+                  and official_measured
                   else "failed")
     # #8486 (R12): the verdict is derived from the SAME identity as the pin, so
     # the receipt is self-consistent rather than merely refused later. A

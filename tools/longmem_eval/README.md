@@ -116,7 +116,11 @@ is OFF by default in code, ON only for the re-validation run),
 reader/judge provider key** since #8486 F3 — those calls are not made. It is
 NOT a blanket "no credential" flag: with `--ingest-mode v2` the run still pays
 for extraction, so the extractor key IS still required and IS still
-pre-flighted),
+pre-flighted. ⚠️ A checkpoint written by a PRE-#8486 retrieval-only run records
+the reader/judge it used to build, so it is **refused on resume**
+(`CheckpointStaleError`, naming `reader_model`/`judge_model`) — the refusal is
+deliberate (the alternative is a fingerprint claiming a reader ran); delete the
+checkpoint and re-run those questions),
 `--hard-stop-usd USD` (#8486 F1 — see the section below),
 `--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
 #1747 census-class-aware: override the `integrity.valid` RATE criterion —
