@@ -781,7 +781,10 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "org_delete": (DISCARDED, "n1_console"),
     "org_create": (UNBACKED, ""),
     "org_get": ("get_organisation_account", "n1_account"),
-    "org_list": ("get_organisation_account", "n1_account"),
+    # 2026-10-25 owner ruling (#4282): `org_list` is GONE, not folded. It ran
+    # `MATCH (t:Team)` with no tenant filter — every customer's account — and had
+    # zero callers. A scoped account list is NEW behaviour, so it has no row here.
+    # See the OVERRIDES line on #4282 before adding one back.
     "migrate_orgs_to_registry": (DISCARDED, "maintenance"),
     # N2
     "graph_delete": ("delete_memory_graph", "n2_rename"),
@@ -794,7 +797,10 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "update_memory_graph": (UNCHANGED, "n2_update"),
     "graph_key_ids": ("list_keys", "n2_keys"),
     "graph_active_key_count": ("list_keys", "n2_keys"),
-    "graph_count": ("list_memory_graphs", "n2_count"),
+    # 2026-10-25 owner ruling (#4282): `graph_count` left the PUBLIC surface and is
+    # now the internal `_graph_count`. It is the plan-quota counter (it skips
+    # deleted graphs so a deletion frees a slot) and only our server calls it; a
+    # customer counts by listing. No target row, so no disposition row here.
     "trash_graphs": (DISCARDED, "maintenance"),
     # N3
     "membership_create": ("add_member", "n3_members"),
@@ -846,7 +852,7 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
                     "`summarize_structure`, `check_structure`, `audit`, "
                     "`validate_domain`, `dream_health_check`, `dream_health_state`, "
                     "`test_guard` |"),
-    "t_n2": (CANON, "| N2 | `graph` | `list_memory_graphs`, `graph_count`, "
+    "t_n2": (CANON, "| N2 | `graph` | `list_memory_graphs`, "
                     "`graph_delete`, `restore_memory_graph`, `trash_graphs`, "
                     "`update_memory_graph`, `graph_key_ids`, "
                     "`graph_active_key_count` |"),
@@ -867,7 +873,7 @@ PHANTOMS: list[tuple[str, str, str]] = [
     # (name the doc uses, the real method it appears to mean, citation)
     ("recall_legs", "retrieval_legs", "r3"),
     ("stale", "stale_points", "r6_aliases"),
-    ("count_memory_graphs", "graph_count", "p_graph_count"),
+    ("count_memory_graphs", "list_memory_graphs", "p_graph_count"),
     ("set_memory_graph_name", "update_memory_graph", "p_set_name"),
     ("set_memory_graph_backend", "", "p_set_name"),
     ("index_sources", "index_directory", "w4_rename"),

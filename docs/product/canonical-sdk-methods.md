@@ -149,8 +149,8 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | # | Namespace | Members |
 |---|---|---|
-| N1 | `org` | `org_create`, `org_get`, `org_list`, `org_update`, `org_delete`, `migrate_orgs_to_registry` |
-| N2 | `graph` | `list_memory_graphs`, `graph_count`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
+| N1 | `org` | `org_create`, `org_get`, `org_update`, `org_delete`, `migrate_orgs_to_registry` |
+| N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
 | N3 | `membership` | `membership_create`, `membership_get`, `membership_list`, `membership_update_role`, `membership_delete` |
 | N4 | `apikey` | `apikey_create`, `apikey_list`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_create`, `invitation_list`, `invitation_get_by_token`, `invitation_get_by_id`, `invitation_accept`, `invitation_revoke`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` |
@@ -360,7 +360,7 @@ Found while building this list. None is fixed here — this document changes no 
    behaviour, recorded in the `OVERRIDES:` note under *reads and writes never share a tool* in
    `docs/product/canonical-mcp-tools.md`. What remains is the METHOD-name half (a name beginning
    `get_`/`compute_` that writes), which the rename pass below owns.
-2. **The control plane writes on first use.** Every registry-backed read (`org_list`,
+2. **The control plane writes on first use.** Every registry-backed read (`org_get`,
    `list_memory_graphs`, `apikey_list`, `membership_list`, `invitation_list`, and others) calls into
    a registry helper that on a cold handle issues `CREATE INDEX` statements. Idempotent, but
    a read that writes.

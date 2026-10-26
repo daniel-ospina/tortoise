@@ -33296,8 +33296,19 @@ class TortoiseSDK:
             })
         return out
 
-    def graph_count(self, org_id: str) -> int:
+    def _graph_count(self, org_id: str) -> int:
         """Graph count for an org — the quota meter's source (C1 #2110).
+
+        ⛔ INTERNAL SINCE 2026-10-25 — NOT on the public SDK surface. Owner ruling
+        on #4282: the question is the SERVER's (the plan-limit check), not a
+        customer's. A customer asking "how many graphs do I have?" lists them,
+        and the number comes back with that list — which is what the comparables
+        do (Mem0 returns a count alongside the entity list). No customer calls
+        this, so it is not a name the product promises. Underscore-prefixed so
+        the AST-derived public surface (`tools/sdk_surface.py`) excludes it; the
+        deleted-graph rule below is unchanged and is what makes deleting a graph
+        free a plan slot. Do NOT re-publicise it without Daniel's approval
+        (AGENTS.md → MCP/SDK Surface Approval).
 
         Supabase mode: 1 (the default graph — always present, derived from
         teams.graph_name) + count(custom active). Deleted rows excluded
@@ -33547,14 +33558,6 @@ class TortoiseSDK:
             params={"id": org_id},
         ).result_set
         return rows[0][0] if rows else None
-
-    def org_list(self) -> list[dict]:
-        """List all orgs."""
-        reg = self._get_registry()
-        rows = reg.query(
-            "MATCH (t:Team) RETURN properties(t) ORDER BY t.createdAt"
-        ).result_set
-        return [r[0] for r in rows]
 
     def org_update(self, org_id: str, **fields) -> dict:
         """Update mutable org fields."""

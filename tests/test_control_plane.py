@@ -106,13 +106,27 @@ class TestTeamCRUD:
         assert result["name"] == "test-team"
         assert result["tier"] == "free"
 
-    def test_team_list_returns_all_teams(self, sdk):
-        sdk.org_create("alpha")
-        sdk.org_create("beta")
-        teams = sdk.org_list()
-        names = {t["name"] for t in teams}
-        assert "alpha" in names
-        assert "beta" in names
+    def test_tenant_list_is_not_on_the_public_surface(self, sdk):
+        """No public "list every tenant" call — owner ruling 2026-10-25 (#4282).
+
+        The method that replaced this test listed every `Team` node with
+        `MATCH (t:Team)` and no tenant filter, so a customer-facing SDK could
+        enumerate other customers' accounts from it. It had **zero** callers
+        (measured: the only other matches were a same-named local variable in
+        `tortoise/cost_allocation.py`). It was removed rather than scoped, because
+        a scoped version is new behaviour and the surface is frozen until this
+        cleanup lands.
+
+        This test is the regression guard, not a test of a feature: the failure it
+        prevents is a later lane "restoring" an unscoped tenant list because it
+        looked like a missing capability. Reading ONE account is `org_get`.
+        """
+        assert not hasattr(sdk, "org_list"), (
+            "a public `org_list` is back on TortoiseSDK. It returns EVERY tenant "
+            "(`MATCH (t:Team)`, unscoped) and was removed by the owner's ruling on "
+            "#4282 (2026-10-25). A scoped account list is NEW behaviour and needs "
+            "Daniel's approval — it is not a restoration of this method."
+        )
 
     def test_team_update_changes_mutable_fields(self, sdk, team):
         sdk.org_update(team["id"], tier="pro", max_users=10)
@@ -370,7 +384,7 @@ class TestAPIKeyC1Tenancy:
 
 
 class TestGraphC1Status:
-    """C1 (#2110) registry parity — Graph node status/recording + graph_count."""
+    """C1 (#2110) registry parity — Graph node status/recording + `_graph_count`."""
 
     def test_graph_create_registry_node_has_status(self, sdk, team):
         """New Graph nodes carry status='active' (v1 lifecycle: no archive)."""
@@ -394,9 +408,9 @@ class TestGraphC1Status:
 
     def test_graph_count_includes_default_and_custom(self, sdk, team):
         """Registry mode: team_create's default node + custom graph."""
-        assert sdk.graph_count(team["id"]) == 1  # default node (team_create)
+        assert sdk._graph_count(team["id"]) == 1  # default node (team_create)
         sdk._graph_create(team["id"], "prod", kind="custom")
-        assert sdk.graph_count(team["id"]) == 2
+        assert sdk._graph_count(team["id"]) == 2
 
 
 class TestInvitationCRUD:
