@@ -92,11 +92,14 @@ MIGRATIONS = [
     # `key_property` re-declared). A probe Postgres without it keys the semantic
     # layer by `name` while the read parses `id` from these files.
     "20261027000001_record_semantic_id_key.sql",
-    # #10017 R2's `public.point.cache_tier`. A COST probe above all others: the
-    # partial `idx_point_graph_tier` is the index the graph-tier read runs on,
-    # and a Postgres without the column sees a turn INSERT naming it fail with
-    # `UndefinedColumn` — a cost measured on a schema the read cannot write to is
-    # not the shipped figure.
+    # #10017's cache tier (`ALTER TABLE public.point ADD COLUMN cache_tier`, plus
+    # `idx_point_graph_tier`). ⚠️ This probe imports NO `tortoise` module — its
+    # read shape is raw SQL — so it does not exercise the tier predicate; the
+    # reason for the entry is the one every neighbouring entry gives: the row
+    # width and `pg_total_relation_size` figures it measures must be the SHIPPED
+    # schema's. Both differ here: the column adds ~6 B/row, and the PARTIAL INDEX
+    # is inside `pg_total_relation_size`, so a re-run measures a larger
+    # footprint than `rho-bench.log` recorded (see its basis note).
     "20261029000001_record_point_cache_tier.sql",
 ]
 
