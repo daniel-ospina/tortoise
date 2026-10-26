@@ -175,7 +175,9 @@ on them would be recording a capability we did not ship.
    sign-up was performed (see the row-1 paragraph above).
 2. Step 2 — narrowing packs and the persisted `configured` flag (browser + tenant).
    *The premise* is MEASURED (census rows 2a-2e); what is uncovered is the click. → **DONE for 2b**
-   (`step2g`–`step2o`: narrow → save → reload → restore); **2a remains a FAIL** on `#8617`.
+   (`step2g`–`step2l`: narrow → save → reload, with `configured` flipping) — **not** `step2m`–`step2o`,
+   which are re-opens of an **all-active** set; see the index's 2b row for what each frame shows;
+   **2a remains a FAIL** on `#8617`.
 3. Steps 4/6/7/8/9 **through ChatGPT** — the tool-call trace as the model actually emits it,
    the OAuth consent as ChatGPT renders it. Needs a ChatGPT Plus/Pro account and a human to
    complete the sign-in/authorize (`#9664` step 4 says so explicitly). → **6/7/8/9 DONE**
@@ -183,7 +185,8 @@ on them would be recording a capability we did not ship.
    but the authorize page's sign-in returns the code to the marketing host, so no token is issued.
    It needs a product fix, not a human keystroke.
 4. Step 10 — the card **as rendered** (the copy is pinned by test; the rendering is not). → **DONE**
-   (`step10*`).
+   — `step10-capture-disclosure-tall-…130452.png` is the frame that carries the ChatGPT row
+   (`step10-…-as-rendered-…130416.png` is a blank Settings page, per the index's filename note).
 5. The four ugly cases — BLOCKED on #9340. → **re-measured**: the graph *argument* is addressable and
    a foreign id is refused correctly; the **write** shape is blocked by the ChatGPT client
    (`#10084`). See the run index's per-case table and the SUPERSEDED note above.
