@@ -210,9 +210,13 @@ kill_timeout = 30
   # absence is logged once per process + reported by the ACL reconcile instead
   # of being inferred. Self-hosted and the docker test lane leave this unset
   # (default `strict` — the per-graph ACL user is still created there, and
-  # nothing about that recipe changes). ⛔ NOT a secret — it must NOT enter
-  # .github/scripts/fly-managed-secrets.txt (a Fly secret would shadow this
-  # versioned value; see the manifest's `fly-toml-env` note).
+  # nothing about that recipe changes). ⛔ NOT a SECRET — it must never be a
+  # `fly secrets` value (a secret shadows this versioned one), and it IS
+  # declared `fly-toml-env` in .github/scripts/fly-managed-secrets.txt (#10093):
+  # `check-fly-machine-env.py` iterates ONLY the declared names, so an
+  # undeclared value that a stale machine did not carry would put this lane
+  # back on `strict` — every hosted mint 503ing again — with nothing red
+  # (#4568 is the same failure: a declared [env] the machine does not carry).
   TORTOISE_ACL_LAYER = "off"
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
   # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded

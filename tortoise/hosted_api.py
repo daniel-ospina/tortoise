@@ -12375,15 +12375,22 @@ def _acl_layer_declared_strict() -> bool:
 _ACL_ABSENCE_ANNOUNCED: set[str] = set()
 
 
-def _announce_acl_absence_once(status: str, graph_id: str, detail: str) -> None:
-    """Log why the per-graph ACL user is missing — once per process per kind.
+def _announce_acl_absence_once(status: str, reason: str, graph_id: str,
+                               detail: str) -> None:
+    """Log why the per-graph ACL user is missing — once per process per KIND.
+
+    Keyed by ``(status, reason)``, not by status alone (#10093): ``absent``
+    covers three different facts — no URI, bare redis, an unreachable server —
+    and a status-only key would print the first one that happened and silently
+    swallow the rest.
 
     ``absent_by_design`` / ``denied`` are WARNINGS (an operator must be able to
     see that this deployment has no database-level second wall); a plain
     ``absent`` (embedded store, bare redis, layer down) is INFO."""
-    if status in _ACL_ABSENCE_ANNOUNCED:
+    key = f"{status}:{reason or 'unknown'}"
+    if key in _ACL_ABSENCE_ANNOUNCED:
         return
-    _ACL_ABSENCE_ANNOUNCED.add(status)
+    _ACL_ABSENCE_ANNOUNCED.add(key)
     if status == "absent":
         _logger.info(
             "per-graph ACL layer absent (%s) — no ACL user for graph %s; "
@@ -12438,7 +12445,8 @@ def _acl_user_create_hook(graph_id: str, org_id: str, *,
         return
     if result.status is AclStatus.PROVISIONED:
         return
-    _announce_acl_absence_once(result.status.value, graph_id, result.detail)
+    _announce_acl_absence_once(result.status.value, result.reason, graph_id,
+                               result.detail)
 
 
 def _acl_user_drop_hook(graph_id: str) -> None:
@@ -37676,6 +37684,7 @@ def _reconcile_acl_users_sync() -> dict:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
         ok = absent_by_design = denied = absent = defaults = 0
+        absent_reasons: dict[str, int] = {}
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37709,11 +37718,18 @@ def _reconcile_acl_users_sync() -> dict:
             elif r.status is AclStatus.DENIED:
                 denied += 1
             else:
+                # #10093: `absent` is a TOTAL, and a total alone cannot tell
+                # "this deployment has no server" from "bare redis" from "the
+                # server vanished mid-op" — three different operator actions.
+                # The kinds ride beside it and sum to it by construction.
                 absent += 1
+                kind = r.reason or "unknown"
+                absent_reasons[kind] = absent_reasons.get(kind, 0) + 1
         results[org_id] = {"status": "reconciled", "provisioned": ok,
                             "absent_by_design": absent_by_design,
                             "denied": denied,
                             "absent": absent,
+                            "absent_reasons": absent_reasons,
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "organizations": len(results), "results": results}
@@ -37721,20 +37737,33 @@ def _reconcile_acl_users_sync() -> dict:
 
 @app.post("/v1/internal/backups/acl-reconcile")
 async def backups_acl_reconcile(request: Request):
-    """Post-restore ACL rebuild/verification (#2313 folded delta): every
-    ACTIVE graph of every org must have its per-graph ACL user.
+    """Post-restore ACL rebuild/verification (#2313 folded delta): on a
+    deployment that provisions the per-graph ACL layer, every ACTIVE graph of
+    every org must have its per-graph ACL user.
+
+    ⛔ On a deployment that DECLARES the layer off (#8617 — the hosted lane,
+    ``TORTOISE_ACL_LAYER=off``) there is nothing to rebuild and this endpoint
+    does not rebuild it: every graph answers ``absent_by_design`` before any
+    server contact, and the honest report IS that absence. Per-graph ACL users
+    are NOT recreated there — isolation on that lane rests on the app-layer
+    ownership check plus the ``org_{tid}_{gid}`` namespace. Read the report,
+    never the HTTP 200: a green reconcile on that lane means "recorded", not
+    "rebuilt".
 
     A full-platform restore (disaster recovery into a fresh FalkorDB server)
     restores graph DATA from R2 — ACL server users do NOT live in the graph
     namespace and are lost with the old server. ``create_acl_user`` is the
-    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
+    idempotent rebuild primitive (full-reset upsert, where the layer is
+    provisionable; registry/selfhost mode
     reuses the stored credential, hosted create-once verifies without
     password churn). This reconcile replays it per ACTIVE graph — the DR
     runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
     is REPORTED, never a 500 — and since #8617 the report says which absence
     it is (`absent_by_design` — this lane declares the layer off, e.g.
     FalkorDB Cloud; `denied` — a reachable server refused the credential;
-    `absent` — no server URI / bare redis / layer down; `provisioned` — the
+    `absent` — no server URI / bare redis / layer down, with `absent_reasons`
+    naming WHICH (#10093: those three imply three different operator actions,
+    and a total alone hides an outage behind a boundary); `provisioned` — the
     user exists), instead of the single pre-#8617 `acl_absent_skipped`
     number that conflated all three. Runs off the
     event loop via ``asyncio.to_thread`` (#2371).

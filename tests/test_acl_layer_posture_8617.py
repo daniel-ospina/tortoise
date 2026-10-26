@@ -100,6 +100,129 @@ def test_the_capability_probe_tells_denied_apart_from_absent(monkeypatch):
     assert result.status is acl.AclStatus.DENIED, result
 
 
+def test_an_unreachable_server_is_not_a_bare_redis(monkeypatch):
+    """#10093: `absent` used to cover BOTH "this server has no graph module"
+    (a boundary: nothing to protect) and "the server could not be reached"
+    (an incident: something broke). An outage certified as a deployment fact
+    is the silent-degradation class the decision exists to end.
+
+    Mutation behind this test: map the non-refusal exception back to
+    `FalkorProbe.ABSENT` — this reds on the first assertion.
+    """
+    import redis
+
+    class _Down(_Client):
+        def execute_command(self, *cmd):
+            raise redis.exceptions.ConnectionError("connection reset by peer")
+
+    down = _Down(module=None)
+    bare = _Client(module=[[b"name", b"python", b"ver", 1]])
+    assert acl._falkordb_present(down) is acl.FalkorProbe.UNREACHABLE
+    assert acl._falkordb_present(bare) is acl.FalkorProbe.ABSENT
+
+    monkeypatch.setattr(acl, "_admin_client", lambda: _Down(module=None))
+    monkeypatch.setenv(acl.ACL_LAYER_ENV, "strict")
+    result = acl.create_acl_user("g_down", "team_x")
+    assert result.status is acl.AclStatus.ABSENT, result
+    assert result.reason == acl.REASON_LAYER_DOWN, result.reason
+
+
+def test_every_absence_names_its_own_reason(monkeypatch):
+    """#10093: the reconcile report decomposes `absent` into kinds that imply
+    DIFFERENT operator actions, so each producing path must stamp its own
+    `reason` — a shared default would make the histogram meaningless."""
+    # no_uri — no admin client at all
+    monkeypatch.setattr(acl, "_admin_client", lambda: None)
+    monkeypatch.setenv(acl.ACL_LAYER_ENV, "strict")
+    assert acl.create_acl_user("g_a", "team_x").reason == acl.REASON_NO_URI
+
+    # no_graph_module — a reachable server without the graph module
+    monkeypatch.setattr(acl, "_admin_client", lambda: _Client(
+        module=[[b"name", b"python", b"ver", 1]]))
+    assert (acl.create_acl_user("g_b", "team_x").reason
+            == acl.REASON_NO_GRAPH_MODULE)
+
+    # probe_denied is a fact about the CREDENTIAL: it stays `denied`
+    monkeypatch.setattr(acl, "_admin_client", lambda: _Client(
+        module=None, refusal="MODULE"))
+    r = acl.create_acl_user("g_c", "team_x")
+    assert r.status is acl.AclStatus.DENIED
+    assert "credential" in r.detail, r.detail
+
+    # declared_off — declared, not discovered
+    monkeypatch.setenv(acl.ACL_LAYER_ENV, "off")
+    assert (acl.create_acl_user("g_d", "team_x").reason
+            == acl.REASON_DECLARED_OFF)
+
+
+def test_the_absence_is_announced_once_per_REASON_not_once_per_status(
+        monkeypatch, caplog):
+    """#10093: the announcement was keyed by STATUS, so the first `absent` in a
+    process silenced every later `absent` of a different kind — an operator
+    read "no server URI" and never learned the server had started vanishing
+    mid-op. Keyed by (status, reason), each distinct fact is stated once.
+
+    Mutation behind this test: key the set on `status` alone — the second
+    record disappears and this reds.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setattr(ha_mod, "_ACL_ABSENCE_ANNOUNCED", set())
+    caplog.set_level(logging.INFO, logger=ha_mod._logger.name)
+
+    ha_mod._announce_acl_absence_once(
+        "absent", acl.REASON_NO_URI, "g_1", "no server URI")
+    ha_mod._announce_acl_absence_once(
+        "absent", acl.REASON_LAYER_DOWN, "g_2", "the server vanished")
+    ha_mod._announce_acl_absence_once(
+        "absent", acl.REASON_LAYER_DOWN, "g_3", "the server vanished")
+
+    msgs = [r.getMessage() for r in caplog.records
+            if "per-graph ACL layer absent" in r.getMessage()]
+    assert len(msgs) == 2, msgs
+    assert any("no server URI" in m for m in msgs)
+    assert any("vanished" in m for m in msgs)
+
+
+def test_the_reconcile_breaks_absent_down_by_reason(monkeypatch):
+    """#10093 acceptance 2: the report must let an operator tell WHICH absence
+    it is. `absent_reasons` sums to `absent` by construction, and a permission
+    refusal is never counted as a design boundary."""
+    import tortoise.hosted_api as ha_mod
+
+    def _result(reason):
+        return acl.AclProvisionResult(
+            status=acl.AclStatus.ABSENT, reason=reason)
+
+    sequence = iter([
+        acl.AclProvisionResult(status=acl.AclStatus.PROVISIONED),
+        acl.AclProvisionResult(status=acl.AclStatus.ABSENT_BY_DESIGN,
+                               reason=acl.REASON_DECLARED_OFF),
+        acl.AclProvisionResult(status=acl.AclStatus.DENIED,
+                               reason=acl.REASON_SETUSER_DENIED),
+        _result(acl.REASON_NO_URI),
+        _result(acl.REASON_LAYER_DOWN),
+        _result(acl.REASON_LAYER_DOWN),
+    ])
+    monkeypatch.setattr(acl, "create_acl_user", lambda gid, org: next(sequence))
+    monkeypatch.setattr(ha_mod, "_backup_config_safe", lambda: {})
+    monkeypatch.setattr(ha_mod, "_control_plane_source", lambda: object())
+    import tortoise.backup_sweep as bs
+    monkeypatch.setattr(bs, "_sweep_graph_list", lambda reg, org: [
+        {"graph_id": f"g_{i}", "kind": "custom"} for i in range(6)])
+    monkeypatch.setattr(bs, "enumerate_eligible_orgs", lambda reg: ["team_x"])
+
+    res = ha_mod._reconcile_acl_users_sync()["results"]["team_x"]
+    assert res["provisioned"] == 1
+    assert res["absent_by_design"] == 1
+    assert res["denied"] == 1
+    assert res["absent"] == 3
+    assert res["absent_reasons"] == {
+        acl.REASON_NO_URI: 1, acl.REASON_LAYER_DOWN: 2}, res["absent_reasons"]
+    assert sum(res["absent_reasons"].values()) == res["absent"]
+    assert res["errors"] == []
+
+
 def test_declared_off_makes_no_server_call(monkeypatch):
     """Ruling 1 + the brief's "declare, do not discover": with the layer
     declared off, `create_acl_user` answers `absent_by_design` BEFORE any
