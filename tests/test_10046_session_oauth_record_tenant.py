@@ -197,3 +197,33 @@ def test_an_unnameable_default_is_still_refused_not_guessed(monkeypatch):
     assert org["org_id"] == UNNAMEABLE_ORG          # the request still succeeds
     assert org["default_graph_id"] is None
     assert ha._resolve_record_tenant(org) is None  # ⇒ counted `no_tenant`
+
+
+def test_an_offload_that_delivered_no_result_is_not_a_tenant(monkeypatch):
+    """An OFFLOAD refusal is not a tenant id, and must not wear one's name.
+
+    `best_effort=True` returns the ``OFFLOAD_REFUSED`` sentinel (NOT ``None``)
+    when the submission is refused or its wait bound expires, so the raw seam
+    result must be normalised before it is stored in a field called
+    `default_graph_id`. `record_tenant_for` type-checks ``str``, so the refusal
+    direction already holds — the hazard is the NEXT reader, which would inherit
+    the sentinel and could file a row under it.
+
+    Mutation this discriminates: dropping the ``isinstance(..., str)``
+    normalisation in `_session_user_org` → `org["default_graph_id"]` is the
+    sentinel and the first assertion reddens.
+    """
+    from tortoise import hosted_api as ha
+
+    _wire(monkeypatch, _session_cp(), SESSION_ORG)
+
+    async def _undelivered(fn, **kwargs):
+        if kwargs.get("op") == "default_graph_row":
+            return ha.OFFLOAD_REFUSED
+        return fn()  # the other reads on this lane are not what is under test
+
+    monkeypatch.setattr(ha, "_cp_offload", _undelivered)
+    org = asyncio.run(ha._session_user_org(_Request(), {"user_id": USER}))
+
+    assert org["default_graph_id"] is None          # never the sentinel
+    assert ha._resolve_record_tenant(org) is None   # ⇒ counted `no_tenant`

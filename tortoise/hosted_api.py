@@ -2824,10 +2824,13 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
     ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
     resolved by the enqueueing request from its own credential. The drain can
     only open a graph, not a tenant, so this is where the answer has to be
-    carried across the queue. ``None`` (a SESSION/JWT or OAuth ``oat_``
-    credential — post-#10025 an org-wide API KEY names the default graph, so it
-    is NOT this case) records nothing and the drain's writes are refused
-    `no_tenant` — a named refusal, not a guess.
+    carried across the queue. ``None`` means the request's credential named no
+    tenant — since #10046 that is no longer a credential class (an API key since
+    #10025, a SESSION/JWT credential and an OAuth ``oat_`` token since #10046 all
+    name the org's default graph), so it now means the default row could not be
+    NAMED (missing, tombstoned, another org's, unreadable). Nothing is recorded
+    and the drain's writes are refused `no_tenant` — a named refusal, not a
+    guess.
     """
     if not dirty_roots:
         return
@@ -6619,11 +6622,23 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # a guess, and it is the direction to prefer over failing a signed-in
     # request. `best_effort=True` keeps an offload hiccup from turning a
     # record-tenant lookup into a 503 on ~33 session endpoints.
-    org["default_graph_id"] = await _cp_offload(
+    #
+    # ⚠️ The offload RESULT is not a tenant id by construction: on a refused
+    # submission / missed wait bound, `best_effort=True` returns the
+    # `OFFLOAD_REFUSED` sentinel rather than `None` (see `_cp_offload`).
+    # `record_tenant_for` type-checks `str`, so the refusal direction is already
+    # fail-closed — but the sentinel must not sit in a field NAMED
+    # `default_graph_id`, so it is normalised here and a later consumer cannot
+    # inherit it.
+    _resolved_default_graph_id = await _cp_offload(
         lambda: default_graph_id_for_credential(
             cp, org_id, row.get("graph_name"),
             context="session auth self-heal"),
         op="default_graph_row", best_effort=True)
+    org["default_graph_id"] = (
+        _resolved_default_graph_id
+        if isinstance(_resolved_default_graph_id, str) and _resolved_default_graph_id
+        else None)
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_org /
     # _get_current_org_supabase; session-driven REST calls never recorded an
@@ -9967,16 +9982,24 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                             "read cannot be served from the record — absence "
                             "is NOT established"))
             # A credential that resolves no record tenant is a PERMANENT
-            # condition — `record_tenant_for` returns None for every session/JWT
-            # read and every non-Supabase deployment — so it gets its OWN reason.
-            # Counting it `record-unavailable` would make that counter, which
-            # exists to alert on outages, fire permanently on a condition the
-            # record never caused.
+            # condition — a retry re-runs the SAME resolution, whose self-heal
+            # mint has already missed, so it never becomes nameable on its own —
+            # so it gets its OWN reason. Since #10046 that is no longer a
+            # credential CLASS: an API key (#10025), a SESSION/JWT credential and
+            # an OAuth `oat_` token all name the org's `kind='default'` row
+            # through `supabase_control.default_graph_id_for_credential`, so
+            # `None` here means that row could not be NAMED (absent, tombstoned,
+            # another org's, unreadable), the tenant read was lost, or this is a
+            # non-Supabase deployment with no control plane — never "this
+            # credential carries no tenant by design". Counting it
+            # `record-unavailable` would make that counter, which exists to alert
+            # on outages, fire permanently on a condition the record never
+            # caused.
             # ⚠️ Count AFTER the cache answers — the same invariant as
             # `record_serve._fell_back`. A cache failure raises out of here, so a
             # request that was never answered contributes no increment (this arm
-            # is the most-travelled counting path in `prefer` mode, because
-            # `record_tenant_for` returns None for every session/JWT credential).
+            # is the most-travelled counting path in `prefer` mode: it is taken
+            # for every request whose org has no nameable default row).
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
             props_from_cache = await asyncio.to_thread(_cache_props)
             record_serve.note_fallback(reason)
