@@ -14,10 +14,10 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 152 |
+| live public methods on `TortoiseSDK` | 150 |
 | approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 13 |
 | approved but not implemented yet | 27 |
-| live and NOT approved (migration backlog) | 140 |
+| live and NOT approved (migration backlog) | 138 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
@@ -121,7 +121,6 @@ the count above is the honest measure of the gap.
 - `get_session`
 - `get_source_reliability`
 - `graph_active_key_count`
-- `graph_count`
 - `graph_delete`
 - `graph_key_ids`
 - `index_directory`
@@ -161,7 +160,6 @@ the count above is the honest measure of the gap.
 - `org_create`
 - `org_delete`
 - `org_get`
-- `org_list`
 - `org_update`
 - `paginated_query`
 - `promote_point`

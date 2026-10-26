@@ -1938,6 +1938,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_dashboard_deploy_script_change_selects_core_not_tier1.
              "website/apps/dashboard/deploy.sh",
+             # #10017: `tools/turn_parity_census.py` is the PURGE GATE for the
+             # pre-#10000 turn nodes — read-only parity census, graph turn
+             # nodes vs record turn rows, with refusal arms its test
+             # (`tests/test_10017_turn_parity_census.py`, registered `core`)
+             # pins. `tools/` is a flat NON_PYTHON_PREFIXES entry and the tool
+             # matches no SOURCE_PATTERNS row, so a census-only diff was
+             # filtered out BEFORE the "not matched -> core" fallback and the
+             # gate's own refusal pins never ran on the file they hold (the
+             # #1349/#3332/#3616 silent-drop class, the same shape as
+             # `tools/lane_stash.py` above). `CORE_ALSO` (not a
+             # SOURCE_PATTERNS row) is deliberate: `core` already carries the
+             # other `tools/` pins. Pinned by
+             # tests/test_ci_selection.py::
+             # test_turn_parity_census_guard_runs_on_a_tools_only_change.
+             "tools/turn_parity_census.py",
              # #8491: the meeting→CRM bridge. `integrations/` is a flat
              # NON_PYTHON_PREFIXES entry and bridge.py matches no
              # SOURCE_PATTERNS row, so a bridge.py-only change was filtered out
@@ -2042,6 +2057,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # surface that can actually run it. Pinned by
              # tests/test_ci_selection.py::test_ci_queue_health_tool_change_selects_core_not_tier1.
              "tools/ci_queue_health.py",
+             # #10017 review P1 (the second time this class was measured on a
+             # CENSUS): tools/backfill_graph_turns.py owns
+             # tests/test_10017_backfill_census.py, registered `core`. `tools/`
+             # is a flat NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS
+             # row, so a tool-only diff came back with `changed == []`, took the
+             # docs-only early return and selected NO surface — the census that
+             # gates an irreversible turn delete would never run its own suite
+             # (nor `tests/test_bounded_raw_clients_3065.py`, which pins its
+             # read bound, nor `tests/test_entry_point_python_guard.py`, which
+             # pins its #5128 guard) on the PR that edits it. Measured before
+             # this entry: `--changed-files tools/backfill_graph_turns.py` ->
+             # surfaces=[], full=False, test_10017_backfill_census.py ABSENT.
+             # `CORE_ALSO` (not `TOOL_CARVEOUTS`) is the documented seam, for the
+             # same reason as `tools/graph_census.py` above: the suite is
+             # hermetic (a fake graph + a fake client, no DB), so `core` is the
+             # surface that can actually run it — fail-closed FULL would add the
+             # whole matrix for a DB-free instrument. Pinned by
+             # tests/test_ci_selection.py::test_backfill_graph_turns_tool_change_selects_core_not_tier1.
+             "tools/backfill_graph_turns.py",
              # #9085 review P1: `tests/test_runner_ports_6673.py` (registered
              # `core`) carries the two #8124 guards that pin the ENGINE, and both
              # read a file the selector did not keep:

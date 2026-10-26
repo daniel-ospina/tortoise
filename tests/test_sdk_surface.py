@@ -45,11 +45,13 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # #4282 lands the 40-method target, this number is expected to change — in the same PR that
 # re-cuts the frozen baseline, so the change is a reviewed decision and not a silent drift.
 #
-# 149 → 152 in PR #10053 (#4282 Phase 2.2). All three added names (`link_entities`,
+# 149 → 150 in PR #10053 (#4282 Phase 2.2). All three added names (`link_entities`,
 # `update_knowledge`, `delete_knowledge`) are rows of the owner's approved 40 — the approved
-# list did not grow, the IMPLEMENTATION of three approved names did — so the pin moves with
-# the same rationale `config/surface-manifest.yml` records beside it.
-DECLARED_COUNT = 152
+# list did not grow, the IMPLEMENTATION of three approved names did. The net move is +1
+# because `main` retired two public names (#10012: `graph_count` → `_graph_count`, `org_list`
+# deleted) while this branch was open; the same rationale `config/surface-manifest.yml`
+# records beside the pin.
+DECLARED_COUNT = 150
 
 
 def _declaration() -> dict:

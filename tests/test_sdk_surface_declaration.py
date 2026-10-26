@@ -9,7 +9,7 @@ What each test is for, and why the naive version of it would prove nothing:
   1. **The declaration is the owner's list.** A literal 40, and set-equality with the
      document in BOTH directions. `len(__all__) == len(parse(doc))` would pass on two
      different sets of 40.
-  2. **A second ledger cannot come back.** The previous draft folded the 149-name inventory
+  2. **A second ledger cannot come back.** The previous draft folded the 149-method inventory
      into the same module (`OFF_SURFACE` + `APPROVED_PENDING`), which made "there is a
      method I never approved" and "the migration has not reached it" the same observation
      and let the gate stay green over a 109-method surplus. Loading such a module is now a
@@ -19,7 +19,7 @@ What each test is for, and why the naive version of it would prove nothing:
      by the declaration's content, not by the test's other machinery.
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 149 live, 140
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 147 live, 138
      off the surface, 30 approved-but-absent). This is the honest reading of #4282; it goes
      green when Phase 2 lands, not before — which is why the three live numbers carry an
      explicit "update this premise" note instead of being restated from the declaration.
@@ -192,12 +192,15 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 152 live. Not green, and not vague.
+    """#4282's true state: 40 approved, 150 live. Not green, and not vague.
 
-    The 149 → 152 / 30 → 27 move is Phase 2.2 (#10053): `link_entities`,
-    `update_knowledge` and `delete_knowledge` are three of the approved-but-absent
-    names, so the IMPLEMENTED side grew while the approved side (40) and the
-    off-surface gap (140) did not.
+    The move is two-sided and lands on the same off-surface number. Phase 2.2 (#10053)
+    implements three approved-but-absent names (`link_entities`, `update_knowledge`,
+    `delete_knowledge`), so the live set +3 and the APPROVED-and-live set +3 → the
+    off-surface gap is unchanged at 138 while `absent` falls 30 → 27. `main` separately
+    retired `graph_count` (now `_graph_count`) and `org_list` (#10012), neither of them
+    an approved name, which is why live is 150 rather than the 152 those three names
+    would have produced on the old base.
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -210,8 +213,8 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 152, "the live surface moved — update this premise (it pins today's gap)"
-    assert len(off_surface) == 140, "the gap moved — update this premise (it pins today's gap)"
+    assert len(live) == 150, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 138, "the gap moved — update this premise (it pins today's gap)"
     assert len(absent) == 27, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.

@@ -1,6 +1,7 @@
 # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.
 #
-# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today (152)
+# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of the public SDK surface
+# as it exists today (`counts.sdk_public_methods`, derived — never typed into a comment)
 # because the required `surface-guard` job compares the live class against them and is run
 # from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The
 # APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row
@@ -17,14 +18,17 @@
 # deliberate, reviewable act in the approving PR — so a re-cut over a grown surface
 # cannot be green by construction.
 #
-# RAISED 149 → 152 on 2026-10-26 by PR #10053 (#4282 Phase 2.2 — the four merges as
+# RAISED 149 → 150 on 2026-10-26 by PR #10053 (#4282 Phase 2.2 — the four merges as
 # dispatchers). The three NEW public methods are `link_entities`, `update_knowledge`
 # and `delete_knowledge`, and every one of them is a row of the owner's 40
 # (`tortoise/__all__.py`, owner ruling 2026-09-21, approval record
 # `docs/product/canonical-mcp-tools.md` — unchanged by this raise). So the approved
-# list did NOT grow and the 140-name migration backlog did NOT grow: what grew is the
+# list did NOT grow and the 138-name migration backlog did NOT grow: what grew is the
 # IMPLEMENTATION of three names the owner already approved, which is exactly what
-# #4282 Phase 2 is for. The alternative — land the dispatchers only once the narrow
+# #4282 Phase 2 is for. The arithmetic is 149 + 3 − 2: `main` retired `graph_count`
+# (now the internal `_graph_count`) and `org_list` in PR #10012 while this branch was
+# open, and neither was ever an approved name, so the backlog is unchanged at 138.
+# The alternative — land the dispatchers only once the narrow
 # methods they supersede are retired — would make this phase wait on Phase 3 and is
 # why the pin is raised HERE, explicitly, rather than silently by a re-cut (which
 # carries a pin forward by design and can never raise it).
@@ -40,7 +44,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 01833c4218fb4bd2a3d55c54d9728ade4727279b
+cut_at_commit: d05370918053f64ee4f970811233a1fbbac63394
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -544,7 +548,7 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 81
-  sdk_public_methods: 152
+  sdk_public_methods: 150
   retired: 18
   keyword_distribution:
     fetch: 14
@@ -559,7 +563,7 @@ counts:
     operate: 6
 high_water_counts:
   tools: 82
-  sdk_public_methods: 152
+  sdk_public_methods: 150
 retired:
 - name: tortoise_get
   use_instead: tortoise_get_entity(id, type=...)
@@ -809,10 +813,10 @@ rows:
     full control.'
   dependency: declares TortoiseSDK.recall_state (resolves)
   lifecycle: active
-  used_by: never called, eval-harness, tooling, docs
+  used_by: agents, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -836,10 +840,10 @@ rows:
     omit query, set kind → all Points of kind.'
   dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
   lifecycle: active
-  used_by: agents, eval-harness, tooling, docs
+  used_by: never called, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -891,10 +895,10 @@ rows:
     path.'
   dependency: declares TortoiseSDK.index_directory (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1405,10 +1409,10 @@ rows:
     canonical fetch-by-id tool.
   dependency: declares TortoiseSDK.get_entity (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: graph
   proposed: true
   exemption: false
@@ -1613,10 +1617,10 @@ rows:
     operators by input set.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1694,10 +1698,10 @@ rows:
     the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -1774,10 +1778,10 @@ rows:
     Omit section → compact combined summary. topics requires entity_id.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -2845,10 +2849,10 @@ rows:
     to the graph; corpus mode walks the server filesystem — stdio/CLI only (excluded from tenant HTTP).
   dependency: declares TortoiseSDK.mine_corpus (resolves)
   lifecycle: active
-  used_by: never called, tooling, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -4283,29 +4287,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:graph_count
-  method: graph_count
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_count.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:graph_delete
   method: graph_delete
   approved: false
@@ -5249,29 +5230,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:org_list
-  method: org_list
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.org_list.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:org_update
   method: org_update
   approved: false
