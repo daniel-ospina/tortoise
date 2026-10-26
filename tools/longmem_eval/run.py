@@ -107,7 +107,7 @@ from tortoise.shared_state.concurrency import flock_exclusive
 # spot-check producer and the test monkeypatch share one symbol.
 from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
-from . import encode_cache, measurement_posture
+from . import encode_cache, measurement_posture, spend_guard
 from . import usage as lme_usage
 from .dataset_audit import audit_dataset
 from .errors import (
@@ -195,6 +195,11 @@ DEFAULT_TOP_K = 20
 DEFAULT_MAX_RETRIES = 3
 BACKOFF_BASE_S = 2.0
 BACKOFF_CAP_S = 30.0
+
+#: #8486 F1: the exit code of a run aborted by the hard spend stop (distinct
+#: from the dense-leg code so a wrapper can tell "stopped on purpose" from
+#: "the host is broken").
+HARD_STOP_EXIT = 4
 
 # ── #1786 (R2/R3): whole-question retry + resume-claim constants ─────────
 #: R2 full-jitter start-spread max (s) — pinned ≥ the maximum expected
@@ -802,6 +807,12 @@ def _call_with_backoff(fn, *, what: str, retries: int,
     exhausted (the caller's per-question guard then records the failure).
     """
     for attempt in range(1, retries + 2):
+        # #8486 F1: the hard spend stop is checked BEFORE every attempt (a
+        # retry is another paid call). It reads spend re-derived from the
+        # run's token rows through PRICING_MAP — never ``usage.cost.usd``,
+        # which priced the pilot's unpriced reader lane at $0.00 and so
+        # reported $0.008456 of a $0.0620 run (13.6% — 87% blind).
+        spend_guard.check(what)
         try:
             return fn()
         except Exception as e:  # noqa: BLE001, RUF100
@@ -810,6 +821,10 @@ def _call_with_backoff(fn, *, what: str, retries: int,
             # deterministic and permanent — retrying it is pointless. Re-raise
             # immediately; the caller's per-question guard then aborts the run
             # (FatalProviderError). Transients keep the existing backoff path.
+            # #8486 F1: a spend stop is likewise permanent — retrying/failing
+            # over would spend past the ceiling it just enforced.
+            if isinstance(e, spend_guard.SpendGuardError):
+                raise
             if is_fatal(e):
                 raise
             if attempt > retries:
@@ -2489,7 +2504,16 @@ def _fold_checkpoint_usage(data: dict, outcomes: dict[str, dict],
     payload = data.get("usage_overhead")
     if isinstance(payload, dict) and payload:
         collector.merge_overhead_payload(payload)
+        # #8486 F1: the abandoned process already PAID for those rows — the
+        # resumed run's spend ceiling counts them, or a long run could spend
+        # the whole ceiling again on every restart.
+        spend_guard.seed_payload(payload)
     for o in outcomes.values():
+        # #8486 F1: completed questions keep their spend on the outcome, not
+        # in the collector — seed the ceiling's total from them too.
+        _env = o.get("llm_usage")
+        if isinstance(_env, dict):
+            spend_guard.seed(_env)
         if not o.get("breaker_open"):
             continue
         rep = o.get("usage")
@@ -3874,6 +3898,10 @@ def run_evaluation(
     session_worker_max_tokens: int | None = None,
     session_worker_temperature: float = 0.0,
     preflight: dict | None = None,
+    # #8486 F1: was a hard spend stop DECIDED for this run (armed or
+    # explicitly disarmed)? ``None`` — the default — keeps every non-CLI
+    # caller byte-identical (no ``hard_stop`` block, no guard read).
+    hard_stop_armed: bool | None = None,
     # R3 (#1542) D2: the embedder pre-flight status (from _preflight_embedder
     # in run_main) — forwarded to the report methodology (D5: embedder +
     # vector_strategy always emitted; None default keeps programmatic
@@ -5298,7 +5326,8 @@ def run_evaluation(
                     # watchdog would never abort). Re-raise so the dispatch
                     # handler records the run-level marker and aborts.
                     if isinstance(e, (WatchdogAbortError, CheckpointPersistError,
-                                      ArmConflictError)):
+                                      ArmConflictError,
+                                      spend_guard.SpendGuardError)):
                         raise
                     # M2 (#1523, D4): a fatal-class provider error mid-run means the
                     # key died (billing cap hit, revocation) — continuing would
@@ -5451,18 +5480,38 @@ def run_evaluation(
                 ]
                 for f in concurrent.futures.as_completed(futures):
                     f.result()  # re-raise any unexpected error
-    except (WatchdogAbortError, CheckpointPersistError) as e:
+    except (WatchdogAbortError, CheckpointPersistError,
+            spend_guard.SpendGuardError) as e:
         # #1785 (Task 1 Step 5 / P2-10): a mid-run abort is recorded on the
         # checkpoint with a DISTINCT run-level marker (``degraded_aborted`` /
         # ``checkpoint_abort``) — never a bare traceback; a resume refuses it
         # (Task 2 run-level refusal). The completed window's outcomes never
         # reach an aggregate/report claim (the exception propagates).
-        _marker = ("degraded_aborted" if isinstance(e, WatchdogAbortError)
-                   else "checkpoint_abort")
-        _detail = ({"reason": getattr(e, "reason", str(e))}
-                   if isinstance(e, WatchdogAbortError) else {"reason": str(e)})
+        # #8486 F1: the hard spend stop gets its OWN marker
+        # (``spend_hard_stop``) and is NOT in the loader's refusal list — the
+        # completed questions are good measurements, so the artifact stays
+        # RESUMABLE (raise the ceiling, re-run the same command) instead of
+        # being quarantined like a degraded/aborted run.
+        if isinstance(e, spend_guard.SpendGuardError):
+            _marker = "spend_hard_stop"
+            _detail = e.artifact() if isinstance(
+                e, spend_guard.HardStopExceeded) else {"reason": str(e)}
+        elif isinstance(e, WatchdogAbortError):
+            _marker = "degraded_aborted"
+            _detail = {"reason": getattr(e, "reason", str(e))}
+        else:
+            _marker = "checkpoint_abort"
+            _detail = {"reason": str(e)}
         print(f"[longmem_eval] RUN ABORTED — {_marker}: "
               f"{_detail['reason']}", file=sys.stderr)
+        if _marker == "spend_hard_stop":
+            _where = (checkpoint if checkpoint
+                      else "(no --checkpoint passed — no resume point)")
+            print(f"[longmem_eval] {len(done)} completed question(s) are on "
+                  f"{_where} with a spend_hard_stop marker; raise the "
+                  f"ceiling (--hard-stop-usd N) and re-run the SAME command "
+                  f"to resume, or disarm with --hard-stop-usd 0.",
+                  file=sys.stderr)
         _record_run_abort(
             checkpoint, marker=_marker, detail=_detail,
             outcomes=list(done.values()), failures=failures,
@@ -5530,6 +5579,8 @@ def run_evaluation(
         ingest_mode=ingest_mode,
         failures=failures,
         preflight=preflight,
+        # #8486 F1: what the ceiling enforced (armed? ceiling? spend?).
+        hard_stop_armed=hard_stop_armed,
         embedder_status=embedder_status,
         # R1 (#1540) D7: knob values recorded verbatim in the methodology
         # (the run protocol step-2 gate consumes them). C1/C2 (#1745): the
@@ -5726,6 +5777,13 @@ def outcomes_to_report(
     # ``reader_provider`` so the report carries what served the labels.
     judge_provider: str | None = None,
     preflight: dict | None = None,
+    # #8486 F1: was a hard spend stop decided for this run? The caller says
+    # SO (run_main arms it); the block itself is read from
+    # ``spend_guard.status()`` HERE, at report time, because the spend is a
+    # running total — a status snapshot taken when the kwargs were built
+    # would record $0.00. A caller that never armed one passes None and gets
+    # no block (byte-identical report).
+    hard_stop_armed: bool | None = None,
     # #1349 vector arm: forwarded to build_report — retriever routing +
     # injected model + mode ride the report methodology + provenance.
     retriever: str = "hybrid",
@@ -5947,6 +6005,16 @@ def outcomes_to_report(
     # the report shape and may promote it into methodology later).
     if preflight is not None:
         extra["preflight"] = preflight
+    # #8486 F1: WHAT THE CEILING ACTUALLY DID — ceiling, armed flag, and the
+    # spend re-derived from token counts at report time. Read from the guard
+    # singleton so the report cannot disagree with the enforcement (the same
+    # state every pre-call check read). ``hard_stop_armed`` is None only for a
+    # caller that never armed one (a programmatic ``outcomes_to_report``), so
+    # those reports stay byte-identical; every ``run_main`` report — including
+    # a disarmed one (``armed: false``) — says which ceiling applied. A
+    # report never merely implies a stop.
+    if hard_stop_armed is not None:
+        extra["hard_stop"] = spend_guard.status()
     return build_report(
         outcomes,
         dataset_id=dataset_id,
@@ -6249,6 +6317,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retrieval-only", action="store_true",
                    help="run retrieval WITHOUT reader/judge — accuracy is None "
                         "and the report is the #1349 gate's vector recall block")
+    # #8486 F1: the hard spend stop is a CEILING IN DOLLARS enforced before
+    # every paid call against spend re-derived from token counts (never the
+    # harness's own cost meter, which priced the pilot's reader lane at $0.00).
+    # Default = the pre-registered HARD_STOP_USD (10.00) — the value is the
+    # recorded owner decision, this flag makes it executable. 0 disarms it
+    # explicitly (recorded as armed: false; nothing is silent).
+    p.add_argument("--hard-stop-usd", type=float, default=None,
+                   metavar="USD",
+                   help="abort before the call that would cross this spend "
+                        "ceiling and leave a resumable checkpoint "
+                        f"(default ${spend_guard.HARD_STOP_USD:,.2f} — the "
+                        "pre-registered HARD_STOP_USD; an unpriced model "
+                        "REFUSES to run under an armed ceiling; 0 disarms "
+                        "it)")
     p.add_argument("--db", default=None,
                    help="#1349 --db mode: a FalkorDB URI "
                         "(docker://|redis://|rediss://|bolt://) — per-question "
@@ -7207,8 +7289,20 @@ def _run_main(parser: argparse.ArgumentParser, args,
         dataset_file = cache_base / ds.SPLIT_FILES[args.split]
     dataset_fingerprint = _dataset_fingerprint(dataset_file)
 
-    reader = build_reader(args.reader_model, mock=args.mock)
-    judge = build_judge(args.judge_model, mock=args.mock)
+    # #8486 F3: a retrieval-only run makes NO LLM call, so it must not demand
+    # an LLM credential. ``build_reader``/``build_judge`` raise
+    # RuntimeError("no LLM provider key configured…") when nothing is
+    # configured, which used to abort `--retrieval-only` BEFORE any retrieval
+    # happened — the official recall_all@5 could not be measured without
+    # paying for a call the run does not make. The None/None/retrieval_only
+    # shape is already the codebase's own (``_run_spot_check`` runs it), so
+    # this builds the models only for the runs that use them.
+    if args.retrieval_only:
+        reader = None
+        judge = None
+    else:
+        reader = build_reader(args.reader_model, mock=args.mock)
+        judge = build_judge(args.judge_model, mock=args.mock)
 
     extractor_model = None
     sw_model_spec = None
@@ -7243,6 +7337,38 @@ def _run_main(parser: argparse.ArgumentParser, args,
     if extractor_model is not None:
         _collector.attach(extractor_model, stage="ingest", provider=None)
 
+    # #8486 F1: ARM THE HARD SPEND STOP before the first paid call (the
+    # preflight pings included — they are real completions). The ceiling is
+    # checked before every call against spend re-derived from the collected
+    # token rows (never the ``cost.usd`` meter), and an armed ceiling REFUSES
+    # to start on a lane with no PRICING_MAP entry: an unpriced model would
+    # meter $0.00 and spend invisibly. ``declared_lanes`` is exactly the set
+    # ``attach`` just wired (``_walk_members`` is the same walk) — a lane that
+    # will emit meter rows.
+    _declared = [
+        *lme_usage.declared_lanes(
+            getattr(reader, "_model", None), stage="reader",
+            provider=getattr(reader, "provider", None)),
+        *lme_usage.declared_lanes(
+            getattr(judge, "_model", None), stage="judge",
+            provider=getattr(judge, "provider", None)),
+        *lme_usage.declared_lanes(extractor_model, stage="ingest"),
+    ]
+    try:
+        _armed = spend_guard.arm(getattr(args, "hard_stop_usd", None),
+                                 declared_lanes=_declared)
+    except spend_guard.SpendGuardError as e:
+        print(f"[longmem_eval] {e}", file=sys.stderr)
+        raise SystemExit(HARD_STOP_EXIT) from e
+    if _armed is None:
+        print("[longmem_eval] hard spend stop: DISARMED "
+              "(--hard-stop-usd 0) — nothing caps this run's spend",
+              file=sys.stderr)
+    else:
+        print(f"[longmem_eval] hard spend stop: armed at ${_armed:,.2f} "
+              f"(actual spend re-derived from tokens; an unpriced lane "
+              f"refuses rather than meters $0.00)", file=sys.stderr)
+
     # M7 #1739 / review #1742 (resource lifecycle): the run-level
     # extractor_model (built above) is closed on EVERY exit path via the
     # try/finally — the CLI previously leaked its session. requests.Session
@@ -7269,7 +7395,8 @@ def _run_main(parser: argparse.ArgumentParser, args,
         else:
             try:
                 preflight = run_preflight(
-                    reader=reader, judge=judge, extractor_model=extractor_model)
+                    reader=reader, judge=judge, extractor_model=extractor_model,
+                    retrieval_only=args.retrieval_only)
             except PreflightError as e:
                 print("[longmem_eval] PRE-FLIGHT GATE FAILED — aborting before "
                       "the run starts (no questions executed):", file=sys.stderr)
@@ -7286,6 +7413,9 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # EP pass) — the run protocol's step-5 command passes it.
                 activate_beliefs=args.activate_beliefs,
                 workers=max(1, args.workers), preflight=preflight,
+                # #8486 F1: the enforced ceiling rides the report (what was
+                # armed, and the spend re-derived at report time).
+                hard_stop_armed=spend_guard.was_decided(),
                 # M7 #1739 / #1742: wire the session-parallel path (the flag was
                 # parsed but never threaded — a silent no-op) and give the worker
                 # factory the resolved spec + tuning so the workers serve exactly
@@ -7396,6 +7526,14 @@ def _run_main(parser: argparse.ArgumentParser, args,
             print("[longmem_eval] RUN ABORTED — arm conflict: "
                   f"{e}", file=sys.stderr)
             raise SystemExit(1) from e
+        except spend_guard.SpendGuardError as e:
+            # #8486 F1: the ceiling aborted the run. ``run_evaluation`` has
+            # already written the completed outcomes + the ``spend_hard_stop``
+            # marker to the checkpoint (the resumable artifact); no report is
+            # written — a partial run is not a report, it is a resume point.
+            print(f"[longmem_eval] RUN ABORTED — hard spend stop: {e}",
+                  file=sys.stderr)
+            raise SystemExit(HARD_STOP_EXIT) from e
 
         out = args.output or str(default_report_path(args.split))
         save_report(report, out)
@@ -7405,6 +7543,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
     finally:
         if extractor_model is not None:
             extractor_model.close()
+        # #8486 F1: the ceiling belongs to THIS run. Leaving it armed in the
+        # process invites a later in-process run to be stopped by a ceiling
+        # it never armed (and a leaked spend total to be charged to it).
+        spend_guard.reset()
 
 
 if __name__ == "__main__":

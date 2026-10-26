@@ -42,6 +42,8 @@ from tools.longmem_eval.judge import (  # noqa: E402, RUF100
     classify_answer, get_anscheck_prompt, grade_label, is_abstention,
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
+from tools.longmem_eval import spend_guard  # noqa: E402, RUF100
+from tools.longmem_eval import usage as lme_usage  # noqa: E402, RUF100
 from tools.longmem_eval.evidence import mark_for_question  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, _apply_evidence_boost, _assemble_context, _dedup_pool,
@@ -6749,3 +6751,222 @@ def test_cli_compare(tmp_path):
         cmp2["overall"]["shared_delta_pp"]
     assert roundtrip["header"]["abs_inclusion_rule"] == \
         cmp2["header"]["abs_inclusion_rule"]
+
+
+# ── #8486 F3 + F1: the harness a measurement lane could not run ────────────
+#
+# The lane that priced #8486 found three defects in this harness. Two blocked
+# the measurement outright, one made a legitimate result unrecordable. F4
+# (the retrieval-only status in w7_publish) is pinned in
+# tests/test_w7_publish.py::test_retrieval_only_run_records_partial_not_failed;
+# F3 and F1 are here because this file owns the run_main surface.
+#
+# ⚠️ The side effect these tests pin: with F3 fixed, a retrieval-only run's
+# fingerprint records ``reader_model = "n/a (retrieval-only)"`` where a
+# ``--mock`` retrieval-only run used to record ``"mock-reader"``. The
+# fingerprint gate is exact, so a checkpoint written by the OLD code is
+# REFUSED on resume (measured: CheckpointStaleError naming ['judge_model',
+# 'reader_model'] → delete and re-run). Deliberate: the alternative is a
+# fingerprint claiming a reader ran.
+
+#: Every provider key the reader/judge builders accept. Cleared for the
+#: keyless test — a leaked ambient key would make F3 pass for the wrong reason.
+_PROVIDER_KEY_ENVS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY",
+                      "DEEPSEEK_API_KEY", "GEMINI_API_KEY")
+
+
+def _clear_provider_keys(monkeypatch) -> None:
+    for key in _PROVIDER_KEY_ENVS:
+        monkeypatch.delenv(key, raising=False)
+
+
+class _FakeEmbedder384:
+    """Dense leg 'available' without sentence-transformers."""
+
+    def encode(self, texts):
+        return [[0.0] * 384 for _ in texts]
+
+
+def test_retrieval_only_completes_with_no_provider_key(monkeypatch, tmp_path):
+    """#8486 F3. RED before the fix: ``run_main`` built the reader (and judge)
+    UNCONDITIONALLY, so this exact command raised
+
+        RuntimeError: no LLM provider key configured for the LongMemEval
+        reader
+
+    before a single question was retrieved. A retrieval-only run makes no LLM
+    call, so the official ``recall_all@5`` was priced at one paid call it does
+    not make.
+
+    GREEN: the retrieval metric is measured with EVERY provider key absent.
+    """
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None:
+                                     _FakeEmbedder384()))
+    cp = tmp_path / "state.json"
+    out = tmp_path / "report.json"
+    report = run_mod.run_main([
+        "--data", str(MINI), "--limit", "2", "--split", "s",
+        "--retrieval-only", "--checkpoint", str(cp), "--output", str(out)])
+
+    methodology = report["methodology"]
+    # the run recorded that no reader existed, rather than a fabricated one
+    assert methodology["reader_model"] == "n/a (retrieval-only)"
+    assert methodology["judge_model"] == "n/a (retrieval-only)"
+    assert report["accuracy"] is None
+    # a real retrieval measurement happened (not an empty/failed artifact)
+    assert report["retrieval"]["session_recall@k"]["5"] is not None
+    assert report["n_failed"] == 0
+    assert out.is_file()
+    # the pre-flight gate has nothing to gate — and says so, rather than
+    # failing on a judge key the run never uses
+    assert report["preflight"]["status"] == "skipped"
+    assert report["preflight"]["retrieval_only"] is True
+    # the disclosed fingerprint side effect (see the block comment above)
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    assert saved["fingerprint"]["reader_model"] == "n/a (retrieval-only)"
+
+
+class _SpendingReader:
+    """A reader that reports its own tokens like a real adapter's sink.
+
+    No key, no network, no ``complete()`` — so it is NOT a declared lane; its
+    spend appears at runtime exactly like a failover lane nobody priced. The
+    numbers are the measured 2026-10-25 pilot's per-question reader burn
+    (~8.7k prompt tokens/question, scaled up 46x so a few-cent ceiling trips).
+    """
+
+    model_id = "deepseek-flash"
+    model_spec = "deepseek:deepseek-flash"
+    provider = "deepseek"
+    pinned = None
+
+    def answer(self, *, context_hits, question, question_date=None,
+               question_type=None):
+        lme_usage.get_collector().record(
+            stage="reader", provider="deepseek", model_id="deepseek-flash",
+            usage={"prompt_tokens": 400_000, "completion_tokens": 2_000},
+            usage_present=True)
+        return "the answer"
+
+
+def test_hard_stop_reads_actual_spend_not_the_meter():
+    """#8486 F1. The ceiling must NOT trust ``usage.cost.usd``: on the
+    2026-10-25 pilot that meter read **$0.008456** for a **$0.0620** run
+    (87% blind) because ``deepseek-flash`` had no ``PRICING_MAP`` entry. The
+    reader lane's measured tokens must now price to the measured spend."""
+    spend_guard.reset()
+    lme_usage.get_collector().reset()
+    lme_usage.get_collector().record(
+        stage="reader", provider="deepseek", model_id="deepseek-flash",
+        usage={"prompt_tokens": 437_253, "completion_tokens": 2_330,
+               "prompt_cache_hit_tokens": 60_928},
+        usage_present=True)
+    usd, priced, _ = spend_guard.spend()
+    assert priced is True
+    # 376,325 miss * 0.14/1M + 60,928 hit * 0.0028/1M + 2,330 * 0.28/1M
+    # (the pricing reader rounds to 6 dp)
+    assert usd == pytest.approx(0.0535085, abs=1e-6)
+    spend_guard.reset()
+
+
+def test_unpriced_lane_refuses_under_a_ceiling_never_meters_zero():
+    """#8486 F1, the residual: a model with no ``PRICING_MAP`` entry is
+    UNKNOWN spend, not free. Under an armed ceiling it must refuse.
+
+    RED before the fix: nothing refused — the lane priced at $0.0 and the
+    run's ``cost.usd`` simply under-reported."""
+    spend_guard.reset()
+    try:
+        with pytest.raises(spend_guard.UnpricedModelRefused):
+            spend_guard.arm(10.0, declared_lanes=[
+                ("reader", "deepseek", "a-model-nobody-priced")])
+        assert spend_guard.ceiling_usd() is None    # refused, not half-armed
+
+        # an unpriced lane that appears MID-RUN (failover) is refused too
+        spend_guard.arm(10.0)
+        lme_usage.get_collector().reset()
+        lme_usage.get_collector().record(
+            stage="reader", provider="deepseek",
+            model_id="a-model-nobody-priced",
+            usage={"prompt_tokens": 10, "completion_tokens": 1},
+            usage_present=True)
+        with pytest.raises(spend_guard.HardStopExceeded) as ei:
+            spend_guard.check("reader for q1")
+        assert ei.value.reason == "unpriced_spend"
+
+        # a lane that returns no usage block is unknown spend as well
+        spend_guard.reset()
+        spend_guard.arm(10.0)
+        lme_usage.get_collector().reset()
+        lme_usage.get_collector().record(
+            stage="judge", provider="deepseek", model_id="deepseek-flash",
+            usage=None, usage_present=False)
+        with pytest.raises(spend_guard.HardStopExceeded) as ei:
+            spend_guard.check("judge for q1")
+        assert ei.value.reason == "unpriced_spend"
+    finally:
+        spend_guard.reset()
+        lme_usage.get_collector().reset()
+
+
+def test_hard_stop_aborts_before_the_call_and_leaves_a_resumable_artifact(
+        monkeypatch, tmp_path):
+    """#8486 F1, behaviour. A ceiling of $0.06 over a reader that burns ~$0.057
+    per question lets question 1 complete and then aborts BEFORE the next call
+    (the guard refuses the call that would follow a crossed ceiling — it
+    cannot un-spend the one that crossed it). The artifact: question 1 on the
+    checkpoint + a ``spend_hard_stop`` marker, no report, and a RESUME on the
+    same checkpoint once the ceiling is raised.
+
+    RED before the fix: ``--hard-stop-usd`` did not exist; the run spent the
+    whole question set (and had no ceiling at all, in any mode)."""
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None:
+                                     _FakeEmbedder384()))
+    monkeypatch.setattr(run_mod, "build_reader",
+                        lambda *a, **kw: _SpendingReader())
+    monkeypatch.setattr(run_mod, "build_judge", lambda *a, **kw: MockJudge())
+    cp = tmp_path / "state.json"
+    out = tmp_path / "report.json"
+    argv = ["--data", str(MINI), "--limit", "2", "--split", "s",
+            "--skip-preflight", "--checkpoint", str(cp), "--output", str(out)]
+
+    with pytest.raises(SystemExit) as ei:
+        run_mod.run_main([*argv, "--hard-stop-usd", "0.06"])
+    assert ei.value.code == run_mod.HARD_STOP_EXIT
+    assert not out.exists()             # a partial run is not a report
+
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    marker = saved["spend_hard_stop"]
+    assert marker["reason"] == "ceiling_reached"
+    assert marker["ceiling_usd"] == 0.06
+    assert marker["spend_usd"] >= 0.06
+    assert marker["map_version"]               # priced, not an unpriced stop
+    # the completed question survives — that is what makes it resumable
+    assert [o["question_id"] for o in saved["outcomes"]] == ["mini_ie_user_001"]
+
+    # RESUME: a higher ceiling on the SAME checkpoint (the ceiling is
+    # deliberately NOT fingerprinted — raising it is the recovery path). The
+    # reported spend includes what the abandoned process already paid, and
+    # nothing below $0.10 could: question 1 alone is $0.0566.
+    out2 = tmp_path / "report2.json"
+    argv2 = ["--data", str(MINI), "--limit", "2", "--split", "s",
+             "--skip-preflight", "--checkpoint", str(cp),
+             "--output", str(out2)]
+    report = run_mod.run_main([*argv2, "--hard-stop-usd", "5"])
+    assert report["n_failed"] == 0
+    assert len(report["outcomes"]) == 2
+    # the report records what was ACTUALLY enforced, and the spend it saw
+    assert report["hard_stop"]["armed"] is True
+    assert report["hard_stop"]["ceiling_usd"] == 5.0
+    assert report["hard_stop"]["spend_usd"] > 0.10
+    assert "spend_hard_stop" not in json.loads(cp.read_text(encoding="utf-8"))

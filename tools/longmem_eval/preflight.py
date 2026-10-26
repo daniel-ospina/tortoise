@@ -211,7 +211,8 @@ def check_judge_key(judge: Any) -> dict[str, Any]:
 
 
 def run_preflight(*, reader: Any, judge: Any, extractor_model: Any = None,
-                  mock: bool = False) -> dict[str, Any]:
+                  mock: bool = False, retrieval_only: bool = False
+                  ) -> dict[str, Any]:
     """Run the four pre-flight checks and aggregate (D2 order).
 
     1. judge key presence (config-only, fastest fail)
@@ -224,10 +225,20 @@ def run_preflight(*, reader: Any, judge: Any, extractor_model: Any = None,
     keys once, not iteratively. Any fatal-class result → ``PreflightError``
     listing every failure. ``mock=True`` → no-op (the ``--mock`` run has no
     keys and no network).
+
+    #8486 F3: ``retrieval_only=True`` → no-op as well, for the same reason
+    and a sharper one — a retrieval-only run never invokes the reader or the
+    judge, so there is no call to gate and no credential to demand. Gating it
+    on an LLM key made the official ``recall_all@5`` unmeasurable without
+    paying for a call the run does not make.
     """
     if mock:
         return {"status": "skipped", "mock": True,
                 "checks": [], "detail": "mock mode — no API gate"}
+    if retrieval_only:
+        return {"status": "skipped", "mock": False, "retrieval_only": True,
+                "checks": [],
+                "detail": "retrieval-only — no reader/judge call to gate"}
     checks: list[dict[str, Any]] = [check_judge_key(judge)]
     if extractor_model is None:
         checks.append({
