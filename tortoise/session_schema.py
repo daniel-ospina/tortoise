@@ -142,13 +142,15 @@ SESSION_PROPERTIES: tuple[str, ...] = (
     # ── capture shape (the shared primitive, #3551) ──
     "created_at",
     "turn_count",
-    # #10000: the id-space high-water mark. `turn_count` is a WINDOW LENGTH, not a
+    # #10000: the id-space end. `turn_count` is a WINDOW LENGTH, not a
     # max turn index, so the stale-turn sweep (the one behaviour that used to walk
     # the turn nodes) needs this to survive the turns leaving the graph. It rides
     # the SAME `SessionRecorded` as the count and `_fold_session_recorded` restores
-    # it with the live write's monotone-up CASE, so a journal-only rebuild keeps the
-    # mark a later sweep reads instead of falling back to `turn_count` (#10000
-    # review P1 — the fold used to drop it, and no record column carries it).
+    # it with the SAME plain assignment the live MERGE uses — the session's LIVE
+    # end, which a shorter re-capture LOWERS after sweeping its own surplus — so a
+    # journal-only rebuild keeps the value a later sweep and the read's tail
+    # witness both read, instead of falling back to `turn_count` (#10000 review P1
+    # — the fold used to drop it, and no record column carries it).
     "turn_max_index",
     "is_episodic",
     "harness",

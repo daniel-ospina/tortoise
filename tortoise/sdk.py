@@ -3125,20 +3125,36 @@ def _write_session_and_turns(
                   # #10000: `turn_count` is a WINDOW LENGTH (``len(turns)``), not
                   # a max id index — an APPEND at ``turn_offset=2`` writes
                   # ``_t2``/``_t3`` while the count reads 2. The stale-turn sweep
-                  # needs the ID SPACE, so the high-water mark is stored beside
-                  # the count and only ever moves UP (an append must not lower it).
-                  "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
-                  "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"]
+                  # needs the ID SPACE, so the id space's end is stored beside
+                  # the count.
+                  #
+                  # ⛔ IT IS THE **LIVE** END, NOT A PEAK (#10000 review P2).
+                  # The first shape kept the larger value (a monotone-up CASE),
+                  # which is right for the sweep — whose range is the PRIOR mark,
+                  # read before this MERGE — and WRONG for the reader that #10000
+                  # added on top of it: `record_read._shortfall` uses this mark as
+                  # the TAIL witness, so a session shrunk from 4 turns to 1 kept a
+                  # mark of 3 and every read of that HEALTHY session reported "the
+                  # tail is missing", forever, with a WARNING and a graph query
+                  # per read. The shrink this write performs is the same one whose
+                  # surplus it sweeps above, so the value the session now holds is
+                  # the value it must declare: one meaning, one consumer question.
+                  # A capture whose turn half fails AFTER this MERGE now leaves a
+                  # surplus only a later capture's sweep would have found — the
+                  # cost of a live witness, and bounded to one failed statement
+                  # (the MERGE precedes the turn write).
+                  "s.turn_max_index=$tmi"]
     merge_params: dict[str, Any] = {"sid": session_id, "now": now,
                                     "tc": turn_count,
                                     "tmi": turn_offset + turn_count - 1}
     session_record: dict[str, Any] = {
         "id": session_id, "created_at": now,
         "turn_count": turn_count, "is_episodic": True,
-        # #10000: the id-space high-water mark rides the SAME record as the count,
-        # so a record-sourced rebuild restores the property the stale-turn sweep
-        # reads (a replay that dropped it would leave the sweep unable to see a
-        # surplus it must remove).
+        # #10000: the id space's LIVE end rides the SAME record as the count, so
+        # a record-sourced rebuild restores the property BOTH consumers read (the
+        # stale-turn sweep's bound and the read's tail witness) to the value the
+        # live MERGE left — a replay that dropped it, or that restored a peak the
+        # live write had lowered, would diverge from the live node.
         "turn_max_index": turn_offset + turn_count - 1,
     }
     if harness:

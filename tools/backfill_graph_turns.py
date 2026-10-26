@@ -380,11 +380,12 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
         # Read at CALL time, never bound as a def-time default: the module
         # constant is what a test retunes to make the census take >1 page.
         page_size = _PAGE_SIZE
-    # `turn_max_index` is the ID-SPACE high-water mark the writer records beside
-    # the window length (`sdk.py`, post-#10000: "`turn_count` is a WINDOW LENGTH,
-    # not a max id index"), so the census can report the two declared numbers
-    # separately from the two measured ones. `created_at` is deliberately not
-    # read: nothing here consumes it.
+    # `turn_max_index` is the session's LIVE id-space end, which the writer
+    # records beside the window length (`sdk.py`, post-#10000: "`turn_count` is a
+    # WINDOW LENGTH, not a max id index"; a shorter re-capture lowers the mark
+    # after sweeping its own surplus), so the census reports the two declared
+    # numbers separately from the two measured ones. `created_at` is deliberately
+    # not read: nothing here consumes it.
     sessions = list(_paged_rows(graph, _SESSIONS_PAGE_QUERY, page_size))
     _cross_check(":Session", len(sessions),
                  _count(graph, _SESSIONS_COUNT_QUERY)[0])

@@ -18182,12 +18182,25 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
     rather than a degradation.
 
     The predicate half is `record_writer.record_holds_turns`, the ONE declaration
-    of "can the record hold a live write right now", asked with THIS tenant. The
-    journal path is resolved EXACTLY as `_make_sdk(graph_name=…)` resolves it for
-    this branch: an explicit graph name, no namespace (the derivation uses the
-    name verbatim, and `namespace="registry"` would divert it). No journal ⇒ the
-    per-turn records are never emitted ⇒ the record is not where the turns are,
-    armed DSN or not.
+    of "can the record hold a live write right now", asked with THIS tenant. No
+    journal ⇒ the per-turn records are never emitted ⇒ the record is not where
+    the turns are, armed DSN or not.
+
+    ⛔ THE JOURNAL PATH IS RESOLVED THE WAY THE WRITE RESOLVES IT (#10000 review
+    P1) — from `_data_sdk`'s OWN branch, never from the dict's
+    `graph_namespace`. The previous version read `org["graph_namespace"]`, which
+    only the KEY lanes stamp (`_get_current_org_supabase`); the SESSION-JWT org
+    dict (`_session_user_org`) carries neither `graph_id` nor `graph_namespace`,
+    so that read was `None` → `record_holds_turns(journal_configured=False)` →
+    `None` → the record was never consulted on the one lane
+    `get_session_detail`'s own docstring says it exists for (#2002/W6, the
+    Settings Captured-sessions transcript DE2E-11), and the endpoint served
+    `turns: []` for a session whose transcript the SAME request's capture had
+    put in the record — silently, since the graph holds no turn node either.
+    `_data_sdk` opens `_make_sdk(graph_name=_data_graph_name(org))` for a
+    graph-bound key and `_make_sdk(namespace=org_id)` otherwise, and `_make_sdk`
+    derives its journal from exactly those two arguments — so this mirrors the
+    branch, and the read cannot resolve a journal the writer did not write to.
     """
     from tortoise.config import _resolve_event_log_path
     from tortoise.record_writer import record_holds_turns, record_tenant
@@ -18197,8 +18210,17 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
         tenant = record_tenant()
     if tenant is None:
         return None
-    journal_path = _resolve_event_log_path(
-        namespace=None, graph_name=org.get("graph_namespace"))
+    if org.get("graph_id"):
+        # The graph-bound branch: an explicit graph name, no namespace (the
+        # derivation uses the name verbatim, and `namespace="registry"` would
+        # divert it) — the SAME pair `_data_sdk` hands `_make_sdk`.
+        journal_path = _resolve_event_log_path(
+            namespace=None, graph_name=_data_graph_name(org))
+    else:
+        # Org-wide key AND session auth: `_data_sdk` opens `namespace=org_id`,
+        # whose journal key the SDK derives from that namespace alone.
+        journal_path = _resolve_event_log_path(
+            namespace=org.get("org_id"), graph_name=None)
     # ⛔ THE WRITE BREAKER IS NOT ASKED HERE (#10000 review P1). `circuit_open`
     # says a connect failed within the last 60 s — a bound on the COST of the
     # write path (one timeout per journal record), and no evidence about where a
@@ -36156,11 +36178,14 @@ def _prior_stored_turn_count(proj, session_id: str) -> int:
     silent. Two facts give the stored total, one per store, and `max` of the two
     is the total whichever store holds them:
 
-    * `s.turn_max_index` — the id-space high-water mark this change makes
-      authoritative (the live MERGE writes it, `_fold_session_recorded` restores
-      it), so it is the record lane's turn total. It is an INDEX, hence ``+ 1``,
-      and it is MONOTONE UP, so a shorter re-capture leaves it above the true
-      count — which errs toward NOT metering a request that wrote no new turn.
+    * `s.turn_max_index` — the session's LIVE id-space end this change makes
+      authoritative (the live MERGE writes it — lowering it on a shorter
+      re-capture — and `_fold_session_recorded` restores it), so it is the record
+      lane's turn total. It is an INDEX, hence ``+ 1``. An idempotent re-POST is
+      not metered (the mark equals this window's own end), which is the
+      #1827/#3892 case; the only replay it still charges is a re-POST of turns a
+      shorter re-capture already swept, i.e. a write of turns the session no
+      longer holds — a real write, not a phantom charge.
     * the live node count — the same fact for the graph lane (an unarmed
       deployment, or a capture whose record write was refused).
 

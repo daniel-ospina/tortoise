@@ -284,8 +284,8 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     ``answered`` is decided by the record's OWN account of the session:
     :func:`_turns` returning rows is an answer only when those rows COVER the
     session's turns — a contiguous run from index 0 long enough for the
-    `turn_count` the same row states, AND reaching the id space's high-water
-    mark when the caller can name it (`turn_max_index`); with no rows, the
+    `turn_count` the same row states, AND reaching the id space's end when the
+    caller can name it (`turn_max_index`); with no rows, the
     answer is only the record's when `public.session_narrative` holds this
     session's `turn_count` — the column the capture's `SessionRecorded` writes
     (`record_projection._narrative_statements`). A count of 0 says "this session
@@ -294,7 +294,7 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     caller. A row set that is short of the count, that does not start at
     index 0 (the `turn_offset` append shape), that has a HOLE in the middle (a
     per-turn write refused between two that landed), or that stops BELOW the
-    id-space high-water mark (a refused HIGHEST turn — the shape `turn_count`
+    id space's end (a refused HIGHEST turn — the shape `turn_count`
     cannot see, see :func:`_shortfall`) is a PARTIAL answer: it is reported as
     not-answered and carries the rows it does hold, so the caller merges them
     with the other store instead of serving them alone.
@@ -302,11 +302,20 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     ⛔ THE TAIL NEEDS A WITNESS THIS STORE DOES NOT HOLD (#10000 review P2).
     ``turn_count`` is a WINDOW length, so this record's own row cannot see a
     missing HIGHEST index; the datum is the graph `:Session`'s
-    ``turn_max_index`` (inclusive, monotone up, written by the capture MERGE and
-    restored by the fold), which the two serving doors already read. It is a
-    CALLER argument rather than a record column because this module reads the
-    record only — and ``None`` (a session captured before the mark existed)
-    degrades to the checks above rather than inventing one.
+    ``turn_max_index`` (inclusive, the session's LIVE id-space end, written by
+    the capture MERGE and restored by the fold), which the two serving doors
+    already read. It is a CALLER argument rather than a record column because
+    this module reads the record only — and ``None`` (a session captured before
+    the mark existed) degrades to the checks above rather than inventing one.
+
+    ⛔ IT MUST DESCRIBE THE LIVE STATE, NOT THE PEAK (#10000 review P2). The
+    writer stored the larger value while this mark was only the sweep bound, and
+    a SHRUNK session (`_t0.._t3` re-captured as `_t0`) then kept a mark of 3, so
+    this reader called a COMPLETE record a partial transcript on every read,
+    forever — a WARNING and a graph query per read on healthy data, and no way
+    to tell a real split-store divergence from it. The write now lowers the mark
+    in the capture that sweeps the surplus, so ``max(held) < turn_max_index``
+    means what it says: a turn the session still owns has no record row.
     """
     from tortoise.record_projection import scope_connection
 
@@ -351,8 +360,8 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None,
       shape (`_t2`/`_t3` in the record, `_t0`/`_t1` still in the graph), where
       `turn_count` is the WINDOW length and therefore cannot see the gap, and an
       interior hole left by one refused write between two that landed;
-    * it stops BELOW the id space's high-water mark
-      (``max(index) < turn_max_index``) — a refused HIGHEST turn. ⛔ THIS ONE is
+    * it stops BELOW the id space's end (``max(index) < turn_max_index``) — a
+      refused HIGHEST turn. ⛔ THIS ONE is
       invisible to the other two AND to the row set itself (#10000 review P2):
       a missing tail is ABOVE ``max(held)``, and the run stays ``0 .. max(held)``
       with `len(rows) >= turn_count` (a WINDOW length) whenever an append window
@@ -360,7 +369,9 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None,
       `_t3` was refused is `turn_count=2` and three contiguous rows, with the
       fourth turn readable through no door. The mark is the only witness, and it
       is the graph `:Session`'s, which is why it is a parameter (``None`` when
-      the caller cannot name it — degrade, never invent).
+      the caller cannot name it — degrade, never invent). It is the session's
+      LIVE end, not a peak: the writer lowers it on a shorter re-capture (see
+      ``session_turns``), so a shrink is not reported as a missing tail.
 
     A record that HOLDS FEWER than its own count, or whose ids start above 0,
     skip an index, or stop short of the mark has not answered for the session —

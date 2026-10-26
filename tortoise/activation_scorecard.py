@@ -292,12 +292,14 @@ STAGE3_PREDICATE = "p.pointKind IS NULL OR p.pointKind <> 'event'"
 #: THAN ONE window is under-reported: this column is its LAST window, not the
 #: session's total, and `turn_points_total` inherits that. The exact total lives
 #: in the record (§9.1/D1) and reading it here is the measurement step of #10000,
-#: not a token swap: `turn_max_index + 1` is the id-space high-water mark but is
-#: MONOTONE UP, so it OVER-counts after a shorter re-capture, and choosing between
-#: "a published figure that under-reports multi-window sessions" and "one that
-#: over-reports after a shorter re-capture" is a decision this scorecard's owner
-#: has not taken. Until it is taken the residual is stated here rather than
-#: silently shipped as a total.
+#: not a token swap: `turn_max_index + 1` is the session's id-space total — exact
+#: for any capture that writes the mark (the capture MERGE stores the session's
+#: LIVE end, appends included, and a shorter re-capture lowers it), but for a
+#: session captured BEFORE the mark existed `coalesce` falls back to
+#: `turn_count`, a WINDOW length, so it UNDER-reports that population. Publishing
+#: it as the turn total is a measurement decision this scorecard's owner has not
+#: taken; until it is taken the residual is stated here rather than silently
+#: shipped as a total.
 #:
 #: ⚠️ NOT written as a `CASE WHEN count(DISTINCT t) > ...` in Cypher: MEASURED
 #: on the embedded engine, that form parses, runs, returns NO error, and reports

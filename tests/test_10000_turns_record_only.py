@@ -913,3 +913,128 @@ def test_the_names_other_modules_import_are_declared_on_the_surface():
     assert {"record_holds_turns", "live_write_refusal",
             "LIVE_WRITE_REFUSALS"} <= set(rw.__all__)
     assert "merge_turn_payloads" in rr.__all__
+
+
+# ── round-3 review: the door that never asked, and the witness that lied ────
+
+
+def test_the_session_lane_resolves_the_journal_the_write_wrote(
+        monkeypatch, tmp_path):
+    """⛔ P1: the READ resolves the journal from the WRITE's branch, not the dict.
+
+    `_data_sdk` opens `_make_sdk(namespace=org_id)` for org-wide keys AND session
+    auth, and `_make_sdk` derives the journal from exactly that argument. The read
+    door read ``org["graph_namespace"]`` instead — a field only the KEY lanes
+    stamp — so the SESSION-JWT org dict (`_session_user_org`, which carries
+    neither `graph_id` nor `graph_namespace`) resolved no journal,
+    `record_holds_turns(journal_configured=False)` answered False, and
+    `GET /v1/sessions/{id}` never consulted the record at all: `turns: []` for a
+    session whose transcript that same lane's capture had put in the record, with
+    no WARNING — the #2002/W6 dashboard lane, which is the lane that endpoint's
+    own docstring says it exists for (#10000 review P1).
+    """
+    import tortoise.hosted_api as ha
+    import tortoise.record_writer as rw
+
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u@h:1/db")
+    monkeypatch.setenv(rw.RECORD_ORG_ENV, "org-1")
+    monkeypatch.setenv(rw.RECORD_GRAPH_ENV, "g-1")
+    monkeypatch.setenv(rw.RECORD_SINGLE_TENANT_ENV, "1")
+    rw._close_live_breaker()
+
+    # The dict `_session_user_org` returns, verbatim in the fields that matter:
+    # no `graph_id`, no `graph_namespace`.
+    session_org = {"org_id": "org-1", "tier": "free",
+                   "dashboard_key_login": True}
+    assert ha._record_tenant_for_read(session_org) == ("org-1", "g-1"), (
+        "the session-JWT lane resolves no record tenant, so its transcript read "
+        "never asks the store that holds the turns and serves `turns: []`")
+
+    # And the two KEY lanes keep resolving the journal of the graph they open.
+    assert ha._record_tenant_for_read(
+        {"org_id": "org-1", "graph_id": "g-1",
+         "graph_namespace": "org-1_graph"}) == ("org-1", "g-1")
+    assert ha._record_tenant_for_read({"org_id": "org-1"}) == ("org-1", "g-1"), (
+        "the org-wide key lane — `_make_sdk(namespace=org_id)` — resolves no "
+        "journal, so its captures' turns are unreadable through the record")
+
+
+def test_a_shrunk_session_is_not_reported_as_a_missing_tail(sdk, monkeypatch):
+    """⛔ P2: the tail witness describes the LIVE id space, not its peak.
+
+    `record_read._shortfall` uses `turn_max_index` to see a refused HIGHEST turn,
+    and the capture writer used to keep the larger value because the same
+    property is the stale-turn sweep's bound. On the SHRINK path the two meanings
+    part: re-capturing 4 turns as 1 sweeps `_t1.._t3` from both stores and leaves
+    a COMPLETE transcript, while the peak still says the ids reach 3 — so every
+    read of that healthy session reported "the tail is missing", at WARNING, with
+    a graph query per read, and a real split-store divergence became
+    indistinguishable from a healthy session.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    proj = sdk._get_proj()
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "shrink-session", turns)
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_max_index",
+        params={"sid": "shrink-session"}).result_set
+    assert rows and rows[0][0] == 3, "the 4-turn capture left no id-space end"
+
+    # The SAME session, re-captured as ONE turn. The surplus is swept, so what the
+    # session now holds is `_t0` alone — and that is what it must declare.
+    _capture(sdk, "shrink-session", turns[0:1], session_existed=True)
+    live = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.turn_max_index",
+        params={"sid": "shrink-session"}).result_set
+    assert live and live[0][0] == 1, "the shrink did not move the window length"
+    assert live[0][1] == 0, (
+        "the id-space end still names the swept peak, so every read of this "
+        "healthy session reports 'the tail is missing'")
+    # The mark the DOORS hand the read is this live value (sess[12]), and the
+    # record's rows are the swept, complete window.
+    conn = _RlsConn(narrative=[(None, None, 0, 1)],
+                    turn_rows=[_turn_row(0, "[user] t0")])
+    answer = record_read.session_turns(
+        conn, org_id="org-1", graph_id="g-1", session_id="sess",
+        turn_max_index=live[0][1])
+    assert answer.answered, (
+        "a shrunk session that holds its whole transcript was reported partial: "
+        f"{answer.reason}")
+
+
+def test_the_fold_leaves_the_live_id_space_end_after_a_shrink(sdk, monkeypatch):
+    """The FOLD mirrors the live clause, so a rebuild cannot resurrect the peak.
+
+    A journal-only rebuild replays every `SessionRecorded` in order. With a
+    monotone-up CASE in the fold, replaying `tmi=3` then the shrink's `tmi=0` left
+    3 on a node the live write had left at 0 — so the tail witness lied AFTER a
+    rebuild and only after one, which is the hardest kind of divergence to
+    attribute (#10000 review P2).
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    proj = sdk._get_proj()
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "fold-shrink", turns)
+    _capture(sdk, "fold-shrink", turns[0:1], session_existed=True)
+    live = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_max_index",
+        params={"sid": "fold-shrink"}).result_set
+    assert live and live[0][0] == 0, "the live shrink left no id-space end"
+    # What a rebuild that cannot restore the property leaves behind.
+    proj.g.query("MATCH (s:Session {id:$sid}) REMOVE s.turn_max_index",
+                 params={"sid": "fold-shrink"})
+    events = [ev for ev in sdk._get_event_log().read_all()
+              if ev.get("type") == "SessionRecorded"
+              and ev.get("id") == "fold-shrink"]
+    assert len(events) >= 2, (
+        "the two captures did not both journal a SessionRecorded to replay")
+    for ev in events:
+        proj._fold_session_recorded(ev)
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.turn_max_index",
+        params={"sid": "fold-shrink"}).result_set
+    assert rows and rows[0][0] == 0, (
+        "the fold replayed the peak (got "
+        f"{rows[0][0] if rows else None!r}), so a rebuilt session reports a "
+        "healthy shrunk transcript as truncated")
