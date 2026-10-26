@@ -92,6 +92,12 @@ MIGRATIONS = [
     # `key_property` re-declared). A probe Postgres without it keys the semantic
     # layer by `name` while the read parses `id` from these files.
     "20261027000001_record_semantic_id_key.sql",
+    # #10017 R2's `public.point.cache_tier`. A COST probe above all others: the
+    # partial `idx_point_graph_tier` is the index the graph-tier read runs on,
+    # and a Postgres without the column sees a turn INSERT naming it fail with
+    # `UndefinedColumn` — a cost measured on a schema the read cannot write to is
+    # not the shipped figure.
+    "20261029000001_record_point_cache_tier.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

@@ -30,7 +30,7 @@
 > thing the purge exists to preserve, so `delete_point`'s `DELETE FROM public.point` would be the
 > wrong effect here. Without this record, a rebuild replays the `PointAdded` that created each turn
 > and resurrects everything the delete phase removed (`tortoise/log.py`'s RESURRECTION class, #3316).
-
+>
 > ⛔ **`ClaimStateChanged` is NOT an event type** (plan-review P1). Every claim
 > transition maps to one of the eleven concrete types above; **challenged is a
 > DERIVED condition** (NAND-operator-edge presence on a live point), not a

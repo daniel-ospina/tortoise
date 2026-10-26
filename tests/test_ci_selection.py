@@ -2687,6 +2687,16 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # longer holds. Measured on the pre-fix head: `_sel([<this path>])` ->
         # surfaces=[], full=False, BOTH readers absent.
         "supabase/migrations/20261027000001_record_semantic_id_key.sql",
+        # #10017 R2: the FORWARD migration that ADDS `public.point.cache_tier`
+        # (`ALTER TABLE public.point ADD COLUMN`) and re-declares the table's
+        # `props_no_derived` refusal. Both readers must run on a change to this
+        # file alone — `test_record_projection.py` reads its ALTER for the
+        # column set and its constraint for the refusal,
+        # `test_record_schema_placement.py` pins the record schema. Measured on
+        # the pre-fix head: `_sel([<this path>])` -> `surfaces: []`,
+        # `full: false`, both readers ABSENT, so adding the column and skipping
+        # the placement table would have merged with no guard running at all.
+        "supabase/migrations/20261029000001_record_point_cache_tier.sql",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)

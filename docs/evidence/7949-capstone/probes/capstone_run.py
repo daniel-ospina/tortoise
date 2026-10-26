@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:12389``, called at ``:11426``) →
+   (``sdk.py:12419``, called at ``:11456``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8356``) calls
    ``_edus_from_conversation`` (S0, ``:8467``), ``run_s1`` (S1, ``:8500``),
    ``run_s2`` (S2.1, ``:8524``), ``_run_vet_pass`` (S2.2, ``:8553``),

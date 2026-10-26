@@ -72,6 +72,13 @@ MIGRATIONS = [
     # probe Postgres without it keys Object/Subject by `name` while the shipped
     # read binds `id`. Applied here for the same reason as the tenancy file.
     "20261027000001_record_semantic_id_key.sql",
+    # #10017 R2's `public.point.cache_tier` (`ALTER TABLE public.point ADD COLUMN`
+    # + a CHECK, the `props_no_derived` re-declaration and a partial index). The
+    # shipped projection's turn INSERT now names the column, so this Postgres
+    # without it answers `UndefinedColumn` for every turn row the probe's
+    # capture writes — the schema the probe measures must be the one the read
+    # writes against.
+    "20261029000001_record_point_cache_tier.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 
