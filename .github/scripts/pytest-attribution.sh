@@ -132,9 +132,16 @@ fi
 # (`/tmp/pytest.log`) while the rc file next to it already moved to
 # `${RUNNER_TEMP:-/tmp}/pytest-rc`. A foreign writer that rewrites the file and stops
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
-# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}` (tracked
-# separately); the three signals below keep the KILL path — the one that produced the
-# "timeout flakes" — from being fooled.
+# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}`.
+#
+# ⚠️ STATUS: PARTIALLY APPLIED (2026-10-25). `python-ci.yml`'s `test` job — the fast
+# matrix, NINE legs, and the largest share of this failure — now passes
+# `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and therefore
+# per-job, since a runner runs one job at a time). For THAT job signals (1)-(3) are
+# now a backstop against a test that shells out to pytest, not the load-bearing
+# defence against a co-tenant. The other legs still write `/tmp/...` literals and
+# still need the same change; the three signals below keep the KILL path — the one
+# that produced the "timeout flakes" — from being fooled until they get it.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:
 #
