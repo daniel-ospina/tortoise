@@ -52,7 +52,7 @@ The run billed the **ambient** `DEEPSEEK_API_KEY` from the process environment, 
 (`tools/run-with-eval-keys.sh` is unusable here — the repo `.env` carries no provider key and the
 wrapper strips the ambient one; parent document §8.4).
 
-```
+```text
 DEEPSEEK_API_KEY  prefix=sk-fb2  len=35  sha256[:16]=b23361d221f8dff7
 ```
 

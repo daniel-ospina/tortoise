@@ -243,7 +243,7 @@ graded as a wrong answer.
 Measured with the official judge call shape (`n=1, temperature=0, max_tokens=10`) on the two DeepSeek
 ids, both arms, `probes/judge-call-shape-2026-10-25.log`:
 
-```
+```text
 === deepseek:deepseek-flash   extra=-                              content: ''   finish: length
       usage: {"completion_tokens": 10, "completion_tokens_details": {"reasoning_tokens": 10}}
 === deepseek:deepseek-v4-pro  extra=-                              content: ''   finish: length
@@ -305,7 +305,7 @@ provenance instead.
 
 `w7_publish` on `main@4c63488` printed:
 
-```
+```text
 [w7_publish] official_recall_all@5 = 0.78 (n=50)
 [w7_publish] receipt valid: True
 ```
