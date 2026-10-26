@@ -3704,3 +3704,39 @@ def test_the_target_tool_refuses_rather_than_pass_when_evidence_is_unreadable(
     assert rc == 1
     assert "::error::" in out and "REFUSED" in out, out
     assert "Traceback" not in out
+
+
+# --- #10044: the required lint IS the declaration's gate (property 13's own proof) -----
+# `cmd_check` is the ONLY required-CI reader of `tortoise/__all__.py` — `surface-guard.py`
+# never reads it, and `surface-target-check.py` runs with `continue-on-error`. Before this,
+# nothing tested that the call is still there: deleting it (or passing the wrong flag) left
+# every test green while the required job stopped enforcing the approved list at all.
+
+def test_the_required_lint_reds_on_a_declaration_that_is_not_the_owners_list(
+    tmp_path, monkeypatch, capsys
+):
+    from tools import sdk_surface_declaration as gate
+
+    sm = _load_manifest_tool()
+    real = gate.load_declaration()
+    padded = {**real, "__all__": [*real["__all__"], "probe_padded_method"]}
+
+    # NON-VACUITY FIRST: the real declaration passes this lint.
+    monkeypatch.setattr(gate, "load_declaration", lambda *a, **k: real)
+    assert sm.cmd_check(argparse.Namespace()) == 0, capsys.readouterr().out
+
+    monkeypatch.setattr(gate, "load_declaration", lambda *a, **k: padded)
+    rc = sm.cmd_check(argparse.Namespace())
+
+    out = capsys.readouterr().out
+    assert rc == 1, "the required lint passed a declaration padded with an unapproved method"
+    assert "probe_padded_method" in out, out
+
+    # And the mirror direction: dropping an approved binding reds too.
+    monkeypatch.setattr(
+        gate, "load_declaration", lambda *a, **k: {**real, "__all__": real["__all__"][1:]}
+    )
+    rc = sm.cmd_check(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert rc == 1, "the required lint passed a declaration missing an approved method"
+    assert "MISSING from __all__" in out, out

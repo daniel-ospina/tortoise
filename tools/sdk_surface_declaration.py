@@ -12,7 +12,7 @@ WHAT IT CHECKS
          the declaration the owner's list rather than a re-derivation.
       2. THE LIVE CLASS (`dir(TortoiseSDK)`, executed) — the migration gap.
          * a public SDK method that is NOT in `__all__`  ->  an ADDITION or backlog that the
-           approved surface does not cover (149 - 40 = 109 today);
+           approved surface does not cover (149 live − 9 approved-and-live = 140 today);
          * a name in `__all__` with NO `def` on the class   ->  an approved method that does
            not exist yet (30 today; `Tortoise` is the constructor and always resolves).
 
@@ -279,7 +279,7 @@ def check(
         return found
     if live is None:
         live = measure_live()
-    return found + gap_problems(declaration["__all__"], live)
+    return found + gap_problems(declaration["__all__"], live) + baseline_problem()
 
 
 def rendered_baseline(
@@ -314,9 +314,17 @@ def rendered_baseline(
         "|---|---|",
         f"| approved methods (the target) | {len(declared)} |",
         f"| live public methods on `TortoiseSDK` | {len(live)} |",
-        f"| approved and implemented (incl. the `Tortoise` constructor) | {len(approved_live)} |",
+        f"| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | {len(approved_live)} |",
         f"| approved but not implemented yet | {len(approved_absent)} |",
         f"| live and NOT approved (migration backlog) | {len(backlog)} |",
+        "",
+        "Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves",
+        "to `TortoiseSDK` (the only constructible entry point); it is not a method on it.",
+        "",
+        "`docs/product/beta-sdk-surface.md` states \"only four of the 40 exist in the current SDK\".",
+        "That sentence is STALE: nine exist, plus the constructor. It is recorded here rather than",
+        "edited there, because the approved document is the owner's ruling and this baseline is not",
+        "the place to amend it (#10044).",
         "",
         "## Approved but not implemented yet",
         "",
@@ -336,6 +344,27 @@ def rendered_baseline(
     lines += [f"- `{name}`" for name in backlog] or ["*(none)*"]
     lines.append("")
     return "\n".join(lines)
+
+
+def baseline_problem(path: Path | None = None) -> list[str]:
+    """Is the committed baseline document stale? A drifting baseline tracks nothing.
+
+    Called from `tools/surface_manifest.py check` too, so a PR that changes the SDK surface
+    without re-rendering `docs/product/sdk-surface-baseline.md` reds the required job
+    instead of silently leaving the gap understated.
+    """
+    path = Path(path or BASELINE_DOC)
+    try:
+        committed = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"the SDK-surface baseline {path} cannot be read: {exc}"]
+    if committed != rendered_baseline():
+        return [
+            f"the SDK-surface baseline {path} is STALE — re-render it with `uv run python "
+            "tools/sdk_surface_declaration.py baseline` (the gap it tracks would otherwise be "
+            "understated)"
+        ]
+    return []
 
 
 def cmd_check(args: argparse.Namespace) -> int:

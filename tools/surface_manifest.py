@@ -1133,7 +1133,7 @@ def build_doc(commit: str | None = None) -> dict:
     # than the gap: `tools/surface-guard.py` — the required gate that compares the live
     # class against these rows — is restored from the BASE REF in CI
     # (`.github/workflows/python-ci.yml` → `surface-guard`), so a baseline cut down to the
-    # 40 would red the required job on the 109 methods that still exist until Phase 2
+    # 40 would red the required job on the 140 live methods that still exist until Phase 2
     # removes them. So the baseline keeps describing reality, the `approved` flag makes the
     # gap visible per row, and the honest red lives in `tools/sdk_surface_declaration.py
     # check` + `tools/surface-target-check.py`. An unreadable declaration is still a REFUSAL:
@@ -2401,17 +2401,28 @@ def cmd_check(args: argparse.Namespace) -> int:
     # new workflow step, so the gate is enforced by the existing required job. (A separate
     # step was the first draft; it needs the `workflow` scope on the pushing credential,
     # and the enforcement does not.)
-    from tools import sdk_surface_declaration as declaration_gate
+    #
+    # ⚠️ THE RESIDUAL BYPASS, STATED: this half runs from the PR's OWN copy of this file. Only
+    # `tools/surface-guard.py` is restored from the base ref by CI (pinning this file too was a
+    # deadlock — see the workflow comment), so a PR that edits `tools/surface_manifest.py` can
+    # drop or neuter this call in the same commit. The pinned expansion gate still catches a new
+    # public SDK method; it cannot see a re-cut approved LIST. That gap is why the declaration
+    # half is also asserted by tests on every code change (#10044).
 
     # The CONTRACT half runs here, in the required `surface-guard` job: the declaration must
-    # still be the owner's exact 40, in both directions. The GAP half (109 live methods off
+    # still be the owner's exact 40, in both directions. The GAP half (140 live methods off
     # the surface + 30 approved but unimplemented, today) is deliberately NOT a required-CI
     # failure — a permanently red required job is a permanently ignored one, and the gap is
     # already red in `tools/sdk_surface_declaration.py check` and in
     # `tools/surface-target-check.py`. It is PRINTED here so a green job cannot be read as
     # "on target" (#10044).
+    from tools import sdk_surface_declaration as declaration_gate
+
     try:
         problems.extend(declaration_gate.check(contract_only=True))
+        # The gap document is a TRACKING artifact, so staleness IS a required-CI failure: a
+        # surface change that does not re-render it would leave the gap understated.
+        problems.extend(declaration_gate.baseline_problem())
         _declared = declaration_gate.load_declaration()["__all__"]
         _live = declaration_gate.measure_live()
     except declaration_gate.DeclarationUnreadable as exc:

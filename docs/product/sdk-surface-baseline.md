@@ -15,9 +15,17 @@
 |---|---|
 | approved methods (the target) | 40 |
 | live public methods on `TortoiseSDK` | 149 |
-| approved and implemented (incl. the `Tortoise` constructor) | 10 |
+| approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 10 |
 | approved but not implemented yet | 30 |
 | live and NOT approved (migration backlog) | 140 |
+
+Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
+to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
+
+`docs/product/beta-sdk-surface.md` states "only four of the 40 exist in the current SDK".
+That sentence is STALE: nine exist, plus the constructor. It is recorded here rather than
+edited there, because the approved document is the owner's ruling and this baseline is not
+the place to amend it (#10044).
 
 ## Approved but not implemented yet
 

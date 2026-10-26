@@ -19,9 +19,10 @@ What each test is for, and why the naive version of it would prove nothing:
      by the declaration's content, not by the test's other machinery.
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
-  5. **Today's state is RED, and pinned with the real numbers** (149 live, 109 off the
-     surface, 30 approved-but-absent). This is the honest reading of #4282; it goes green
-     when Phase 2 lands, not before.
+  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 149 live, 140
+     off the surface, 30 approved-but-absent). This is the honest reading of #4282; it goes
+     green when Phase 2 lands, not before — which is why the three live numbers carry an
+     explicit "update this premise" note instead of being restated from the declaration.
   6. **The CONTRACT half is green and is the required-CI invariant** — the declaration is
      still the owner's 40 — and it reds when the declaration is padded or a binding dropped.
   7. **The baseline document is generated, fresh, and says it is not the target.** The gap is
@@ -199,16 +200,18 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     off_surface = sorted(live - set(declared))
     absent = sorted(n for n in declared if not surface.resolves(n, live))
 
-    assert off_surface, "the gap has closed — update this test's premise (it pins the RED)"
-    assert absent, "the gap has closed — update this test's premise (it pins the RED)"
+    # The numbers are LITERALS, not restatements of the same set algebra: `|live − declared|`
+    # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
+    # verify nothing at all. Each literal carries its own premise note —
+    assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
+    assert len(live) == 149, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(off_surface) == 140, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 30, "the gap moved — update this premise (it pins today's gap)"
+    assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
     assert sum(1 for p in problems if "does NOT exist on TortoiseSDK" in p) == len(absent)
     assert len(problems) == len(off_surface) + len(absent)
-    # And the numbers are the ones the report states: 40 approved / 149 live / 109 off the
-    # surface / 30 approved-but-absent.
-    assert len(declared) == APPROVED_COUNT
-    assert len(off_surface) == len(live) - len([n for n in declared if n in live])
 
 
 def test_the_gate_is_NOT_always_red():
@@ -216,13 +219,15 @@ def test_the_gate_is_NOT_always_red():
 
     Without this, every failure above is satisfiable by a gate that always reds.
     """
-    declared = _declaration()["__all__"]
-    # The surface #4282 targets: every approved name, implemented — no surplus on the class.
-    surface_now = {n for n in declared if surface.resolves(n, _live())}
+    doc_names = surface.approved_from_doc()
+    # The surface #4282 targets, i.e. the shape Phase 2 produces: the owner's 40 are all
+    # implemented and NOTHING else is public. It MUST be green — without this, every failure
+    # above is satisfiable by a gate that always reds.
+    completed = set(doc_names)
 
-    declared_now = sorted(surface_now)
-    assert surface.contract_problems(declared_now, declared_now) == []
-    assert surface.gap_problems(declared_now, surface_now) == []
+    assert surface.problems(doc_names, completed, doc_names) == []
+    # ... and the same call on TODAY's live set is red, so the difference is the surface.
+    assert surface.problems(doc_names, _live(), doc_names) != []
 
 
 # ── 6. the contract half: the required-CI invariant ─────────────────────────────
@@ -386,5 +391,36 @@ def test_the_target_check_reads_the_sdk_target_from_the_declaration():
 
 
 def test_the_constructor_row_resolves_to_the_class():
-    """Row 1 of the approved table is the constructor, not a method on the class."""
+    """Row 1 of the approved table is `Tortoise(...)` — the class a caller constructs.
+
+    This pins the DOCUMENTED MAPPING, not a measurement: there is no `Tortoise` binding in the
+    package, and `resolves()` says so. The constructible entry point is `TortoiseSDK`, asserted
+    here so the mapping cannot drift into a claim about a symbol that does not exist.
+    """
+    from tortoise.sdk import TortoiseSDK
+
     assert surface.resolves(surface.CONSTRUCTOR, _live()) is True
+    assert callable(TortoiseSDK)
+    # ... and NOT because a `Tortoise` symbol exists on the class or in the package.
+    assert not hasattr(TortoiseSDK, surface.CONSTRUCTOR)
+    assert surface.CONSTRUCTOR not in _live()
+
+
+def test_loading_the_declaration_by_path_does_not_shadow_star_import():
+    """`tortoise/__all__.py` is a MODULE; importing it as `tortoise.__all__` would break
+    `from tortoise import *` for the rest of the process. The tools load it by PATH, so the
+    package attribute must stay absent — pinned here, because a future dotted import would
+    turn a working star-import into `TypeError: 'module' object is not iterable`.
+    """
+    import importlib
+
+    import tortoise
+
+    assert "__all__" not in vars(tortoise)
+    surface.load_declaration()  # the supported way to read it
+    assert "__all__" not in vars(tortoise)
+    # And the trap is real, not hypothetical — it is why the loader avoids the dotted name.
+    importlib.import_module("tortoise.__all__")
+    with pytest.raises(TypeError):
+        exec("from tortoise import *", {})  # proving the trap exists
+    delattr(tortoise, "__all__")
