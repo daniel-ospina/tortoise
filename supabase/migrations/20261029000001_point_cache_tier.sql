@@ -1,0 +1,67 @@
+-- #10017 R2 — declarative cache tier for `public.point`
+--
+-- §9.1 (D1) places raw turns OUTSIDE the graph (owner, 2026-09-23: "the same
+-- rule applies to raw turns … both of the two non-entity tiers live outside the
+-- graph"), and #10000 stops the capture writer minting turn nodes on a
+-- record-armed deployment. The RECORD, however, still holds those turns as
+-- `public.point` rows (that is what `record_read` serves).
+--
+-- `cache_projection.read_record_view` reads every row of every node table and
+-- `record_plan` plans a `MERGE` for each — so without a tier, `rebuild_from_record`
+-- would re-create the very turn nodes the journal rebuild correctly skips: two
+-- rebuild routes, two different graphs.
+--
+-- The tier is declared in the DATA, not in a reader: a predicate in one reader
+-- is the "hide, don't delete" shape #10017's ruling rejected, because the next
+-- reader written (an export, a second projection, a sibling tool) would not
+-- inherit it. `'graph'` is the default, so every existing row keeps exactly the
+-- behaviour it has today; the column is inert until a writer sets
+-- `'record_only'`.
+--
+-- ⚠️ `cache_tier` is ALSO added to the schema's own `props_no_derived` refusal
+-- below. `cache_projection._props_from_row` has three destinations and "no
+-- fourth": a column it can neither place nor refuse raises `UnknownRecordColumn`
+-- and would break cache projection for every tenant. The refusal is a PLACEMENT
+-- declaration (this column is not graph authority), not a claim that the value
+-- is derived.
+
+-- 1. The tier column.
+ALTER TABLE public.point
+  ADD COLUMN IF NOT EXISTS cache_tier text NOT NULL DEFAULT 'graph';
+
+ALTER TABLE public.point
+  DROP CONSTRAINT IF EXISTS chk_point_cache_tier;
+
+ALTER TABLE public.point
+  ADD CONSTRAINT chk_point_cache_tier
+  CHECK (cache_tier IN ('graph', 'record_only'));
+
+COMMENT ON COLUMN public.point.cache_tier IS
+  'Which store this row is for. ''graph'' = the record and the cache both hold '
+  'it. ''record_only'' = §9.1 tier: the record holds it, the graph must not '
+  '(owner 2026-09-23; #10017 R2). The cache projection skips record_only rows, '
+  'so rebuild_from_record and the journal rebuild agree.';
+
+-- 2. Refuse it as a `props` key — a forward re-declaration of the SAME
+--    constraint (append-only history: the CREATE TABLE is not edited), carrying
+--    the full set, since this REPLACES the table's refusal rather than adding to
+--    it at the SQL level. The set is read from the live parser
+--    (`refused_props_names()`) so it cannot drift from what the code believes.
+ALTER TABLE public.point
+  DROP CONSTRAINT IF EXISTS chk_point_props_no_derived;
+
+ALTER TABLE public.point
+  ADD CONSTRAINT chk_point_props_no_derived
+  CHECK (NOT (props ?| ARRAY[
+    '_graph_id', '_nid', 'baseline_set', 'c_cal', 'cache_tier', 'confidence',
+    'content_hash', 'ep_alpha', 'ep_beta', 'ep_dirty', 'ep_dirty_at',
+    'inherited_at', 'lastDreamedAt', 'posterior_alpha', 'posterior_beta',
+    'reason', 'version'
+  ]::text[]));
+
+-- 3. The read this column exists for: a tenant's graph-tier points. Partial, so
+--    the `record_only` rows (the highest-volume rows in the table) do not cost
+--    the cache projection a scan.
+CREATE INDEX IF NOT EXISTS idx_point_graph_tier
+  ON public.point (org_id, graph_id, node_key)
+  WHERE cache_tier = 'graph';
