@@ -33,16 +33,32 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
-> **§4.7 changelog entry (2026-10-26 — issue #9202 — the END's state is SETTLED, and the write door SHAPES or REFUSES):**
+> **Changelog v3.31 (2026-10-26 — issue #9202 — the END's state is SETTLED, and the write door SHAPES or REFUSES):**
 >
-> **Owner ruling, 2026-10-26 (Daniel Ospina), the spec text approved verbatim and now in §4.7.** This
-> entry records the model statement that replaces the sentence *"Whether that state should instead read
-> `unknown` / `open` is **#9202's owner decision** and is NOT settled by the gate"* — the gate question
-> that had been open since the 2026-10-20 coverage entry and the 2026-10-24 write-door entry below.
-> **The version line is unchanged (v3.30): the approved diff is the §4.7 paragraph, and that document's
-> CRITICAL RULE gates its own version/`updated:` lines, which this change does not carry.** A version
-> bump is therefore the owner's call, not this lane's; the missing bump is recorded here rather than
-> taken.
+> **Owner rulings, 2026-10-26 (Daniel Ospina): the spec text approved verbatim, then the STRUCTURE of where it
+> lives ruled on.** This entry records the model statement that replaces the sentence *"Whether that state
+> should instead read `unknown` / `open` is **#9202's owner decision** and is NOT settled by the gate"* —
+> the gate question that had been open since the 2026-10-20 coverage entry and the 2026-10-24 write-door
+> entry below — and records the second ruling that split ONE approved package into its three homes.
+> **`ONTOLOGY.md` is bumped v3.30 → v3.31** (a model change moves the version), the bump approved as its
+> own item because that document's CRITICAL RULE gates its own version/`updated:` lines. **This file carries
+> its own *"no modification without approval"* line; the 2026-10-26 ruling REQUIRES this entry and records
+> that this file is not gated** — stated here so the conflict is visible rather than assumed away.
+>
+> **Where this lives (the 2026-10-26 structure ruling — this is a MOVED change, not a re-decided one).**
+> `ONTOLOGY.md` is canonical and states the **model only**: the in-line §4.7 edit states that an end which is
+> stored but names no instant is an un-datable END reading `end_state: "unknown"`, that `END_KNOWN` means
+> **dated** not **present**, and that `END_OPEN` stays reserved for an ABSENT end. Everything that is
+> **agent-UX behaviour** — the marker vocabulary, the shape rule, the receipt, the refusal wording, and the
+> logging/counting — is annotated at the **decision site** (`validity.read_caller_end`,
+> `validity.END_UNKNOWN_MARKERS`, `validity.END_WRITE_OUTCOMES`, `sdk._shape_or_refuse_caller_end`,
+> `sdk._with_end_receipt`) and documented on the **tool surface** (`config/surface-manifest.yml`'s
+> `tortoise_create_point` / `tortoise_update_point` `job` cells, and the `valid_to_shaped` rows in
+> `docs/product/mcp-sdk-surface.md`). None of that text is new: it was already written at those homes, and
+> the ontology's copy of it is withdrawn rather than re-homed. The `agent-UX` paragraph that stood in §4.7
+> for one commit was 45 added lines (a marker catalogue, the receipt, the refusal narrative, the
+> logging sentence and a test-name catalogue); the in-line replacement is 20 lines, and every sentence withdrawn
+> from it is accounted for in the PR's triage table.
 >
 > **The model statement.** `END_KNOWN` now means **dated**, not **present**. `validity.end_state` gates
 > it on the bound's own orderability (`_names_an_instant`, the `_created_sort_key` measure
@@ -109,10 +125,12 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >
 > **Residuals, stated not fixed.** The unguarded `update_entity` Point arms remain a live route to a junk
 > end (#9649), and `supersede_point`'s numeric-`valid_from` kwarg exemption is not a caller `validTo`
-> write — so **the refusal is not airtight**, and §4.7 says so rather than letting a later reader
-> discover it. The new reply field is a field on the two existing write doors, not a new tool or public
-> SDK method; `tools/surface_manifest.py check` and `tools/surface-guard.py` both stay green, with the
-> field recorded in the manifest's `response_fields` block.
+> write — so **the refusal is not airtight**. That caution is stated at the decision site (the
+> `sdk._shape_or_refuse_caller_end` docstring) and here, not in §4.7: a residual is build state, and the
+> canonical model document does not carry scope caveats about its own tool surface. The new reply field is
+> a field on the two existing write doors, not a new tool or public SDK method; `tools/surface_manifest.py
+> check` and `tools/surface-guard.py` both stay green, with the field recorded in the manifest's
+> `response_fields` block.
 >
 > **Surface.** No tool or public method added, removed, or renamed. Two tool DESCRIPTIONS gained the
 > accepted-`validTo` documentation §2 requires, which moves their derived `job` cells in
@@ -125,10 +143,12 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > plus `test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`,
 > `test_an_un_datable_end_reads_unknown_and_fires_the_flags`,
 > `test_the_two_un_datable_spellings_stay_distinguishable` and
-> `test_the_un_datability_gate_does_not_widen_end_state` (§4.7 cites all four). The write-door pin was
-> **re-stated, never deleted**: under this ruling some of its rows are refused rather than stored, and a
-> "simplification" that drops the matrix drops the only thing that would catch a silent reversion to
-> verbatim storage.
+> `test_the_un_datability_gate_does_not_widen_end_state`. §4.7 cites ONE of the four —
+> `test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`, the coverage pin, in the
+> same single-pointer style as the START paragraph above it — because a catalogue of test names is a build
+> record, not the model. The write-door pin was **re-stated, never deleted**: under this ruling some of its
+> rows are refused rather than stored, and a "simplification" that drops the matrix drops the only thing that
+> would catch a silent reversion to verbatim storage.
 >
 > ⚠️ **Supersedes, in time order,** `## §4.7 — the write door says what an un-datable END means (#9202,
 > write-door half, 2026-10-24)` near the end of this file, which still reads *"the END's reported state is

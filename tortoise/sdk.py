@@ -6831,6 +6831,15 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
     named the START, and shaping it would re-open a reading it deliberately
     pinned. Only the END moved, and only because the owner re-decided it here.
 
+    ⚠️ **This binds the GUARDED caller doors only** (``create_point``,
+    ``update_point``), so the refusal is not airtight and §4.7 does not claim it
+    is: ``update_entity``'s Point arms remain an unguarded route to a junk end
+    (#9649), and ``supersede_point``'s numeric-``valid_from`` kwarg is
+    deliberately exempt (it is not a caller ``validTo`` write). The shape/refuse
+    rule, its vocabulary, its receipt and its count are stated HERE and in
+    ``validity.read_caller_end`` rather than in the canonical ontology: they are
+    write-door behaviour, not the model.
+
     Mutates ``props`` in place — ``validTo`` absent (``None``, which ``SET n +=
     $props`` removes) plus ``validToPrecision='unknown'`` — and returns the
     in-band RECEIPT (``{"sent": <token>, "validTo": None,

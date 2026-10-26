@@ -732,14 +732,25 @@ def test_reader_marker_on_the_search_wire_states_an_undatable_end(lane):
     The pure-function pin above builds the hit itself, so it would still pass
     if the search wire stopped carrying ``end_state``/``valid_to_precision``
     (the renderer would fall back or print the raw bound again). This reads
-    the marker off a hit ``create_point(validTo="TBD")`` produced through the
-    PUBLIC write and the scan decoration — the path the ask lane renders.
+    the marker off a hit produced by the PUBLIC write and the scan decoration —
+    the path the ask lane renders.
+
+    ⚠️ **The un-datable fixture is a PRE-2026-10-26 row, written directly** (#9202
+    merged after this pin was written): the shaping ruling makes
+    ``create_point(validTo="TBD")`` store the canonical un-datable form — no end
+    plus the declared marker — instead of the literal, so a LITERAL end on the
+    wire can now only come from a graph written before the ruling. Every
+    assertion below is unchanged: the renderer's contract is the same for both
+    spellings, which is the property this pin exists to protect.
     """
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
     un_datable = sdk.create_point("statement", "un-datable end",
-                                 validFrom="2024-01-01", validTo="TBD")
+                                 validFrom="2024-01-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'",
+        params={"i": un_datable["id"]})
     dated = sdk.create_point("statement", "dated end",
                              validFrom="2024-01-01", validTo="2024-06-01")
     hits = {r["id"]: r for r in _scan(sdk)}

@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.30"
+title: "Tortoise — Canonical Ontology v3.31"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-21
+updated: 2026-10-26
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.30
+# Tortoise — Canonical Ontology v3.31
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -700,51 +700,26 @@ window, independent of when Tortoise learned it. Canonical pair:
 > Pinned by `tests/test_validity_windows.py`
 > (`test_a_start_naming_no_instant_leaves_the_window_open`,
 > `test_restore_read_path_treats_falsey_but_present_valid_from_as_present` part b).
-> The END agrees on the **gate**, and the **state is settled** (#9202, owner
-> ruling of 2026-10-25, option B): an unorderable `validTo` bounds nothing —
+> The END agrees on the **gate**, and its **state is settled** (#9202, owner
+> ruling 2026-10-25, option B): an unorderable `validTo` bounds nothing —
 > `_covers` skips the arm, because ordering a value that names no instant answers
 > from a lexicographic comparison rather than from the data, so a probe that
 > itself names no instant is covered too (#9202's coverage half, #9408) — **and it
-> reports `end_state: "unknown"`**. A stored end that names no instant is an
-> **un-datable END**: the fact ended, at a time we cannot pin. It is the same
-> state the DECLARED marker (`validToPrecision = "unknown"` with no `validTo`)
-> produces, and it fires the same reply-level `end_state_unknown` /
-> `indeterminate_end_ids` flags, so a caller is told the window cannot be excluded
-> rather than being told it is still true. `END_KNOWN` therefore means **dated**,
-> not **present** — `validity.end_state` gates it on the bound's own orderability
-> (`_names_an_instant`, the `_created_sort_key` measure `effective_precision` and
-> `_covers` already order with), so the emitted triple cannot contradict itself
-> (`valid_to_precision: null` beside `end_state: "known"` is gone).
-> **`END_OPEN` stays reserved for an ABSENT end** — an end column carrying a value
-> is an ASSERTED end, so "no end was recorded" is a claim the record contradicts,
-> and reading a present-but-un-datable end as still-true is the fabricated-coverage
-> hazard this vocabulary exists to prevent (#2349/#2350).
-> A caller-supplied end is **read for intent on the way in**, on that same
-> orderability measure, and three kinds of input are told apart. **A value that
-> declares no date** — blank, or a human uncertainty marker (`TBD`, `TBA`, `TBC`,
-> `unknown`, `N/A`, `NA`, `-`, `--`, `—`, `?`; case- and whitespace-insensitive) —
-> is **shaped** into the canonical form: no end value plus the declared
-> un-datable marker, so the record says *ended, un-datable* instead of carrying
-> text no reader can order. **A value that attempts an instant and fails, or
-> carries no recoverable intent** — an impossible calendar day (`2026-02-30`), a
-> month 13, an epoch supplied as a string where the number would have named an
-> instant, arbitrary prose — is **refused**, naming the fault and the repair,
-> because the caller can almost certainly supply the right value next turn and a
-> silent guess would bury the mistake. Shaping is echoed in the write reply and
-> refusals list what the field accepts, so a caller learns the convention in-band;
-> both are logged and counted. A recognisable instant is accepted, and
-> representational variance is normalised without comment. Rows written before the
-> shaping keep their literal end and keep reading `end_state: "unknown"` — the read
-> path does not care which form a row carries. ⚠️ This binds the guarded caller
-> doors (`create_point`, `update_point`); the unguarded `update_entity` route
-> remains a live path to a junk end.
-> Pinned by `tests/test_validity_windows.py`
-> (`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`;
-> `test_an_un_datable_end_reads_unknown_and_fires_the_flags` — every spelling the
-> ruling names; `test_the_two_un_datable_spellings_stay_distinguishable`;
-> `test_the_un_datability_gate_does_not_widen_end_state` — the control set, so no
-> dated or absent end moves; and the write-door pins, **re-stated** for the
-> shaping and refusal paths).
+> reports `end_state: "unknown"`**. An end that is stored but names no instant is
+> an **un-datable END**: the fact ended, at a time we cannot pin — the same state
+> the DECLARED marker (`validToPrecision = "unknown"` with no `validTo`) produces,
+> firing the same reply-level `end_state_unknown` / `indeterminate_end_ids` flags,
+> so a caller learns the window cannot be excluded rather than that it is still
+> true. `END_KNOWN` therefore means **dated**, not **present**, gated by
+> `validity.end_state` on the bound's own orderability so that a bound and the
+> state reported for it cannot contradict each other; the reading depends on the
+> bound, never on how a row spells it. **`END_OPEN` stays reserved for an ABSENT
+> end**: an end column carrying a value is an **asserted** end, so "no end was
+> recorded" is a claim the record contradicts, and reading it as still-true is the
+> fabricated-coverage hazard this vocabulary exists to prevent (#2349/#2350).
+> Rationale and the ruling behind it: `ONTOLOGY-CHANGELOG.md`. Pinned by
+> `tests/test_validity_windows.py`
+> (`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`).
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
 above carries an **additive** precision layer: `validFromPrecision` /
@@ -754,8 +729,9 @@ above carries an **additive** precision layer: `validFromPrecision` /
 known** — the stored bound is unchanged, so `_created_sort_key` orders exactly
 what it always did — and a legacy bare-ISO bound with no precision property
 reads as `day` with **no migration**. The END is **three-valued**: `open`
-(`validTo` absent, no precision — still true), `known` (`validTo` present), and
-`unknown` (`validToPrecision = 'unknown'` with **no** `validTo` — the window
+(`validTo` absent, no precision — still true), `known` (`validTo` present and
+**dated**), and `unknown` (the declared `validToPrecision = 'unknown'` with **no**
+`validTo`, or a stored `validTo` that names no instant (§4.7); the window
 ended but at a time we cannot pin, so **no date is fabricated**). Every
 window-consuming read path emits the same `valid_from_precision` /
 `valid_to_precision` / `end_state` block through `validity.window_read_fields`,
