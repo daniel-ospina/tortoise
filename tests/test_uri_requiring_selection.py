@@ -81,10 +81,12 @@ from __future__ import annotations
 
 import copy
 import functools
+import io
 import os
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -124,6 +126,124 @@ def _carries_module_abort(src: str) -> bool:
     )
 
 
+_FSTRING_START = getattr(tokenize, "FSTRING_START", -1)
+_FSTRING_END = getattr(tokenize, "FSTRING_END", -1)
+_TRIVIAL_TOKENS = frozenset(
+    {tokenize.NEWLINE, tokenize.NL, tokenize.ENDMARKER, tokenize.INDENT,
+     tokenize.DEDENT, tokenize.COMMENT}
+)
+
+
+def _code_only(src: str) -> str:
+    """`src` with COMMENTS and STANDALONE-STATEMENT strings removed.
+
+    The tripwire's question is "can this helper abort a collection?". Prose
+    cannot: a docstring or a comment that DESCRIBES an abort — which
+    `tests/_live_gate.py` and `tests/conftest.py` both do, because explaining
+    the collection class is their whole job — aborts nothing. Matching raw text
+    made the tripwire red on the DOCUMENTATION of the very defect it guards: a
+    false block, and a guard that reds correct work is one that gets laundered
+    around rather than obeyed.
+
+    The exemption is NARROW on purpose. Only a string that IS a whole statement
+    (a docstring, or any bare string expression) is prose. Every other literal
+    stays, because a literal can be the MECHANISM: `pytest.skip(reason,
+    **{"allow_module_level": True})` carries the keyword name as a string, and so
+    does `exec("pytest.skip('x', allow_module_level=True)")`. Collapsing ALL
+    literals — the first version of this helper — made the tripwire miss both of
+    those, which the raw-text predicate it replaced had caught. That is a
+    fail-open regression in a guard, measured by a differential run, and it is
+    the reason this predicate removes prose rather than normalising data.
+
+    The `**_kwargs` shape is not hypothetical: this file's own module docstring
+    lists `**_KW forwarding` among the shapes review cycles found, so a helper
+    may legitimately spell the abort that way.
+
+    The line structure is preserved — exactly one output line per input line,
+    with the line-ending tokens dropped rather than re-emitted — because the
+    broad half below exempts `except` / `import` / `from` LINES, and each kept
+    token is written back at its ORIGINAL COLUMN, so a construct's adjacency
+    survives. A single space join would turn `pytest.skip(...)` into
+    `pytest . skip ( ...` and silently stop `_POSITIONAL_SKIP_RE` matching.
+
+    Untokenizable input falls back to `src` unchanged. That is the conservative
+    direction: this predicate is used to REFUSE.
+
+    RESIDUALS, declared rather than covered. A mechanism that spells its own
+    class inside a string and CALLS it dynamically — `raise getattr(unittest,
+    "SkipTest")(...)` — is still seen as the string it is (the literal is kept),
+    so it remains flagged; what is invisible is only a spelling whose NAME the
+    guard would have to interpret, which is outside the calibration list it
+    implements (`allow_module_level`, a `raise …SkipTest`, and
+    `pytest.skip(reason, True)`). Conversely a user-facing MESSAGE that quotes
+    one of those spellings verbatim inside a non-statement string is treated as
+    data and does flag — which is why the live gate's message does not quote it.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return src
+
+    # Pair each f-string opening with its closing token so a dropped f-string
+    # statement takes its whole group with it (3.12+ tokenizes the interior).
+    fstring_end: dict[int, int] = {}
+    stack: list[int] = []
+    for i, tok in enumerate(tokens):
+        if tok.type == _FSTRING_START:
+            stack.append(i)
+        elif tok.type == _FSTRING_END and stack:
+            fstring_end[stack.pop()] = i
+
+    dropped: set[int] = set()
+    at_stmt_start = True
+    i = 0
+
+    def _follows_with_newline(end: int) -> bool:
+        """True when the statement ends right after `end` — i.e. it is bare."""
+        j = end + 1
+        while j < len(tokens) and tokens[j].type in (tokenize.COMMENT,
+                                                     tokenize.NL):
+            j += 1
+        return j < len(tokens) and tokens[j].type == tokenize.NEWLINE
+
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.type in _TRIVIAL_TOKENS:
+            if tok.type in (tokenize.NEWLINE, tokenize.NL):
+                at_stmt_start = True
+            i += 1
+            continue
+        at_stmt_start_here = at_stmt_start
+        at_stmt_start = False
+        if tok.type == _FSTRING_START:
+            end = fstring_end.get(i, i)
+        elif tok.type == tokenize.STRING:
+            end = i
+        else:
+            i += 1
+            continue
+        if at_stmt_start_here and _follows_with_newline(end):
+            dropped.update(range(i, end + 1))
+        i = end + 1
+
+    placed: dict[int, list[tuple[int, str]]] = {}
+    last_row = 1
+    for i, tok in enumerate(tokens):
+        last_row = max(last_row, tok.end[0])
+        if i in dropped or tok.type in _TRIVIAL_TOKENS:
+            continue
+        placed.setdefault(tok.start[0], []).append((tok.start[1], tok.string))
+    out: list[str] = []
+    for row in range(1, last_row + 1):
+        buf = ""
+        for col, text in sorted(placed.get(row, [])):
+            if col > len(buf):
+                buf += " " * (col - len(buf))
+            buf += text
+        out.append(buf)
+    return "\n".join(out)
+
+
 def _references_skip_mechanism(src: str) -> bool:
     """The tripwire's predicate: BROADER than `_carries_module_abort`.
 
@@ -134,14 +254,19 @@ def _references_skip_mechanism(src: str) -> bool:
     `raise(unittest.SkipTest(...))` in a helper aborts collection identically.
     Only bare `except` / `import` / `from` lines are exempt, so a legitimate
     handler is not read as an abort mechanism.
+
+    Both halves run on `_code_only(src)`, so the predicate is broad over
+    MECHANISMS and blind to PROSE — see `_code_only` for why prose is not a
+    mechanism and why the placeholder is `_` rather than nothing.
     """
-    if _carries_module_abort(src):
+    code = _code_only(src)
+    if _carries_module_abort(code):
         return True
-    for line in src.splitlines():
-        code = line.split("#", 1)[0].strip()
-        if "SkipTest" not in code:
+    for line in code.splitlines():
+        line = line.strip()
+        if "SkipTest" not in line:
             continue
-        if code.startswith(("except", "import ", "from ")):
+        if line.startswith(("except", "import ", "from ")):
             continue
         return True
     return False
@@ -374,6 +499,61 @@ def test_tripwire_is_broader_than_the_candidate_filter() -> None:
         "try:\n    run()\nexcept unittest.SkipTest:\n    pass\n"
     )
     assert not _references_skip_mechanism("from unittest import SkipTest\n")
+
+
+def test_tripwire_reads_code_not_prose() -> None:
+    """A helper that DESCRIBES an abort is not a helper that PERFORMS one.
+
+    The tripwire's question is "can this helper abort a collection?". Prose
+    cannot: a docstring, a comment, or a bare string expression quoting
+    `pytest.skip(..., allow_module_level=True)` aborts nothing. Matching raw
+    text made the tripwire red on `tests/_live_gate.py` and `tests/conftest.py`
+    for exactly that reason — those files exist to EXPLAIN the collection class,
+    so they must name it — which is a false block, and a guard that reds correct
+    work is one that gets laundered around rather than obeyed.
+
+    The exemption is NARROW, and that half is pinned too. A DATA string is not
+    prose: `pytest.skip(reason, **{"allow_module_level": True})` carries the
+    keyword name as a literal, and so does `exec("pytest.skip('x',
+    allow_module_level=True)")`. A version of `_code_only` that collapsed EVERY
+    literal lost both — plus the positional abort, whose reason is itself the
+    literal `_POSITIONAL_SKIP_RE` matches — while the suite stayed green. Each
+    of those is asserted below so the regression cannot come back silently.
+    """
+    for prose in (
+        '"""pytest.skip(..., allow_module_level=True) is decided during '
+        'COLLECTION, so no item exists."""\n',
+        "# a raise unittest.SkipTest(...) gate would abort the module here\n",
+        '"""a\nb\nallow_module_level\n"""\n',
+        'f"{name}: allow_module_level=True"\n',
+    ):
+        assert not _references_skip_mechanism(prose), prose
+    # CODE, in every abort form the guard's own calibration names.
+    assert _references_skip_mechanism(
+        "pytest.skip('no db', allow_module_level=True)\n"
+    )
+    assert _references_skip_mechanism("pytest.skip('no db', True)\n")
+    assert _references_skip_mechanism("raise unittest.SkipTest('no db')\n")
+    # …and the DATA-STRING forms, which a blanket literal collapse loses. The
+    # `**_KW` shape is listed in this file's own module docstring among the
+    # spellings review cycles found, so it is not hypothetical.
+    assert _references_skip_mechanism(
+        "_KW = {'allow_module_level': True}\npytest.skip('no db', **_KW)\n"
+    )
+    assert _references_skip_mechanism(
+        "pytest.skip('no db', **{'allow_module_level': True})\n"
+    )
+    assert _references_skip_mechanism(
+        "exec(\"pytest.skip('no db', allow_module_level=True)\")\n"
+    )
+    # The two files this fix exists for: the gate's own module and conftest name
+    # the collection spelling in PROSE and must stay OFF the offender set. Named
+    # explicitly so a future narrowing of `_code_only` cannot quietly re-red them.
+    for path in (TESTS / "_live_gate.py", TESTS / "conftest.py"):
+        src = path.read_text(encoding="utf-8")
+        assert not _references_skip_mechanism(src), path
+        # ...and the prose really is why: the raw text DOES carry the spelling.
+        assert _carries_module_abort(src), path
 
 
 def test_nodeid_parsing_is_not_fooled_by_skip_summary_lines() -> None:

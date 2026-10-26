@@ -219,7 +219,7 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 MANIFEST_HEADER = (
     "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.\n"
     "#\n"
-    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today (149)\n"
+    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today\n"
     "# because the required `surface-guard` job compares the live class against them and is run\n"
     "# from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The\n"
     "# APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row\n"
@@ -1146,7 +1146,7 @@ def build_doc(commit: str | None = None) -> dict:
     # than the gap: `tools/surface-guard.py` — the required gate that compares the live
     # class against these rows — is restored from the BASE REF in CI
     # (`.github/workflows/python-ci.yml` → `surface-guard`), so a baseline cut down to the
-    # 40 would red the required job on the 140 live methods that still exist until Phase 2
+    # 40 would red the required job on the 138 live methods that still exist until Phase 2
     # removes them. So the baseline keeps describing reality, the `approved` flag makes the
     # gap visible per row, and the honest red lives in `tools/sdk_surface_declaration.py
     # check` + `tools/surface-target-check.py`. An unreadable declaration is still a REFUSAL:
@@ -2431,7 +2431,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # required job executed the PR's own edited gate with none of its proofs having run.
 
     # The CONTRACT half runs here, in the required `surface-guard` job: the declaration must
-    # still be the owner's exact 40, in both directions. The GAP half (140 live methods off
+    # still be the owner's exact 40, in both directions. The GAP half (138 live methods off
     # the surface + 30 approved but unimplemented, today) is deliberately NOT a required-CI
     # failure — a permanently red required job is a permanently ignored one, and the gap is
     # already red in `tools/sdk_surface_declaration.py check` and in
