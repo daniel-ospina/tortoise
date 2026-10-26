@@ -851,17 +851,22 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "pass (#5333)."
     )
     # The OTHER half of the same claim, and the one `_ABSENT_WRITER_CLAIM`
-    # cannot enumerate (#10069 review, fourth round): the target paragraph
-    # read *"No first-class producer or lifecycle transition writes
+    # cannot enumerate (#10069 review, fourth and fifth rounds): the target
+    # paragraph read *"No first-class producer or lifecycle transition writes
     # `archived`"*. That is FALSE — a pack-declared status fold IS a
-    # lifecycle transition, and `status_folds.py` validates a fold's status
+    # lifecycle transition, and `status_folds.py:25` validates a fold's status
     # only against the DECLARING kind's `statuses` ("a kind that declares a
     # lifecycle OWNS its state"), so a pack declaring `archived` writes it.
     # It is also self-contradicting: the same subsection says the population
     # `may have been` placed `by a pack-declared status fold`. The absolute
     # carries none of the guard's spellings ("transition writes"), so it is
-    # pinned the other way round — by the QUALIFIER's presence, scoped to the
-    # one paragraph that owns it: drop either half and this reds.
+    # pinned the other way round — by the two EXISTING WRITERS the claim must
+    # name. ⚠️ The axis matters: `tortoise_update_entity` (`tool_registry.py`)
+    # IS core-shipped and IS the writer, so a provenance qualifier
+    # ("core-shipped") is false about this repo and must not be pinned; the
+    # breadth that holds is purpose-built-ness. Scoped to the claim CLAUSE
+    # (sentence start → `declares it terminal`), so dropping EITHER named
+    # writer reds — a paragraph-scoped check would stay green on the pair.
     target_lines = [
         line for line in section.splitlines()
         if line.startswith("**The target, if a relocation is ever authorised")
@@ -872,16 +877,27 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "the passage stating what a relocation writes has no home (#5333)."
     )
     target = target_lines[0].lower()
-    assert "core-shipped" in target and "pack-declared status fold" in target, (
-        "the target paragraph's no-writer claim must be SCOPED to core-shipped "
-        "producers AND name the pack-fold exception in the same paragraph. "
-        "Unqualified ('no first-class producer or lifecycle transition "
-        "writes `archived`') it is refuted by `_fold_object_status`, which "
-        "writes whatever status the declaring kind's vocabulary names — so a "
+    claim_start = target.find("**no purpose-built producer")
+    claim_end = target.find("declares it terminal", claim_start + 1)
+    assert claim_start != -1 and claim_end > claim_start, (
+        "the target paragraph's no-writer claim is gone or unrecognisable — "
+        "it must open 'No purpose-built producer writes `archived`, and no "
+        "`_ALLOWED_TRANSITIONS` transition does' and run to the map's "
+        "`declares it terminal` entry (#10069 review P2)."
+    )
+    claim = target[claim_start:claim_end]
+    assert "generic unvalidated" in claim and "pack-declared status fold" in claim, (
+        "the no-writer claim must name BOTH writers that exist — the generic "
+        "unvalidated `update_entity` path and a pack-declared status fold — "
+        "in the same clause. Unqualified it is refuted by this repo in two "
+        "directions: by `_fold_object_status` (a fold writes whatever status "
+        "the declaring kind's vocabulary names) and by "
+        "`tortoise_update_entity` itself (`tool_registry.py`), which is "
+        "core-shipped and reaches the store with no vocabulary check — so a "
         "lane enumerating the already-`archived` population (a stated "
-        "precondition of any relocation) would leave pack folds out of the "
-        "scan and undercount a population this passage calls UNMEASURED "
-        "(#10069 review P2)."
+        "precondition of any relocation) would leave one or both writers out "
+        "of the scan and undercount a population this passage calls "
+        "UNMEASURED (#10069 review P2)."
     )
     lowered = section.lower()
     assert "_allowed_transitions" in lowered, (
