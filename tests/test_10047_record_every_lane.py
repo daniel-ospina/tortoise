@@ -161,12 +161,23 @@ def test_an_org_with_no_default_row_installs_nothing(monkeypatch):
 
 
 def test_the_selfhost_lane_never_reaches_the_control_plane(monkeypatch):
-    """The self-host deployment has no control plane: do not call one."""
+    """The self-host deployment has no control plane: do not call one.
+
+    The probe MUST raise something the helper's own ``except Exception`` cannot
+    swallow (``tortoise/hosted_api.py`` wraps ``get_control_plane()`` in that
+    block), or this test cannot fail: a plain ``AssertionError`` would be
+    caught, logged and turned into the same ``return`` a working guard takes,
+    so deleting the guard would leave ``sink == []`` and the test GREEN.
+    ``pytest.fail`` raises ``Failed``, which derives from ``BaseException`` —
+    the same device ``_LaneStopped`` uses above — so a regression escapes to the
+    caller and reds. Verified by mutation: with
+    ``if not is_supabase_enabled(): return`` deleted, this test fails.
+    """
     monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
 
-    def _boom():  # pragma: no cover — reached only on a regression
-        raise AssertionError("the self-host lane must not read the control "
-                             "plane for a record tenant")
+    def _boom():
+        pytest.fail("the self-host lane must not read the control plane for a "
+                    "record tenant")
 
     monkeypatch.setattr(supabase_control, "get_control_plane", _boom)
     sink: list[tuple[str, str]] = []
