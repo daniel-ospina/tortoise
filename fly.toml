@@ -215,8 +215,13 @@ kill_timeout = 30
   # the manifest's route for non-secret versioned `[env]` config, and declaring
   # it is what makes (a) a Fly SECRET of this name fail the drift gate as a
   # shadow, and (b) `check-fly-machine-env.py` assert the RUNNING machine
-  # actually carries `off` — the #4568 class, where this value could silently
-  # revert to `strict` and re-break every hosted graph mint with nothing red.
+  # actually carries `off` — the #4568 class, where this declared value could
+  # silently revert in production with nothing red. What that costs if lost is
+  # the DECLARATION, not availability: a refusal is a `denied` result, never a
+  # rollback, so a hosted mint succeeds under `strict` too. Losing `off` just
+  # turns each mint back into a per-graph `ACL` attempt that is refused and
+  # reported as `denied` instead of `absent_by_design` — wasted round trips and a
+  # report that misnames the reason — with no gate turning red.
   TORTOISE_ACL_LAYER = "off"
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
   # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded
