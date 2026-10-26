@@ -97,9 +97,11 @@ MIGRATIONS = [
     # read shape is raw SQL — so it does not exercise the tier predicate; the
     # reason for the entry is the one every neighbouring entry gives: the row
     # width and `pg_total_relation_size` figures it measures must be the SHIPPED
-    # schema's. Both differ here: the column adds ~6 B/row, and the PARTIAL INDEX
-    # is inside `pg_total_relation_size`, so a re-run measures a larger
-    # footprint than `rho-bench.log` recorded (see its basis note).
+    # schema's. Both differ here, and the FOOTPRINT delta is the INDEX, not the
+    # column: the partial index is inside `pg_total_relation_size` (+97.2 B/row),
+    # while the column's `NOT NULL DEFAULT 'graph'` costs 6 B/row of row width and
+    # is absorbed by page slack. Measured twice: `rho-bench.log`'s basis note and
+    # daniel-ospina/tortoise#10070, comment 6426999081.
     "20261029000001_record_point_cache_tier.sql",
 ]
 

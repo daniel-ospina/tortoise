@@ -1902,25 +1902,39 @@ uv run python docs/evidence/7983-cost-magnitudes/probes/graph_content_census.py
 
 **`ρ` — its DENOMINATOR (the disk line) is a measured value; of the three non-storage lines, IOPS and egress are PRICED but conditional on a miss RATE no tenant exists to provide (both are $0 below their step), and the compute tier is a DENSITY assumption.** Bench: a throwaway `postgres:16` carrying the **committed** record migrations (`2026101200000{1..4}_record_*.sql` + `20261014000001`), **TWO tenants** planted at §17.4.2's stock (**89,701 nodes each**, so the per-tenant figure below is the measured total ÷ 2 and not an extrapolation), with the content width and vector share taken from the dogfood graph — `graph-content-census.json`, measured 2026-10-17 at this same commit: **4,145 / 10,374 = 39.96%** of Points carry a vector, and content is planted at the graph's MEASURED distribution — **1,121.4 B over the 49.0% of Points that carry any** (5,696,946 ÷ 1,121.4 = 5,080 of 10,374), **549.1 B over ALL of them** (5,696,946 ÷ 10,374). ⚠️ **Those are two different populations and the footprint needs the second**: `avg()` skips NULLs, so applying the carrying mean to every node would overstate the row by the dominant column (content is ~85% of a carrying row). Reads measured with `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`; **blocks are exact and deterministic across both runs**, milliseconds are a range over two runs on a shared-CPU container with default settings (this is an accounting bench, not a vendor benchmark). ⛔ **AND THE READ SHAPE MATTERS: `EXPLAIN (ANALYZE)` on `SELECT *` sends its tuples to a dummy receiver that never runs an OUTPUT function, so a TOASTed column stays an 18-byte pointer and its TOAST heap is never read — a 14.5× undercount of a rebuild.** The quoted figures therefore come from the DETOASTING shape a real reader pays (`octet_length(t::text)`, i.e. the row converted to text exactly as a text-mode client fetch does), with the heap-only number beside it labelled as the undercount:
 
-⚠️ **BASIS (2026-10-26, #10017):** these figures were cut on a schema WITHOUT
-`public.point.cache_tier` and its partial index `idx_point_graph_tier`. The probe's
-migration list is pinned EQUAL to `record_projection.RECORD_MIGRATIONS`, so a
-re-run includes both — and would land OUTSIDE the band below. Measured on
-postgres:16 by re-running this probe's own plant with and without the migration:
-`pg_total_relation_size(public.point)` 347,193,344 → **364,634,112 B**, i.e.
-**+4.55%**, and **2,136 → ≈2,234 B/node** on disk.
+⚠️ **BASIS (2026-10-26, #10017):** these figures were cut on a record schema
+WITHOUT `public.point.cache_tier` and `idx_point_graph_tier`. The probe's migration
+list is pinned EQUAL to `record_projection.RECORD_MIGRATIONS`, so a re-run includes
+both and no longer measures the figures below.
 
-⛔ The delta is the INDEX, not the column: `idx_point_graph_tier` is 17,448,960 B
-= **97.2 B/row** — the exact size `point_pkey` takes on the same rows, and the
-whole +17,440,768 B. The column's `NOT NULL DEFAULT 'graph'` costs 6 B/row in ROW
-WIDTH (`pg_column_size` 1,487 → 1,493) and is absorbed by page slack in the
-footprint; the heap even measures 90,112 B SMALLER. A note that blamed the column
-and called it "+3-4%" would send a reader to the wrong scalar AND a re-run outside
-its own stated band.
+**Measured delta — artifact: daniel-ospina/tortoise#10070, comment 6426999081.**
+Two arms of this probe's own `plant()` on postgres:16 (the "without" arm required
+editing the pinned list; the output is NOT committed):
 
-The figures below remain a correct measurement of the schema that existed on the
-date they were cut. They are not the schema today: re-run the probe before
-quoting them as current.
+| | without | with |
+|---|---|---|
+| per-tenant FOOTPRINT | 191,643,648 B · 2,136 B/node | 200,364,032 B · ≈2,234 B/node (**+4.55%**) |
+| `public.point` alone | 347,193,344 B | 364,634,112 B (**+5.02%**) |
+
+⛔ TWO BASES, and confusing them is the easy error: +4.55% / 2,234 B/node is the
+per-tenant FOOTPRINT (what the logged line below sums); +5.02% is `public.point`
+on its own. And the delta is the **INDEX**, not the column: `idx_point_graph_tier`
+is 17,448,960 B (97.2 B/row, the same size `point_pkey` takes on these rows)
+against a 17,440,768 B net — the 8,192 B difference is one page of rounding. The
+column costs 6 B/row of ROW WIDTH (`pg_column_size` on ONE content-carrying row,
+1,487 → 1,493; NOT the n=2,000 distribution this log reports as 1,263/1,423) and
+is absorbed by page slack in the footprint — the heap measures 90,112 B smaller.
+
+**What inherits it, and is NOT restated below:** disk `$0.0240 → ≈$0.025046`/tenant/
+month; `ρ` at 1,000 tenants `3.55 → ≈3.39`; `ratio` 609/365 → ≈582/349 and every
+break-even and `f = 1` multiplier; "1.28× the cache" → ≈1.34×; 40 tenants of stock
+`7.66 → 8.01 GB` (so the 40-tenant row is now PAST the 8 GB allowance, and the
+crossing is `41.8 → 39.9 tenants`, which flips the "the marginal byte costs $0 at
+40 tenants" reading).
+
+The figures below remain a correct measurement of the schema as of the date they
+were cut (2026-10-17). They are not today's schema, and the derived numbers above
+are not corrected here.
 
 | `ρ`'s line | measured | base / denominator |
 |---|---|---|
