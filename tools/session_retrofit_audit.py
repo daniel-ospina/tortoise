@@ -890,8 +890,11 @@ def _cmd_retrofit(args) -> int:
         print(f"graph: {report['graph']}")
         print(f"  sessions total          : {report['sessions']}")
         print(f"  (a) capture_ok=true, short turn count : "
-              f"{report['short_turn_count']['capture_ok_true']} "
-              f"(of {report['short_turn_count']['candidates_measured']} measured)")
+              + (f"{report['short_turn_count']['capture_ok_true']} "
+                 f"(of {report['short_turn_count']['candidates_measured']} measured)"
+                 if report['short_turn_count'].get('retro_quantifiable')
+                 else "NOT MEASURABLE here — "
+                      f"{report['short_turn_count'].get('reason') or ''}"))
         print(f"  (b) capture_ok=true (ordering-ambiguous upper bound): "
               f"{report['ordering_ambiguous']['sessions']} — "
               f"retro_quantifiable="

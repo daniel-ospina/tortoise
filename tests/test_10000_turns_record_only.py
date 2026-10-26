@@ -726,6 +726,14 @@ def test_the_endpoint_and_the_sdk_read_the_same_store():
     re-points one and not the other reddens here: the SDK still walked
     `CONTAINS -> Point {pointKind:'event'}` and served `turn_points: []` for
     every session on an armed deployment while the endpoint served the record.
+
+    The UNION half is pinned the same way, and it has to be: a door that serves
+    the record's rows ALONE when the record answered partially is the truncation
+    the short-answer leg above forbids, one layer up (#10000 review P1). The SDK
+    door is pinned FUNCTIONALLY below (`test_a_partially_refused_capture_is_served_
+    from_both_stores`); the hosted door's body is an async route over a live
+    projection, so its half is pinned structurally here — a revert to
+    record-only reds because `merge_turn_payloads` leaves the function.
     """
     import inspect
 
@@ -738,6 +746,9 @@ def test_the_endpoint_and_the_sdk_read_the_same_store():
         assert "session_turns" in src or "_record_turn_answer" in src, (
             f"{name} does not consult the record's turn read — it serves the "
             "graph's turn nodes, which do not exist once the record holds them")
+        assert "merge_turn_payloads" in src, (
+            f"{name} serves ONE store's rows: a partial record answer must be "
+            "merged with the other store's, not served instead of them")
     assert "_record_turn_answer" in sdk_src
 
 

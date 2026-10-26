@@ -649,7 +649,8 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
     The report never prints a class it did not measure: an empty graph is
     reported as 0 of 0 candidates, and the ordering class carries
     ``retro_quantifiable: False`` plus its reason rather than a number that
-    would read like an attribution.
+    would read like an attribution. The short-turn class carries the same
+    marker when the turns are RECORD rows (see :func:`_graph_cannot_count_turns`).
     """
     total = int(g.query("MATCH (s:Session) RETURN count(s)").result_set[0][0])
 
@@ -657,29 +658,69 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
     # capture window held); the Session's episodic, non-operator event members
     # are what the graph HOLDS. `capture_ok` is reported beside it so a reader
     # can see the class the epic named without a second query.
-    short_rows = g.query(
-        "MATCH (s:Session) WHERE s.turn_count IS NOT NULL "
-        "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
-        "  WHERE t.pointKind = 'event' AND t.is_episodic = true "
-        "WITH s, count(t) AS stored_turns "
-        "WHERE stored_turns < s.turn_count "
-        "RETURN s.id, s.turn_count, stored_turns, s.capture_ok, "
-        "       s.capture_extractor, s.harness, s.capture_lane "
-        "ORDER BY s.id"
-    ).result_set
-    measured = int(g.query(
-        "MATCH (s:Session) WHERE s.turn_count IS NOT NULL RETURN count(s)"
-    ).result_set[0][0])
-    short_all = [
-        {"id": r[0], "turn_count": r[1], "stored_turns": r[2],
-         "capture_ok": r[3], "capture_extractor": r[4], "harness": r[5],
-         "capture_lane": r[6]}
-        for r in short_rows
-    ]
-    short_ok = [r for r in short_all if r["capture_ok"] is True]
+    #
+    # ⛔ THAT COMPARISON IS ONLY EVIDENCE WHILE THE GRAPH IS THE TURN STORE. On an
+    # armed deployment #10000 moved the turns into the record and the writer
+    # writes NO turn node (`sdk._write_capture_turns`), so `count(t)` is 0 for
+    # every session captured since arming: the diagnostic that exists to detect a
+    # SHORT transcript would report `stored_turns = 0 < turn_count = N` for
+    # sessions stored perfectly — a 100% false positive on healthy data, which
+    # trains its reader to ignore the class. It is reported NOT MEASURABLE
+    # instead, with no graph count issued for it; the honest figure lives in the
+    # record (§9.1/D1) and belongs to #10000's measurement step.
+    unmeasurable = _graph_cannot_count_turns()
+    if unmeasurable is not None:
+        short_block: dict[str, Any] = {
+            "candidates_measured": 0,
+            "capture_ok_true": 0,
+            "all_short": 0,
+            "turns_missing": None,
+            "sample": [],
+            "sample_limit": AUDIT_SAMPLE_LIMIT,
+            "sample_truncated": False,
+            "retro_quantifiable": False,
+            "reason": unmeasurable,
+        }
+    else:
+        short_rows = g.query(
+            "MATCH (s:Session) WHERE s.turn_count IS NOT NULL "
+            "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
+            "  WHERE t.pointKind = 'event' AND t.is_episodic = true "
+            "WITH s, count(t) AS stored_turns "
+            "WHERE stored_turns < s.turn_count "
+            "RETURN s.id, s.turn_count, stored_turns, s.capture_ok, "
+            "       s.capture_extractor, s.harness, s.capture_lane "
+            "ORDER BY s.id"
+        ).result_set
+        measured = int(g.query(
+            "MATCH (s:Session) WHERE s.turn_count IS NOT NULL RETURN count(s)"
+        ).result_set[0][0])
+        short_all = [
+            {"id": r[0], "turn_count": r[1], "stored_turns": r[2],
+             "capture_ok": r[3], "capture_extractor": r[4], "harness": r[5],
+             "capture_lane": r[6]}
+            for r in short_rows
+        ]
+        short_ok = [r for r in short_all if r["capture_ok"] is True]
+        short_block = {
+            "candidates_measured": measured,
+            "capture_ok_true": len(short_ok),
+            "all_short": len(short_all),
+            "turns_missing": sum(
+                int(r["turn_count"]) - int(r["stored_turns"])
+                for r in short_all),
+            "sample": short_all[:AUDIT_SAMPLE_LIMIT],
+            "sample_limit": AUDIT_SAMPLE_LIMIT,
+            "sample_truncated": len(short_all) > AUDIT_SAMPLE_LIMIT,
+            # The graph DOES hold these turns, so the comparison it makes is
+            # evidence about this store (#10000's armed branch sets it False).
+            "retro_quantifiable": True,
+        }
 
     # (b) the ordering class. See RETROFIT_VERDICTS — the upper bound is the
-    # set of records a re-computation could disagree with.
+    # set of records a re-computation could disagree with. `capture_ok` lives on
+    # the Session node, which #10000 did not move, so this stays measurable on
+    # an armed deployment too.
     ambiguous = int(g.query(
         "MATCH (s:Session) WHERE s.capture_ok = true RETURN count(s)"
     ).result_set[0][0])
@@ -719,17 +760,7 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
     return {
         "graph": graph,
         "sessions": total,
-        "short_turn_count": {
-            "candidates_measured": measured,
-            "capture_ok_true": len(short_ok),
-            "all_short": len(short_all),
-            "turns_missing": sum(
-                int(r["turn_count"]) - int(r["stored_turns"])
-                for r in short_all),
-            "sample": short_all[:AUDIT_SAMPLE_LIMIT],
-            "sample_limit": AUDIT_SAMPLE_LIMIT,
-            "sample_truncated": len(short_all) > AUDIT_SAMPLE_LIMIT,
-        },
+        "short_turn_count": short_block,
         "ordering_ambiguous": {
             "sessions": ambiguous,
             "retro_quantifiable": False,
@@ -743,6 +774,40 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
             "sample_truncated": len(links) > AUDIT_SAMPLE_LIMIT,
         },
     }
+
+def _graph_cannot_count_turns() -> str | None:
+    """Why a graph turn count is not evidence here — or ``None`` if it is.
+
+    #10000's store decision is a CAPABILITY question (`record_writer.
+    record_holds_turns`, the ONE declaration the capture writer itself asks):
+    where the writer would put a capture's turns in the record, this graph holds
+    no turn node for it, so counting turn nodes measures the migration rather
+    than the transcript.
+
+    ⛔ ``journal_configured=True`` is passed deliberately, and it is the one
+    assumption here. This audit runs in the OPERATOR's process and cannot see
+    the journal of the process that captured the sessions it reads — so the rule
+    biases toward "not measurable", which is the safe direction: a class that
+    says it could not measure is visible and actionable, while a number derived
+    from a store that no longer holds the turns reads as a finding and trains its
+    reader to ignore the whole audit. The unarmed case is unaffected (nothing is
+    armed, so the graph is still the turn store and the count is evidence).
+    """
+    try:
+        from tortoise.record_writer import record_holds_turns, record_tenant
+
+        if record_holds_turns(journal_configured=True, durable=True,
+                              tenant=record_tenant()):
+            return (
+                "the turns are RECORD rows on this deployment (#10000): the "
+                "capture writer puts them in the record and writes no turn "
+                "node, so a graph count would report every session as short. "
+                "The figure lives in the record's own turn rows "
+                "(`record_read.session_turns`), not in this graph."
+            )
+    except Exception:  # pragma: no cover - an import/env failure is "not armed"
+        return None
+    return None
 
 
 def iter_declared_properties() -> Iterable[str]:
