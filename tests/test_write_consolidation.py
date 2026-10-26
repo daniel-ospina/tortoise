@@ -527,8 +527,20 @@ class TestMcpHandlers:
         nid = r["node"]["id"]
         u = tortoise_update(nid, props={"tier": "gold"})
         assert "error" not in u and u.get("tier") == "gold"
+        # #9660 (owner ruling): delete is preview-then-confirm. The first call
+        # returns a token and CHANGES NOTHING; only the second call, carrying
+        # that token, destroys the node. The protocol's own depth lives in
+        # tests/test_deletion_confirmation.py — here it is exercised end to end
+        # through the real handlers, so the round-trip cannot silently regress
+        # to "deleted on the first call".
         d = tortoise_delete(nid)
-        assert d.get("deleted") is True and d.get("id") == nid
+        assert "error" not in d, d
+        assert d.get("dry_run") is True, d
+        assert d.get("deleted") is not True, d
+        token = d.get("confirmation")
+        assert token, d
+        confirmed = tortoise_delete(nid, confirmation=token)
+        assert confirmed.get("deleted") is True and confirmed.get("id") == nid
 
     def test_tortoise_operator_action_mitigate_requires_reason(self):
         from tortoise.mcp_server import tortoise_operator_action
