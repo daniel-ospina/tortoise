@@ -1133,8 +1133,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
             # makes that window one request long.
             #
             # Safe to WRITE on an auth path: this runs only on the miss, the
-            # mint is idempotent and convergent (a concurrent request loses on
-            # `uq_graphs_org_name_active` and adopts the winner's row), and it
+            # mint is idempotent and convergent (a concurrent writer loses on
+            # `uq_graphs_org_default_active` — the partial unique index
+            # `20261028000001` creates on (org_id) WHERE kind='default' AND
+            # status<>'deleted', or on `uq_graphs_org_name_active` when it
+            # already holds the name — and then adopts the winner's row), and it
             # can never fail the request — `record_tenant_for` still refuses
             # rather than guesses. Same posture as `update_last_used` below
             # ("a telemetry write must NEVER gate authentication").
@@ -1224,6 +1227,37 @@ def _graph_namespace_for(cp, org_id: str, graph_id: str | None,
     return rows[0]["namespace"] if rows else None
 
 
+#: Last time (monotonic) the default-row READ failure was logged, per org.
+#:
+#: #10025 review F4. The mint's retry register (:data:`_DEFAULT_ROW_MINT_RETRY`)
+#: bounds the WRITE attempt, but the READ in :func:`default_graph_id_for` runs
+#: first on every org-wide request — so on a broken/un-migrated `graphs` table
+#: that WARNING fired once per authenticated request, which is exactly the
+#: unbounded log volume the retry window was written to prevent, on the very
+#: channel the #10025 diagnosis depended on. The window is shared with the mint
+#: so the two cannot drift apart.
+#:
+#: ⚠️ This suppresses the LOG only. The read and its fail-closed ``None`` are
+#: unchanged: the tenant stays unnamed and the write stays refused every time,
+#: and a row that appears by any other route is still picked up immediately.
+_DEFAULT_ROW_READ_WARNED: dict[str, float] = {}
+
+
+def _warn_default_row_read_failed(org_id: str, exc: BaseException) -> None:
+    """Log a default-row read failure once per org per retry window (#10025 F4)."""
+    now = time.monotonic()
+    last = _DEFAULT_ROW_READ_WARNED.get(org_id)
+    if last is not None and (now - last) < _DEFAULT_ROW_MINT_RETRY_S:
+        _logger.debug(
+            "graphs default-row read failed for org %s (already reported; the "
+            "record tenant stays unnamed): %s", org_id, exc)
+        return
+    _DEFAULT_ROW_READ_WARNED[org_id] = now
+    _logger.warning(
+        "graphs default-row read failed — the record tenant stays unnamed "
+        "(fail-closed; migration 20261028000001 applied?): %s", exc)
+
+
 def default_graph_id_for(cp, org_id: str) -> str | None:
     """The org's DEFAULT graph's stable id (#10025), or None (fail-closed).
 
@@ -1249,9 +1283,7 @@ def default_graph_id_for(cp, org_id: str) -> str | None:
                      ("status", "eq", "active")],
         )
     except Exception as e:
-        _logger.warning(
-            "graphs default-row read failed — the record tenant stays unnamed "
-            "(fail-closed; migration 20261028000001 applied?): %s", e)
+        _warn_default_row_read_failed(org_id, e)
         return None
     return rows[0]["id"] if rows else None
 
@@ -4036,11 +4068,15 @@ def ensure_default_graph_row(cp, org_id: str,
     ⚠️ Those guards are read-then-write, so they are idempotent SEQUENTIALLY
     only. Two concurrent calls for one org — a client retry, or provisioning
     racing an operator re-run of ``20261028000001`` — can both pass them and
-    both insert; the loser collides on ``uq_graphs_org_name_active`` and then
-    ADOPTS the winner's row (the convergent arm below, the same one
-    :func:`set_graph_name` uses) rather than 500ing a request whose org is
-    fine. A collision with any OTHER graph is impossible here: the name-
-    collision guard above already returned ``None`` for it.
+    both insert; the loser raises on ``uq_graphs_org_default_active`` (the
+    partial unique index ``20261028000001`` creates on (org_id) WHERE
+    kind='default' AND status<>'deleted' — the guarantee that two ACTIVE
+    default rows cannot exist, which every ``rows[0]`` reader in this module
+    assumes) or on ``uq_graphs_org_name_active``, and then ADOPTS the winner's
+    row (the convergent arm below, the same one :func:`set_graph_name` uses)
+    rather than 500ing a request whose org is fine. A collision with any OTHER
+    graph is impossible here: the name-collision guard above already returned
+    ``None`` for it.
 
     ⛔ RAISES on a failed insert, deliberately — that is THIS function's
     contract, and :func:`insert_graph`'s: a mint must not claim success for an
@@ -4397,13 +4433,14 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
         # kind == 'default' → fall through: the default path renames THIS row and
         # never writes `namespace`. The caller NAMED a row above (and it is
         # known to be this org's ACTIVE default), so the PATCH targets THAT id —
-        # never a re-resolved `rows[0]`. ⚠️ Two `kind='default'` rows are
-        # POSSIBLE (a tombstone beside an active one), but only defensively: the
-        # partial unique index is on `(org_id, name)` so it does not forbid the
-        # pair, yet `soft_delete_graph` refuses `kind='default'`, so no
-        # supported path produces the tombstone — which is why the migration
-        # treats the shape as defensive too. It is still reachable by raw SQL /
-        # ops, and a fresh read returns the two in unspecified order, so a
+        # never a re-resolved `rows[0]`. ⚠️ A TOMBSTONED `kind='default'` row can
+        # sit beside this active one: `uq_graphs_org_default_active`
+        # (`20261028000001` step 0) forbids two NON-DELETED default rows per org,
+        # and its `status <> 'deleted'` predicate deliberately leaves the
+        # tombstone pair legal — `soft_delete_graph` refuses `kind='default'`, so
+        # no supported path mints the tombstone, but the migration's guard would
+        # mint a second active row if one existed, and raw SQL / ops can leave
+        # one behind. A fresh read returns the two in unspecified order, so a
         # re-resolve could PATCH the row nobody resolved, still return True, and
         # leave the visible rename unapplied.
         named_default_row_id: str | None = graph_id
@@ -4413,10 +4450,12 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
         # that MUST resolve the row.
     # Default graph: rename the existing ACTIVE kind='default' display row,
     # else upsert one (namespace = the ORG graph name — never the display
-    # name). The `status` filter is load-bearing: a tombstoned default row
-    # beside an active one is POSSIBLE (defensively — `soft_delete_graph`
-    # refuses `kind='default'`, so no supported path mints the tombstone, but
-    # `20261028000001`'s guard would mint a second row if one existed), and
+    # name). The `status` filter is load-bearing: a TOMBSTONED default row
+    # beside an active one stays legal (`uq_graphs_org_default_active` only
+    # forbids two non-deleted rows; `soft_delete_graph` refuses
+    # `kind='default'`, so no supported path mints the tombstone, but
+    # `20261028000001`'s guard would mint a second active row if one existed),
+    # and
     # `graph_metadata`/`default_graph_id_for` read ACTIVE only — PATCHing
     # `rows[0]` blind would accept the rename (True, HTTP 200) and then never
     # show it.
@@ -4509,9 +4548,10 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
         return True
     # Default graph: read an ACTIVE kind='default' row (upsert on set). ACTIVE
     # for the same reason `set_graph_name` filters it: a tombstoned default row
-    # plus a minted active one is a legal pair, and every reader of the default
-    # graph reads active only — writing the override onto the tombstone would
-    # return True and change nothing anyone can see.
+    # plus a minted active one is a legal pair (`uq_graphs_org_default_active`
+    # only forbids two NON-DELETED default rows per org), and every reader of the
+    # default graph reads active only — writing the override onto the tombstone
+    # would return True and change nothing anyone can see.
     rows = cp.query(
         "graphs", select=["id"],
         filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
@@ -4576,10 +4616,13 @@ def count_graph_keys(cp, org_id: str, graph_id: str) -> int:
     """Active (non-revoked) api_keys bound to a graph — the key_count
     source for GET /v1/graphs (surface 5).
 
-    #2306: only ever called with a CUSTOM graph's row id. The default row's
-    id is the DERIVED literal 'default' (never a graphs.id — api_keys.graph_id
-    REFERENCES graphs(id)), so this seam can never match a default-row count
-    and the list short-circuits kind='default' rows to 0 before reaching it.
+    #2306: only ever called with a CUSTOM graph's row id. Guarded on the row's
+    # KIND, not structurally: since #10025 the default row HAS a real
+    # `g_<16hex>` id that `api_keys.graph_id` (FK to graphs(id)) COULD
+    # reference, so it is the `kind == 'default'` short-circuit in the list seam
+    # that keeps a default-row count at 0 — not the FK. This seam is never
+    # reached for one, and an org-wide row counted under a graph id would be a
+    # number the Graphs tab cannot act on.
     Org-wide rows (graph_id NULL) are the keys that RESOLVE to the default
     graph; they are counted nowhere on a graph row (managed on the API-Keys
     tab) — do NOT special-case 'default' here to count them. #2481: revoked tombstones are

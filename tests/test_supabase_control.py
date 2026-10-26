@@ -18,7 +18,10 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-from tortoise.auth import lookup_hash  # noqa: I001
+# Module import (not a name): the `fake` fixture resets #10025's module-global
+# registers so `query_count` pins do not depend on test order.
+from tortoise import supabase_control  # noqa: I001
+from tortoise.auth import lookup_hash
 from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
 from tortoise.supabase_control import (
     ClaimError,
@@ -144,6 +147,20 @@ def fake() -> FakeControlPlane:
     # The invitation-seam tests use team-1 (with a generous member cap for
     # the accept quota gate, PR #864 review P2); FREE_TEAM serves the
     # resolve/session tests.
+    #
+    # #10025: the auth-path self-heal's failure register is MODULE-GLOBAL and
+    # keyed by org_id, with a 300 s window. FREE_TEAM has no `graph_name`, so
+    # the first org-wide resolve in the process records `team-free-001` and
+    # every later one skips the mint's three guard reads — which makes any
+    # `query_count` pin below depend on whether a peer FILE (e.g.
+    # `test_hosted_api.py`, which sorts first) already resolved that org.
+    # Measured red: `pytest test_hosted_api.py::TestRestAttributionE2E2600::
+    # test_b1_supabase_key_create_point_carries_actor test_supabase_control.py
+    # ::TestResolveApiKey::test_session_key_resolves_via_api_keys` →
+    # `assert 3 == 6`. Clear it so the documented single-process run
+    # (`uv run pytest tests/`) is order-independent.
+    supabase_control._DEFAULT_ROW_MINT_RETRY.clear()
+    supabase_control._DEFAULT_ROW_READ_WARNED.clear()
     return FakeControlPlane({
         "api_keys": [],
         "org_memberships": [],
@@ -3127,14 +3144,15 @@ class TestGraphLifecycleSeam:
         """#2306 (supabase structural half of the lane-consistency pin): the
         default row's key_count is 0 BY CONSTRUCTION — the keys that resolve
         to the default graph are the TEAM-WIDE rows (graph_id NULL, managed
-        on the API-Keys tab), and api_keys.graph_id REFERENCES graphs(id)
-        with the default row's id being the DERIVED literal 'default' (never
-        a graphs.id), so no api_keys row can reference it. count_graph_keys
-        for 'default' stays 0 with team-wide keys present; even a real
-        kind='default' graphs row (recording-override upsert — its own g_ id)
-        with a raw-bound key is invisible to the literal 'default' count. The
-        list seam (#2306) additionally short-circuits default-kind rows to 0
-        before any lane count runs."""
+        on the API-Keys tab). Since #10025 the default row HAS a real
+        `g_<16hex>` id that `api_keys.graph_id` COULD reference, so the guard
+        is the row's KIND (the list seam short-circuits `kind='default'` to 0
+        before any lane count runs), not the FK. count_graph_keys
+        for the literal 'default' stays 0 with team-wide keys present; even a
+        real kind='default' graphs row (recording-override upsert — its own
+        g_ id) with a raw-bound key is invisible to the literal 'default'
+        count. The list seam (#2306) additionally short-circuits default-kind
+        rows to 0 before any lane count runs."""
         self._seed_team(fake)
         fake.seed("api_keys", [
             {"id": "tw1", "org_id": "team-c2-001", "lookup_hash": "h1",

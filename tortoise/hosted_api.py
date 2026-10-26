@@ -22578,11 +22578,12 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
             continue  # tombstones not listed (C2 D5; C7 may add with_deleted)
         # #2306: the DEFAULT graph has no per-graph keys — its key_count is
         # ALWAYS 0, in BOTH lanes, so the two lanes can never disagree about
-        # the default row again. Supabase enforces this structurally
-        # (api_keys.graph_id REFERENCES graphs(id): the default row's id is
-        # the DERIVED literal 'default', never a graphs.id, so no api_keys
-        # row can reference it — org-wide rows are graph_id NULL and the
-        # keys that RESOLVE to the default graph are exactly those rows,
+        # the default row again. GUARDED ON `kind`, not structurally: since
+        # #10025 the default row HAS a real `g_<16hex>` id a key column COULD
+        # reference, so the `kind == 'default'` short-circuit below (and
+        # `_ensure_graph_exists`'s kind guard) is what holds key_count at 0 —
+        # the FK alone no longer does. Org-wide rows are graph_id NULL and
+        # the keys that RESOLVE to the default graph are exactly those rows,
         # managed on the API-Keys tab, never counted on a graph row). The
         # registry kind='default' node is equally not key-bindable
         # (_ensure_graph_exists 404s default-kind mints) — counting APIKey

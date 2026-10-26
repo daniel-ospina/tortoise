@@ -23,6 +23,8 @@ NOT retired under existing consumers, and a rename cannot move identity.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tortoise.record_writer import record_tenant_for
@@ -115,6 +117,20 @@ def test_graph_bound_key_still_names_its_own_graph() -> None:
     {"org_id": "org-1", "graph_id": None, "default_graph_id": ""},
     {"org_id": "org-1", "graph_id": None, "default_graph_id": 17},  # wrong type
     {"graph_id": None, "default_graph_id": DEFAULT_ROW_ID},    # no org
+    # Review F2(a): a PRESENT but unusable `graph_id` must refuse — it must
+    # never fall through to the org default, which would widen a
+    # graph-bound credential into an org-wide one. Pinned WITH a valid
+    # `default_graph_id` present, because that is the only shape that can
+    # tell the two behaviours apart: without it, an implementation that
+    # fell through would return `None` too and the pin would be silent.
+    {"org_id": "org-1", "graph_id": "", "default_graph_id": DEFAULT_ROW_ID},
+    {"org_id": "org-1", "graph_id": 17, "default_graph_id": DEFAULT_ROW_ID},
+    # Review F2(b): the `"default"` SENTINEL is not a `public.graphs.id`
+    # (`g_<16hex>`), so filing under it would produce a row the record's FK
+    # rejects. The shape is reachable in production: the org-list payload's
+    # `default_graph_id` carries exactly this sentinel (`hosted_api`'s graphs
+    # listing), so the refusal in `record_tenant_for` is load-bearing.
+    {"org_id": "org-1", "graph_id": None, "default_graph_id": "default"},
 ])
 def test_an_unnameable_tenant_still_refuses(credential: dict) -> None:
     """Fail-closed: no usable row ⇒ None ⇒ `no_tenant`, never a guess."""
@@ -164,6 +180,30 @@ def test_default_graph_id_is_none_without_a_row_or_on_a_read_failure() -> None:
     assert default_graph_id_for(_FakeCP(tables={"graphs": []}), "org-1") is None
     assert default_graph_id_for(
         _FakeCP(fail={"graphs": "relation does not exist"}), "org-1") is None
+
+
+def test_a_broken_read_logs_once_per_org_but_still_refuses(caplog) -> None:
+    """Review F4: the read's failure log is bounded; the FAIL-CLOSED is not.
+
+    The mint's retry window bounds the WRITE attempt, but this READ runs first
+    on every org-wide request, so an unbounded WARNING here re-created the very
+    log flood the window was written to prevent (all production keys are
+    org-wide). Rate-limiting the log must never soften the refusal: every call
+    still returns ``None`` ⇒ ``no_tenant``, and a healing row is still picked
+    up on the next call with no window to wait out.
+    """
+    cp = _FakeCP(fail={"graphs": "relation does not exist"})
+    with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+        for _ in range(3):
+            assert default_graph_id_for(cp, "org-f4") is None
+    warnings = [r for r in caplog.records
+                if r.levelname == "WARNING" and "default-row read failed" in r.message]
+    assert len(warnings) == 1, [r.message for r in caplog.records]
+    # Per-ORG, not global: a peer org's breakage is still reported.
+    with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+        assert default_graph_id_for(cp, "org-f4-peer") is None
+    assert any("default-row read failed" in r.message and r.levelname == "WARNING"
+               for r in caplog.records)
 
 
 # ── 3. The sentinel is not retired; the real id rides beside it ─────────────
@@ -283,9 +323,12 @@ def test_a_failed_mint_cannot_hard_delete_the_default_graph() -> None:
 # ── 5b. A rename targets the ACTIVE default row, never a re-resolved `rows[0]` ─
 #
 # A tombstoned `kind='default'` row and an active one CAN coexist — the partial
-# unique index is on `(org_id, name) WHERE status <> 'deleted'`, so the index
-# does not forbid it and `20261028000001`'s `status = 'active'` guard mints a
-# second row when the only row it can see is not active. ⚠️ No SUPPORTED path
+# unique indexes are `(org_id, name) WHERE status <> 'deleted'` and, since
+# `20261028000001` step 0, `(org_id) WHERE kind='default' AND status <>
+# 'deleted'`; the second one forbids two NON-DELETED default rows per org but
+# deliberately leaves the tombstone pair legal, and the migration's
+# `status = 'active'` guard mints a second active row when the only row it can
+# see is not active. ⚠️ No SUPPORTED path
 # produces the tombstone: `soft_delete_graph` refuses `kind='default'`, which is
 # why the migration treats the shape as defensive rather than normal. It is
 # reachable by raw SQL / ops, and that is enough: PostgreSQL returns the two in
@@ -641,3 +684,77 @@ def test_a_mint_that_cannot_succeed_is_not_retried_on_every_request() -> None:
                         "name": "default", "kind": "default",
                         "status": "active", "namespace": "org_org-1"}])
     assert resolve_api_key(cp, key)["default_graph_id"] == "g_healed"
+
+
+# ── 6. The BACKFILL half: it cannot abort the deploy, and "one default row"
+#       is a database invariant rather than an assumption ──────────────────
+#
+# Both arms below are SQL, so they are read from the shipped file (the same
+# convention the migration gates use) rather than executed: `20261028000001`
+# runs on a LIVE deployment, and the failure it could cause — aborting the whole
+# migration file, i.e. the backfill for EVERY organization — is not one a
+# Python test can observe after the fact.
+
+_MIGRATION = (Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+              / "20261028000001_graphs_default_row_stable_id.sql")
+
+
+def _migration_statements() -> list[str]:
+    """Top-level statements, comment-stripped.
+
+    `--` comments are removed FIRST because the header quotes prose containing
+    semicolons; splitting raw text would cut a comment in half and silently
+    re-join it with a statement.
+    """
+    body = "\n".join(line.split("--", 1)[0]
+                     for line in _MIGRATION.read_text().splitlines())
+    return [s.strip() for s in body.split(";") if s.strip()]
+
+
+def test_the_backfill_cannot_abort_the_deploy_on_a_concurrent_insert() -> None:
+    """The backfill's guards are a READ-THEN-WRITE, and the writers are live.
+
+    `NOT EXISTS` is evaluated at the statement's snapshot; PostgreSQL does not
+    re-check it at index-insertion time, and Supabase applies a migration file in
+    ONE transaction. The deployment it runs against contains production code
+    that inserts exactly this row for exactly the orgs it is about to insert for
+    (`ensure_default_graph_row` on a first API-key request, `set_graph_name` /
+    `set_graph_recording` on a rename or a recording toggle). A commit landing in
+    that window raises `uq_graphs_org_name_active` and takes the whole backfill
+    down with it, so the guard set is incomplete without an `ON CONFLICT` arm:
+    the conflict IS the row the statement wanted to create.
+    """
+    inserts = [s for s in _migration_statements()
+               if "INSERT INTO public.graphs" in s]
+    assert len(inserts) == 1, f"expected one backfill INSERT, got {len(inserts)}"
+    assert "ON CONFLICT DO NOTHING" in inserts[0], (
+        "the backfill has no ON CONFLICT arm, so a concurrent mint during the "
+        f"deploy aborts the migration for every org: {inserts[0]}")
+
+
+def test_one_non_deleted_default_row_per_org_is_a_database_invariant() -> None:
+    """Four readers take `rows[0]` of an UNORDERED query and call the result
+    "the org's default row": `default_graph_id_for` (the record tenant for every
+    org-wide credential), `graph_metadata`'s `stable_id`, `ensure_default_graph_row`
+    and both `set_graph_*` writers. `uq_graphs_org_name_active` keys on the NAME,
+    so it permits two ACTIVE `kind='default'` rows whose names differ — which the
+    writes themselves can produce (a rename stores the user's chosen name, the
+    mint stores 'default'). The tenant would then depend on heap order.
+
+    The predicate is `status <> 'deleted'` on purpose: the TOMBSTONE-beside-active
+    pair stays legal, because `20261028000001`'s own `status = 'active'` guard —
+    and `ensure_default_graph_row`'s — mint a fresh active row when the only
+    default row they can see is not active.
+    """
+    indexes = [s for s in _migration_statements()
+               if "CREATE UNIQUE INDEX" in s
+               and "uq_graphs_org_default_active" in s]
+    assert len(indexes) == 1, (
+        f"the (org_id) default-row invariant is not enforced: {indexes}")
+    stmt = " ".join(indexes[0].split())
+    assert "ON public.graphs (org_id)" in stmt, stmt
+    assert "kind = 'default'" in stmt, stmt
+    assert "status <> 'deleted'" in stmt, (
+        "the index must leave the tombstone-beside-active pair legal — a "
+        f"tighter predicate would forbid the shape two readers mint: {stmt}")
+    assert "status = 'active'" not in stmt, stmt

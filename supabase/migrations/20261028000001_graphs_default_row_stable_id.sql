@@ -37,8 +37,53 @@
 -- same shape `set_graph_name` mints (`g_{uuid4().hex[:16]}`), and idempotency
 -- is expressed as *existence* (below), never as a reproducible value.
 
+-- ── 0. The invariant the readers already assume, made structural ─────────
+-- `default_graph_id_for`, `graph_metadata` (`stable_id`), `ensure_default_graph_row`
+-- and `set_graph_name` / `set_graph_recording` all take "the org's default row"
+-- as SINGULAR and read `rows[0]` of an UNORDERED query. Nothing in the schema
+-- said so: the only uniqueness on this table is `uq_graphs_org_name_active`
+-- (org_id, name) WHERE status <> 'deleted', which permits two ACTIVE
+-- `kind='default'` rows as long as the two NAMES differ — and they can: a
+-- rename writes the user's chosen name onto a `kind='default'` row, while the
+-- mint writes `'default'`. Two active rows make the record tenant depend on
+-- heap order, i.e. one credential filing some requests under one graph and some
+-- under another, which is the very "two answers to one question" class this
+-- change closes one level up.
+--
+-- The predicate is `status <> 'deleted'` (not `status = 'active'`) so the shape
+-- the readers treat as DEFENSIVE stays legal: a tombstone BESIDE an active row
+-- (see step 1's first guard, which mints a fresh active row when the only
+-- default row it can see is not active). Only two NON-DELETED rows are
+-- forbidden, which is exactly the pair no reader can disambiguate.
+-- `status` has no CHECK constraint but IS `NOT NULL DEFAULT 'active'`, so the
+-- NULL-as-active case the readers allow for stays inside the predicate.
+--
+-- Precondition: no organization may already hold two non-deleted `kind='default'`
+-- rows. Production held ONE `public.graphs` row in total when this was written,
+-- so this cannot fail there; if a drifted database does hold a duplicate, the
+-- index creation fails naming the org_id (`Key (org_id)=(…) is duplicated`)
+-- rather than silently committing an ambiguous state — and the operator's
+-- remedy is to tombstone the duplicate (`UPDATE public.graphs SET status =
+-- 'deleted' WHERE org_id = '<id>' AND kind = 'default' AND id <> '<keep>'`).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_default_active
+    ON public.graphs (org_id)
+ WHERE kind = 'default' AND status <> 'deleted';
+
 -- ── 1. One `kind='default'` row per organization that lacks one ────────────
 -- Idempotent by the NOT EXISTS guard: re-running inserts nothing.
+--
+-- ⛔ `ON CONFLICT DO NOTHING` is NOT redundant beside those guards, and it is
+-- required even with the index above in place: the guards are a READ-THEN-WRITE,
+-- and this migration is applied to a LIVE deployment whose own writers insert
+-- exactly this row (`ensure_default_graph_row` at first post-provision use,
+-- `set_graph_name`/`set_graph_recording` on a rename or a recording toggle).
+-- PostgreSQL does not re-evaluate `NOT EXISTS` at index-insertion time, so a
+-- concurrent commit between this statement's snapshot and its index insertion
+-- raises a unique violation — and Supabase applies a migration file in ONE
+-- transaction, so that would abort the backfill for EVERY organization, not
+-- just the colliding one. A conflict here IS the row this statement wanted to
+-- create (the Python mint models the same race and adopts the winner), so
+-- "nothing to do" is the correct outcome.
 -- The existence guard tests `status = 'active'` — the SAME predicate
 -- `default_graph_id_for` uses to name a tenant. The two must be identical, not
 -- merely both status-aware: `graphs.status` is free text with NO check
@@ -76,7 +121,8 @@ SELECT 'g_' || substr(md5(random()::text || clock_timestamp()::text || o.id), 1,
    AND NOT EXISTS (
         SELECT 1 FROM public.graphs g2
          WHERE g2.org_id = o.id AND g2.name = 'default'
-           AND g2.status <> 'deleted');
+           AND g2.status <> 'deleted')
+ON CONFLICT DO NOTHING;
 
 -- ── 2. The storage key, re-asserted ────────────────────────────────────────
 -- A `kind='default'` row's namespace must BE the org's graph name. This is the

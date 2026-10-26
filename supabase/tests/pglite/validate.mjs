@@ -400,12 +400,125 @@ for (const f of files) {
                 '2026-06-06T00:00:00Z', '2026-06-06T00:00:00Z');
       `);
     }
+    if (f === '20261028000001_graphs_default_row_stable_id.sql') {
+      // #10025 — seed the THREE shapes the default-row backfill must survive, so
+      // the migration file is the thing under test rather than an empty table.
+      //
+      //   1. a `kind='default'` row whose `status` is neither 'active' nor
+      //      'deleted' — the only shape that is INVISIBLE to both `NOT EXISTS`
+      //      guards yet COVERED by the new `uq_graphs_org_default_active`
+      //      index. It is the single-connection stand-in for the deploy-time
+      //      race (the real one is a concurrent app mint committing between the
+      //      guards' snapshot and the index insertion), and it is exactly what
+      //      the INSERT's `ON CONFLICT DO NOTHING` is for: without it the whole
+      //      file aborts, taking the backfill for EVERY org down with it.
+      //   2. a TOMBSTONED `kind='default'` row — the pair the index deliberately
+      //      leaves legal, and the shape the migration must answer by minting a
+      //      fresh ACTIVE row (its guard tests `status = 'active'`).
+      //   3. an org with no default row at all — the ordinary backfill.
+      await db.exec(`
+        INSERT INTO public.organizations (id, name, graph_name)
+          VALUES ('10025-preseed-paused', '10025-preseed-paused',
+                  'org_10025-preseed-paused'),
+                 ('10025-preseed-tombstone', '10025-preseed-tombstone',
+                  'org_10025-preseed-tombstone'),
+                 ('10025-preseed-plain', '10025-preseed-plain',
+                  'org_10025-preseed-plain');
+        INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+          VALUES ('g_1002500000000001', '10025-preseed-paused',
+                  'renamed-elsewhere', 'default',
+                  'org_10025-preseed-paused', 'paused');
+        INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+          VALUES ('g_1002500000000002', '10025-preseed-tombstone',
+                  'default', 'default', 'org_10025-preseed-tombstone', 'deleted');
+      `);
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
     console.error(`✗ migration ${f} FAILED:\n  ${e.message.split('\n').slice(0,3).join('\n  ')}`);
     process.exit(1);
   }
+}
+
+// ── #10025: the default-row backfill's two structural properties ────────────
+// Both are properties of the migration FILE (seeded above), not of any Python
+// seam: (a) a conflict the two `NOT EXISTS` guards cannot see must not abort
+// the whole file, and (b) "one NON-DELETED `kind='default'` row per org" must be
+// a database invariant, because four readers (`default_graph_id_for`, the
+// record tenant for every org-wide credential; `graph_metadata`'s `stable_id`;
+// `ensure_default_graph_row`; both `set_graph_*` writers) take `rows[0]` of an
+// UNORDERED query and call it "the org's default row".
+{
+  const pick = async () => (await db.query(
+    `SELECT org_id, id, name, status FROM public.graphs
+      WHERE org_id LIKE '10025-preseed-%'
+      ORDER BY org_id, status, id`)).rows;
+  const rows = await pick();
+  const fail = (msg) => {
+    console.error(`✗ #10025 default-row backfill FAILED: ${msg}\n  rows: ${JSON.stringify(rows)}`);
+    process.exit(1);
+  };
+  // (a) The unseen conflict: the paused row is the org's only default row, so
+  // the guards did NOT skip the org — the INSERT collided with the new index and
+  // `ON CONFLICT DO NOTHING` swallowed it. No second row, and (crucially) the
+  // other two orgs below still got theirs, which is what an aborted file loses.
+  const paused = rows.filter((r) => r.org_id === '10025-preseed-paused');
+  if (paused.length !== 1 || paused[0].id !== 'g_1002500000000001') {
+    fail('a default row the guards cannot see was NOT handled by ON CONFLICT DO NOTHING '
+      + '(a duplicate was inserted, or the file aborted before finishing)');
+  }
+  // (b) tombstone + active stays legal, and the active row is minted.
+  const tomb = rows.filter((r) => r.org_id === '10025-preseed-tombstone');
+  const tombActive = tomb.filter((r) => r.status === 'active');
+  if (tomb.length !== 2 || tombActive.length !== 1) {
+    fail('the migration did not mint exactly one ACTIVE default row beside the tombstone');
+  }
+  // (c) the ordinary backfill, with the org's graph_name as namespace.
+  const plain = rows.filter((r) => r.org_id === '10025-preseed-plain');
+  if (plain.length !== 1 || plain[0].status !== 'active') {
+    fail('an org with no default row at all was not backfilled');
+  }
+  const ns = (await db.query(
+    "SELECT namespace FROM public.graphs WHERE org_id = '10025-preseed-plain'")).rows[0];
+  if (ns.namespace !== 'org_10025-preseed-plain') {
+    fail(`the minted row's namespace is ${ns.namespace}, not the org graph_name`);
+  }
+  // (d) THE INVARIANT: a second NON-DELETED default row for one org is rejected.
+  let rejected = false;
+  try {
+    await db.exec(`
+      INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+        VALUES ('g_1002500000000009', '10025-preseed-plain', 'renamed-later',
+                'default', 'org_10025-preseed-plain', 'active');
+    `);
+  } catch { rejected = true; }
+  if (!rejected) {
+    fail('a SECOND active kind=default row was accepted for one org — the tenant readers '
+      + '(`rows[0]`, unordered) can then disagree, which is the class #10025 closes');
+  }
+  // ...while the TOMBSTONE pair the readers mint against stays legal.
+  await db.exec(`
+    INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+      VALUES ('g_1002500000000010', '10025-preseed-plain', 'old-name',
+              'default', 'org_10025-preseed-plain', 'deleted');
+  `);
+  // (e) Re-applying the file on that end state is a no-op (idempotency).
+  await db.exec(readFileSync(
+    `${MIG_DIR}/20261028000001_graphs_default_row_stable_id.sql`, 'utf8'));
+  const again = (await pick()).filter((r) => r.org_id !== '10025-preseed-plain');
+  if (JSON.stringify(again) !== JSON.stringify(rows.filter((r) => r.org_id !== '10025-preseed-plain'))) {
+    fail('re-applying the migration minted another row');
+  }
+  console.log('✓ #10025: the backfill survives a conflict its guards cannot see (ON CONFLICT), '
+    + 'mints an active row beside a tombstone, and one NON-DELETED default row per org is '
+    + 'a database invariant');
+  console.log('✓ #10025: re-applying the migration is a no-op');
+  // Seeded for THIS block only — the suites that follow count orgs and graphs.
+  await db.exec(`
+    DELETE FROM public.graphs WHERE org_id LIKE '10025-preseed-%';
+    DELETE FROM public.organizations WHERE id LIKE '10025-preseed-%';
+  `);
 }
 
 // ── #4216: the migration's DEPLOY-TIME repair actually ran ──────────────────
