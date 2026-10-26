@@ -2714,13 +2714,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // `utilities.GetReferrer`) and still delivers a live `code` there. That is
   // exactly what the #9664 run measured — the code landed on
   // `https://tortoise.premiselabs.co/?code=…`, the marketing page ignored it, and
-  // the flow died with the code burned. A query-bearing target is therefore a
-  // DIFFERENT STRING from every allow-list entry the record requires, and the
-  // page cannot observe whether GoTrue accepted it. The bare path is the entry
-  // `docs/ops/auth-email-flows.md` §3 records, and it is the only form that
-  // survives an entry written as the full path (`…/oauth/authorize`) instead of
-  // as `…/**` — neither shape is readable from here, so the page must not depend
-  // on the difference.
+  // the flow died with the code burned.
+  //
+  // What that measurement does NOT establish is that the query was the reason:
+  // this page used to send `…/oauth/authorize?<the authorize request>`, and if the
+  // live entry is the `…/**` the record names (a SUPER wildcard: compiled with
+  // separators, `**` crosses `/`, so it matches the query-bearing form too), that
+  // string matched. Whether the entry is `…/**` or the path written out is not
+  // readable from here, and the page cannot observe GoTrue's verdict either way —
+  // so the target must not DEPEND on the difference. The bare path does not: it
+  // matches under either shape.
   //
   // So the authorize request crosses the provider boundary in the page's own
   // origin-scoped aux store (`stashAuthorizeFlow`), the SAME store the PKCE

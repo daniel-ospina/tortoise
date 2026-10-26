@@ -703,6 +703,29 @@ class TestProviderReturnShell:
             assert r.status_code == 400, (params, r.status_code)
             assert r.json()["error"] == "invalid_request", (params, r.text)
 
+    def test_a_provider_marker_does_not_skip_validation_when_a_client_id_is_present(
+            self, api_client):
+        """The shell also requires the request to name NO client.
+
+        `shell_only` is `not client_id and provider_return`. If the `client_id`
+        conjunct ever drops, a provider-shaped request that DOES name a client
+        skips `validate_authorize_params` and `canonical_redirect_target` — the
+        page is then served as a 200 shell for a client the server never
+        resolved, carrying an unvalidated `redirect_uri` into the consent view.
+        Every other test here sends a provider marker with NO `client_id`, or a
+        `client_id` with NO marker, so only this one pins the conjunction."""
+        tc, _ = api_client
+        r = tc.get("/oauth/authorize", params={
+            "client_id": "ct_nope", "redirect_uri": "https://evil.example/cb",
+            "response_type": "code", "code": "providercode",
+            "state": "st-1"},
+            follow_redirects=False)
+        assert r.status_code == 400, (r.status_code, r.text)
+        assert r.json()["error"] == "invalid_request", r.text
+        # Explicitly NOT the shell: the shell renders empty params.
+        assert '"client_id": ""' not in r.text, "validation was skipped for a named client"
+        assert "Location" not in r.headers or "evil.example" not in r.headers.get("Location", "")
+
 
 class TestLoopbackPortAgnostic:
     """#2846 — RFC 8252 §7.3: for loopback redirect URIs the AS must ignore the
