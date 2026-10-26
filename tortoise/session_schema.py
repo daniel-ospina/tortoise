@@ -343,8 +343,8 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
         kind="replay",
         lane="journal fold",
         properties=frozenset({
-            "created_at", "capture_lane", "turn_count", "harness",
-            "is_episodic", "actor_user_id",
+            "created_at", "capture_lane", "turn_count", "turn_max_index",
+            "harness", "is_episodic", "actor_user_id",
             "client_captured_at", "client_captured_at_source", "source",
             "entity_links_attempted", "entity_links_created",
             "capture_ok", "capture_extractor", "capture_redactions",
@@ -358,7 +358,11 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "the live writers' truthiness guards so a "
             "rebuild cannot disagree with the graph it is rebuilding; a "
             "journal with no `SessionRecorded` (pre-#3664, or a journal-less "
-            "lane) restores only the `_link_session` stub."),
+            "lane) restores only the `_link_session` stub. `turn_max_index` "
+            "(#10000) is a plain `SET`, like `turn_count`: it is the id-space "
+            "high-water mark the stale-turn sweep reads once the turns live in "
+            "the record, so a journal-only rebuild that dropped it would let a "
+            "shorter re-capture keep serving turns the session no longer owns."),
     ),
     SessionWriter(
         key="tortoise/projection/entities.py::_link_session",

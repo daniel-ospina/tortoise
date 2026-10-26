@@ -34,7 +34,7 @@ class _FakeGraph:
     def __init__(self, edges):
         self._edges = edges
 
-    def query(self, statement, params=None):
+    def query(self, statement, params=None):  # signature parity
         return _QueryResult([[self._edges]])
 
 
