@@ -649,13 +649,21 @@ jobs:
     # The rc / files / hygiene reports next to these already moved to
     # `${RUNNER_TEMP}`; this finishes the migration for the artifacts the
     # verdict and the guards are read from.
-    env:
-      PYTEST_LOG: ${{ runner.temp }}/pytest.log
-      PYTEST_JUNIT: ${{ runner.temp }}/junit.xml
-      PYTEST_JUNIT_LF: ${{ runner.temp }}/junit-lf.xml
-      PYTEST_MANIFEST: ${{ runner.temp }}/expected-nodeids.txt
-      PYTEST_STEP_WALL: ${{ runner.temp }}/step_wall.txt
-      PYTEST_CANARY: ${{ runner.temp }}/canary-producer.json
+    #
+    # ⛔ NOT AS A JOB-LEVEL `env:` BLOCK. `runner` is not an available context
+    # at `jobs.<job_id>.env` (the allowlist there is github, needs, strategy,
+    # matrix, vars, secrets, inputs), so `${{ runner.temp }}` is rejected by
+    # actionlint on all six lines — and an unsupported expression is worse than
+    # a red, because it does not stop the job: it resolves EMPTY, which turns
+    # every path back into a ROOT-LEVEL `/pytest.log` and silently restores the
+    # exact host-global collision this change removes. The paths are therefore
+    # resolved in the FIRST step of the job below, from `$RUNNER_TEMP` (the
+    # shell's alias of the same value, which IS available in a step), and
+    # published to every later step through `$GITHUB_ENV`: shell steps read
+    # `$PYTEST_LOG`, the quoted heredocs read `os.environ[...]` (a quoted
+    # heredoc does not expand), and the `upload-artifact` `path:` lists use
+    # `${{ runner.temp }}` directly, because `jobs.<job_id>.steps.with` DOES
+    # allow the `runner` context.
     # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
     # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
     # green while EP tests never ran — masked #1382). Two services cover BOTH probe
@@ -701,6 +709,25 @@ jobs:
     # the concurrency group; a backlog of merges queues them) — queue wait is
     # not a job hang and cannot be fixed in-repo.
     steps:
+      # ⛔ FIRST STEP ON PURPOSE. Every later step reads these six variables,
+      # and `$GITHUB_ENV` only reaches SUBSEQUENT steps — so this has to run
+      # before anything that names a pytest artifact. `RUNNER_TEMP` is set by
+      # the runner for every step; failing closed on it (rather than falling
+      # back to `/tmp`) is the whole point of the change: a silent `/tmp`
+      # fallback is indistinguishable from the bug being fixed.
+      - name: Resolve per-job pytest artifact paths (#10028)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          {
+            echo "PYTEST_LOG=$base/pytest.log"
+            echo "PYTEST_JUNIT=$base/junit.xml"
+            echo "PYTEST_JUNIT_LF=$base/junit-lf.xml"
+            echo "PYTEST_MANIFEST=$base/expected-nodeids.txt"
+            echo "PYTEST_STEP_WALL=$base/step_wall.txt"
+            echo "PYTEST_CANARY=$base/canary-producer.json"
+          } >> "$GITHUB_ENV"
+          echo "pytest artifacts for this job are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
