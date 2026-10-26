@@ -13683,6 +13683,183 @@ class TortoiseSDK:
             return self.delete_point(id)
         return self.delete_entity(id)
 
+    # ── Phase 2.2 (#4282) — the four merges INTO the approved 40 ──────────
+    #
+    # ⛔ THESE ADD NOTHING TO THE SURFACE. Each name below is already a row of
+    # the owner's approved list (`docs/product/beta-sdk-surface.md` rows 12, 19,
+    # 22, 24) and already declared in `tortoise/__all__.py`; three of them were
+    # the "approved and declared but it does NOT exist on TortoiseSDK" half of
+    # `tools/sdk_surface_declaration.py`'s gap, and this is Phase 2 closing it.
+    # No fourth spelling is invented and no absorbed name is invented either —
+    # every dispatch target below is a method that exists today, named in the
+    # absorption ledger of `beta-sdk-surface.md` ("Discarded — and why").
+    #
+    # THE SHAPE IS THE SAME FOR ALL FOUR: one public name, a dispatch on the
+    # CALLER'S SEMANTIC INTENT (the type, the relation, the temporal field),
+    # and zero duplicated graph logic — the narrow door does the write exactly
+    # as it did before, so a caller who used the narrow name and a caller who
+    # uses the merged name land in the same place. `create_entity` (row 12,
+    # `type=` over the five `create_*` constructors) was built this way in epic
+    # #888 W2 and is the shape the other three follow.
+
+    def link_entities(self, relation: str, from_id: str, to_id: str, *,
+                      operator: bool | None = None,
+                      direction: str | None = None,
+                      confidence: float | None = None,
+                      weight: float | None = None,
+                      label: str | None = None,
+                      batch_id: str | None = None,
+                      entity_label: str | None = None,
+                      source_kind: str = "document",
+                      promote_source: bool = True) -> dict:
+        """Connect two nodes — **the relation decides how**, not the caller.
+
+        The approved surface has one linking verb (row 19). It absorbs the four
+        connection writers that used to be separate calls, and it picks between
+        them from ``relation`` alone:
+
+          - ``wasDerivedFrom`` → :meth:`create_derivation` (the `(dst)-[:wasDerivedFrom]->(src)`
+            writer — the direction is the ontology's, not the caller's).
+          - ``IMPL`` / ``NAND`` without ``operator=True`` → :meth:`create_direct_edge`
+            (the operator-less half: a bare edge, per ONTOLOGY §5.3/v3.5 §8).
+          - a **Point↔Point support/contradict** relation (``supports`` /
+            ``refutes`` / ``mutuallySupportive``), or ``operator=True`` →
+            :meth:`create_operator` (an operator Point carrying the edge). This is
+            the ontology's rule, not a preference: an operator is created **iff**
+            there is a mitigation, or the edge is Point↔Point support/contradict
+            — so a structural relation never grows one by accident.
+          - ``references`` with an explicit ``entity_label`` → :meth:`link_source_to_entity`,
+            the PROVENANCE writer. This is the one arm where the choice is not
+            cosmetic: the bare ``create_edge`` path mints a ``references`` edge
+            with **no ``sourceVersion`` anchor and nothing will add one later**
+            (see :meth:`create_edge`), so a caller who names the entity label gets
+            the anchored writer. ``create_edge`` remains reachable, but only when
+            the caller does not ask for the anchor.
+          - anything else → :meth:`create_edge` (a typed structural edge, PLAIN —
+            the relation is validated there against the declared-relations set,
+            so an unknown relation is a refusal from the writer, not a guess here).
+
+        ``operator`` is the ONE explicit override: it exists because IMPL/NAND is
+        the only relation with two legitimate storages (with or without a
+        carrying operator), and a caller who needs to mitigate the edge later
+        must be able to say so. ``None`` (the default) means "decide from the
+        relation"; it is not a third mode.
+
+        Returns whatever the chosen writer returns — the merge adds no envelope.
+        """
+        rel = (relation or "").strip()
+        if not rel:
+            raise ValueError("link_entities: relation is required")
+        if not from_id or not to_id:
+            raise ValueError("link_entities: from_id and to_id are required")
+
+        # Provenance writer first: it is the only arm whose edge carries the
+        # sourceVersion anchor, and it is only reachable when the caller named
+        # the entity label (the signal that they are linking a SOURCE).
+        if rel == "references" and entity_label:
+            return self.link_source_to_entity(
+                source_url=from_id, entity_id=to_id,
+                entity_label=entity_label, source_kind=source_kind)
+
+        if rel == "wasDerivedFrom":
+            # create_derivation(src_id, dst_id) writes (dst)-[:wasDerivedFrom]->(src).
+            return self.create_derivation(from_id, to_id)
+
+        upper = rel.upper()
+        if upper in ("IMPL", "NAND") and operator is not True:
+            return self.create_direct_edge(
+                upper, from_id, to_id, direction=direction, confidence=confidence,
+                weight=weight, label=label, batch_id=batch_id,
+                promote_source=promote_source)
+
+        # An epistemic relation that needs a carrying operator builds one;
+        # everything else stays PLAIN. The set is the ontology's rule (operator iff
+        # mitigation, or Point↔Point support/contradict), NOT `CORE_OPERATOR_LABELS`
+        # — that set also contains STRUCTURAL predicates (`ownedBy`, `hasPart`,
+        # `dependsOn`, `related` …), so using it here would grow an operator on a
+        # relation the reification rule says must stay a plain edge.
+        if operator is True or upper in (
+                "SUPPORTS", "SUPPORT", "REFUTES", "CONTRADICTS",
+                "MUTUALLYSUPPORTIVE", "MUTUALLYEXCLUSIVE"):
+            return self.create_operator(
+                upper, from_id, [to_id], label=label,
+                direction=direction or "bidirectional",
+                promote_source=promote_source)
+
+        return self.create_edge(rel, from_id, to_id)
+
+    def update_knowledge(self, id: str, *, valid_until: str | None = None,
+                         invalid_at: str | None = None,
+                         corrected_by_id: str | None = None,
+                         annotation: dict | None = None,
+                         **props) -> dict:
+        """Change what a stored thing says — **a node or a link** — or retract it.
+
+        The approved surface has one revise verb (row 22) and **retraction is a
+        temporal field on it, not a separate verb** (Zep's shape; ``withdraw_knowledge``
+        was removed from the plan for exactly this reason). It absorbs:
+
+          - ``update_point`` / ``update_entity`` → :meth:`update`, which already
+            dispatches on the resolved label (a Point takes the point-lifecycle
+            arm, an entity the plain-property arm). Nothing is re-implemented here.
+          - ``retract_point`` → ``valid_until=`` **or** ``invalid_at=`` with no
+            successor: a tombstone (``status='retracted'``, the node STAYS).
+          - ``invalidate_point`` → the same field **plus** ``corrected_by_id=``:
+            the node is marked outdated and linked to its replacement.
+          - link annotation → ``annotation={'bias':…, 'precision':…,
+            'consistency':…, 'directness':…}``, which is :meth:`annotate_operator`.
+            Annotating a link is an update on it; ``adjust_relationship`` is the
+            separate verb for *strength*.
+
+        The rule the merge encodes (``beta-sdk-surface.md`` row 24): **retract when
+        nothing replaced the claim, supersede when a specific successor did, delete
+        when it must not be retained.** ``supersede_knowledge`` and
+        ``delete_knowledge`` stay separate verbs because they destroy or replace —
+        this one always keeps the record.
+        """
+        if annotation is not None:
+            if not isinstance(annotation, dict):
+                raise ValueError(
+                    "update_knowledge: annotation must be a dict of epistemic "
+                    "dimensions")
+            return self.annotate_operator(id, **annotation)
+
+        retract = invalid_at if invalid_at is not None else valid_until
+        if retract is not None:
+            if corrected_by_id:
+                return self.invalidate_point(id, corrected_by_id)
+            return self.retract_point(id)
+
+        if corrected_by_id:
+            raise ValueError(
+                "update_knowledge: corrected_by_id needs a temporal field — pass "
+                "invalid_at= or valid_until= with it (that is what makes it a "
+                "supersede-in-place rather than a silent no-op)")
+
+        return self.update(id, **props)
+
+    def delete_knowledge(self, id: str) -> bool:
+        """Remove knowledge — **a node or a link**. Hard removal; there is no undo.
+
+        The approved surface has one removal verb (row 24). It absorbs
+        ``delete_point`` and ``delete_point_wrapped`` (and, for an epistemic link,
+        the operator Point's delete) into :meth:`delete`, which resolves the label
+        first and then takes the arm the node needs — the Point arm keeps the tag
+        GC, the ``PointRetracted`` subscriber signal and the JSONL hard-delete
+        record; the entity arm hard-deletes as ``delete_entity`` always did.
+
+        A LINK is removable here because an epistemic link IS a Point
+        (``is_operator=true``), so its id routes through the Point arm (#6131). A
+        **plain structural edge** carries no id in this model — there is nothing to
+        name — so it is removed by deleting the node that holds it, which is the
+        documented boundary and not a gap this verb can close.
+
+        Returns True if a node was found and removed, False otherwise. Raises
+        exactly what the narrow doors raise (``WriteNotLandedError`` on an
+        unconfirmed destruction) — a merge must not soften a guarantee.
+        """
+        return self.delete(id)
+
     @_declares_apply_first_write_lane("update_point")
     def update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
