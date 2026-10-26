@@ -6452,13 +6452,16 @@ tier1:
 - test_extractor_v4_failure_policy.py
 # #5333 review (P1, twice): the SAME document's *G5's destructive half* guards now
 # live in `test_definite_description_backfill_5059.py` (`core` above) — FOUR of
-# them read ONLY `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
-# load-bearing share (§4.3's evidence bar), the `archived`-has-a-writer claim
-# (which now rejects the set of no-writer spellings it enumerates, rather than
-# one literal — the literal form was evaded twice), the
-# `_ALLOWED_TRANSITIONS` production-reader scan, and the recorded design
-# decision itself (add-only, never a delete, fold-only removal — the newest and
-# the load-bearing one). `docs/` is in
+# them BIND the passage and THREE read the document: the load-bearing share
+# (§4.3's evidence bar — it also reads its own module for the measurement), the
+# `archived`-has-a-writer claim (which now rejects the set of no-writer spellings
+# it enumerates, rather than one literal — the literal form was evaded twice),
+# and the recorded design decision itself (add-only, never a delete, fold-only
+# removal — the newest and the load-bearing one). The fourth, the
+# `_ALLOWED_TRANSITIONS` production-reader scan, reads NO line of the document:
+# it AST-scans `tortoise/` for a consumer of the map the passage cites, so a
+# docs-only edit cannot red it (#10069 review, P3 — this comment said FOUR read
+# ONLY the document, which was false for it). `docs/` is in
 # NON_PYTHON_PREFIXES and this document matches no SOURCE_PATTERNS entry, so a
 # docs-only edit of the passage filters to `changed == []` and takes
 # `select()`'s early return — tier1 ONLY. Registered in `core` alone, those

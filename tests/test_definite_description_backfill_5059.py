@@ -781,6 +781,63 @@ _ABSENT_WRITER_CLAIM = re.compile(
     re.IGNORECASE,
 )
 
+#: A claim that is ALREADY SCOPED to the acting class is not the refuted
+#: absolute (#10069 review, P3). `no PASS writes it` is this decision's own
+#: qualified form, so "`archived` is never written by a relocation pass" is
+#: TRUE — measured: without this exemption the enumeration above reds it, and
+#: the failure message then calls a correct statement the refuted absolute
+#: (a false BLOCK, and the message the writer was told to satisfy). Scoped to
+#: the SAME ±90-character neighbourhood as the match, never to the whole line:
+#: these paragraphs are single lines of thousands of characters, so a line-wide
+#: exemption would let an unrelated absolute ride in on a distant "by a pass".
+_PASS_SCOPED_CLAIM = re.compile(
+    r"\b(?:by|through|from)\s+(?:(?:a|an|any|the)\s+)?(?:relocation\s+)?pass\b",
+    re.IGNORECASE,
+)
+
+
+def _unqualified_writer_absolutes(section: str) -> list[str]:
+    """Lines of ``section`` asserting a no-writer absolute WITHOUT a scope.
+
+    The co-located guard's hit list, minus any match whose own neighbourhood
+    scopes the claim to the acting class (``_PASS_SCOPED_CLAIM``). One line is
+    reported once, however many matches it carries.
+    """
+    hits: list[str] = []
+    for line in section.splitlines():
+        for match in _ABSENT_WRITER_CLAIM.finditer(line):
+            window = line[max(0, match.start() - 90):match.end() + 90]
+            if _PASS_SCOPED_CLAIM.search(window):
+                continue
+            hits.append(line)
+            break
+    return hits
+
+
+def test_the_no_writer_guard_exempts_a_pass_scoped_claim_but_not_a_bare_one():
+    """The co-located guard's grading, measured in both directions.
+
+    It has to be able to tell the refuted absolute from the QUALIFIED form the
+    same test demands (`no pass writes it`), or it reds a correct sentence and
+    then reads like it is asking for one. The exemption is deliberately
+    NEIGHBOURHOOD-scoped: the passage's paragraphs are single lines, so the
+    scope word must sit next to the claim it scopes (#10069 review, P3).
+    """
+    assert _unqualified_writer_absolutes(
+        "`archived` is never written by a relocation pass."
+    ) == []
+    assert _unqualified_writer_absolutes(
+        "`archived` is not written by any pass."
+    ) == []
+    assert _unqualified_writer_absolutes("Nothing writes `archived` today.")
+    assert _unqualified_writer_absolutes(
+        "`archived` has no writer at all today."
+    )
+    # …and the scope has to be NEAR the claim, not merely on the same line.
+    assert _unqualified_writer_absolutes(
+        "Nothing writes `archived` today. " + "x" * 400 + " — written by a pass."
+    )
+
 
 def test_the_doc_does_not_claim_archived_has_no_writer():
     """`archived` IS writable today through the generic, unvalidated path.
@@ -810,17 +867,16 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
     # of the no-writer ABSOLUTES below, on one line with `archived`, in either
     # order — and the claim stated in the message is only ever as wide as the
     # spellings enumerated here, never "any rephrasing".
-    hits = [
-        line for line in section.splitlines()
-        if _ABSENT_WRITER_CLAIM.search(line)
-    ]
+    hits = _unqualified_writer_absolutes(section)
     assert not hits, (
         "the passage asserts, in a spelling this guard enumerates, that "
         "NOTHING writes `archived` — the refuted absolute: `archived` IS "
         "reachable through the generic unvalidated write path (and through "
         "pack-declared status folds), so the population is UNMEASURED, not "
         "empty. Qualify the claim to the writers this decision governs (a "
-        "PASS) instead of deleting the clause "
+        "PASS) — and, if the spelling is one this guard enumerates, say so "
+        "in the neighbourhood ('… by a relocation pass'), because an "
+        "enumerated spelling with no scope next to it reads as the absolute "
         f"(#5333). Offending line(s): {hits[:2]}"
     )
     assert "no pass writes it" in section.lower(), (
@@ -1072,6 +1128,24 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
         "the add-only clause is gone: after COMMIT no pass may remove a "
         "committed row from the graph, archive it as a storage action, or "
         "withdraw it from recall except through the journaled fold (#5333)."
+    )
+    # The PROHIBITION's exception list must carry BOTH carve-outs the same
+    # paragraph permits (#10069 review, P2). It read "— except through the one
+    # journaled fold below —", and "the one journaled fold" resolves to the
+    # NEXT sentence's successorless `restatus`→`archived`; the D7
+    # `ObjectSuperseded` arm — permitted forty words later, and itself a
+    # withdrawal (its `status='superseded'` IS recall-excluded,
+    # `commit_ops.py:51`/`:59`) — was not in it. A lane implementing the
+    # operative "What a pass may never do" list literally therefore rejects the
+    # live `apply_supersessions` path. Presence of `no pass may remove` alone
+    # must not satisfy this: measured, the one-armed exception read green.
+    assert "or through the d7 `objectsuperseded` arm" in decision, (
+        "the prohibition's exception list must name BOTH permitted removal "
+        "arms — the journaled successorless fold AND the D7 "
+        "`ObjectSuperseded` arm where a visible successor exists. Without "
+        "the second, 'no pass may … withdraw it from recall' contradicts "
+        "the D7 arm the same paragraph permits, and a guard written from "
+        "this list refuses successor resolution (#5333)."
     )
     assert "only deletion trigger is gdpr / retention" in decision, (
         "the never-delete rule is gone or softened — nothing is ever deleted "
