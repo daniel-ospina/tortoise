@@ -8965,51 +8965,89 @@ def journal_object_surviving_keys(
 
 
 def journal_object_registered_names(events) -> frozenset[str]:
-    """Every Object NAME the journal ever REGISTERS — the addressability
-    oracle for the #3590 D2 exemption.
+    """Every Object NAME the journal ever puts in the graph — the
+    addressability oracle for the #3590 D2 exemption.
 
     :func:`journal_object_surviving_keys` answers a DIFFERENT question ("does
     this Object exist at the journal's END"), and it cannot separate "never
     registered" from "registered then hard-deleted". The D2 exemption covers
     only the FIRST: a name the journal registered and then deleted belongs to
     the separately-carried ``supersede-target-deleted`` bound and must keep
-    refusing here. So this reads registrations alone and never subtracts.
+    refusing here. So this reads the positive sources alone and never
+    subtracts.
 
     A NAME set, deliberately, not a name->id map: the record that needs the
-    answer carries no usable id (`_fold_object_superseded` returned ``(0, 0)``
-    for it), so the name is the only identity it offers.
+    answer may carry no usable id (``_fold_object_superseded`` returned
+    ``(0, 0)`` for it), so the name is the only identity it offers.
 
-    ``EventRecorded``'s mentioned-name stubs are NOT registrations — a mention
-    does not create an entity (#3590 D1) — so they are excluded, exactly as
-    :func:`journal_object_surviving_keys` refuses to let a mention mint a
-    carrier. Including them would exempt a supersede whose name the journal
-    only ever MENTIONED, which is the fail-OPEN direction this guard must
-    never take.
+    ⚠️ TWO name sources, and the second is NOT optional. ``ObjectRegistered``
+    is the obvious one; an ``EntityMutated`` **state op** is the other, because
+    the fold applies ``SET n += $state`` — a rename CARRIES a name into the
+    MERGE key the supersede sweep matches on, which is exactly why
+    :func:`journal_object_surviving_keys` models the same arm ("a rename moves
+    the MERGE key"). Reading registrations alone left a rename-produced name
+    looking unregistered, so a supersede the journal COULD have addressed was
+    exempted on ``rebuild_all`` while ``rebuild()`` folded it — a silent
+    divergence where ``main`` refused (#10107 review P1).
+
+    ``EventRecorded``'s mentioned-name stubs ARE excluded, and the claim is
+    deliberately ONE-DIRECTIONAL: a mention does not create an entity (#3590
+    D1), so it is not a registration and counting it would let a name the
+    journal never really established suppress the refusal. The cost of
+    excluding them is bounded and loud, not silent: a mention stub DOES put a
+    node in the graph (``_event_plain_merge``), so where the stub exists the
+    graph folds the supersede and only the reference fold may emit an EXEMPT
+    "matched no Object" entry — an over-report in the health report, never a
+    skipped fold and never a rebuild/apply divergence.
     """
     names: set[str] = set()
     for raw in events:
         if not isinstance(raw, dict):
             continue
         ev = _norm(raw)
-        if ev.get("type") != "ObjectRegistered":
+        t = ev.get("type")
+        if t == "ObjectRegistered":
+            name = ev.get("name")
+        elif (t == "EntityMutated"
+                and ev.get("op") in _ENTITY_MUTATION_STATE_OPS):
+            label = ev.get("label")
+            if (isinstance(label, str)
+                    and label in _CANONICAL_ENTITY_LABELS
+                    and label != "Object"):
+                continue
+            state = ev.get("state")
+            name = state.get("name") if isinstance(state, dict) else None
+        else:
             continue
-        name = ev.get("name")
         if isinstance(name, str) and name:
             names.add(name)
     return frozenset(names)
 
 
 def _supersede_name_unregistered(ev: dict, registered_names) -> bool:
-    """True ONLY when the record carries a NAME the journal never registered
+    """True ONLY when the record carries a NAME the journal never established
     (#3590 D2).
 
     A record with no name at all is NOT this exemption: nothing in it is
     addressable, so "the journal never registered it" is unfalsifiable and the
-    fail-closed default must stand. A record whose name WAS registered keeps
+    fail-closed default must stand. A record whose name WAS established keeps
     ``object-superseded-miss`` — the bound that stops a supersede which could
     have landed from ever becoming skippable.
+
+    ⚠️ The name is read through ``_norm`` so all three classifying surfaces see
+    the SAME spelling: the two graph engines already normalise, while
+    ``consistency``'s reference fold iterates the raw journal, and a nested
+    record let those two halves disagree (one exempt, one refusing — the #3585
+    asymmetry; #10107 review P2). ``_norm`` is idempotent, so normalising an
+    already-normalised record changes nothing.
+
+    The record's ``id``, when present, is deliberately NOT consulted: the D2
+    producer path synthesises one for the legacy target, so requiring its
+    absence would refuse the very records this exemption exists for. An id in
+    this shape addresses nothing in the journal either way — the refusal
+    machinery for a real id miss is ``object-superseded-miss``.
     """
-    name = ev.get("name")
+    name = _norm(ev).get("name") if isinstance(ev, dict) else None
     return (isinstance(name, str) and bool(name)
             and registered_names is not None
             and name not in registered_names)

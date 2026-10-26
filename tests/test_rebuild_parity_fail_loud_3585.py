@@ -2264,3 +2264,56 @@ def test_journal_object_registered_names_counts_registrations_not_mentions():
     assert names == frozenset({"KNOWN"}), names
     assert "MENTIONED" not in names, names
     assert "" not in names, names
+
+
+def test_name_from_a_rename_counts_as_established_both_engines(env):
+    """#10107 review P1: a name a RENAME carried into the merge key is
+    ESTABLISHED, so the exemption must not fire for it.
+
+    FAILS IF: `journal_object_registered_names` reads `ObjectRegistered` alone.
+    Then "B" looks unregistered, the sweep EXEMPTS the record and `rebuild_all`
+    silently drops a supersede, while `rebuild()` — which folds chronologically,
+    when the node was still named "B" — applies it: one journal, two graphs, and
+    `check_consistency` agreeing with the WRONG one. `main` refused here, so the
+    regression direction is fail-OPEN and silent.
+
+    REACHABLE: rename A→B, supersede "B" by name, rename B→A. At sweep time the
+    node is "A", so the name-only supersede genuinely misses — the class that
+    must stay refused.
+    """
+    sdk, events = env
+    oid = sdk.create_entity("object", name="A")["node"]["id"]
+    _raw(events, type="EntityMutated", op="rename", label="Object", id=oid,
+         state={"name": "B"}, event_id="e-ren-1")
+    _raw(events, type="ObjectSuperseded", name="B", supersedes_by="C",
+         event_id="e-sup-b")
+    _raw(events, type="EntityMutated", op="rename", label="Object", id=oid,
+         state={"name": "A"}, event_id="e-ren-2")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), (
+        "a name the journal established by RENAME was treated as unregistered "
+        f"— the exemption widened past its bound: {ei.value}")
+
+
+def test_nested_record_spelling_agrees_on_every_engine(env):
+    """#10107 review P2: the three classifying surfaces read the SAME name.
+
+    FAILS IF: `rebuild_all` normalises the record (`_norm` splices the nested
+    payload) while `consistency`'s reference fold reads the raw envelope. Then
+    the graph engines exempt the record and the reference fold refuses it —
+    the #3585 asymmetry, introduced by making the two halves of ONE predicate
+    read different spellings.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectSuperseded", point={"name": "GHOST-NESTED"},
+         supersedes_by="C", event_id="e-nested")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, (
+        "the reference fold refused a record both graph engines exempt — the "
+        f"nested spelling split the predicate: {r['non_folded_events']}")
+    assert r["divergence"] != "non-folded", r["divergence"]

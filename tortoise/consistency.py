@@ -74,6 +74,7 @@ from .projection import (
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
     _replay_write_scope,  # #7951 §17.1: replay folds are authorized, live ones are not
+    _supersede_name_unregistered,  # #3590 D2: the ONE predicate (see _record_supersede_miss)
     _writable_id,
     entities,
     fold_with_entities,
@@ -1842,16 +1843,17 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     def _record_supersede_miss(seq: int, ev: dict) -> None:
         candidate = ev.get("name") if isinstance(ev.get("name"), str) \
             and ev.get("name") else ev.get("id")
-        # #3590 D2: exempt ONLY a target NAME the journal never registered, so
-        # this fold agrees with `rebuild_all`'s sweep. A registered name (or a
+        # #3590 D2: exempt ONLY a target NAME the journal never established, so
+        # this fold agrees with `rebuild_all`'s sweep. A established name (or a
         # record carrying none) stays `object-superseded-miss` and refuses.
-        _name = ev.get("name")
-        _unregistered = (isinstance(_name, str) and bool(_name)
-                         and _name not in journal_registered_names)
+        # #10107 review P2: the SAME predicate the two graph engines use, so
+        # the two halves of one classification cannot read different spellings
+        # (this fold iterates the RAW journal; they normalise).
         record_non_folded(
-            classify_terminalizer_miss("ObjectSuperseded",
-                                       target_deleted=False,
-                                       name_unregistered=_unregistered),
+            classify_terminalizer_miss(
+                "ObjectSuperseded", target_deleted=False,
+                name_unregistered=_supersede_name_unregistered(
+                    ev, journal_registered_names)),
             event_id=ev.get("event_id"), event_type="ObjectSuperseded",
             seq=seq,
             id=ev.get("id") if isinstance(ev.get("id"), str) else None,
