@@ -8537,8 +8537,9 @@ class TestC3KeyLifecycle:
         """422 on an off-allowlist scope; 404 on a graph-bound mint to an
         unknown graph OR the literal "default" (the default graph is bound
         by a team-wide key — graph_id absent — never a per-graph mint; the
-        supabase "default" id is a DERIVED row with no graphs-table row, so
-        an api_keys FK to it would 500)."""
+        literal "default" is not a `graphs.id` at all, and since #10025 the
+        default row's REAL g_ id is refused by `_ensure_graph_exists`'s
+        `kind='default'` guard — the FK no longer refuses it)."""
         gen = self._setup(tmp_path)
         _sdk, tid, tc = next(gen)
         try:

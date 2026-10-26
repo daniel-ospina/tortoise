@@ -89,10 +89,17 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
 
 ```
 (:Graph {
-  id: string,        // g_<16 hex> (random hex — NOT a ULID); the DEFAULT
-                     // graph's id is the DERIVED default (registry:
-                     // kind='default' node; supabase: the literal 'default'
-                     // — no graphs row, derived from teams.graph_name)
+  id: string,        // g_<16 hex> (random hex — NOT a ULID). Since #10025 the
+                     // DEFAULT graph has a REAL graphs row carrying such an id
+                     // in BOTH lanes (registry: kind='default' node; supabase:
+                     // kind='default' row, minted on demand). The id is READ
+                     // from that row (default_graph_id_for), never derived from
+                     // teams.graph_name — a rename cannot change it. The literal
+                     // 'default' survives only as the back-compat `graph_id`
+                     // sentinel in graph_metadata's API payload (with the real
+                     // id beside it as `stable_id`), which is why every reader
+                     // of "the default's id" must use stable_id, not the
+                     // sentinel
   org_id: string,   // references Team.id
   name: string,      // display name (default graph: "default")
   kind: string,      // "default" | "custom"
