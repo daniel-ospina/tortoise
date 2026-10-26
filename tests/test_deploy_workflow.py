@@ -2555,7 +2555,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         section,
     ), (
         "the `no_tenant` bound is stated as an absolute again — a graph-bound "
-        "self-host registry credential is FILED in `no_tenant` by design "
+        "self-host registry credential is REFUSED and counted `no_tenant` by design "
         "(`record_tenant_for` returns None for it, and it can never satisfy the "
         "`public.graphs` FK), so the section tells an operator to read a designed "
         "outcome as a fault; the counter-example that makes the qualifier "
