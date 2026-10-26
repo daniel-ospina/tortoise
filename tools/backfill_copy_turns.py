@@ -63,8 +63,9 @@ left nodes the record can never hold:
   what did land), and so is a refusal that lands part of the copy (a write whose
   position could not be proven at session N of M — the artifact carries the
   sessions that completed). A refusal raised before the loop (a duplicate turn
-  key, a truncated read, a ``--journal`` that is not this graph's journal)
-  writes no artifact, because nothing was copied.
+  key, a truncated read, a ``--journal`` that does not name an existing,
+  non-empty file — a SHAPE check, not an identity one) writes no artifact,
+  because nothing was copied.
 
 Honest bounds, stated rather than implied:
 
@@ -324,8 +325,14 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     #   stated", which is what `created_at` above already argues for.
     declared_count = census._int_or_none(props.get("turn_count")) or 0
     declared_max = census._int_or_none(props.get("turn_max_index"))
+    # Each key is guarded by ITS OWN measurement: `turn_count > 0` is a count,
+    # `max_index >= 0` is a high-water mark, and a caller that passes one without
+    # the other must not be handed a synthetic `-1` (the value the block above
+    # calls worse than absence). `copy_phase` can only produce the coupled pair,
+    # so this guard is what makes the module-level contract true on its own.
     if turn_count > 0:
         event["turn_count"] = max(declared_count, turn_count)
+    if max_index >= 0:
         event["turn_max_index"] = max(
             declared_max if declared_max is not None else -1, max_index)
     return event
@@ -429,7 +436,12 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
         bucket = by_session.get(sid, {})
         indexes = sorted(bucket)
         props = sessions.get(sid, {})
-        if props.get("created_at") is None and sid in sessions:
+        # BOTH spellings: `build_session_event` drops either, and a report that
+        # named a session as timestamp-absent while the payload carried a real
+        # `createdAt` is a false entry in the list an operator reads before an
+        # irreversible delete.
+        if (props.get("created_at") is None and props.get("createdAt") is None
+                and sid in sessions):
             stats["created_at_absent"].append(sid)
         events = [build_session_event(
             sid, props, turn_count=len(indexes),
@@ -559,9 +571,11 @@ def _commit_or_refuse(write, applied, session_id: str, *,
 
     ``owns_connection`` is True because this module calls the seam with
     ``conn=None``, so the seam OPENS the transaction and hands it back
-    (`RecordWrite.connection`) for the caller to commit. A caller that injects
-    ``conn=`` owns the transaction itself and must pass False — otherwise this
-    refusal would accuse it of not committing a transaction it did commit.
+    (`RecordWrite.connection`) for the caller to commit — this function then
+    commits it and closes it. A caller that injects ``conn=`` owns both the
+    transaction AND the handle: it must pass False, and this function then
+    neither accuses it of committing nothing, nor commits, nor closes what it
+    does not own.
     """
     connection = getattr(write, "connection", None)
     try:
@@ -582,7 +596,7 @@ def _commit_or_refuse(write, applied, session_id: str, *,
                 f"{session_id}: the record executed {statements} statement(s) "
                 "but returned no connection to commit — an uncommitted write is "
                 "not a copy")
-        if connection is not None:
+        if owns_connection and connection is not None:
             try:
                 connection.commit()
             except Exception as exc:
@@ -599,11 +613,33 @@ def _commit_or_refuse(write, applied, session_id: str, *,
                     f"statement(s) ({type(exc).__name__}) — nothing may be "
                     "counted as copied") from exc
     finally:
-        if connection is not None:
-            # close must never mask a write failure that is already propagating
+        if owns_connection and connection is not None:
+            # close must never mask a write failure that is already propagating.
+            # Only OUR connection is closed: a caller that injected `conn=` keeps
+            # its handle, which is what `owns_connection=False` means.
             with contextlib.suppress(Exception):
                 connection.close()
     return write
+
+
+def _write_artifact(path: str | None, payload: dict) -> None:
+    """Write the ``--out`` artifact, never as a crash and never over a verdict.
+
+    ``Path.write_text`` raises the filesystem's own classes (ENOSPC, EACCES,
+    ``IsADirectoryError``/``FileNotFoundError`` for a bad path), none of which
+    `main` catches — so an unguarded write on the SUCCESS path escaped as a
+    traceback and exit 1 ("the tool cannot start") after every session had
+    already been committed, and on the REFUSAL path it suppressed the refusal's
+    own stderr line. The artifact is duplicated on stdout, so a failed write is
+    recoverable; it is loud, and the exit code the run already earned stands.
+    """
+    if not path:
+        return
+    try:
+        Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    except OSError as exc:
+        print(f"copy: the artifact was not written to {path} ({exc}) — the JSON "
+              "below is the same report", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -690,8 +726,7 @@ def main(argv: list[str] | None = None) -> int:
                                               "graph_id": args.graph_id},
                             "refused": str(exc)})
             if args.out:
-                Path(args.out).write_text(
-                    json.dumps(partial, indent=2, sort_keys=True))
+                _write_artifact(args.out, partial)
             print(json.dumps(partial, indent=2, sort_keys=True))
         print(f"copy: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
@@ -707,7 +742,7 @@ def main(argv: list[str] | None = None) -> int:
     # re-derived from the command line.
     stats["record_tenant"] = {"org_id": args.org_id, "graph_id": args.graph_id}
     if args.out:
-        Path(args.out).write_text(json.dumps(stats, indent=2, sort_keys=True))
+        _write_artifact(args.out, stats)
     print(json.dumps(stats, indent=2, sort_keys=True))
     blocking = {k: n for k, n in stats["anomalies"].items()
                 if n and k in _BLOCKING_ANOMALIES}

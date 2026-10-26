@@ -535,6 +535,63 @@ def test_a_present_null_created_at_never_reaches_the_payload() -> None:
     assert kept["created_at"] == "2026-10-20T00:00:00Z"
 
 
+def test_a_count_without_a_high_water_mark_never_writes_a_negative_one() -> None:
+    """The two guards are per-key: a count alone must not invent a `-1` mark.
+
+    `copy_phase` derives both from one list, so it cannot produce this pair — but
+    `build_session_event` is module-level API, and a COUPLED guard wrote
+    `max(-1, -1) == -1`, the value the block above calls WORSE than absence
+    (`sdk` reads `coalesce(s.turn_max_index, s.turn_count, 0)`, so -1 makes the
+    stale-turn sweep walk nothing — the one behaviour #10000 added).
+    """
+    event = copy_mod.build_session_event(
+        "s1", {}, turn_count=1, max_index=-1, event_id="E")
+    assert event["turn_count"] == 1 and "turn_max_index" not in event
+    # And the mirror: a mark alone is written, with no fabricated count.
+    marked = copy_mod.build_session_event(
+        "s1", {}, turn_count=0, max_index=4, event_id="E")
+    assert marked["turn_max_index"] == 4 and "turn_count" not in marked
+
+
+def test_an_unwritable_out_artifact_never_replaces_the_verdict(
+        monkeypatch, tmp_path, capsys) -> None:
+    """A bad `--out` path is a warning, not a crash and not a new exit code.
+
+    `Path.write_text` raises the filesystem's own classes (EACCES/ENOSPC/
+    `IsADirectoryError`); unguarded, that escaped as a traceback and exit 1 ("the
+    tool cannot start") AFTER every session had been committed — inviting the one
+    remedy the module docstring forbids (a re-run re-appends the journal). The
+    artifact is duplicated on stdout, so the report is not lost: the run keeps
+    the exit code it earned.
+    """
+    _main_harness(monkeypatch, _FakeGraph(sessions=[], turns=[]))
+    out = tmp_path / "a-directory"
+    out.mkdir()
+    code = copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                          "--dry-run", "--out", str(out)])
+    assert code == 0                       # the run's own verdict survives
+    captured = capsys.readouterr()
+    assert "the artifact was not written" in captured.err
+    assert json.loads(captured.out)["dry_run"] is True   # and the report is intact
+
+
+def test_a_created_at_absence_is_reported_by_either_spelling() -> None:
+    """The artifact's `created_at_absent` must not name a session it did carry.
+
+    `build_session_event` drops a null under either spelling and carries a real
+    `createdAt` verbatim; a report that checked only `created_at` while the
+    payload held a real `createdAt` put a false entry in the per-session list an
+    operator reads before an irreversible delete.
+    """
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {"createdAt": "2026-10-20T00:00:00Z"}),
+                  (2, "s2", {})],
+        turns=[])
+    stats = copy_mod.copy_phase(graph, lambda sid, events: 1,
+                                event_id=lambda: "E")
+    assert stats["created_at_absent"] == ["s2"]
+
+
 def test_a_failed_session_write_aborts_the_copy_instead_of_being_counted() -> None:
     graph = _FakeGraph(
         sessions=[(1, "s1", {}), (2, "s2", {})],
@@ -856,19 +913,24 @@ def test_statements_with_no_connection_to_commit_refuse() -> None:
 
 
 def test_a_caller_that_owns_the_transaction_is_not_accused_of_skipping_it() -> None:
-    """`owns_connection=False` is the injecting caller's case, and it is PINNED.
+    """`owns_connection=False` means the caller owns the transaction AND the handle.
 
     The parameter is a documented contract with no in-tree caller today (this
-    module always passes `conn=None`, so the seam opens the transaction). An
+    module always passes `conn=None`, so the seam opens the transaction), and an
     unexercised branch inside a function whose job is to REFUSE reads as proven
-    when it has never run — so the branch gets a test: a caller that injected
-    its own connection has already committed it, and this refusal must not
-    accuse it of committing nothing.
+    when it has never run. The contract is: do not accuse it of committing
+    nothing, do not commit its transaction, and do not close a handle it owns.
     """
     outcome = _outcome()
     write = _Write(outcome.APPLIED, 2, None)
     assert copy_mod._commit_or_refuse(
         write, outcome, "s1", owns_connection=False) is write
+
+    # WITH a connection: the branches that could touch it must stay off it.
+    conn = _Conn()
+    copy_mod._commit_or_refuse(
+        _Write(outcome.APPLIED, 2, conn), outcome, "s1", owns_connection=False)
+    assert conn.commits == 0 and conn.closed is False
 
 
 # ── the artifact's verdict ───────────────────────────────────────────────
