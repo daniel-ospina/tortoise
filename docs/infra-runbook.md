@@ -284,10 +284,11 @@ downtime so far.
 
    - `+ACL` — the one grant the platform refuses; requiring it is what broke
      graph creation.
-   - `+MODULE|LIST` — **optional, and not worth `Admin`.** The ACL capability
-     probe does not run on this lane at all (the layer is declared off, so
-     `create_acl_user` returns before any server contact). Two other probes DO
-     read `MODULE LIST`, and a refusal degrades them *safely*, not wrongly:
+   - `+MODULE|LIST` — **optional ON THIS LANE, and not worth `Admin`.** The ACL
+     capability probe does not run here at all (the layer is declared off, so
+     `create_acl_user` returns before any server contact), unlike the
+     self-hosted lane where it is required. Two other probes DO read
+     `MODULE LIST`, and a refusal degrades them *safely*, not wrongly:
      `cypher_guard`'s engine-version probe reads UNKNOWN on `NOPERM` and then
      takes the conservative `WITH *` barrier (a measured no-op on the engines
      that already bind, re-probed after a TTL), and the projection's version
@@ -313,12 +314,18 @@ downtime so far.
      that constant as the app's requirement is how a self-hosted credential ends
      up unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
    - **`+ACL`** — to create and rotate per-graph users at all;
-   - `+MODULE|LIST` is *optional*: without it the probe refusal is recorded as
-     `denied` (an under-privileged CREDENTIAL, never a boundary) and the mint
-     still succeeds. Read it from the `denied` counter plus its log line
-     (`MODULE LIST refused …`) — the reconcile breaks down `absent` by reason,
-     not `denied`. The two version probes degrade as described in the Cloud
-     bullet above.
+   - **`+MODULE|LIST` — REQUIRED to have the layer here.** It gates
+     `_falkordb_present`, and a refusal makes `create_acl_user` return `denied`
+     **before any `ACL SETUSER`** — so not one per-graph user is created for any
+     graph, while every mint stays green and the log says only "credential
+     refused". MEASURED on this head: a `NOPERM` on `MODULE LIST` leaves the
+     server having seen `MODULE LIST` and nothing else (`status=denied`,
+     `reason=probe_denied`). That is the silent-degradation shape this whole
+     change exists to end, so it is in the list of grants the APP credential
+     needs even though the MINT alone would succeed without it. Read a refusal
+     from the `denied` counter plus its `MODULE LIST refused …` log line — the
+     reconcile breaks down `absent` by reason, not `denied`. (Only the two
+     VERSION probes degrade safely without this grant; see the Cloud bullet.)
 
    There are no console presets on a self-hosted server — that vocabulary is
    FalkorDB Cloud's; write the ACL from the list above. The requirement's home

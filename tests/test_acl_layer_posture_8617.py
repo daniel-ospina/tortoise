@@ -69,6 +69,11 @@ def test_a_denied_credential_is_recorded_and_never_raised(monkeypatch):
     result = acl.create_acl_user("g_denied", "team_x")  # must NOT raise
 
     assert result.status is acl.AclStatus.DENIED, result
+    # Round-4 review, proven by mutation: this stamp could be deleted with the
+    # whole suite green, and the reconcile counts the STATUS only — so a
+    # `denied` whose reason silently became "unknown" would send the operator
+    # after a code defect instead of at the credential.
+    assert result.reason == acl.REASON_SETUSER_DENIED, result.reason
     assert result.provisioned is False
     assert "refused" in result.detail.lower(), result.detail
 
@@ -152,12 +157,6 @@ def test_every_absence_names_its_own_reason(monkeypatch):
     assert r.status is acl.AclStatus.DENIED
     assert r.reason == acl.REASON_PROBE_DENIED, r.reason
     assert "credential" in r.detail, r.detail
-    # …and every reason is from the closed vocabulary, never prose.
-    vocab = {acl.REASON_DECLARED_OFF, acl.REASON_NO_URI,
-             acl.REASON_NO_GRAPH_MODULE, acl.REASON_PROBE_DENIED,
-             acl.REASON_LAYER_DOWN, acl.REASON_SETUSER_DENIED,
-             acl.REASON_PROBE_UNREADABLE}
-    assert r.reason in vocab, r.reason
 
     # declared_off — declared, not discovered
     monkeypatch.setenv(acl.ACL_LAYER_ENV, "off")
@@ -214,6 +213,35 @@ def test_the_absence_is_announced_once_per_REASON_not_once_per_status(
     assert len(msgs) == 2, msgs
     assert any("no server URI" in m for m in msgs)
     assert any("vanished" in m for m in msgs)
+
+
+def test_a_connection_failure_during_setuser_is_a_layer_down_not_a_boundary(
+        monkeypatch):
+    """Round-4 review, proven by mutation: the `layer_down` stamp on the
+    SETUSER path could be deleted with the suite green, and the reconcile would
+    then bucket a mid-op outage as `unknown` — which both operator docs tell the
+    reader to treat as a CODE DEFECT, i.e. the opposite direction.
+
+    The server here ANSWERS the probe (so the layer is real) and then dies
+    during the ACL write: exactly the transient fault that must never look like
+    a deployment fact."""
+    import redis
+
+    class _DiesAtSetuser(_Client):
+        def execute_command(self, *cmd):
+            self.seen.append(cmd)
+            if cmd[0] == "MODULE":
+                return [[b"name", b"graph", b"ver", 60002]]
+            if cmd[0] == "ACL" and len(cmd) > 1 and cmd[1] == "SETUSER":
+                raise redis.exceptions.ConnectionError("connection reset mid-op")
+            return []
+
+    monkeypatch.setattr(acl, "_admin_client", lambda: _DiesAtSetuser(module=[]))
+    monkeypatch.setenv(acl.ACL_LAYER_ENV, "strict")
+
+    r = acl.create_acl_user("g_midop", "team_x")
+    assert r.status is acl.AclStatus.ABSENT, r.status
+    assert r.reason == acl.REASON_LAYER_DOWN, r.reason
 
 
 def test_the_hook_forwards_the_reason_it_was_given(monkeypatch, caplog):

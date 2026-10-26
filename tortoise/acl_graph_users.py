@@ -262,8 +262,9 @@ def _admin_client():
     failure". A failure inside :func:`_falkordb_present` no longer vanishes:
     since #8617 a permission refusal there logs the refusal (it is the
     ``denied`` state, a fact about the credential), while an unreachable
-    server answers ``unreachable`` and LOGS the outage — so an outage is never
-    reported as ``absent`` (a boundary). The HEDGE arm is the one this
+    server answers ``unreachable`` and LOGS the outage — carried as ``absent``
+    with ``reason=layer_down``, so an outage can never be mistaken for the
+    ``no_graph_module`` boundary. The HEDGE arm is the one this
     channel gets, deliberately:
     every verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
     ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
