@@ -4252,10 +4252,27 @@ def _record_default_row_mint_failure(org_id: str, now: float) -> None:
 
     Bounded on purpose: an unbounded dict keyed by org is a leak in a
     long-lived process, so expired entries are pruned once it grows.
+
+    ⛔ The prune iterates a SNAPSHOT, never the live view. This dict is
+    process-global and is written from three concurrent executors in ONE
+    process — the auth pool (8 workers, through `resolve_api_key`'s self-heal),
+    the org pool (4, the provisioning wrappers) and the event loop (the MCP
+    lane) — so the loop can run while another thread inserts a new org key.
+    Mutating a dict during iteration "has an undefined effect and will in most
+    cases raise a RuntimeError exception" (PEP 3106; CPython raises
+    `dictionary changed size during iteration`), and that raise would not stay
+    here: this function is called from INSIDE
+    `_mint_default_graph_row_best_effort`'s `except Exception:` arm, and from the
+    provisioning wrappers AFTER their RPC has committed. It would therefore
+    escape a helper whose whole contract is "never fail the caller": an auth
+    500 on the org-wide-key lane, and a costed account on the signup lane.
+    A snapshot is the fix rather than a lock — every other access here is a
+    single dict operation (atomic under the GIL), so the iteration was the only
+    multi-step read; a lock would serialise the auth hot path to protect it.
     """
     _DEFAULT_ROW_MINT_RETRY[org_id] = now
     if len(_DEFAULT_ROW_MINT_RETRY) > 1024:
-        for stale in [oid for oid, ts in _DEFAULT_ROW_MINT_RETRY.items()
+        for stale in [oid for oid, ts in list(_DEFAULT_ROW_MINT_RETRY.items())
                       if (now - ts) >= _DEFAULT_ROW_MINT_RETRY_S]:
             _DEFAULT_ROW_MINT_RETRY.pop(stale, None)
 

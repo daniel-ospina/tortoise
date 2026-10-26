@@ -679,6 +679,78 @@ def test_a_mint_that_cannot_succeed_is_not_retried_on_every_request() -> None:
     assert resolve_api_key(cp, key)["default_graph_id"] == "g_healed"
 
 
+# ── The retry window under CONCURRENCY (#10025 review round 15, F1) ─────────
+# `_DEFAULT_ROW_MINT_RETRY` is process-global, and this PR put it on three
+# concurrent executors in ONE process: the auth pool (`resolve_api_key`'s
+# self-heal), the org pool (the provisioning wrappers) and the event loop (the
+# MCP lane). So its prune loop can run while a peer thread inserts a new org key
+# — and PEP 3106: mutating a dict while an iterator over it is live "has an
+# undefined effect and will in most cases raise a RuntimeError exception".
+
+
+class _PeerInsertingTimestamp(float):
+    """A stored timestamp that performs a PEER THREAD's insert on comparison.
+
+    The prune loop evaluates `now - ts`, which is exactly the moment a
+    concurrent `resolve_api_key`/`provision_org` lands its own org key, so doing
+    the insert from `__rsub__` makes that race DETERMINISTIC instead of timed.
+    `float.__rsub__` is consulted first for `now - ts` because this is a
+    subclass of `float` and overrides the reflected operation.
+    """
+
+    def __new__(cls, value: float, on_compare):
+        self = super().__new__(cls, value)
+        self._on_compare = on_compare
+        return self
+
+    def __rsub__(self, other):
+        self._on_compare()
+        return float(other) - float(self)
+
+
+def test_the_mint_retry_window_survives_a_concurrent_insert(monkeypatch) -> None:
+    """#10025 review round 15, F1: the prune iterates a SNAPSHOT, never the view.
+
+    Why it matters is the cast of the raise, not the prune: this helper is
+    called from INSIDE `_mint_default_graph_row_best_effort`'s
+    `except Exception:` arm and from the provisioning wrappers AFTER their RPC
+    has committed, so a `RuntimeError` here escapes a function whose whole
+    contract is "never fail the caller" — an auth 500 on the org-wide-key lane
+    (the shape of all 128 production keys) and a costed account on the signup
+    lane, whose caller compensates destructively on a raise.
+
+    Seeded past the 1024-entry prune trigger, with the first stored timestamp's
+    `__rsub__` standing in for the peer thread. The witness at the end proves
+    that insert really does red the LIVE-view shape, so a pass here is the
+    snapshot's and not luck.
+    """
+    from tortoise import supabase_control as sc
+
+    now = 10_000.0
+    live: dict[str, float] = {}
+    live["org-expired"] = _PeerInsertingTimestamp(
+        now - 10_000.0, lambda: live.setdefault("org-peer", now))
+    for i in range(1030):          # > 1024 ⇒ the prune branch actually runs
+        live[f"seed-{i}"] = now - 10_000.0
+    monkeypatch.setattr(sc, "_DEFAULT_ROW_MINT_RETRY", live)
+
+    sc._record_default_row_mint_failure("org-failing", now)   # must NOT raise
+
+    assert "org-failing" in live, "the failure was not recorded at all"
+    assert "org-peer" in live, (
+        "the peer insert never happened — this test proved nothing")
+
+    # Non-vacuity witness: on the LIVE view the helper used to iterate, that
+    # same insert reds the iteration.
+    witness: dict[str, float] = {}
+    witness["org-expired"] = _PeerInsertingTimestamp(
+        now - 10_000.0, lambda: witness.setdefault("org-peer", now))
+    witness["seed-1"] = now - 10_000.0
+    with pytest.raises(RuntimeError, match="changed size during iteration"):
+        for _oid, ts in witness.items():          # the PRE-FIX shape
+            _ = now - ts
+
+
 # ── The migration's two structural guarantees (#10025 review, at-head) ──────
 # Both live in SCHEMA, so `supabase/tests/20261028000001_graphs_default_row_
 # stable_id.sql` is where they are EXECUTED against real Postgres (PGlite). The
