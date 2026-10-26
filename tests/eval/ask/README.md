@@ -119,6 +119,81 @@ rendered into §1/§6 of the run report, so a reviewer can re-check it from the
 report alone. It adds no clause to the pre-registration's decision rule: it is
 a publishing precondition, not a scoring change.
 
+### The other half: the run records the tree it ran from
+
+The binding above makes the named sha vouch for the **corpus** and the
+**protocol** at that sha. It says nothing about the tree the **numbers** came
+from, so a run made at tree A could be published under a commit B whose corpus
+and protocol are byte-identical — any `main` merge between the run and the
+publish has exactly that shape — and `git checkout B` would re-run different
+code while every corpus check passed. So `run_sealed()` records its own
+`code_identity`: the resolved `HEAD` commit and whether the tree was clean.
+That record is carried through `score` into the receipt, and `publish` refuses
+when it is missing, when it is not a full 40-hex sha, when it names a
+**different** commit than the report is about to name, or when the tree had
+**uncommitted paths** (a sha reproduces *sha plus a patch nobody recorded*,
+which is not the recorded sha alone). A `git status` that fails is recorded as
+not-provably-clean, never as clean: the check must not fail open on an
+unreadable index. Both rows — the commit and the tree state — are rendered in
+§1/§6 beside the binding.
+
+The record is taken **twice**, before the first case and after the last one,
+and that is a fifth refusal: a measurement takes minutes, so a commit that
+lands while the run is in flight means the numbers came from **no single
+tree** — the start and end records differ, and `publish` refuses the run rather
+than publishing numbers under either sha. The same applies in reverse to a
+path the run itself dirties. Untracked files count as dirty, and the untracked
+mode is pinned (`--untracked-files=normal`) rather than read from the
+operator's git config, so a repository configured not to report untracked
+files cannot make a dirty tree look clean.
+
+`git status` is **not the only oracle**, because it can be told to say
+"clean" in two ways that have nothing to do with the tree: an index flag
+(`git update-index --assume-unchanged` / `--skip-worktree`) makes git skip a
+modified file's content, and an ignore rule (`.gitignore`, `.git/info/exclude`,
+a global `core.excludesFile`) hides an untracked, importable module. Both are
+recorded defeats of a status/diff check elsewhere in this package
+(`guard_measured_revision.py`), so the record also puts the question to git
+with no filter in it, over the **executed surface** — `tortoise/` (the SDK
+under measurement), `tools/` (the measurement tooling) and `tests/eval/ask/`
+(the corpus loader that tooling imports, so it EXECUTES on every run): the
+untracked set is enumerated **without** `--exclude-standard`, and every tracked
+file's index tag is read — `H` is ordinary, a lowercase tag is
+assume-unchanged, `S` is skip-worktree, and anything else is refused. Each such
+path is recorded as an uncommitted path, so publish refuses the run. A path the
+surface scan finds that `git status` **already reported** is not recorded
+twice (byte-caches included): one file is one uncommitted path, and the "an
+ignore rule hides it" wording is used only for a path status did not list. A
+failed `git ls-files` is recorded as not-provably-clean, exactly as a failed
+`git status` is.
+
+The surface is not hand-curated: `tests/test_measure_ask_distilled.py::
+test_the_recorded_surface_COVERS_every_module_the_run_imports` imports the
+runner in a fresh interpreter and fails, naming the file, if anything it loads
+sits outside the list. That is how the corpus loader came to be in it — without
+it, an `--assume-unchanged` patch to that loader published under a clean record.
+
+Only the editor/VCS suffixes (`.orig`, `.rej`, `.swp`, `.swo`, `.DS_Store`) are
+excused from the untracked scan, taken from the guard's own predicate
+(`guard_measured_revision._is_noise`) so the two cannot drift. **Byte-caches
+(`.pyc`/`.pyo`) are REFUSED**, which is the guard's default too (#3712): they
+are executable code this record does not verify, a forged one's header matches
+its source by construction, and CPython prefers a matching `.pyc` over the
+`.py` beside it — so a tree carrying one is not a tree the recorded sha
+reproduces, however clean `git status` looks. Tracked/committed byte-caches are
+refused on the same ground. The byte-code-free requirement that makes a run
+publishable is **this command's own**, not an inherited property:
+`run_protocol` launches `tools.longmem_eval.run` and `full_context` with `-B`,
+not this module. A bare interpreter launch writes `.pyc` files under the
+surface on import — before any identity is taken — so `run` **refuses to
+start** when `sys.dont_write_bytecode` is False, naming the removal command
+and the invocation that works. Two halves, both checked: the interpreter
+flag, and the tree itself — a byte-code-free launch over a tree that already
+carries caches removes none, so it would measure and then be refused at
+publish. The refusal is not advisory: `-B` stops caches being written but not
+one being read, so a run is publishable only once the surface carries no
+byte-caches.
+
 ## Why this is a separate tree from `tests/eval/write_path/`
 
 Mechanical, not stylistic: the write-path corpus's own integrity gate derives
