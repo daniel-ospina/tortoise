@@ -81,10 +81,12 @@ from __future__ import annotations
 
 import copy
 import functools
+import io
 import os
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -124,6 +126,81 @@ def _carries_module_abort(src: str) -> bool:
     )
 
 
+_FSTRING_START = getattr(tokenize, "FSTRING_START", -1)
+_FSTRING_END = getattr(tokenize, "FSTRING_END", -1)
+_LINE_END_TOKENS = frozenset(
+    {tokenize.NEWLINE, tokenize.NL, tokenize.ENDMARKER, tokenize.INDENT,
+     tokenize.DEDENT}
+)
+
+
+def _code_only(src: str) -> str:
+    """`src` with comments dropped and every string literal collapsed to `_`.
+
+    A docstring, a comment, or a user-facing message that DESCRIBES an abort
+    (`pytest.skip(..., allow_module_level=True)` quoted in prose — which
+    `tests/_live_gate.py` and `tests/conftest.py` both do, because explaining
+    the collection class is their whole job) is not a mechanism: it cannot
+    abort a collection. Matching raw text makes the tripwire red on the
+    DOCUMENTATION of the very defect it guards — a false block, and a guard that
+    reds correct work is one that gets laundered around rather than obeyed.
+
+    The line structure is preserved — exactly one output line per input line,
+    with the line-ending tokens dropped rather than re-emitted — because the
+    broad half below exempts `except` / `import` / `from` LINES — and each kept
+    token is written back at its ORIGINAL COLUMN, so a construct's adjacency
+    survives. A single space join would turn `pytest.skip(...)` into
+    `pytest . skip ( ...` and silently stop `_POSITIONAL_SKIP_RE` matching.
+
+    A string literal collapses to a NAMED placeholder (`_`) rather than to
+    nothing: `pytest.skip(<reason>, True)` is one of the aborts, and with the
+    reason deleted `_POSITIONAL_SKIP_RE`'s `[^,()]+` stops matching — the guard
+    would go blind on a real positional abort. The placeholder keeps the shape.
+
+    Untokenizable input falls back to `src` unchanged. That is the conservative
+    direction: this predicate is used to REFUSE.
+
+    RESIDUAL, declared rather than covered: a mechanism that spells its own
+    class inside a string — `raise getattr(unittest, "SkipTest")(...)` — is now
+    invisible, because the string is collapsed. That spelling is outside the
+    calibration list this predicate implements (the guard's own spellings are
+    `allow_module_level`, a `raise …SkipTest`, and `pytest.skip(reason, True)`),
+    and the four real aborts that list names all survive the collapse — the
+    positional form is the one a naive rewrite loses, which is why the
+    placeholder is `_` and not nothing.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return src
+    placed: dict[int, list[tuple[int, str]]] = {}
+    last_row = 1
+    depth = 0
+    for tok in tokens:
+        last_row = max(last_row, tok.end[0])
+        if tok.type in _LINE_END_TOKENS or tok.type == tokenize.COMMENT:
+            continue
+        if tok.type == _FSTRING_START:
+            depth += 1
+            placed.setdefault(tok.start[0], []).append((tok.start[1], "_"))
+            continue
+        if depth:
+            if tok.type == _FSTRING_END:
+                depth -= 1
+            continue
+        text = "_" if tok.type == tokenize.STRING else tok.string
+        placed.setdefault(tok.start[0], []).append((tok.start[1], text))
+    out: list[str] = []
+    for row in range(1, last_row + 1):
+        buf = ""
+        for col, text in sorted(placed.get(row, [])):
+            if col > len(buf):
+                buf += " " * (col - len(buf))
+            buf += text
+        out.append(buf)
+    return "\n".join(out)
+
+
 def _references_skip_mechanism(src: str) -> bool:
     """The tripwire's predicate: BROADER than `_carries_module_abort`.
 
@@ -134,14 +211,19 @@ def _references_skip_mechanism(src: str) -> bool:
     `raise(unittest.SkipTest(...))` in a helper aborts collection identically.
     Only bare `except` / `import` / `from` lines are exempt, so a legitimate
     handler is not read as an abort mechanism.
+
+    Both halves run on `_code_only(src)`, so the predicate is broad over
+    MECHANISMS and blind to PROSE — see `_code_only` for why prose is not a
+    mechanism and why the placeholder is `_` rather than nothing.
     """
-    if _carries_module_abort(src):
+    code = _code_only(src)
+    if _carries_module_abort(code):
         return True
-    for line in src.splitlines():
-        code = line.split("#", 1)[0].strip()
-        if "SkipTest" not in code:
+    for line in code.splitlines():
+        line = line.strip()
+        if "SkipTest" not in line:
             continue
-        if code.startswith(("except", "import ", "from ")):
+        if line.startswith(("except", "import ", "from ")):
             continue
         return True
     return False
@@ -374,6 +456,48 @@ def test_tripwire_is_broader_than_the_candidate_filter() -> None:
         "try:\n    run()\nexcept unittest.SkipTest:\n    pass\n"
     )
     assert not _references_skip_mechanism("from unittest import SkipTest\n")
+
+
+def test_tripwire_reads_code_not_prose() -> None:
+    """A helper that DESCRIBES an abort is not a helper that PERFORMS one.
+
+    The tripwire's question is "can this helper abort a collection?". Prose
+    cannot: a docstring, a comment, or a user-facing message quoting
+    `pytest.skip(..., allow_module_level=True)` aborts nothing. Matching raw
+    text made the tripwire red on `tests/_live_gate.py` and `tests/conftest.py`
+    for exactly that reason — those files exist to EXPLAIN the collection class,
+    so they must name it — which is a false block, and a guard that reds correct
+    work is one that gets laundered around rather than obeyed.
+
+    Both directions are pinned, because the cheap "fix" (delete the literal from
+    the prose) would have left the guard just as blind: the SAME spellings in
+    CODE must still be caught, and the positional form `pytest.skip(reason, True)`
+    is the one a naive "strip the string and match" rewrite loses (the reason
+    IS the string, so deleting it removes what `_POSITIONAL_SKIP_RE` matches).
+    That regression was measured while writing this test.
+    """
+    for prose in (
+        '"""pytest.skip(..., allow_module_level=True) is decided during '
+        'COLLECTION, so no item exists."""\n',
+        "# a raise unittest.SkipTest(...) gate would abort the module here\n",
+        'MSG = "pytest.skip(reason, True) aborts the module"\n',
+        'f"{name}: allow_module_level=True"\n',
+    ):
+        assert not _references_skip_mechanism(prose), prose
+    # CODE, in every abort form the guard's own calibration names.
+    assert _references_skip_mechanism(
+        "pytest.skip('no db', allow_module_level=True)\n"
+    )
+    assert _references_skip_mechanism("pytest.skip('no db', True)\n")
+    assert _references_skip_mechanism("raise unittest.SkipTest('no db')\n")
+    # The two files this fix exists for: the gate's own module and conftest name
+    # the collection spelling in prose and must stay OFF the offender set. Named
+    # explicitly so a future narrowing of `_code_only` cannot quietly re-red them.
+    for path in (TESTS / "_live_gate.py", TESTS / "conftest.py"):
+        src = path.read_text(encoding="utf-8")
+        assert not _references_skip_mechanism(src), path
+        # ...and the prose really is why: the raw text DOES carry the spelling.
+        assert _carries_module_abort(src), path
 
 
 def test_nodeid_parsing_is_not_fooled_by_skip_summary_lines() -> None:
