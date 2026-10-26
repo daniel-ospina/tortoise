@@ -67,8 +67,11 @@ The pin stays ARMED, and it reds on the WRONG follow-through first:
   fusion-side remedy, i.e. the closed option D. The ruling's instruction for
   the dedup change is therefore a DELIBERATE act, and it calls it *"proposal,
   not a decision"*: delete this marker and replace the pin with one asserting
-  **one claim, N sources**, together with the #2102 E2E-1 restatement. Never a
-  silent green.
+  **one claim, N sources**. Whether the #2102 E2E-1 indicator's wording is
+  restated alongside it is **not** decided by the ruling — its point 5 reads
+  "The #2102 E2E-1 indicator's wording is NOT re-specified by this ruling. No
+  hard rule is to be written in its place" — so treat any restatement as a
+  separate, still-open question. Never a silent green.
 
 The three green guards below hold ANY change here to its invariants (a
 generator leg is not swallowed, a leg that DID rank the rows apart is still
