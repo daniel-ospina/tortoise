@@ -76,6 +76,20 @@ REFUSED = rp.refused_props_names(MIGRATIONS)
 SECTION_TABLE_ALL = {**SECTION_TABLE, "Edges": "relation"}
 
 
+def _stripped_source(rel_path: str) -> str:
+    """A repo source file with whole-line `#` comments REMOVED.
+
+    Only whole-line comments are dropped (no pinned clause sits on a commented
+    line); the file is still read from disk, so the pins remain source-parsed and
+    need no engine.
+    """
+    path = REPO_ROOT / rel_path
+    return "\n".join(
+        line for line in path.read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 def _fold_source() -> str:
     """`projection/entities.py` with whole-line `#` comments REMOVED.
 
@@ -91,11 +105,7 @@ def _fold_source() -> str:
     line); the file is still read from disk, so the pins remain source-parsed and
     need no engine.
     """
-    path = REPO_ROOT / "tortoise" / "projection" / "entities.py"
-    return "\n".join(
-        line for line in path.read_text().splitlines()
-        if not line.lstrip().startswith("#")
-    )
+    return _stripped_source("tortoise/projection/entities.py")
 
 
 def _rows(cls: str):
@@ -598,22 +608,27 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
                 "from the fold, do not guess. A NEW constant the fold owns is "
                 "the same finding: this table is the record→cache side of it."
             )
-    # A constant with a SECOND home drifts silently: `_mint_subject_stub`
-    # (`projection/edges.py`) writes the same `subjectKind='other'` literal for a
-    # stub-minted Subject, so a change there would red nothing above.
-    edges = (REPO_ROOT / "tortoise" / "projection" / "edges.py").read_text()
-    assert re.search(r"s\.subjectKind='other'", edges), (
-        "`_mint_subject_stub` in projection/edges.py no longer writes the same "
-        "`subjectKind='other'` literal this table transcribes for Subject — the "
-        "stub-minted half of the constant drifted. Re-derive, do not guess."
-    )
-    # The Object twin: `_event_plain_merge` writes `o.objectKind='other'` for the
-    # stub Object an event's mechanism link mints.
-    assert re.search(r"o\.objectKind='other'", fold), (
-        "the Object stub path (`_event_plain_merge` in projection/entities.py) "
-        "no longer writes the same `objectKind='other'` literal this table "
-        "transcribes — the stub-minted half of the constant drifted."
-    )
+    # ⛔ The SECOND HOME this block used to transcribe is GONE (#3590), so the
+    # pin INVERTS instead of disappearing: the fold no longer MINTS a carrier for
+    # a bare reference, so `_mint_subject_stub` (`projection/edges.py`) RESOLVES a
+    # live holder instead of writing `s.subjectKind='other'`, and
+    # `_event_plain_merge` no longer writes `o.objectKind='other'` for a stub
+    # Object. Nothing is left to restate — but if either mint comes back, a
+    # carrier would carry a discriminator this table does not declare, so the
+    # RETURN of either literal must red HERE (which is what the pin was for: a
+    # constant with a second home drifts silently).
+    for rel, pattern, helper in (
+        ("tortoise/projection/edges.py", r"s\.subjectKind='other'",
+         "`_mint_subject_stub`"),
+        ("tortoise/projection/entities.py", r"o\.objectKind='other'",
+         "`_event_plain_merge`'s Object stub"),
+    ):
+        assert not re.search(pattern, _stripped_source(rel)), (
+            f"{helper} in {rel} writes a stub-mint literal this table does not "
+            f"declare (/{pattern}/) — a fold-time mint is back (#3590 D9 retires "
+            "it), and the constant it transcribes is invisible to the pins above. "
+            "Re-derive FOLD_ON_CREATE_DEFAULTS and the exemption, do not guess."
+        )
     # The values the patterns above force, asserted so the table cannot drift
     # while the patterns still match (they pin the CONSTRUCTION, not the literal).
     assert declared[("Subject", "subjectKind")] == "other"

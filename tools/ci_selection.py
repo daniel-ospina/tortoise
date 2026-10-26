@@ -298,6 +298,19 @@ SHARED_MODULES = (
     # induced in an api/eval/ep session would never run on the PR that made it
     # (#1349/#3332/#3910 under-selection class).
     "tests/_canonical_store_guard.py",
+    # #3590 (review round 4, still open): the minted-id read helper
+    # (`tests/_node_ids.py`, `node_id(sdk, label, name)` → the live holder's
+    # `n.id`) is imported by test modules on MORE THAN ONE surface — core
+    # (`test_object_registered_journal.py`, `test_subjectadded_journal.py`,
+    # `test_status_folds_2729.py`), sdk (`test_capture_session.py`,
+    # `test_entity_delete_rebuild.py`), eval (`test_rebuild_parity_fail_loud_3585.py`)
+    # and `test_subject_supersession_1423.py` / `test_assembly_pure.py`. It is not
+    # a `test_*.py` file, so the manifest never classifies it: without this entry
+    # a helper-only edit selects `core` only and every other surface's consumer
+    # runs a resolver whose contract nobody re-ran (#1349/#3332/#3910). Its unit
+    # IS `.py`, so `test_shared_modules_force_the_full_matrix` above derives the
+    # invariant for it rather than trusting this comment.
+    "tests/_node_ids.py",
     # #9208: the degraded-change-feed attribution decision
     # (`tests/_change_feed_isolation.py`) is imported by `tests/conftest.py`'s
     # autouse `_change_feed_state_isolation` fixture, so it runs in EVERY test's

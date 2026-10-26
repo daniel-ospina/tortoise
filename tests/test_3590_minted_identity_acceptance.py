@@ -732,3 +732,135 @@ def test_a_create_holds_the_per_name_mint_lock_across_its_write(sdk, monkeypatch
         "name is create-poisoned (#3590 review P2-1)")
     assert len(_name_ids(proj, "Object", "Serialised")) == 1, (
         "one name, one carrier")
+
+
+# ── The HOSTED COMMIT DOOR (`/v1/sessions/commit`) ──────────────────────────
+# The door writes its extractor events in step 3b, BEFORE step 6 registers the
+# payload's entities, so it defers each `events[].about_entities` reference to
+# step 6a. Two things went wrong there, and both are the same question the SDK
+# event door already answers (`sdk._register_referenced_entity` +
+# `resolve_fold_name_ids`): the deferral only RESOLVED (so a name the payload
+# merely mentions was never registered — #3590 review ISSUE 2a), and it resolved
+# with the SINGULAR form (so a name two live entities hold, the legal D2/#8864
+# state, wired NO edge where `origin/main` wired both — ISSUE 2b).
+
+
+def _commit_naming(*names: str, eid: str = "ev_commit_door_3590",
+                   session_id: str = "sess_commit_door_3590"):
+    """A minimal valid `CommitPayload`/`CommitPlan` whose one event mentions
+    ``names`` in ``about_entities`` and declares NO entities of its own — the
+    "#1272 P2-4" shape the deferral exists for, minus the declaration."""
+    from tortoise.commit_schema import (
+        BudgetDecision,
+        CommitEvent,
+        CommitPayload,
+        CommitPlan,
+        ExtractorInfo,
+        ReconcileResult,
+        Telemetry,
+        TelemetryCounts,
+        TelemetryExtractor,
+        TelemetryModel,
+    )
+
+    payload = CommitPayload(
+        session_id=session_id,
+        client_commit_id=f"ccid-{session_id}",
+        captured_at="2026-03-04T05:06:07Z",
+        extractor=ExtractorInfo(version="value@1.0.0", mode="byok",
+                                calibration_version="v3"),
+        summary="commit door aboutObject wiring",
+        events=[CommitEvent(
+            id=eid,
+            eventKind="note",
+            content="an occurrence mentioning entities this payload does not declare",
+            about_entities=list(names),
+            source_ref=f"session:{session_id}",
+        )],
+        telemetry=Telemetry(
+            extractor=TelemetryExtractor(version="value@1.0.0", mode="byok",
+                                         calibration_version="v3"),
+            model=TelemetryModel(provider="anthropic", id="m", cfg_hash="h"),
+            counts=TelemetryCounts(kept=0, candidate=0, segment=0, window=1,
+                                   empty_windows=0),
+            keep_ratio=1.0, dedup_hits=0),
+    )
+    plan = CommitPlan(
+        payload=payload, duplicate=False, first_adjudication=True,
+        reconcile=ReconcileResult(points=[], entities=[]),
+        budget=BudgetDecision(outcome="ok", cumulative_after=0),
+    )
+    return payload, plan
+
+
+def _about_object_ids(proj, eid: str) -> set[str]:
+    return {r[0] for r in proj.g.query(
+        "MATCH (e:Event {eventId:$eid})-[:aboutObject]->(o:Object) "
+        "RETURN o.id", params={"eid": eid}).result_set}
+
+
+def test_the_commit_door_registers_a_name_it_only_mentions(sdk):
+    """ISSUE 2a: the commit door REGISTERS what it references (D9).
+
+    The deferral moved the resolve after step 6, but step 6 registers
+    ``payload.entities`` and nothing else — so for a name the payload only
+    MENTIONS, step 6a still found no holder, dropped the ``aboutObject`` edge
+    and recorded a non-exempt ``unregistered-reference``. On ``main`` the
+    retired ``MERGE (o:Object {name:$name})`` created the node, so the outcome
+    for the case the deferral was written for did not improve.
+
+    RED on the pre-fix door: zero edges, and no carrier. Non-vacuous in the
+    other direction too — the edge has to exist AND the entity has to be
+    journaled, because live-only registration would vanish at replay.
+    """
+    from tortoise import hosted_api
+
+    client, events = sdk
+    proj = client._get_proj()
+    payload, plan = _commit_naming("Fresh Mention Topic")
+    eid = payload.events[0].id
+
+    hosted_api._execute_commit_writes(client, payload, plan)
+
+    carriers = _name_ids(proj, "Object", "Fresh Mention Topic")
+    assert len(carriers) == 1, (
+        "the commit door referenced a name it never registered, so the "
+        f"deferral's whole purpose (#1272 P2-4) is unmet: {carriers}")
+    assert carriers[0] != "Fresh Mention Topic", (
+        "the id is derived from the name again — identity must be MINTED")
+    assert _about_object_ids(proj, eid) == set(carriers), (
+        "the deferred aboutObject edge was dropped for a name this payload "
+        "introduces")
+    assert any("Fresh Mention Topic" in json.dumps(rec)
+               for rec in _journal(events)), (
+        "the registration was not journaled, so a rebuild cannot recover the "
+        "entity the edge addresses (#3590 D9)")
+
+
+def test_the_commit_door_wires_every_live_carrier_of_a_doubly_held_name(sdk):
+    """ISSUE 2b: an ATTRIBUTION addresses every carrier, not only a lone one.
+
+    Two live ``Object``s may hold one name (D2/#8864). The singular resolver
+    answers "the identity of the record being folded" and returns ``None``
+    there, so the door wired NO edge where ``origin/main``'s name-keyed MERGE
+    bound to both — while the SDK event door, pinned three tests above, wires
+    both. Same legal state, two doors, opposite outcomes.
+    """
+    from tortoise import hosted_api
+
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Dup Door Name", _server_id="id-door-a",
+                         is_episodic=False)
+    client.create_entity("object", "Dup Door Name", _server_id="id-door-b",
+                         is_episodic=False)
+    assert sorted(_name_ids(proj, "Object", "Dup Door Name")) == [
+        "id-door-a", "id-door-b"], "fixture did not produce the legal state"
+
+    payload, plan = _commit_naming("Dup Door Name", eid="ev_commit_door_dup")
+    hosted_api._execute_commit_writes(client, payload, plan)
+
+    assert _about_object_ids(proj, "ev_commit_door_dup") == {
+        "id-door-a", "id-door-b"}, (
+        "the commit door did not wire BOTH legal carriers of the mentioned "
+        "name — the SDK event door does, and `main` did")

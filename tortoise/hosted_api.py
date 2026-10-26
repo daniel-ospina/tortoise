@@ -96,7 +96,9 @@ from tortoise.config import _resolve_event_log_path
 from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
     EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
-from tortoise.entity_identity import resolve_fold_name  # #3590 fold-side name resolution
+# #3590 fold-side name resolution — the PLURAL form: an `aboutObject` link is
+# an ATTRIBUTION, and a name may legally have several live carriers (D2/#8864).
+from tortoise.entity_identity import resolve_fold_name_ids
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
@@ -17299,15 +17301,40 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # this very payload introduces and dropped the edge, which is exactly the
     # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
     # cover. A name that still resolves to nothing is left UNWIRED (and recorded
-    # by `resolve_fold_name`) rather than fabricated.
+    # by `resolve_fold_name_ids`) rather than fabricated.
+    #
+    # ⛔ TWO HALVES, and both are owed by THIS door (#3590 reviews P1/P1-1):
+    #
+    # (a) REGISTER what you reference (D9's producer duty). Resolving alone is
+    #     only half the deferral: step 6 registers ``payload.entities``, so for
+    #     a name this payload mentions but does not declare — the case #1272
+    #     P2-4 was filed about — step 6a still found no holder, dropped the
+    #     edge and recorded a NON-exempt ``unregistered-reference``. On
+    #     ``main`` the retired ``MERGE (o:Object {name:$name})`` created it, so
+    #     the order moved and the OUTCOME for that case did not improve. This
+    #     is the SAME duty and the SAME helper the SDK event door performs on
+    #     its own mentions (``sdk._register_referenced_entity``), so the two
+    #     doors register the same references and journal the same
+    #     registration records.
+    #
+    # (b) ADDRESS EVERY LIVE CARRIER — the singular resolver answers the
+    #     "identity of the record being folded" question (one holder or none),
+    #     which is the wrong question for a loose attribution: with two live
+    #     ``Object``s holding one name (the legal D2/#8864 state this PR's own
+    #     acceptance pins exercise) it returned ``None`` and the door wired NO
+    #     edge, where ``main`` bound to both. ``resolve_fold_name_ids`` is the
+    #     plural form the fold's about-cascade (``edges.resolve_about_link``)
+    #     already uses — one edge per carrier, nothing recorded when it finds
+    #     them, the exempt ``unfolded-mention`` shape when it finds none.
     for _eid, _name in _deferred_about_objects:
-        _resolved = resolve_fold_name(proj.g, "Object", _name,
-                                      context="session-commit aboutObject")
-        if _resolved:
+        sdk._register_referenced_entity("Object", _name)
+        for _oid in resolve_fold_name_ids(
+                proj.g, "Object", _name,
+                context="session-commit aboutObject", mention=True):
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
                 "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": _eid, "oid": _resolved},
+                params={"eid": _eid, "oid": _oid},
             )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel

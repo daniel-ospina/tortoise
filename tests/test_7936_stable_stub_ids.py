@@ -186,7 +186,12 @@ def test_the_graph_entity_view_is_a_pure_function_of_the_journal(
         views: list = []
         for _ in range(2):
             _rebuild(sdk, events)
-            views.append(_graph_entities(sdk._get_proj())[0])
+            # ⛔ NO `[0]`: `_graph_entities` returns ONE `(label, id)`-keyed dict.
+            # It returned a `(id_index, name_index)` pair until #3590 retired the
+            # name index (`_entities_from_view`), and this line kept subscripting
+            # the pair — `KeyError: 0` on every run, i.e. the pin was RED rather
+            # than asserting anything (found by the #3590 CI brief, 2026-10-26).
+            views.append(_graph_entities(sdk._get_proj()))
         assert views[0], "the entity view must not be empty — else this is vacuous"
         assert views[0] == views[1], (
             "the graph's entity view is not a pure function of the journal: "

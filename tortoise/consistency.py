@@ -2275,13 +2275,19 @@ def _graph_view(projection) -> dict:
     return view
 
 
-def _graph_entities(projection) -> tuple[dict, dict]:
-    """The graph's non-Point entities, indexed two ways.
+def _graph_entities(projection) -> dict:
+    """The graph's non-Point entities, keyed ``(label, id)``.
 
-    Returns ``({(label, id): {"status": …}}, {(label, name): same-record})``.
-    The NAME index exists because `_upsert_object`/`_upsert_subject` MERGE on
-    name, so the id a journal record registered may not be the id the node
-    carries (#3585 review).
+    Returns ``{(label, id): {"status": …}}`` — ONE index, ID-KEYED ONLY. The
+    ``{(label, name): …}`` companion index this helper used to return alongside
+    it is GONE with #3590 (`_entities_from_view`'s docstring carries the reason:
+    the entity writers MERGE on ``id`` now, so a second registration of one name
+    under a fresh id is TWO nodes and the name index resolved a BURIED journal id
+    onto a different incarnation of the same name and reported the burial CLEAN).
+    The annotation and the docstring were left saying ``tuple[dict, dict]`` after
+    that shape change, which is why the only caller
+    (`tests/test_7936_stable_stub_ids.py`) was still subscripting ``[0]`` and
+    raising ``KeyError: 0``.
 
     A projection over :func:`_graph_view` — the SAME ``(label, id)`` index the
     baseline digest folds (:func:`_graph_fingerprint`), so the comparison and
