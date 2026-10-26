@@ -346,7 +346,8 @@ def _graph_vector(tid: str, embedding) -> list | None:
     """The graph's stored vector as floats — or a REFUSAL (``CensusError``).
 
     A `vecf32` read-back is NOT contractually a `list`: the repo's own sanitizer
-    (`tortoise/embeddings.py::sanitize_journal_embedding`, #5004 round-3)
+    (`tortoise/embeddings.py::stamp_journal_embedding`, line 153-158, #5004
+    round-3)
     accepts ANY non-string iterable precisely because "a graph read-back
     (`t.embedding` after a `vecf32` write, #5004 round-3) can arrive as a numpy
     array or a driver vector type". Accepting only `list`/`tuple` here refused
@@ -368,7 +369,12 @@ def _graph_vector(tid: str, embedding) -> list | None:
             "never a silent 'no vector'")
     try:
         items = list(embedding)
-    except TypeError as exc:
+    except Exception as exc:
+        # Any exception, not just `TypeError`: a container whose `__iter__`
+        # raises anything else would otherwise escape as a traceback, i.e. the
+        # exit-1 "usage/IO" code, where the contract is "unclassifiable side ->
+        # exit 3". `BaseException` (KeyboardInterrupt/SystemExit) still
+        # propagates.
         raise CensusError(
             f"turn {tid}: the graph embedding is "
             f"{type(embedding).__name__}, not a sequence — it cannot be "
@@ -723,8 +729,13 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                           for a in entries})
     return {
         "population": {
-            # The read population is the DELETE SET (`is_episodic = true`);
-            # `turn_shaped_nodes` is the purge set inside it.
+            # The read population is the DELETE SET (`is_episodic = true`).
+            # `turn_shaped_nodes` is the TURN SHAPE inside it — NOT the purge
+            # set: a turn-shaped node can still be excluded by the anomaly
+            # partition (orphan, cross_wired, session_mismatch,
+            # operator_flagged), and the suite pins that divergence. The purge
+            # set is `dry_run.would_delete_turn_nodes` plus
+            # `dry_run.held_back_turn_nodes`.
             # The DELETE SET, so it counts every node the read returned —
             # including the ones with no usable key, which carry no `t.id` to
             # be a dict key. Counting `nodes` alone understated the population

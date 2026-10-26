@@ -156,7 +156,25 @@ def test_exact_parity_passes_and_the_dry_run_counts():
     assert session["sample"][0]["id"] == "s1_t0"
     assert session["sample"][0]["speaker"] == "user"
     assert session["sample"][0]["createdAt"] == "2026-10-25T00:00:00+00:00"
-    assert len(session["sample"][0]["content_head"]) <= 60
+
+
+def test_the_sample_carries_a_60_CHARACTER_HEAD_not_the_transcript():
+    """The exposure claim, PINNED — the previous assert could not hold it.
+
+    It was `len(content_head) <= 60` against a fixture whose content is 20
+    characters, so widening the slice to `[:600]` (a 10x-wider transcript head)
+    or replacing it with `""` left the suite green: the property the comment
+    above states was unpinned. The body here is longer than the slice, and the
+    assertion is EXACT — the head, not a bound.
+    """
+    body = "[user] " + ("0123456789" * 30)  # 307 characters
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content=body)}
+    rows = {"s1_t0": _record_row("s1_t0", content=body)}
+    assert _census(nodes, rows)["verdict"] == "CLEAN"
+    sample = _census(nodes, rows)["dry_run"]["per_session_sample"][0]["sample"][0]
+    assert sample["content_head"] == body[:60]
+    assert len(sample["content_head"]) == 60
+    assert sample["content_head"] != body
 
 
 def test_binary64_record_vector_matches_binary32_graph_vector():
@@ -435,7 +453,7 @@ def test_a_DRIVER_vector_type_is_READ_not_refused(monkeypatch):
     """A `vecf32` read-back is NOT contractually a `list` — accept what the
     repo's own sanitizer accepts, or the gate can never open.
 
-    `tortoise/embeddings.py::sanitize_journal_embedding` accepts ANY non-string
+    `tortoise/embeddings.py::stamp_journal_embedding` accepts ANY non-string
     iterable for the same value from the same store, and says why: "a graph
     read-back (`t.embedding` after a `vecf32` write, #5004 round-3) can arrive
     as a numpy array or a driver vector type". The graph leg accepted only
@@ -474,6 +492,27 @@ def test_a_numeric_NON_sequence_is_still_REFUSED(monkeypatch, container):
     """
     rows = [[1, "s1_t0", "[user] body of s1_t0", "user", "draft",
              "2026-10-25T00:00:00+00:00", "event", container, False,
+             ["s1"]]]
+    _patch_proj(monkeypatch, _PagedG(rows))
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
+    assert "not a sequence" in str(exc.value)
+
+
+def test_a_container_whose_ITERATION_RAISES_REFUSES_it_does_not_crash(monkeypatch):
+    """A pathological container is an unreadable side (exit 3), not a traceback.
+
+    `list(embedding)` caught only `TypeError`, so a container whose `__iter__`
+    raised anything else escaped as the exit-1 "usage/IO" code — a code the
+    module docstring reserves for bad flags. `BaseException` still propagates,
+    so a `KeyboardInterrupt` is not swallowed.
+    """
+    class _Exploding:
+        def __iter__(self):
+            raise RuntimeError("driver blew up mid-iteration")
+
+    rows = [[1, "s1_t0", "[user] body of s1_t0", "user", "draft",
+             "2026-10-25T00:00:00+00:00", "event", _Exploding(), False,
              ["s1"]]]
     _patch_proj(monkeypatch, _PagedG(rows))
     with pytest.raises(tpc.CensusError) as exc:
