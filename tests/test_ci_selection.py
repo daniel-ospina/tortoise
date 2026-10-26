@@ -215,8 +215,9 @@ def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     Four guards in `tests/test_definite_description_backfill_5059.py` assert
     only against `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's
     destructive half*: the load-bearing share, the `archived`-has-a-writer
-    claim (which forbids any rephrasing of the refuted absolute, not one
-    spelling of it), the `_ALLOWED_TRANSITIONS` production-reader scan, and the
+    claim (which rejects the set of no-writer spellings it enumerates, rather
+    than one literal — the literal form was evaded twice), the
+    `_ALLOWED_TRANSITIONS` production-reader scan, and the
     recorded design decision itself. The file was
     registered in `core` alone — which is right for its module-level guards, and
     useless for these: `docs/` is in NON_PYTHON_PREFIXES and the document

@@ -768,6 +768,20 @@ def test_the_doc_states_the_load_bearing_share_not_its_complement():
     )
 
 
+#: The no-writer ABSOLUTES this guard enumerates — the spellings of "`archived`
+#: has no writer" that a docs-only edit would reintroduce. Scoped to ONE line
+#: that also names `archived` (the claim is about that status, never about the
+#: raw layer), and enumerated rather than generative: the guard's message may
+#: only claim the spellings listed here (#10069 review P2, third round).
+_ABSENT_WRITER_CLAIM = re.compile(
+    r"archived[^.\n]{0,80}\b(?:no writer|never written|nothing writes|"
+    r"not written|unwritten)\b"
+    r"|\b(?:no writer|never written|nothing writes|not written|unwritten)\b"
+    r"[^.\n]{0,80}archived",
+    re.IGNORECASE,
+)
+
+
 def test_the_doc_does_not_claim_archived_has_no_writer():
     """`archived` IS writable today through the generic, unvalidated path.
 
@@ -787,19 +801,27 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "the passage again claims nothing writes `archived`. It is false: the "
         "generic unvalidated write path reaches it on an :Object (#5333)."
     )
-    # The CLAIM, not one spelling of it. The literal above was evaded once by a
-    # rephrasing — "until a relocation pass is authorised, nothing writes it at
-    # all" (lowercase, pronoun instead of the noun) — which satisfied the
-    # literal while carrying the same false absolute, inside the very
-    # paragraph the design-decision pin was meant to protect. Any remaining
-    # *unqualified* no-writer absolute is the same defect, so the guard reads
-    # the claim case-insensitively and requires the qualified form instead.
-    assert "nothing writes" not in section.lower(), (
-        "the passage asserts, in some spelling, that NOTHING writes — that is "
-        "the refuted absolute: `archived` IS reachable through the generic "
-        "unvalidated write path, so the population is UNMEASURED, not empty. "
-        "Qualify the claim to the writers this decision governs (a PASS) "
-        "instead of deleting the clause (#5333)."
+    # The CLAIM, not one spelling of it (#10069 review P2, third round). The
+    # first form of this guard checked the literal "Nothing writes `archived`",
+    # and a rephrase evaded it ("nothing writes it at all" — lowercase, pronoun
+    # instead of the noun). Widening to the single token "nothing writes" was
+    # STILL a literal: measured, inserting "`archived` has no writer at all
+    # today." left every arm of this guard green. So the guard now rejects any
+    # of the no-writer ABSOLUTES below, on one line with `archived`, in either
+    # order — and the claim stated in the message is only ever as wide as the
+    # spellings enumerated here, never "any rephrasing".
+    hits = [
+        line for line in section.splitlines()
+        if _ABSENT_WRITER_CLAIM.search(line)
+    ]
+    assert not hits, (
+        "the passage asserts, in a spelling this guard enumerates, that "
+        "NOTHING writes `archived` — the refuted absolute: `archived` IS "
+        "reachable through the generic unvalidated write path (and through "
+        "pack-declared status folds), so the population is UNMEASURED, not "
+        "empty. Qualify the claim to the writers this decision governs (a "
+        "PASS) instead of deleting the clause "
+        f"(#5333). Offending line(s): {hits[:2]}"
     )
     assert "no pass writes it" in section.lower(), (
         "the fold must still be stated as inert until authorised — the "
@@ -807,6 +829,21 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
         "absolute. Without it the paragraph stops saying the fold does not "
         "run today, and a lane reads the permitted form as a live "
         "mechanism (#5333)."
+    )
+    # …and the hedge that keeps the population UNMEASURED rather than zero: an
+    # asserted provenance ('was placed by hand') over-claims for data the same
+    # subsection says is uncounted, and invites 'scan the update_entity audit
+    # trail' as an implementation of the enumeration precondition.
+    assert (
+        "may have been" in section.lower()
+        and "placed by hand" in section.lower()
+        and "pack-declared status fold" in section.lower()
+    ), (
+        "the exception sentence must HEDGE the provenance of the "
+        "already-`archived` population ('may have been placed by hand', and "
+        "or by a pack-declared status fold) — asserting it upgrades a "
+        "measurement the passage calls UNMEASURED into a known one "
+        "(#5333)."
     )
     assert "UNMEASURED" in section, (
         "the passage must state that the number of existing `archived` Objects "
@@ -943,10 +980,12 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
     """§4.3's relocation subsection must carry the decision, all of it.
 
     Recorded 2026-10-26 against #5333's design half. The decision has four
-    load-bearing clauses, and a passage that drops ANY of them re-opens a
-    question the recorded chain has already answered (``#5059``'s options and
-    recommendation; §2.4 row 3's never-delete rule; D7's appended-Event
-    lifecycle; the 2026-10-24 capstone's real-subject-matter finding):
+    load-bearing clauses — and, beyond them, a provenance claim and two
+    index/table claims this pin also holds. A passage that drops ANY of them
+    re-opens a question the recorded chain has already answered (``#5059``'s
+    options and recommendation; §2.4.2 row 3's never-delete rule; D7's
+    appended-Event lifecycle; the 2026-10-24 capstone's real-subject-matter
+    finding):
 
     1. **add-only** — after COMMIT no pass may remove, archive or withdraw a
        committed row, and a field write only by an appended lifecycle Event;
@@ -1010,12 +1049,44 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
         "a recorded design answer is not a licence to build the pass "
         "(#5333)."
     )
+    # `ONLY` must be SCOPED to the successorless case. Unqualified it denies the
+    # D7 arm the same paragraph permits — `ObjectSuperseded` writes
+    # `status='superseded'`, and `OBJECT_TERMINAL_STATUSES` IS the
+    # recall-exclusion set (commit_ops.py:51/:59), so supersession is a
+    # removal-from-recall. A lane implementing "the ONLY permitted form" would
+    # reject the live `apply_supersessions` path, or route rows that HAVE a
+    # successor through `restatus`→`archived` and break successor resolution
+    # while reporting success (#10069 review P1).
+    assert "where no visible successor exists" in decision, (
+        "'the ONLY permitted form of removal-from-recall' is unscoped again — "
+        "it must be limited to the successorless case, or it contradicts the "
+        "D7 arm (`ObjectSuperseded` → `status='superseded'`) that the same "
+        "paragraph permits and that `OBJECT_TERMINAL_STATUSES` already "
+        "recall-excludes (#5333)."
+    )
     assert "only permitted form of removal-from-recall" in decision, (
         "the permitted form must be named in the SAME paragraph as the "
         "prohibition — 'no pass may remove, archive or withdraw' without it "
         "reads as forbidding the journaled `restatus`→`archived` fold that "
         "the paragraph itself records as the target (a lane implementing the "
         "guard cannot tell prohibition from permitted form) (#5333)."
+    )
+    # The FORECLOSURE itself, not merely its grounds. Measured (#10069 review
+    # P1): while only the GDPR/retention quote and Option C were asserted,
+    # rewriting this sentence to "A physical delete is PERMITTED to a
+    # relocation pass" left every arm green — the primary clause of the
+    # decision was unpinnned, and no other guard in the tree reads it.
+    assert "a physical delete is foreclosed to every pass" in decision, (
+        "the never-delete foreclosure is gone or inverted. It is the clause "
+        "the decision exists for, and `grep -rn foreclosed tests/ config/ "
+        "tools/` finds no other guard that reads it: without this assertion "
+        "a docs-only edit can PERMIT a physical delete and merge green "
+        "(#5333)."
+    )
+    assert "or withdraw it from recall" in decision, (
+        "the prohibition lost its third verb — 'no pass may remove, archive "
+        "or withdraw' is three distinct prohibitions, and dropping 'withdraw "
+        "it from recall' leaves the recall-view removal unnamed (#5333)."
     )
     # The rest of clause 1: the two other verbs of the prohibition, and the
     # field-write rule. Without these the paragraph can be INVERTED — "fields

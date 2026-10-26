@@ -6454,7 +6454,8 @@ tier1:
 # live in `test_definite_description_backfill_5059.py` (`core` above) — FOUR of
 # them read ONLY `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
 # load-bearing share (§4.3's evidence bar), the `archived`-has-a-writer claim
-# (which now also forbids any rephrasing of the refuted absolute), the
+# (which now rejects the set of no-writer spellings it enumerates, rather than
+# one literal — the literal form was evaded twice), the
 # `_ALLOWED_TRANSITIONS` production-reader scan, and the recorded design
 # decision itself (add-only, never a delete, fold-only removal — the newest and
 # the load-bearing one). `docs/` is in
