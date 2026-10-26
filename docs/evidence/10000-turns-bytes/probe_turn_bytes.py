@@ -132,10 +132,20 @@ def _census(g) -> dict:
 def _text_hits(g, needles: list[str]) -> int:
     """How many graph nodes carry any of this corpus's own turn texts.
 
-    The PROPERTY form of the acceptance bullet: a node is counted if it carries
-    the text, whatever label, edge or `pointKind` a writer gave it — so a second
-    write path that invents its own shape is caught here, which an id-space
-    query (`sdk._capture_turn_ids`) would not see.
+    The PROPERTY form of the acceptance bullet, over **three** properties —
+    ``c``, ``content`` and ``text``, the ones every write path in this tree
+    uses for a node's prose. A node is counted whatever its label AND whatever
+    `pointKind` a writer gave it, so a second write path with its own label is
+    caught here — which an id-space query (`sdk._capture_turn_ids`) would not
+    see.
+
+    ⚠️ The scope is three properties, NOT "any property": `payload` and `props`
+    are deliberately outside this query (they hold JSON blobs and attribute
+    bags), so a hit there would not be counted. That half of the claim is not
+    this instrument's — `tests/test_10000_turns_record_only.py::
+    test_an_armed_capture_puts_the_turn_text_in_no_node_at_all` scans all five
+    properties, on a 2-turn capture. Do not widen this query's claim without
+    widening this query.
     """
     total = 0
     for needle in needles:

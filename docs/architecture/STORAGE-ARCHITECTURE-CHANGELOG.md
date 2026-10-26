@@ -1604,4 +1604,5 @@ Why it left: the class guard
 (`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
 reds on an issue-state claim adjacent to a `#NNN` — `IMPLEMENTED … (#10000` is exactly that shape —
 which is the same GUARD (the same test) whose other arm moved §13's issue map out with the
-`CORRECTED 20xx-xx-xx` stamps (`_CHANGE_NARRATION`, a different regex) on 2026-10-15.
+`CORRECTED 20xx-xx-xx` stamps (`_CHANGE_NARRATION`, a different regex) when the changelog was created
+(#8542).
