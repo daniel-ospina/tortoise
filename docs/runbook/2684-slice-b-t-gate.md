@@ -143,6 +143,24 @@ name the *reason*. `_absence_class` never derives a class from that text:
 `turn_idx is None`. So for those two classes the identification is carried by
 this table and by the census's own derivation — not by the warning text.
 
+⚠️ **A SECOND population no census here can see, and the one emit site it hid:
+MINTED OPERATOR ENDPOINTS.** A minted endpoint (`_mint_endpoint`, the #2552
+mint-before-wire pre-pass) is a statement **Point**, so #2684's rule applies to
+it — but the census reads the S2 receipts and minted endpoints are created in
+**S5**, so none of the counts above ever spoke about them. Measured on the
+shipped code before this was fixed: a value-bearing endpoint that WAS
+verbatim-anchored (`src='cut latency by 20%'` against a turn holding that text)
+carried `quote` + `source_turn_id` and **no** span, and its band route carried no
+span **and said nothing** — the pre-pass spent its resolver call into a scratch
+warnings list (deliberate: the generic "no resolvable source turn" text
+describes an emitted point losing its E3 anchor, not a mint) and never called
+`_value_verbatim_span`, whose own band warning needs a non-empty quote the band
+route deliberately leaves empty. The mint site therefore now runs the **same**
+gate and owns the absence report itself. Pinned by
+`test_extractor_v2.py::TestValueVerbSpan2684::test_a_value_bearing_MINTED_endpoint_carries_the_span_or_says_it_cannot`,
+not by a census row — a receipt-shaped census cannot reach an S5-created point,
+and inventing a second census for it would be a parallel layer over one gate.
+
 **The guards, and which one discriminates what.**
 
 * `test_every_value_bearing_point_carries_a_span_or_is_a_REPORTED_class` — the
