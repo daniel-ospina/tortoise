@@ -531,16 +531,17 @@ CITES: dict[str, tuple[str, str]] = {
     "w9": (BETA, "| `create_operator`, `create_direct_edge`, `create_derivation`, "
                  "`link_source_to_entity` | 4 | → `link_entities`, which dispatches on "
                  "the relation. |"),
-    "w9_canon": (CANON, "| W9 | `link_entities` | #15 | `create_edge`, "
-                        "`create_derivation`, `link_source_to_entity`, `create_operator`, "
-                        "`create_direct_edge` |"),
+    "w9_canon": (CANON, "| W9 | `link_entities` | #15 | `link_entities`, "
+                        "`create_edge`, `create_derivation`, `link_source_to_entity`, "
+                        "`create_operator`, `create_direct_edge` |"),
     "w10": (BETA, "| `file_human_approval` | 1 | → `record_decision`. |"),
     "w10_file_decision": (BETA, "| `file_decision` | → rows 20/21 **`write_question`** "
                                 "+ **`record_decision`**. It was filing a *question* "
                                 "and calling it a decision. |"),
     "w11": (BETA, "| `update_point`, `update_entity` | 2 | → `update_knowledge`. |"),
-    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update`, "
-                         "`update_point`, `update_entity`, `supersede`, `supersede_point`, "
+    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update_knowledge`, "
+                         "`update`, `update_point`, `update_entity`, `supersede`, "
+                         "`supersede_point`, "
                          "`invalidate_point`, `retract_point`, `promote_point`, "
                          "`set_point_baseline`, `list_drafts`, `quarantine_batch` |"),
     "w11_supersede": (BETA, "| `supersede`, `supersede_point` | 2 | "
@@ -561,9 +562,9 @@ CITES: dict[str, tuple[str, str]] = {
                             "`update_point(status='live')`. |"),
     "w12": (BETA, "| `delete_point`, `delete_point_wrapped` | 2 | "
                   "→ `delete_knowledge`. |"),
-    "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete`, "
-                        "`delete_point`, `delete_entity`, `delete_point_wrapped` | "
-                        "keep, collapse |"),
+    "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete_knowledge`, "
+                        "`delete`, `delete_point`, `delete_entity`, "
+                        "`delete_point_wrapped` | keep, collapse |"),
     "w13_canon": (CANON, "| W13 | `stabilize_beliefs` | #19 | `dream`, "
                         "`compute_confidence`, `compute_reputation`, "
                         "`record_calibration` |"),
@@ -736,6 +737,13 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "get_source_reliability": ("list_knowledge", "w8"),
     # W9 — the one member the beta collapse row does not name.
     "create_edge": ("link_entities", "w9_canon"),
+    # W9/W11/W12 — the three canonical names are now PUBLIC methods as well as
+    # targets (#4282 Phase 2.2, PR #10053). Before they had a `def` they only had
+    # to appear as their group's target; now the partition must COVER them, and
+    # the disposition is UNCHANGED because each method IS its own destination.
+    "link_entities": (UNCHANGED, "unchanged4"),
+    "update_knowledge": (UNCHANGED, "unchanged4"),
+    "delete_knowledge": (UNCHANGED, "unchanged4"),
     # W10
     "file_decision": ("write_question", "w10_file_decision"),
     # W5 — the journal reconciliation. Each member's destination is its OWN, taken from

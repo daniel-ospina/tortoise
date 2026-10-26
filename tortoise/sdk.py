@@ -13744,7 +13744,7 @@ class TortoiseSDK:
                       batch_id: str | None = None,
                       entity_label: str | None = None,
                       source_kind: str = "document",
-                      promote_source: bool = True) -> dict:
+                      promote_source: bool = True) -> dict | None:
         """Connect two nodes — **the relation decides how**, not the caller.
 
         The approved surface has one linking verb (row 19). It absorbs the four
@@ -13790,7 +13790,21 @@ class TortoiseSDK:
         must be able to say so. ``None`` (the default) means "decide from the
         relation"; it is not a third mode.
 
+        ⛔ **A parameter an arm cannot RECORD is refused, never dropped.** The
+        five writers take different parameter sets, so a keyword this signature
+        accepts may mean nothing to the arm that fires. Silently accepting it
+        would return success for a write that stored a subset of the call — the
+        fail-silent class, on the verb that is meant to be the single linking
+        entry point. ``confidence``/``weight``/``label``/``batch_id``/
+        ``direction``/``promote_source`` are honoured by the
+        ``create_direct_edge`` arm, ``label``/``direction``/``promote_source`` by
+        the ``create_operator`` arm, and NONE of them by the derivation,
+        provenance or plain-edge arms; asking for one there raises a
+        ``ValueError`` that names the arm and the writer.
+
         Returns whatever the chosen writer returns — the merge adds no envelope.
+        ``link_source_to_entity`` answers ``None`` and the other arms answer a
+        ``dict``, hence the honest ``dict | None`` annotation.
         """
         rel = (relation or "").strip()
         if not rel:
@@ -13798,24 +13812,73 @@ class TortoiseSDK:
         if not from_id or not to_id:
             raise ValueError("link_entities: from_id and to_id are required")
 
+        # What each arm can actually RECORD (#4282). A parameter the caller set
+        # that the chosen writer has no home for is refused by `_dispatch`
+        # below, never accepted-and-dropped. `None` is this signature's "not
+        # asked"; `promote_source=True` is its default, so only an explicit
+        # False counts as asking.
+        _honours: dict[str, frozenset[str]] = {
+            "create_direct_edge": frozenset({
+                "direction", "confidence", "weight", "label", "batch_id",
+                "promote_source"}),
+            "create_operator": frozenset({"label", "direction", "promote_source"}),
+            "create_derivation": frozenset(),
+            "link_source_to_entity": frozenset(),
+            "create_edge": frozenset(),
+        }
+        requested = {
+            name: value for name, value in (
+                ("direction", direction), ("confidence", confidence),
+                ("weight", weight), ("label", label),
+                ("batch_id", batch_id),
+            ) if value is not None
+        }
+        if promote_source is False:
+            requested["promote_source"] = False
+
+        def _dispatch(door: str, call):
+            """Run the arm, or REFUSE what its writer cannot record (#4282).
+
+            `fail-silent` is the one class a merge must never add: on this verb
+            a dropped keyword returns success for a write that stored a subset
+            of the call, with nothing for the caller to notice. Name the arm,
+            the writer and the parameters instead.
+            """
+            dropped = sorted(set(requested) - _honours[door])
+            if dropped:
+                raise ValueError(
+                    f"link_entities: the {rel!r} arm writes through `{door}`, which "
+                    f"records no {', '.join(dropped)} — refusing rather than "
+                    f"returning success for a write that dropped "
+                    f"{'them' if len(dropped) > 1 else 'it'}. Call "
+                    f"`TortoiseSDK.{door}` directly if you need that parameter."
+                )
+            return call()
+
         # Provenance writer first: it is the only arm whose edge carries the
         # sourceVersion anchor, and it is only reachable when the caller named
         # the entity label (the signal that they are linking a SOURCE).
         if rel == "references" and entity_label:
-            return self.link_source_to_entity(
-                source_url=from_id, entity_id=to_id,
-                entity_label=entity_label, source_kind=source_kind)
+            return _dispatch(
+                "link_source_to_entity",
+                lambda: self.link_source_to_entity(
+                    source_url=from_id, entity_id=to_id,
+                    entity_label=entity_label, source_kind=source_kind))
 
         if rel == "wasDerivedFrom":
             # create_derivation(src_id, dst_id) writes (dst)-[:wasDerivedFrom]->(src).
-            return self.create_derivation(from_id, to_id)
+            return _dispatch(
+                "create_derivation",
+                lambda: self.create_derivation(from_id, to_id))
 
         upper = rel.upper()
         if upper in ("IMPL", "NAND") and operator is not True:
-            return self.create_direct_edge(
-                upper, from_id, to_id, direction=direction, confidence=confidence,
-                weight=weight, label=label, batch_id=batch_id,
-                promote_source=promote_source)
+            return _dispatch(
+                "create_direct_edge",
+                lambda: self.create_direct_edge(
+                    upper, from_id, to_id, direction=direction,
+                    confidence=confidence, weight=weight, label=label,
+                    batch_id=batch_id, promote_source=promote_source))
 
         # An epistemic relation that needs a carrying operator builds one;
         # everything else stays PLAIN. The set is the ontology's rule (operator iff
@@ -13833,10 +13896,12 @@ class TortoiseSDK:
         if meaning is not None:
             from tortoise.pack_registry import SEMANTICS_MECHANISMS
 
-            return self.create_operator(
-                SEMANTICS_MECHANISMS[meaning], from_id, [to_id], label=label,
-                direction=direction or "bidirectional",
-                promote_source=promote_source, semantics=meaning)
+            return _dispatch(
+                "create_operator",
+                lambda: self.create_operator(
+                    SEMANTICS_MECHANISMS[meaning], from_id, [to_id], label=label,
+                    direction=direction or "bidirectional",
+                    promote_source=promote_source, semantics=meaning))
 
         if upper in self._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING:
             hint = self._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING[upper]
@@ -13852,12 +13917,15 @@ class TortoiseSDK:
             )
 
         if operator is True:
-            return self.create_operator(
-                upper, from_id, [to_id], label=label,
-                direction=direction or "bidirectional",
-                promote_source=promote_source)
+            return _dispatch(
+                "create_operator",
+                lambda: self.create_operator(
+                    upper, from_id, [to_id], label=label,
+                    direction=direction or "bidirectional",
+                    promote_source=promote_source))
 
-        return self.create_edge(rel, from_id, to_id)
+        return _dispatch(
+            "create_edge", lambda: self.create_edge(rel, from_id, to_id))
 
     def update_knowledge(self, id: str, *, valid_until: str | None = None,
                          invalid_at: str | None = None,
@@ -13874,9 +13942,14 @@ class TortoiseSDK:
             dispatches on the resolved label (a Point takes the point-lifecycle
             arm, an entity the plain-property arm). Nothing is re-implemented here.
           - ``retract_point`` → ``valid_until=`` **or** ``invalid_at=`` with no
-            successor: a tombstone (``status='retracted'``, the node STAYS).
+            successor: a tombstone (``status='retracted'``, the node STAYS). The
+            instant is the window's END and it is CARRIED, never discarded — it
+            is written as the point's ``validTo`` and journalled on the record,
+            so a rebuild replays the same window. Retraction therefore means
+            "this claim stopped holding at <instant>", not just a status flip.
           - ``invalidate_point`` → the same field **plus** ``corrected_by_id=``:
-            the node is marked outdated and linked to its replacement.
+            the node is marked outdated and linked to its replacement; the
+            instant is the predecessor's window end, written the same way.
           - link annotation → ``annotation={'bias':…, 'precision':…,
             'consistency':…, 'directness':…}``, which is :meth:`annotate_operator`.
             Annotating a link is an update on it; ``adjust_relationship`` is the
@@ -13893,13 +13966,36 @@ class TortoiseSDK:
                 raise ValueError(
                     "update_knowledge: annotation must be a dict of epistemic "
                     "dimensions")
+            # All four are REQUIRED positional parameters of
+            # `annotate_operator`, so a partial dict used to raise `TypeError:
+            # missing 3 required positional arguments` — or, for a typo'd key,
+            # `TypeError: unexpected keyword` — out of a public verb whose every
+            # other malformed input raises `ValueError` (#4282). Validate the
+            # KEYS here and refuse in the same class, naming what is missing.
+            allowed = ("bias", "precision", "consistency", "directness")
+            unknown = sorted(set(annotation) - set(allowed))
+            missing = [name for name in allowed if name not in annotation]
+            if unknown or missing:
+                problem = (f"unknown dimension(s) {unknown}" if unknown
+                           else f"missing dimension(s) {missing}")
+                raise ValueError(
+                    f"update_knowledge: annotation takes exactly "
+                    f"{', '.join(allowed)} — {problem}. A partial rating is not "
+                    f"a smaller update: annotate_operator requires all four, and "
+                    f"leaving them unset is the neutral default (factor 1.0), so "
+                    f"pass all four or none.")
             return self.annotate_operator(id, **annotation)
 
-        retract = invalid_at if invalid_at is not None else valid_until
-        if retract is not None:
+        # The temporal field IS the window end, so it must reach the writer that
+        # stamps `validTo`. It used to gate the branch and then be thrown away:
+        # `update_knowledge(p, valid_until="2027-01-01")` retracted the point
+        # immediately and stored no end at all, and the `corrected_by_id` arm
+        # stamped `validTo = now` instead of the caller's instant (#4282).
+        end = invalid_at if invalid_at is not None else valid_until
+        if end is not None:
             if corrected_by_id:
-                return self.invalidate_point(id, corrected_by_id)
-            return self.retract_point(id)
+                return self.invalidate_point(id, corrected_by_id, valid_to=end)
+            return self.retract_point(id, valid_to=end)
 
         if corrected_by_id:
             raise ValueError(
@@ -15314,7 +15410,8 @@ class TortoiseSDK:
                 and status not in TERMINAL_EXCLUDED_STATUSES
                 else (status or "live"))
 
-    def _assert_window_start_not_inverted(self, point_id: str, now: str) -> None:
+    def _assert_window_start_not_inverted(self, point_id: str, now: str,
+                                          *, door: str = "invalidate_point") -> None:
         """#5358: refuse an INVERTED predecessor window BEFORE any mutation.
 
         The stamp block in ``invalidate_point`` writes ``validTo = now`` from
@@ -15325,6 +15422,12 @@ class TortoiseSDK:
         ``_covers`` then covers NO instant and the point silently disappears
         from every temporal query while the system reports honest absence
         (#4021's sibling, separate root).
+
+        ``door`` (#4282) names the writer in the refusal, because
+        ``retract_point`` passes a caller-named window end through the SAME
+        guard: a message that said "invalidate_point … retract_point is the
+        window-agnostic route" would name the wrong door AND recommend the call
+        the caller had just made.
 
         The comparison reuses the READ path's measure — ``_created_sort_key``,
         the SAME key ``_covers`` orders with — and its PRESENCE predicate
@@ -15388,19 +15491,28 @@ class TortoiseSDK:
             try:
                 validate_validity_window(stored_vf, now)
             except ValueError:
+                if door == "retract_point":
+                    advice = (
+                        f"The window end is the caller's here, so pass a "
+                        f"valid_to that is not before it, or omit valid_to for "
+                        f"an undated tombstone.")
+                else:
+                    advice = (
+                        f"retract_point is the window-agnostic route (it does "
+                        f"not touch the window): call "
+                        f"retract_point({point_id!r}) instead.")
                 raise ValueError(
-                    f"invalidate_point: cannot invalidate {point_id!r} — its "
-                    f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
-                    f"stamping validTo=now would persist an inverted window "
-                    f"(validTo < validFrom) and the point would disappear "
-                    f"from every temporal query. retract_point is the "
-                    f"window-agnostic route (it does not touch the window): "
-                    f"call retract_point({point_id!r}) instead."
+                    f"{door}: cannot write the window end for {point_id!r} — its "
+                    f"validFrom {stored_vf!r} is AFTER the requested end "
+                    f"({now!r}), so stamping validTo={now!r} would persist an "
+                    f"inverted window (validTo < validFrom) and the point would "
+                    f"disappear from every temporal query. {advice}"
                 ) from None
 
     @_declares_live_write_lane("invalidate_point")
     def invalidate_point(self, id: str, corrected_by_id: str,
-                         *, valid_to_precision: str | None = None) -> dict:
+                         *, valid_to_precision: str | None = None,
+                         valid_to: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
         §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `PointInvalidated`
@@ -15443,6 +15555,14 @@ class TortoiseSDK:
         state ("this ended, but I cannot date it"). When that marker is given
         the #5358 inverted-window precondition is skipped: no end is written,
         so no inversion is possible.
+
+        ``valid_to=`` (#4282) is the caller's WINDOW END: the instant the claim
+        stopped holding. It replaces the ``now`` fallback in the stamp — and only
+        there, since ``expiredAt``/``updatedAt`` record when the graph LEARNED of
+        the end, not when the claim ended. It reaches the record through
+        ``valid_to=`` on ``PointInvalidated`` (the §17.5 carrier), so a rebuild
+        replays the caller's instant rather than its own clock, and the #5358
+        inversion guard runs against the value that is actually stored.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -15473,12 +15593,16 @@ class TortoiseSDK:
         from .validity import normalize_precision as _normalize_precision
         end_precision = _normalize_precision(
             valid_to_precision, field="valid_to_precision")
-        stamp_valid_to = None if end_precision == _PREC_UNKNOWN else now
+        # #4282: a caller-named instant IS the window end; `now` is the fallback
+        # for a caller who named none. Resolved BEFORE the #5358 inversion guard,
+        # which must measure the value that is about to be stored.
+        end_instant = valid_to if valid_to is not None else now
+        stamp_valid_to = None if end_precision == _PREC_UNKNOWN else end_instant
         # #5358: refuse an INVERTED predecessor window BEFORE any mutation.
         # The check is shared with the MCP dry-run preview
         # (`_preview_invalidate`) so the writer and its preview cannot drift.
         if stamp_valid_to is not None:
-            self._assert_window_start_not_inverted(id, now)
+            self._assert_window_start_not_inverted(id, stamp_valid_to)
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
         # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
@@ -16369,7 +16493,7 @@ class TortoiseSDK:
         }
 
     @_declares_live_write_lane("retract_point")
-    def retract_point(self, id: str) -> dict:
+    def retract_point(self, id: str, *, valid_to: str | None = None) -> dict:
         """Tombstone-retract a Point: status='retracted' (point stays in graph).
 
         §17.1 LANE (#9124): JOURNAL-FIRST, declared. `PointRetracted` is
@@ -16397,6 +16521,15 @@ class TortoiseSDK:
         Raises ValueError if the point is missing, is an operator node, or is
         already terminal (the shared terminal vocabulary: a status in
         live.TERMINAL_EXCLUDED_STATUSES OR the legacy outdated=true flag).
+
+        ``valid_to=`` (#4282) is the caller's WINDOW END — the instant the claim
+        stopped holding, which is what "retraction is a temporal field" means
+        once the field is read rather than merely tested. It is stamped as the
+        point's ``validTo`` in the same CAS ``SET`` (the node is still live here,
+        so this is not the #7819 terminal re-stamp that verb refuses) and carried
+        on the ``PointRetracted`` record, so a rebuild replays the caller's
+        instant instead of losing it. ``updatedAt`` keeps its own meaning: the
+        graph's clock for when it LEARNED of the retraction.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -16414,9 +16547,17 @@ class TortoiseSDK:
         # a second read here, and a third at replay, made live/rebuild/fold
         # hold three different stamps for one retraction.
         _now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #4282: refuse an INVERTED window BEFORE any mutation (the same shared
+        # guard `invalidate_point` / `supersede_point` use, #5358) — a retraction
+        # that names an end before the stored start would persist a window
+        # covering no instant, which is exactly what that guard exists to stop.
+        if valid_to is not None:
+            self._assert_window_start_not_inverted(id, valid_to, door="retract_point")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
-        # only after the input contract validates).
-        self._emit_event("PointRetracted", {"id": id}, id=id, recorded_ts=_now)
+        # only after the input contract validates). `valid_to` rides the record so
+        # the replay folds the SAME window (#4282).
+        self._emit_event("PointRetracted", {"id": id, "valid_to": valid_to},
+                         id=id, recorded_ts=_now)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
         # a concurrent retract/supersede/invalidate can't both pass validation
         # and have a terminal overwrite. #2498: the CAS now uses the SAME
@@ -16464,9 +16605,12 @@ class TortoiseSDK:
             lambda: proj.g.query(
                 "MATCH (n:Point {id:$id}) "
                 f"WHERE {_terminal_excluded('n.status')} "
-                "SET n.status = 'retracted', n.updatedAt = $now, "
-                f"{decay_clause('n')} RETURN properties(n)",
-                params={"id": id, "now": _now}),
+                "SET n.status = 'retracted', n.updatedAt = $now"
+                + (", n.validTo = $valid_to" if valid_to is not None else "")
+                + f", {decay_clause('n')} RETURN properties(n)",
+                params={"id": id, "now": _now,
+                        **({"valid_to": valid_to}
+                           if valid_to is not None else {})}),
             what="retract_point CAS SET",
             # #8854 review P1: empty `result_set` is ambiguous — "matched a
             # terminal node" (the legitimate ValueError below) or "matched

@@ -197,12 +197,12 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     'w10': ('beta-sdk-surface.md', '| `file_human_approval` | 1 | → `record_decision`. |'),
     'w10_file_decision': ('beta-sdk-surface.md', '| `file_decision` | → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |'),
     'w11': ('beta-sdk-surface.md', '| `update_point`, `update_entity` | 2 | → `update_knowledge`. |'),
-    'w11_canon': ('canonical-sdk-methods.md', '| W11 | `revise_knowledge` | #17 | `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` |'),
+    'w11_canon': ('canonical-sdk-methods.md', '| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` |'),
     'w11_lifecycle': ('beta-sdk-surface.md', "| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | 4 | Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. |"),
     'w11_retract': ('beta-sdk-surface.md', "| `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. |"),
     'w11_supersede': ('beta-sdk-surface.md', '| `supersede`, `supersede_point` | 2 | → `supersede_knowledge`. They also **disagree** — `supersede_point` carries a `valid_from` the other silently drops. |'),
     'w12': ('beta-sdk-surface.md', '| `delete_point`, `delete_point_wrapped` | 2 | → `delete_knowledge`. |'),
-    'w12_canon': ('canonical-sdk-methods.md', '| W12 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |'),
+    'w12_canon': ('canonical-sdk-methods.md', '| W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |'),
     'w13_canon': ('canonical-sdk-methods.md', '| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` |'),
     'w15': ('beta-sdk-surface.md', '| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` currently **accepts and silently ignores** `credibility` — a bug. |'),
     'w17_ulid': ('beta-sdk-surface.md', '| `ulid` | 1 | A ULID generator. Not a memory operation. |'),
@@ -224,7 +224,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     'w8': ('beta-sdk-surface.md', '| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |'),
     'w8_backfill': ('beta-sdk-surface.md', '| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` | 4 | One-shot migrations. Run once, then dead code carrying a public promise. |'),
     'w9': ('beta-sdk-surface.md', '| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` | 4 | → `link_entities`, which dispatches on the relation. |'),
-    'w9_canon': ('canonical-sdk-methods.md', '| W9 | `link_entities` | #15 | `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` |'),
+    'w9_canon': ('canonical-sdk-methods.md', '| W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` |'),
 }
 
 CITATION_REGION_LITERAL: dict[str, str] = {
@@ -275,12 +275,12 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'w10': '| `file_human_approval` | 1 | → `record_decision`. |',
     'w10_file_decision': '| `file_decision` | → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |',
     'w11': '| `update_point`, `update_entity` | 2 | → `update_knowledge`. |',
-    'w11_canon': '| W11 | `revise_knowledge` | #17 | `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |',
+    'w11_canon': '| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |',
     'w11_lifecycle': "| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | 4 | Lifecycle and confidence **state** — a **field on `update_knowledge`** (promote, baseline, quarantine), selected by a **filter on `list_knowledge(kind=…, status=…)`** (drafts). No separate verb. `promote_point` also promotes its incident operators and carries the approval gate, so it is not `update_point(status='live')`. |",
     'w11_retract': "| `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a separate verb. |",
     'w11_supersede': '| `supersede`, `supersede_point` | 2 | → `supersede_knowledge`. They also **disagree** — `supersede_point` carries a `valid_from` the other silently drops. |',
     'w12': '| `delete_point`, `delete_point_wrapped` | 2 | → `delete_knowledge`. |',
-    'w12_canon': '| W12 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |',
+    'w12_canon': '| W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |',
     'w13_canon': '| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |',
     'w15': '| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship` for strength, `update_knowledge` for annotation. `operator_action(**kwargs)` currently **accepts and silently ignores** `credibility` — a bug. |',
     'w17_ulid': '| `ulid` | 1 | A ULID generator. Not a memory operation. |',
@@ -302,11 +302,11 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'w8': '| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |',
     'w8_backfill': '| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` | 4 | One-shot migrations. Run once, then dead code carrying a public promise. |',
     'w9': '| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` | 4 | → `link_entities`, which dispatches on the relation. |',
-    'w9_canon': '| W9 | `link_entities` | #15 | `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |',
+    'w9_canon': '| W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |',
 }
 
 
-# The COMPLETE row → (target, citation text) binding, for all 149 rows. Pinning the
+# The COMPLETE row → (target, citation text) binding, for all 152 rows. Pinning the
 # quotes by citation KEY was not enough: nothing pinned WHICH key a row selected, and
 # where two keys share a `named` member (`w3`/`w3_cut`, `w4`/`w4_index_sessions`) a
 # key swap kept the target, the basis AND the pinned quote set intact — so row 23
@@ -342,7 +342,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'create_derivation': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
     'create_direct_edge': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
     'create_document': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'create_edge': ('link_entities', '`canonical-sdk-methods.md` — “\\| W9 \\| `link_entities` \\| #15 \\| `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` \\| keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split \\|”'),
+    'create_edge': ('link_entities', '`canonical-sdk-methods.md` — “\\| W9 \\| `link_entities` \\| #15 \\| `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` \\| keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split \\|”'),
     'create_entity': ('create_entity', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'create_event': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
     'create_object': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
@@ -351,8 +351,9 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'create_point': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
     'create_source': ('register_source', '`canonical-sdk-methods.md` — “\\| W3 \\| `register_source` \\| #11 \\| `create_source`, `complete_source` \\| keep — **not foldable**: the URL is the node identity \\|”'),
     'create_subject': ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`. The ontology models all of them as entities. \\|”'),
-    'delete': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
-    'delete_entity': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
+    'delete': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
+    'delete_entity': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
+    'delete_knowledge': ('delete_knowledge', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'delete_point': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
     'delete_point_wrapped': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
     'diary_read': ('list_knowledge', '`canonical-mcp-tools.md` — “\\| `diary_read` \\| dissolves into `list_knowledge(kind="diary")` \\|”'),
@@ -391,6 +392,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'invitation_list': ('', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
     'invitation_revoke': ('', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
     'issue_insight': ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    'link_entities': ('link_entities', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'link_source_to_entity': ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`, which dispatches on the relation. \\|”'),
     'list_batch': ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_batch`, `list_batches` \\| 2 \\| → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. \\|”"),
     'list_batches': ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_batch`, `list_batches` \\| 2 \\| → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. \\|”"),
@@ -457,8 +459,9 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'trash_graphs': ('', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.** Never product surface. \\|”'),
     'traverse': ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
     'ulid': ('', '`beta-sdk-surface.md` — “\\| `ulid` \\| 1 \\| A ULID generator. Not a memory operation. \\|”'),
-    'update': ('update_knowledge', '`canonical-sdk-methods.md` — “\\| W11 \\| `revise_knowledge` \\| #17 \\| `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| keep, collapse — **the widest group; see Open items** \\|”'),
+    'update': ('update_knowledge', '`canonical-sdk-methods.md` — “\\| W11 \\| `revise_knowledge` \\| #17 \\| `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| keep, collapse — **the widest group; see Open items** \\|”'),
     'update_entity': ('update_knowledge', '`beta-sdk-surface.md` — “\\| `update_point`, `update_entity` \\| 2 \\| → `update_knowledge`. \\|”'),
+    'update_knowledge': ('update_knowledge', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the **27** target tools exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **5** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`, `manage_sources`) have a prefixed equivalent. The other **22** have neither — no target name matches a served name verbatim. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'update_memory_graph': ('update_memory_graph', '`beta-sdk-surface.md` — “\\| 30 \\| `update_memory_graph` \\| **The one partial update a memory graph has** — rename it, or set/clear its session-recording override. A graph is created with its fields; this is the single place they change \\| `graph_set_recording` (recording only) \\| builder \\|”'),
     'update_point': ('update_knowledge', '`beta-sdk-surface.md` — “\\| `update_point`, `update_entity` \\| 2 \\| → `update_knowledge`. \\|”'),
     'validate_domain': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
@@ -737,8 +740,8 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
 
     drifted = tmp_path / "sdk-rename-table.md"
     text = DOC.read_text(encoding="utf-8")
-    assert "149 public methods" in text
-    drifted.write_text(text.replace("149 public methods", "151 public methods"),
+    assert "152 public methods" in text
+    drifted.write_text(text.replace("152 public methods", "155 public methods"),
                        encoding="utf-8")
 
     rc = sdk_rename_table.main(["--check", "--out", str(drifted)])
@@ -790,6 +793,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'create_subject': 'create_entity',
     'delete': 'delete_knowledge',
     'delete_entity': 'delete_knowledge',
+    'delete_knowledge': 'delete_knowledge',
     'delete_point': 'delete_knowledge',
     'delete_point_wrapped': 'delete_knowledge',
     'diary_read': 'list_knowledge',
@@ -828,6 +832,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'invitation_list': '',
     'invitation_revoke': '',
     'issue_insight': 'search_knowledge',
+    'link_entities': 'link_entities',
     'link_source_to_entity': 'link_entities',
     'list_batch': 'list_knowledge',
     'list_batches': 'list_knowledge',
@@ -896,6 +901,7 @@ TARGETS_LITERAL: dict[str, str] = {
     'ulid': '',
     'update': 'update_knowledge',
     'update_entity': 'update_knowledge',
+    'update_knowledge': 'update_knowledge',
     'update_memory_graph': 'update_memory_graph',
     'update_point': 'update_knowledge',
     'validate_domain': 'graph_overview',
@@ -943,6 +949,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'create_subject': ('deprecated', 'public', 'stated', 'retain'),
     'delete': ('deprecated', 'public', 'stated', 'retain'),
     'delete_entity': ('deprecated', 'public', 'stated', 'retain'),
+    'delete_knowledge': ('stable', 'public', 'derived', 'retain'),
     'delete_point': ('deprecated', 'public', 'stated', 'retain'),
     'delete_point_wrapped': ('deprecated', 'public', 'stated', 'retain'),
     'diary_read': ('deprecated', 'public', 'stated', 'retain'),
@@ -981,6 +988,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'invitation_list': ('removed', 'internal', 'derived', 'delete'),
     'invitation_revoke': ('removed', 'internal', 'derived', 'delete'),
     'issue_insight': ('deprecated', 'public', 'stated', 'retain'),
+    'link_entities': ('stable', 'public', 'derived', 'retain'),
     'link_source_to_entity': ('deprecated', 'public', 'stated', 'retain'),
     'list_batch': ('deprecated', 'public', 'stated', 'retain'),
     'list_batches': ('deprecated', 'public', 'stated', 'retain'),
@@ -1049,6 +1057,7 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'ulid': ('removed', 'internal', 'stated', 'delete'),
     'update': ('deprecated', 'public', 'stated', 'retain'),
     'update_entity': ('deprecated', 'public', 'stated', 'retain'),
+    'update_knowledge': ('stable', 'public', 'derived', 'retain'),
     'update_memory_graph': ('stable', 'public', 'stated', 'retain'),
     'update_point': ('deprecated', 'public', 'stated', 'retain'),
     'validate_domain': ('deprecated', 'public', 'stated', 'retain'),
@@ -1222,7 +1231,7 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     # targets that have no `def` but are never a destination (`Tortoise`,
     # `check_connection`, `create_memory_graph`) — so 31 vs 34 is correct, and the
     # sentence must say which is which rather than attributing 31 to C1.
-    assert c1_total == 31, f"Part C1 lists {c1_total} Phase-2 methods, expected 31"
+    assert c1_total == 28, f"Part C1 lists {c1_total} Phase-2 methods, expected 28"
     assert c1_total == no_def + 3, (
         f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
         f"the 3 never-a-destination targets"
@@ -1231,20 +1240,21 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
         f"the summary's parts ({no_def}+{exists}+{non_target}) do not sum to its "
         f"distinct-destination count ({distinct})"
     )
-    # Each part is pinned, not just the sum. `exists` is 9, not 2, because an UNCHANGED
+    # Each part is pinned, not just the sum. `exists` is 12, not 2, because an UNCHANGED
     # row's Target is the method's own name (`create_entity`, `get_entity`,
     # `approve_merge`, `close`, `poll_events`, `get_historical_knowledge`,
-    # `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`) rather than
-    # the old `UNCHANGED` token.
-    assert (distinct, no_def, exists, non_target) == (40, 28, 9, 3), (
+    # `list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`, and — since
+    # #4282 Phase 2.2 — `link_entities`, `update_knowledge`, `delete_knowledge`) rather
+    # than the old `UNCHANGED` token.
+    assert (distinct, no_def, exists, non_target) == (40, 25, 12, 3), (
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
-    assert "**32 groups** over **148** named members" in doc, (
+    assert "**32 groups** over **151** named members" in doc, (
         "the structural note's canonical-group counts are gone"
     )
-    assert "149 = the 149-method surface" in doc, (
-        "the structural note no longer reconciles its members to the 149-method surface"
+    assert "152 = the 152-method surface" in doc, (
+        "the structural note no longer reconciles its members to the 152-method surface"
     )
     # C6 sits between C5 and the structural notes; terminate the C5 slice at C6 so a
     # `W11` mention in the contested section cannot leak into the wildcard set.
@@ -1315,7 +1325,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
     """
     rows = part_a_rows()
     names = [r["name"] for r in rows]
-    assert len(rows) == 149, f"Part A has {len(rows)} rows, expected the 149-method surface"
+    assert len(rows) == 152, f"Part A has {len(rows)} rows, expected the 152-method surface"
     assert len(set(names)) == len(names), (
         "Part A lists a method twice — `--check` cannot see a duplicated row because the "
         "duplicate is in the constant too"
@@ -1324,7 +1334,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
 
 
 def test_the_whole_mapping_is_pinned() -> None:
-    """Every one of the 149 `method → destination` pairs equals the pinned literal.
+    """Every one of the 152 `method → destination` pairs equals the pinned literal.
 
     The representative-pin test guards group defaults; this guards the exceptions.
     Without it a row can be reassigned to a different target while its citation
@@ -1646,18 +1656,18 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     # Digit-BOUNDED, not substring: `"150 public methods" in text` also passes when the
     # render produces `1150 public methods`, so the pin did not hold the number.
     for pattern in (
-        r"(?<![\d])149 public methods",
+        r"(?<![\d])152 public methods",
         r"(?<![\d])40 target methods",
-        r"(?<![\d])111 of the 149 are renames",
-        r"\*\*9\*\* are already targets \(unchanged\)",
+        r"(?<![\d])111 of the 152 are renames",
+        r"\*\*12\*\* are already targets \(unchanged\)",
         r"\*\*25\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
         r"\*\*0\*\* are live but \*\*unlisted\*\* \(visibility `unlisted` — NOT deleted\)",
         r"\*\*1\*\* is \*\*relocated\*\* out of the product SDK \(visibility `internal`\)",
         r"\*\*0\*\* are \*\*contested\*\* \(the docs name conflicting destinations\)",
         r"\*\*3\*\* have no destination",
-        r"only \*\*9\*\* of them exist on `TortoiseSDK` today",
-        r"\*\*31\*\* are Phase 2 work",
+        r"only \*\*12\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*28\*\* are Phase 2 work",
     ):
         assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
 
@@ -1674,12 +1684,12 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
     ordinals = [int(m) for m in re.findall(r"^\| (\d+) \|", part_a, re.M)]
-    assert ordinals == list(range(1, 150)), (
-        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..149"
+    assert ordinals == list(range(1, 153)), (
+        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..152"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
-    assert c1.count("| no `def` on `TortoiseSDK` today |") == 31, (
-        "C1's status column no longer repeats its one true statement on all 31 rows"
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 28, (
+        "C1's status column no longer repeats its one true statement on all 28 rows"
     )
     c4 = text.split("### C4")[1].split("### C5")[0]
     for name, referent in (
@@ -1699,7 +1709,7 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     # The old flat enum is gone: a row is now classified by its AXES, so these counts are
     # read off lifecycle/visibility/delete rather than a single token. The six UNCHANGED
     # rows carry their own name as the target (they are already on the target surface).
-    assert sum(1 for r in rows if r["target"] == r["name"]) == 9
+    assert sum(1 for r in rows if r["target"] == r["name"]) == 12
     assert sum(1 for r in rows if r["lifecycle"] == "removed"
                and r["delete"] == "delete") == 25
     assert sum(1 for r in rows if r["visibility"] == "unlisted") == 0
@@ -1758,7 +1768,7 @@ def test_group_column_matches_the_canonical_inventory() -> None:
 
 
 def test_part_b_counts_match_the_rows_they_list() -> None:
-    """Part B's counts must equal the members it lists, and the total must be 149."""
+    """Part B's counts must equal the members it lists, and the total must be 152."""
     rows = []
     total = None
     for line in _section("Part B — destination counts").splitlines():
@@ -1776,10 +1786,10 @@ def test_part_b_counts_match_the_rows_they_list() -> None:
         rows.append((dest.strip("`"), re.findall(r"`([a-z_][a-z0-9_]*)`", names),
                      int(count)))
     assert rows, "parsed no Part B rows"
-    assert total == 149, f"Part B's total row says {total}, expected 149"
+    assert total == 152, f"Part B's total row says {total}, expected 152"
     bad = [(d, len(ms), c) for d, ms, c in rows if len(ms) != c]
     assert not bad, f"Part B counts disagree with the members listed: {bad}"
-    assert sum(c for _, _, c in rows) == 149
+    assert sum(c for _, _, c in rows) == 152
 
     by_target: dict[str, set[str]] = {}
     for r in part_a_rows():
@@ -1790,7 +1800,7 @@ def test_part_b_counts_match_the_rows_they_list() -> None:
 
 
 def test_basis_split_is_the_literal() -> None:
-    """`derived` is the 19 rows backed only by a wildcard/namespace statement.
+    """`derived` is the 22 rows backed only by a wildcard/namespace statement.
 
     `stated` vs `derived` is the column that says *how strongly* a mapping is backed.
     A mutation that forces every row to `stated` leaves every other test green, so
@@ -1798,12 +1808,13 @@ def test_basis_split_is_the_literal() -> None:
     """
     derived = {r["name"] for r in part_a_rows() if r["basis"] == "derived"}
     assert derived == {
-        "apikey_create", "apikey_list", "apikey_revoke", "graph_count",
-        "invitation_accept", "invitation_create", "invitation_get_by_id",
-        "invitation_get_by_token", "invitation_list", "invitation_revoke",
-        "membership_create", "membership_delete", "membership_list",
-        "org_get", "org_list", "signup_token_lookup", "signup_token_recover",
-        "signup_token_revoke", "stale_points",
+        "apikey_create", "apikey_list", "apikey_revoke", "delete_knowledge",
+        "graph_count", "invitation_accept", "invitation_create",
+        "invitation_get_by_id", "invitation_get_by_token", "invitation_list",
+        "invitation_revoke", "link_entities", "membership_create",
+        "membership_delete", "membership_list", "org_get", "org_list",
+        "signup_token_lookup", "signup_token_recover", "signup_token_revoke",
+        "stale_points", "update_knowledge",
     }
 
 
@@ -1813,7 +1824,7 @@ def test_part_c1_lists_exactly_the_targets_with_no_def() -> None:
     Expected values are recomputed here from the beta doc + a fresh AST walk.
     """
     expected = set(targets_independently()) - set(public_methods_independently())
-    assert len(expected) == 31
+    assert len(expected) == 28
     listed = set(_first_column(_section("C1 — target methods with no `def` on `TortoiseSDK`")))
     assert listed == expected, (
         "Part C1 does not list exactly the target methods with no `def`.\n"
@@ -2545,11 +2556,11 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
     assert "uv run python tools/sdk_rename_table.py          # regenerate this file" in doc
     assert ("uv run python tools/sdk_rename_table.py --check  # verify, non-zero on "
             "drift") in doc
-    # The structural reconciliation must name its 32 groups and 148 members, and say
-    # how `backfill_v25` (the Archived-table member) reconciles to the 149-method surface.
-    assert "partitions the surface into **32 groups** over **148** named members" in doc
+    # The structural reconciliation must name its 32 groups and 151 members, and say
+    # how `backfill_v25` (the Archived-table member) reconciles to the 152-method surface.
+    assert "partitions the surface into **32 groups** over **151** named members" in doc
     assert "`backfill_v25` is in its Archived table instead" in doc
-    assert "149 = the 149-method surface" in doc
+    assert "152 = the 152-method surface" in doc
 
 
 def test_table_header_rows_are_read() -> None:

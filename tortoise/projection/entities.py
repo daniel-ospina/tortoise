@@ -2981,7 +2981,8 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
-    def _retract(self, pid: str, now: str | None = None) -> int:
+    def _retract(self, pid: str, now: str | None = None,
+                 valid_to: str | None = None) -> int:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
         Retracted points are hidden from normal reads (get_point, query,
@@ -3022,13 +3023,22 @@ class _EntityHandlers:
         ``now=_now_iso()``). Closing that needs pass-1a to stop re-clocking
         ``updatedAt``, which is the wider #5048 residual for EVERY
         never-retracted Point, not this arm's to invent.
+        ``valid_to`` (#4282) is the WINDOW END the producer named, replayed
+        verbatim as ``validTo`` — the same exact-stamp contract ``now`` follows
+        above, and for the same reason: a rebuild that invented an end (or
+        dropped the caller's) would disagree with the live node. Gated by
+        ``_usable_instant`` too, so a corrupt record states no end rather than
+        aborting the replay.
         """
         stamp = ", n.updatedAt = $now" if _usable_instant(now) else ""
         params: dict = {"id": pid}
         if stamp:
             params["now"] = now
+        window = ", n.validTo = $valid_to" if _usable_instant(valid_to) else ""
+        if window:
+            params["valid_to"] = valid_to
         r = self.g.query(
-            f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}, "
+            f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}{window}, "
             f"{decay_clause('n')} RETURN count(n)",
             params=params,
         )

@@ -322,7 +322,13 @@ def rendered_baseline(
         "to `TortoiseSDK` (the only constructible entry point); it is not a method on it.",
         "",
         "`docs/product/beta-sdk-surface.md` states \"only four of the 40 exist in the current SDK\".",
-        "That sentence is STALE: nine exist, plus the constructor. It is recorded here rather than",
+        # DERIVED, never a literal (#4282). The literal used to say `nine` while this
+        # same table said 13 — and because `baseline --check` compares committed vs
+        # rendered, both sides said nine and the gate stayed green over a document
+        # that contradicted itself one paragraph above. Row 1 is the constructor, so
+        # the METHOD count is the implemented row minus one.
+        f"That sentence is STALE: {len(approved_live) - 1} exist, plus the constructor."
+        " It is recorded here rather than",
         "edited there, because the approved document is the owner's ruling and this baseline is not",
         "the place to amend it (#10044).",
         "",

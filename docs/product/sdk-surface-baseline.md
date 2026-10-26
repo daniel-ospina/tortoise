@@ -23,7 +23,7 @@ Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs.
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
 
 `docs/product/beta-sdk-surface.md` states "only four of the 40 exist in the current SDK".
-That sentence is STALE: nine exist, plus the constructor. It is recorded here rather than
+That sentence is STALE: 12 exist, plus the constructor. It is recorded here rather than
 edited there, because the approved document is the owner's ruling and this baseline is not
 the place to amend it (#10044).
 

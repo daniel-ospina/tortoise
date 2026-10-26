@@ -14,10 +14,17 @@ WHAT THIS FILE IS THE GATE ON
      a regression names the arm that broke rather than "dispatch is wrong".
   3. **Behaviour is preserved, not re-implemented.** The narrow doors are still the writers:
      the merged verb calls them, so a caller who used the narrow name lands in the same
-     place. `test_..._is_the_old_door` pins that by proving the same call reaches the same
-     method with the same arguments.
+     place. `test_delete_knowledge_keeps_the_two_arms_the_narrow_doors_had` pins that for
+     the one merge whose narrow door has its own branch; the others assert the ARGUMENTS
+     the door receives, which is what a delegation can actually get wrong.
   4. **The refusal arms stay refusals.** A merge must not soften a guard (an unknown type
-     still raises; `corrected_by_id` with no temporal field is still an error).
+     still raises; `corrected_by_id` with no temporal field is still an error; a parameter
+     an arm cannot record is refused, never silently dropped).
+  5. **The arguments are ACCEPTED BY THE DOOR, not just routed to it.** A routing assertion
+     proves which door fired; it cannot prove the door accepts what it was handed (#4282:
+     `link_entities("supports", …)` routed to `create_operator` with `'SUPPORTS'` as its
+     `op_type` and raised on every call). The `_accepts` tests below exercise the real
+     writer's own contract.
 
 The narrow doors are substituted on the INSTANCE, so no database is needed: these are
 routing tests, and routing is what a merge changes. The writers' own behaviour is covered
@@ -149,7 +156,10 @@ def test_create_entity_still_refuses_a_type_it_does_not_absorb(monkeypatch):
         # The operator-less half of the epistemic layer: a bare IMPL/NAND edge.
         ("IMPL", "create_direct_edge", lambda a, k: a[0] == "IMPL"),
         ("nand", "create_direct_edge", lambda a, k: a[0] == "NAND"),
-        # The derivation writer owns the direction — the caller's is not used.
+        # The derivation writer owns the direction — the caller's is not used,
+        # and the arm passes the two ids through POSITIONALLY: `link_entities`
+        # documents the ontology's `(dst)-[:wasDerivedFrom]->(src)` orientation
+        # rather than silently re-ordering the caller's arguments (#10053 review).
         ("wasDerivedFrom", "create_derivation", lambda a, k: a == ("src", "dst")),
         # A structural relation stays PLAIN (ontology v3.5 §8) even though
         # `ownedBy` is in CORE_OPERATOR_LABELS — that set mixes the two vocabularies.
@@ -160,6 +170,14 @@ def test_create_entity_still_refuses_a_type_it_does_not_absorb(monkeypatch):
         # registry fixes for it, never the meaning itself (#10053).
         ("supports", "create_operator",
          lambda a, k: a[0] == "IMPL" and k["semantics"] == "supports"),
+        ("refutes", "create_operator",
+         lambda a, k: a[0] == "NAND" and k["semantics"] == "refutes"),
+        ("mutuallySupportive", "create_operator",
+         lambda a, k: a[0] == "IMPL" and k["semantics"] == "mutuallySupportive"),
+        # The caller's casing is not the vocabulary's: `mutuallyExclusive` is
+        # camelCase and `create_operator` matches it exactly.
+        ("MUTUALLYEXCLUSIVE", "create_operator",
+         lambda a, k: a[0] == "NAND" and k["semantics"] == "mutuallyExclusive"),
     ],
 )
 def test_link_entities_routes_each_relation_to_the_door_it_absorbed(
@@ -361,3 +379,166 @@ def test_delete_knowledge_keeps_the_two_arms_the_narrow_doors_had(monkeypatch):
             "_resolve_entity": lambda self, i, **k: [{"label": "Object"}],
         })())
     assert TortoiseSDK.delete_knowledge(inst, "x") == "entity-arm"
+
+
+# ── 4. the door ACCEPTS what the merge hands it (not just "it was routed") ────
+#
+# A routing spy proves WHICH door fired; it cannot prove the door accepts the
+# arguments, because the spy never runs the writer's own input contract. That gap
+# is how `link_entities("supports", …)` shipped with `'SUPPORTS'` as the
+# `op_type` of a door whose mechanism set is closed: routed correctly, raised on
+# every call, and every assertion here was green (#4282).
+
+
+class _ReachedTheGraph(RuntimeError):
+    """The writer got past its own input contract and tried to touch the graph."""
+
+
+def _stops_at_the_graph(inst: TortoiseSDK) -> TortoiseSDK:
+    """Run the REAL writer and stop it at its first graph access.
+
+    `create_operator` validates `op_type` and resolves `semantics` BEFORE it reads
+    the projection, so reaching the graph is proof the arguments were accepted.
+    """
+    def _boom():
+        raise _ReachedTheGraph
+
+    inst._get_proj = _boom  # type: ignore[method-assign]
+    return inst
+
+
+@pytest.mark.parametrize("relation", [
+    "supports", "refutes", "mutuallySupportive", "mutuallyExclusive",
+])
+def test_link_entities_hands_the_operator_door_arguments_it_accepts(relation):
+    inst = _stops_at_the_graph(_sdk())
+    with pytest.raises(_ReachedTheGraph):
+        TortoiseSDK.link_entities(inst, relation, "p1", "p2")
+
+
+def test_the_operator_door_really_does_refuse_the_uppercased_word():
+    """The contradiction that proves the test above is not vacuous.
+
+    This is the pre-fix argument, verbatim. It raises inside the door, so a merge
+    passing it could never have written anything.
+    """
+    with pytest.raises(ValueError, match="op_type must be"):
+        TortoiseSDK.create_operator(_sdk(), "SUPPORTS", "p1", ["p2"])
+
+
+@pytest.mark.parametrize("mechanism", ["IMPL", "NAND", "composedOf",
+                                       "decomposesInto", "contains", "wraps"])
+def test_every_mechanism_the_merge_can_pick_is_accepted_by_the_door(mechanism):
+    """The operator door's mechanism set is closed — every member is accepted."""
+    inst = _stops_at_the_graph(_sdk())
+    with pytest.raises(_ReachedTheGraph):
+        TortoiseSDK.create_operator(inst, mechanism, "p1", ["p2"])
+
+
+def test_operator_true_on_a_relation_with_no_mechanism_is_refused():
+    """`related` declares no mechanism, so the door refuses the word as one."""
+    inst = _sdk()
+    with pytest.raises(ValueError, match="op_type must be"):
+        TortoiseSDK.link_entities(inst, "related", "p1", "p2", operator=True)
+
+
+# ── 5. no arm may accept a parameter it cannot RECORD ────────────────────────
+
+
+@pytest.mark.parametrize(("relation", "kwargs", "door"), [
+    ("wasDerivedFrom", {"confidence": 0.8}, "create_derivation"),
+    ("wasDerivedFrom", {"promote_source": False}, "create_derivation"),
+    ("hasPart", {"confidence": 0.8}, "create_edge"),
+    ("hasPart", {"label": "part-of"}, "create_edge"),
+    ("hasPart", {"direction": "->"}, "create_edge"),
+    ("supports", {"weight": 0.5}, "create_operator"),
+    ("supports", {"batch_id": "b1"}, "create_operator"),
+    ("references", {"entity_label": "Event", "label": "cited"}, "link_source_to_entity"),
+    ("references", {"entity_label": "Event", "confidence": 0.4}, "link_source_to_entity"),
+])
+def test_link_entities_refuses_a_parameter_the_chosen_arm_cannot_record(
+        sdk, relation, kwargs, door):
+    """Accept-and-drop is the fail-silent class: success returned, nothing stored."""
+    with pytest.raises(ValueError, match=f"`{door}`, which records no"):
+        sdk.link_entities(relation, "src", "dst", **kwargs)
+    assert sdk.calls == [], "a refusal must not fall through to a write"
+
+
+def test_the_direct_edge_arm_still_records_every_attribute_it_can(sdk):
+    """The refusal above is scoped to the arms that CANNOT store the value."""
+    sdk.link_entities("IMPL", "src", "dst", confidence=0.8, weight=0.5,
+                      label="bearson", batch_id="b1", direction="->")
+    door, _args, kwargs = sdk.calls[-1]
+    assert door == "create_direct_edge"
+    assert kwargs["confidence"] == 0.8 and kwargs["weight"] == 0.5
+    assert kwargs["label"] == "bearson" and kwargs["batch_id"] == "b1"
+    assert kwargs["direction"] == "->"
+
+
+def test_the_operator_arm_still_records_the_attributes_it_can(sdk):
+    sdk.link_entities("supports", "src", "dst", label="backed", direction="->")
+    door, _args, kwargs = sdk.calls[-1]
+    assert door == "create_operator"
+    assert kwargs["label"] == "backed" and kwargs["direction"] == "->"
+
+
+# ── 6. the temporal FIELD's value is the datum, not just the branch selector ──
+
+
+def test_the_retraction_instant_reaches_the_writer(sdk):
+    """#4282: `valid_until=…` used to be tested and thrown away."""
+    sdk.update_knowledge("p1", valid_until="2026-01-01")
+    door, _args, kwargs = sdk.calls[-1]
+    assert door == "retract_point" and kwargs["valid_to"] == "2026-01-01"
+
+    sdk.update_knowledge("p1", invalid_at="2026-02-02")
+    assert sdk.calls[-1][2]["valid_to"] == "2026-02-02"
+
+
+def test_the_supersede_arms_instant_reaches_the_writer(sdk):
+    """#4282: the successor arm stamped `now` and dropped the caller's instant."""
+    sdk.update_knowledge("p1", invalid_at="2026-01-01", corrected_by_id="p2")
+    door, args, kwargs = sdk.calls[-1]
+    assert door == "invalidate_point" and args == ("p1", "p2")
+    assert kwargs["valid_to"] == "2026-01-01"
+
+
+@pytest.mark.parametrize("door", ["retract_point", "invalidate_point"])
+def test_the_writers_have_somewhere_to_put_the_callers_instant(door):
+    """The merge may only forward `valid_to` if the writers accept it."""
+    import inspect
+
+    assert "valid_to" in inspect.signature(getattr(TortoiseSDK, door)).parameters
+
+
+def test_the_merge_exposes_the_temporal_field_and_forwards_its_value():
+    import inspect
+
+    params = inspect.signature(TortoiseSDK.update_knowledge).parameters
+    assert {"valid_until", "invalid_at"} <= set(params), (
+        "beta row 22: retraction is `valid_until`/`invalid_at` on the update verb")
+
+
+def test_the_retraction_record_carries_the_window_end():
+    """A window end that is not journalled is lost on the next rebuild."""
+    from tortoise.record_projection import RECORD_MUTATIONS
+
+    mutation = RECORD_MUTATIONS["PointRetracted"]
+    written = getattr(mutation.effect, "from_payload", frozenset())
+    assert "valid_to" in written, (
+        "PointRetracted must carry the caller's `valid_to`, or a rebuild replays "
+        "the tombstone with no window end while the live node has one")
+
+
+# ── 7. malformed annotation input is ValueError, like every other refusal ────
+
+
+@pytest.mark.parametrize("annotation", [
+    {"precision": 0.2},                                   # partial → was TypeError
+    {"bias": 0.1, "precision": 0.2, "consistency": 0.3, "directness": 0.4,
+     "bogus": 1.0},                                       # typo'd key → was TypeError
+])
+def test_a_malformed_annotation_is_a_ValueError_not_a_TypeError(sdk, annotation):
+    with pytest.raises(ValueError, match="annotation takes exactly"):
+        sdk.update_knowledge("op1", annotation=annotation)
+    assert sdk.calls == [], "a refusal must not fall through to a write"

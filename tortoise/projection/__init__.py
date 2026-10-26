@@ -9326,6 +9326,12 @@ def _apply_one(points: dict[str, dict], ev: dict,
             p.update(VACUITY_BELIEF)
             if _usable_instant(ev.get("ts")):
                 p["updatedAt"] = ev["ts"]
+            # #4282: the WINDOW END the retraction carries, replayed verbatim —
+            # the same exact-stamp contract `updatedAt` follows above, and under
+            # the same `_usable_instant` gate, so a corrupt record states no end
+            # rather than putting a non-scalar into the node.
+            if _usable_instant(ev.get("valid_to")):
+                p["validTo"] = ev["valid_to"]
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
@@ -11798,7 +11804,8 @@ class FalkorProjection(
             # materialization, so a create → hard-delete → retract journal
             # (first <= seq) still refuses.
             if (isinstance(rid, str)
-                    and self._retract(rid, now=ev.get("ts")) == 0
+                    and self._retract(rid, now=ev.get("ts"),
+                                      valid_to=ev.get("valid_to")) == 0
                     and not _journal_forward_reference(
                         journal_first_materialized, journal_seq,
                         "Point", rid)):
@@ -14345,7 +14352,8 @@ class FalkorProjection(
                     # tombstone still applies.
                     _retr_anchor = last_ann_drop_seq.get(("Point", rid))
                     if ((_retr_anchor is None or seq > _retr_anchor)
-                            and self._retract(rid, now=ev.get("ts")) == 0):
+                            and self._retract(rid, now=ev.get("ts"),
+                                              valid_to=ev.get("valid_to")) == 0):
                         # #3585 (R8): a 0-row retract is a non-folded event
                         # (the mutation is lost) — the reference fold refuses
                         # the same shape, so both classifiers agree.

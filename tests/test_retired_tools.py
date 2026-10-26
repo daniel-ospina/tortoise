@@ -63,7 +63,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 149, f"SDK surface changed: {len(public)} != 149"
+        assert len(public) == 152, f"SDK surface changed: {len(public)} != 152"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK
