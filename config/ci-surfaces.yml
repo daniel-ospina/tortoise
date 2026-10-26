@@ -405,6 +405,12 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
+  # #8617: the DECLARED ACL-layer posture + the recorded absence (unit lane:
+  # no server, no docker — the refusal shapes a healthy self-hosted
+  # server cannot produce). Registered under `api` because the change it
+  # guards lives in `tortoise/hosted_api.py` (the mint hook) and
+  # `tortoise/acl_graph_users.py`.
+  - test_acl_layer_posture_8617.py
   - test_analytics_write_path_resolution.py
   # #8151: `fetch_rows` now walks via `supabase_control.query_all` (#4038), the
   # same seam `test_5388_org_enumeration_completeness.py` guards on this
@@ -984,6 +990,24 @@ surfaces:
   # `hosted_api.py`/`supabase_control.py`-only change, the #2938 silent-drop
   # class this comment exists to prevent.
   - test_10025_graph_identity.py
+  # #10047 (the #10025 residual): the five lambdas that build their OWN SDK —
+  # the onboarding/starter seed runners and the three background index jobs —
+  # install the org's DEFAULT-graph record tenant via
+  # `_bind_default_graph_record_tenant`. DUAL-REGISTERED (`api` + `core`), for
+  # exactly the reason stated directly above for its `test_10025` sibling: the
+  # file drives `tortoise/hosted_api.py` and `tortoise/supabase_control.py`
+  # (`default_graph_id_for`), BOTH exact `SOURCE_PATTERNS["api"]` entries, so an
+  # api-only diff selects `api` + `onboarding` and REPLACES the `core` fallback
+  # — measured on this entry's absence: `--changed-files
+  # tortoise/hosted_api.py` -> surfaces=['api','onboarding'] with this file
+  # ABSENT, and `--changed-files tortoise/supabase_control.py` -> ['api'] with
+  # it ABSENT too. The `core` arm is load-bearing for the other input,
+  # `tortoise/record_writer.py` (`record_tenant_for`, the seam the tenant must
+  # reach), which matches no SOURCE_PATTERNS row and so takes the `core`
+  # fallback. Dropping either arm is the #2938/#3154 silent-drop class this
+  # comment exists to prevent. DB-free: a fake control plane and a recording
+  # fake SDK, no graph writes, no server.
+  - test_10047_record_every_lane.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -2496,6 +2520,21 @@ surfaces:
   # DB or network of its own, and a `tortoise/projection/`-only change selects
   # this surface.
   - test_5048_retract_instant_recorded.py
+  # #10053 review (P2): the DURABILITY half of #4282 phase 2.2 — a dated
+  # retraction's window end must survive `derived = replay(journal)`. Registered
+  # HERE as well as on `sdk`, because its three replay/reference arms live in
+  # modules NO `SOURCE_PATTERNS` row claims — `tortoise/consistency.py`'s
+  # reference fold, `tortoise/record_projection.py`'s carrier,
+  # `tortoise/projection/entities.py`'s `_retract` — so each falls through to
+  # the plain `tortoise/` arm and selects `core` ALONE. With the `sdk` row only
+  # (what #10053 first shipped) those three diffs could not reach the file:
+  # measured `select(["tortoise/consistency.py"], "pull_request", m)` ->
+  # `surfaces=['core']`, the suite ABSENT from `test_files`. That is the
+  # #1349/#2938 silent-drop class: a follow-up reverting one arm of the
+  # invariant would change nothing that runs. Same home and same reason as
+  # `test_5048_retract_instant_recorded.py` above: it builds its own embedded
+  # `TortoiseSDK` (`tmp_path` db + journal), so it needs no server.
+  - test_4282_dated_retraction_durability.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
@@ -3186,6 +3225,7 @@ surfaces:
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
   - test_10025_graph_identity.py  # #10025: graph id vs user-editable name; default-graph record tenant; dual: api
+  - test_10047_record_every_lane.py  # #10047: the seed runners + background index jobs install the DEFAULT-graph tenant; dual: api (core is load-bearing for record_writer.py, which matches no SOURCE_PATTERN)
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
@@ -4347,8 +4387,10 @@ surfaces:
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
-  # `xfail(strict=True)` pin is the forcing function for the open owner ruling
-  # on that issue). Registered under `core` for the #3518 reason above:
+  # `xfail(strict=True)` pin stays ARMED, and it reds on a FUSION-side remedy
+  # (the first one being option D, which the owner ruling CLOSED) rather than on
+  # the dedup fix, which is a write-path change and never reaches it — deleting
+  # the pin is a deliberate act in that change). Registered under `core` for the #3518 reason above:
   # `tortoise/search_engine.py` (where `rrf_fusion` lives) matches no
   # SOURCE_PATTERNS entry and falls to the `core` fallback, so a
   # search_engine.py-only PR would otherwise never run this pin. Hermetic (no
@@ -5616,6 +5658,27 @@ surfaces:
   # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
   - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
+  # #4282 Phase 2.2 (the four merges into the approved 40): the merged verbs are
+  # `TortoiseSDK.link_entities` / `update_knowledge` / `delete_knowledge` — the `sdk`
+  # subject exactly — and the file pins the re-cut baseline's live count, so it belongs
+  # beside the door suites above. Registered HERE because an unclassified
+  # `tests/**/test_*.py` reds the required `manifest-integrity` job
+  # (`tools/ci_selection.py --integrity`) — which is what PR #10053 shipped.
+  - test_4282_phase2_merges.py
+  # #10053 review (P1): the DURABILITY half of the same phase — a dated
+  # retraction's window end must survive `derived = replay(journal)`. MULTI-
+  # REGISTERED (see its `core` row beside `test_5048_retract_instant_recorded.py`),
+  # and each row is load-bearing for a DIFFERENT subject:
+  #   * `core` — the three replay/reference modules no `SOURCE_PATTERNS` row
+  #     claims (`consistency.py`, `record_projection.py`,
+  #     `projection/entities.py`) select `core` alone, and a lone `sdk` row is
+  #     ABSENT from those `test_files` (measured).
+  #   * `sdk` — the SDK subject: the producers this half pins are
+  #     `link_entities` / `update_knowledge`, and a non-full `sdk` selection is
+  #     reachable without `tortoise/sdk.py` itself touching the diff.
+  # The sibling routing file above is graph-free by design; splitting them keeps
+  # that property and still covers the pair.
+  - test_4282_dated_retraction_durability.py
   # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
   # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
   # re-running `select()` with the row withheld:
@@ -7072,6 +7135,8 @@ durations:
   eval/write_path/test_value_span_census_2684.py: 1.5  # The row has to EXIST, not merely default: adding the file to the `core`/`eval`/`sdk` surfaces puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. MEASURED at this head in BOTH states, because they differ by exactly this row: WITH it `fast_pool` is 1032 files with 102 unweighted = 930/1032 = 0.901163 (`duration_coverage_issues() == []`, ONE unweighted row of headroom); WITHOUT it 103 are unweighted = 929/1032 = 0.900194 — still above the inclusive 0.90 floor, so the row is not what makes the gate pass, it is the headroom: the NEXT unweighted fast file lands on exactly that 103/1032 = 0.900194 (green), and the one after it reds at 104/1032 = 0.899225. ⚠️ Read that pair as a SNAPSHOT of a moving denominator, not a constant: main keeps adding fast files, so `tools/ci_selection.py --integrity` is the authority. What the weight covers: hermetic and cheap — committed #7947 arms receipts + `tests/eval/write_path/fixtures/` JSON only, plus the shipped `extractor_v2`/`retrieval` predicates; no DB, no network, no model, ~4 s measured. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_5140_d10_code_half_residuals.py: 5.9  # What the weight covers: 7 cases, ALL SEVEN taking the URI-aware `sdk_factory` graph fixture — a throwaway embedded FalkorDB each (the tier-2 PR legs this file is registered in are URI-empty BY DESIGN, so that is how it runs there; only a leg that DOES set `TORTOISE_DB_URI` redirects the graph to that server, under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`); no Postgres, no network, no model; ⚠️ The counterfactual below is a SNAPSHOT OF A MOVING DENOMINATOR, not a current requirement, and the SHA matters — at this branch's PRE-REBASE head `ed33730a0` (base `ee9edbffc`), `--integrity` reported `❌ manifest drift: … 925/1028 … below the 90% floor` WITHOUT it. At the rebased head that ADDS the row (`99e4e472c`, base `90fe82ea4`) the pool had grown to 1030 and WITHOUT the row coverage was 927/1030 = 0.900000, i.e. `duration_coverage_issues()` was `[]` — already green with ZERO headroom, so a claim that the row is REQUIRED at that head is false. `tools/ci_selection.py --integrity` is the authority, and one file of headroom is not headroom. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_4282_memory_graph_surface.py: 5.1  # new in #4282 (phase 2.3); What the weight covers: 17 cases — 13 taking the derived `sdk` graph fixture (a team created and torn down per test; EMBEDDED locally, redirected by `tests/_embedded.py` to the docker/server lane under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI`, so the flat weight is the same either way) and 4 that need no graph (the retirement hint, the class check, the tool-name check, and one source scan of EVERY tracked `*.py` for retired call sites, deliberately wider than `tortoise/` because `graph-scripts/` held a live caller) — no Postgres, no network, no model. The row has to EXIST, not merely default: one more unweighted fast file moves the coverage ratio, and `--integrity`'s duration-coverage issue list is measured against the pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
+  test_4282_phase2_merges.py: 2.0  # new in #4282 (phase 2.2, PR #10053): the same #3400/#4348 trap as its phase-2.3 sibling above — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: registering the file on the `sdk` surface puts it in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case is either a pure substitution of the narrow doors on an instance from `TortoiseSDK.__new__` (no projection, no connection) or a stub of `_get_proj` / `_get_ep` / `_graph_write_with_retry` that records the write parameters. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_4282_dated_retraction_durability.py: 2.0  # new in #10053 (#4282 phase 2.2 durability, PR #10053): the same #3400/#4348 trap as its sibling row above — a file a PR ADDS can never carry a CI junit reading yet, so it takes the header's flat `DEFAULT_FAST_WEIGHT`. Registers REAL work (~2.5 min measured locally, embedded FalkorDB per test), but the shard-layout input must come from the junit sweep, not from this note: `tools/ci_timing.py --refresh-durations` re-bases it after the next push-to-main sweep.
   test_evidence_8503_claims.py: 0.1  # What the weight covers: TWO file scans and nothing else — `docs/00_index.md` (one row, its artifact list and its published figures) and `docs/evidence/8503/README.md` (the verdict banner's over-claim absence + the scoped claim it was replaced with). No graph, no DB, no network, and no import of `tortoise.extractor_v2`, which is why it is safe in `tier1`. The row must EXIST, not merely default: this file is added to the fast pool by this PR, and an unweighted fast file is what `--integrity`'s `duration_coverage_issues` measures against the pool's own size. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_batch_review.py: 2.0  # carried forward (not a full-file CI measurement) — new in #9790 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and not a dev-box reading (#2818/#3419, pinned by `tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`). MEASURED at this head, both states, because the difference is the whole point of the row: the `core` surface entry is manifest CLASSIFICATION only (#4348), so this file enters `fast_pool()` either way — at `2b26d9239` WITH the row the pool is 1021 files and 99 are unweighted = 0.903036 (922/1021); WITHOUT it 100 are = 0.902057 (921/1021) (`fast_pool(load_manifest())`, `ci_selection.py --integrity` rc 0). Treat that pair as a SNAPSHOT OF A MOVING DENOMINATOR, not a constant: the same figure read 1007 / 0.901688 before the previous `origin/main` merge and 1021 / 0.903036 here, because main keeps adding fast files — so `--integrity` is the authority and these numbers are only what it said at this head. Headroom is 3 unweighted files, not 1: 102 unweighted = 0.900098 still passes, 103 = 0.899119 reds the 0.90 floor, so a handful of new unweighted fast files — not one — is what triggers `duration_coverage_issues`. What the weight covers: DB-free and network-free — `plan_records`/`validate_answer`/`_diff_file_paths` over in-memory manifest dicts and a `tmp_path` diff cache, plus THREE subprocess seams: a stub `gh` standing in for the GitHub API in `prepare`, a stub `record-review.sh` the `record` command actually execs (asserting the planned argv and the fail-closed rc), and an injected normalizer standing in for `diff-normalize.py`. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.4s) is a LOWER bound; kept 2.0
   test_9572_discriminator_not_clobbered.py: 2.5  # new in #9572; Surface: the identity-upsert discriminator (a bare re-create or a blank kind must not reset `subjectKind`/`objectKind`) across every door and caller layer that used to fabricate the default. MEASURED 2026-10-23 against `origin/main` dd0d9e3f6 (this file copied into a detached worktree there and run with THAT worktree's own `.venv`): **30 cases, 22 taking the `sdk` graph fixture, 26 FAIL pre-fix, 4 pass** — and **5 of the 26 fail BY IMPORT** (`tortoise.kind_fallbacks` ×4, `sdk._payload_entity_kind` ×1: the modules are new here). The 4 that pass pre-fix are over-fix guards, named rather than counted: `test_subject_first_create_still_defaults_to_other`, `test_object_first_create_still_defaults_to_other`, `test_subject_explicit_kind_still_updates`, `test_caller_supplied_props_still_apply_on_recreate`. ⛔ Do NOT measure the pre-fix half with the FIXING worktree's `.venv`: it is an editable install of the fix, so a module absent at base resolves back into the fix and the run reports **23 fail / 7 pass** instead (measured — the contamination is invisible except in the number, so a detached worktree needs its own `uv sync`). Five pins live at ROUTE level, all FAIL pre-fix: four in `test_hosted_api.py` (`/v1/subjects` and `/v1/objects`, each with a NAMED-kind re-create and a BLANK-kind re-create) and one in `test_commit_endpoint.py` (`/v1/sessions/commit`, the production capture door). Registration: `core` (the block above) PLUS `api` and `onboarding`, because these pins cover `_OrgSeedSurface` (`tortoise/hosted_api.py`) and `_SdkSeedSurface` (`tortoise/onboarding/selfhost.py`) and a SOURCE_PATTERNS match REPLACES the `core` fallback (pinned by `tests/test_ci_selection.py::test_the_9572_seed_surface_pins_are_selected_on_their_own_modules`). Lane: not an embedded fixture — the file is registered on `core` and is not in `TEST_NO_REDIRECT_STEMS` (`tests/_embedded.py`), so under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI` its explicit `TortoiseSDK(.../topic.db)` construction is redirected to the docker server (a socket, not an embedded DB). No Postgres, no network egress. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep has measured it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
@@ -7565,6 +7630,12 @@ durations:
   test_dataplane_lane_loop_responsiveness.py: 17.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 13.4
   test_extractor_reliability.py: 5.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.9
   test_acl_graph_users.py: 9.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 10.6
+  # #3400/#9068 trap: a file ADDED BY A PR has no CI junit measurement, and an
+  # absent key drops `durations` coverage under the 90% floor. The row is
+  # REQUIRED, and it carries the flat 2.0 default — a local timing is a
+  # shard-layout input that must model CI, not this box. Refresh from the
+  # first post-merge run.
+  test_acl_layer_posture_8617.py: 2.0  # new in #8617; unmeasured on CI (flat default, see the entry above)
   test_battery_exposure_liveness.py: 12.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.2
   test_attribution_machine_model.py: 14.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.5
   test_battery_real_deadline.py: 5.0  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.0

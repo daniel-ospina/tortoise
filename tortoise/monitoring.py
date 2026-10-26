@@ -1362,7 +1362,7 @@ def record_record_write_failure(reason: str) -> None:
       credential named no graph (use a graph-bound key; an org-wide **API KEY**
       — `tt_`/`tk_` — IS named from `default_graph_id` since #10025, while a
       SESSION token on the hosted REST lane and an OAuth `oat_` connector stay
-      #10047's open scope); a
+      #10046's open scope); a
       deployment that serves exactly ONE graph may
       instead set ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
       ``TORTOISE_RECORD_SINGLE_TENANT=1``. The pair alone is IGNORED (a

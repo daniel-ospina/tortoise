@@ -15,8 +15,10 @@ graders:
   harness specifies; CI replays are byte-reproducible,
 * recall through the REAL ``recall_state`` (continuity readers grade what
   the reader cell actually surfaces),
-* the NULL reflex (the graded reflex seam lands with the W4 delivery issue)
-  — kta/push numbers are the honest pre-W4 baseline.
+* the GRADED reflex (``config.reflex = "graded"``, #8125): every user turn of
+  a know_to_ask / push session is decided by the REAL
+  ``tortoise.volunteer.decide`` layer over an EP-warmed cell, and the
+  injected pointers are graded in the harness vocabulary.
 
 Assertions cover the properties the issue owns:
 
@@ -29,9 +31,10 @@ Assertions cover the properties the issue owns:
   DETECTED as violations ⇒ REGRESSION;
 * determinism: two full-corpus replays on fresh hermetic graphs produce
   byte-identical metrics;
-* can-fail: a synthetic graded-reflex baseline (kta 0.00 bar live) the
-  null-reflex run cannot meet ⇒ REGRESSION with origin gate_regression —
-  the property that FAILS CI until the W4 reflex lands and re-blesses;
+* E2E-3 (#8125): the graded reflex meets the epic target on the frozen
+  corpus (know-to-ask failure 0.00, false-fire 0.00) — and the EP warm-start
+  is LOAD-BEARING: with it disabled the reflex has no posterior to decide on
+  and the run is a REGRESSION with origin gate_regression;
 * the committed m2.json baseline is PASS-at-reproduction (the deterministic
   lane's gate is reproduction, exactly like W2-b's m2 lane).
 """
@@ -114,10 +117,15 @@ def test_harness_replay_grades_real_surfaces(sdk_factory):
     """S1 + grading-surface smoke over the REAL pipeline: every session
     replays + emits through the real capture path; the graded-today suites
     read REAL numbers from the written graph + recall transcript; the
-    deterministic M2 lane reproduces its committed m2.json ⇒ PASS."""
+    deterministic M2 lane reproduces its committed m2.json ⇒ PASS.
+
+    #8125 flipped the know_to_ask lane from the NULL reflex to the GRADED
+    reflex over an EP-warmed cell: the run now decides through the real
+    ``volunteer.decide`` and the standing kta / false-fire bars are LIVE."""
     report = _run_all(sdk_factory)
     assert report["run_status"] == "completed", report.get("log")
     assert (report.get("resolved_config") or {}).get("extractor_posture") == "m2"
+    assert report["resolved_config"]["reflex"] == "graded"
     assert report["verdict"] == schema.VERDICT_PASS, report.get("log")
     assert report["failure_origin"] is None
     assert set(report["metrics"]) == schema.METRIC_VALUES
@@ -127,10 +135,37 @@ def test_harness_replay_grades_real_surfaces(sdk_factory):
     assert report["metrics"]["continuity_recall"] == 1.0
     # E2E-4 (this issue's own gate): source isolation = 0.
     assert report["metrics"]["source_isolation_violations"] == 0
-    # Null-reflex honesty: kta failure is total (nothing injected yet) and
-    # the run's notes NAME the failure class.
-    assert report["metrics"]["know_to_ask_failure_rate"] == 1.0
-    assert any("no-reflex" in n for n in report["notes"])
+    # The graded reflex meets the epic target on the frozen corpus (E2E-3):
+    # every know-to-ask turn that should retrieve, retrieves; nothing fires
+    # on a courtesy / below-notability turn.
+    assert report["metrics"]["know_to_ask_failure_rate"] == 0.0, (
+        [r for r in report["session_results"] if r.get("kta")]
+    )
+    assert report["metrics"]["false_fire_rate"] == 0.0, (
+        [r for r in report["session_results"] if r.get("false_fire")]
+    )
+    assert any("graded-reflex" in n for n in report["notes"])
+    assert any("EP warm-start" in n for n in report["notes"])
+    # Every know-to-ask / push session actually replayed the reflex over an
+    # EP-warmed cell (no session silently graded on the null lane).
+    graded = [r for r in report["session_results"]
+              if r.get("suite") in ("know_to_ask", "push")]
+    assert graded
+    for result in graded:
+        assert result["reflex"] == "graded"
+        assert result.get("ep_warm_start") is not None
+        assert result["ep_warm_start"]["seeded"] > 0
+        assert "injected" in result
+    # The push precision floor is disclosed as NOT APPLICABLE (the committed
+    # gold names symbolic pointer ids no cell can mint) — never silently
+    # applied against a number the reflex could not have moved.
+    gate = report["reflex_gate"]
+    assert gate["reflex"] == "graded"
+    assert gate["kta_bar_applied"] is True
+    assert gate["push_pointer_identity_evaluable"] is False
+    assert gate["push_bar_applied"] is False
+    assert any("push pointer identity NOT EVALUABLE" in n
+               for n in report["notes"])
     # Every session emitted (never skipped) and every capture was ok — the
     # BPRE gate corpus excludes the pinned holdout (frozen for the W4
     # reflex), which the run's notes state.
@@ -141,21 +176,24 @@ def test_harness_replay_grades_real_surfaces(sdk_factory):
     for result in report["session_results"]:
         assert result["emitted"] is True
         assert result["capture_ok"] is True
-    # Receipt validates (the publish artifact).
+    # Receipt validates (the publish artifact) and states which bars applied.
     receipt = runner.build_receipt(report)
     assert runner.validate_receipt(receipt) == []
     assert receipt["judge_pin"] == runner.JUDGE_PIN
     assert receipt["corpus_hash"] == corpus.compute_fixtures_hash()
+    assert receipt["reflex_gate"]["push_bar_applied"] is False
 
 
 def test_harness_replay_determinism_and_graded_reflex_gate(sdk_factory, tmp_path):
     """Determinism + the can-fail gate on real replay data:
 
     1. two full-corpus replays produce byte-identical metrics;
-    2. a synthetic graded-reflex baseline (kta 0.00 bar LIVE) that the
-       null-reflex run cannot meet ⇒ REGRESSION with origin
-       ``gate_regression`` — the property that FAILS CI until the W4
-       reflex lands and re-blesses the lane to reflex=graded."""
+    2. the EP warm-start is LOAD-BEARING: with it disabled the graded reflex
+       has no posterior to decide on (the Beta(1,1) neutral 0.5 sits under
+       the 0.7 gate), so know_to_ask failure reads 1.0 against the committed
+       0.0 ⇒ REGRESSION with origin ``gate_regression``.  This is the
+       property that FAILS CI if the warm-start regresses or the reflex bars
+       go dark again."""
     report1 = _run_all(sdk_factory)
     assert report1["run_status"] == "completed"
     report2 = _run_all(sdk_factory)
@@ -167,34 +205,39 @@ def test_harness_replay_determinism_and_graded_reflex_gate(sdk_factory, tmp_path
     assert pending["fixtures_hash"] == report1["corpus_hash"]
     fixture_config = dict(corpus.BASELINE_CONFIG)
     fixture_config["extractor_posture"] = "m2"
-    # config.reflex stays null (config parity with the run's resolved config
-    # — a graded-reflex baseline is a config mismatch => inconclusive, which
-    # is itself the protocol guard under test in the hermetic schema tests).
-    # The can-fail probe: commit the AT-TARGET kta snapshot (0.00, the shape
-    # the W4 graded-reflex re-bless will commit) — the null-reflex lane runs
-    # at failure 1.0 > 0.00 => REGRESSION, pure directional (bars off).
+    # Deliverable baseline: config parity with the run (reflex=graded) and the
+    # at-target kta snapshot the graded lane must keep meeting.
     fixture_baseline = {
         "schema_version": 1,
         "fixtures_hash": report1["corpus_hash"],
         "judge_pin": runner.JUDGE_PIN,
         "config": fixture_config,
-        "justification": "synthetic at-target baseline (integration test)",
-        "metrics": {
-            "know_to_ask_failure_rate": 0.0,
-            "false_fire_rate": 0.0,
-            "push_precision": 1.0,
-            "push_recall": 1.0,
-            "write_back_fidelity": 1.0,
-            "continuity_recall": 1.0,
-            "source_isolation_violations": 0,
-        },
+        "justification": "synthetic at-target graded baseline (integration test)",
+        "metrics": dict(report1["metrics"]),
         "history": [],
     }
     assert schema.validate_baseline(fixture_baseline) == []
     (root / "baselines" / "m2.json").write_text(json.dumps(fixture_baseline, indent=2))
+    # Baseline reproduction is a PASS (the committed-vs-run compare is exact).
+    assert runner.run_benchmark(root=root)["verdict"] == schema.VERDICT_PASS
 
-    report3 = runner.run_benchmark(root=root)
+    # CAN-FAIL: a graded lane with no EP warm-start under-fires.
+    real_warm_start = runner.ep_warm_start
+
+    def _no_warm_start(sdk, *, log=None):
+        if log is not None:
+            log.append("EP warm-start DISABLED (can-fail probe)")
+        return {"seeded": 0, "prior": "none", "dream_mode": None,
+                "dream_affected": None, "dream_scanned": None,
+                "dream_converged": None}
+
+    runner.ep_warm_start = _no_warm_start
+    try:
+        report3 = runner.run_benchmark(root=root)
+    finally:
+        runner.ep_warm_start = real_warm_start
     assert report3["run_status"] == "completed"
+    assert report3["metrics"]["know_to_ask_failure_rate"] == 1.0
     assert report3["verdict"] == schema.VERDICT_REGRESSION
     assert report3["failure_origin"] == "gate_regression"
     receipt = runner.build_receipt(report3)
@@ -322,3 +365,16 @@ def test_unknown_mode_fails_closed(sdk_factory):
     assert report["run_status"] == "failed"
     assert report["failure_origin"] == "runner_error"
     assert any("unknown mode" in line for line in report["log"])
+
+
+def test_unknown_reflex_lane_fails_closed(sdk_factory):
+    """#8125: an unknown reflex lane must not silently fall back to the
+    default one — a typo'd ``--reflex grade`` would otherwise publish a
+    null-or-graded number under a label that says otherwise, and the blessed
+    baseline's bars would activate (or not) on a config nobody chose."""
+    report = runner.run_benchmark(reflex="grade")
+    assert report["run_status"] == "failed"
+    assert report["failure_origin"] == "runner_error"
+    assert any("unknown reflex lane" in line for line in report["log"])
+    # The run never started: no session was replayed or graded.
+    assert not report.get("session_results")
