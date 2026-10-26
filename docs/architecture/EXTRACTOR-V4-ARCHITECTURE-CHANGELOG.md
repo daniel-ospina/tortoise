@@ -1009,9 +1009,9 @@ per token is the vendor's documented example (`$0.000026 / 62 tokens`, ⇒ `4.19
 cross-checked against a 100-row usage ledger from this machine, whose fit is `4.20e-7 × input_tokens`
 with a maximum absolute error of `$0.000001`. ⚠️ **No live call was made** (no `JEV_API_KEY` on the
 box that wrote this), so the token counts are a `cl100k` proxy (read them ±15%) and the first armed
-call is what produces a receipt. Both halves record it: VET at
-`result["vet"][*]["batch"]["seam"]["cost_usd"]`, classify at `stats["seam"]["cost_usd"]`.
-⚠️ It lands in `result["vet"]`, **not** in `stats["llm"]`, so the A/B cost gate does not add it to
+call is what produces a receipt — the seam records it in `stats["seam"]["cost_usd"]` (the VET gate's
+`stats` and the classify `stats` both nest the seam's own record under that key). ⚠️ It lands in
+`result["vet"][*]["stats"]`, **not** in `stats["llm"]`, so the A/B cost gate does not add it to
 the LLM tail's spend — the two providers are counted separately on purpose, and an armed run's true
 tail cost is their sum.
 
@@ -1019,16 +1019,19 @@ tail cost is their sum.
 a `NOOP` **verdict** per candidate; since `vet_gate` applies arbiter verdicts over the mechanical
 pass, that **rescinded the `#4899` identifier-only `DISCARD`** on a key outage — an outage silently
 keeping what a working predicate had dropped, and erasing the rule id that explains it. A degraded
-item now emits **no verdict** and the failure is recorded by name in `batch["seam"]`; the
-composition is pinned by an assertion. (2) The VET half accumulated `cost_usd` and threw it away
-(`vet_arbiter` discarded its stats) — the receipt the flag exists for was unreadable for the half
-that spends more. `vet_candidates` now lets the arbiter's batch payload ride (additive, and never
-over a mechanical `check_batch` fact), so the record reaches `result["vet"][*]["batch"]["seam"]`.
+item now emits **no verdict** and the failure is recorded by name in `stats["seam"]["degraded"]` /
+`["schema_rejects"]`; the composition is pinned by an assertion. (2) The VET half accumulated
+`cost_usd` and threw it away (`vet_arbiter` discarded its stats) — the receipt the flag exists for
+was unreadable for the half that spends more. `vet_candidates` now folds the arbiter's own record
+into its `stats["seam"]` (additive; its counters stay its own), so the spend, the bands and the
+degraded items reach `result["vet"][*]["stats"]["seam"]`.
 
-**Tests:** two, and both are mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
+**Tests:** four, and each is mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
 answer decides through the REAL `vet_gate` and the REAL `KindClassifier`; an out-of-schema answer
 (wrong primitive / `9.0` on a 0–3 scale / a choice outside the offered set) produces no verdict and
-names its question. **Seven** mutants each redden at least one of them and restore byte-identically —
-including `_noul`'s coercion of a missing probability to `0.0` (which turns a `choice` answer into a
+names its question; the seam's own record (`prompt`/`model`/`bands`/`cost_usd`) reaches the gate's
+stats; and an injected decider's unrepresentable spend cannot abort the fail-open classify pass.
+**Nine** mutants each redden at least one of them and restore byte-identically — including
+`_noul`'s coercion of a missing probability to `0.0` (which turns a `choice` answer into a
 confident **DISCARD**), the rejected `NOOP`-on-degradation shape, and `vet_arbiter` dropping its
 stats again.

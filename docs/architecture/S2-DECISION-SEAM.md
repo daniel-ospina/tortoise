@@ -32,7 +32,7 @@ already existed and had no production caller.
 | part | what it is |
 |---|---|
 | **adapter** | `vet_verdicts` / `classify_tail` turn a candidate batch into **one round trip**: `state` (the narrative, plus one element per candidate) and a **map** of typed `questions`, answered in one response. The shape is copied from a working caller where one existed — see §2 for the two parts that are not. |
-| **prompt** | two versioned question sets, `vet-v1` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v1` (a `choice` per candidate over the kinds the kNN just offered). The version rides in the seam's record (`result["vet"][*]["batch"]["seam"]["prompt"]` for VET, `stats["seam"]["prompt"]` for the tail) and in every degraded record, so an artifact names the wording that decided. |
+| **prompt** | two versioned question sets, `vet-v1` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v1` (a `choice` per candidate over the kinds the kNN just offered). The version rides in every result — `stats["seam"]["prompt"]`, on both the VET gate's stats and the classifier's — and `vet-v1` is stamped into every rejected verdict's `reason`. On the classify side the rejected answer is recorded as the failing question name in `stats["seam"]["rejected"]`, with the version beside it under `stats["seam"]["prompt"]`. |
 | **parser** | `_noul` / `_score` / `_choice` validate the answer *against the question that was asked*: the echoed `type`, a finite probability in `[0, 1]`, a score on the declared scale, a choice inside the offered set. A violation raises `SchemaViolation` **carrying the question name**; nothing downstream coerces a bad answer into a label. |
 
 ## 2. The request shape is copied from a caller, not from the documentation
@@ -72,7 +72,7 @@ settles it; the counters name it. Do not read this page as "verified live".
   the hardcoded prompt + JSON parser that used to answer the low-margin tail.
 - **The verdict is the caller's.** The model returns a number; `vet_verdict` reads
   it through `Bands` — written down, argued in `#4899`/`#2453`, overridable per
-  call and recorded in `stats["bands"]`:
+  call and recorded in `stats["seam"]["bands"]`:
 
   | band | default | meaning |
   |---|---|---|
@@ -134,7 +134,7 @@ identifier-only candidate ⇒ still `DISCARD` / `value.identifier_only.hash`).
 
 ## 6. Arming it
 
-```
+```bash
 TORTOISE_S2_DECISION_SEAM=1   # unset/0 = off (the production state)
 JEV_API_KEY=...               # $JEV_API_KEY, else the repo-root .env
 ```
@@ -163,42 +163,50 @@ the price per input token, which is derived twice and agrees with itself.
 
 | shape | request (measured, this module) | tokens (cl100k proxy) | cost |
 |---|---|---|---|
-| `vet-v1`, **40 items** / 80 questions, 500-word narrative | 39,484 B | 9,265 | **$0.0039** → **$0.000097/item** |
-| `classify-v1`, **40 tail items** / 40 questions, top-5 kinds offered | 23,292 B | 6,112 | **$0.0026** → **$0.000064/item** |
+| `vet-v1`, **40 items** / 80 questions, 500-word narrative | 39,484 B | 9,265 | **\$0.0039** → **\$0.000097/item** |
+| `classify-v1`, **40 tail items** / 40 questions, top-5 kinds offered | 23,292 B | 6,112 | **\$0.0026** → **\$0.000064/item** |
 
 Derivation, so it can be re-checked rather than believed:
 
-- **The price.** The vendor's documented example bills **$0.000026 for 62 input
-  tokens** ⇒ `4.19e-7 $/token`. Independently, a 100-row usage ledger retained from
-  this machine's 2026-09-24 consolidation pass fits `cost = 4.20e-7 · input_tokens`
-  with a **maximum absolute error of $0.000001** across all 100 rows (output tokens
-  contribute ≈ 0 — the fit's coefficient is `-2.6e-10`, i.e. within noise). Both
-  agree at **≈ $0.42 per 1M input tokens**, input-only.
+- **The price.** The vendor's documented example bills **\$0.000026 for 62 input
+  tokens** ⇒ `4.19e-7 $/token`. Independently, a 100-row usage ledger retained
+  from this machine's 2026-09-24 consolidation pass fits
+  `cost = 4.20e-7 · input_tokens` with a **maximum absolute error of \$0.000001**
+  across all 100 rows (output tokens contribute ≈ 0 — the fit's coefficient is
+  `-2.6e-10`, i.e. within noise). Both agree at **≈ \$0.42 per 1M input tokens**,
+  input-only.
+
+  The `\$` escapes are load-bearing, not decoration: two unescaped dollar signs in
+  one paragraph — `\$0.000026` above and the `$` inside the `$/token` code span —
+  form a math delimiter pair, which re-pairs the backticks around them and makes
+  the REQUIRED `docs` check red (`MD038`: one space inside a "code span" that was
+  never intended as one).
 - **The tokens.** `cl100k_base` over the exact serialized payload. The upstream
   tokenizer is not published, so read the token counts as **±15%**, and the
   dollars as an estimate of the same order — not a receipt. The first real call is
-  what produces a receipt, and the seam records it on **both** halves:
-  `usage.cost_usd` accumulates into the VET record at
-  `result["vet"][*]["batch"]["seam"]["cost_usd"]` (with `calls`, `bands`,
-  `prompt`, `unavailable`, `degraded`) and into `stats["seam"]["cost_usd"]` on the
-  classify stats. So the number becomes measured rather than derived the moment it
-  is armed — on both halves, from the same artifact a reader already opens.
-  ⚠️ It reaches `result["vet"]`, **not** `stats["llm"]`, so the A/B cost gate
-  (`stats["llm"]["cost_usd"]`) does not add it to the LLM tail's spend: the two
-  providers are counted separately, on purpose, and an armed run's true tail cost
-  is their sum.
+  what produces a receipt, and the seam records it: `usage.cost_usd` accumulates
+  into `stats["seam"]["cost_usd"]` on both sides (the VET gate's `stats` and the
+  classify stats), so the number becomes measured rather than derived the moment
+  it is armed. ⚠️ It reaches `result["vet"][*]["stats"]`, **not**
+  `stats["llm"]`, so the A/B cost gate (`stats["llm"]["cost_usd"]`) does not add
+  it to the LLM tail's spend: the two providers are counted separately, on
+  purpose, and an armed run's true tail cost is their sum.
 - **Two questions per item is not free.** The `score` question's four-level
   `criteria` is repeated **per item**; that is the dominant term in `vet-v1`'s
   request, and it is why this row costs more per item than the architecture doc's
   recorded `$0.000144/item at 1 question`.
 - **A month, by arithmetic** (§4.2's own projection: 25k items, ~20% tail):
-  classify's 5,000 tail items = 125 round trips ≈ **$0.32/month** — against the
+  classify's 5,000 tail items = 125 round trips ≈ **\$0.32/month** — against the
   doc's `$0.72/month` estimate for the same tail, on the same order.
 
-## 8. The two tests, and the mutants that redden them
+## 8. The tests, and the mutants that redden them
 
-`tests/test_s2_decision_seam_5087.py` — two tests, because the seam prevents one
-defect class and a hundred shape-pinning assertions would not strengthen it.
+`tests/test_s2_decision_seam_5087.py` — two tests for the defect class the seam
+prevents (because a hundred shape-pinning assertions would not strengthen it),
+plus two for the record and the fail-open edge the first review cycle found. The
+first pair is the seam's contract; the second pair exists because *being right*
+and *being measurable* are different failures, and only one of them reddens a
+pure-logic test.
 
 | test | what it proves |
 |---|---|
@@ -216,6 +224,8 @@ Mutation-checked (each restores byte-identically — verified with `diff`):
 | `vet_arbiter` drops its stats again (`"batch": {}`) | ✅ **both**: the record assertions find no `batch["seam"]` |
 | the classify record loses its `prompt` | ✅ the prompt-version assertion reads `None` |
 | `classify_tail` assigns the offered top-1 instead of the model's choice | ✅ **both**: the kind assertion reads `core:plan` instead of `core:workflow`, and the out-of-set answer stops being rejected because nothing is validated |
+| `vet_arbiter` drops the `seam` key (or `vet_candidates` stops folding it) | ✅ the gate stats carry no `prompt`/`bands`/`cost_usd` |
+| the cost accumulator takes `float(cost)` unbounded | ✅ `OverflowError` escapes `classify_items` on `10**400` |
 
 ## 9. What this does NOT close
 

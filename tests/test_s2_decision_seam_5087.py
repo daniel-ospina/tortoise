@@ -1,15 +1,22 @@
-"""S2.2/S2.3 typed-decision seam (#5087) — two discriminating tests, and nothing else.
+"""S2.2/S2.3 typed-decision seam (#5087) — four discriminating tests.
 
-**Why only two.** This seam exists to prevent one defect class: *an answer that
-does not fit the schema is trusted anyway*. Every test here is either "a valid
-typed answer produces the expected verdict through the REAL consumers" (so the
-seam's shape is the gate's shape, not a private one) or "an out-of-schema answer
-fails closed" (the defect the seam prevents). Anything that merely pins the
-request's byte layout is a test that cannot fail for a reason we care about — the
-one request-shape assertion kept is the ``questions`` **map** (``#7866``): the
+**Why the first two.** This seam exists to prevent one defect class: *an answer
+that does not fit the schema is trusted anyway*. Both are either "a valid typed
+answer produces the expected verdict through the REAL consumers" (so the seam's
+shape is the gate's shape, not a private one) or "an out-of-schema answer fails
+closed" (the defect the seam prevents). Anything that merely pins the request's
+byte layout is a test that cannot fail for a reason we care about — the one
+request-shape assertion kept is the ``questions`` **map** (``#7866``): the
 documented array form 400s, so that line is the 400 trap, not decoration.
 
-**The fail-closed tests are mutation-checked**, and the mutant is named in each
+**Why the other two.** Being right and being *measurable* are different
+failures, and only one of them reddens a pure-logic test. Arming the seam puts a
+billable call on the write path, so the record of it is asserted where a cost
+gate reads (``vet_gate``'s ``stats["seam"]``), and an injected decider's
+unrepresentable spend is asserted not to abort a pass documented as
+never-raising. Neither was reachable from the first two tests.
+
+**Every test here is mutation-checked**, and the mutant is named in its
 docstring. A test that cannot be made red by breaking the guard it claims to
 test is not a test.
 """
@@ -123,13 +130,13 @@ def test_a_valid_typed_answer_produces_the_expected_verdict():
     assert classified["stats"]["seam"]["assignments"] == 1
     assert classified["stats"]["seam"]["calls"] == 1
     # The record that makes arming measurable: the VET half carries its spend and
-    # its bands out through ``batch`` (the gate's own contract), and each half
-    # names the prompt version that decided, so a prompt change is visible in the
-    # artifact rather than inferred from the rollout date.
-    assert out["batch"]["seam"]["prompt"] == seam.VET_PROMPT
-    assert out["batch"]["seam"]["calls"] == 1
-    assert out["batch"]["seam"]["cost_usd"] > 0.0
-    assert out["batch"]["seam"]["bands"] == seam.DEFAULT_BANDS.as_record()
+    # its bands out through the gate's own ``stats`` (``stats["seam"]``), and each
+    # half names the prompt version that decided, so a prompt change is visible in
+    # the artifact rather than inferred from the rollout date.
+    assert out["stats"]["seam"]["prompt"] == seam.VET_PROMPT
+    assert out["stats"]["seam"]["calls"] == 1
+    assert out["stats"]["seam"]["cost_usd"] > 0.0
+    assert out["stats"]["seam"]["bands"] == seam.DEFAULT_BANDS.as_record()
     assert classified["stats"]["seam"]["prompt"] == seam.CLASSIFY_PROMPT
     offered = seen[-1]["questions"]["kind_c0"]["criteria"]
     assert set(offered) < set(FIXTURE_SPEC), (
@@ -169,7 +176,7 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
 
     assert "DISCARD" not in out["stats"]["by_outcome"], (
         "an unusable answer must never become a drop — a wrong drop is memory loss")
-    degraded = out["batch"]["seam"]["degraded"]
+    degraded = out["stats"]["seam"]["degraded"]
     by_text = {d["text"]: iid for iid, d in out["decisions"].items()}
     for text, question in (("Decided: the cache stays warm across restarts.", "keep_c0"),
                            ("See above.", "atomic_c1")):
@@ -182,8 +189,8 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
         assert question in degraded[by_text[text]], (
             f"the failing question must be named, got {degraded!r}")
     assert out["stats"]["candidates"] == 2  # both candidates reached the gate
-    assert out["batch"]["seam"]["schema_rejects"] == ["keep_c0", "atomic_c1"]
-    assert out["batch"]["seam"]["by_outcome"] == {}, "a degraded item produced no verdict"
+    assert out["stats"]["seam"]["schema_rejects"] == ["keep_c0", "atomic_c1"]
+    assert out["stats"]["seam"]["by_outcome"] == {}, "a degraded item produced no verdict"
 
     # S2.3: the model answers with a kind nobody offered.
     clf = _classifier(seam.classify_decider(transport=_transport({
@@ -247,10 +254,76 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
         f"got {only['outcome']}/{only['rule_id']}")
     assert only["counterfactual"].startswith("would have shipped"), (
         "a discard that survives must stay explainable")
-    seam_record = out["batch"]["seam"]
+    seam_record = out["stats"]["seam"]
     assert seam_record["unavailable"] == 1 and seam_record["by_outcome"] == {}
     assert seam_record["prompt"] == seam.VET_PROMPT
     monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+
+
+# ── 3. the seam's own record survives the boundary into the artifact ────────
+
+def test_the_seam_record_reaches_the_gate_stats():
+    """An armed seam is a network call and a SPEND on the write path, so the
+    record of it has to exist somewhere a human can read — otherwise the cost
+    gate sees $0 for a billable call, which is the inert-enforcer class one
+    layer out (it reports itself as measured and measures nothing).
+
+    Both fields asserted here are the ones the design record promises:
+    ``prompt`` (which question wording answered) and ``cost_usd`` / ``bands``
+    (what the answer was read through).
+
+    Mutant that reddens it: return ``{"verdicts": …, "batch": {}}`` from
+    ``seam.vet_arbiter`` — i.e. drop the ``seam`` key — or drop the fold in
+    ``vet_gate.vet_candidates``. Either leaves the spend recorded nowhere.
+    """
+    out = vet_gate.vet_candidates(
+        _vet_embed_list(),
+        arbiter=seam.vet_arbiter(transport=_transport({
+            "keep_c0": {"type": "noul", "noul": 0.93},
+            "atomic_c0": {"type": "score", "score": 3.0},
+            "keep_c1": {"type": "noul", "noul": 0.10},
+            "atomic_c1": {"type": "score", "score": 3.0},
+        })))
+    record = out["stats"]["seam"]
+    assert record["prompt"] == seam.VET_PROMPT
+    assert record["model"] == seam.MODEL
+    assert record["bands"] == {"keep_min": seam.DEFAULT_BANDS.keep_min,
+                               "discard_max": seam.DEFAULT_BANDS.discard_max,
+                               "atomic_min": seam.DEFAULT_BANDS.atomic_min}
+    assert record["cost_usd"] > 0.0, "the call's spend must be in the record"
+    assert record["by_outcome"] == {"KEEP": 1, "DISCARD": 1}
+    assert out["stats"]["by_outcome"] == record["by_outcome"], (
+        "the seam's own tally and the gate's must describe the same 2 candidates")
+
+
+# ── 4. a decider's reported spend cannot abort the fail-open pass ───────────
+
+def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
+    """``tail_decider`` accepts ANY callable, and the spend it reports is a JSON
+    number — a JSON int can be arbitrarily large, and ``float(10**400)`` raises
+    ``OverflowError``. That must degrade to "spend not counted", never escape
+    ``classify_items`` (documented *never raises*): one absurd number from one
+    batch would otherwise abort the whole pass instead of falling back to kNN.
+
+    Mutant that reddens it: accumulate ``float(cost)`` directly (drop the
+    ``_bounded_cost`` bound) — this raises ``OverflowError``.
+    """
+    clf = _classifier(lambda _rows: ({"i0": "core:workflow"}, {
+        "calls": 1, "cost_usd": 10 ** 400, "prompt": seam.CLASSIFY_PROMPT,
+        "model": seam.MODEL, "unavailable": 1, "schema_rejects": ["kind_c0"],
+    }))
+    classified = clf.classify_items(
+        [{"id": "i0", "type": "entity", "text": "the plan workflow"}])
+    seam_stats = classified["stats"]["seam"]
+    assert classified["assignments"]["i0"]["kind"] == "core:workflow"
+    assert seam_stats["cost_usd"] == 0.0, "an unrepresentable spend is not counted"
+    assert seam_stats["prompt"] == seam.CLASSIFY_PROMPT, (
+        "the armed-but-unavailable state has to be readable from the artifact")
+    assert seam_stats["model"] == seam.MODEL, (
+        "the pin that answered belongs in the record — it is the provenance the "
+        "seam enforces but the classify artifact used to drop")
+    assert seam_stats["unavailable"] == 1
+    assert "kind_c0" in seam_stats["rejected"]
 
 
 if __name__ == "__main__":  # pragma: no cover

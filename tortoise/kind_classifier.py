@@ -75,26 +75,34 @@ def _default_encoder():
     return _DefaultEncoder()
 
 
-def _sections_for(item_type: str) -> tuple[str, ...]:
-    return TYPE_SECTIONS.get(str(item_type or "").lower(), ("objects", "subjects"))
+def _bounded_cost(value: object) -> float | None:
+    """A non-negative, FINITE spend from an injected decider, else ``None``.
 
+    ``tail_decider`` accepts ANY callable, and the value it reports is a JSON
+    number — a JSON int can be arbitrarily large, so ``float(10**400)`` raises
+    ``OverflowError``. That exception is not one of the ones this pass expects,
+    and it would escape a method documented as *never raises* (the whole
+    classify pass would abort for one batch instead of falling back to kNN).
 
-def _finite_cost(value: object) -> float | None:
-    """A non-negative, finite cost, or ``None`` — never an exception.
-
-    An injected decider can report anything, and ``float(10**400)`` raises
-    ``OverflowError`` because a JSON int is arbitrarily large. This method's
-    contract is fail-open: a bad cost must cost the counter, not the batch.
+    So the bound lives here, where the untrusted value enters: ``bool`` is
+    rejected despite being an ``int`` subclass, a non-finite or unrepresentable
+    number is skipped (not counted as spend), and a negative is floored at 0.
+    Same rule the seam itself applies to the answer it parses — and the caller
+    owns the mechanics, not the model.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
-        cost = float(value)
+        number = float(value)
     except (OverflowError, ValueError, TypeError):
         return None
-    if not math.isfinite(cost) or cost < 0.0:
+    if not math.isfinite(number):
         return None
-    return cost
+    return max(0.0, number)
+
+
+def _sections_for(item_type: str) -> tuple[str, ...]:
+    return TYPE_SECTIONS.get(str(item_type or "").lower(), ("objects", "subjects"))
 
 
 class KindClassifier:
@@ -566,9 +574,14 @@ class KindClassifier:
         (``assigned_llm`` means "assigned by the model tail", of either kind),
         and the seam's own record rides in ``stats["seam"]`` — additive keys
         only, the classify-later payload's convention. That record carries
-        ``prompt`` / ``unavailable`` / ``degraded`` as well as the spend, because
-        "endpoint down" and "nothing was offered" are otherwise the same
-        reading (all-zero counters) and neither names the prompt that decided.
+        ``prompt`` (which prompt version answered), ``model`` (the pin that
+        answered), ``unavailable`` (how many batches the capability never
+        answered, so an armed-but-keyless run is distinguishable from "no item
+        reached the tail"), ``items``, ``degraded`` (per item, what went wrong)
+        and ``rejected`` (the failing question names — the seam reports them as
+        ``schema_rejects``, re-keyed here to the name the two gates' record
+        uses). "Endpoint down" and "nothing was offered" would otherwise be the
+        same reading.
 
         The seam re-chunks at its own :data:`s2_decision_seam.BATCH_MAX` (40,
         the validated shape), so a classifier batch of up to 50 can become two
@@ -597,18 +610,22 @@ class KindClassifier:
             items = seam_stats.get("items")
             if isinstance(items, int) and not isinstance(items, bool):
                 seam["items"] += items
-            unavailable = seam_stats.get("unavailable")
-            if isinstance(unavailable, int) and not isinstance(unavailable, bool):
-                seam["unavailable"] += unavailable
-            # A cost is bounded like every other number the seam reads: an
-            # injected decider may report an unbounded int (float(10**400)
-            # raises OverflowError) and this method must never raise (fail-open).
-            cost = _finite_cost(seam_stats.get("cost_usd"))
+            cost = _bounded_cost(seam_stats.get("cost_usd"))
             if cost is not None:
                 seam["cost_usd"] += cost
             prompt = seam_stats.get("prompt")
             if isinstance(prompt, str) and prompt:
                 seam["prompt"] = prompt
+            model = seam_stats.get("model")
+            if isinstance(model, str) and model:
+                # The pin that answered — the same provenance `_decide` enforces
+                # (a mismatched envelope is Unavailable, so an unverified model's
+                # answer never becomes a kind). Dropped here it would leave the
+                # classify artifact unable to say WHICH model produced the kinds.
+                seam["model"] = model
+            unavailable = seam_stats.get("unavailable")
+            if isinstance(unavailable, int) and not isinstance(unavailable, bool):
+                seam["unavailable"] = seam.get("unavailable", 0) + unavailable
             degraded = seam_stats.get("degraded")
             if isinstance(degraded, dict):
                 seam["degraded"].update({str(k): str(v) for k, v in degraded.items()})

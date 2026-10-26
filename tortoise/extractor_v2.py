@@ -10485,8 +10485,8 @@ def _s2_seam_armed() -> bool:
     — the tail decider only exists where a `KindClassifier` is constructed, i.e.
     under `TORTOISE_CLASSIFY_LATER=1` or an injected classifier. There is no
     classify-only arming; arming both halves is one flag, and each half's record
-    names which one answered (`result["vet"][*]["batch"]["seam"]` for VET,
-    `stats["seam"]["prompt"]` for the tail).
+    names which one answered (`stats["seam"]` on both — `_run_vet_pass`'s stats
+    for VET, the classify stats for the tail).
     """
     from tortoise import s2_decision_seam
 
