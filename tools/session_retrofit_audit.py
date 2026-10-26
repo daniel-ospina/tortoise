@@ -889,7 +889,7 @@ def _cmd_retrofit(args) -> int:
     else:
         print(f"graph: {report['graph']}")
         print(f"  sessions total          : {report['sessions']}")
-        print(f"  (a) capture_ok=true, short turn count : "
+        print("  (a) capture_ok=true, short turn count : "
               + (f"{report['short_turn_count']['capture_ok_true']} "
                  f"(of {report['short_turn_count']['candidates_measured']} measured)"
                  if report['short_turn_count'].get('retro_quantifiable')

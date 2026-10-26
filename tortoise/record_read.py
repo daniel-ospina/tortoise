@@ -82,6 +82,7 @@ __all__ = [
     "SessionText",
     "Turn",
     "TurnAnswer",
+    "merge_turn_payloads",
     "session_text",
     "session_turns",
     "source_narrative",

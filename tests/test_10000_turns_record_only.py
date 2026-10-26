@@ -770,3 +770,67 @@ def test_the_prior_vector_read_is_scoped_and_returns_what_the_record_holds():
         created_at="2026-01-01T00:00:00+00:00", status="established")}, got
     # The scope is what the read asked for, and it asked on ITS OWN connection.
     assert any("set_config" in s for s in conn.statements), conn.statements
+
+
+def _imported_from(target: str) -> dict[str, set[str]]:
+    """``{name: {modules}}`` — what the PACKAGE imports out of ``target``.
+
+    Derived from the ASTs rather than listed by hand, because the defect this
+    serves (#10000 review P3) is a hand-maintained list falling behind the code
+    that uses it: three names this change added to `record_writer` were imported
+    across modules with no declaration on the module's own surface. A literal in
+    a test would be the same kind of hand-maintained list, one file over.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(sdk_mod.__file__).resolve().parent
+    leaf = target.rsplit(".", 1)[-1]
+    found: dict[str, set[str]] = {}
+    for path in root.rglob("*.py"):
+        if path.name == f"{leaf}.py":
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - a broken sibling is its own red
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            # `from tortoise.record_read import …` (absolute) or
+            # `from .record_read import …` (relative, any level).
+            matches = ((node.level == 0 and node.module == target)
+                       or (node.level >= 1 and node.module == leaf))
+            if not matches:
+                continue
+            for alias in node.names:
+                found.setdefault(alias.name, set()).add(path.name)
+    return found
+
+
+def test_the_names_other_modules_import_are_declared_on_the_surface():
+    """A module's ``__all__`` may not lag the names its siblings IMPORT from it.
+
+    #10000 review P3: this change added `record_holds_turns`, `live_write_refusal`
+    and `LIVE_WRITE_REFUSALS` to `record_writer` and had the hosted and SDK doors
+    import them, while `record_writer.__all__` still declared the pre-change
+    surface — so the module's own contract described a smaller module than the
+    one three callers were coding against. Private names (`_default_connect`,
+    imported by the connection door) are exempt: an underscore is not API.
+    """
+    from tortoise import record_read as rr
+    from tortoise import record_writer as rw
+
+    for module in (rr, rw):
+        declared = set(module.__all__)
+        imported = {name for name in _imported_from(module.__name__)
+                    if not name.startswith("_")}
+        missing = sorted(imported - declared)
+        assert not missing, (
+            f"{module.__name__}: {missing} are imported across modules but are "
+            f"absent from __all__ — the declared surface lags the code")
+    # And the specific names this change introduced are on it, so the pin above
+    # cannot be satisfied by a caller that stops importing them.
+    assert {"record_holds_turns", "live_write_refusal",
+            "LIVE_WRITE_REFUSALS"} <= set(rw.__all__)
+    assert "merge_turn_payloads" in rr.__all__
