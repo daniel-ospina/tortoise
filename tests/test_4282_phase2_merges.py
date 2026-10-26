@@ -101,7 +101,7 @@ def test_the_four_merges_are_rows_of_the_approved_40_and_the_declaration_is_unch
 def test_create_entity_is_the_door_the_typed_constructors_land_in(sdk, alias, type_, extra):
     """The absorbed constructor reaches `create_entity(type=...)` — same writer, same place."""
     getattr(sdk, alias)(**extra)
-    door, args, kwargs = sdk.calls[-1]
+    door, args, _kwargs = sdk.calls[-1]
     assert door == "create_entity", f"{alias} must land in create_entity, got {door}"
     assert args[0] == type_, f"{alias} must route type={type_!r}, got {args[0]!r}"
 
@@ -181,7 +181,7 @@ def test_link_entities_does_not_mint_an_unanchored_references_edge_when_the_labe
     a caller into that hole when they asked for the anchored write.
     """
     sdk.link_entities("references", "https://ex/s", "e1", entity_label="Event")
-    door, args, kwargs = sdk.calls[-1]
+    door, _args, kwargs = sdk.calls[-1]
     assert door == "link_source_to_entity"
     assert kwargs["source_url"] == "https://ex/s" and kwargs["entity_id"] == "e1"
 
