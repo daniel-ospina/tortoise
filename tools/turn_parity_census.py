@@ -44,10 +44,27 @@ suffixes, cross-wirings, `is_operator` flags) so nothing is silently invisible
 to the gate — a census that quietly excluded what it could not classify would
 be a number an owner decides on while looking at a smaller graph than exists.
 
+THE READ IS THE DELETE SET, NOT JUST THE TURN SHAPE (#10017's own predicate)
+===========================================================================
+The purge predicate #10017 records — in its body, in its completion test and in
+the `delete`-phase recipe on the issue — is `MATCH (t:Point) WHERE
+is_episodic = true`, with **no** kind filter. `is_episodic` is NOT co-extensive
+with "turn" in this repo: `graph-scripts/backfill_is_episodic.py` stamps it on
+every `(s:Session)-[:CONTAINS]->(p:Point)` (its own docstring: "capture turn +
+regex-extracted points"), and `create_point` / `update_point` accept the flag
+on any point kind. So the graph leg READS every `is_episodic = true` node —
+the delete set itself — and a node that is episodic but not turn-shaped gets
+its own anomaly class (`non_turn_point_kind`), reported BY ID and refusing the
+census. Reading only `pointKind = 'event'` would make the gate's population a
+strict SUBSET of the set the purge deletes: those nodes would be in neither the
+comparison nor the anomaly partition, which is exactly the "a smaller graph
+than exists" failure above. The turn SHAPE still decides the purge set (what
+`would_delete` counts); the wider READ decides what the census may call CLEAN.
+
 **An anomaly REFUSES the census (exit 2).** Excluding a node from the purge set
-is not the same as certifying it: a shape-based sweep (`is_episodic = true AND
-pointKind = 'event'`) deletes those nodes too, and the census cannot claim
-parity over a node it never compared. So `CLEAN` means *measured the whole
+is not the same as certifying it: the recorded sweep (`is_episodic = true`)
+deletes those nodes too, and the census cannot claim parity over a node it
+never compared. So `CLEAN` means *measured the whole
 population and it all matched* — never *measured part of it and the part
 matched*. The alternative (a distinct `CLEAN_WITH_ANOMALIES` exit) would put
 the decision of what each anomaly class means back on whoever reads the exit
@@ -81,10 +98,14 @@ For every in-population graph turn node, a record row (`public.point`,
     text (framed, as stored)   t.content                 content
     speaker                    t.speaker                 speaker
     kind                       t.pointKind ('event')     point_kind
-    episodic                   t.is_episodic (true)      is_episodic
     status                     t.status                  status
     createdAt                  t.createdAt               created_at
     embedding (when the graph holds one)  t.embedding    embedding
+
+    `is_episodic` is the population PREDICATE on both sides (the graph leg
+    reads `is_episodic = true`, the record leg filters `is_episodic IS TRUE`),
+    so comparing it would be vacuous: it is not in `_EXACT_FIELDS` and must not
+    be listed as a compared field here.
 
     ALLOWED TO DIFFER, WITH THE REASON
     ─────────────────────────────────────────────────────────────
@@ -144,11 +165,24 @@ THE PASS CRITERION AND THE EXIT CODES
 
 THE NEGATIVE ARM (how we know the gate refuses)
 ===============================================
-A gate observed only passing is decoration. The demonstration lives in
-`tests/test_10017_turn_parity_census.py`: it builds a throwaway graph+record
-pair, replays the real journal into the record, asserts exit 0, then removes
-ONE turn row from the throwaway record and asserts exit 2 with the missing
-key named — and tampers one content and asserts the field mismatch is named.
+A gate observed only passing is decoration. What CI pins, in
+`tests/test_10017_turn_parity_census.py`, is the comparison core and the CLI
+contract: a missing record row, a mismatched field, a lost/length-changed/
+component-different vector and every anomaly class each REFUSE with the node
+and field NAMED, over the two dictionaries the store legs produce — built by
+hand, not read from live stores. A census that could not refuse those is
+broken at the core, and that is what these cases hold.
+
+The live end-to-end demonstration (a real capture, the real journal replayed
+into a throwaway record, exit 0, then ONE record row removed and exit 2) is a
+lane-run artifact on throwaway stores, NOT a CI test, so nothing here should
+be read as proof that the live pair was measured. The STORE LEGS are pinned
+separately and without stores — `read_record_turns`' scoped door, its SQL
+column set and the refusal it raises are asserted against a stubbed
+connection, and `read_graph_turns`' paging/count/classification against a fake
+`g` — because an unpinned door is how an unscoped read (#10024) would certify
+vacuously while every core case stayed green.
+
 Nothing in this tool may be weakened to make a census pass.
 
 USAGE
@@ -179,20 +213,24 @@ USAGE
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first with an UNATTRIBUTED error.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/turn_parity_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/turn_parity_census.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import os
 import re
 import struct
-import sys
 from pathlib import Path
-
-# #5128: refuse a <3.12 interpreter before the imports below.
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    sys.stderr.write("turn_parity_census: Python >= 3.12 required "
-                     f"(running {sys.version.split()[0]})\n")
-    raise SystemExit(1)
 
 #: The all-decimal suffix rule (`sdk._capture_turn_ids` — `isdecimal`, never
 #: prefix alone, so `sec` cannot claim `sec_t0_t3` and a `²`-class suffix is
@@ -204,19 +242,21 @@ _TURN_ID_RE = re.compile(r"^(?P<sid>.+)_t(?P<idx>[0-9]+)$")
 #: independent aggregate count below is the load-bearing guard (#5062's class).
 _GRAPH_PAGE_SIZE = 1000
 
-#: ONE row per turn-shaped node: `collect(DISTINCT s.id)` collapses the
+#: ONE row per episodic node: `collect(DISTINCT s.id)` collapses the
 #: `CONTAINS` wirings, so a page boundary can never split a node's rows (with
 #: a row-per-wiring shape, a node spanning the boundary would lose a wiring and
 #: mis-classify a cross-wiring as a clean single-session turn). OPTIONAL MATCH
-#: keeps EVERY turn-shaped node in the result — including orphans (no CONTAINS
+#: keeps EVERY episodic node in the result — including orphans (no CONTAINS
 #: wiring) and cross-wirings — because a census that drops what it cannot
-#: classify reports a smaller graph than exists. `is_episodic = true AND
-#: pointKind = 'event'` is the writer's own turn predicate; the id shape is
-#: re-derived in Python where the suffix rule lives. Paged on `id(t)` with the
-#: `>= $cursor` / `last + 1` idiom of `hosted_backup._paged_rows`.
-_GRAPH_TURNS_CYPHER = (
+#: classify reports a smaller graph than exists. The predicate is the RECORDED
+#: delete predicate (`is_episodic = true`, #10017), NOT the writer's narrower
+#: turn shape: `pointKind` is read as a field and classified in Python
+#: (`non_turn_point_kind`), so no node in the delete set is outside the read.
+#: Paged on `id(t)` with the `>= $cursor` / `last + 1` idiom of
+#: `hosted_backup._paged_rows`.
+_GRAPH_EPISODIC_CYPHER = (
     "MATCH (t:Point) WHERE id(t) >= $cursor "
-    "  AND t.is_episodic = true AND t.pointKind = 'event' "
+    "  AND t.is_episodic = true "
     "OPTIONAL MATCH (s:Session)-[:CONTAINS]->(t) "
     "RETURN id(t), t.id, t.content, t.speaker, t.status, t.createdAt, "
     "       t.pointKind, t.embedding, t.is_operator, collect(DISTINCT s.id) "
@@ -226,10 +266,30 @@ _GRAPH_TURNS_CYPHER = (
 #: The STORE's own count — ONE row, so RESULTSET_SIZE cannot truncate it
 #: (#4233/#4515). The reference the paged read must not fall short of: a
 #: truncated page set is silence, not an error, so without this the census
-#: would compare part of the population and call the whole of it clean.
-_GRAPH_TURN_COUNT_CYPHER = (
-    "MATCH (t:Point) WHERE t.is_episodic = true AND t.pointKind = 'event' "
+#: would compare part of the population and call the whole of it clean. Same
+#: predicate as the page query, or the cross-check would measure a different
+#: set than the read.
+_GRAPH_EPISODIC_COUNT_CYPHER = (
+    "MATCH (t:Point) WHERE t.is_episodic = true "
     "RETURN count(t)"
+)
+
+#: The record census query's column set — ONE declaration, because the column
+#: names are also the contract `read_record_turns` CHECKS against the cursor's
+#: own `description`: a renamed/absent `public.point` column would otherwise
+#: silently yield zero comparable rows and certify vacuously (the #10024 shape,
+#: arriving through the record's schema instead of its scope).
+_RECORD_TURNS_COLUMNS = ("node_key", "content", "speaker", "status",
+                         "created_at", "embedding", "point_kind",
+                         "is_episodic")
+
+#: The record census query — the same predicate family `record_read._turns`
+#: uses, corpus-wide: tenant-scoped, `is_episodic IS TRUE`, turn keys only
+#: (the anchored shape is re-derived in Python, one rule for both stores).
+_RECORD_TURNS_SQL = (
+    "SELECT " + ", ".join(_RECORD_TURNS_COLUMNS) + " "
+    "FROM public.point "
+    "WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE"
 )
 
 #: The record census query — the same predicate family `record_read._turns`
@@ -274,15 +334,21 @@ def _embedding_parity(graph_emb, record_emb) -> tuple[bool, str]:
                        f"record {len(record_emb)})")
     for i, (g, r) in enumerate(zip(graph_emb, record_emb, strict=False)):
         try:
-            if _f32(float(r)) != float(g):
-                return False, f"component {i} differs after binary32 rounding"
-        except (TypeError, ValueError):
-            return False, f"component {i} is not numeric in the record"
+            record_component = _f32(float(r))
+        except (TypeError, ValueError, OverflowError, struct.error):
+            # `struct.pack('<f', 1e300)` raises OverflowError, and `float()`
+            # raises it for an integer too large for binary64 — a field-VALUE
+            # problem, so it is a MISMATCH (exit 2), never a crash that a
+            # caller reads as a flag mistake (exit 1).
+            return False, (f"component {i} is not a finite binary32 value "
+                           f"in the record")
+        if record_component != float(g):
+            return False, f"component {i} differs after binary32 rounding"
     return True, ""
 
 
 def _graph_rows(g) -> list:
-    """Every row of the turn query, keyset-paged on `id(t)`. READ-ONLY.
+    """Every row of the episodic query, keyset-paged on `id(t)`. READ-ONLY.
 
     A single unpaged `RETURN` is the #5062/#4515 shape: FalkorDB applies a
     server-global `RESULTSET_SIZE` (default 10_000) SILENTLY, and the
@@ -294,7 +360,7 @@ def _graph_rows(g) -> list:
     rows: list = []
     while True:
         page = g.query(
-            _GRAPH_TURNS_CYPHER,
+            _GRAPH_EPISODIC_CYPHER,
             params={"cursor": cursor, "batch": _GRAPH_PAGE_SIZE},
         ).result_set
         if not page:
@@ -306,14 +372,18 @@ def _graph_rows(g) -> list:
 
 
 def read_graph_turns(uri: str | None, db_path: str | None,
-                     graph_name: str | None) -> dict[str, dict]:
-    """The graph leg: every turn-shaped node, classified. READ-ONLY.
+                     graph_name: str | None) -> dict:
+    """The graph leg: every EPISODIC node (the delete set), classified.
 
-    Returns ``{"nodes": {id: node-dict}}``. Raises :class:`CensusError` when
-    the graph cannot be reached or answered, when the paged read comes back
-    SHORT of the store's own aggregate count (RESULTSET_SIZE truncation — an
-    absence would not be established), or when a row cannot be classified
-    (an unparseable vector is a refusal, never a silent "no vector").
+    READ-ONLY. Returns ``{"nodes": {id: node-dict}, "unidentifiable": [...]}``.
+    The read population is `is_episodic = true` — the predicate #10017 records
+    for the purge — so a node that is episodic but not turn-shaped still comes
+    back and is classified (`non_turn_point_kind`) instead of being invisible
+    to a gate that would delete it. Raises :class:`CensusError` when the graph
+    cannot be reached or answered, when the paged read comes back SHORT of the
+    store's own aggregate count (RESULTSET_SIZE truncation — an absence would
+    not be established), or when a row cannot be classified (an unparseable
+    vector is a refusal, never a silent "no vector").
     """
     try:
         from tortoise.projection import FalkorProjection
@@ -324,9 +394,14 @@ def read_graph_turns(uri: str | None, db_path: str | None,
         if uri:
             proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
         else:
-            proj = FalkorProjection(db_path)
+            # `--graph-name` is a TARGET selector, not a URI-only flag: the
+            # embedded store selects the graph by name too. Dropping it here
+            # censused the default `tortoise` graph while the operator asked
+            # for another — a wrong-target read that still reported a verdict.
+            proj = FalkorProjection(db_path,
+                                    graph_name=graph_name or "tortoise")
         rows = _graph_rows(proj.g)
-        total = int(proj.g.query(_GRAPH_TURN_COUNT_CYPHER).result_set[0][0])
+        total = int(proj.g.query(_GRAPH_EPISODIC_COUNT_CYPHER).result_set[0][0])
     except CensusError:
         raise
     except Exception as exc:
@@ -335,6 +410,7 @@ def read_graph_turns(uri: str | None, db_path: str | None,
             "an absence is NOT established") from exc
 
     nodes: dict[str, dict] = {}
+    unidentifiable: list[dict] = []
     for row in rows or []:
         try:
             (_inner_id, tid, content, speaker, status, created_at, point_kind,
@@ -344,7 +420,14 @@ def read_graph_turns(uri: str | None, db_path: str | None,
                 f"the graph returned a row of unexpected shape ({exc}) — "
                 "an absence is NOT established") from exc
         if not isinstance(tid, str):
-            continue  # not identifiable (incl. v6's phantom row); str-only shape
+            # NOT dropped: a node with no usable key is still a node the purge
+            # would delete, so it is reported under its own class instead of
+            # vanishing from both `nodes` and `anomalies` — and instead of
+            # masquerading as the TRUNCATED-read diagnosis the count guard
+            # would otherwise produce.
+            unidentifiable.append({"id": str(_inner_id),
+                                   "id_type": type(tid).__name__})
+            continue
         if embedding is not None and not isinstance(embedding, (list, tuple)):
             raise CensusError(
                 f"turn {tid}: the graph embedding is "
@@ -373,13 +456,16 @@ def read_graph_turns(uri: str | None, db_path: str | None,
         else:
             prior["sessions"] |= entry["sessions"]
 
-    if len(nodes) < total:
+    # Every node the store counts is either classified or reported as
+    # unidentifiable; a shortfall beyond that is a torn/truncated read.
+    seen = len(nodes) + len(unidentifiable)
+    if seen < total:
         raise CensusError(
-            f"the graph read returned {len(nodes)} turn node(s) but the store "
-            f"counts {total} — the read was TRUNCATED (RESULTSET_SIZE) or "
+            f"the graph read returned {seen} but the store counts {total} "
+            "episodic node(s) — the read was TRUNCATED (RESULTSET_SIZE) or "
             "torn. Refusing to certify parity over a population it did not "
             "see: an absence is NOT established")
-    return {"nodes": nodes}
+    return {"nodes": nodes, "unidentifiable": unidentifiable}
 
 
 def read_record_turns(record_dsn: str, org_id: str,
@@ -407,7 +493,6 @@ def read_record_turns(record_dsn: str, org_id: str,
             f"the record's modules could not be imported "
             f"({type(exc).__name__}: {exc}) — the record cannot be read, so "
             "an absence is NOT established") from exc
-    from tortoise import record_projection, record_serve
     try:
         conn = record_serve.open_record(record_dsn)
     except Exception as exc:
@@ -426,6 +511,18 @@ def read_record_turns(record_dsn: str, org_id: str,
     finally:
         with contextlib.suppress(Exception):  # best-effort close
             conn.close()
+
+    # The schema contract: a renamed or dropped `public.point` column would
+    # leave every row unkeyed, i.e. an EMPTY comparison that certifies parity
+    # vacuously — the #10024 shape arriving through the record's schema instead
+    # of its scope. Refuse (exit 3) instead of reading it as "no rows".
+    missing = [c for c in _RECORD_TURNS_COLUMNS if c not in columns]
+    if missing:
+        raise CensusError(
+            f"the record query did not return {', '.join(missing)} — the "
+            "`public.point` schema the census depends on has moved, so an "
+            "absence is NOT established (got: "
+            f"{', '.join(str(c) for c in columns)})")
 
     rows_by_key: dict[str, dict] = {}
     non_turn_shaped = 0
@@ -449,8 +546,25 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
     anomalies: dict[str, list[dict]] = {
         "non_decimal_suffix": [], "orphan": [], "cross_wired": [],
         "operator_flagged": [], "session_mismatch": [],
+        "non_turn_point_kind": [], "non_string_id": [],
     }
+    # A node the read could not key is still a node the purge would delete, so
+    # it is REPORTED (under its own class) rather than vanishing between
+    # `nodes` and `anomalies`. `read_graph_turns` carries them separately
+    # because they have no `t.id` to be a dict key.
+    for entry in graph.get("unidentifiable") or ():
+        anomalies["non_string_id"].append(entry)
     for tid, node in sorted(nodes.items()):
+        if node.get("pointKind") != "event":
+            # IN THE DELETE SET (`is_episodic = true`, #10017's predicate) but
+            # NOT a turn: `graph-scripts/backfill_is_episodic.py` stamps the
+            # flag on regex-extracted points too, and `create_point`/
+            # `update_point` accept it on any kind. Nothing compared it, so a
+            # sweep driven by the recorded predicate would delete it on this
+            # gate's word — its own anomaly class, by id, refusing the census.
+            anomalies["non_turn_point_kind"].append(
+                {"id": tid, "pointKind": node.get("pointKind")})
+            continue
         if node.get("is_operator"):
             anomalies["operator_flagged"].append(
                 {"id": tid, "is_operator": node["is_operator"]})
@@ -486,12 +600,23 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         # while the anomaly line says it is excluded is a self-contradiction
         # in one report).
         in_population = False
-        if len(sids) == 1 and not node.get("is_operator"):
+        if (len(sids) == 1 and not node.get("is_operator")
+                and node.get("pointKind") == "event"):
             sid = next(iter(sids))
             m = _TURN_ID_RE.match(tid)
             in_population = m is not None and m.group("sid") == sid
         if in_population:
             sessions.setdefault(sid, {"nodes": {}})["nodes"][tid] = node
+
+    # Grouped ONCE: the per-session record count used to re-scan every record
+    # row per session (O(sessions x rows) regex matches after the whole tenant
+    # was already materialised). Same numbers, no quadratic term.
+    rows_by_session: dict[str, int] = {}
+    for key in rows:
+        match = _TURN_ID_RE.match(key)
+        if match is not None:
+            rows_by_session[match.group("sid")] = (
+                rows_by_session.get(match.group("sid"), 0) + 1)
 
     clean: list[dict] = []
     failed: list[dict] = []
@@ -524,11 +649,9 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                     "node": tid, "field": "embedding",
                     "problem": "field_mismatch", "detail": why,
                 })
-        record_rows_for_session = {
-            k for k in rows
-            if (m := _TURN_ID_RE.match(k)) is not None and m.group("sid") == sid}
+        record_rows_for_session = rows_by_session.get(sid, 0)
         graph_count = len(sessions[sid]["nodes"])
-        record_count = len(record_rows_for_session)
+        record_count = record_rows_for_session
         verdict = {"session": sid, "graph_turn_nodes": graph_count,
                    "record_turn_rows": record_count,
                    "counts_equal": graph_count == record_count}
@@ -554,11 +677,15 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                 for tid in sids_nodes[:sample]],
         })
 
-    anomaly_ids = sorted(a["id"] for entries in anomalies.values()
-                         for a in entries)
+    anomaly_ids = sorted({a["id"] for entries in anomalies.values()
+                          for a in entries})
     return {
         "population": {
-            "turn_shaped_nodes": len(nodes),
+            # The read population is the DELETE SET (`is_episodic = true`);
+            # `turn_shaped_nodes` is the purge set inside it.
+            "episodic_graph_nodes": len(nodes),
+            "turn_shaped_nodes": sum(1 for n in nodes.values()
+                                     if n.get("pointKind") == "event"),
             "sessions_with_graph_turns": len(sessions),
             "outside_population": len(anomaly_ids),
         },
@@ -614,7 +741,9 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--uri", help="FalkorDB URI of the target graph")
     src.add_argument("--db-path", help="embedded graph path instead of a URI")
     parser.add_argument("--graph-name", default=None,
-                        help="the graph inside the store (default: the URI's)")
+                        help="the graph inside the store (default: the URI's, "
+                             "or 'tortoise' for --db-path); applies to BOTH "
+                             "legs")
     parser.add_argument("--record-dsn", default=None,
                         help="record DSN (default: TORTOISE_RECORD_DSN)")
     parser.add_argument("--org-id", default=os.environ.get(
@@ -626,7 +755,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sample", type=int, default=5,
                         help="sample size per session in the dry-run report")
     parser.add_argument("--expect-empty", action="store_true",
-                        help="allow a graph holding ZERO turn-shaped nodes to "
+                        help="allow a graph holding ZERO is_episodic nodes to "
                              "certify; without it that is exit 3 (a drained "
                              "graph and a wrong --graph-name look identical "
                              "from here)")
@@ -656,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
 
-    # Zero turn-shaped nodes is not evidence of parity — it is the same answer a
+    # Zero episodic nodes is not evidence of parity — it is the same answer a
     # wrong --graph-name, or a --db-path typo that opens a fresh empty DB, gives
     # (`FalkorProjection.from_uri` does not verify the graph exists). The record
     # axis refuses a wrong tenant loudly; the graph axis must refuse a wrong
@@ -664,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
     # draining is expected (#10017's post-purge re-run).
     if not graph["nodes"] and not args.expect_empty:
         sys.stderr.write(
-            "turn_parity_census: the graph holds ZERO turn-shaped nodes — an "
+            "turn_parity_census: the graph holds ZERO is_episodic nodes — an "
             "absence is NOT established (a wrong --graph-name / --db-path is "
             "indistinguishable from a drained graph). Pass --expect-empty if "
             "the graph is known to hold no turn nodes.\n")
@@ -676,7 +805,8 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(report, indent=2, default=str), encoding="utf-8")
 
     pop = report["population"]
-    print(f"population : {pop['turn_shaped_nodes']} turn-shaped graph nodes "
+    print(f"population : {pop['episodic_graph_nodes']} episodic graph node(s) "
+          f"(the delete set), {pop['turn_shaped_nodes']} of them turn-shaped, "
           f"across {pop['sessions_with_graph_turns']} session(s)")
     print(f"record     : {report['record']['turn_rows_total']} turn rows "
           f"({report['record']['episodic_rows_not_turn_shaped']} episodic "

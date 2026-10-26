@@ -10,13 +10,18 @@ The live end-to-end demonstration (real capture → real journal replay into a
 throwaway record → census exit 0 → one row removed → exit 2) is a lane-run
 artifact on throwaway stores, not a CI test; what CI can and must hold is the
 comparison core and the CLI contract, which is everything the verdict is made
-of. The store legs are thin: `read_graph_turns` / `read_record_turns` feed
-`census()` the two dictionaries these tests build by hand.
+of. The STORE LEGS are pinned separately, without stores: `read_record_turns`
+is driven through a STUBBED connection (its scoped door, its SQL column
+contract and the refusal each failure raises) and `read_graph_turns` through a
+fake `g` (paging, the aggregate cross-check, and the classification of every
+row the store returns). An unpinned door is exactly how an unscoped read
+(#10024) would certify vacuously while every core case stayed green.
 """
 
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -480,3 +485,272 @@ def test_a_TRUNCATED_graph_read_refuses_instead_of_certifying(monkeypatch):
         tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
     assert "TRUNCATED" in str(exc.value)
     assert "counts 3" in str(exc.value)
+
+
+# ── the population IS the recorded delete predicate (#10017) ────────────────
+#
+# #10017's delete set and completion test are `MATCH (t:Point) WHERE
+# is_episodic = true` — NO kind filter. `is_episodic` is not co-extensive with
+# "turn" (graph-scripts/backfill_is_episodic.py stamps it on every
+# session-wired point, "capture turn + regex-extracted points"; create_point /
+# update_point accept it on any kind), so a gate that read only
+# `pointKind = 'event'` left a class that the purge WOULD delete in neither the
+# comparison nor the anomaly partition. These cases pin the widened read.
+
+def test_an_episodic_node_that_is_not_a_turn_refuses_and_is_named():
+    """In the DELETE set, outside the turn shape: reported by id, and REFUSED."""
+    nodes = {
+        "s1_t0": _graph_node("s1_t0", "s1"),
+        "ex1": _graph_node("ex1", "s1", pointKind="claim",
+                           content="regex-extracted claim, not a turn"),
+    }
+    rows = {"s1_t0": _record_row("s1_t0")}
+    report = _census(nodes, rows)
+    assert report["verdict"] == "REFUSED"
+    assert report["refused_for"] == ["outside_population"]
+    # The purge SET is still the turn shape — nothing uncompared is counted.
+    assert report["dry_run"]["would_delete_turn_nodes"] == 1
+    assert report["dry_run"]["would_delete_ids"] == ["s1_t0"]
+    assert ([a["id"] for a in report["anomalies"]["non_turn_point_kind"]]
+            == ["ex1"])
+    # ...and the read population is the delete set itself.
+    assert report["population"]["episodic_graph_nodes"] == 2
+    assert report["population"]["turn_shaped_nodes"] == 1
+
+
+def test_the_graph_leg_reads_the_whole_delete_set_not_only_the_turn_shape(
+        monkeypatch):
+    """The QUERY must not re-narrow the population to `pointKind = 'event'`.
+
+    A row for an episodic-but-not-turn node must come back from the store and
+    reach `census()`; and the predicate itself is pinned, because a future
+    edit that re-adds the kind filter restores the silent exclusion without
+    reddening any classification test.
+    """
+    rows = [_turn_row(1, "s1_t0", "s1"),
+            [2, "ex1", "claim text", "user", "draft",
+             "2026-10-25T00:00:00+00:00", "claim", None, False, ["s1"]]]
+    g = _PagedG(rows)
+    _patch_proj(monkeypatch, g)
+    graph = tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
+    assert sorted(graph["nodes"]) == ["ex1", "s1_t0"]
+    assert graph["nodes"]["ex1"]["pointKind"] == "claim"
+    assert "t.is_episodic = true" in tpc._GRAPH_EPISODIC_CYPHER
+    assert "pointKind = " not in tpc._GRAPH_EPISODIC_CYPHER, (
+        "the read is narrowed to the turn shape again — the delete set is "
+        "`is_episodic = true` (#10017)")
+    assert "pointKind" not in tpc._GRAPH_EPISODIC_COUNT_CYPHER
+
+
+def test_a_node_with_no_usable_key_is_REPORTED_not_silently_dropped(
+        monkeypatch):
+    """The one shape that used to be invisible in BOTH `nodes` and `anomalies`.
+
+    It was dropped with a bare `continue`, and the aggregate cross-check then
+    reported it as `TRUNCATED (RESULTSET_SIZE) or torn` — a misleading
+    diagnosis that sends the operator at the wrong problem. It must be its own
+    reported class, and the count guard must not blame truncation for it.
+    """
+    rows = [_turn_row(1, "s1_t0", "s1"),
+            [2, 7, "no string id", "user", "draft", None, "event", None,
+             False, ["s1"]]]
+    g = _PagedG(rows)  # its aggregate counts both rows
+    _patch_proj(monkeypatch, g)
+    graph = tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
+    assert graph["unidentifiable"] == [{"id": "2", "id_type": "int"}]
+    report = tpc.census(graph, {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+                                "non_turn_shaped": 0}, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert [a["id"] for a in report["anomalies"]["non_string_id"]] == ["2"]
+
+
+def test_an_overlarge_record_component_REFUSES_it_does_not_crash():
+    """A field-VALUE problem is exit 2, never the exit-1 "bad flags" crash.
+
+    `struct.pack('<f', 1e300)` raises OverflowError, which used to escape both
+    `_embedding_parity` and `census()` and surface as a traceback with exit 1 —
+    a code the docstring defines as "usage / IO error".
+    """
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", embedding=[1.0])}
+    rows = {"s1_t0": _record_row("s1_t0", embedding=[1e300])}
+    report = _census(nodes, rows)  # must not raise
+    assert report["verdict"] == "REFUSED"
+    problem = _problems(report, "s1")[0]
+    assert problem["field"] == "embedding"
+    assert "binary32" in problem["detail"]
+
+
+def test_a_node_in_two_anomaly_classes_is_counted_ONCE():
+    """`outside_population` must be a NODE count, not a classification count."""
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", is_operator=True,
+                                  sessions=set())}
+    report = _census(nodes, {})
+    anomalies = report["anomalies"]
+    assert [a["id"] for a in anomalies["orphan"]] == ["s1_t0"]
+    assert [a["id"] for a in anomalies["operator_flagged"]] == ["s1_t0"]
+    assert report["population"]["outside_population"] == 1
+
+
+# ── the embedded leg honours --graph-name (a wrong-target read) ─────────────
+
+def test_the_embedded_leg_honours_graph_name(monkeypatch):
+    """`--db-path x.db --graph-name team_acme` must read team_acme, not the default.
+
+    `FalkorProjection(path, graph_name=...)` accepts the keyword and the
+    embedded store selects the graph by it; the leg used to drop it, so the run
+    censused the default `tortoise` graph and still printed a verdict for the
+    graph nobody asked about.
+    """
+    seen: dict = {}
+
+    class _G:
+        def query(self, cypher, params=None):
+            class _R:
+                result_set = [] if params else [[0]]
+            return _R()
+
+    class _Proj:
+        def __init__(self, path=None, **kwargs):
+            seen["path"] = path
+            seen.update(kwargs)
+            self.g = _G()
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", _Proj)
+
+    graph = tpc.read_graph_turns(None, "/tmp/x.db", "team_acme")
+    assert graph["nodes"] == {}
+    assert seen == {"path": "/tmp/x.db", "graph_name": "team_acme"}
+
+    seen.clear()
+    tpc.read_graph_turns(None, "/tmp/x.db", None)
+    assert seen == {"path": "/tmp/x.db", "graph_name": "tortoise"}
+
+
+# ── the record leg: its door, its SQL contract, and its refusals ───────────
+#
+# Nothing in the file above calls `read_record_turns`; these cases do, against
+# a stubbed driver, so the arms the PR body claims are pinned (scoped door,
+# exit 3 on an unreadable side) really are: deleting the `scope_connection`
+# call, or a renamed `public.point` column, reds here.
+
+def _stub_record(monkeypatch, *, columns=None, rows=(), refuse_scope=False):
+    """A stubbed record leg: the door is a spy, the connection has no cursor.
+
+    `_Conn.cursor()` raises, so a leg that reaches the connection directly
+    (bypassing `scope_connection`) cannot pass — it must go through the door.
+    """
+    import tortoise.projection  # noqa: F401 - imported for its side effects
+    from tortoise import record_projection, record_serve
+
+    monkeypatch.setitem(sys.modules, "psycopg2", types.ModuleType("psycopg2"))
+    calls: dict = {}
+
+    class _Cursor:
+        def __init__(self):
+            self.description = [(c,) for c in (columns
+                                               or _RECORD_COLUMNS_EXPECTED)]
+
+        def execute(self, sql, params):
+            calls["sql"], calls["params"] = sql, params
+
+        def fetchall(self):
+            return list(rows)
+
+    class _Conn:
+        def cursor(self):  # a bypass must not be a way through
+            raise AssertionError("the record leg must use the SCOPE door")
+
+        def close(self):
+            calls["closed"] = True
+
+    conn = _Conn()
+
+    def _open(dsn):
+        calls["dsn"] = dsn
+        return conn
+
+    def _scope(opened, org_id):
+        calls["scope"] = (opened, org_id)
+        if refuse_scope:
+            raise RuntimeError("tenant scope refused (BYPASSRLS role)")
+        return _Cursor()
+
+    monkeypatch.setattr(record_serve, "open_record", _open)
+    monkeypatch.setattr(record_projection, "scope_connection", _scope)
+    return calls, conn
+
+
+#: The record columns the census consumes, spelled out HERE rather than read
+#: from the tool: a stub built from the tool's own constant cannot catch the
+#: constant shrinking together with the query.
+_RECORD_COLUMNS_EXPECTED = ("node_key", "content", "speaker", "status",
+                           "created_at", "embedding", "point_kind",
+                           "is_episodic")
+
+
+def _record_row_tuple(tid: str, *, kind="event", content=None) -> tuple:
+    return (tid, content or f"[user] body of {tid}", "user", "draft",
+            "2026-10-25T00:00:00+00:00", None, kind, True)
+
+
+def test_the_record_leg_goes_through_the_scoped_door(monkeypatch):
+    """The #10024 shape: an unscoped read returns zero rows and would certify.
+
+    Asserts the DOOR is the one used (it is called, with the tenant org, and
+    the connection's own `cursor()` is never reached), that the tenant pair is
+    bound as SQL parameters, and that the SQL selects every column the
+    comparison and the classifier consume.
+    """
+    calls, conn = _stub_record(
+        monkeypatch, rows=[_record_row_tuple("s1_t0"),
+                           _record_row_tuple("claim-1", kind="claim")])
+    out = tpc.read_record_turns("postgresql://x/y", "org-1", "graph-1")
+    assert calls["scope"] == (conn, "org-1")
+    assert calls["dsn"] == "postgresql://x/y"
+    assert calls["sql"] == tpc._RECORD_TURNS_SQL
+    assert calls["params"] == ("org-1", "graph-1")
+    # The SQL really selects every column the comparison and the classifier
+    # consume, and filters on the same predicate the graph leg reads.
+    assert calls["sql"] == tpc._RECORD_TURNS_SQL
+    assert tuple(tpc._RECORD_TURNS_COLUMNS) == _RECORD_COLUMNS_EXPECTED
+    for column in _RECORD_COLUMNS_EXPECTED:
+        assert column in calls["sql"], f"the SQL omits {column}"
+    assert "FROM public.point" in calls["sql"]
+    assert "is_episodic IS TRUE" in calls["sql"]
+    assert calls["closed"] is True
+    # The turn key is grouped; the non-turn episodic row is counted, not lost.
+    assert sorted(out["rows_by_key"]) == ["s1_t0"]
+    assert out["non_turn_shaped"] == 1
+
+
+def test_a_scope_refusal_is_an_unreadable_side_not_an_empty_record(monkeypatch):
+    """A refused tenant scope must exit 3, never read as "the record is empty"."""
+    _stub_record(monkeypatch, refuse_scope=True)
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_record_turns("postgresql://x/y", "org-1", "graph-1")
+    assert "tenant scope refused" in str(exc.value)
+
+
+def test_a_moved_record_column_refuses_rather_than_certifying_vacuously(
+        monkeypatch):
+    """A dropped `node_key` would leave every row unkeyed — an EMPTY comparison.
+
+    The census would then compare a full graph against zero rows and report a
+    verdict for a record it never read; the schema gap must be exit 3.
+    """
+    columns = tuple(c for c in _RECORD_COLUMNS_EXPECTED if c != "node_key")
+    _stub_record(monkeypatch, columns=columns,
+                 rows=[_record_row_tuple("s1_t0")])
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_record_turns("postgresql://x/y", "org-1", "graph-1")
+    assert "node_key" in str(exc.value)
+
+
+def test_a_record_leg_refusal_reaches_exit_three(monkeypatch):
+    """End to end through `main`: the door's refusal is the exit CODE, not a 0."""
+    _stub_record(monkeypatch, refuse_scope=True)
+    monkeypatch.setattr(tpc, "read_graph_turns",
+                        lambda *a, **k: {"nodes": {"s1_t0": _graph_node(
+                            "s1_t0", "s1")}})
+    assert tpc.main(_argv()) == 3
