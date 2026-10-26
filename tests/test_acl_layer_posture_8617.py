@@ -74,7 +74,7 @@ def test_a_denied_credential_is_recorded_and_never_raised(monkeypatch):
 
 
 def test_the_capability_probe_tells_denied_apart_from_absent(monkeypatch):
-    """Ruling 1's mechanism: `_falkordb_present` is TRI-state. A server that
+    """Ruling 1's mechanism: `_falkordb_present` is multi-state. A server that
     ANSWERED and refused (`denied`) is a fact about the CREDENTIAL; a server
     with no graph module (`absent`) is a fact about the SERVER. Conflating them
     is what made the pre-#8617 absence unreadable.
@@ -142,12 +142,22 @@ def test_every_absence_names_its_own_reason(monkeypatch):
     assert (acl.create_acl_user("g_b", "team_x").reason
             == acl.REASON_NO_GRAPH_MODULE)
 
-    # probe_denied is a fact about the CREDENTIAL: it stays `denied`
+    # probe_denied is a fact about the CREDENTIAL: it stays `denied`, and the
+    # reason is the TOKEN — not the detail sentence. Round-1 review proved by
+    # mutation that stamping prose here left every test green while
+    # REASON_PROBE_DENIED became a constant nothing emits.
     monkeypatch.setattr(acl, "_admin_client", lambda: _Client(
         module=None, refusal="MODULE"))
     r = acl.create_acl_user("g_c", "team_x")
     assert r.status is acl.AclStatus.DENIED
+    assert r.reason == acl.REASON_PROBE_DENIED, r.reason
     assert "credential" in r.detail, r.detail
+    # …and every reason is from the closed vocabulary, never prose.
+    vocab = {acl.REASON_DECLARED_OFF, acl.REASON_NO_URI,
+             acl.REASON_NO_GRAPH_MODULE, acl.REASON_PROBE_DENIED,
+             acl.REASON_LAYER_DOWN, acl.REASON_SETUSER_DENIED,
+             acl.REASON_PROBE_UNREADABLE}
+    assert r.reason in vocab, r.reason
 
     # declared_off — declared, not discovered
     monkeypatch.setenv(acl.ACL_LAYER_ENV, "off")
@@ -176,6 +186,41 @@ def test_the_absence_is_announced_once_per_REASON_not_once_per_status(
         "absent", acl.REASON_LAYER_DOWN, "g_2", "the server vanished")
     ha_mod._announce_acl_absence_once(
         "absent", acl.REASON_LAYER_DOWN, "g_3", "the server vanished")
+
+    msgs = [r.getMessage() for r in caplog.records
+            if "per-graph ACL layer absent" in r.getMessage()]
+    assert len(msgs) == 2, msgs
+    assert any("no server URI" in m for m in msgs)
+    assert any("vanished" in m for m in msgs)
+
+
+def test_the_hook_forwards_the_reason_it_was_given(monkeypatch, caplog):
+    """Round-1 review, proven by mutation: the announcement test drives
+    `_announce_acl_absence_once` DIRECTLY, so replacing `result.reason` with
+    `""` at the hook's call site (hosted_api) left the whole suite green — the
+    production forwarding was pinned by nothing, and the status-only-keying
+    defect had a silent path back in.
+
+    Mutation behind this test: pass "" instead of `result.reason` in
+    `_acl_user_create_hook` — the two records collapse into one and this reds.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setenv(acl.ACL_LAYER_ENV, "strict")
+    monkeypatch.setattr(ha_mod, "_ACL_ABSENCE_ANNOUNCED", set())
+    caplog.set_level(logging.INFO, logger=ha_mod._logger.name)
+
+    seq = iter([
+        acl.AclProvisionResult(status=acl.AclStatus.ABSENT,
+                               reason=acl.REASON_NO_URI, detail="no server URI"),
+        acl.AclProvisionResult(status=acl.AclStatus.ABSENT,
+                               reason=acl.REASON_LAYER_DOWN,
+                               detail="the server vanished"),
+    ])
+    monkeypatch.setattr(acl, "create_acl_user", lambda gid, org: next(seq))
+
+    ha_mod._acl_user_create_hook("g_one", "team_x", strict=True)
+    ha_mod._acl_user_create_hook("g_two", "team_x", strict=True)
 
     msgs = [r.getMessage() for r in caplog.records
             if "per-graph ACL layer absent" in r.getMessage()]

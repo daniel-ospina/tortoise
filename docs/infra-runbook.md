@@ -248,8 +248,11 @@ downtime so far.
    `denied` / `absent` / `provisioned` counters in
    `POST /v1/internal/backups/acl-reconcile`, with `absent_reasons`
    (`no_uri` / `no_graph_module` / `layer_down`, summing to `absent`) naming
-   WHICH absence the bare `absent` total would otherwise hide. On this lane the
-   only reachable value is `absent_by_design`, for every custom graph.
+   WHICH absence the bare `absent` total would otherwise hide. (`unknown` and
+   `probe_unreadable` can appear there too — treat either as a CODE DEFECT, not
+   as an operator state: a path returned `absent` without classifying it.) On
+   this lane the only reachable counter is `absent_by_design`, for every custom
+   graph.
 
    **What that costs, stated plainly:** on the hosted product there is **no
    database-level second wall** between graphs. What isolates a graph there is
@@ -279,8 +282,9 @@ downtime so far.
      +MONITOR +SLOWLOG` — a larger blast radius than the conservative barrier.
      Stay on `Write`.
 
-   A hand-written ACL narrower than `Write` must include the graph verbs above
-   **plus `+GRAPH.COPY`**: restore/drill swaps issue it on this lane
+   A hand-written ACL narrower than `Write` must still include **`+GRAPH.COPY`
+   — it is in `Write`, and it is the easiest one to drop from a hand-written
+   "query-only" ACL.** Restore/drill swaps issue it on this lane
    (`hosted_backup.restore_backup`), so an ACL that looks complete for query
    traffic but omits it turns every restore into a failure.
 
