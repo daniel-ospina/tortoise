@@ -424,22 +424,26 @@ class TestWriterValidation(unittest.TestCase):
         self.assertEqual(partial["made_count"], 1)
         self.assertEqual(partial["made_ids"], ["p1"])
 
-    def test_dedup_hit_warning_is_classified_as_fold(self):
-        # the SDK's dedup-hit warning (cross-source fold) is a REPORT of
-        # correct behavior, not write-path drift: it must be classified as
-        # a fold, never fatal — and an all-fold batch exits 0
-        import logging
+    def test_cross_source_fold_is_classified_from_the_write_result(self):
+        # A cross-source fold is a REPORT of correct behavior, not write-path
+        # drift: it must be classified as a fold, never fatal — and an all-fold
+        # batch exits 0. The signal is the SURVIVOR the write returns (a dedup
+        # hit returns the existing point's id, and #7704's fold wires this run's
+        # source onto it), NOT the SDK's log line — #7704 moved that report from
+        # WARNING to INFO, and the message-keyed classifier this replaces then
+        # saw nothing: `folded_onto_other_sources` disappeared from the receipt
+        # and CI reddened on the KeyError. The fake below emits NO log at all,
+        # so this pin cannot be satisfied by a template.
         class _FoldingSDK:
             def __init__(self, **kw):
                 pass
             def query(self, **kw):
                 return []
             def create_point(self, kind, content, **kw):
-                logging.getLogger("tortoise.sdk").warning(
-                    "create_point dedup hit on %s: extractedFrom %r not "
-                    "applied — those refs are absent from the Point's "
-                    "Source edges", "p-existing", ["s://other"])
-                return {"id": "p-existing", "status": "live"}
+                # the survivor already carried another source; this write
+                # folded onto it and the fold wired `extractedFrom` too
+                return {"id": "p-existing", "status": "live",
+                        "extractedFrom": ["s://other", kw.get("extractedFrom")]}
             def close(self):
                 pass
         with self.assertRaises(SystemExit) as cm:
@@ -751,6 +755,22 @@ class TestWriterContract(unittest.TestCase):
         receipt = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(receipt["new"], 1)
         self.assertEqual(receipt["folded_onto_other_sources"], 1)
+        # #7704: the fold KEEPS the new source instead of dropping it, so the
+        # survivor's own provenance now NAMES both sources. Pinned through the
+        # public doors the writer itself uses (the equality-filtered read-back
+        # cannot see a multi-ref point, which is exactly why
+        # `folded_onto_other_sources` has to be derived from the write result).
+        check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            hits = check.query(content=shared, include_retracted=True)
+        finally:
+            check.close()
+        self.assertEqual(len(hits), 1, hits)
+        refs = hits[0].get("extractedFrom")
+        if isinstance(refs, str):
+            refs = [refs]
+        self.assertEqual(sorted(refs or []), sorted([other, self.source]),
+                         "the fold lost the claim's new source")
         # all-fold batch on a FRESH source: exits 0 via the
         # folded_onto_existing path (this source has no points of its own)
         code, out, _ = self._exec(self._payload(

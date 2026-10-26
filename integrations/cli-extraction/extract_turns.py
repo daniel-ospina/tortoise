@@ -473,17 +473,18 @@ sdk = TortoiseSDK(namespace=ns, event_log_path=log)
 # are environmental noise: recorded in the receipt, never fatal, so a
 # noisy-but-healthy deployment still writes.
 warnings_seen = []
-folded = []   # pids of existing points a dedup hit folded onto: the SDK's
-              # dedup-hit warning is a REPORT of correct behavior (content
-              # already known under another source), not drift. Classified
-              # by the unformatted template (record.msg): an upstream reword
-              # degrades LOUD — unrecognized warnings go back to fatal —
-              # never silent.
+# pids of existing points this run FOLDED onto — read off the WRITE'S RESULT,
+# never off a log line (#7704). The SDK reports a fold at INFO now (it is
+# correct behaviour, not drift), and an earlier revision of this writer parsed
+# the WARNING that preceded it: when #7704 moved that report to INFO the
+# classifier saw nothing, `folded_onto_other_sources` vanished from the receipt
+# and CI reddened on the missing key. The durable signal is the survivor the
+# write RETURNS — a dedup hit returns the existing point's id, and the fold
+# WIRES this run's source onto it — so a returned point whose `extractedFrom`
+# names any OTHER source is a cross-source fold. No message template involved.
+folded = []
 class _Collect(logging.Handler):
     def emit(self, record):
-        if isinstance(record.msg, str) and record.msg.startswith('create_point dedup hit on '):
-            folded.append(str(record.args[0]) if record.args else '?')
-            return
         warnings_seen.append((record.name, record.getMessage()))
 _handler = _Collect()
 _handler.setLevel(logging.WARNING)   # collect WARNING+ only: an INFO-tuned
@@ -511,6 +512,15 @@ try:
             non_live.append(r['id'])   # reported, never force-promoted: a retracted
                                        # or draft point is someone else's decision
         made.append(r['id'])
+        # A cross-source fold, read off the RESULT (#7704): the survivor was
+        # already a point and the fold wired THIS source onto it, so its
+        # `extractedFrom` names another source beside ours. A point this run
+        # genuinely minted names ours alone.
+        _refs = r.get('extractedFrom')
+        if isinstance(_refs, str):
+            _refs = [_refs]
+        if any(_ref != source for _ref in (_refs or [])):
+            folded.append(r['id'])
     _new_warnings = warnings_seen[_baseline:]
     _fatal = [f'{name}: {msg}' for name, msg in _new_warnings
               if name.startswith(_WRITE_PATH_LOGGERS)]
@@ -525,7 +535,14 @@ try:
         raise RuntimeError(f'inconsistent write: before={before} after={after}')
     _noise = [f'{name}: {msg}' for name, msg in _new_warnings
               if not name.startswith(_WRITE_PATH_LOGGERS)]
-    receipt = {'written': len(made), 'new': after - before, 'total_for_source': after,
+    # `new` counts points that are under this source and were not before. A
+    # folded survivor is NOT among them: the fold leaves `extractedFrom` a LIST
+    # and `query(extractedFrom=…)` matches that property by EQUALITY, so the
+    # survivor is not returned by this read at all (measured — the `:Source`
+    # EDGES are the authoritative provenance, #3263). `after - before` therefore
+    # already excludes folds; `folded_onto_other_sources` is what reports them.
+    receipt = {'written': len(made), 'new': after - before,
+               'total_for_source': after,
                'non_live_hits': non_live, 'ids': made[:5]}
     if folded:
         receipt['folded_onto_other_sources'] = len(folded)
@@ -533,19 +550,24 @@ try:
         receipt['env_warnings'] = {'count': len(_noise),
                                    'sample': [n[:150] for n in _noise[:2]]}
     if after == 0:
-        # Every claim folded onto existing points under OTHER sources (dedup
-        # drops extractedFrom): a legitimate all-fold run, not a failure —
-        # nothing new under this source, so nothing to tier or propagate.
-        # The guard is a drift tripwire: create_point calls succeeded yet
-        # query() finds nothing under the source AND the SDK reported no
-        # folds — the write path has drifted (e.g. extractedFrom stopped
-        # being a queryable property), which must fail, never exit 0.
+        # Nothing is queryable under this source after the loop. Two shapes reach
+        # here and they must not be confused:
+        #   * ALL-FOLD — every call folded onto a point that already existed under
+        #     OTHER sources. The fold KEEPS the evidence now (it wires this source
+        #     onto the survivor, #7704) — but the surviving point's
+        #     `extractedFrom` PROPERTY becomes a LIST and `query(extractedFrom=…)`
+        #     matches that property by equality, so a folded survivor is not
+        #     returned by this read. A legitimate all-fold run: nothing NEW under
+        #     this source, so nothing to tier or propagate.
+        #   * DRIFT — create_point calls succeeded, the SDK reported no folds, and
+        #     the read-back still finds nothing (e.g. `extractedFrom` stopped
+        #     being a queryable property). That must fail, never exit 0.
         if len(folded) != len(made):
             raise RuntimeError(
                 f'inconsistent write: {len(made)} create_point calls succeeded but '
                 f'query() finds 0 points under the source with only {len(folded)} '
                 'dedup folds reported — SDK drift, not an all-fold run')
-        receipt['folded_onto_existing'] = len(made)
+        receipt['folded_onto_existing'] = len(folded)
         print(json.dumps(receipt))
         sdk.close()
         sys.exit(0)   # SystemExit is a BaseException: not caught below
@@ -554,8 +576,7 @@ try:
     # catches silent drift (a renamed kwarg becomes a stale property, not an
     # error). Every Point currently under this source must carry this domain —
     # new ones because this loop just wrote them, old ones because a rerun uses
-    # the same arguments. Points that dedup-folded onto OTHER sources are not
-    # under this source and do not participate (their domain is theirs).
+    # the same arguments.
     _bad = [p.get('id') for p in pts if p.get('domain') != domain]
     if _bad:
         raise RuntimeError('read-back failed: points under source missing domain '

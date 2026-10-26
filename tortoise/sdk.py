@@ -27948,6 +27948,19 @@ class TortoiseSDK:
         pure write of a decision already made; an empty `missing` returns
         before any write, so a future caller cannot emit a no-op journal record.
 
+        A ref the node's ``extractedFrom`` PROPERTY names but no edge addresses
+        — the shape ``update_point(extractedFrom=…)`` writes, since that writer
+        sets the property and wires no edge — is ADOPTED into the wiring rather
+        than dropped. Dropping it was a silent narrowing of the caller's
+        provenance (the same class this fold exists to close, in the other
+        direction); wiring it makes the ref list this fold writes a SUPERSET of
+        the property it replaces.
+
+        The re-emitted record carries ``embedding_preserved`` whenever it carries
+        a vector: that vector is the node's EXISTING one, which this fold did not
+        compute, so attesting the active embedder would journal a false origin
+        (``_write_capture_turns``' own marker, #5004).
+
         **Journal first (§17.1).** The record is the commit point of a live
         write. The snapshot is the full Point (``get_point`` + the accumulated
         refs), re-emitted as a ``PointAdded`` — the SAME shape the capture
@@ -28031,13 +28044,35 @@ class TortoiseSDK:
         for _url in present:
             _spelling.setdefault(_url, _carried.get(_url, _url))
         accumulated = list(_spelling.values())
-        for _ref in missing:
+        _edge_urls = set(present)
+        # A ref the node's PROPERTY names but no EDGE addresses is not evidence
+        # (#3263: the edges are authoritative) — and rebuilding the list from
+        # the edges alone therefore DELETED it, leaving only the INFO below as
+        # a trace. `update_point(extractedFrom=…)` is the shape that writes one
+        # (it sets the prop and wires no edge, which is why the dedup branch
+        # refuses to use that writer — see its comment), and the fold is what
+        # made it disappear; on `origin/main` the dedup branch never touched the
+        # property, so the value survived. Dropping a caller's ref is the same
+        # class this fold exists to close (provenance vanishing), just in the
+        # other direction, so ADOPT it into the wiring instead: it is a ref the
+        # caller declared, `_link_source` is the ONE writer that turns a ref
+        # into an edge + `:Source` (and the replayer's `_upsert_point_edges`
+        # calls that same helper, so live == replay by construction), and the
+        # record below carries it in its own ``extractedFrom``. Healing toward
+        # KEPT evidence is the #7704 ruling's direction ("one claim, N
+        # sources"), and it makes the ref list the fold writes a SUPERSET of the
+        # prop it replaces — never a silent narrowing.
+        _adopted = [ref for key, ref in _carried.items()
+                    if key not in _edge_urls]
+        _wired: list[str] = []
+        for _ref in list(missing) + _adopted:
             _key = resolve_source_key(proj.g, _ref)
             if _key in _spelling:
                 continue
             _spelling[_key] = _ref
             accumulated.append(_ref)
-        versions = resolve_source_versions(proj.g, missing)
+            _wired.append(_ref)
+        versions = resolve_source_versions(proj.g, _wired)
         # Keep the pairs the Point already carries for refs it still holds —
         # decided on the EDGE identity, which is the only authoritative
         # statement that the ref is still held (#3263) — and re-key each to the
@@ -28047,7 +28082,6 @@ class TortoiseSDK:
         # spellings are the same string and this is a no-op. Add one pair per
         # new ref whose Source has a recorded (non-blank) version.
         prior = existing.get("sourceVersionTransit")
-        _edge_urls = set(present)
         pairs: list[list[str]] = []
         if isinstance(prior, list):
             for pair in prior:
@@ -28069,6 +28103,23 @@ class TortoiseSDK:
         pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)
 
         snapshot = {**existing, "extractedFrom": accumulated}
+        # #7704 review P1: the fold computes NO vector — `existing["embedding"]`
+        # is the node's EXISTING one, read back through `get_point` — so this
+        # re-emitted `PointAdded` must not attest an origin. `_emit_event`
+        # stamps every PointAdded as a CREATING record (`creating=True`) and
+        # `stamp_journal_embedding` then attests the ACTIVE embedder whenever the
+        # payload owns a vector — so a fold performed after a model change would
+        # journal `embedding_model = <the new model>` for a vector the OLD one
+        # computed: a false origin, and the R1 model-change warning is silenced
+        # by construction (it compares the JOURNALED identity to the configured
+        # embedder). `embedding_preserved` is the marker the capture writer uses
+        # for exactly this case (`_write_capture_turns`, sdk.py:2760-2769) and it
+        # is payload-only metadata — never a node property — so it cannot leak
+        # into the graph. Set only when a vector is actually carried: with none,
+        # `stamp_journal_embedding`'s `vec is not None` arm already takes the
+        # other branch.
+        if existing.get("embedding") is not None:
+            snapshot["embedding_preserved"] = True
         if pairs:
             snapshot["sourceVersionTransit"] = pairs
         else:
@@ -28095,7 +28146,7 @@ class TortoiseSDK:
         # COMMITTED, so the ordering is journal-then-cache by construction.
         with _live_write_scope("create_point"):
             self._graph_write_with_retry(
-                lambda: proj._link_source(pid, missing,
+                lambda: proj._link_source(pid, _wired,
                                           source_versions=versions),
                 what="create_point dedup provenance edges",
             )
@@ -28121,7 +28172,7 @@ class TortoiseSDK:
         _logger.info(
             "create_point dedup hit on %s: folded %d new extractedFrom ref(s) "
             "%r onto the surviving Point — one claim, %d sources (#7704)",
-            pid, len(missing), missing, len(accumulated),
+            pid, len(_wired), _wired, len(accumulated),
         )
         return snapshot
 

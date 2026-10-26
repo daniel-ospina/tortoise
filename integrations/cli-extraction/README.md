@@ -127,8 +127,10 @@ The transcript is captured user text and is treated as **data**, end to end:
   carry the domain, `set_source_tier(source, "T2")` must actually tier
   (checked via `get_source_reliability`), and any warning from the
   write-path loggers (`tortoise.sdk`/`projection`/`ingest`) during the loop
-  fails the write — except the SDK's dedup-hit fold report, which is
-  classified as a fold and counted, not failed (see idempotency below). With
+  fails the write. The dedup fold is no longer an EXCEPTION to that rule: the
+  SDK reports a fold at INFO (#7704), so it can never reach the WARNING+
+  tripwire, and the fold is counted from the write's own result instead (see
+  idempotency below). With
   a `**props` API, read-back is the only loud failure mode for silent
   signature drift (cf. the removed `context` kwarg, #49).
 - **Write failures propagate.** Container exit != 0 fails the command.
@@ -150,12 +152,18 @@ The transcript is captured user text and is treated as **data**, end to end:
   `(pointKind, content_hash)` — rerunning `write` with the SAME extraction
   file reports `new: 0`. A *reworded* claim (a fresh `run`) is new content
   and will create a new point; a claim whose exact content already exists
-  under a different source folds onto the existing point — the SDK's
-  dedup-hit warning is classified as a fold and counted
-  (`folded_onto_other_sources`; `new` counts only genuinely new points).
+  under a different source FOLDS onto the existing point — the fold now WIRES
+  this source onto the survivor (#7704: one claim with N sources), and the
+  writer classifies the fold from the point the write RETURNS (any
+  `extractedFrom` ref other than this source), never from a log line. Counted
+  as `folded_onto_other_sources`; `new` counts only genuinely new points.
   An all-fold batch exits 0 with `folded_onto_existing` and leaves the
-  source untiered (nothing new to tier); an all-empty read-back with **no**
-  fold reports is treated as SDK drift and fails. A write that dies
+  source untiered (nothing new to tier). Note the read-back cannot SEE a
+  folded survivor: the fold leaves `extractedFrom` a list and `query()`
+  matches that property by equality, so the source's own count does not
+  include it (the `:Source` EDGES are the authoritative provenance, #3263).
+  An all-empty read-back with **no** fold reports is treated as SDK drift and
+  fails. A write that dies
   mid-loop prints a partial receipt (`{"partial": true, "made_ids": [...]}`)
   on stdout before raising, so already-created ids are never lost.
 

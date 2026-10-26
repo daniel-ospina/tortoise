@@ -570,6 +570,97 @@ def test_a_fold_with_an_unhashed_ref_does_not_remove_the_carrier(prov):
         f"live={live!r} replayed={_render_row(proj, pid)!r}")
 
 
+def test_a_fold_adopts_and_WIRES_a_prop_only_ref(prov):
+    """A ref only the PROPERTY names is adopted into the wiring, not deleted.
+
+    ``update_point(extractedFrom=…)`` writes the property and wires NO edge —
+    the shape the dedup branch refuses for its own write, which is why the fold
+    reads the edges in the first place — so a ref list rebuilt from the edges
+    alone DELETED the caller's ref and left only an INFO line behind. On
+    ``origin/main`` the dedup branch never touched the property, so the value
+    survived: the fold must not be the thing that loses it. Adopting it is the
+    #7704 ruling's direction ("one claim, N sources") — the list the fold
+    writes is a SUPERSET of the property it replaces — and because the replayer's
+    ``_upsert_point_edges`` calls the same ``_link_source``, live == replay.
+
+    Frozen before (#7704 review P2): the property came back ``[held, second]``
+    and the prop-only ref had no edge, no Source, and no record.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    held = "https://example.com/held"
+    prop_only = "https://example.com/prop-only"
+    second = "https://example.com/second"
+    content = "a prop-only ref is adopted by the fold"
+    pid = sdk.create_point("statement", content, extractedFrom=held,
+                           dedup=True)["id"]
+    sdk.update_point(pid, extractedFrom=prop_only)
+    assert _sources_of(proj, pid) == {held}, \
+        "guard: update_point wires no edge, so the prop is the only name"
+    assert _prop_refs(proj, pid) == prop_only, \
+        f"guard: the property holds only the moved ref: {_prop_refs(proj, pid)!r}"
+
+    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    assert _sources_of(proj, pid) == {held, prop_only, second}, (
+        "the fold dropped a ref the caller had declared on the property (or "
+        f"left it unwired): {_sources_of(proj, pid)}")
+    live = _render_row(proj, pid)
+    assert set(live["extractedFrom"]) == {held, prop_only, second}, live
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "live != replay after adopting a prop-only ref — the record's ref list "
+        f"and the wired edges disagree: live={live!r} "
+        f"replayed={_render_row(proj, pid)!r}")
+
+
+def test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute(prov):
+    """The re-emitted ``PointAdded`` PRESERVES the vector, never attests it.
+
+    The fold computes no vector: ``snapshot["embedding"]`` is the node's
+    EXISTING one, read back through ``get_point``. ``_emit_event`` stamps every
+    ``PointAdded`` as a CREATING record, and ``stamp_journal_embedding`` then
+    attests the ACTIVE embedder whenever the payload owns a vector and is not
+    marked preserved — so a fold performed after a model change would journal
+    ``embedding_model = <the new model>`` for a vector the OLD one computed, a
+    FALSE origin that silences the R1 model-change warning by construction (that
+    warning compares the JOURNALED identity against the configured embedder).
+    The capture writer marks exactly this case (``embedding_preserved``,
+    ``_write_capture_turns``).
+
+    Frozen before (#7704 review P1): the fold's record carried
+    ``embedding_model``/``embedding_revision``/``embedding_text_hash`` for a
+    vector it never computed, and no ``embedding_preserved``.
+    """
+    import json
+
+    sdk, events = prov
+    log_path = os.path.join(str(events), "events.jsonl")
+    first_ref, second_ref = ("https://example.com/emb-one",
+                             "https://example.com/emb-two")
+    content = "the fold must not attest an origin it did not compute"
+    pid = sdk.create_point("statement", content, extractedFrom=first_ref,
+                           embedding=[0.5] * 8, dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=second_ref,
+                     dedup=True)
+
+    with open(log_path) as fh:
+        rows = [json.loads(ln) for ln in fh if ln.strip()]
+    folds = [r for r in rows
+             if r.get("type") == "PointAdded"
+             and (r.get("point") or {}).get("id") == pid]
+    assert len(folds) >= 2, (
+        f"guard: the fold must emit a second PointAdded for {pid}: {len(folds)}")
+    fold = folds[-1]["point"]
+    assert fold.get("embedding") is not None, (
+        "guard: this pin is about a fold that CARRIES the existing vector")
+    assert fold.get("embedding_preserved") is True, (
+        "the fold's record is CREATING and holds a vector it did not compute — "
+        "it must say the vector was PRESERVED: " + repr(sorted(fold)))
+    for key in ("embedding_model", "embedding_revision", "embedding_text_hash"):
+        assert key not in fold, (
+            f"the fold attested {key} for a vector it never computed")
+
+
 def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
                                                                monkeypatch):
     """§17.1 — NO record ⇒ NO fold.
