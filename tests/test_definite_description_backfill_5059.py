@@ -969,6 +969,12 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
         "on supersession; the only deletion trigger is GDPR / retention "
         "(§2.4 row 3, #5333)."
     )
+    assert "option c is closed on the recorded recommendation" in decision, (
+        "the never-delete clause lost its ground: Option C (deletion) is "
+        "closed on the RECORDED recommendation (*never*), not merely "
+        "deprioritised — without it the clause reads as a preference a later "
+        "lane may revisit (#5333)."
+    )
     assert "reconstruction source" in decision, (
         "the reconstruction invariant is gone — the fold's event stream is "
         "the reconstruction source (#5333)."
@@ -989,6 +995,25 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
         "reads as forbidding the journaled `restatus`→`archived` fold that "
         "the paragraph itself records as the target (a lane implementing the "
         "guard cannot tell prohibition from permitted form) (#5333)."
+    )
+    # The rest of clause 1: the two other verbs of the prohibition, and the
+    # field-write rule. Without these the paragraph can be INVERTED — "fields
+    # may be rewritten freely" is D7's defect class, and it is the one clause
+    # an implementer is most likely to relax — while this pin stays green.
+    assert "archive it as a storage action" in decision, (
+        "the prohibition lost 'archive it as a storage action' — dropping "
+        "the qualifier leaves 'archive' reading as the very mechanism the "
+        "paragraph permits (a journaled `restatus` to `archived`), so the "
+        "clause contradicts itself again (#5333)."
+    )
+    assert (
+        "no field of a committed row may be written except by an appended "
+        "lifecycle event" in decision
+    ), (
+        "D7's field-write rule is gone or inverted: after COMMIT no field of "
+        "a committed row may be written except by an appended lifecycle "
+        "Event — a raw `SET` onto `Object.status` is #3304's defect class "
+        "(#5333)."
     )
     # The two capstone figures may not stand uncited: they have no committed
     # artifact behind them, so the paragraph must name their record.
