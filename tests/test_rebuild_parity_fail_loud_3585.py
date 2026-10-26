@@ -570,23 +570,65 @@ class TestOneClassifierForTheNonFoldedSet:
 
 
 class TestReReviewRoundTwo:
-    def test_name_only_supersede_with_no_carrier_refuses_both_engines(
+    def test_name_only_supersede_of_never_registered_name_is_exempt_both_engines(
             self, env):
-        """FAILS IF: the reference fold treats a carrier-less name-only
-        supersede as harmless ambiguity.
+        """#3590 D2 (adopted on #3590, bounded): an id-less `ObjectSuperseded`
+        whose target name the journal NEVER registered is EXEMPT and RECORDED.
 
-        The graph fold matches 0 Objects and records `object-superseded-miss`
-        (refused), so `check_consistency` must not report `ok=True` on the same
-        journal.
+        FAILS IF: the exemption is removed (the run raises again — a damaged
+        journal cannot be rebuilt at all), OR the shape stops being recorded
+        (an exemption still requires the record, #5380), OR the reference fold
+        disagrees with the graph engine (the classifier asymmetry #3585
+        exists to close).
         REACHABLE: a journal whose only record supersedes a name that was never
-        registered (nothing to be ambiguous about)."""
+        registered — no registration exists that could have created it, so
+        live folded nothing either and live/replay agree.
+
+        ⚠️ RETIRED CONTRACT: this test previously asserted the OPPOSITE
+        (`object-superseded-miss`, refused). D2 reverses exactly that, and the
+        reversal is bounded by the test below, which keeps the refusal for a
+        name the journal DID register.
+        """
         sdk, events = env
         _raw(events, type="ObjectSuperseded", name="NOPE",
              supersedes_by="other", event_id="e-nope")
+        proj = sdk._get_proj()
+        # No raise: the exemption lets a damaged journal be rebuilt.
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        r = check_consistency(str(events / "events.jsonl"), proj)
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        assert r["non_folded_count"] >= 1, (
+            "the exempt miss was not RECORDED at all — an exemption must never "
+            f"be silent: {r['non_folded_events']}")
+        assert any("object-superseded-unregistered" in e
+                   for e in r["non_folded_events"]), r["non_folded_events"]
+        assert r["divergence"] != "non-folded", r["divergence"]
+
+    def test_name_only_supersede_of_registered_then_deleted_name_still_refuses(
+            self, env):
+        """#3590 D2's BOUND: the exemption covers ONLY the never-registered
+        case.
+
+        FAILS IF: `name_unregistered` is inferred from the GRAPH ("no live
+        holder") instead of the JOURNAL. A name the journal registered and
+        then hard-deleted has no live holder either, so a graph-probe
+        implementation would exempt it — and a supersede that COULD have
+        landed becomes skippable, which is the one thing the bound forbids.
+        REACHABLE: register `GONE`, hard-delete it by id, then supersede it by
+        name alone (no id), so `target_deleted` cannot fire (it reads the
+        record's id, which is absent).
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="GONE")["node"]["id"]
+        sdk.delete_entity(oid)
+        _raw(events, type="ObjectSuperseded", name="GONE",
+             supersedes_by="other", event_id="e-gone")
+        proj = sdk._get_proj()
         with pytest.raises(NonFoldedEventsError) as ei:
-            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+            proj.rebuild_all(str(events), confirm_destructive=True)
         assert "object-superseded-miss" in str(ei.value), str(ei.value)
-        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+        assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
+        r = check_consistency(str(events / "events.jsonl"), proj)
         assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
         assert r["divergence"] == "non-folded", r["divergence"]
 
@@ -2141,3 +2183,84 @@ def test_edge_message_known_scope_with_ids_still_folds(tmp_path):
         assert [e.shape for e in nf] == [], nf
     finally:
         proj.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #3590 D2 — the object-supersede exemption is scoped by the JOURNAL, not
+# by the graph.
+#
+# The exemption covers a record that is unaddressable BY THE JOURNAL'S OWN
+# CONTENT: no id, and a name no registration ever created. The bound is what
+# makes it safe — a name the journal DID register keeps the refusal, so a
+# supersede that could have landed never becomes skippable. These tests pin
+# the two polarities at the classifier level and the mention exclusion at the
+# oracle level; the end-to-end polarities live in TestReReviewRoundTwo above.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_classify_object_supersede_unregistered_is_its_own_exempt_shape():
+    """The never-registered case is a DISTINCT, exempt shape.
+
+    FAILS IF: the exemption is expressed by exempting
+    `object-superseded-miss` wholesale (which would also exempt a target the
+    journal registered — the fail-OPEN direction), or the new shape is left
+    non-exempt (the rebuild aborts again, the defect D2 exists to fix).
+    """
+    from tortoise.projection.nonfolded import (
+        EXEMPT_SHAPES,
+        SHAPE_OBJECT_SUPERSEDED_MISS,
+        SHAPE_OBJECT_SUPERSEDED_UNREGISTERED,
+        SHAPE_SUPERSEDE_TARGET_DELETED,
+        classify_terminalizer_miss,
+    )
+
+    assert classify_terminalizer_miss(
+        "ObjectSuperseded", name_unregistered=True,
+    ) == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
+    assert SHAPE_OBJECT_SUPERSEDED_UNREGISTERED in EXEMPT_SHAPES
+    assert SHAPE_OBJECT_SUPERSEDED_UNREGISTERED != SHAPE_OBJECT_SUPERSEDED_MISS
+
+    # The registered case keeps the refusal: exempting the OLD shape would make
+    # every object-supersede miss skippable.
+    assert classify_terminalizer_miss(
+        "ObjectSuperseded") == SHAPE_OBJECT_SUPERSEDED_MISS
+    assert SHAPE_OBJECT_SUPERSEDED_MISS not in EXEMPT_SHAPES
+
+    # The sibling exemption keeps its own bound and is never absorbed.
+    assert classify_terminalizer_miss(
+        "ObjectSuperseded", target_deleted=True, name_unregistered=True,
+    ) == SHAPE_SUPERSEDE_TARGET_DELETED
+
+    # A record naming NOTHING is not "never registered" — nothing is
+    # addressable, so the flag is unfalsifiable and the caller must not set it
+    # (see `_supersede_name_unregistered`).
+    from tortoise.projection import _supersede_name_unregistered
+    assert _supersede_name_unregistered({"name": None}, frozenset()) is False
+    assert _supersede_name_unregistered({"name": ""}, frozenset()) is False
+    assert _supersede_name_unregistered({"name": "X"}, None) is False, (
+        "the one-record LIVE path supplies no journal and must stay "
+        "fail-closed")
+
+
+def test_journal_object_registered_names_counts_registrations_not_mentions():
+    """The oracle reads REGISTRATIONS only — a mention does not address.
+
+    FAILS IF: `EventRecorded`'s mentioned-name stubs are counted as
+    registrations. A mention does not create an entity (#3590 D1), so counting
+    it would exempt a supersede whose name the journal only ever MENTIONED —
+    the fail-OPEN direction. It is also the D2 counterpart of
+    `journal_object_surviving_keys`, which refuses to let a mention mint a
+    carrier.
+    """
+    from tortoise.projection import journal_object_registered_names
+
+    events = [
+        {"type": "ObjectRegistered", "id": "o-1", "name": "KNOWN"},
+        {"type": "EventRecorded", "id": "e-1", "eventKind": "k",
+         "object": "MENTIONED"},
+        {"type": "ObjectRegistered", "id": "o-2", "name": ""},
+    ]
+    names = journal_object_registered_names(events)
+    assert names == frozenset({"KNOWN"}), names
+    assert "MENTIONED" not in names, names
+    assert "" not in names, names

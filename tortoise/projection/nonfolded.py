@@ -65,6 +65,11 @@ SHAPE_DELETE_MISS = "delete-miss"
 SHAPE_UNIMPLEMENTED_OP = "unimplemented-op"
 #: An ``EntityMutated`` op outside the recorded vocabulary.
 SHAPE_UNKNOWN_OP = "unknown-op"
+#: ``ObjectSuperseded`` matched no Object, and the JOURNAL never registered
+#: the target's name — the record is unaddressable by the journal's own
+#: content (#3590 D2). Distinct from ``SHAPE_OBJECT_SUPERSEDED_MISS``, which
+#: keeps the fail-closed refusal for a target the journal DID register.
+SHAPE_OBJECT_SUPERSEDED_UNREGISTERED = "object-superseded-unregistered"
 #: ``ObjectSuperseded`` matched no Object.
 SHAPE_OBJECT_SUPERSEDED_MISS = "object-superseded-miss"
 #: ``PointSuperseded`` matched no Point.
@@ -197,6 +202,23 @@ EXEMPT_SHAPES: dict[str, str] = {
         "and the rebuilt graph may keep seeds the live graph dropped — "
         "reconcile the producer before relying on the rebuilt edge state"
     ),
+    SHAPE_OBJECT_SUPERSEDED_UNREGISTERED: (
+        "#3590 D2 (adopted on #3590, bounded): an `ObjectSuperseded` whose "
+        "target the journal NEVER registered is unaddressable BY THE "
+        "JOURNAL'S OWN CONTENT — there is no id to match and no registration "
+        "that would have created the name, so live folded nothing either and "
+        "live/replay end in the SAME state. This is a weaker claim than the "
+        "neighbouring `edge-message-unreplayed` exemption, which tolerates a "
+        "real divergence; here there is none. DEGRADED GUARANTEE: what is lost "
+        "is the supersede a journal could not address — no entity is invented "
+        "on either side, the miss is still RECORDED and reported by the run "
+        "boundary (an exemption still requires the record, #5380), and the "
+        "exemption covers ONLY the never-registered case: a target the journal "
+        "DID register still refuses as `object-superseded-miss` (a supersede "
+        "that could have landed never becomes skippable), a hard-deleted "
+        "target keeps its own anchored `supersede-target-deleted` bound, and a "
+        "registered-then-deleted name is NOT absorbed here"
+    ),
 }
 
 
@@ -205,6 +227,7 @@ def classify_terminalizer_miss(
     *,
     has_successor: bool = False,
     target_deleted: bool = False,
+    name_unregistered: bool = False,
 ) -> str:
     """The failure SHAPE for a Point/Object terminalizer that matched 0 rows.
 
@@ -227,6 +250,15 @@ def classify_terminalizer_miss(
     in the reference fold, its ordered ``anchors`` boundary as an additional
     exemption). This module has no journal, so it cannot decide it.
 
+    ``name_unregistered`` is the sibling caller-decision for
+    ``ObjectSuperseded`` only (#3590 D2): the caller has scanned the journal
+    and found NO ``ObjectRegistered`` carrying the record's ``name``, so the
+    record is unaddressable by the journal's own content. Also a journal
+    question this module cannot answer — it is passed in for the same reason
+    as ``target_deleted``, and it must NOT be inferred from the graph, because
+    a live-holder probe is exactly the ambiguity the exemption excludes. It is
+    ignored for every other ``event_type``.
+
     The default arm is fail-CLOSED: a terminalizer type outside the four
     named below returns :data:`SHAPE_UNCLASSIFIED_TERMINALIZER`, which is NOT
     in :data:`EXEMPT_SHAPES`.
@@ -246,8 +278,12 @@ def classify_terminalizer_miss(
         # a genuine miss whatever the target's hard-delete state.
         return SHAPE_POINT_RETRACTED_MISS
     if event_type == "ObjectSuperseded":
+        # `target_deleted` FIRST: it has its own anchor-gated bound and must
+        # not be absorbed by the newer exemption (#3590 D2).
         if target_deleted:
             return SHAPE_SUPERSEDE_TARGET_DELETED
+        if name_unregistered:
+            return SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
         return SHAPE_OBJECT_SUPERSEDED_MISS
     return SHAPE_UNCLASSIFIED_TERMINALIZER
 
