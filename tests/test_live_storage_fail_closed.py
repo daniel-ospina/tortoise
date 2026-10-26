@@ -281,7 +281,8 @@ def test_collection_verdict_table(report, env, violation, monkeypatch):
 
 def _run_pytest(*, carve_out: bool, expect_uri: bool = False,
                 paths: tuple[str, ...] = (LIVE_FILE,),
-                extra_env: dict[str, str] | None = None
+                extra_env: dict[str, str] | None = None,
+                extra_args: tuple[str, ...] = ()
                 ) -> subprocess.CompletedProcess:
     """Run the live file in a CHILD pytest, so the hook runs as it really does.
 
@@ -317,7 +318,7 @@ def _run_pytest(*, carve_out: bool, expect_uri: bool = False,
         env["TORTOISE_TEST_EXPECT_URI"] = "1"
     env.update(extra_env or {})
     return subprocess.run(
-        [sys.executable, "-m", "pytest", *paths, "-q", "-rs",
+        [sys.executable, "-m", "pytest", *paths, *extra_args, "-q", "-rs",
          "-p", "no:cacheprovider"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=900,
     )
@@ -423,31 +424,67 @@ def test_a_missing_optional_extra_is_not_a_live_storage_abort(tmp_path):
     assert "could not import 'redislite'" in proc.stdout, proc.stdout[-3000:]
 
 
-def test_the_e2e_exemption_is_a_property_of_the_tree_not_of_the_nodeid():
+def test_the_e2e_exemption_is_a_property_of_the_tree_not_of_the_nodeid(
+        monkeypatch):
     """SCOPE: the `tests/e2e/**` exemption must survive a moved rootdir.
 
-    `CollectReport.nodeid` is ROOTDIR-relative, so a run that relocates the
-    rootdir (`--rootdir`, `-c` from another tree, an installed layout) spells the
-    same module WITHOUT the `tests/` prefix — and a prefix-only test would then
-    lose the exemption and turn a documented opt-in gate into a collection error
-    naming a FalkorDB remedy. The FILE is the authority when the report has one;
-    the nodeid form stays as the fallback every CI leg produces.
+    `CollectReport.nodeid` is ROOTDIR-relative, and `fspath`/`location[0]` are
+    DERIVED from it (`_pytest/reports.py:161-165` — a read-only property, not a
+    field), so a run that relocates the rootdir (`--rootdir`, `-c` from another
+    tree) spells the same module WITHOUT the `tests/` prefix. A prefix-only test
+    then loses the exemption and turns a documented opt-in gate into a
+    collection error naming a FalkorDB remedy. The report's
+    `(path, lineno, message)` tuple carries the real file
+    (`_pytest/runner.py:419-425`), and that is the authority.
+
+    Both reports below are REAL `CollectReport`s carrying a REAL skip tuple, and
+    the nodeids are the RELOCATED spelling — so on the pre-fix tree the first
+    one is a violation, not an exemption (the tuple path was ignored and
+    `e2e/...` does not start with `tests/e2e/`).
     """
+    from _pytest.reports import CollectReport
+
     e2e_file = ROOT / "tests" / "e2e" / "test_dashboard_billing.py"
-
-    class _Relocated(_FakeCollectReport):
-        fspath = e2e_file
-
-    relocated = _Relocated("skipped", "Skipped: RUN_DASHBOARD_E2E=1",
-                           nodeid="e2e/test_dashboard_billing.py")
+    relocated = CollectReport(
+        "e2e/test_dashboard_billing.py", "skipped",
+        (str(e2e_file), 50,
+         "Skipped: dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1"),
+        [])
+    # `fspath` is the nodeid path, NOT the file — which is why the prefix test
+    # alone could not see this module.
+    assert relocated.fspath == "e2e/test_dashboard_billing.py"
+    monkeypatch.setenv("TORTOISE_TEST_EXPECT_URI", "1")
     assert _live_gate._out_of_scope(relocated) is True
+    assert _live_gate.collection_violation(relocated) is None
 
-    class _NotE2e(_FakeCollectReport):
-        fspath = ROOT / "tests" / "test_guard.py"
-
-    sibling = _NotE2e("skipped", "Skipped: whatever",
-                      nodeid="test_guard.py")
+    # …and the exemption does not widen: the same relocated spelling for a
+    # `tests/` module keeps its verdict on a lane that promised the URI.
+    sibling = CollectReport(
+        "test_guard.py", "skipped",
+        (str(ROOT / "tests" / "test_guard.py"), 20, "Skipped: whatever"),
+        [])
     assert _live_gate._out_of_scope(sibling) is False
+    assert _live_gate.collection_violation(sibling) is not None
+
+
+def test_a_moved_rootdir_does_not_false_red_an_opt_in_e2e_module():
+    """The same scope in a REAL run: `--rootdir` relocates the nodeid.
+
+    `pytest tests/e2e/test_dashboard_billing.py --rootdir=tests` spells the
+    module `e2e/...`, exactly the spelling a prefix-only test cannot exempt. On
+    the pre-fix tree this is a collection ERROR on a lane that PROMISED the URI
+    — "live storage is REQUIRED by this MODULE … Give the run a database" — for
+    a module whose abort is about `RUN_DASHBOARD_E2E`. Measured by hand at the
+    previous head before this pin existed; it is the false red the path-based
+    scope exists for.
+    """
+    proc = _run_pytest(carve_out=False, expect_uri=True,
+                       paths=(E2E_OPT_IN_FILE,),
+                       extra_args=("--rootdir=tests",))
+    assert "live storage is REQUIRED by this MODULE" not in proc.stdout, \
+        proc.stdout[-3000:]
+    assert "RUN_DASHBOARD_E2E" in proc.stdout, proc.stdout[-3000:]
+    assert proc.returncode in (0, 5), proc.stdout[-3000:]
 
 
 def test_the_docker_password_seam_reads_at_call_time(monkeypatch):

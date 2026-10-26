@@ -82,10 +82,11 @@ So on CI's `test-carve-out` leg (`python-ci.yml:2611` sets the carve-out flag
 and NOT the expectation, and its matcher at `:2818` runs WITHOUT
 `--manifest-only`) the log matcher sees lane `None` and would hold an
 availability skip against the run, where this gate exempts it. That asymmetry
-is PRE-EXISTING and deliberate on this side: epic #1647 P4 records the
-carve-out lane's live skips as its shape, so the in-process verdict is the
-correct one and re-pointing the guard's lane derivation is a change to the
-#1436/#3592 calibration this module must not make on its own initiative. It is
+is deliberate on this side, and it is CREATED here (the guard's derivation and
+that leg's matcher are what pre-exist): epic #1647 P4 records the carve-out
+lane's live skips as its shape, so the in-process verdict is the correct one
+and re-pointing the guard's lane derivation is a change to the #1436/#3592
+calibration this module must not make on its own initiative. It is
 latent — that shard's selection produces no FalkorDB-availability skip today —
 but it is a real difference, so it is recorded here instead of being covered by
 a blanket "the two points cannot disagree".
@@ -123,12 +124,17 @@ skips this gate is about, not about whether a skip is a violation:
     wrong one: the remedy printed would send a reader looking for a database).
 
 DECLARED RESIDUALS of the collection arm, neither silently covered:
-  * the exemption above matches pytest's SHAPE for an absent optional extra,
-    not its cause. `importorskip(..., reason="…")` replaces that shape, so a
-    custom-reason abort still reaches the verdict; and an `importorskip` on a
-    module that IS live storage is exempted with the rest of the shape.
-    Narrowing further would need the ORIGIN of the skip, which pytest does not
-    report on a `CollectReport`.
+  * the exemption above matches pytest's SHAPE for an `importorskip` abort —
+    both of its reason spellings — not its cause. `importorskip(...,
+    reason="…")` replaces that shape, so a custom-reason abort still reaches the
+    verdict; a hand-written reason quoting `module 'x' has __version__ …` is
+    exempted by the `minversion` spelling; and an `importorskip` on a module that
+    IS live storage is exempted with the rest of the shape. Narrowing further
+    would need the ORIGIN of the skip, which pytest does not report on a
+    `CollectReport`. The `minversion` half is DEFENSIVE: it is pytest's real
+    shape at the pinned 9.1.1, but no module in this tree calls
+    `importorskip(..., minversion=...)` today, so unlike the other two
+    exemptions it is not backed by a measured population.
   * a live-storage skip raised from a test BODY or a fixture at RUNTIME is still
     a plain skip here. The measured population is not "optional extras": e.g.
     `tests/test_cross_lens.py:392` skips `live FalkorDB (localhost:1) not
@@ -242,8 +248,8 @@ _COLLECTION_SKIP_MESSAGE = "collection skipped"
 #: fallback spelling: `CollectReport.nodeid` is ROOTDIR-relative, so a run that
 #: moves the rootdir (`--rootdir`, `-c` from another tree, an installed layout)
 #: spells the same module without the `tests/` prefix — `_out_of_scope` decides
-#: from the FILE whenever the report carries one, so the exemption is a property
-#: of the tree rather than of one invocation.
+#: from the report's own `(path, lineno, message)` tuple, so the exemption is a
+#: property of the tree rather than of one invocation.
 _NON_SELECTABLE_PREFIXES = ("tests/e2e/",)
 _E2E_ROOT = (_ROOT / "tests" / "e2e").resolve()
 
@@ -267,24 +273,49 @@ def _is_importorskip_abort(detail: str) -> bool:
     return any(rx.search(detail) for rx in _IMPORTORSKIP_DETAIL_RES)
 
 
+def _report_file(report: pytest.CollectReport) -> Path | None:
+    """The FILE a collection report is about, or None when it carries none.
+
+    `CollectReport.fspath` — and its alias `location[0]` — cannot be used for
+    this: both are READ-ONLY PROPERTIES returning `self.nodeid.split("::")[0]`
+    (`_pytest/reports.py:161-165`, `:498-502` in the pinned 9.1.1), i.e. the
+    ROOTDIR-RELATIVE spelling again, never a filesystem path (and not
+    assignable: the property has no setter). The real path is the first field
+    of the tuple `pytest_make_collect_report` builds for a module-level skip —
+    `(str(r.path), r.lineno, r.message)` (`_pytest/runner.py:419-425`).
+    """
+    longrepr = getattr(report, "longrepr", None)
+    if not isinstance(longrepr, (tuple, list)) or not longrepr:
+        return None
+    first = longrepr[0]
+    if not isinstance(first, str) or not first.strip():
+        return None
+    path = Path(first)
+    # A relative spelling is what hand-built reports in this suite pass; pytest
+    # itself always writes an absolute `str(r.path)`. Anchor a relative one at
+    # the repo root, which is the directory a nodeid is relative TO.
+    return path if path.is_absolute() else _ROOT / path
+
+
 def _out_of_scope(report: pytest.CollectReport) -> bool:
     """True when this module is not part of the gate's class — see the module
     docstring's scope paragraph.
 
-    The NODEID is checked first because that is what every CI leg and the
-    documented `pytest tests/` run produce. It is rootdir-relative, though, so
-    the FILE is the authority when the report carries one — otherwise a run that
-    relocated the rootdir would lose the `tests/e2e/**` exemption and turn a
-    documented opt-in gate into a collection error naming a FalkorDB remedy.
+    The NODEID is checked first because that is the spelling every CI leg and
+    the documented `pytest tests/` run produce. It is rootdir-relative, though,
+    so the report's FILE is the authority when it carries one — otherwise a run
+    that relocated the rootdir (`--rootdir`, `-c` from another tree) would lose
+    the `tests/e2e/**` exemption and turn a documented opt-in gate into a
+    collection error naming a FalkorDB remedy.
     """
     nodeid = str(getattr(report, "nodeid", "") or "")
     if nodeid.replace("\\", "/").startswith(_NON_SELECTABLE_PREFIXES):
         return True
-    fspath = getattr(report, "fspath", None)
-    if fspath is None:  # pragma: no cover - pytest always sets it on a module
+    path = _report_file(report)
+    if path is None:  # pragma: no cover - a whole-module skip carries the tuple
         return False
     try:
-        return Path(str(fspath)).resolve().is_relative_to(_E2E_ROOT)
+        return path.resolve().is_relative_to(_E2E_ROOT)
     except (OSError, ValueError):  # pragma: no cover - unreadable/odd path
         return False
 
