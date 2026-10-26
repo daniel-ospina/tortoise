@@ -2745,6 +2745,48 @@ def test_a_refused_live_write_is_visible_to_its_caller(monkeypatch):
     assert record_writer.write_live_record({"type": "PointAdded"}) is None
 
 
+def test_a_malformed_dsn_is_reported_by_the_live_door(monkeypatch):
+    """#8447: the `malformed_dsn` arm REPORTS the refusal too, and carries the
+    caller's own position instead of rewinding the watermark.
+
+    The gap this closes is a REAL one, not a symmetry argument: the armed-
+    but-malformed shape is the first thing an operator hits when arming, and
+    before this the live door answered it with the SAME `None` an unarmed
+    deployment returns. The sibling test at
+    `test_a_malformed_dsn_on_the_journal_less_lane_is_counted` cannot pin this
+    arm: it goes through `sdk.capture_session` on the journal-less lane, whose
+    seam call never reaches `write_live_record`.
+
+    Mutation: `return None` on this arm — the first assertion reddens. Drop the
+    `seq` carry in `_refused` — the watermark assertion reddens with (1, 0), a
+    rewind from position 7.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "mysql://not-postgres/nope")
+    monkeypatch.setattr(record_writer, "write_records", lambda *a, **k: pytest.fail(
+        "a malformed DSN reached the seam"))
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
+        "a malformed DSN opened a socket"))
+
+    before = dict(monitoring.record_write_failure_counts()).get("malformed_dsn", 0)
+    write = record_writer.write_live_record(
+        {"type": "PointAdded", "id": "p1"}, seq=7)
+    after = dict(monitoring.record_write_failure_counts()).get("malformed_dsn", 0)
+
+    assert write is not None, (
+        "the malformed-DSN refusal returned None — the SAME value an unarmed "
+        "deployment returns (#8447)")
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED, write
+    assert write.refusal == "malformed_dsn", write
+    # ARMED and not reached: the degraded term, never the healthy one.
+    assert write.status == "degraded", write.status
+    assert (write.first_seq, write.last_seq) == (7, 6), (
+        "a refusal must report the caller's own position (last_seq == seq - 1, "
+        f"this class's 'nothing consumed' spelling) — got {write.first_seq}/"
+        f"{write.last_seq}, so a consumer applying last_seq + 1 rewinds to 1")
+    assert after == before + 1, (
+        f"the refusal left the metric behind: malformed_dsn {before} -> {after}")
+
+
 def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
     """The REST lane's SECOND writer: the dream drain, which opens its own SDK.
 

@@ -4252,6 +4252,53 @@ class TestSessionDetail:
         assert ok.status_code == 200, ok.text
         assert len(ok.json()["turn_points"]) == 2, ok.json()["turn_points"]
 
+    def test_detail_still_serves_the_graph_copy_when_the_record_cannot_answer(
+            self, client, monkeypatch):
+        """#8447 must not repeal #1591: a graph copy that EXISTS is still served.
+
+        The refusal above is for the case the fallback cannot cover — nothing to
+        serve. The other half of that conjunct (`and not turns`) is what keeps
+        the pre-arming copy byte-identical, and without this test a mutant
+        `if _record_read_failed: raise _record_unavailable()` passes the suite:
+        the sibling test DELETES the graph's turn nodes before the call, so the
+        guard is never reached with turns present.
+
+        Shape: capture while UNARMED (the graph holds the turns — the pre-arming
+        deployment), then arm the record and make its read fail. The caller must
+        still get 200 and the SAME turns, not a 503.
+
+        Mutation: drop `and not turns` — this test reds on the 503.
+        """
+        sid = "detail-record-down-graph-copy"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 2, r.json()
+
+        import tortoise.hosted_api as ha
+
+        # ARMED for the READ only: the capture above already landed the graph
+        # copy, which is the pre-arming state #1591 protects.
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would pass without "
+            "exercising the fallback at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 200, (
+            "#1591 repealed: a graph copy that EXISTS was refused because the "
+            f"record could not answer — {r.status_code} {r.text[:300]}")
+        turns = r.json()["turn_points"]
+        assert len(turns) == 2, turns
+        assert [t["role"] for t in turns] == ["user", "assistant"], turns
+
     def test_detail_exposes_the_session_source_node(self, client):
         """#3809: the detail carries the session's graph Source node
         (``session:<id>``, sourceKind ``agentSession``) so

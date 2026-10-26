@@ -408,7 +408,10 @@ class RecordWrite:
     #: door's write with no PROVEN ordinal: `write_live_record` reports that
     #: spelling rather than claiming a position it did not write), so a caller
     #: can advance its offset without re-deriving. Never a rewind: it is always
-    #: derived from the caller's own ``first_seq``.
+    #: derived from the caller's own ``first_seq`` — including on a ``REFUSED``
+    #: return, where ``first_seq`` is the caller's ``seq`` when it supplied one
+    #: (:func:`_refused`), so ``last_seq + 1`` re-offers the refused position
+    #: instead of rewinding to the start of the journal.
     last_seq: int = 0
     #: The connection the seam OPENED, or ``None`` when the caller injected one
     #: (theirs to close) or the call was not armed. When set, the caller owns the
@@ -429,15 +432,24 @@ class RecordWrite:
 
         The one check a caller needs. ``False`` means *nothing was written* —
         for ``NOT_ARMED`` it is not an error (an unarmed deployment is a
-        supported state), for ``REFUSED`` it IS one (the record was armed and
-        this call did not write — read :attr:`refusal`), but either way a caller
-        that needs the record to exist must not read ``False`` as success.
+        supported state); a ``REFUSED`` call was armed and did not write, and
+        :attr:`refusal` says WHY, but the five refusal tokens are not one
+        severity: ``malformed_dsn`` / ``no_tenant`` / ``circuit_open`` /
+        ``write_failed`` are FAILURES (counted on ``record_write_failures``),
+        while ``no_durable_journal`` is a healthy-armed DECLINE counted on
+        ``record_non_journal_skips`` — that lane has no journal by design, so
+        nothing a replay could restore is missing (#9231 review P2, and the
+        vocabulary note in `monitoring.record_write_failure`). A consumer must
+        branch on :attr:`refusal`, not on ``applied is False``, before calling a
+        decline an error. Either way a caller that needs the record to exist
+        must not read ``False`` as success.
         """
         return self.outcome is RecordWriteOutcome.APPLIED
 
     @property
     def status(self) -> str:
-        """The recorded status term for this outcome (``available``/``unconfigured``).
+        """The recorded status term for this outcome
+        (``available``/``degraded``/``unconfigured``).
 
         Derives through :func:`status_vocabulary.classify` — the ONE mapping of
         observable facts onto the recorded vocabulary — so the write side cannot
@@ -463,6 +475,28 @@ class RecordWrite:
         # probed. The alternative — `empty` — would assert a read returned no
         # rows, which is equally untrue.
         return status_vocabulary.classify(configured=True, reached=True)
+
+
+def _refused(refusal: str, seq: int | None) -> RecordWrite:
+    """The LIVE door's refusal report for an ARMED call that did not write.
+
+    ONE constructor for all six refusal arms (#8447), for two reasons:
+
+    * the ARM decides the outcome, so no arm can drift back to ``return None``
+      — the value this module reserves for NOT ARMED — by accident;
+    * the WATERMARK carries the caller's own position. A bare
+      ``RecordWrite(outcome=REFUSED)`` takes the dataclass defaults
+      ``first_seq=1, last_seq=0``, which is a *rewind* for any caller that
+      supplied ``seq`` and applies the documented ``last_seq + 1`` rule: it
+      would re-offer journal position 1 instead of the refused position.
+      Reporting ``first_seq=seq, last_seq=seq - 1`` is this class's own "nothing
+      consumed" spelling (``first_seq - 1``) — truthful (nothing beyond
+      ``seq - 1`` was consumed by this call) and never a rewind, so a consumer
+      that retries the refused position does the right thing.
+    """
+    first = seq if seq is not None else 1
+    return RecordWrite(outcome=RecordWriteOutcome.REFUSED, refusal=refusal,
+                       first_seq=first, last_seq=first - 1)
 
 
 def dsn_fingerprint(dsn: str) -> str:
@@ -1219,8 +1253,7 @@ def write_live_record(record: Mapping[str, Any], *,
     except RecordWriteError as exc:
         _count_write_failure("malformed_dsn")
         _logger.warning("the record write did not happen (malformed_dsn): %s", exc)
-        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
-                           refusal="malformed_dsn")
+        return _refused("malformed_dsn", seq)
     if not armed:
         return None
     if not durable:
@@ -1234,8 +1267,7 @@ def write_live_record(record: Mapping[str, Any], *,
             "is armed but this log is a scratch buffer, not a journal, so no "
             "replay could reproduce the row: %s", record.get("type"),
         )
-        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
-                           refusal="no_durable_journal")
+        return _refused("no_durable_journal", seq)
     tenant = tenant if tenant is not None else record_tenant()
     if tenant is not None and not (
             isinstance(tenant, tuple) and len(tenant) == 2
@@ -1249,8 +1281,7 @@ def write_live_record(record: Mapping[str, Any], *,
             "was not a (org_id, graph_id) pair of non-empty strings: %r",
             tenant,
         )
-        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
-                           refusal="no_tenant")
+        return _refused("no_tenant", seq)
     if tenant is None:
         _count_write_failure("no_tenant")
         _logger.warning(
@@ -1258,8 +1289,7 @@ def write_live_record(record: Mapping[str, Any], *,
             "but no tenant could be named for this write.%s",
             _refused_tenant_env_note(),
         )
-        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
-                           refusal="no_tenant")
+        return _refused("no_tenant", seq)
     org_id, graph_id = tenant
     if _breaker_is_open():
         # A recent connect FAILED. Refuse locally: the journal already holds the
@@ -1272,8 +1302,7 @@ def write_live_record(record: Mapping[str, Any], *,
             "without a socket: %s", LIVE_WRITE_BREAKER_SECONDS,
             record.get("type"),
         )
-        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
-                           refusal="circuit_open")
+        return _refused("circuit_open", seq)
     connection: Any | None = None
     if seq is None:
         # A DURABLE journal whose append could not prove the record's position
@@ -1311,8 +1340,7 @@ def write_live_record(record: Mapping[str, Any], *,
             "the record write did not happen (write_failed) — the journal has "
             "the record and a replay heals the record: %s", exc,
         )
-        return RecordWrite(outcome=RecordWriteOutcome.REFUSED,
-                           refusal="write_failed")
+        return _refused("write_failed", seq)
     finally:
         if connection is not None:
             # Close AFTER the commit so an armed deployment does not leak one
