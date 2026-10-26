@@ -18215,6 +18215,26 @@ def _read_record_turns(org: dict, session_id: str) -> list:
                                    session_id=session_id))
 
 
+async def _session_turn_count(proj, session_id: str) -> int | None:
+    """How many turns the ``:Session`` node SAYS it has — the reconciliation bound.
+
+    ``turn_count`` rides BOTH stores (§10000's split), so it is the one fact that
+    can tell a SHORT record answer from a COMPLETE one without trusting either
+    store's copy. Read-only, and only consulted when the record answered.
+    """
+    rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": session_id},
+        ).result_set)
+    if not rows or not rows[0]:
+        return None
+    try:
+        return int(rows[0][0])
+    except (TypeError, ValueError):
+        return None
+
+
 async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
     """A session's transcript, from the store that actually HOLDS it (#10000).
 
@@ -18319,7 +18339,8 @@ async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
             "created_at": created_at,
         })
     turns, graph_only = record_serve.reconcile_turn_answers(
-        record_served, graph_turns)
+        record_served, graph_turns,
+        expected_count=await _session_turn_count(proj, session_id))
     if record_served and graph_only:
         # The record answered SHORT and the graph completed it. INFO, not a
         # warning, for the same arming-migration reason as the empty branch —

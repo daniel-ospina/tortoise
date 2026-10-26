@@ -178,6 +178,7 @@ __all__ = [
     "read_node",
     "read_point",
     "read_session_turns",
+    "reconcile_turn_answers",
     "reset_fallback_counts",
     "serve_mode",
     "serve_point",
@@ -657,7 +658,9 @@ def read_session_turns(*, org_id: str, graph_id: str, session_id: str,
 
 
 def reconcile_turn_answers(record_turns: list[dict],
-                          graph_turns: list[dict]) -> tuple[list[dict], int]:
+                          graph_turns: list[dict], *,
+                          expected_count: int | None = None,
+                          ) -> tuple[list[dict], int]:
     """Complete a PARTIAL record answer from the graph (#10024 review, P1).
 
     ⛔ THE TRANSITIONAL HALF OF #10000, ONE STEP FURTHER THAN "EMPTY ≠
@@ -674,14 +677,25 @@ def reconcile_turn_answers(record_turns: list[dict],
     replica's answer as authoritative while another holds data.
     (``https://cassandra.apache.org/doc/latest/cassandra/managing/operating/read_repair.html``.)
 
+    ⛔ AND IT IS BOUNDED BY THE SESSION'S OWN ``turn_count`` — never a blind
+    union. The graph copy is only ever *contributing* here because it is
+    transitional (until #10017 purges it), and it is NOT pruned while the record
+    holds the turns (`_write_capture_turns` skips the stale sweep when armed), so
+    a pre-arming capture of 4 turns followed by an armed re-capture of 2 leaves
+    ``t2``/``t3`` on the graph. A union would serve those back as if the session
+    still owned them — the #1920 stale-turn defect, resurrected through the read
+    path. ``expected_count`` (the ``:Session``'s ``turn_count``, written by BOTH
+    stores) says how many turns this session CLAIMS: a record answer that already
+    reaches it is complete and the graph contributes nothing; a short one is
+    topped up to it, lowest missing indices first.
+
     The RECORD WINS on an id both stores hold — §2.0 makes Postgres the system of
     record and the graph a derived cache, so a disagreeing copy is the cache's
     staleness, never the record's. The graph only CONTRIBUTES the ids the record
     did not answer with, and only until #10017 purges the graph copy.
 
-    Ordering: the record's answer is already in turn order and the graph arm's is
-    the query's own order, so neither is re-sorted unless BOTH contribute — then
-    the merged list is ordered by the turn index the ids carry (the same rule
+    Ordering: the record's answer is already in turn order and the merged list is
+    ordered by the turn index the ids carry (the same rule
     ``record_read._turn_index`` states), so a turn recovered from the graph sits
     where the transcript says it belongs instead of at the end.
 
@@ -690,9 +704,18 @@ def reconcile_turn_answers(record_turns: list[dict],
     """
     record_ids = {t.get("id") for t in record_turns}
     graph_only = [t for t in graph_turns if t.get("id") not in record_ids]
+    if not record_turns:
+        # The record did not answer: the graph arm IS the answer (unchanged from
+        # the empty-answer repair), and `graph_only` counts what it supplied.
+        return list(graph_turns), len(graph_only)
+    if expected_count is None or len(record_turns) >= expected_count:
+        # Complete as far as anything can tell — the record's answer is served
+        # as-is, so a stale graph copy can never be resurrected into it.
+        return list(record_turns), 0
+    graph_only.sort(key=_turn_index_sort_key)
+    graph_only = graph_only[:expected_count - len(record_turns)]
     merged = list(record_turns) + graph_only
-    if record_turns and graph_only:
-        merged.sort(key=_turn_index_sort_key)
+    merged.sort(key=_turn_index_sort_key)
     return merged, len(graph_only)
 
 

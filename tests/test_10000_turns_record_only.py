@@ -399,21 +399,28 @@ class _FakeResult:
 
 
 class _FakeGraph:
-    def __init__(self, rows):
+    def __init__(self, rows, session_rows=None):
         self.rows = rows
+        self.session_rows = session_rows or []
         self.queries: list[str] = []
 
     def query(self, cypher, params=None):
         self.queries.append(cypher)
+        # The reconciliation bound is a SECOND, small read: how many turns the
+        # `:Session` node claims. Dispatching on the projection keeps the leg
+        # honest about which query answered what.
+        if "s.turn_count" in cypher:
+            return _FakeResult(self.session_rows)
         return _FakeResult(self.rows)
 
 
 class _FakeProj:
-    def __init__(self, rows):
-        self.g = _FakeGraph(rows)
+    def __init__(self, rows, session_rows=None):
+        self.g = _FakeGraph(rows, session_rows)
 
 
-def _hosted_turns(monkeypatch, *, record, graph_rows, armed=True):
+def _hosted_turns(monkeypatch, *, record, graph_rows, armed=True,
+                  turn_count=None):
     """`hosted_api._session_turns` with the record door and the graph stubbed."""
     from tortoise import hosted_api
 
@@ -425,7 +432,8 @@ def _hosted_turns(monkeypatch, *, record, graph_rows, armed=True):
         return record
 
     monkeypatch.setattr(hosted_api, "_read_record_turns", _read)
-    proj = _FakeProj(graph_rows)
+    proj = _FakeProj(graph_rows,
+                     [] if turn_count is None else [(turn_count,)])
     turns = asyncio.run(hosted_api._session_turns(
         {"org_id": "o", "graph_id": "g"}, "s", proj))
     return turns, proj
@@ -460,7 +468,7 @@ def test_an_armed_record_that_answers_serves_the_record(monkeypatch):
     """
     turns, proj = _hosted_turns(
         monkeypatch, record=[_turn("s_t0", "[user] hello")],
-        graph_rows=GRAPH_ROWS)
+        graph_rows=GRAPH_ROWS, turn_count=2)
     assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
         "the record answered with one of the session's two turns and the graph "
         "turn the write repair landed was dropped from the transcript")
@@ -476,10 +484,37 @@ def test_a_complete_record_answer_is_not_duplicated_by_the_graph(monkeypatch):
     turns, _proj = _hosted_turns(
         monkeypatch, record=[_turn("s_t0", "[user] hello"),
                              _turn("s_t1", "[assistant] hi")],
-        graph_rows=GRAPH_ROWS)
+        graph_rows=GRAPH_ROWS, turn_count=2)
     assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
         f"the merge duplicated a turn both stores hold: {[t['id'] for t in turns]}")
     assert [t["content"] for t in turns] == ["hello", "hi"]
+
+
+def test_a_stale_graph_turn_beyond_the_session_count_is_not_served(monkeypatch):
+    """⛔ THE UNION IS BOUNDED BY THE SESSION'S OWN `turn_count`.
+
+    A PRE-ARMING capture of four turns leaves its nodes on the graph, and the
+    stale sweep does not prune them while the record holds the turns
+    (`sdk._write_capture_turns`: `if stale and not _record_holds_turns`). An
+    armed re-capture of two turns then leaves `s_t2`/`s_t3` behind, so an
+    unbounded union would serve turns back that the session NO LONGER OWNS —
+    the #1920 stale-turn defect, resurrected through the read path.
+
+    `turn_count` rides BOTH stores and says how many turns the session CLAIMS:
+    a record answer that reaches it is complete, so the graph contributes
+    nothing.
+    """
+    turns, _proj = _hosted_turns(
+        monkeypatch, record=[_turn("s_t0", "[user] hello"),
+                             _turn("s_t1", "[assistant] hi")],
+        graph_rows=[*GRAPH_ROWS, ("s_t2", "[user] stale",
+                                 "2026-10-25T00:00:02+00:00"),
+                                ("s_t3", "[assistant] stale",
+                                 "2026-10-25T00:00:03+00:00")],
+        turn_count=2)
+    assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
+        "the read resurrected turns the session's own turn_count does not "
+        f"claim: {[t['id'] for t in turns]}")
 
 
 def test_a_graph_turn_recovered_into_a_partial_answer_keeps_turn_order(monkeypatch):
@@ -491,7 +526,7 @@ def test_a_graph_turn_recovered_into_a_partial_answer_keeps_turn_order(monkeypat
     """
     turns, _proj = _hosted_turns(
         monkeypatch, record=[_turn("s_t1", "[assistant] hi")],
-        graph_rows=[GRAPH_ROWS[0]])
+        graph_rows=[GRAPH_ROWS[0]], turn_count=2)
     assert [t["id"] for t in turns] == ["s_t0", "s_t1"], (
         "the turn recovered from the graph was served out of turn order")
     assert [t["content"] for t in turns] == ["hello", "hi"]
@@ -644,8 +679,6 @@ def test_a_journal_append_that_raises_repairs_the_turn_it_never_reported(
     The pin is the ARTIFACT: the graph must hold the turn whose append raised, and
     only that one.
     """
-    from tortoise import record_writer
-
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     sdk._bind_record_tenant("org-10024", "graph-10024")
     handed = _counting_record_seam(monkeypatch)
@@ -734,7 +767,7 @@ def test_the_sdk_read_completes_a_partial_record_answer(sdk, monkeypatch):
             "SET t.pointKind='event', t.is_episodic=true, t.content=$c, "
             "t.createdAt=$now MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": "sdk-part", "tid": f"sdk-part_t{i}", "c": text,
-                    "now": "2026-10-25T00:00:0%d+00:00" % i})
+                    "now": f"2026-10-25T00:00:0{i}+00:00"})
     detail = sdk._read_captured_session(proj, "sdk-part")
     assert [t["id"] for t in detail["turn_points"]] == [
         "sdk-part_t0", "sdk-part_t1"], (

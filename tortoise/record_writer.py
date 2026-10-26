@@ -685,6 +685,37 @@ def record_tenant() -> tuple[str, str] | None:
     return None
 
 
+def _tenant_pair(value: Any) -> tuple[str, str] | None:
+    """``value`` as a tenant pair, or ``None`` — THE shape rule, one declaration.
+
+    A tenant is two non-empty strings or it is not a tenant. Every door that
+    validates one calls this: a carried value and an env/scope value must be
+    held to the same rule, or a malformed pair is refused door-by-door.
+    """
+    if (isinstance(value, tuple) and len(value) == 2
+            and all(isinstance(part, str) and part for part in value)):
+        return value
+    return None
+
+
+def read_tenant(carried: Any | None = None) -> tuple[str, str] | None:
+    """The tenant a record READ is filed under — ``None`` when none is bound.
+
+    The READ twin of :func:`live_write_verdict`'s tenant arm, and the same
+    precedence (``carried`` > scope > env pair), so a read cannot be filed
+    under a tenant the write did not use.
+
+    ⛔ It answers the TENANT question and nothing else (#10024 review P2). A
+    read decided by :func:`live_write_verdict` inherits two arms that describe
+    WRITE eligibility: ``no_durable_journal`` refuses a journal-less lane (a
+    supported shape — the transcript is still perfectly readable) and
+    ``circuit_open`` silences reads for 60 s after one failed WRITE. Either one
+    sent the reader to the graph, where an armed session has no turn node, i.e.
+    the blank-transcript defect the record read exists to remove.
+    """
+    return _tenant_pair(carried if carried is not None else record_tenant())
+
+
 def _refused_tenant_env_note() -> str:
     """Why the env pair did not arm this write — and what to do instead.
 
@@ -1040,9 +1071,7 @@ def live_write_verdict(durable: bool,
     if not durable:
         return _LiveWriteVerdict("no_durable_journal")
     resolved = tenant if tenant is not None else record_tenant()
-    if resolved is not None and not (
-            isinstance(resolved, tuple) and len(resolved) == 2
-            and all(isinstance(part, str) and part for part in resolved)):
+    if resolved is not None and _tenant_pair(resolved) is None:
         return _LiveWriteVerdict("no_tenant", None, resolved)
     if resolved is None:
         return _LiveWriteVerdict("no_tenant")

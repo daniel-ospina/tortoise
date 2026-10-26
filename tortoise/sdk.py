@@ -2453,25 +2453,6 @@ def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
     return f"{session_id}_t{index + turn_offset}"
 
 
-def _resolve_read_tenant(own: Any, ambient: Any) -> tuple[str | None, str | None]:
-    """The tenant a RECORD READ is filed under — or ``(None, None)``.
-
-    The READ-side half of the tenant precedence the write door applies
-    (`record_writer.record_tenant`): this SDK's own binding (the graph it writes
-    to) wins, else the ambient scope, else the single-tenant env pair.
-
-    ⛔ It validates the SHAPE and nothing else. Deciding a read from
-    `record_writer.live_write_verdict` was #10024 review P2: two of that door's
-    arms (`no_durable_journal`, `circuit_open`) describe WRITE eligibility, so a
-    journal-less SDK — a supported shape — and a lane whose last write failed
-    both fell through to the graph, which an armed session does not have.
-    """
-    candidate = own if own is not None else (ambient() if ambient else None)
-    if (isinstance(candidate, tuple) and len(candidate) == 2
-            and all(isinstance(part, str) and part for part in candidate)):
-        return candidate
-    return None, None
-
 def _capture_turn_ids(proj, session_id: str) -> list[str]:
     """Every turn-Point id currently ``CONTAINS``-wired to ``session_id``.
 
@@ -37337,7 +37318,7 @@ class TortoiseSDK:
         turn node — i.e. the blank-transcript defect this method exists to remove,
         in the configuration the hosted door serves correctly.
         """
-        from tortoise.record_writer import RecordWriteError, record_dsn, record_tenant
+        from tortoise.record_writer import RecordWriteError, read_tenant, record_dsn
 
         try:
             if record_dsn() is None:
@@ -37348,12 +37329,14 @@ class TortoiseSDK:
                 "read from the graph: %s", session_id, exc)
             return ()
         # The record's tenant is this SDK's OWN binding (the graph this object
-        # writes to) unless the ambient scope names one — the same precedence
-        # the live write door applies, so the read cannot be filed under a
-        # tenant the write did not use.
-        org_id, graph_id = _resolve_read_tenant(
-            getattr(self, "_record_tenant", None), record_tenant)
-        if org_id is None:
+        # writes to) when it has one, else the door's own precedence (scope,
+        # then the declared single-tenant env pair) — the same rule the live
+        # write door applies, so the read cannot be filed under a tenant the
+        # write did not use. `record_writer.read_tenant` is that rule's ONE
+        # declaration: it answers the TENANT question only (#10024 review P2),
+        # never the write-eligibility arms a read must not inherit.
+        tenant = read_tenant(getattr(self, "_record_tenant", None))
+        if tenant is None:
             _logger.info(
                 "session %s: no record tenant is bound, so its turns are read "
                 "from the graph", session_id)
@@ -37361,6 +37344,7 @@ class TortoiseSDK:
         try:
             from tortoise.record_serve import read_session_turns
 
+            org_id, graph_id = tenant
             return tuple(read_session_turns(org_id=org_id, graph_id=graph_id,
                                             session_id=session_id))
         except RecordWriteError as exc:
@@ -37468,8 +37452,12 @@ class TortoiseSDK:
                 "id": tr[0], "role": role, "content": body,
                 "created_at": tr[2],
             })
+        try:
+            _expected = int(sess[2]) if sess[2] is not None else None
+        except (TypeError, ValueError):
+            _expected = None
         turn_points, _graph_only = reconcile_turn_answers(
-            turn_points, _graph_turns)
+            turn_points, _graph_turns, expected_count=_expected)
         if turn_points and _graph_only:
             # The mixed store the write repair creates: the record answered
             # short and the graph completed it. Said out loud for the same
