@@ -2432,9 +2432,21 @@ _SESSION_REDACTIONS_CYPHER = (
 )
 
 
+#: "This capture cannot attest the value" — distinct from ``None``, which is a
+#: real absence (a fresh turn) the journalled snapshot must state. A snapshot key
+#: carrying this sentinel is OMITTED, and an omitted column is one the record's
+#: upsert (and the graph fold) leaves untouched (#10000 review P1).
+_UNATTESTABLE = object()
+
+
 def _record_prior_vectors(sdk, session_id: str,
-                          turn_ids: list[str]) -> dict[str, tuple[str, Any]]:
-    """``{turn_id: (stored content, embedding)}`` for the ids the RECORD holds.
+                          turn_ids: list[str]) -> dict[str, Any] | None:
+    """``{turn_id: PriorTurn}`` for the ids the RECORD already holds.
+
+    ⛔ THE NAME IS THE VECTOR HALF'S, THE MAPPING IS THE WHOLE PRIOR ROW: the same
+    read answers "what vector does the record hold for this turn" (#5004) and
+    "what ``created_at``/``status`` does it hold" (the fold's absolute upsert,
+    which the graph path never needs because its Cypher coalesces).
 
     The record half of #5004 round-3's PRESERVE rule (#10000 review P1). On the
     graph path the writer learns what its write LEFT from the write's own
@@ -2472,18 +2484,22 @@ def _record_prior_vectors(sdk, session_id: str,
     conn = None
     try:
         conn = open_record()
-        rows = turn_prior_vectors(
+        return turn_prior_vectors(
             conn, org_id=org_id, graph_id=graph_id, session_id=session_id,
             turn_ids=turn_ids)
-        return {tid: (content, vector) for tid, (content, vector)
-                in rows.items() if vector is not None}
     except Exception:  # noqa: BLE001, RUF100
         _logger.warning(
-            "could not read the record's prior turn vectors for session %s — "
-            "this capture journals no vector for %d turn(s), so the stored "
-            "vector is cleared rather than preserved (#5004)", session_id,
+            "could not read the record's prior turn rows for session %s — this "
+            "capture journals no vector for %d turn(s), so the stored vector is "
+            "cleared rather than preserved (#5004), and it leaves "
+            "created_at/status OUT of the journal rather than asserting this "
+            "capture's own values over the record's", session_id,
             len(turn_ids), exc_info=True)
-        return {}
+        # ``None`` is NOT ``{}``: ``{}`` means "the record holds no row for these
+        # ids" (a fresh turn), while ``None`` means "this capture cannot know" —
+        # and the journalled snapshot must then OMIT the fields it cannot attest
+        # rather than write a value over the record's.
+        return None
     finally:
         if conn is not None:
             with contextlib.suppress(Exception):
@@ -2703,11 +2719,14 @@ def _write_capture_turns(
     # Postgres; this asks only whether Postgres can hold it right now). Two
     # halves, and the SECOND one is what the review's P0 was about:
     #
-    #   1. BEFORE the write: `record_writer.live_write_refusal` — the write
+    #   1. BEFORE the write: `record_writer.record_holds_turns` — the write
     #      door's OWN predicate (armed DSN + durable journal + a tenant + a
-    #      closed connect breaker). Everything it can name is decided here, and
-    #      the graph write then happens FIRST, exactly as the unarmed path does,
-    #      so its read-back feeds the journal the stored createdAt/status/vector.
+    #      closed connect breaker). The record path then SKIPS the graph write
+    #      entirely (the `if not _record_first` batch below), so there is no node
+    #      read-back to learn `createdAt`/`status`/`vector` from: those come from
+    #      the record's PRIOR row instead (`_record_prior_vectors`), which is
+    #      what the journal must carry for a replay to leave the record alone.
+    #      The graph path is the one that writes first and reads back.
     #   2. AFTER the write: the outcome each emit actually reported. A record
     #      write can still be REFUSED after the preflight approved it — the
     #      database went unreachable mid-capture, the breaker tripped on it, the
@@ -2748,30 +2767,58 @@ def _write_capture_turns(
         ).result_set
         stored = {r[0]: (r[1], r[2], r[3]) for r in (_rows or [])}
 
-    if _record_first and any(emb is None for emb in turn_embs):
-        # #5004 round-3 (#10000 review P1): this capture encoded no vector for at
-        # least one turn, so the value its write LEAVES depends on what the
-        # record already holds. Read it rather than journal `None` — `None` is
-        # the replay's instruction to CLEAR, and an unavailable embedder is not a
-        # statement that the stored vector should be dropped.
-        _prior = _record_prior_vectors(
-            sdk, session_id,
-            [turn_rows[i]["id"] for i in range(len(turn_rows))
-             if turn_embs[i] is None])
+    if _record_first:
+        # ── WHAT THE RECORD'S WRITE *LEAVES* (#5004 round-3, #10000 review P1) ──
+        # Two of the three journalled fields depend on what the record already
+        # holds, and the record path has no node read-back to learn them from, so
+        # they are read here:
+        #
+        #   * the VECTOR — this capture may have encoded none (the embedder was
+        #     unavailable), and journalling `None` is the replay's instruction to
+        #     CLEAR; an unavailable embedder is not a statement that the stored
+        #     vector should be dropped (`#5004`).
+        #   * `created_at` / `status` — the record's upsert writes them from
+        #     EXCLUDED ABSOLUTELY (`record_projection._upsert_statement`), unlike
+        #     `_TURN_WRITE_CYPHER`'s `coalesce`. Journalling this capture's
+        #     `now`/`"draft"` for a turn that is ALREADY stored therefore
+        #     re-stamps its `created_at` and demotes a promoted turn to `draft`
+        #     on the store of record, permanently and silently. Journalling the
+        #     prior values is what makes the fold's write idempotent, and it is
+        #     the same "journal what the write LEFT" rule the graph read-back
+        #     provides on the other path.
+        #
+        # Read only on a RE-CAPTURE: a fresh session has no prior row, so its hot
+        # path keeps its exact query count (#3086).
+        _prior: dict[str, Any] = {}
+        _prior_unknown = False
+        if session_existed and turn_rows:
+            _read = _record_prior_vectors(
+                sdk, session_id, [row["id"] for row in turn_rows])
+            _prior_unknown = _read is None
+            _prior = _read or {}
         for _i, _row in enumerate(turn_rows):
-            if turn_embs[_i] is not None:
-                continue
             _held = _prior.get(_row["id"])
-            # The SAME rule the Cypher applies: a preserved vector survives only
-            # when the content did not change — a vector for text no longer
-            # stored is the dense-leg lie #5004 exists to remove. The comparison
-            # is against what the RECORD holds (`_held[0]`), never against this
-            # capture's own `turn_texts[i]`: `_row["c"]` is computed FROM that
-            # value, so that comparison is the text with itself.
-            _emb = _held[1] if _held is not None else None
-            _unchanged = _held is not None and _held[0] == _row["c"]
-            stored[_row["id"]] = (
-                None, None, _emb if (_emb is not None and _unchanged) else None)
+            _emb = turn_embs[_i]
+            if _emb is None and _held is not None:
+                # The SAME rule the Cypher applies: a preserved vector survives
+                # only when the content did not change — a vector for text no
+                # longer stored is the dense-leg lie #5004 exists to remove. The
+                # comparison is against what the RECORD holds (`_held.content`),
+                # never against this capture's own `turn_texts[i]`: `_row["c"]`
+                # is computed FROM that value, so that comparison is the text
+                # with itself.
+                _unchanged = _held.content == _row["c"]
+                _emb = _held.embedding if (
+                    _held.embedding is not None and _unchanged) else None
+            if _held is not None:
+                _left_created, _left_status = _held.created_at, _held.status
+            elif _prior_unknown:
+                # Cannot attest: OMIT (see `_UNATTESTABLE`) so the replay leaves
+                # the record's values alone.
+                _left_created = _left_status = _UNATTESTABLE
+            else:
+                _left_created = _left_status = None
+            stored[_row["id"]] = (_left_created, _left_status, _emb)
 
     # #1920, re-homed by #10000: a SHORTER re-capture must remove the previous
     # capture's turns beyond the new window, or the stored transcript keeps rows
@@ -2863,9 +2910,19 @@ def _write_capture_turns(
             # #5445: the redacted role (see the turn_rows write above).
             "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
-            "status": status if status is not None else "draft",
-            "createdAt": created_at if created_at is not None else now,
         }
+        # ⛔ AN OMITTED FIELD IS NOT A CLAIM (#10000 review P1). `status` and
+        # `createdAt` are journalled as what the write LEAVES, and both folds
+        # apply the snapshot absolutely (the graph path's `coalesce` is the write
+        # rule; the record's upsert is `EXCLUDED`). So the key is present when
+        # this capture knows the value — the prior row's, or the fresh-turn
+        # defaults — and ABSENT when the prior read could not tell it, because a
+        # key that is absent is a column the upsert does not touch, while a key
+        # carrying `now`/`draft` DEMOTES and RE-STAMPS a stored turn.
+        if status is not _UNATTESTABLE:
+            _turn_snapshot["status"] = status if status is not None else "draft"
+        if created_at is not _UNATTESTABLE:
+            _turn_snapshot["createdAt"] = created_at if created_at is not None else now
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
         # #5004 round-3: when THIS capture encoded nothing, what rides the
@@ -37415,10 +37472,10 @@ class TortoiseSDK:
         # the endpoint and the SDK twin disagreeing about one session, which
         # #3557's parity contract exists to prevent.
         turn_points: list[dict] = []
+        from tortoise.record_read import merge_turn_payloads, turn_payloads
+
         _answer = self._record_turn_answer(session_id)
         if _answer is not None and _answer.answered:
-            from tortoise.record_read import turn_payloads
-
             turn_points = turn_payloads(_answer.turns)
         else:
             if _answer is not None:
@@ -37427,19 +37484,30 @@ class TortoiseSDK:
                 # Never silence, and never an empty transcript while another
                 # store holds one.
                 _logger.warning(
-                    "session %s: the record did not answer for its turns (%s) "
-                    "— serving the graph copy", session_id, _answer.reason)
+                    "session %s: the record did not answer for its whole "
+                    "transcript (%s) — merging the graph copy for the turns "
+                    "it does not hold", session_id, _answer.reason)
             turn_rows = proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
                 "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
                 params={"sid": session_id},
             ).result_set
+            graph_points: list[dict] = []
             for tr in turn_rows:
                 role, body = _capture_turn_role_text(tr[1] or "")
-                turn_points.append({
+                graph_points.append({
                     "id": tr[0], "role": role, "content": body,
                     "created_at": tr[2],
                 })
+            # ⛔ A SHORT record answer is not an answer (#10000 review P0): the
+            # writer's store decision is per TURN while this read's is per
+            # SESSION, so a mid-capture refusal leaves part of the transcript in
+            # each store. `merge_turn_payloads` serves the UNION (the record's
+            # rows first, then the graph's for the ids it does not hold) — the
+            # same rule the hosted door applies, from the ONE definition.
+            turn_points = (
+                merge_turn_payloads(_answer, graph_points)
+                if _answer is not None else graph_points)
         ext_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
@@ -37501,31 +37569,41 @@ class TortoiseSDK:
         or it could not be read) — the caller then serves the graph, which is
         where the capture writer put them in exactly that case.
 
-        The capability test is `record_writer.record_holds_turns`, the SAME
-        declaration `_write_capture_turns` uses, so the read and the write cannot
-        disagree about which store holds the turns (#10000 review P0-3).
+        ⛔ IT ASKS THE RECORD'S CAPABILITY, NOT THIS PROCESS'S JOURNAL (#10000
+        review P2). The question "is the record where this session's turns are"
+        is about the process that CAPTURED the session, and this is a READ door:
+        a journal-less SDK (the documented embedded/dev lane, and the shape of any
+        reader that is not the writer) may be reading a session the hosted lane
+        captured WITH a journal. Asking its own journal answered a write-side
+        question about the wrong process — `None`, the graph — and the graph holds
+        no turn node, because the record took them: an empty transcript for a
+        captured session, mutely. So the gate is the record's capability for this
+        tenant (`live_write_refusal`: armed DSN + tenant + closed breaker) and
+        `session_turns.answered` is the AUTHORITY on whether this session's turns
+        are in there. A record that is unarmed — the graph-only lane — is still
+        answered `None` with no round trip, and a record that stays silent falls
+        back to the graph through the caller's existing `not answered` arm.
+        (Asking is not the same as trusting: the durability half is a WRITE
+        precondition and lives in `_write_capture_turns`, where it decides the
+        store.)
 
         Deliberately fail-soft: a record that raises must not blank a transcript
         the graph still holds, and the exception is logged rather than swallowed.
         """
         from tortoise.record_read import session_turns
         from tortoise.record_serve import open_record
-        from tortoise.record_writer import record_holds_turns, record_tenant
+        from tortoise.record_writer import live_write_refusal, record_tenant
 
         tenant = self._record_tenant or record_tenant()
         if tenant is None:
             # No record tenant: the same SDK's capture is refused `no_tenant`
             # and writes its turns to the graph, so the graph is the answer.
             return None
-        _log = self._get_event_log()
-        # DURABILITY IS READ, exactly as `_write_capture_turns` and
-        # `_write_record_projection` read it: a scratch buffer is not a journal,
-        # the record DECLINES it, and a read that assumed otherwise would serve
-        # this session's `turns` from a store the writer never filled.
-        if not record_holds_turns(
-                journal_configured=_log is not None,
-                durable=_log is not None and getattr(_log, "durable", True),
-                tenant=tenant):
+        # `durable=True` is this read door's statement about the WRITER's side:
+        # whether the capturing process could journal is not observable here, and
+        # the record's own answer is what decides. A refusal (unarmed, malformed
+        # DSN, open breaker) is the graph-only lane and costs no round trip.
+        if live_write_refusal(durable=True, tenant=tenant) is not None:
             return None
         org_id, graph_id = tenant
         conn = None

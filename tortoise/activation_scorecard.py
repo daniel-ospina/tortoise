@@ -277,11 +277,27 @@ STAGE3_PREDICATE = "p.pointKind IS NULL OR p.pointKind <> 'event'"
 #: falsifier (c) at the aggregate level.
 #:
 #: So the query returns BOTH facts and `stage_counts` takes the LARGER: a turn
-#: node is a turn, and `s.turn_count` is the session's own statement of how many
-#: turns it holds. In the graph-only world the node count is the larger (it is,
-#: by construction: `turn_count` is the WINDOW LENGTH, never more than the ids
-#: written), so the reported numbers do not move for a deployment that has not
-#: armed the record; in the record world the counter is all there is.
+#: node is a turn, and `s.turn_count` is the count the WRITER reported for the
+#: window it just captured. In the graph-only world the node count is the larger
+#: (by construction: `turn_count` is the WINDOW LENGTH — `len(turns)` for that
+#: capture — so it can never exceed the ids that capture wrote), which is why the
+#: reported numbers do not move for a deployment that has not armed the record.
+#:
+#: ⛔ WHAT THIS COLUMN IS **NOT** (corrected — the earlier wording claimed it was
+#: "the session's own statement of how many turns it holds", which the writer
+#: contradicts: `sdk._write_capture_turns` says of the same property that
+#: `turn_count` is a WINDOW LENGTH, not a max id index, because an APPEND at
+#: `turn_offset=2` writes `_t2`/`_t3` while the count still reads 2). So on an
+#: armed deployment, where `count(DISTINCT t)` is 0, a session captured in MORE
+#: THAN ONE window is under-reported: this column is its LAST window, not the
+#: session's total, and `turn_points_total` inherits that. The exact total lives
+#: in the record (§9.1/D1) and reading it here is the measurement step of #10000,
+#: not a token swap: `turn_max_index + 1` is the id-space high-water mark but is
+#: MONOTONE UP, so it OVER-counts after a shorter re-capture, and choosing between
+#: "a published figure that under-reports multi-window sessions" and "one that
+#: over-reports after a shorter re-capture" is a decision this scorecard's owner
+#: has not taken. Until it is taken the residual is stated here rather than
+#: silently shipped as a total.
 #:
 #: ⚠️ NOT written as a `CASE WHEN count(DISTINCT t) > ...` in Cypher: MEASURED
 #: on the embedded engine, that form parses, runs, returns NO error, and reports

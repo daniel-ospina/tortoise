@@ -194,6 +194,7 @@ _logger = logging.getLogger(__name__)
 __all__ = [
     "CONNECT_TIMEOUT_SECONDS",
     "LIVE_WRITE_BREAKER_SECONDS",
+    "LIVE_WRITE_REFUSALS",
     "POSITION_ORDINAL_SOURCE",
     "POSITION_UNPROVEN_WARN_SECONDS",
     "RECORD_DSN_ENV",
@@ -207,7 +208,9 @@ __all__ = [
     "RecordWriter",
     "current_record_tenant",
     "dsn_fingerprint",
+    "live_write_refusal",
     "record_dsn",
+    "record_holds_turns",
     "record_tenant",
     "record_tenant_for",
     "single_tenant_declared",

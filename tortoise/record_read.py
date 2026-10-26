@@ -194,6 +194,30 @@ class SessionText:
 
 
 @dataclass(frozen=True)
+class PriorTurn:
+    """What the record already holds for ONE turn id, as a re-capture must see it.
+
+    ⛔ ``created_at``/``status`` ARE HERE BECAUSE THE RECORD'S UPSERT IS ABSOLUTE
+    (#10000 review P1). On the graph path a re-capture cannot restamp or demote a
+    stored turn: `_TURN_WRITE_CYPHER` sets ``t.status=coalesce(t.status, ...)``
+    and ``t.createdAt=coalesce(t.createdAt, $now)``, and the writer journals the
+    values the write LEFT because the write hands them back. The record path has
+    no node to read back, and `record_projection._upsert_statement` writes
+    ``created_at``/``status`` from EXCLUDED outright — so journalling this
+    capture's own ``now``/``"draft"`` for a turn the record already holds
+    re-stamps its ``created_at`` and resets a promoted turn to ``draft``, on the
+    store that IS the system of record, permanently and silently. Reading the
+    prior row is how the journal carries what the write leaves, which is the same
+    rule the vector half applies below.
+    """
+
+    content: str
+    embedding: Any = None
+    created_at: str | None = None
+    status: str | None = None
+
+
+@dataclass(frozen=True)
 class TurnAnswer:
     """This record's answer about ONE session's transcript — and whether it SPOKE.
 
@@ -211,8 +235,23 @@ class TurnAnswer:
     #10000 removes it). ``answered`` carries that, and ``reason`` names WHICH
     silence it was for the log an operator reads.
 
-    ``turns`` is only meaningful when ``answered`` is True; when it is False the
-    tuple is empty and says nothing about the session.
+    ⛔ AND A **SHORT** ANSWER IS NOT AN ANSWER (#10000 review P0). "Did the record
+    speak" and "did it speak for the WHOLE session" are two questions, and only
+    the second one licenses serving the record INSTEAD of the other store. The
+    writer this module is paired with deliberately produces a SPLIT store: a
+    per-turn record write refused after an earlier one landed leaves the landed
+    turns in the record and the refused ones in the graph
+    (`sdk._write_capture_turns`), and an append on an armed deployment writes the
+    new window to the record while the pre-arming turns stay in the graph. Any
+    non-empty row set treated as authoritative therefore serves a TRUNCATED
+    transcript over a store that holds the rest — the same loss this type exists
+    to prevent, one arm over from the empty one.
+
+    ``turns`` is what the record HOLDS. When ``answered`` is True that is the
+    whole session's transcript. When it is False the tuple is what the record
+    could still contribute (empty for the silent cases, the landed prefix for a
+    short answer) and it must be served ONLY IN ADDITION to the other store's
+    turns, never instead of them — see :func:`merge_turn_payloads`.
     """
 
     answered: bool
@@ -242,13 +281,19 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     than reading on unscoped (see its docstring).
 
     ``answered`` is decided by the record's OWN account of the session:
-    :func:`_turns` returning rows is an answer by itself; with no rows, the
-    answer is only the record's when `public.session_narrative` holds this
-    session's `turn_count` — the column the capture's `SessionRecorded` writes
+    :func:`_turns` returning rows is an answer only when those rows COVER the
+    session's turns — a contiguous run from index 0 long enough for the
+    `turn_count` the same row states; with no rows, the answer is only the
+    record's when `public.session_narrative` holds this session's `turn_count` —
+    the column the capture's `SessionRecorded` writes
     (`record_projection._narrative_statements`). A count of 0 says "this session
     has no turns"; a positive count with no rows, or no count row at all, says
     "this record did not answer for these turns" and leaves the decision to the
-    caller.
+    caller. A row set that is short of the count, or that does not start at
+    index 0 (the `turn_offset` append shape) or has a HOLE in the middle (a
+    per-turn write refused between two that landed), is a PARTIAL answer: it is
+    reported as not-answered and carries the rows it does hold, so the caller
+    merges them with the other store instead of serving them alone.
     """
     from tortoise.record_projection import scope_connection
 
@@ -259,8 +304,12 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     turns = _turns(conn, org_id, graph_id, session_id)
     turn_count = row[3] if row is not None and isinstance(row[3], int) else None
     if turns:
-        return TurnAnswer(answered=True, turns=turns, turn_count=turn_count,
-                          reason="turn rows")
+        shortfall = _shortfall(turns, turn_count)
+        if shortfall is None:
+            return TurnAnswer(answered=True, turns=turns, turn_count=turn_count,
+                              reason="turn rows")
+        return TurnAnswer(answered=False, turns=turns, turn_count=turn_count,
+                          reason=shortfall)
     if turn_count == 0:
         return TurnAnswer(answered=True, turns=(), turn_count=0,
                           reason="the record states 0 turns")
@@ -273,6 +322,38 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
         answered=False, turn_count=None,
         reason=("the record holds no narrative row and no turn rows for this "
                 "session — it did not answer"))
+
+
+def _shortfall(turns: Sequence[Turn], turn_count: int | None) -> str | None:
+    """WHY these rows are not the session's whole transcript — or ``None``.
+
+    Two facts make a row set incomplete, and both are detectable from what the
+    read already fetched, so neither needs a second store to ask:
+
+    * it is SHORTER than the count the record itself states on the narrative row
+      (`len(turns) < turn_count`) — the shape a mid-capture refusal leaves, where
+      the refused turns went to the graph;
+    * it does not cover index ``0 .. max(index)`` — the `turn_offset` append
+      shape (`_t2`/`_t3` in the record, `_t0`/`_t1` still in the graph), where
+      `turn_count` is the WINDOW length and therefore cannot see the gap, and an
+      interior hole left by one refused write between two that landed.
+
+    A record that HOLDS FEWER than its own count, or whose ids start above 0 or
+    skip an index, has not answered for the session — see ``TurnAnswer``.
+    """
+    if turn_count is not None and len(turns) < turn_count:
+        return (f"the record states {turn_count} turn(s) but holds only "
+                f"{len(turns)} — a partial transcript, not an answer for the "
+                "whole session")
+    held = {turn.index for turn in turns}
+    if not held:
+        return None
+    missing = [i for i in range(max(held) + 1) if i not in held]
+    if missing:
+        shown = ", ".join(str(i) for i in missing[:5])
+        return (f"the record holds {len(turns)} turn(s) but not the whole run "
+                f"(no turn row for index {shown}) — a partial transcript")
+    return None
 
 
 def turn_payloads(turns: Sequence[Turn]) -> list[dict]:
@@ -301,10 +382,59 @@ def turn_payloads(turns: Sequence[Turn]) -> list[dict]:
     return out
 
 
+def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict]) -> list[dict]:
+    """The record's rows AND the other store's, ONE turn each, in turn order.
+
+    ⛔ WHY A MERGE AND NOT A CHOICE (#10000 review P0). The read's store
+    decision is per SESSION while the writer's is per TURN, so the transitional
+    dual-store state includes sessions whose transcript is SPLIT: a per-turn
+    record write refused after an earlier one landed (`sdk._write_capture_turns`
+    puts the refused ones in the graph), or an append on an armed deployment
+    whose earlier turns were captured before arming. In that state NEITHER store
+    holds the whole transcript, so serving either one alone is a truncated
+    answer — and serving the record alone, which any non-empty row set used to
+    license, silently dropped the turns the fallback had just rescued.
+
+    So the caller serves the UNION: the record's rows first, then the other
+    store's rows for the ids the record does not hold, ordered by the index the
+    turn id carries (`{session}_t{i}`, the contract `_turn_index` states). A row
+    present in BOTH stores is the record's — the record is the store of record
+    (§9.1/D1), and the two are the same turn.
+
+    This is the transition half of #10000, exactly like the graph fallback it
+    extends: it disappears with the graph-side purge step. Until then it is what
+    makes "no path leaves a turn in neither store" true of the READ as well as
+    of the write.
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for payload in turn_payloads(answer.turns):
+        turn_id = payload.get("id")
+        if isinstance(turn_id, str) and turn_id and turn_id not in merged:
+            merged[turn_id] = payload
+            order.append(turn_id)
+    for payload in other:
+        turn_id = payload.get("id") if isinstance(payload, dict) else None
+        if isinstance(turn_id, str) and turn_id and turn_id not in merged:
+            merged[turn_id] = payload
+            order.append(turn_id)
+
+    def _order_key(turn_id: str) -> tuple:
+        match = re.search(r"_t([0-9]+)$", turn_id)
+        # Ids that do not carry an index keep their arrival order at the end
+        # rather than raising in a serving read: ordering is a nicety here, and
+        # a legacy row must not cost the caller its transcript.
+        if match is None:
+            return (1, 0, turn_id)
+        return (0, int(match.group(1)), turn_id)
+
+    return [merged[turn_id] for turn_id in sorted(order, key=_order_key)]
+
+
 def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
                        session_id: str,
-                       turn_ids: Sequence[str]) -> dict[str, tuple[str, Any]]:
-    """``{turn_id: (stored content, stored embedding)}`` for the ids it holds.
+                       turn_ids: Sequence[str]) -> dict[str, PriorTurn]:
+    """``{turn_id: PriorTurn}`` — what the record already HOLDS for these ids.
 
     The record's half of #5004 round-3's PRESERVE rule (#10000 review P1). The
     graph path learns what a write LEFT on the node from the write's own
@@ -322,6 +452,9 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
     for "no prior vector": the caller decides, and the graph path's answer for
     that case is a CLEARED vector — see `sdk._write_capture_turns`.
 
+    ⛔ IT ALSO CARRIES ``created_at`` AND ``status``, because the vector is not
+    the only field a re-capture must not overwrite (see :class:`PriorTurn`).
+
     SCOPED, like :func:`session_turns`: an unscoped read here would silently
     report "no prior vector" for every turn and clear the whole window's vectors.
     """
@@ -333,16 +466,25 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
     scope_connection(conn, org_id)
     cursor = _cursor(conn)
     cursor.execute(
-        f"SELECT node_key, content, embedding FROM public.{POINT_TABLE} "
+        f"SELECT node_key, content, embedding, created_at, status "
+        f"FROM public.{POINT_TABLE} "
         f"WHERE org_id = %s AND graph_id = %s AND node_key IN %s",
         (org_id, graph_id, ids),
     )
-    out: dict[str, tuple[str, Any]] = {}
+    out: dict[str, PriorTurn] = {}
     for row in _rows(cursor):
-        node_key, content, embedding = row[0], row[1], row[2]
-        if isinstance(node_key, str):
-            out[node_key] = (content if isinstance(content, str) else "",
-                             embedding)
+        node_key = row[0]
+        if not isinstance(node_key, str):
+            continue
+        content = row[1]
+        created_at = row[3] if len(row) > 3 else None
+        status = row[4] if len(row) > 4 else None
+        out[node_key] = PriorTurn(
+            content=content if isinstance(content, str) else "",
+            embedding=row[2],
+            created_at=created_at if isinstance(created_at, str) else None,
+            status=status if isinstance(status, str) else None,
+        )
     return out
 
 

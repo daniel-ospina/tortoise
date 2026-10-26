@@ -14711,29 +14711,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # prior stored-turn count — not on which branch ran (see the meter below).
     prior_turn_count = 0
     if session_existed:
-        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
-        # meter. Before #3551 it sat AFTER the Session MERGE that had already
-        # committed; the MERGE now runs LATER, inside the pooled
-        # _write_session_and_turns submission below, so nothing is committed
-        # at this point yet. It stays best-effort regardless — a transient
-        # graph error here must never 500 a capture (the file's posture, and
-        # every sibling bookkeeping read in this function), and the Session
-        # node is guaranteed to pre-exist by `session_existed`. On failure 0
-        # makes the meter OVER-count (`len(windowed) > 0`), the documented
-        # conservative posture, never a blind spot. It also must not abort the
-        # keyless→keyed upgrade this PR exists to enable.
-        try:
-            _prior_turns = proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                "WHERE t.is_episodic = true RETURN count(t)",
-                params={"sid": session_id}).result_set
-            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
-        except Exception:
-            import logging
-            logging.getLogger("tortoise.api").warning(
-                "prior_turn_count read failed (non-fatal, metering over-counts)",
-                exc_info=True)
-            prior_turn_count = 0
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op meter,
+        # and it must never 500 a capture — see `_prior_stored_turn_count`.
+        prior_turn_count = _prior_stored_turn_count(proj, session_id)
 
     # #4194: embed the whole window BEFORE the loop — the stored text of each
     # turn, exactly as the loop writes it — in ONE local-model call, using the
@@ -18196,26 +18176,54 @@ def _record_holds_turns(org: dict) -> bool:
     the graph is not an option); it asks whether Postgres CAN hold them right
     now, because a refusal there is what leaves them in the graph.
     """
-    if not org.get("graph_id"):
-        # An org-wide credential names no graph, so no record tenant can be
-        # scoped for this read (the record's key is (org_id, graph_id)) — and the
-        # SAME credential's capture is refused `no_tenant`, which keeps its turns
-        # in the graph. Reading the graph is then the correct answer rather than
-        # a degradation. (Before this, `org["graph_id"]` raised here and the
-        # whole record leg was skipped by the enclosing `except`, mutely.)
-        return False
-    from tortoise.config import _resolve_event_log_path
-    from tortoise.record_writer import record_holds_turns
+    return _record_tenant_for_read(org) is not None
 
-    # The journal path is resolved EXACTLY as `_make_sdk(graph_name=…)` resolves
-    # it for this branch: an explicit graph name, no namespace (the derivation
-    # uses the name verbatim, and `namespace="registry"` would divert it).
-    # No journal ⇒ the per-turn records are never emitted ⇒ the record is not
-    # where the turns are, armed DSN or not.
-    return record_holds_turns(
-        journal_configured=_resolve_event_log_path(
-            namespace=None, graph_name=org["graph_namespace"]) is not None,
-        tenant=(org["org_id"], org["graph_id"]))
+
+def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
+    """The tenant this READ must scope, or ``None`` ⇒ the graph holds the turns.
+
+    ⛔ THE READ MUST RESOLVE THE TENANT THE WAY THE WRITE DOES (#10000 review
+    P1). The previous version hand-built ``(org["org_id"], org["graph_id"])`` —
+    the credential's pair — while the capture writer resolves through
+    `record_writer.record_tenant()` (``_live_write_verdict``: *"the scope's, else
+    the env pair"*). On a self-host registry deployment armed with the
+    single-tenant env pair those are DIFFERENT values: `record_tenant_for`
+    refuses a registry `g_<hex>` graph id (the record's tables FK into
+    `public.graphs`), so the write files the turns under the env pair while a
+    read scoped to the credential sees nothing — `answered=False`, the graph
+    fallback, and the graph holds no turn node because the record took them. An
+    empty transcript for a captured session, from the store the ruling chose.
+
+    So: `_resolve_record_tenant` first (the control-plane pair, the ONE
+    declaration this module already owns — it dovetails with what
+    `_bind_record_tenant` puts on the SDK), then `record_tenant()` for the
+    single-tenant / scoped lane the writer falls through to. `None` when neither
+    names one: the same credential's capture is then refused ``no_tenant`` and
+    keeps its turns in the graph, so reading the graph is the CORRECT answer
+    rather than a degradation.
+
+    The predicate half is `record_writer.record_holds_turns`, the ONE declaration
+    of "can the record hold a live write right now", asked with THIS tenant. The
+    journal path is resolved EXACTLY as `_make_sdk(graph_name=…)` resolves it for
+    this branch: an explicit graph name, no namespace (the derivation uses the
+    name verbatim, and `namespace="registry"` would divert it). No journal ⇒ the
+    per-turn records are never emitted ⇒ the record is not where the turns are,
+    armed DSN or not.
+    """
+    from tortoise.config import _resolve_event_log_path
+    from tortoise.record_writer import record_holds_turns, record_tenant
+
+    tenant = _resolve_record_tenant(org)
+    if tenant is None:
+        tenant = record_tenant()
+    if tenant is None:
+        return None
+    journal_path = _resolve_event_log_path(
+        namespace=None, graph_name=org.get("graph_namespace"))
+    if not record_holds_turns(journal_configured=journal_path is not None,
+                              tenant=tenant):
+        return None
+    return tenant
 
 
 def _open_record():
@@ -18333,13 +18341,17 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # migration that silently empties transcripts is worse than one that reddens.
     turns = []
     _record_answer = None
-    if _record_holds_turns(org):
+    # ONE resolution for the capability question AND the scope the read installs:
+    # the read must file under the SAME tenant the capture writer used, or it
+    # answers from a tenant nothing was written to (`_record_tenant_for_read`).
+    _read_tenant = _record_tenant_for_read(org)
+    if _read_tenant is not None:
         try:
             def _read_record_turns():
                 conn = _open_record()
                 try:
                     return _record_read.session_turns(
-                        conn, org_id=org["org_id"], graph_id=org["graph_id"],
+                        conn, org_id=_read_tenant[0], graph_id=_read_tenant[1],
                         session_id=session_id)
                 finally:
                     conn.close()
@@ -18361,13 +18373,17 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         turns.extend(_record_read.turn_payloads(_record_answer.turns))
     else:
         if _record_answer is not None:
-            # The record was REACHABLE and did not answer for these turns. The
-            # session says it has a transcript (`s.turn_count` above) while the
-            # record holds none, which is a divergence between the two stores —
-            # never a reason to serve an empty transcript, and never silent.
+            # The record was REACHABLE and did not answer for the WHOLE
+            # transcript. Either it holds none of these turns (the session says
+            # it has one — `s.turn_count` above — while the record holds none) or
+            # it holds only part of them (a per-turn write refused mid-capture,
+            # or an append whose earlier turns predate arming). Both are
+            # divergences between the two stores — never a reason to serve an
+            # empty or truncated transcript, and never silent.
             _logger.warning(
-                "session %s: the record did not answer for its turns (%s) — "
-                "serving the graph copy for this request",
+                "session %s: the record did not answer for its whole "
+                "transcript (%s) — merging the graph copy for the turns it "
+                "does not hold",
                 session_id, _record_answer.reason)
         # Turn points (events) — ordered by turn index embedded in the id
         turn_rows = await asyncio.to_thread(
@@ -18376,6 +18392,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
                 params={"sid": session_id},
             ).result_set)
+        graph_turns: list[dict] = []
         for tr in turn_rows:
             tid = tr[0]
             content = tr[1] or ""
@@ -18385,12 +18402,21 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # have ONE definition — a client comparing a stored turn against a
             # served detail depends on the two agreeing (#4675).
             role, body = _capture_turn_role_text(content)
-            turns.append({
+            graph_turns.append({
                 "id": tid,
                 "role": role,
                 "content": body,
                 "created_at": created_at,
             })
+        # ⛔ A SHORT record answer is not an answer (#10000 review P0). The
+        # writer's store decision is per TURN while this read's is per SESSION, so
+        # a mid-capture refusal leaves part of one transcript in each store;
+        # serving the record alone (what any non-empty row set used to license)
+        # dropped the turns the writer's fallback had just rescued. The UNION is
+        # served, from the same definition the SDK twin uses.
+        turns.extend(
+            _record_read.merge_turn_payloads(_record_answer, graph_turns)
+            if _record_answer is not None else graph_turns)
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
@@ -36105,6 +36131,58 @@ def _index_state_updates(cursors: dict, totals: dict) -> dict:
     return updates
 
 
+def _prior_stored_turn_count(proj, session_id: str) -> int:
+    """How many turns this session ALREADY holds — for the write-op meter.
+
+    Best-effort: this feeds ONLY the write-op meter. It sits before the Session
+    MERGE (which runs later, inside the pooled `_write_session_and_turns`
+    submission), so nothing of this request is committed yet. A transient graph
+    error must never 500 a capture, and the documented conservative posture for
+    an unreadable count is ``0`` — which makes the meter OVER-count
+    (`len(windowed) > 0`), never a blind spot.
+
+    ⛔ THE COUNT COMES FROM THE SESSION'S OWN TURN ACCOUNT, NOT A NODE WALK
+    (#10000 review P1). Once the record holds the turns, the capture writes NO
+    turn node at all (`sdk._write_capture_turns` takes the record branch), so
+    the old `CONTAINS -> Point {is_episodic}` count read 0 for every session
+    captured since arming — and `len(windowed) > prior_turn_count` is then TRUE
+    for every idempotent re-POST, metering a write op for a replay that wrote
+    nothing. That is the #1827/#3892 phantom write-op on the billing/abuse leg,
+    silent. Two facts give the stored total, one per store, and `max` of the two
+    is the total whichever store holds them:
+
+    * `s.turn_max_index` — the id-space high-water mark this change makes
+      authoritative (the live MERGE writes it, `_fold_session_recorded` restores
+      it), so it is the record lane's turn total. It is an INDEX, hence ``+ 1``,
+      and it is MONOTONE UP, so a shorter re-capture leaves it above the true
+      count — which errs toward NOT metering a request that wrote no new turn.
+    * the live node count — the same fact for the graph lane (an unarmed
+      deployment, or a capture whose record write was refused).
+
+    `coalesce(..., s.turn_count, 0)` keeps a session captured before the mark
+    existed readable.
+    """
+    try:
+        prior = proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
+            "WHERE t.is_episodic = true "
+            "RETURN coalesce(s.turn_max_index, s.turn_count, 0), "
+            "       count(t)",
+            params={"sid": session_id}).result_set
+        if not prior:
+            return 0
+        mark = int(prior[0][0] or 0)
+        nodes = int(prior[0][1] or 0)
+        return max(nodes, mark + 1)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "prior_turn_count read failed (non-fatal, metering over-counts)",
+            exc_info=True)
+        return 0
+
+
 def _relink_sessions_after_index(org_id: str) -> None:
     """#1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking pass for
     the org's captured sessions after an index completes.
@@ -36112,6 +36190,20 @@ def _relink_sessions_after_index(org_id: str) -> None:
     Sessions captured BEFORE their entities materialized carried honest
     no-match links; once the index lands (entities minted), the pass resolves
     them. Best-effort: a failure is logged, never fatal to the job status.
+
+    ⚠️ DOCUMENTED RESIDUAL — a SILENT NO-OP on an armed deployment (#10000
+    review P2). It finds its work by walking `CONTAINS -> Point {pointKind:
+    'event'}`, which is the TURN NODE collection; once the record holds the turns
+    the capture writes no turn node (`sdk._write_capture_turns` takes the record
+    branch), so this query returns nothing and the post-index re-link pass never
+    runs for the sessions it exists to re-link — `entity_links_attempted` /
+    `entity_links_created` are never written for them. Recorded rather than fixed
+    because the fix is not local: the session list and each session's turn TEXTS
+    both have to come from the record (a per-session tenant-scoped
+    `session_turns` read), which is the same re-pointing work #10000 owns for the
+    graph-side purge step and its measurement. It is the `session_reinjection`
+    class of residual, and it must land before the turn nodes are purged or the
+    sessions captured under the old store lose their re-link pass.
     """
     try:
         from .session_link import link_session_entities
