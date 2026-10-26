@@ -816,13 +816,23 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     # and therefore worthless. The endpoint subquery is label-agnostic on
     # purpose: `point` is the only tiered table, and a key that is not a point
     # simply never matches it.
+    # ⚠️ `<> 'graph'` is the COMPLEMENT and it is deliberately unindexed: a
+    # partial index is only used where the predicate implies it, so this scans
+    # `idx_point_scope` + filter. Acceptable here and nowhere else — this is the
+    # rebuild path, and the node read above keeps the `= 'graph'` spelling that
+    # its index can serve.
     record_only = ("SELECT node_key FROM public.point "
                    "WHERE org_id = %s AND graph_id = %s "
                    "AND cache_tier <> 'graph'")
+    # ⚠️ The exclusion is scoped to `Point` ENDPOINTS: `node_identity` is keyed
+    # `(org_id, graph_id, node_label, node_key)`, so another label may legally
+    # carry the same key STRING as a record-only point — an unscoped `NOT IN`
+    # would drop that edge from the view AND from `relations_not_written`
+    # (whose denominator excludes it): a silent edge loss with no signal.
     for row in _rows(cur, f"SELECT * FROM public.{RELATION_TABLE} "
                           "WHERE org_id = %s AND graph_id = %s "
-                          f"AND src_key NOT IN ({record_only}) "
-                          f"AND tgt_key NOT IN ({record_only})",
+                          f"AND NOT (src_label = 'Point' AND src_key IN ({record_only})) "
+                          f"AND NOT (tgt_label = 'Point' AND tgt_key IN ({record_only}))",
                      (org_id, graph_id,
                       org_id, graph_id, org_id, graph_id)):
         relations.append(relation_from_row(row))
