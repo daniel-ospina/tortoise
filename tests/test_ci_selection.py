@@ -10679,6 +10679,22 @@ def test_lane_stash_guard_runs_on_a_tools_only_change():
     assert "test_lane_stash.py" in r["test_files"], r
 
 
+def test_turn_parity_census_guard_runs_on_a_tools_only_change():
+    # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
+    # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
+    # for the pre-#10000 turn nodes. `tools/` is a flat NON_PYTHON_PREFIXES
+    # entry and the tool matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a census-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: the gate's own refusal pins never ran
+    # on the file they hold (the #1349/#3332/#3616 silent-drop class).
+    # Mutation check: removing the CORE_ALSO entry fails the arm below
+    # (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/turn_parity_census.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_10017_turn_parity_census.py" in r["test_files"], r
+
+
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
     # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
     # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as
