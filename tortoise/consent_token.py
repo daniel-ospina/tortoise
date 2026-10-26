@@ -72,6 +72,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import math
@@ -124,25 +125,46 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # ── configuration (§2.3 / §8) ───────────────────────────────────────────────
 
+#: Keys that must never ALSO be the consent HMAC key — §2.3: "It must **not** be the service-role
+#: key (key reuse across purposes) and must **not** be the anon key (the consent page embeds it in
+#: HTML, so it is public)". The anon key is not in this process's environment, so this half can only
+#: be checked where it IS known (the page origin); §8's checklist carries that half for the operator.
+_REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
+
+
+def consent_token_secret_problem() -> str | None:
+    """Why the arm is unavailable, or ``None`` when it can be used (§2.3).
+
+    A REUSED key is treated as *not provisioned* rather than as a working arm. §2.3 makes a
+    dedicated secret a ``must``, and the failure it guards is silent and total: the anon key is
+    embedded in the consent page's HTML, so a ``CONSENT_TOKEN_SECRET`` copied from it turns this
+    verifier into a forgery oracle — anyone who loaded the page could assert any ``sub`` with any
+    ``bind``, and ``sub`` is the only identity input on the token arm. Refusing here costs one
+    typed 503 and one restart with the right value; accepting it costs every account.
+    """
+    secret = os.environ.get(_SECRET_ENV, "").strip()
+    if not secret:
+        return f"{_SECRET_ENV} is not set"
+    for name in _REUSED_KEY_ENVS:
+        if secret == os.environ.get(name, "").strip():
+            return (f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
+                    "arm is treated as unprovisioned rather than trusting a reused key")
+    return None
+
+
 def consent_token_secret() -> str | None:
     """The HMAC key, or ``None`` when the arm is not provisioned (§2.3).
 
     Read per call, not cached at import: provisioning is an operator action on a running platform,
     and a value cached at import would make a rollback to unset invisible until the next deploy.
     """
-    secret = os.environ.get(_SECRET_ENV, "").strip()
-    return secret or None
+    return None if consent_token_secret_problem() else os.environ[_SECRET_ENV].strip()
 
 
 def consent_token_issuer() -> str:
     """The configured session origin (§2.1 `iss`)."""
     configured = os.environ.get(_ISSUER_ENV, "").strip()
     return configured or DEFAULT_CONSENT_TOKEN_ISSUER
-
-
-def consent_token_arm_available() -> bool:
-    """Whether `POST /oauth/consent` can accept a consent token at all (§2.3)."""
-    return consent_token_secret() is not None
 
 
 # ── refusals ───────────────────────────────────────────────────────────────
@@ -298,12 +320,14 @@ def verify_consent_token(token: str, *, presented: dict) -> dict:
     if len(token) > _MAX_TOKEN_BYTES:
         raise _refuse("it is too large")
 
+    problem = consent_token_secret_problem()
+    if problem is not None:
+        # §2.3: unprovisioned (or provisioned with a key that must not be reused). Fail CLOSED and
+        # TYPED — never fall through to the bearer path, which would answer "missing session
+        # token" for a request that has no business holding one, and would make a missing secret
+        # look like a broken browser. The description names WHICH operator action is needed.
+        raise _unavailable(problem)
     secret = consent_token_secret()
-    if secret is None:
-        # §2.3: unprovisioned. Fail CLOSED and TYPED — never fall through to the bearer path,
-        # which would answer "missing session token" for a request that has no business holding
-        # one, and would make a missing secret look like a broken browser.
-        raise _unavailable(f"{_SECRET_ENV} is not set")
 
     parts = token.split(".")
     if len(parts) != 3:
@@ -451,8 +475,14 @@ def configure_consent_jti_store(store) -> None:
     ``JtiStoreUnavailable`` when it cannot answer.
     """
     global _jti_store
-    if store is not None and not callable(getattr(store, "consume", None)):
-        raise TypeError("a consent jti store must expose an async consume(jti, expires_at)")
+    if store is not None:
+        consume = getattr(store, "consume", None)
+        # BOTH: callable, and genuinely `async`. A blocking `consume` (the natural shape for a
+        # D1/HTTP store — a plain `def` returning the row) would run its body, RECORD the jti, and
+        # then fail at the `await` — a 500 thrown by a request that has already spent the nonce.
+        if not callable(consume) or not inspect.iscoroutinefunction(consume):
+            raise TypeError(
+                "a consent jti store must expose an async consume(jti, expires_at)")
     with _jti_store_lock:
         _jti_store = store
 
@@ -484,8 +514,15 @@ async def consume_consent_jti(jti: str, expires_at: float) -> None:
     """
     try:
         first_use = await consent_jti_store().consume(jti, expires_at)
-    except JtiStoreUnavailable as exc:
-        raise _unavailable(str(exc)) from exc
+    except OAuthError:
+        raise
+    except Exception as exc:
+        # ANY store failure is "cannot answer", not an internal error: whatever step 1 installs
+        # (D1, HTTP) raises its own exception types, and none of them may surface as a 500 after
+        # the nonce has been spent. `JtiStoreUnavailable` is the documented one; this is the
+        # fail-closed catch-all around it, so the module's "never a 500" claim is true by
+        # construction rather than by enumeration.
+        raise _unavailable(f"the consent jti store could not answer: {exc}") from exc
     if not first_use:
         raise _refuse("it has already been redeemed (single-use, §2.2)")
 

@@ -272,6 +272,11 @@ oversight.**
       provider sign-in no longer leaves the app origin (§6). Record the answer on #3524.
 - [ ] `CONSENT_TOKEN_SECRET` exists on **both** the `tortoise-dashboard` Pages project and the hosted API,
       and `config/required-bindings.yml` declares it (the deploy preflight then fails closed until it does).
+- [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value — NOT the service-role key and NOT the anon key
+      (§2.3). The hosted API refuses a value that equals a service-role key it can see (typed 503, and
+      the description names the collision), but the anon key is embedded in the consent page and is
+      not in the API's environment, so **that** half can only be checked by the human doing this step.
+      Skipping it turns the verifier into a forgery oracle for anyone who loaded the page.
 - [ ] `docs/ops/auth-email-flows.md` §3's table is complete against the live allowlist (it claims to be the
       required set).
 
@@ -284,7 +289,7 @@ is costed, and the sign-in fallback origin is settled with its record corrected.
 
 | Remaining step | Why it is its own unit |
 |---|---|
-| 1. The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration | infrastructure, outside a code diff; the mechanism choice is §2.3 |
+| 1. The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the accepted-`kid` allowlist (the "rotation is `kid`-scoped" half of §2.3 — today every `kid` is accepted) + the manifest declaration | infrastructure, outside a code diff; the mechanism choice is §2.3 |
 | 2. `POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params) | the AS half; testable in Python (`tests/test_oauth_*`), and it must land **before** any page change so the bearer path stays live meanwhile |
 | 3. The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce | the BFF half; static-gated only (the repo's existing status for all BFF code) |
 | 4. The page rewrite (delete §7's rows, keep the org picker + the #5734 refusal copy, add the mint call and the terminal-loop guard) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
@@ -298,21 +303,26 @@ bearer path untouched); step 4 is where the flow changes.
 `/oauth/consent` handler), and its guarantees are EXECUTED — not merely anchored — by
 `tests/test_oauth_consent_bridge.py`. Two conditions an operator must know, both recorded there:
 
-- the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API. Unset, the arm
-  answers a typed `503 temporarily_unavailable` and the bearer path is untouched — never a 500, and
-  never a silent fall-through to the bearer;
+- the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API **and is a dedicated
+  value** (§2.3; a value equal to a service-role key the process can see is treated as
+  unprovisioned). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
+  and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
 - single-use is **per process** until §2.3's shared `jti` store (step 1) lands. The register is the
   seam step 1 replaces; until then this step is not fit for a multi-instance AS.
 
 Two properties of the arm that a later step must be written against, because they are limits of the
 contract rather than of the implementation:
 
-- **the token does not attest the org or the scope.** `bind` is exactly §2.1's four params, so
-  `resource` (the D4 org picker) and `scope` are taken from the redemption REQUEST and are bounded
-  only by `parse_resource` + the membership and suspension checks inside `issue_auth_code`. That
-  keeps them inside the asserted user's own authority, but it means a token minted while the visitor
-  was approving team A can be redeemed naming team B. Step 4's page must therefore not present the
-  picker as token-attested; widening the bind set is a spec decision, not an implementation one.
+- **the token does not attest the org or the scope.** `bind` is exactly §2.1's four params, so both
+  are taken from the redemption REQUEST, and the two are bounded DIFFERENTLY:
+  `resource` (the D4 org picker) by `parse_resource` + the membership and suspension checks inside
+  `issue_auth_code` — so a token minted while the visitor was approving team A can be redeemed
+  naming team B, but only a team the asserted user actually belongs to; `scope` by neither of those,
+  only by `validate_scope` against `SCOPES_ACCEPTED` before identity is read, so a redemption body
+  may widen `mcp` to `mcp offline_access` (a refresh-token-capable grant) regardless of what the
+  page displayed. Step 4's page must therefore present NEITHER as token-attested, and widening the
+  bind set (or binding the minted scope to the displayed one) is a spec decision, not an
+  implementation one.
 - **a failure after the nonce is spent consumes it.** The `jti` is recorded before the code is
   inserted (so one consent cannot yield two codes), and `issue_auth_code` can then still refuse —
   no active team, a suspended org, a transient control-plane failure. The retry answers
@@ -329,6 +339,7 @@ old cookie is the "strictly worse than not starting" state.
 |---|---|
 | **Mint authority** | `app.premiselabs.co` — the single session-bearing origin (`SCOPE.md` §3). |
 | **Signing** | HMAC-SHA256, dedicated `CONSENT_TOKEN_SECRET`, `kid`-scoped rotation. Never the service-role key; never the anon key (public: the page embeds it). |
+| **Issuer** | `CONSENT_TOKEN_ISSUER` (optional; default `https://app.premiselabs.co`) is the `iss` the AS accepts — the knob a preview deployment sets so it verifies its OWN mint. Read per call, never cached at import. |
 | **TTL / replay** | `exp = iat + 120 s` (leeway ≤30 s) **and** a single-use `jti`; neither substitutes for the `bind` set. |
 | **Redemption** | `POST /oauth/consent` (`@app.post("/oauth/consent")` in `hosted_api.py`) — TWO identity sources as of §9 step 2: the bearer (`verify_session_jwt`, `session_auth.py:588`) or a `consent_token` in the body verified by `tortoise/consent_token.verify_consent_token`. |
 | **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2100`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |

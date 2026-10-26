@@ -1503,6 +1503,8 @@ _TEST_SECRET = "consent-token-secret-for-tests"
 #: failure §2.2 names, so the look-alike below is a real shape, not a placeholder.
 _ISSUER = "https://app.premiselabs.co"
 _LOOKALIKE_ISSUER = "https://app.premiselabs.co.evil.example"
+#: A second LEGITIMATE origin — what a preview deployment sets `CONSENT_TOKEN_ISSUER` to (§2.1).
+_STAGING_ISSUER = "https://staging.app.premiselabs.co"
 #: A second redirect registered for the SAME client, so a request using it passes
 #: `validate_authorize_params` and reaches the BIND check rather than being refused earlier for
 #: the wrong reason (a test that reds for the wrong reason proves nothing). A different PATH, not
@@ -1782,6 +1784,11 @@ def test_a_token_bound_to_a_state_the_request_drops_is_refused(bridge_client, mi
     # §2.2 — `exp = iat + CONSENT_TOKEN_TTL_S`. A token that outlives the TTL is a mint bug (or
     # a rogue minter), and accepting it would silently turn a 120 s window into an arbitrary one.
     ({"iat": time.time(), "exp": time.time() + 86_400}, "ttl"),
+    # §2.2 — the TTL test above bounds the SPAN (`exp - iat`), not the expiry, so a future-dated
+    # `iat` passes it: `iat = now + 10_000, exp = iat + 120` is live for ~10 119 s. The future-`iat`
+    # refusal is the only thing bounding that, and deleting it left this file GREEN (measured,
+    # review round 2), so it needs its own row.
+    ({"iat": time.time() + 10_000, "exp": time.time() + 10_120}, "future"),
     # §2.2 `jti` — single-use is unimplementable without it, so its absence must refuse.
     ({"jti": ""}, "jti"),
     # §2.2 `sub` — the identity. Without it the AS has no input at all.
@@ -1843,6 +1850,164 @@ def test_a_bind_carrying_a_key_the_contract_does_not_name_is_refused(
         "the refusal must come from the exact-set rule (which names the unexpected key), not from "
         f"the bind mismatch: {r.text}")
     assert mint_spy == []
+
+
+def test_a_header_that_does_not_say_typ_jwt_is_refused(bridge_client, mint_spy,
+                                                     bearer_refuses) -> None:
+    """§2.1 — `typ` is why a Supabase session JWT can never read as a consent assertion."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    for typ in ("", "at+jwt", "JWT "):
+        r = _post_token(tc, _signed(_claim_set(bind), typ=typ), bind)
+        assert r.status_code == 401, f"typ={typ!r}: {r.text}"
+        assert "typ" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_the_register_refuses_rather_than_evicting_when_it_is_full(bridge_client, mint_spy,
+                                                                  bearer_refuses) -> None:
+    """§2.3 — a full register answers 503; it never evicts, because evicting re-enables replay.
+
+    Driven through the documented step-1 seam with `max_entries=1`: the SECOND distinct token must
+    be refused, and the refusal must not mint. The first still mints, so the refusal is the
+    capacity policy and not the arm being off.
+    """
+    from tortoise.consent_token import (
+        ProcessLocalJtiStore,
+        configure_consent_jti_store,
+        reset_consent_jti_store,
+    )
+
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    configure_consent_jti_store(ProcessLocalJtiStore(max_entries=1))
+    try:
+        first = _post_token(tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=bind),
+                            bind)
+        assert first.status_code == 200, first.text
+        minted = len(mint_spy)
+
+        _, other_challenge = _pkce()
+        other_bind = _bind(client_id, other_challenge)
+        second = _post_token(
+            tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=other_bind),
+            other_bind)
+        assert second.status_code == 503, second.text
+        assert second.json()["error"] == "temporarily_unavailable", second.text
+        assert "full" in second.json()["error_description"], second.text
+        assert len(mint_spy) == minted, "a full register must not mint"
+    finally:
+        reset_consent_jti_store()
+
+
+def test_a_store_that_cannot_answer_is_a_typed_503_and_never_a_500(bridge_client, mint_spy,
+                                                               bearer_refuses) -> None:
+    """§2.3 + #3026 — step 1's store may fail in its OWN way (D1/HTTP, not `JtiStoreUnavailable`).
+
+    Two shapes, both of which reached a 500 `server_error` in review round 2: a store whose
+    `consume` is not `async` (its body runs, records the jti, and only then fails at the `await`),
+    and a store that raises outside the documented exception — the handler's #3026 net converts
+    `RuntimeError` to a retryable 503 but anything else to an internal error. Neither may surface
+    as one.
+    """
+    from tortoise.consent_token import configure_consent_jti_store, reset_consent_jti_store
+
+    class _SyncStore:
+        def consume(self, jti, expires_at):
+            return True
+
+    with pytest.raises(TypeError, match="async"):
+        configure_consent_jti_store(_SyncStore())
+
+    class _StoreBlewUp(Exception):
+        """Deliberately NOT a `RuntimeError`: the handler's #3026 net maps `RuntimeError` to a
+        retryable 503 and everything ELSE to a 500 `server_error`, and a store failure is never a
+        bug-in-this-request. A driver error (httpx, a D1 client) is exactly this shape."""
+
+    class _BrokenStore:
+        async def consume(self, jti, expires_at):
+            raise _StoreBlewUp("D1: 500 from the ticket table")
+
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    configure_consent_jti_store(_BrokenStore())
+    try:
+        r = _post_token(tc, token, bind)
+        assert r.status_code == 503, r.text
+        assert r.json()["error"] == "temporarily_unavailable", r.text
+        assert mint_spy == [], "a store that cannot answer must not mint"
+    finally:
+        reset_consent_jti_store()
+
+
+def test_an_oversized_token_is_refused_before_anything_is_parsed(bridge_client, mint_spy,
+                                                                 bearer_refuses) -> None:
+    """Resource exhaustion: the length cap is the only attacker-facing bound on this input."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    r = _post_token(tc, "A" * 8193, bind)
+    assert r.status_code == 401, r.text
+    assert "too large" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_the_issuer_is_the_configurable_session_origin_and_not_a_literal(bridge_client,
+                                                                        mint_spy,
+                                                                        bearer_refuses,
+                                                                        monkeypatch) -> None:
+    """§2.1 — `iss` must equal the configured session origin, so a preview deployment can verify
+    its own mint. Without this, changing the anchor is invisible to the suite (measured round 2:
+    deleting the env override entirely left the file green)."""
+    from tortoise.consent_token import DEFAULT_CONSENT_TOKEN_ISSUER
+
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", _STAGING_ISSUER)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # minted by the origin this deployment now trusts → accepted
+    ok = _post_token(tc, _signed(_claim_set(bind, iss=_STAGING_ISSUER)), bind)
+    assert ok.status_code == 200, ok.text
+
+    # the DEFAULT origin is a different origin → refused, and the refusal names `iss`
+    wrong = _post_token(tc, _signed(_claim_set(bind, iss=DEFAULT_CONSENT_TOKEN_ISSUER)), bind)
+    assert wrong.status_code == 401, wrong.text
+    assert "iss" in wrong.json()["error_description"], wrong.text
+
+
+def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """§2.3 — the secret must be DEDICATED. A reused key is treated as unprovisioned.
+
+    Without this, `CONSENT_TOKEN_SECRET=<anon key>` makes the verifier a forgery oracle for anyone
+    who has loaded the consent page (the page embeds that key in its HTML) — and `sub` is the only
+    identity input on the token arm, so that is every account. Unit-level on purpose: the arm's
+    unavailability already has an end-to-end test, and the operator signal here is the REASON the
+    503 carries, which is what distinguishes "unset" from "set to something you must not reuse".
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token_secret() == _TEST_SECRET
+    assert consent_token_secret_problem() is None
+
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", _TEST_SECRET)
+    assert consent_token_secret() is None, "a reused key must not be accepted as the HMAC key"
+    problem = consent_token_secret_problem()
+    assert problem and "DEDICATED" in problem and "SUPABASE_SERVICE_ROLE_KEY" in problem, problem
 
 
 def test_a_token_without_a_kid_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
@@ -1933,6 +2098,10 @@ def test_a_forged_token_is_refused(bridge_client, mint_spy, bearer_refuses, buil
 
     r = _post_token(tc, token, bind)
     assert r.status_code == 401, f"{why}: {r.text}"
+    # ⛔ The status alone does not prove this test's subject: with the whole token arm reverted,
+    # all five cases still answered 401 — from the BEARER path (`bearer_refuses`), which never
+    # looked at the token. Measured in review round 2. `invalid_token` is the arm's own code.
+    assert r.json()["error"] == "invalid_token", f"{why}: {r.text}"
     assert mint_spy == []
 
 
@@ -2086,12 +2255,42 @@ def test_the_bearer_path_never_consults_the_token_arm(bridge_client, monkeypatch
     green.
     """
     from tortoise import consent_token
+    from tortoise.consent_token import (
+        ProcessLocalJtiStore,
+        configure_consent_jti_store,
+        reset_consent_jti_store,
+    )
 
     def _boom(*args, **kwargs):
         raise AssertionError("the bearer path consulted the consent-token arm")
 
     monkeypatch.setattr(consent_token, "verify_consent_token", _boom)
-    monkeypatch.setattr(consent_token, "consume_consent_jti", _boom)
+
+    # ⛔ …and a SECOND, hoist-proof probe. Patching a module attribute above only works because the
+    # handler imports these names inside the function: hoisting that import to module scope (a
+    # behaviourally identical, lint-preferable refactor) would silently make it observe nothing —
+    # measured in review round 2, where a real regression stayed GREEN after the hoist. The store
+    # is resolved from the module global at CALL time, so a store that records use survives any
+    # import style. Assert on the observation, not on a side effect of the import.
+    consulted: list[str] = []
+
+    class _RecordingStore(ProcessLocalJtiStore):
+        async def consume(self, jti: str, expires_at: float) -> bool:
+            consulted.append(jti)
+            return await super().consume(jti, expires_at)
+
+    configure_consent_jti_store(_RecordingStore())
+    try:
+        tc, _ = bridge_client
+        client_id = _register_client(tc)["client_id"]
+        verifier, challenge = _pkce()
+        bind = _bind(client_id, challenge)
+
+        r = _post_bearer(tc, bind)
+        assert r.status_code == 200, r.text
+    finally:
+        reset_consent_jti_store()
+    assert consulted == [], "the bearer path reached the jti register — §9 step 2 is additive"
 
     tc, _ = bridge_client
     client_id = _register_client(tc)["client_id"]
