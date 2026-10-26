@@ -5658,7 +5658,18 @@ def test_expect_uri_gated_iff_uri():
     guard = next(s for s in steps
                  if s.get("name", "").startswith("Skip-fail guard"))
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in guard["run"]
-    assert "--manifest /tmp/expected-nodeids.txt" in guard["run"]
+    # ⛔ THE GUARD MUST READ THE MANIFEST THE MANIFEST STEP WROTE — the PATH is not
+    # the contract, the PAIRING is (2026-10-25). Both now ride the job's
+    # `$PYTEST_MANIFEST` (= `${{ runner.temp }}/expected-nodeids.txt`) instead of the
+    # global `/tmp/expected-nodeids.txt`: on a self-hosted runner several jobs share
+    # ONE `/tmp`, so a fixed name let this guard compare against ANOTHER job's
+    # manifest and red on a mismatch belonging to no test it ran (#7815). Asserting
+    # the literal would re-open that clobber; asserting the pairing is what keeps
+    # the guard honest once the path is per-runner.
+    assert "--manifest \"$PYTEST_MANIFEST\"" in guard["run"]
+    assert (
+        '--output "$PYTEST_MANIFEST"' in manifest["run"]
+    ), "the manifest step and the skip-fail guard must share ONE path variable"
     # The canary producer is gated to half b + post-merge (cycle-5 P1-7
     # option (b): exactly ONE leg writes, no last-writer-wins clobber).
     # #4367: the nightly schedule trigger was removed, so post-merge is
@@ -7185,12 +7196,21 @@ def _extract_pytest_marker(run_script: str) -> str:
     module form is never a marker — the unquoted fallback skips 'pytest'.
 
     #6142: the `test` job now has a SECOND pytest invocation — the last-failed
-    pre-phase, whose junit is /tmp/junit-lf.xml. Scanning the whole script
-    silently retargets this pin to the pre-phase (the same class of bug fixed
-    in tests/test_skip_guard.py), so the pre-phase line is dropped and the
-    search stays on the canonical gating invocation."""
+    pre-phase. Scanning the whole script silently retargets this pin to the
+    pre-phase (the same class of bug fixed in tests/test_skip_guard.py), so the
+    pre-phase line is dropped and the search stays on the canonical gating
+    invocation.
+
+    #10028: the exclusion is spelled on the PRE-PHASE's own junit indirection,
+    not on a `/tmp/...` literal — `--junitxml="$PYTEST_JUNIT_LF"`. The retired
+    literal appears nowhere any more, so leaving it here silently dropped
+    NOTHING and the search fell through to the pre-phase (both markers happened
+    to be identical, so the pin stayed green while no longer discriminating).
+    Filtering on the LF token drops exactly the pre-phase: `"$PYTEST_JUNIT"` is
+    not a substring of `"$PYTEST_JUNIT_LF"`."""
     searchable = "\n".join(
-        ln for ln in run_script.splitlines() if "junit-lf.xml" not in ln)
+        ln for ln in run_script.splitlines()
+        if '"$PYTEST_JUNIT_LF"' not in ln)
     quoted = _re.search(r"-m '([^']+)'", searchable)
     if quoted:
         return quoted.group(1)
