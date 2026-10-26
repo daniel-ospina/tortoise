@@ -7758,11 +7758,23 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 # deliberately leaves empty (never a fabricated excerpt). So
                 # without this line a value-bearing minted endpoint loses its
                 # span with NOTHING said about it: no span, no warning.
+                #
+                # ⛔ But this site reports ONLY the silence — never a class the
+                # gate already named. ``_value_verbatim_span`` has TWO
+                # reporting absences of its own (the band pass, and a VERBATIM
+                # anchor whose quoted text carries no value, e.g. the value
+                # sits past this quote's ``_MAX_QUOTE`` clamp); appending this
+                # site's "without a verbatim anchor" over either of them would
+                # contradict the class just reported and count one absence
+                # twice — and send a repairer to re-anchor text that WAS
+                # anchored verbatim. So the guard is the gate's own output:
+                # report only when the call added no warning of its own.
+                _warnings_before = len(warnings)
                 _span = _value_verbatim_span(content, pt_entry["quote"], _turn,
                                              edus, warnings=warnings)
                 if _span is not None:
                     pt_entry["span_start"], pt_entry["span_end"] = _span
-                elif _carries_value(content):
+                elif len(warnings) == _warnings_before and _carries_value(content):
                     warnings.append(
                         f"value-bearing minted endpoint ({where}) resolved to "
                         f"turn {_turn} without a verbatim anchor — it carries "

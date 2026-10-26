@@ -3305,6 +3305,42 @@ class TestValueVerbSpan2684:
         assert not any("minted endpoint" in w and "no source span" in w
                        for w in r["warnings"]), r["warnings"]
 
+    def test_a_verbatim_minted_anchor_with_no_value_in_its_quote_keeps_ITS_class(
+            self):
+        """ONE absence, reported as the class that actually happened.
+
+        The mint site adds its absence text only when the shared gate reported
+        NOTHING — otherwise a verbatim anchor whose quoted text carries no
+        value (here: the value sits past the ``_MAX_QUOTE`` clamp, so the
+        quote is real but value-free) would be reported TWICE and the second
+        line would contradict the first: "resolved verbatim, but the quoted
+        text carries no value" followed by "without a verbatim anchor". The
+        two classes are deliberately distinct (#2684 Slice B) — re-anchoring
+        cannot repair the first, the clamp or the endpoint's length can — so
+        collapsing them sends a repairer to the wrong fix.
+        """
+        # A verbatim-anchored mint whose first _MAX_QUOTE chars hold no value;
+        # the value is in the tail, i.e. outside the quote that gets stamped.
+        content = ("we keep the retro notes short every single week "
+                   * 6).strip() + " so we cut latency by 20%"
+        turn = content[:v2._MAX_QUOTE] + " and the team noticed"
+        assert not v2._carries_value(content[:v2._MAX_QUOTE])
+        assert v2._carries_value(content)
+        edus = [{"index": 0, "role": "user", "text": turn}]
+        r = v2.execute_embed(
+            {"entities": [], "points": [], "events": [],
+             "operators": [{"src": content, "dst": "the retro doc",
+                            "op_type": "IMPL"}]},
+            {}, session_id="s1", edus=edus)
+        pt = {p["content"]: p for p in r["payload"]["points"]}[content]
+        assert "span_start" not in pt and "span_end" not in pt
+        absences = [w for w in r["warnings"]
+                    if "no source span" in w or "no verbatim anchor" in w]
+        assert len(absences) == 1, absences
+        assert "resolved verbatim in turn 0" in absences[0], absences[0]
+        assert not any("minted endpoint" in w and "no source span" in w
+                       for w in r["warnings"]), r["warnings"]
+
 
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 
