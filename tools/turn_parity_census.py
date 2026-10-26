@@ -342,6 +342,50 @@ def _embedding_parity(graph_emb, record_emb) -> tuple[bool, str]:
     return True, ""
 
 
+def _graph_vector(tid: str, embedding) -> list | None:
+    """The graph's stored vector as floats — or a REFUSAL (``CensusError``).
+
+    A `vecf32` read-back is NOT contractually a `list`: the repo's own sanitizer
+    (`tortoise/embeddings.py::sanitize_journal_embedding`, #5004 round-3)
+    accepts ANY non-string iterable precisely because "a graph read-back
+    (`t.embedding` after a `vecf32` write, #5004 round-3) can arrive as a numpy
+    array or a driver vector type". Accepting only `list`/`tuple` here refused
+    those containers as unclassifiable (exit 3) — which means the census could
+    never certify, and this gate could never open, on exactly the graphs where
+    vector parity is the thing at risk. So the acceptance rule is the
+    sanitizer's: refuse `str`/`bytes` (a sequence of CHARACTERS), `dict` (not a
+    sequence of numbers) and anything not iterable at all; `list(...)`
+    everything else. A component that still cannot become a float is a refusal,
+    never a silent "no vector".
+    """
+    if embedding is None:
+        return None
+    if isinstance(embedding, (str, bytes, dict)):
+        raise CensusError(
+            f"turn {tid}: the graph embedding is "
+            f"{type(embedding).__name__}, not a sequence of numbers — it "
+            "cannot be classified, and an unclassifiable vector is a refusal, "
+            "never a silent 'no vector'")
+    try:
+        items = list(embedding)
+    except TypeError as exc:
+        raise CensusError(
+            f"turn {tid}: the graph embedding is "
+            f"{type(embedding).__name__}, not a sequence — it cannot be "
+            "classified, and an unclassifiable vector is a refusal, never a "
+            "silent 'no vector'") from exc
+    try:
+        return [float(v) for v in items]
+    except (TypeError, ValueError, OverflowError) as exc:
+        # `OverflowError` for an integer past binary64's range — the record
+        # leg already catches it (`_embedding_parity`); a value the leg
+        # cannot classify is a refusal on BOTH sides, never a traceback a
+        # caller reads as the exit-1 "bad flags" code.
+        raise CensusError(
+            f"turn {tid}: the graph embedding holds a non-numeric "
+            f"component ({exc}) — an absence is NOT established") from exc
+
+
 def _graph_rows(g) -> list:
     """Every row of the episodic query, keyset-paged on `id(t)`. READ-ONLY.
 
@@ -423,22 +467,7 @@ def read_graph_turns(uri: str | None, db_path: str | None,
             unidentifiable.append({"id": str(_inner_id),
                                    "id_type": type(tid).__name__})
             continue
-        if embedding is not None and not isinstance(embedding, (list, tuple)):
-            raise CensusError(
-                f"turn {tid}: the graph embedding is "
-                f"{type(embedding).__name__}, not a sequence — it cannot be "
-                "classified, and an unclassifiable vector is a refusal, never "
-                "a silent 'no vector'")
-        try:
-            vec = [float(v) for v in embedding] if embedding is not None else None
-        except (TypeError, ValueError, OverflowError) as exc:
-            # `OverflowError` for an integer past binary64's range — the record
-            # leg already catches it (`_embedding_parity`); a value the leg
-            # cannot classify is a refusal on BOTH sides, never a traceback a
-            # caller reads as the exit-1 "bad flags" code.
-            raise CensusError(
-                f"turn {tid}: the graph embedding holds a non-numeric "
-                f"component ({exc}) — an absence is NOT established") from exc
+        vec = _graph_vector(tid, embedding)
         entry = {
             "id": tid, "content": content, "speaker": speaker,
             "status": status, "createdAt": created_at,
@@ -538,6 +567,7 @@ def read_record_turns(record_dsn: str, org_id: str,
 def census(graph: dict, record: dict, *, sample: int) -> dict:
     """The comparison and the classification. Pure: no I/O, no verdict I/O."""
     nodes, rows = graph["nodes"], record["rows_by_key"]
+    unidentifiable = graph.get("unidentifiable") or []
 
     # The anomaly partition: turn-shaped nodes the deterministic id space
     # cannot place are NEVER purge candidates, and NEVER invisible — each is
@@ -660,7 +690,13 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         else:
             clean.append(verdict)
 
+    # `would_delete_*` is the PURGE SET among CLEAN sessions — what the gate
+    # would actually permit. `held_back_*` is the mirror: turn nodes in a
+    # REFUSED session, which are in the shape-derived purge population but are
+    # NOT eligible (nothing compared them), so a REFUSED run cannot read as
+    # "there is nothing to delete".
     would_delete = sum(v["graph_turn_nodes"] for v in clean)
+    held_back = sum(v["graph_turn_nodes"] for v in failed)
     sample_out = []
     for v in clean:
         sids_nodes = sorted(sessions[v["session"]]["nodes"])
@@ -670,6 +706,13 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                 {"id": tid,
                  "speaker": sessions[v["session"]]["nodes"][tid].get("speaker"),
                  "createdAt": sessions[v["session"]]["nodes"][tid].get("createdAt"),
+                 # A 60-CHARACTER HEAD of the transcript, deliberately — the
+                 # operator's eyeball comparison for a sampled turn. It is not
+                 # "an identifying field" and this artifact is not
+                 # content-free: the FAILURE evidence above (`graph`/`record`
+                 # values) carries the full text of a mismatched turn, which a
+                 # parity gate cannot do its job without. The whole transcript
+                 # is never emitted for any turn.
                  "content_head": (str(
                      sessions[v["session"]]["nodes"][tid].get("content")
                      or "")[:60])}
@@ -682,7 +725,11 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         "population": {
             # The read population is the DELETE SET (`is_episodic = true`);
             # `turn_shaped_nodes` is the purge set inside it.
-            "episodic_graph_nodes": len(nodes),
+            # The DELETE SET, so it counts every node the read returned —
+            # including the ones with no usable key, which carry no `t.id` to
+            # be a dict key. Counting `nodes` alone understated the population
+            # the label names (an unkeyable node is still in the sweep).
+            "episodic_graph_nodes": len(nodes) + len(unidentifiable),
             "turn_shaped_nodes": sum(1 for n in nodes.values()
                                      if n.get("pointKind") == "event"),
             "sessions_with_graph_turns": len(sessions),
@@ -698,6 +745,7 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         "anomalies": anomalies,
         "dry_run": {
             "would_delete_turn_nodes": would_delete,
+            "held_back_turn_nodes": held_back,
             "blocked_sessions": [v["session"] for v in failed],
             "per_session_sample": sample_out,
             "note": "READ-ONLY dry run: this tool never deletes. The purge is "
@@ -832,8 +880,13 @@ def main(argv: list[str] | None = None) -> int:
         more = "" if len(v["problems"]) <= 3 else f" +{len(v['problems'])-3} more"
         print(f"  REFUSED  session {v['session']}: {head}{more}")
     print(f"dry run    : would delete {report['dry_run']['would_delete_turn_nodes']} "
-          f"turn node(s) across {len(report['parity']['clean_sessions'])} session(s) "
-          f"(READ-ONLY — this tool never deletes)")
+          f"turn node(s), in {len(report['parity']['clean_sessions'])} CLEAN "
+          f"session(s) (READ-ONLY — this tool never deletes)")
+    if report["dry_run"]["held_back_turn_nodes"]:
+        print(f"held back  : {report['dry_run']['held_back_turn_nodes']} turn "
+              f"node(s) in {len(report['parity']['failed_sessions'])} REFUSED "
+              f"session(s) are in the delete set but NOT eligible — nothing "
+              f"compared them")
     if report.get("refused_for"):
         print(f"refused    : {', '.join(report['refused_for'])}")
     print(f"verdict    : {report['verdict']}")

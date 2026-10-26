@@ -149,10 +149,14 @@ def test_exact_parity_passes_and_the_dry_run_counts():
     assert report["parity"]["failed_sessions"] == []
     session = report["dry_run"]["per_session_sample"][0]
     assert session["count"] == 3
-    # Identifying fields, never the whole transcript.
+    # The sampled turn's own fields. `content_head` is a 60-CHARACTER HEAD of
+    # the transcript, emitted on purpose for the operator's eyeball comparison —
+    # so this artifact is NOT content-free; what it never emits is the whole
+    # transcript of any turn.
     assert session["sample"][0]["id"] == "s1_t0"
     assert session["sample"][0]["speaker"] == "user"
     assert session["sample"][0]["createdAt"] == "2026-10-25T00:00:00+00:00"
+    assert len(session["sample"][0]["content_head"]) <= 60
 
 
 def test_binary64_record_vector_matches_binary32_graph_vector():
@@ -427,6 +431,56 @@ def test_a_non_sequence_graph_vector_refuses_rather_than_reading_as_absent(
     assert "not a sequence" in str(exc.value)
 
 
+def test_a_DRIVER_vector_type_is_READ_not_refused(monkeypatch):
+    """A `vecf32` read-back is NOT contractually a `list` — accept what the
+    repo's own sanitizer accepts, or the gate can never open.
+
+    `tortoise/embeddings.py::sanitize_journal_embedding` accepts ANY non-string
+    iterable for the same value from the same store, and says why: "a graph
+    read-back (`t.embedding` after a `vecf32` write, #5004 round-3) can arrive
+    as a numpy array or a driver vector type". The graph leg accepted only
+    `list`/`tuple`, so on such a driver EVERY vector-carrying turn raised
+    `CensusError` → exit 3 for the whole graph: the census could never certify
+    on exactly the graphs where vector parity is the risk, and the gate could
+    never open. Refusing a container the store itself hands back is a
+    MISCLASSIFICATION, not caution.
+    """
+    class _DriverVector:  # no list base, no `.shape`: iteration is the contract
+        def __init__(self, values):
+            self._values = values
+
+        def __iter__(self):
+            return iter(self._values)
+
+        def __len__(self):
+            return len(self._values)
+
+    value = tpc._f32(0.1)
+    rows = [[1, "s1_t0", "[user] body of s1_t0", "user", "draft",
+             "2026-10-25T00:00:00+00:00", "event",
+             _DriverVector([value]), False, ["s1"]]]
+    _patch_proj(monkeypatch, _PagedG(rows))
+    graph = tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
+    assert graph["nodes"]["s1_t0"]["embedding"] == [value]
+
+
+@pytest.mark.parametrize("container", [{"a": 1.0}, 3.0])
+def test_a_numeric_NON_sequence_is_still_REFUSED(monkeypatch, container):
+    """Widening the acceptance to iterables must not widen it to anything.
+
+    A `dict` is a container (not a sequence of numbers) and a float is not
+    iterable; the sanitizer refuses both for the same reason, and so does the
+    census — the refusal direction is preserved, never a silent `None`.
+    """
+    rows = [[1, "s1_t0", "[user] body of s1_t0", "user", "draft",
+             "2026-10-25T00:00:00+00:00", "event", container, False,
+             ["s1"]]]
+    _patch_proj(monkeypatch, _PagedG(rows))
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
+    assert "not a sequence" in str(exc.value)
+
+
 def test_an_OVERLARGE_graph_component_REFUSES_it_does_not_crash(monkeypatch):
     """`float(v)` overflows for an int past binary64's range: refuse, do not crash.
 
@@ -615,6 +669,59 @@ def test_an_overlarge_record_component_REFUSES_it_does_not_crash():
     problem = _problems(report, "s1")[0]
     assert problem["field"] == "embedding"
     assert "binary32" in problem["detail"]
+
+
+def test_the_population_counts_the_nodes_with_no_usable_key():
+    """`episodic_graph_nodes` is labelled "(the delete set)" — so it must
+    include the nodes whose `t.id` is not a string.
+
+    Those nodes carry no dict key, so they live in `unidentifiable`; counting
+    `len(nodes)` alone printed a population SMALLER than the delete set the
+    line names (an all-unkeyable graph printed 0). They still refuse the census
+    as `non_string_id`, so no verdict changes — the number just has to be about
+    the population it says it is about.
+    """
+    graph = {"nodes": {"s1_t0": _graph_node("s1_t0", "s1")},
+             "unidentifiable": [{"id": "2", "id_type": "int"},
+                                {"id": "3", "id_type": "int"}]}
+    report = tpc.census(
+        graph,
+        {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+         "non_turn_shaped": 0}, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["population"]["episodic_graph_nodes"] == 3
+    assert report["population"]["turn_shaped_nodes"] == 1
+
+
+def test_a_refused_session_reports_the_turn_nodes_it_HELD_BACK():
+    """`would_delete_turn_nodes` is CLEAN sessions only — the gate refuses what
+    it could not verify — so a REFUSED run must also state what it is holding
+    back, or "would delete 0" reads as "there is nothing to delete".
+    """
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1"),
+             "s1_t1": _graph_node("s1_t1", "s1")}
+    rows = {"s1_t0": _record_row("s1_t0")}  # s1_t1 absent -> s1 REFUSED
+    report = _census(nodes, rows)
+    assert report["verdict"] == "REFUSED"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+    assert report["dry_run"]["held_back_turn_nodes"] == 2
+    assert report["dry_run"]["blocked_sessions"] == ["s1"]
+
+
+def test_the_CLI_states_the_held_back_turn_nodes(capsys, monkeypatch):
+    """The operator reads stdout, not the JSON: the held-back line must print."""
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1"),
+                  "s1_t1": _graph_node("s1_t1", "s1")},
+        "unidentifiable": []})
+    monkeypatch.setattr(tpc, "read_record_turns", lambda *a, **k: {
+        "rows_by_key": {"s1_t0": _record_row("s1_t0")},
+        "non_turn_shaped": 0})
+    assert tpc.main(_argv()) == 2
+    out = capsys.readouterr().out
+    assert "would delete 0 turn node(s)" in out
+    assert "held back  : 2 turn node(s)" in out
+    assert "NOT eligible" in out
 
 
 def test_a_node_in_two_anomaly_classes_is_counted_ONCE():
