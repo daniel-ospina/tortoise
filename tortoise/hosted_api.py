@@ -18264,15 +18264,19 @@ def _record_unavailable() -> HTTPException:
     gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
     write door declines `no_durable_journal` and the GRAPH keeps the turns, so
     "the graph keeps only the counters" is a property of armed+journaling, not
-    of arming alone. This refusal's own behaviour is unaffected either way: it
-    also requires ``not turns``, so a graph copy carrying real turns is still
-    served 200.
+    of arming alone. This refusal's own behaviour is unaffected there: the guard
+    at the bottom of the read measures the fallback against the Session's own
+    ``turn_count``, and on that config the graph holds all of them, so a
+    complete copy is still served 200.
 
     The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
-    repealed: a graph copy that exists is still served byte-identically, because
-    it protects a transcript that is really there. This body is for the case
-    that arm cannot cover — the fallback yielded no turns at all, so there is
-    nothing to protect and nothing to serve.
+    repealed: a graph copy that is COMPLETE against the Session's own
+    ``turn_count`` is still served byte-identically, because it protects a
+    transcript that is really there. A copy that is only a stale PREFIX of that
+    transcript is NOT protected — serving it would be the same silent truncation
+    in a less obvious shape — and `sess[2]` is the count this endpoint already
+    publishes. This body is for the cases that arm cannot cover: the fallback
+    yielded no turns at all, or fewer than the count it would report alongside.
 
     Same envelope as :func:`_graph_unavailable` on this route (``503`` +
     ``error_code``) rather than a new one, because on this route that body is
@@ -18493,13 +18497,27 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
 
     # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. On an
     # armed JOURNALING deployment the record was the store holding these turns
-    # and it did not answer; the graph fallback above therefore carries EITHER
-    # the pre-arming copy (serve it, unchanged — #1591 keeps failing soft) OR
-    # nothing at all. Nothing is not an empty transcript: the two are
-    # indistinguishable to the caller, and there an empty graph copy is the
-    # NORMAL state (#10000 writes no turn nodes), so `turns: []` here would claim
-    # a captured session had no turns. Refuse visibly instead — see
-    # `_record_unavailable`.
+    # and it did not answer; the graph fallback above therefore carries ONE OF
+    # THREE things, and only two of them may be served:
+    #
+    #   1. a stale PREFIX of the transcript — refused. `sdk._write_capture_turns`'
+    #      stale-turn sweep is gated on the write predicate (`sdk.py:2696`, `if
+    #      stale and not _record_holds_turns`), so a session captured BEFORE
+    #      arming and re-captured after it keeps its old, SHORTER turn nodes and
+    #      nothing removes them. Serving that answers 2 turn_points beside the
+    #      response's own `turns: 4` — a truncated transcript indistinguishable
+    #      from a complete one, which is the shape #8447 forbids;
+    #   2. nothing at all — refused. An empty graph copy is the NORMAL state on an
+    #      armed+journaling deployment (#10000 writes no turn nodes), so
+    #      `turns: []` would claim a captured session had no turns;
+    #   3. a COMPLETE copy — served unchanged (#1591 keeps failing soft).
+    #
+    # Completeness is measured against the Session's OWN `turn_count`, which is
+    # `sess[2]` here and is written on EVERY capture including the armed one
+    # (`sdk.py`'s `"tc": turn_count`), so it is already the count this endpoint
+    # publishes (`"turns": sess[2]` below) — the fallback must not quietly serve
+    # fewer points than the number it reports. It is 0/None on an uncounted row,
+    # which collapses this to the emptiness test.
     #
     # ⚠️ KNOWN OVER-BLOCK, stated rather than papered over: `_record_holds_turns`
     # tests only the DSN, so on an armed-but-NOT-journaling deployment (where the
@@ -18511,7 +18529,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # transcript, precisely because this arm cannot know that it did. Closing it
     # is the shared-predicate fix recorded on #10021, not a read rewrite smuggled
     # into this visibility diff.
-    if _record_read_failed and not turns:
+    _expected_turns = sess[2] or 0
+    if _record_read_failed and (not turns or len(turns) < _expected_turns):
         raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM

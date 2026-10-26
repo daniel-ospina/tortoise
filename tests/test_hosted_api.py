@@ -4299,6 +4299,76 @@ class TestSessionDetail:
         assert len(turns) == 2, turns
         assert [t["role"] for t in turns] == ["user", "assistant"], turns
 
+    def test_detail_refuses_a_graph_copy_that_is_a_stale_prefix(
+            self, client, monkeypatch):
+        """#8447: a graph copy SHORTER than the session's own turn count is a
+        truncated transcript, and `200` would render it as a complete one.
+
+        The sibling tests cover the two obvious states — the graph copy is
+        EMPTY (refuse) and the graph copy is COMPLETE (serve). This one is the
+        third, and it is the state an ordinary arming day leaves behind:
+        `sdk._write_capture_turns`' stale-turn sweep is gated on the write
+        predicate (`sdk.py:2696`, `if stale and not _record_holds_turns`), so a
+        session captured BEFORE arming and re-captured after it keeps its old,
+        SHORTER turn nodes and NOTHING removes them. With the record then
+        unreachable, the fallback yields 2 turn_points while the response's own
+        `turns` (the Session's `turn_count`) says 4 — the caller cannot tell the
+        transcript is short, and the body even contradicts itself.
+
+        The fixture patches the SDK init so captured turns land in the GRAPH, so
+        the armed re-capture cannot be replayed end to end here. The state it
+        leaves is reproduced directly and ASSERTED: `turn_count` 4 on the
+        Session, with the last two turn nodes removed so the copy is a strict
+        prefix (ids `_t0`/`_t1`).
+
+        Mutation: restore `and not turns` (test only emptiness) — this REDs on
+        the 200, which is the silent truncation.
+        """
+        sid = "detail-record-down-stale-prefix"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+                {"role": "user", "content": "And Postgres for the record."},
+                {"role": "assistant", "content": "Agreed."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 4, r.json()
+
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "WHERE t.id IN $ids DETACH DELETE t",
+            params={"sid": sid, "ids": [f"{sid}_t2", f"{sid}_t3"]})
+
+        # The precondition, asserted rather than assumed: the graph copy is a
+        # strict PREFIX (2 nodes) of a 4-turn transcript.
+        nodes = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)", params={"sid": sid}).result_set
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert nodes[0][0] == 2, nodes
+        assert counts[0][0] == 4, counts
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the fallback served a 2-turn PREFIX of a 4-turn transcript at "
+            f"{r.status_code}: {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
     def test_detail_exposes_the_session_source_node(self, client):
         """#3809: the detail carries the session's graph Source node
         (``session:<id>``, sourceKind ``agentSession``) so
