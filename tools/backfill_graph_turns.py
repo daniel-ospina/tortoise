@@ -43,16 +43,26 @@ def _connect(uri: str):
     """Open the graph store from a redis/falkor URI (TLS when `rediss`)."""
     from falkordb import FalkorDB
 
+    from tortoise.projection import _bounded_server_socket_kwargs
+
     u = up.urlparse(uri)
     if u.scheme not in ("redis", "rediss", "falkor", "falkors"):
         raise SystemExit(
             f"census: unsupported URI scheme {u.scheme!r} — expected redis(s)://")
+    # #8118: the read bound comes from the product's ONE resolver, not from this
+    # call site. ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands
+    # it to redis-py explicitly, so an unbounded client parks a production census
+    # in ``recv()`` forever against a stalled engine (#2969's defrag loop, #2838's
+    # MERGE lock) — alive, 0% CPU, no error — which is the one outcome this tool's
+    # "read a live graph and change nothing" contract cannot tolerate: the
+    # operator sees a hang with no diagnosis, on the phase that gates a delete.
     return FalkorDB(
         host=u.hostname,
         port=u.port or 6379,
         username=up.unquote(u.username) if u.username else None,
         password=up.unquote(u.password) if u.password else None,
         ssl=(u.scheme in ("rediss", "falkors")),
+        **_bounded_server_socket_kwargs(),
     ), f"{u.scheme}://{u.hostname}:{u.port or 6379}"
 
 
