@@ -2646,6 +2646,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     // it. On this page the UI callers fire the flow; the harness is the caller
     // that awaits it, and returning the in-flight promise makes "await this call"
     // mean what it says.
+    // #10088: no request, no flow. This page is rendered with an empty PARAMS
+    // only as a provider return leg, so a missing request means the return did
+    // not bring one back — entering the consent view would print "wants to
+    // access your Tortoise MCP surface" for a client we cannot name and post an
+    // empty `client_id`. Say what happened instead.
+    if (REQUEST_MISSING) {
+      showSignin();
+      showError(terminalMessage());
+      return Promise.resolve("missing");
+    }
     if (previewInFlight) return previewInFlight;
     previewInFlight = (async () => {
       orgResource = null;         // never carry a stale selection between runs
@@ -2694,14 +2704,60 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // `%63ode=` is removed too).
   const STRIP_PARAMS = ["code", "error", "error_code", "error_description",
                         "error_uri", "sb_flow_id", "flow_id", "type"];
-  // #3496: defence-in-depth — the return target is rebuilt from the sanitised
-  // query so a transient is never echoed back to the provider. (GoTrue's
-  // `url.Values.Set` makes the "permanent stale-code loop" premise false; this
-  // is canonicalisation, not a loop fix.)
+  // #10088: the return target is the BARE path — no query at all.
+  //
+  // GoTrue decides whether to honour a `redirect_to` by matching the WHOLE url
+  // (query included; only the fragment is cut, `internal/utilities/request.go`
+  // `IsRedirectURLValid`) against the project's redirect allow-list, and a
+  // rejected `redirect_to` is SILENT: GoTrue substitutes the project Site URL
+  // (`internal/api/external.go` — `flow_state.Referrer`, set from
+  // `utilities.GetReferrer`) and still delivers a live `code` there. That is
+  // exactly what the #9664 run measured — the code landed on
+  // `https://tortoise.premiselabs.co/?code=…`, the marketing page ignored it, and
+  // the flow died with the code burned. A query-bearing target is therefore a
+  // DIFFERENT STRING from every allow-list entry the record requires, and the
+  // page cannot observe whether GoTrue accepted it. The bare path is the entry
+  // `docs/ops/auth-email-flows.md` §3 records, and it is the only form that
+  // survives an entry written as the full path (`…/oauth/authorize`) instead of
+  // as `…/**` — neither shape is readable from here, so the page must not depend
+  // on the difference.
+  //
+  // So the authorize request crosses the provider boundary in the page's own
+  // origin-scoped aux store (`stashAuthorizeFlow`), the SAME store the PKCE
+  // verifier already has to survive in — if that store cannot hold the request,
+  // the exchange could not complete either. That store is not a trust boundary:
+  // the page posts the restored values to /oauth/consent, which re-validates
+  // `client_id` and rebuilds the target from the REGISTERED `redirect_uri`, so a
+  // restored value can never widen what the grant is bound to.
   function authorizeReturnTo() {
-    const u = new URL(window.location.href);
-    STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
-    return window.location.origin + AUTHORIZE_PATH + (u.search || "");
+    return window.location.origin + AUTHORIZE_PATH;
+  }
+  // #10088: the authorize request, carried across the provider round trip. A
+  // STABLE key on purpose: an abandoned attempt leaves at most one entry (no
+  // credential, ~300 bytes) and the next attempt overwrites it — the same
+  // bounded residual the capability probe records, without a randomised key.
+  const FLOW_KEY = COOKIE_NAME + "-authorize-flow";
+  const FLOW_FIELDS = ["client_id", "redirect_uri", "response_type",
+                       "code_challenge", "code_challenge_method", "state",
+                       "scope", "resource", "redirect_target", "client_name"];
+  function stashAuthorizeFlow() {
+    const flow = {};
+    FLOW_FIELDS.forEach((k) => { flow[k] = PARAMS[k] == null ? "" : String(PARAMS[k]); });
+    return writeAux(FLOW_KEY, JSON.stringify(flow));
+  }
+  // Single-use: the entry is TAKEN on the return leg, so a later load cannot
+  // resume a request this page already spent.
+  function takeAuthorizeFlow() {
+    const raw = readAux(FLOW_KEY);
+    if (raw === null) return null;
+    removeAux(FLOW_KEY);
+    try {
+      const flow = JSON.parse(raw);
+      // A flow with no client is not a request: never let a truncated or empty
+      // entry stand in for one (the page would render consent for a client it
+      // cannot name, which is #8218's subject, not this one).
+      return (flow && typeof flow === "object" && flow.client_id) ? flow : null;
+    } catch (e) { return null; }
   }
   // #3496: PKCE cannot be done correctly without WebCrypto (the bundle silently
   // downgrades to `plain` when crypto.subtle is absent — reachable because this
@@ -2798,6 +2854,18 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       // #5734 (B): an ATTEMPT failed, so offer the retry affordance — its handler
       // re-probes, which is the only in-page way back after the user grants site
       // storage (the provider buttons are disabled in this state).
+      showRetrySignin();
+      return;
+    }
+    // #10088: the request has to survive the crossing BEFORE the browser leaves,
+    // because the return leg has no query left to resume from — and a request
+    // that arrives without one is unrecoverable while the code it brings back is
+    // already spent. Same fail-closed rule as the verifier's store.
+    if (!stashAuthorizeFlow()) {
+      showSignin();
+      showError("This page can't start a secure sign-in here — it has no usable "
+        + "site storage in which to keep the connection request. Allow site "
+        + "storage for this page and retry.");
       showRetrySignin();
       return;
     }
@@ -2922,16 +2990,30 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const LOAD_QUERY = loadParams();
   // #3496: a provider round trip is evidenced only by PROVIDER-owned markers.
   // `type` and `flow_id` are generic names a benign authorize GET can carry (the
-  // server ignores unknown params and `authorizeReturnTo` preserves the rest), so
-  // treating them as evidence told a first-time visitor who had done nothing that
-  // their sign-in failed. They stay in STRIP_PARAMS — stripping is cosmetic — and
-  // no longer make `present` true.
+  // server ignores unknown params), so treating them as evidence told a
+  // first-time visitor who had done nothing that their sign-in failed. They stay
+  // in STRIP_PARAMS — stripping is cosmetic, and #10088's return leg carries no
+  // authorize params at all — and no longer make `present` true.
   const TRANSIENT_MARKERS = ["code", "error", "error_code", "error_description",
                              "error_uri", "sb_flow_id"];
   const LOAD_TRANSIENT = {
     present: TRANSIENT_MARKERS.some((k) => LOAD_QUERY.has(k)),
     error_description: LOAD_QUERY.get("error_description"),
   };
+  // #10088: the return leg of a provider round trip carries the provider's
+  // `code`/`error` and NOTHING else — the authorize request crossed in the aux
+  // store, so the server rendered this page with empty PARAMS. Take the request
+  // back BEFORE any view reads PARAMS. Read synchronously here, ahead of the
+  // library's async exchange, so `client-line`/`scope-line`/`state` are settled
+  // by the time `runConsentFlow` renders.
+  if (!PARAMS.client_id) {
+    const flow = takeAuthorizeFlow();
+    if (flow) FLOW_FIELDS.forEach((k) => { PARAMS[k] = flow[k]; });
+  }
+  // True only on a return leg whose request did not come back (another tab or
+  // browser, cleared storage, or a stashed entry this page already spent). The
+  // consent view must never render in this state.
+  const REQUEST_MISSING = !PARAMS.client_id;
   const MSG_BUDGET = 300;   // the bound, in chars INCLUDING the appended ellipsis
   function boundedText(s, limit = MSG_BUDGET) {
     if (!s) return "";
@@ -2947,7 +3029,14 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     const err = LOAD_QUERY.get("error") || "";
     const desc = LOAD_TRANSIENT.error_description;
     let cause, remedy;
-    if (err === "access_denied") {
+    if (REQUEST_MISSING) {
+      // #10088: the provider came back to a page with no connection request. The
+      // remedy is the client, because that is the only surface that can start a
+      // new authorize request — retrying the sign-in here cannot.
+      cause = "This page came back from sign-in without the connection request "
+        + "it started from, so there is nothing here to approve.";
+      remedy = "Start again from your MCP client.";
+    } else if (err === "access_denied") {
       cause = "Sign-in was declined at the provider, so nothing was connected.";
       remedy = "Retry to pick an account and approve the connection.";
     } else if (err === "server_error" || err === "temporarily_unavailable") {
@@ -3000,7 +3089,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     // cause, and the generic `?code` branch would replace it with one its own
     // condition cannot establish.
     showError(terminalMessage());
-    showRetrySignin();
+    // #10088: a missing request is not retryable HERE (its copy's remedy is the
+    // client), so the affordance stays away — a control the message does not
+    // imply is the state invariant 21 exists to prevent.
+    if (!REQUEST_MISSING) showRetrySignin();
   }
   function sanitiseUrl() {
     try {

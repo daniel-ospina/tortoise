@@ -69,7 +69,7 @@ Supabase matches redirect URLs by **string match, with `*` wildcards allowed whe
 | `https://app.premiselabs.co/**` | the app's own navigations; the session origin |
 | `https://tortoise.premiselabs.co` | legacy links; `website/_redirects` 301s the auth paths to the app origin |
 | `https://tortoise.premiselabs.co/welcome.html` | pre-#4054 welcome links still in inboxes |
-| **`https://api.premiselabs.co/**`** | **the MCP consent page's provider sign-in return** (#3524 task 5) — `tortoise/oauth.py` sets `signInWithOAuth({redirectTo: window.location.origin + "/oauth/authorize"})`, whose origin is `api.premiselabs.co` (the AS). GoTrue refuses an unrecognised `redirect_to`, so without this entry GitHub/Google sign-in on the consent page is refused. **This row is what the table was missing**; `tests/test_oauth_consent_bridge.py::test_the_redirect_allowlist_record_covers_the_consent_page` fails if the origin goes unaddressed again. The bridge (#3524) makes the entry unnecessary by moving provider sign-in to `app.*/auth`, which `https://app.premiselabs.co/**` already covers — remove the row **only** with that record. |
+| **`https://api.premiselabs.co/**`** | **the MCP consent page's provider sign-in return** (#3524 task 5) — `tortoise/oauth.py` sets `signInWithOAuth({redirectTo: window.location.origin + "/oauth/authorize"})`, whose origin is `api.premiselabs.co` (the AS). GoTrue refuses an unrecognised `redirect_to`, so without this entry GitHub/Google sign-in on the consent page is refused. **This row is what the table was missing**; `tests/test_oauth_consent_bridge.py::test_the_redirect_allowlist_record_covers_the_consent_page` fails if the origin goes unaddressed again. The bridge (#3524) makes the entry unnecessary by moving provider sign-in to `app.*/auth`, which `https://app.premiselabs.co/**` already covers — remove the row **only** with that record. **#10088: the target is now the BARE path** — `https://api.premiselabs.co/oauth/authorize` with no query, because GoTrue matches the whole url (query included) and the authorize request crosses the round trip in the page's own origin-scoped store instead. So the entry that satisfies this row must match `…/oauth/authorize` exactly: `/**` does, and so does the bare path written out; `/*` does not cross the `/`, and a query-bearing form is no longer required. Measured 2026-10-26: a query-bearing target was not honoured (the provider delivered a live `code` to the Site URL), despite this entry being present. |
 
 `mailer_autoconfirm = False` (email confirmations ON) is a prerequisite for the signup-confirmation flow to
 exist at all. The hosted signup path creates accounts with `email_confirm=true` by default and sends NO email
@@ -100,7 +100,9 @@ the Management API with `SUPABASE_ACCESS_TOKEN`. Record the result on #3528.
 - [ ] **Change email address** template builds `…?token_hash={{ .TokenHash }}&type=email_change`.
 - [ ] Additional Redirect URLs contain `/auth/confirm` on the app origin (§3).
 - [ ] Additional Redirect URLs contain **`https://api.premiselabs.co/**`** (§3, #3524 task 5) — or the consent
-      page no longer signs in off-origin. Record which, on #3524.
+      page no longer signs in off-origin. Record which, on #3524. Since #10088 the target is the bare
+      `https://api.premiselabs.co/oauth/authorize` (no query), so read the entry back and confirm it covers that
+      exact path: `/**` and the bare path do, `/*` and any query-shaped entry do not.
 - [ ] Email confirmations are ON (`mailer_autoconfirm = False`) if the signup-confirmation flow is meant to fire.
 
 > **Magic link is out of this audit.** `/auth/start?provider=email` starts a PKCE flow and GoTrue redirects to

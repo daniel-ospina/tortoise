@@ -45,8 +45,13 @@ Invariants pinned here:
    `test_page_specifier_matches_the_vendored_bundle_version`)
  9 no WebCrypto refuses locally; with the guard removed the bundle downgrades
    to `code_challenge_method=plain` (the paired control)
-11 the return target is canonicalised (no transient echoed), with a
-   guard-removed control that DOES carry it
+11 the return target the page hands the provider is the BARE path — no query at
+   all, so it is byte-identical to the path the redirect-allowlist record names
+   (`docs/ops/auth-email-flows.md` §3; GoTrue matches the whole url, query
+   included, and answers a mismatch by delivering a live code to the Site URL —
+   #10088). The survival half moved carrier with it: the authorize request
+   crosses the round trip in the page's own aux store (inv 25), pinned as the
+   params the flow NEEDS, because an over-strip would otherwise stay green
 12 the aux stores hold no verifier after the removal path
 13 the WRITER probes each store with a same-length dummy under a throwaway key
    and selects a store only when the write/read/remove cycle completed AND the
@@ -106,6 +111,15 @@ Invariants pinned here:
    (DCR/CIMD client-controlled) — i.e. substitution does not rescan its own
    output (#6001), with a control that re-applies the pre-fix pass and FAILS
    the same check
+
+#10088 (the provider round trip, after the return target became the bare path):
+25 the return leg RESUMES: a `?code=` load with the request only in the store
+   renders the consent view for the RESTORED client/state and consumes the
+   entry (single-use) — with a restore-removed control that lands on the
+   sign-in view instead, so a page that stopped restoring cannot pass
+26 a return leg whose request did NOT come back fails CLOSED and says so: no
+   consent view for a client the page cannot name, a message naming the client
+   as the remedy, and NO retry affordance (the message implies none)
 
 Every field the tests assert on is produced by the page's own code running in the
 context, never read back from a shim.
@@ -186,6 +200,33 @@ def _render_page(redirect_uri: str = "https://client.example/cb",
                                 else redirect_target),
             "client_name": "test-connector",
         },
+        supabase_url="https://proj.supabase.co",
+        supabase_anon_key="anon-key",
+    )
+    return html
+
+
+def _render_shell() -> str:
+    """Render what the AS serves on a PROVIDER RETURN (#10088).
+
+    The handler renders this page for a request that carries a provider marker
+    (`code`/`error`) and no authorize params — the authorize request crossed the
+    round trip in the page's own store, so every param is empty and there is no
+    server-built target. Rendering it with `_render_page()`'s populated params
+    would hand the page a request it is supposed to RESTORE, and every assertion
+    about the restore would then pass without it (#10088's first draft did exactly
+    that and stayed green with the restore deleted).
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from tortoise.oauth import consent_page_html
+
+    html, _nonce = consent_page_html(
+        client_name="",
+        scope="",
+        params={k: "" for k in ("client_id", "redirect_uri", "response_type",
+                                 "code_challenge", "code_challenge_method", "state",
+                                 "scope", "resource")}
+              | {"redirect_target": "", "client_name": ""},
         supabase_url="https://proj.supabase.co",
         supabase_anon_key="anon-key",
     )
@@ -303,8 +344,8 @@ def test_inv2_single_origin_completion_and_pkce_exchange() -> None:
     assert rt.path == AUTHORIZE_PATH, r
 
     evil = _render_page().replace(
-        'return window.location.origin + AUTHORIZE_PATH + (u.search || "");',
-        'return "https://evil.example" + AUTHORIZE_PATH + (u.search || "");',
+        'return window.location.origin + AUTHORIZE_PATH;',
+        'return "https://evil.example" + AUTHORIZE_PATH;',
     )
     ctl = _run("single_origin", page=evil, search="?code=THECODE&state=st-1",
                seedVerifier="verifier-abc")
@@ -774,16 +815,27 @@ def test_inv9_weak_challenge_refused_with_a_guard_removed_control() -> None:
     )
 
 
-def test_inv11_return_target_is_canonicalised_with_a_control() -> None:
-    """Invariant 11: the `redirect_to` the page hands to the provider is rebuilt
-    from a SANITISED query — no `code`/`error`/`error_description`/`sb_flow_id`
-    is echoed. The nested `redirect_to` is parsed explicitly: the assign URL's own
-    origin is the Supabase host and carries the transients percent-encoded
-    INSIDE `redirect_to`, so asserting on the assign URL directly is both a false
-    red and a permanent false green.
+def test_inv11_return_target_is_bare_with_a_control() -> None:
+    """Invariant 11 (#10088): the `redirect_to` the page hands the provider is the
+    BARE authorize path — no query, no transient, no authorize params.
 
-    The control restores the raw-search form and asserts the transient IS echoed,
-    so the assertion discriminates."""
+    Why the absence is the contract: GoTrue decides whether to honour a
+    `redirect_to` by matching the WHOLE url against the project's redirect
+    allow-list (query included; only the fragment is cut), and a rejected target
+    is silent — GoTrue substitutes the project Site URL and still delivers a live
+    code there. The #9664 run measured exactly that
+    (`https://tortoise.premiselabs.co/?code=…`, marketing page, code burned), and
+    neither the allow-list's content nor the matcher's verdict on a given string
+    is observable from this lane. A query-free target is the entry the record
+    requires, under every entry SHAPE the record allows.
+
+    The survival half would otherwise be a permanent false green: the authorize
+    params must still reach the far side, and they now cross in the page's own
+    aux store. Asserted as the fields the flow NEEDS, in the store entry, because
+    an over-strip (`FLOW_FIELDS` missing `state` or `code_challenge`) breaks
+    /oauth/consent and the MCP handshake while every "no query" assertion stays
+    green. The control restores the pre-fix query-bearing target and asserts the
+    params DO reappear there, so the bare-target assertion discriminates."""
     hostile = ("?client_id=x&redirect_uri=https%3A%2F%2Fclient.example%2Fcb"
                "&response_type=code&code_challenge=chal&code_challenge_method=S256"
                "&scope=mcp&state=st-1&code=STALE&error=access_denied"
@@ -791,29 +843,127 @@ def test_inv11_return_target_is_canonicalised_with_a_control() -> None:
     r = _run("return_target", search=hostile)
     assert r["innerOrigin"] == PAGE_ORIGIN, r
     assert r["innerPath"] == AUTHORIZE_PATH, r
-    assert r["innerTransients"] == [], (
-        f"a transient was echoed into the return target: {r['innerTransients']}"
+    assert r["innerParams"] == [], (
+        "the provider return target carries a query again — GoTrue matches the "
+        f"whole url against the allow-list, query included: {r['innerParams']}"
     )
-    # The OTHER half of the contract: the params the flow NEEDS must SURVIVE the
-    # strip. The server re-renders PARAMS from this callback URL, so silently
-    # dropping `state` or `code_challenge` here breaks /oauth/consent and the MCP
-    # handshake while every "the transient was removed" assertion above stays
-    # green — an over-strip is a permanent false green without this.
+    # The request crossed in the store instead — and with EVERY field the flow
+    # needs, the transient included as ABSENT.
+    stashed = [e for e in r["auxRawEntries"]
+               if e["key"].endswith("-authorize-flow")]
+    assert len(stashed) == 1, (
+        f"the authorize request was not stashed for the crossing: {r['auxRawEntries']}"
+    )
+    flow = json.loads(stashed[0]["value"])
     for required in ("client_id", "redirect_uri", "response_type",
-                     "code_challenge", "code_challenge_method", "state", "scope"):
-        assert required in r["innerParams"], (
-            f"required authorize param {required!r} was stripped from the return "
-            f"target: {r['innerParams']}"
+                     "code_challenge", "code_challenge_method", "state", "scope",
+                     "redirect_target", "client_name"):
+        assert flow.get(required), (
+            f"required authorize field {required!r} did not cross in the store: {flow}"
         )
+    assert not ({"code", "error", "error_description", "sb_flow_id"} & set(flow)), (
+        f"a transient crossed in the store: {flow}"
+    )
 
     guard_off = _render_page().replace(
         "options: { redirectTo: authorizeReturnTo() },",
         "options: { redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search },",
     )
     ctl = _run("return_target", page=guard_off, search=hostile)
-    assert "code" in ctl["innerTransients"], (
-        f"the control did not echo the transient — the assertion is vacuous: {ctl}"
+    assert "client_id" in ctl["innerParams"], (
+        f"the control did not put the params back on the return target — the "
+        f"assertion above is vacuous: {ctl['innerParams']}"
     )
+
+
+# ── #10088: the authorize request crosses the provider round trip ─────────────
+
+#: What a previous load stashed before the browser left for the provider. The
+#: return leg has NOTHING else: the redirect target carries no query (inv 11).
+_STASHED_FLOW = {
+    "client_id": "client-1",
+    "redirect_uri": "https://client.example/cb",
+    "response_type": "code",
+    "code_challenge": "chal",
+    "code_challenge_method": "S256",
+    "state": "st-1",
+    "scope": "mcp",
+    "resource": "",
+    "redirect_target": "https://client.example/cb",
+    "client_name": "test-connector",
+}
+
+
+def test_10088_the_return_leg_resumes_the_restored_request() -> None:
+    """Invariant 25 (#10088): the provider returns to the bare path with `?code=`
+    and nothing else; the page restores the request from its own store, the code
+    is exchanged, and the consent view renders for THAT client/state.
+
+    The store entry is consumed, so a later load cannot resume a request an
+    earlier one already spent. The paired control disables the restore and
+    asserts the page lands on the sign-in view instead — without it, a page whose
+    restore silently stopped working would still be green here (the view would
+    render from nothing in particular)."""
+    r = _run("flow_return", search="?code=THECODE", seedVerifier="verifier-abc",
+             seedFlow=_STASHED_FLOW, previewOk=True, page=_render_shell())
+    assert r["exchangeCount"] == 1, f"the returned code was never exchanged: {r}"
+    assert r["viewConsent"] == "block", (
+        f"the return leg did not reach the consent view: {r}"
+    )
+    assert r["viewSignin"] == "none", r
+    params = json.loads(r["params"])
+    assert params["client_id"] == "client-1", params
+    assert params["state"] == "st-1", params
+    assert params["redirect_uri"] == "https://client.example/cb", params
+    # The server-built target crossed too, so the deny path still has somewhere
+    # to go on the return leg (the server cannot rebuild it: it has no client).
+    assert params["redirect_target"] == "https://client.example/cb", params
+    assert "test-connector" in r["clientLine"], (
+        f"the consent view named a client other than the restored one: {r['clientLine']!r}"
+    )
+    assert r["flowEntriesLeft"] == [], (
+        f"the restored request was not consumed (single-use): {r['flowEntriesLeft']}"
+    )
+
+    no_restore = _render_shell().replace(
+        "const flow = takeAuthorizeFlow();", "const flow = null;")
+    ctl = _run("flow_return", search="?code=THECODE",
+               seedVerifier="verifier-abc", seedFlow=_STASHED_FLOW,
+               previewOk=True, page=no_restore)
+    assert ctl["viewConsent"] != "block", (
+        f"the control rendered consent without restoring the request: {ctl}"
+    )
+    assert ctl["viewSignin"] == "block", ctl
+    assert json.loads(ctl["params"])["client_id"] == "", ctl["params"]
+
+
+def test_10088_a_return_with_no_request_fails_closed() -> None:
+    """Invariant 26 (#10088): a return leg whose request did NOT come back (a
+    different tab or browser, cleared storage, an entry already spent) never
+    renders consent for a client it cannot name, and says what to do.
+
+    Two lines matter, in opposite directions: the message names the CLIENT as the
+    remedy (retrying the sign-in here cannot recreate the request), and the retry
+    affordance stays away — a control the copy does not imply is the dead end
+    invariant 21 exists to prevent."""
+    r = _run("flow_return", search="?code=THECODE", seedVerifier="verifier-abc",
+             previewOk=True, page=_render_shell())
+    assert r["exchangeCount"] == 1, r
+    assert r["viewConsent"] != "block", (
+        f"consent rendered for a client the page cannot name: {r}"
+    )
+    assert r["viewSignin"] == "block", r
+    assert r["errorVisible"] is True, r
+    assert "connection request" in r["errorText"], (
+        f"the message does not name the cause: {r['errorText']!r}"
+    )
+    assert "MCP client" in r["errorText"], (
+        f"the message does not name the only remedy: {r['errorText']!r}"
+    )
+    assert r["retrySigninVisible"] == "none", (
+        f"a non-retryable message offered a retry control: {r}"
+    )
+    assert r["navs"] == [], f"the fail-closed arm navigated somewhere: {r['navs']}"
 
 
 # ── #3443: the navigation target is the SERVER's rebuild ────────────────────
@@ -1823,6 +1973,13 @@ if (opts.seedVerifier) {
   const target = (opts.seedVerifierStore === 'local') ? localStorage : sessionStorage;
   target.setItem(COOKIE_NAME + '-code-verifier', JSON.stringify(opts.seedVerifier));
 }
+if (opts.seedFlow) {
+  // #10088: the authorize request a PREVIOUS load stashed before the provider
+  // round trip — the only carrier on the return leg. Written raw, not through the
+  // page's writer, because that is literally what the previous load left behind.
+  const flowStore = (opts.seedFlowStore === 'local') ? localStorage : sessionStorage;
+  flowStore.setItem(COOKIE_NAME + '-authorize-flow', JSON.stringify(opts.seedFlow));
+}
 
 function jsonResponse(obj, status) {
   return new Response(JSON.stringify(obj), {
@@ -2015,6 +2172,32 @@ function innerTarget(assignUrl) {
         out.innerParams = Array.from(inner.searchParams.keys());
       }
     }
+  } else if (scenario === 'flow_return') {
+    // #10088: the RETURN leg. The provider's `code` is in the query and the
+    // authorize request exists only in the store — every observable is the page's
+    // own (PARAMS after the restore, the views, the store entries left behind).
+    await waitFor(function () {
+      return !!(els['view-consent'] && els['view-consent'].style.display === 'block')
+          || !!(els['error'] && els['error'].classList.contains('visible'));
+    }, 3000);
+    await sleep(40);
+    out.viewConsent = els['view-consent'] ? String(els['view-consent'].style.display) : null;
+    out.viewSignin = els['view-signin'] ? String(els['view-signin'].style.display) : null;
+    out.errorVisible = els['error'] ? els['error'].classList.contains('visible') : false;
+    out.errorText = els['error'] ? String(els['error'].textContent) : '';
+    out.clientLine = els['client-line'] ? String(els['client-line'].textContent) : '';
+    out.params = q('JSON.stringify({client_id: PARAMS.client_id, state: PARAMS.state, '
+      + 'redirect_uri: PARAMS.redirect_uri, redirect_target: PARAMS.redirect_target})');
+    out.flowEntriesLeft = Array.from(sessionStorage._map.keys())
+      .concat(Array.from(localStorage._map.keys()))
+      .filter(function (k) { return k.indexOf('-authorize-flow') >= 0; });
+    out.retrySigninVisible = els['btn-retry-signin']
+      ? String(els['btn-retry-signin'].style.display) : null;
+    out.exchangeCount = fetchCalls.filter(function (c) {
+      return c.url.indexOf('/auth/v1/token') >= 0;
+    }).length;
+    out.replaceStates = replaceStates.slice();
+    out.navs = navs.slice();
   } else if (scenario === 'load') {
     // One of the two terminal states must have been rendered; wait for the
     // page to have touched its own view rather than assuming a duration.

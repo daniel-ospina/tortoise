@@ -652,6 +652,58 @@ class TestAuthorizePage:
         assert "error=" in r.headers["location"]
 
 
+class TestProviderReturnShell:
+    """#10088 — the provider round trip returns to the BARE authorize path.
+
+    The page hands GoTrue `https://api.premiselabs.co/oauth/authorize` with no
+    query (GoTrue matches the WHOLE url — query included — against the project's
+    redirect allow-list, and a rejected target is delivered to the Site URL with
+    a live code; measured 2026-10-26), and carries the authorize request across
+    in its own origin-scoped store. So the return leg arrives as `?code=`/`?error=`
+    with no authorize params at all: it must reach the PAGE, or the user is
+    stranded with a JSON body mid-journey.
+
+    Nothing is granted by serving it — the shell carries empty params, and
+    /oauth/consent still refuses to mint without a validated client — so the
+    assertions that matter are that the page is served, that NOTHING from the
+    return request is reflected into it, and that the gate is a provider-owned
+    marker (a bare `/oauth/authorize` keeps refusing).
+    """
+
+    def test_a_provider_return_serves_the_page_and_reflects_nothing(self, api_client):
+        tc, _ = api_client
+        r = tc.get("/oauth/authorize", params={"code": "RETURNCODEPROBE"},
+                   follow_redirects=False)
+        assert r.status_code == 200, r.text
+        assert "text/html" in r.headers["content-type"]
+        assert "RETURNCODEPROBE" not in r.text, (
+            "the provider's code was reflected into the page"
+        )
+        # The shell names no client and carries no server-built target, so the
+        # page restores the request or reports that the return lost it.
+        assert '"client_id": ""' in r.text
+        assert '"redirect_target": ""' in r.text
+
+    def test_a_provider_refusal_reaches_the_page(self, api_client):
+        tc, _ = api_client
+        r = tc.get("/oauth/authorize",
+                   params={"error": "access_denied",
+                           "error_description": "REFUSALDESCRIPTIONPROBE"},
+                   follow_redirects=False)
+        assert r.status_code == 200, r.text
+        assert "text/html" in r.headers["content-type"]
+        assert "REFUSALDESCRIPTIONPROBE" not in r.text
+
+    def test_a_bare_authorize_without_a_provider_return_still_refuses(self, api_client):
+        """The shell is gated on a PROVIDER-owned marker. `type`/`flow_id` are
+        generic names a benign authorize GET may carry, so they must not open it."""
+        tc, _ = api_client
+        for params in ({}, {"type": "signup"}, {"flow_id": "x"}):
+            r = tc.get("/oauth/authorize", params=params, follow_redirects=False)
+            assert r.status_code == 400, (params, r.status_code)
+            assert r.json()["error"] == "invalid_request", (params, r.text)
+
+
 class TestLoopbackPortAgnostic:
     """#2846 — RFC 8252 §7.3: for loopback redirect URIs the AS must ignore the
     port, because a native client (Claude Code CLI) binds an ephemeral port at

@@ -40825,6 +40825,13 @@ async def oauth_authorization_server_metadata(request: Request):
     return authorization_server_metadata(_oauth_base(request))
 
 
+# #10088: the markers that evidence a PROVIDER round trip on the authorize page.
+# `type`/`flow_id` are deliberately absent — they are generic names a benign
+# authorize GET may carry (the page's `TRANSIENT_MARKERS` draws the same line).
+_PROVIDER_RETURN_MARKERS = ("code", "error", "error_code", "error_description",
+                            "error_uri", "sb_flow_id")
+
+
 @app.get("/oauth/authorize")
 async def oauth_authorize(request: Request):
     """Authorization endpoint (P2) — validates the request and renders the
@@ -40858,29 +40865,48 @@ async def oauth_authorize(request: Request):
         "scope": request.query_params.get("scope", ""),
         "resource": request.query_params.get("resource", ""),
     }
+    # #10088: the provider round trip returns HERE carrying the provider's
+    # `code`/`error` and no authorize params at all — the request crosses that
+    # boundary in the page's own origin-scoped store, so the `redirect_to` is the
+    # BARE path (see `authorizeReturnTo`); a query-bearing target is a different
+    # string from every allow-list entry the record requires, and GoTrue answers
+    # a rejected one by delivering a live code to the project Site URL. Serving
+    # the page for that return is what lets it restore the request, or say why it
+    # cannot — the alternative is the JSON 400 an authorize request without a
+    # `client_id` earns today (measured on production: `GET /oauth/authorize?code=…`
+    # → 400 `Unknown or revoked client_id.`), which strands the user mid-journey.
+    # Nothing is granted here: the shell carries empty params, and /oauth/consent
+    # still refuses to mint without a validated client.
+    provider_return = any(request.query_params.get(k)
+                          for k in _PROVIDER_RETURN_MARKERS)
+    shell_only = not params["client_id"] and provider_return
     try:
-        client = await _oauth_offload(
-            lambda: validate_authorize_params(
-                cp, client_id=params["client_id"],
-                redirect_uri=params["redirect_uri"] or None,
-                response_type=params["response_type"] or None,
-                code_challenge=params["code_challenge"] or None,
-                code_challenge_method=params["code_challenge_method"] or None,
-                scope=params["scope"] or None),
-            op="oauth_authorize_params")
-        # #3443: WHETHER the request may proceed and WHERE the browser is sent
-        # are decided together, inside this try — the destination is rebuilt
-        # from the registered URI (`canonical_redirect_target`), never taken
-        # from the request string, so a target we cannot rebuild is an
-        # invalid_request handled by the block below (as JSON: there is no
-        # destination to redirect to). `None` is unreachable while the matcher
-        # in `validate_authorize_params` and this helper agree, which they do by
-        # construction: same predicate, same list. The guard is the fail-closed
-        # direction if that ever stops being true.
-        redirect_target = canonical_redirect_target(client, params["redirect_uri"])
-        if redirect_target is None:
-            raise OAuthError(400, "invalid_request",
-                             "redirect_uri is not registered for this client.")
+        if shell_only:
+            client = {"client_name": ""}
+            redirect_target = ""
+        else:
+            client = await _oauth_offload(
+                lambda: validate_authorize_params(
+                    cp, client_id=params["client_id"],
+                    redirect_uri=params["redirect_uri"] or None,
+                    response_type=params["response_type"] or None,
+                    code_challenge=params["code_challenge"] or None,
+                    code_challenge_method=params["code_challenge_method"] or None,
+                    scope=params["scope"] or None),
+                op="oauth_authorize_params")
+            # #3443: WHETHER the request may proceed and WHERE the browser is sent
+            # are decided together, inside this try — the destination is rebuilt
+            # from the registered URI (`canonical_redirect_target`), never taken
+            # from the request string, so a target we cannot rebuild is an
+            # invalid_request handled by the block below (as JSON: there is no
+            # destination to redirect to). `None` is unreachable while the matcher
+            # in `validate_authorize_params` and this helper agree, which they do by
+            # construction: same predicate, same list. The guard is the fail-closed
+            # direction if that ever stops being true.
+            redirect_target = canonical_redirect_target(client, params["redirect_uri"])
+            if redirect_target is None:
+                raise OAuthError(400, "invalid_request",
+                                 "redirect_uri is not registered for this client.")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
@@ -40915,7 +40941,7 @@ async def oauth_authorize(request: Request):
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/authorize")
     html, nonce = consent_page_html(
-        client_name=client.get("client_name") or client["id"],
+        client_name=client.get("client_name") or client.get("id") or "",
         scope=params["scope"] or client.get("scope") or "mcp",
         # #3443: `redirect_target` rides along with the raw params — the page
         # navigates THAT (deny included, which has no server round trip) and
