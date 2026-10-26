@@ -716,6 +716,40 @@ def _c_unquote(path: str) -> str:
     return out.decode("utf-8", "surrogateescape")
 
 
+def _status_paths(stdout: str) -> list[str]:
+    """The PATH(s) a ``git status --porcelain`` answer names, decoded.
+
+    ONE parse site, because there were two and they disagreed: ``_status_covered``
+    split a rename/copy row on ``" -> "`` BEFORE unquoting it, while
+    ``code_identity`` unquoted the WHOLE row — so ``R  "tortoise/\303\251.py"
+    -> "tortoise/\303\274.py"`` was recorded as ``tortoise/é.py" ->
+    "tortoise/ü.py``, a string no ``git`` resolves, and the dirty path echoed in
+    the publish refusal named no path in the tree. Both sides of a rename are
+    reported: the source is gone from the worktree, the destination is new, and
+    each is a path git answers for (``git show <sha>:<src>`` / on disk).
+
+    The rename marker is read from the TWO-CHARACTER status prefix, not inferred
+    from the presence of ``" -> "`` in the body: a path may legitimately
+    CONTAIN that substring (``?? tools/a -> b.py`` is one file), and splitting
+    it would invent a second path that exists nowhere.
+
+    A collapsed untracked directory keeps its trailing ``/``
+    (``?? tools/newdir/``), which is what lets :func:`_status_covered` match the
+    files ``--untracked-files=normal`` did not list.
+    """
+    paths: list[str] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        code, body = line[:2], line[3:]
+        parts = body.split(" -> ") if ("R" in code or "C" in code) else [body]
+        for part in parts:
+            decoded = _c_unquote(part.strip())
+            if decoded:
+                paths.append(decoded)
+    return paths
+
+
 def _status_covered(rel: str, status_paths: tuple[str, ...] | list[str]) -> bool:
     """Whether ``git status`` ALREADY reported ``rel`` (so re-reporting it
     would inflate the count and misname the reason).
@@ -726,25 +760,20 @@ def _status_covered(rel: str, status_paths: tuple[str, ...] | list[str]) -> bool
     reporting both made one file read as "2 uncommitted path(s)" whose reason
     pointed the operator at an ignore rule that does not exist.
 
-    Four shapes have to match, or the dedupe would still double-report:
+    ``status_paths`` are the paths ``git status`` NAMED, already decoded by
+    :func:`_status_paths` — every side of a rename/copy row as its own entry.
+    This function therefore only MATCHES; it does not parse. Two shapes have to
+    match, or the dedupe would still double-report:
 
     * the plain row (``?? tools/x.py``);
     * a COLLAPSED untracked directory — ``--untracked-files=normal`` prints
       ``?? tools/newdir/`` and not its contents, so a file inside it is
-      covered by that row;
-    * a rename/copy row (``R  old -> new``): the path that exists now is the
-      right-hand side;
-    * a C-quoted path (git quotes non-ASCII/control bytes unless
-      ``core.quotePath=false``).
+      covered by that row.
     """
     for raw in status_paths:
         path = raw.strip()
         if not path:
             continue
-        _, sep, destination = path.partition(" -> ")
-        if sep:
-            path = destination.strip()
-        path = _c_unquote(path)
         if path == rel or (path.endswith("/") and rel.startswith(path)):
             return True
     return False
@@ -1025,8 +1054,7 @@ def code_identity(repo_root: str | Path | None,
     if status.returncode != 0:
         dirty_paths = ["<git status failed: the tree is not provably clean>"]
     else:
-        dirty_paths = [_c_unquote(line[3:]) for line in
-                       status.stdout.splitlines() if line.strip()]
+        dirty_paths = _status_paths(status.stdout)
     # ⛔ The status answer is NOT the whole of "was the tree clean?": an index
     # flag or an ignore rule makes a modified/untracked executed file print
     # nothing at all. Both are asked of git's records directly, and a git

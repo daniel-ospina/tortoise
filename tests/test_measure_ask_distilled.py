@@ -2069,6 +2069,43 @@ def test_a_C_QUOTED_untracked_path_is_reported_ONCE(tmp_path):
     assert not any("ignore rule" in path for path in dirty), dirty
 
 
+def test_a_RENAMED_C_quoted_path_is_recorded_as_the_PATHS_not_the_row(
+        tmp_path):
+    """FAIL-BEFORE: a rename recorded ``tortoise/é.py" -> "tortoise/ü.py`` —
+    ONE string that names no path in the tree.
+
+    ``code_identity`` unquoted the WHOLE status row, so for a rename it stripped
+    only the OUTERMOST quotes and kept the inner ones: the dirty path carried
+    into the observations, and echoed in the publish refusal, was a string no
+    ``git`` resolves. ``_status_covered`` already split on ``" -> "`` before
+    unquoting, which is why the dedupe still worked by luck — two parse sites,
+    one right. Both sides are recorded, each decoded, and the collapse case is
+    pinned by the untracked-directory test above.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / "tortoise" / "é.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert _git_commit(repo, "a module that is about to move")
+    assert m._git(repo, "mv", "tortoise/é.py", "tortoise/ü.py").returncode == 0
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    # Non-vacuity: the fixture really did produce a C-quoted RENAME row, so the
+    # split below is exercised rather than skipped by a quoting config.
+    assert status.startswith("R"), status
+    assert status.count('\\303') == 2 and " -> " in status, status
+
+    dirty = m.code_identity(repo)["dirty_paths"]
+    assert "tortoise/é.py" in dirty, dirty
+    assert "tortoise/ü.py" in dirty, dirty
+    # The property, not just the spelling: EVERY recorded row is a path git
+    # answers for — present in the worktree, or in the recorded commit.
+    for path in dirty:
+        in_worktree = (repo / path).exists()
+        at_commit = m._git(repo, "cat-file", "-e", f"HEAD:{path}").returncode == 0
+        assert in_worktree or at_commit, (
+            f"the recorded dirty path {path!r} resolves nowhere in the tree")
+    assert not any('" -> "' in path for path in dirty), dirty
+
+
 def test_the_reproduce_instructions_carry_the_byte_code_free_spelling(
         shared_run, tmp_path):
     """FAIL-BEFORE: §6 and the pre-registration template printed a ``run``
@@ -2240,6 +2277,73 @@ def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,
         # Leave the fixture as the other tests expect it (the module is scoped).
         m._git(repo, "checkout", "--", "run.marker")
         (repo / "untracked_note.txt").unlink(missing_ok=True)
+    assert m.code_identity(repo)["dirty_paths"] == []
+
+
+def test_a_git_read_that_FAILS_is_not_a_clean_tree(tmp_path, capsys):
+    """FAIL-BEFORE with either failed-read branch defaulting to ``[]``/``pass``:
+    this published a number attributed to a tree nobody measured.
+
+    ``git status`` and ``git ls-files`` answer "was the tree clean?", and both
+    fail with EMPTY stdout when git cannot read its own index. Folding that
+    failure into `dirty_paths == []` is a fail-open on the one question this
+    record exists to answer — the same shape as the ``--untracked-files`` config
+    trap above, and it was pinned by NOTHING: both branches could be flipped to
+    a plausible "git can't tell, so assume clean" and the whole file stayed
+    green, because every other test measures a git answer that SUCCEEDS.
+
+    The fixture corrupts ``.git/index`` so ``HEAD`` still resolves (the receipt's
+    commit is derivable) while the cleanliness question is unanswerable — a
+    truncated index, not a missing repository, so this cannot pass because git
+    died on something the other tests already cover. Both failure rows are
+    asserted independently, so flipping EITHER branch reddens this test.
+    """
+    fixture = _make_bound_repo(tmp_path)
+    repo = Path(fixture["repo"])
+    index = repo / ".git" / "index"
+    original_index = index.read_bytes()
+    try:
+        index.write_bytes(b"not an index git can read")
+        # Non-vacuity: the two premises that make this the RIGHT shape. HEAD is
+        # still resolvable (so a publish of the recorded commit is reachable),
+        # and both cleanliness oracles really do fail.
+        assert m._resolve_commit(repo, "HEAD") == fixture["run_commit"]
+        assert m._git(repo, "status", "--porcelain",
+                      "--untracked-files=normal").returncode != 0
+        assert m._git(repo, "ls-files", "-z", "-v", "--",
+                      *m.EXECUTED_SURFACE).returncode != 0
+
+        identity = m.code_identity(repo)
+        status_row = "<git status failed: the tree is not provably clean>"
+        hidden_row = "<git ls-files failed: the tree is not provably clean>"
+        assert identity["commit"] == fixture["run_commit"], identity
+        assert status_row in identity["dirty_paths"], (
+            "a status that FAILED read as a clean tree", identity)
+        assert hidden_row in identity["dirty_paths"], (
+            "a failed ls-files read as 'nothing hidden'", identity)
+
+        run = m.run_sealed(corpus_root=fixture["corpus_dir"], repo_root=repo,
+                           reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+        assert run["code_identity"]["dirty_paths"], (
+            "the run lost the unreadable-tree rows")
+        scored = m.score(run_report=run, corpus_root=fixture["corpus_dir"],
+                         judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+        scored_path = tmp_path / "scored.json"
+        scored_path.write_text(json.dumps(scored), encoding="utf-8")
+        report = tmp_path / "run-report.md"
+        receipt = tmp_path / "receipt.json"
+        rc = m._main(_publish_argv(
+            scored_path=scored_path, commit=fixture["run_commit"],
+            report=report, receipt=receipt,
+            corpus_root=fixture["corpus_dir"], prereg=fixture["prereg_path"],
+            repo=repo))
+        err = capsys.readouterr().err
+        assert rc == 2, "an unreadable tree must never be published"
+        assert "uncommitted path" in err and "not provably clean" in err, err
+        assert not report.exists() and not receipt.exists(), (
+            "a refused publish wrote an artifact")
+    finally:
+        index.write_bytes(original_index)
     assert m.code_identity(repo)["dirty_paths"] == []
 
 
