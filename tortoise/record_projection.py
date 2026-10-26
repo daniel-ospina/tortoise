@@ -244,6 +244,7 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # pre-move contract (`Object -> name`) while the database enforced the
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
+    "20261029000001_point_cache_tier.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -1302,6 +1303,12 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # cache is the projection). `test_record_projection`'s storable-primary leg
     # is what keeps that distinction honest.
     "agent_id",
+    # #10017 R2: a PLACEMENT declaration, not a derived value. The cache tier
+    # says which store a row is for; a node must never carry it, and
+    # `cache_projection._props_from_row` copies the tail VERBATIM — so without
+    # this, a record-sourced rebuild would write a props key a journal replay
+    # never does, and the two rebuild paths would diverge on every turn row.
+    "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
