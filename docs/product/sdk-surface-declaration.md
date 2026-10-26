@@ -31,6 +31,13 @@ number here would red this gate on a comment insertion.
 | "`__all__` lists the 41 approved methods" | The methods are **class members**. A module-level `__all__` physically cannot name them. |
 | "the surface is the module's names" | `tests/test_surface_resolution.py` resolves `getattr(TortoiseSDK, entry.sdk_method)` — the **class body** is the surface production consumes. |
 
+**What #10034 added, and why it is a second artifact.** The approved **TARGET** is declared in
+`tortoise/__all__.py` — the owner's 40 methods, transcribed from `beta-sdk-surface.md`, plus the
+off-surface backlog — and held by `tools/sdk_surface_declaration.py`. This file and that module
+answer different questions and neither can be cut from the other: this one declares *what exists*
+(derived from the code, 149), that one declares *what is approved* (typed, 40) and *what is on its
+way out*. The manifest is cut from the second and cross-checked against the first.
+
 ## Why three comparisons, not one
 
 A declaration checked only against itself proves nothing. `--check` compares the frozen

@@ -3441,6 +3441,26 @@ def _write_beta_fixture(path: Path, *, mcp: int = 7, sdk: int = 9) -> None:
     )
 
 
+def _write_declaration_fixture(path: Path, *, count: int) -> Path:
+    """A stand-in `tortoise/__all__.py` carrying `count` approved names (#10034).
+
+    The SDK leg of the target is read from the DECLARATION, so a test that moves the target
+    has to move it where the target now lives. Only `__all__`'s length matters to
+    `read_targets`; the other blocks are present so the module is the real shape.
+    """
+    names = tuple(f"approved_method_{i}" for i in range(count))
+    path.write_text(
+        "from __future__ import annotations\n"
+        f"__all__ = {names!r}\n"
+        "APPROVED_PENDING = __all__\n"
+        "OFF_SURFACE = ()\n"
+        "PENDING_HIGH_WATER = 999\n"
+        "OFF_SURFACE_HIGH_WATER = 0\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_the_live_surface_is_the_baseline_the_guard_froze():
     """The live counts are the same numbers the manifest's `counts:` records.
 
@@ -3528,11 +3548,30 @@ def test_the_target_is_read_from_the_docs_not_a_constant(tmp_path):
     beta = tmp_path / "beta-sdk-surface.md"
     _write_canonical_fixture(canonical, mcp=11)
     _write_beta_fixture(beta, mcp=11, sdk=13)
-    targets = tc.read_targets(canonical, beta)
+    declaration = _write_declaration_fixture(tmp_path / "__all__.py", count=13)
+    targets = tc.read_targets(canonical, beta, declaration)
     assert targets["mcp"] == 11
     assert targets["sdk"] == 13
     assert targets["approval"]["principal"] == "someone-else"
     assert targets["approval"]["pr"] == "9999"
+
+
+def test_a_declaration_that_disagrees_with_the_approved_doc_is_a_refusal(tmp_path):
+    """#10034: the SDK target is the declaration AND the document — never one over the other.
+
+    Reading it from prose alone made it a number nobody maintained; reading it from the
+    declaration alone would let a typed list overrule the owner's ruling. A disagreement is
+    refused, so neither half can silently win.
+    """
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, mcp=7)
+    _write_beta_fixture(beta, mcp=7, sdk=9)
+    declaration = _write_declaration_fixture(tmp_path / "__all__.py", count=11)
+
+    with pytest.raises(tc.TargetUnreadable, match="disagree on the SDK target"):
+        tc.read_targets(canonical, beta, declaration)
 
 
 def test_the_canonical_docs_beta_target_number_is_not_read_as_the_mcp_target(tmp_path):
@@ -3560,7 +3599,8 @@ def test_the_canonical_docs_beta_target_number_is_not_read_as_the_mcp_target(tmp
         encoding="utf-8",
     )
     _write_beta_fixture(beta, mcp=26, sdk=40)
-    targets = tc.read_targets(canonical, beta)
+    declaration = _write_declaration_fixture(tmp_path / "__all__.py", count=40)
+    targets = tc.read_targets(canonical, beta, declaration)
     assert targets["mcp"] == 26, "the canonical doc's `beta target` number leaked into the MCP target"
     assert targets["sdk"] == 40
 

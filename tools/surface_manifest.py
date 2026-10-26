@@ -213,7 +213,7 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 # other explanatory line above the first key). The marker's durable homes are the tool
 # docstrings; this is the copy a reader of the ARTIFACT sees, kept across re-cuts.
 MANIFEST_HEADER = (
-    "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).\n"
+    "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.\n"
     "#\n"
     "# The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by\n"
     "# `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.\n"
@@ -1118,6 +1118,31 @@ def build_doc(commit: str | None = None) -> dict:
     public = sorted(
         name for name in dir(TortoiseSDK) if not name.startswith("_") and callable(getattr(TortoiseSDK, name))
     )
+    # #10034: the `sdk:` rows below are cut FROM THE DECLARATION, not from a bare `dir()`
+    # walk. `tortoise/__all__.py` states the approved surface (40), the tracked gaps, and the
+    # off-surface backlog; this reflection walk is the MEASUREMENT that proves the declaration
+    # still describes the class. Cutting from `dir()` alone left the frozen baseline and the
+    # declaration free to disagree — the baseline would freeze whatever existed, including a
+    # method nobody had declared, and `cut` would report success. The two sets must be equal
+    # or the re-cut is REFUSED: a baseline derived from an unreadable or contradicted
+    # declaration is exactly the "snapshot is not the target" defect (#4185) one level down.
+    from tools.sdk_surface_declaration import DeclarationUnreadable, declared_live_methods
+
+    try:
+        declared_public = declared_live_methods()
+    except DeclarationUnreadable as exc:
+        raise SurfaceEvidenceUnreadable(str(exc)) from exc
+    if declared_public != set(public):
+        only_code = sorted(set(public) - declared_public)
+        only_declaration = sorted(declared_public - set(public))
+        raise SurfaceEvidenceUnreadable(
+            "the approved-surface declaration (tortoise/__all__.py) and the TortoiseSDK class "
+            f"disagree: public in the class only {only_code}, declared only "
+            f"{only_declaration}. The baseline is cut FROM the declaration, so it cannot be "
+            "re-cut while the two disagree — run `uv run python "
+            "tools/sdk_surface_declaration.py check` for the full set of differences."
+        )
+    public = sorted(declared_public)
     # Retired names are STILL HANDLERS (they are served through the #3883 shim), so
     # they count for the caller scan: a call inside `tortoise_get_point` is a call
     # inside a tool handler, not free-floating code.
@@ -2174,7 +2199,8 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eleven structural properties, plus a twelfth derived from the code."""
+    """AC13's lint: eleven structural properties, a twelfth derived from the code, and a
+    thirteenth: the DECLARED surface is the approved one (#10034)."""
     try:
         order = load_order()
         doc = _read_manifest()
@@ -2360,6 +2386,22 @@ def cmd_check(args: argparse.Namespace) -> int:
         return _refuse(exc)
     problems.extend(_derivation_problems(doc, derived))
 
+    # 13. the DECLARED surface is the APPROVED one (#10034) ----------------------
+    # `build_doc` above proves the baseline was cut from a declaration that agrees with the
+    # class. It does not prove the declaration is the OWNER'S list: a re-cut over a grown
+    # or re-derived declaration would reproduce it faithfully. That check lives in
+    # `tools/sdk_surface_declaration.py`, and it is run HERE — from the required
+    # `python-ci.yml::surface-guard` step that already runs this lint — rather than from a
+    # new workflow step, so the gate is enforced by the existing required job. (A separate
+    # step was the first draft; it needs the `workflow` scope on the pushing credential,
+    # and the enforcement does not.)
+    from tools import sdk_surface_declaration as declaration_gate
+
+    try:
+        problems.extend(declaration_gate.check())
+    except declaration_gate.DeclarationUnreadable as exc:
+        return _refuse(SurfaceEvidenceUnreadable(str(exc)))
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
@@ -2367,7 +2409,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
-        "twelve properties hold (eleven structural, one derived-from-code)"
+        "thirteen properties hold (eleven structural, one derived-from-code, one declared-vs-approved)"
     )
     return 0
 
