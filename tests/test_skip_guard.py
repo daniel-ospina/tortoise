@@ -210,17 +210,40 @@ class TestGuardAcceptsCleanLog:
         text = workflow.read_text()
         fast_run = [
             l for l in text.splitlines()  # noqa: E741
-            # the watchdog duration is intentionally not pinned (it has moved
-            # 30m->45m->55m as the corpus grew; only the -r summary contract
-            # matters here)
-            if re.search(r"timeout -s INT -k 10 \d+m", l) and "-m pytest" in l
+            # #10028: the duration must be matched in EITHER form. The gating
+            # run's watchdog is the per-shard expression
+            # `${{ matrix.watchdog_minutes }}m`, never a literal, so the old
+            # `\d+m` matched only the legs that hardcode a budget — which is the
+            # real reason this guard was green on the WRONG job: the retired
+            # `--junitxml=/tmp/junit.xml` literal selected `test-slow` (literal
+            # `40m`, literal path) instead of this job's gating run.
+            if re.search(
+                r"timeout -s INT -k 10 (?:\d+|\$\{\{\s*matrix\.watchdog_minutes\s*\}\})m", l)
+            and "-m pytest" in l
             # #6142: the last-failed PRE-PHASE also matches the watchdog
-            # pattern, but it writes /tmp/junit-lf.xml and is NOT the run the
-            # skip guard reconciles. Pin on the canonical junit so this guard
-            # cannot silently retarget to the pre-phase (it did, and passed
-            # only by coincidence while the real gating run was unchecked).
-            and "--junitxml=/tmp/junit.xml" in l
+            # pattern, but it writes its junit through `$PYTEST_JUNIT_LF` and is
+            # NOT the run the skip guard reconciles. Pin on the canonical gating
+            # junit so this guard cannot silently retarget to the pre-phase (it
+            # did, and passed only by coincidence while the real gating run was
+            # unchecked).
+            # #10028: neither path is a `/tmp` literal any more — the gating run
+            # writes `--junitxml="$PYTEST_JUNIT"` and the pre-phase
+            # `--junitxml="$PYTEST_JUNIT_LF"`. Pin the GATING spelling WITH its
+            # closing quote: `"$PYTEST_JUNIT"` is not a substring of
+            # `"$PYTEST_JUNIT_LF"`, so the pre-phase is excluded by the same
+            # token that selects the gating run.
+            and '--junitxml="$PYTEST_JUNIT"' in l
         ]
+        # A retarget here is INVISIBLE without these two floors: every pytest
+        # invocation in this file carries `-r fEs`, and the retired literal still
+        # matched the `test-slow` leg, so reading the WRONG job passed silently
+        # (measured: the old filter matched exactly one line, and it was
+        # test-slow's). Name the count and the selection variable.
+        assert len(fast_run) == 1, fast_run
+        assert "$FILES" in fast_run[0], (
+            "the pinned invocation does not expand $FILES — it is not the "
+            f"fast-suite gating run: {fast_run[0]}"
+        )
         assert fast_run, "fast-suite pytest invocation not found"
         assert "-r fEs" in fast_run[0], (
             "fast-suite pytest must report skips in the summary (-r fEs): -v "
