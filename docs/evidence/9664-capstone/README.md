@@ -2,8 +2,9 @@
 title: "#9664 capstone — the ChatGPT onboarding journey: the measurable half, and three steps corrected"
 type: evidence
 domain: platform
-doc_status: draft
+doc_status: live
 created: 2026-10-22
+updated: 2026-10-26
 subjects.team: epistemic-team
 aboutSubjects: Tortoise onboarding, MCP connector, ChatGPT
 aboutObjects: "#9664, #9340, #2208, tortoise-onboarding, website/docs.html, app.premiselabs.co/skills"
@@ -11,8 +12,16 @@ aboutObjects: "#9664, #9340, #2208, tortoise-onboarding, website/docs.html, app.
 
 # #9664 — capstone acceptance: the ChatGPT onboarding journey
 
-**Status: the run has NOT been executed. This directory holds the half of it that an
-agent can measure, and it records three of the ten steps as WRONG-AS-WRITTEN.**
+**Status: the run HAS been executed (2026-10-26) and is published in
+[`run-2026-10-26/`](run-2026-10-26/INDEX.md). This file is the half an agent can measure
+without a browser, and it records three of the ten steps as WRONG-AS-WRITTEN.**
+
+The run's verdict table is the sibling index. Read the two together: this file says what
+*should* happen and why a step's wording was wrong; the run says what *did* happen through a real
+ChatGPT UI, with a dated screenshot or a trace for each row, and it names the two remaining
+blockers — `#8617` (step 2a, graph creation refused by the FalkorDB ACL layer) and `#10088`
+(step 4, the authorize page's sign-in delivers the code to the marketing host). Two of this
+file's claims were superseded by the run and are marked in place below.
 
 Issue #9664 defines a *manual, agent-run clickthrough* across three surfaces (Tortoise
 web, the ChatGPT UI, our MCP server). It is deliberately **not** a script and **not** a CI
@@ -71,6 +80,15 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 | 9 | run a decision → `decide-completed` closes | VERIFIED-HERE (server layer) | same 42 tests; `decide-completed` is filed only on a decision-shaped write (`tortoise_file_decision`, or a `pointKind` in `DECISION_SHAPED_POINT_KINDS`) — both documented decide protocols. Through ChatGPT: NOT COVERED. |
 | 10 | capture disclosure card: capture unavailable for ChatGPT, not silence | VERIFIED-HERE (copy) | `HARNESS_CAPTURE_SUPPORT.chatgpt === false` renders `HARNESS_CAPTURE_REASON.chatgpt` = *"ChatGPT connects from its own cloud — session capture isn't available for it"* (`harnessStatusCard.jsx:120`), pinned by 38 green tests (`05` log). Not silence. |
 
+**The `NOT COVERED`-through-ChatGPT half of this table is now measured.** Rows 2b, 6, 7, 8, 9 and 10
+were observed through the real ChatGPT UI on 2026-10-26 with dated screenshots and traces
+(`run-2026-10-26/INDEX.md`); rows 3 and 5 were observed *as corrected*; row 2a and row 4 are the two
+blockers left, `#8617` and `#10088`. Row 1 was observed as **state, not as a sign-up** — the run
+started from an existing org and read `team-named` complete in `tortoise_onboarding_state`, so the
+sign-up path itself is still unexercised. Read this table for *what the step should be*, and the run
+index for *what happened* — this one is deliberately not rewritten per row, because its basis column
+is a claim about the repo at a measured commit.
+
 **Step 2's premise became `MEASURED` last** (census rows 2a-2e). It was the only step
 whose basis this table recorded as `STATIC` — the state in which nothing re-read the
 premise (steps 3 and 10 have no census row either; their premises are measured by
@@ -127,9 +145,20 @@ is never called because it does not exist."*
 
 ## Blocker on the "deliberate ugly cases"
 
+> **SUPERSEDED 2026-10-26 by the run — read this paragraph as history, not as the current
+> state.** It was measured before #9340's *tool-argument* ship (`#9699`). The run then observed,
+> through the ChatGPT UI: a `graph` **tool argument** exists on graph-touching tools; a **read**
+> scoped to a foreign graph id reaches Tortoise and is refused
+> `INVALID_ARGUMENT: No graph 'org_000…' is reachable from this workspace`; and a **write**
+> carrying a graph argument is blocked by the client before it ever reaches us (`#10084`). So the
+> blocker moved from *"the connector has no addressable form"* to *"the primary client will not
+> deliver the write shape"* — a different layer, a different owner. What follows is the
+> pre-#9699 reading, kept because the resource-vs-argument distinction it draws is still how the
+> OAuth-scoped form behaves.
+
 The four ugly cases (#9340) — an explicit non-default graph, a duplicate graph **name**, a
 graph id from another workspace, a soft-deleted graph — have **no addressable form on the
-connector today**. MEASURED (census rows `4+ugly`): `parse_resource` accepts only the bare
+connector** *via the OAuth resource*. MEASURED (census rows `4+ugly`): `parse_resource` accepts only the bare
 MCP resource, the origin root, and `…/mcp/organizations/<org_id>`; a graph-scoped resource
 is `REFUSED(400 invalid_resource)` (`oauth.py:812-840`), and the access token carries no
 `graph_id`, so every connector lands on the workspace's default graph. Those cases are
@@ -138,17 +167,26 @@ on them would be recording a capability we did not ship.
 
 ## The explicit uncovered list (what the run still owes)
 
-1. Step 1 — sign-up, workspace naming, `team-named` closing (browser).
+**Discharged by the run on 2026-10-26 (`run-2026-10-26/INDEX.md`) except where noted:**
+
+1. Step 1 — sign-up, workspace naming, `team-named` closing (browser). → **DONE** (`step1*`).
 2. Step 2 — narrowing packs and the persisted `configured` flag (browser + tenant).
-   *The premise* is MEASURED (census rows 2a-2e); what is uncovered is the click.
+   *The premise* is MEASURED (census rows 2a-2e); what is uncovered is the click. → **DONE for 2b**
+   (`step2g`–`step2o`: narrow → save → reload → restore); **2a remains a FAIL** on `#8617`.
 3. Steps 4/6/7/8/9 **through ChatGPT** — the tool-call trace as the model actually emits it,
    the OAuth consent as ChatGPT renders it. Needs a ChatGPT Plus/Pro account and a human to
-   complete the sign-in/authorize (`#9664` step 4 says so explicitly).
-4. Step 10 — the card **as rendered** (the copy is pinned by test; the rendering is not).
-5. The four ugly cases — BLOCKED on #9340.
+   complete the sign-in/authorize (`#9664` step 4 says so explicitly). → **6/7/8/9 DONE**
+   (`step6*`, `step7*`, `step8*`, `step9*`); **step 4 BLOCKED** on `#10088` — the consent renders,
+   but the authorize page's sign-in returns the code to the marketing host, so no token is issued.
+   It needs a product fix, not a human keystroke.
+4. Step 10 — the card **as rendered** (the copy is pinned by test; the rendering is not). → **DONE**
+   (`step10*`).
+5. The four ugly cases — BLOCKED on #9340. → **re-measured**: the graph *argument* is addressable and
+   a foreign id is refused correctly; the **write** shape is blocked by the ChatGPT client
+   (`#10084`). See the run index's per-case table and the SUPERSEDED note above.
 
-Screenshots and the model's tool-call trace remain outstanding; nothing in this directory
-substitutes for them.
+Screenshots and the model's tool-call trace now exist for every step. What remains is **two
+product blockers**, not two missing artifacts: `#8617` (step 2a) and `#10088` (step 4).
 
 ## Re-running the measurable half
 
