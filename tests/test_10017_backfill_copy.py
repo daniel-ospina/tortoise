@@ -35,7 +35,7 @@ def test_classify_places_only_session_wired_derived_ids() -> None:
     assert by_session == {"s1": {
         0: {"id": "s1_t0", "pointKind": "event"},
         1: {"id": "s1_t1", "pointKind": "event"}}}
-    assert anomalies == {k: [] for k in anomalies} or not any(anomalies.values())
+    assert not any(anomalies.values())
 
 
 def test_classify_refuses_every_unplaceable_node_by_its_own_class() -> None:
@@ -90,10 +90,20 @@ def test_session_event_never_invents_a_timestamp() -> None:
 def test_session_event_carries_capture_provenance_and_owns_the_counts() -> None:
     props = {"created_at": "2026-10-20T01:00:00Z", "harness": "pi",
              "capture_lane": "sdk", "capture_redactions": None,
-             "turn_count": 6, "turn_max_index": 5, "namespace": "ignored"}
+             "capture_ok": False, "capture_extractor": "regex",
+             "entity_links_created": 4, "commit_count": 2, "draft_count": 1,
+             "value_nodes_held": 3, "updated_at": "2026-10-21T00:00:00Z",
+             "lme_question_id": "q-1", "is_episodic": True,
+             "turn_count": 6, "turn_max_index": 5}
     event = copy_mod.build_session_event("s1", props, turn_count=12,
                                          max_index=11, event_id="E1")
+    # NO WHITELIST: session columns and the props tail both survive the copy.
     assert event["harness"] == "pi" and event["capture_lane"] == "sdk"
+    assert event["capture_ok"] is False and event["capture_extractor"] == "regex"
+    assert event["entity_links_created"] == 4 and event["commit_count"] == 2
+    assert event["value_nodes_held"] == 3
+    assert event["updated_at"] == "2026-10-21T00:00:00Z"
+    assert event["lme_question_id"] == "q-1"
     # A null `capture_redactions` is a VALUE ("nothing was ever redacted").
     assert event["capture_redactions"] is None
     assert event["created_at"] == "2026-10-20T01:00:00Z"
@@ -191,8 +201,14 @@ def _patch_journal(monkeypatch, positions, tmp_path=None):
 
     monkeypatch.setattr(log_mod, "EventLog", _Log)
     monkeypatch.setattr(rw, "write_records", _write)
-    monkeypatch.setattr(rw, "RecordWriter", lambda **kwargs: "writer")
-    return calls
+    built: list[dict] = []
+
+    def _writer(**kwargs):
+        built.append(kwargs)        # the DSN regression lives here
+        return "writer"
+
+    monkeypatch.setattr(rw, "RecordWriter", _writer)
+    return calls, built
 
 
 def _journal(tmp_path) -> str:
@@ -203,7 +219,7 @@ def _journal(tmp_path) -> str:
 
 
 def test_contiguous_positions_anchor_the_rows_at_the_first_one(monkeypatch, tmp_path) -> None:
-    calls = _patch_journal(monkeypatch, [7, 8, 9])
+    calls, built = _patch_journal(monkeypatch, [7, 8, 9])
     emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     assert emit("s1", [{"a": 1}, {"b": 2}, {"c": 3}]) == 7
     kwargs = calls[0][1]
@@ -211,6 +227,9 @@ def test_contiguous_positions_anchor_the_rows_at_the_first_one(monkeypatch, tmp_
     # The DSN must reach the seam EXPLICITLY: it was accepted and dropped once,
     # so a non-default --dsn-env wrote into whatever TORTOISE_RECORD_DSN named.
     assert kwargs["writer"] is not None and kwargs["conn"] is None
+    # The DSN must be given EXPLICITLY to the writer: dropping it is the round-2
+    # P0 (a non-default --dsn-env wrote into the ambient database, exit 0).
+    assert built == [{"dsn": "dsn"}]
 
 
 def test_an_interleaved_journal_is_refused_not_misnumbered(monkeypatch, tmp_path) -> None:
@@ -223,7 +242,7 @@ def test_an_interleaved_journal_is_refused_not_misnumbered(monkeypatch, tmp_path
 def test_an_unproven_position_files_no_row_rather_than_fabricating_one(monkeypatch, tmp_path) -> None:
     """`EventLog.append` returns None when it cannot prove a position; inventing
     `1` would collide with a later replay's numbering (#9190)."""
-    calls = _patch_journal(monkeypatch, [None])
+    calls, _built = _patch_journal(monkeypatch, [None])
     emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     assert emit("s1", [{"a": 1}]) is None
     assert calls[0][1]["position"] is False and calls[0][1]["first_seq"] == 1

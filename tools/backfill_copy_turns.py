@@ -87,16 +87,11 @@ _COPY_SESSIONS_PAGE_QUERY = (
     "ORDER BY id(s) LIMIT $batch"
 )
 
-#: Session properties the record stores as COLUMNS. Anything else rides in
-#: `props` (the record's own split does that in `_split_properties`), so this
-#: list is only the set whose meaning is the column's, not a whitelist.
-_SESSION_FIELDS = (
-    "created_at", "harness", "capture_lane", "model", "machine_id", "source",
-    "actor_user_id", "client_captured_at", "client_captured_at_source",
-    "capture_redactions", "turn_count", "turn_max_index",
-)
 #: Columns the copy OWNS — a graph property may never override these.
 _SESSION_DERIVED = ("turn_count", "turn_max_index")
+#: Keys the envelope owns.
+_SESSION_ENVELOPE = ("id", "event_id", "type", "ts", "initiated_by",
+                     "projection_version", "contains_session")
 
 
 class CopyRefused(RuntimeError):
@@ -139,9 +134,13 @@ def classify_copy(rows) -> tuple[dict, dict]:
             # session holding a graph turn with no record row — refusing to
             # copy it would fail that gate forever, with nothing able to fix it.
             anomalies["cross_wired"].append({"id": pid, "sessions": sorted(sids)})
-        if sids[0] != derived:
+        # MEMBERSHIP, not `sids[0]`: `collect(s.id)` has no defined order, so
+        # testing the first element let the same node be copied or dropped
+        # depending on which edge the server returned first.
+        if derived not in sids:
             anomalies["session_mismatch"].append(
-                {"id": pid, "wired_session": sids[0], "derived_session": derived})
+                {"id": pid, "wired_session": sorted(sids)[0],
+                 "derived_session": derived})
             continue
         if props.get("pointKind") != "event":
             # COPIED and reported: the id space places it and the record's turn
@@ -161,14 +160,23 @@ def classify_copy(rows) -> tuple[dict, dict]:
 def build_session_event(session_id: str, props: dict, *, turn_count: int,
                         max_index: int, event_id: str) -> dict:
     """``SessionRecorded`` — the record row's source, and the sweep's mark."""
-    event = {
+    # EVERY graph property is carried, minus the two the copy derives and minus
+    # the envelope's keys. The record's OWN split (`_split_properties`) places a
+    # property naming a column into that column and the rest into `props`, so a
+    # whitelist here loses data silently — the version that had one dropped
+    # `capture_ok`, `capture_extractor`, `entity_links_*`, `commit_count`,
+    # `draft_count`, `value_nodes_*`, `updated_at` and the props tail, and
+    # neither gate can see it (the census reads only the counts; the parity gate
+    # compares turn nodes).
+    event = {k: v for k, v in props.items()
+             if k not in _SESSION_DERIVED and k not in _SESSION_ENVELOPE}
+    event.update({
         "event_id": event_id, "type": "SessionRecorded",
         "initiated_by": "backfill", "projection_version": 2,
-        "id": session_id, "is_episodic": True,
-    }
-    for field in _SESSION_FIELDS:
-        if field in props and field not in _SESSION_DERIVED:
-            event[field] = props[field]
+        "id": session_id,
+        # A session fact, not a constant of this phase.
+        "is_episodic": props.get("is_episodic", True),
+    })
     event.setdefault("created_at", None)  # PRESENT and null, never "now"
     # The ATTACHED count, never the node's declared `turn_count`: the census
     # measured 21 sessions declaring fewer turns than they carry (declared=6,
@@ -219,6 +227,9 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
         # EVERY class, zeros included: a subset cannot distinguish "0" from
         # "not measured", which is how a silent gap reads as a clean result.
         "anomalies": {k: len(v) for k, v in anomalies.items()},
+        # With the IDS: a count alone cannot tell an operator which turns are
+        # absent from the record before an irreversible delete.
+        "anomaly_ids": {k: v[:100] for k, v in anomalies.items() if v},
     }
     # EVERY session, not just the ones with turns: a session with none still has
     # provenance, and a delete step that touches Session nodes would lose it
@@ -363,6 +374,10 @@ def main(argv: list[str] | None = None) -> int:
     emit = (lambda sid, events: 0) if args.dry_run else _journal_emit(
         args.journal, dsn, args.org_id, args.graph_id)
     stats = copy_phase(graph, emit, event_id=ulid)
+    if args.dry_run:
+        # A dry run proposes no positions; counting them as if it had made the
+        # artifact indistinguishable from a real run's.
+        stats["positions_measured"] = stats.pop("positioned")
     stats["graph"] = shown
     stats["dry_run"] = args.dry_run
     if args.out:
