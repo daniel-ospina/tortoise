@@ -204,7 +204,15 @@ def test_a_write_of_zero_statements_refuses() -> None:
         copy_mod._commit_or_refuse(_Write(outcome.APPLIED, 0), outcome, "s1")
 
 
-def test_a_commit_failure_still_closes_the_connection() -> None:
+def test_a_commit_failure_refuses_and_still_closes_the_connection() -> None:
+    """A commit that throws is a REFUSAL, and the connection is still closed.
+
+    The commit runs HERE, on a connection the seam handed back, so the driver's
+    own exceptions (`psycopg2.Error` → `OperationalError`/`InterfaceError`) are
+    what surface — none of them is `RecordWriteError`, which `main` catches.
+    Propagating it raw made a dead connection on the commit round trip an
+    uncaught traceback (exit 1, "the tool cannot start") with NO artifact.
+    """
     outcome = _outcome()
 
     class _Boom(_Conn):
@@ -212,8 +220,10 @@ def test_a_commit_failure_still_closes_the_connection() -> None:
             raise RuntimeError("commit failed")
 
     conn = _Boom()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(copy_mod.CopyRefused, match="commit failed") as excinfo:
         copy_mod._commit_or_refuse(_Write(outcome.APPLIED, 1, conn), outcome, "s1")
+    # Chained: the driver's own error stays readable, not replaced by the verdict.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
     assert conn.closed is True
 
 
@@ -403,6 +413,70 @@ def test_a_record_seam_failure_still_writes_the_artifact(monkeypatch, tmp_path) 
     report = json.loads(out.read_text())
     assert report["sessions"] == 1 and report["turns"] == 1
     assert report["refused"] == "connection terminated at s2"
+
+
+def test_a_commit_failure_is_a_refusal_with_an_artifact_not_a_traceback(
+        monkeypatch, tmp_path) -> None:
+    """The same defect as the seam test above, one line lower.
+
+    A connection dying on `commit()` (not on `execute`) used to escape `main`'s
+    handler entirely: `RecordWriteError` does not cover the driver's classes, and
+    the commit happens in this module on the seam's own connection. Driven
+    through the REAL `_commit_or_refuse`, the whole chain is pinned — commit
+    throws → `CopyRefused` → `copy_phase` attaches the stats → exit `2` with the
+    artifact reporting the sessions that landed.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    outcome = _outcome()
+
+    class _Boom(_Conn):
+        def commit(self) -> None:
+            raise RuntimeError("server closed the connection unexpectedly")
+
+    def _fake_journal_emit(journal_path, dsn, org_id, graph_id):
+        def emit(sid, events):
+            if sid == "s2":                      # s1 commits, s2's does not
+                copy_mod._commit_or_refuse(
+                    _Write(outcome.APPLIED, 1, _Boom()), outcome, sid)
+            return 5
+        return emit
+
+    monkeypatch.setattr(copy_mod, "_journal_emit", _fake_journal_emit)
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(journal), "--out", str(out)])
+    assert excinfo.value.code == 2      # REFUSED, not "cannot start" (1)
+    report = json.loads(out.read_text())
+    assert report["sessions"] == 1 and report["turns"] == 1
+    assert "commit failed" in report["refused"]
+
+
+def test_a_mistyped_journal_is_a_refusal_not_a_traceback(
+        monkeypatch, tmp_path) -> None:
+    """`_journal_emit` raises while being BUILT, before anything is copied.
+
+    That construction sat outside `main`'s handler, so the one refusal an
+    operator hits before a run — a fresh or misspelled `--journal`, the exact
+    case the check exists for — reached them as a traceback and exit `1`
+    ("the tool cannot start") instead of the message the code wrote for it.
+    Nothing was copied, so no artifact is written.
+    """
+    _main_harness(monkeypatch, _FakeGraph(sessions=[], turns=[]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(tmp_path / "nope.jsonl"),
+                       "--out", str(out)])
+    assert excinfo.value.code == 2
+    assert not out.exists()
 
 
 def test_a_failed_session_write_aborts_the_copy_instead_of_being_counted() -> None:

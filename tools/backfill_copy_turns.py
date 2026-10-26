@@ -49,9 +49,11 @@ left nodes the record can never hold:
   ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
   store), or the copy stopped on a write it could not prove: a truncated read, an
   unproven journal position, a non-contiguous segment, a record that was not
-  armed, a record that executed statements nobody committed, or the record seam
-  itself raising (``RecordWriteError``/``RecordConnectError`` — unreachable,
-  refusing, or rolling back at session N of M).
+  armed, a record that executed statements nobody committed, a commit that
+  throws (the driver's own ``psycopg2.Error`` — a connection that died on the
+  commit round trip), or the record seam itself raising
+  (``RecordWriteError``/``RecordConnectError`` — unreachable, refusing, or
+  rolling back at session N of M).
   A blocking class is reported IN the artifact (the copy ran, so the JSON says
   what did land), and so is a refusal that lands part of the copy (a write whose
   position could not be proven at session N of M — the artifact carries the
@@ -547,7 +549,21 @@ def _commit_or_refuse(write, applied, session_id: str, *,
                 "but returned no connection to commit — an uncommitted write is "
                 "not a copy")
         if connection is not None:
-            connection.commit()
+            try:
+                connection.commit()
+            except Exception as exc:
+                # The commit is a ROUND TRIP, and a dropped connection is at
+                # least as likely to surface here as on `execute`. The driver's
+                # failures are the DB-API class tree (`psycopg2.Error` →
+                # `OperationalError`/`InterfaceError`), and NONE of them is
+                # `RecordWriteError` — so an uncaught one here is a traceback and
+                # exit 1 ("the tool cannot start") with NO artifact, on a run
+                # that already committed N-1 sessions. A commit that throws is a
+                # refusal: nothing about this write may be counted as copied.
+                raise CopyRefused(
+                    f"{session_id}: the record commit failed after {statements} "
+                    f"statement(s) ({type(exc).__name__}) — nothing may be "
+                    "counted as copied") from exc
     finally:
         if connection is not None:
             # close must never mask a write failure that is already propagating
@@ -609,11 +625,6 @@ def main(argv: list[str] | None = None) -> int:
     census._assert_graph_exists(db, args.graph)
     graph = db.select_graph(args.graph)
 
-    # A dry run proves NO position: it never opens the journal. Returning `0`
-    # here made every session count as positioned, so the one number an operator
-    # needs before a 38k-row write was the one the dry run fabricated.
-    emit = (lambda sid, events: None) if args.dry_run else _journal_emit(
-        args.journal, dsn, args.org_id, args.graph_id)
     # The record seam's OWN failure classes are part of the artifact contract:
     # a connection that dies at session N of M is a REFUSAL (exit 2, artifact
     # written reporting what landed), not "the tool cannot start" (exit 1).
@@ -621,6 +632,18 @@ def main(argv: list[str] | None = None) -> int:
     from tortoise.record_writer import RecordWriteError
 
     try:
+        # A dry run proves NO position: it never opens the journal. Returning `0`
+        # here made every session count as positioned, so the one number an
+        # operator needs before a 38k-row write was the one the dry run
+        # fabricated.
+        #
+        # Built INSIDE this handler on purpose: `_journal_emit` validates the
+        # journal as its FIRST action, and a mistyped/fresh `--journal` is the
+        # operator's most likely mistake — the one refusal that reaches them
+        # before anything is copied, and therefore the one that must read as a
+        # verdict (exit 2 with the reason) instead of as a traceback (exit 1).
+        emit = (lambda sid, events: None) if args.dry_run else _journal_emit(
+            args.journal, dsn, args.org_id, args.graph_id)
         stats = copy_phase(graph, emit, event_id=ulid)
     except (census.CensusError, CopyRefused, RecordWriteError) as exc:
         # A refusal is a VERDICT, not a crash: exit 2 with the reason, so the
