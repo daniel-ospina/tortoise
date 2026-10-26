@@ -12354,32 +12354,91 @@ def _ensure_graph_exists(org_id: str, graph_id: str) -> None:
         raise HTTPException(status_code=404, detail="Unknown graph")
 
 
+def _acl_layer_declared_strict() -> bool:
+    """#8617: the ACL layer's DECLARED posture — ``TORTOISE_ACL_LAYER`` is
+    ``strict`` (the default) only when this deployment expects the per-graph
+    ACL user to be creatable.
+
+    An unreachable ``acl_graph_users`` (module absent) answers True: the
+    rollback arms below only run for an ``AclLayerError``, which cannot exist
+    without that module."""
+    try:
+        from tortoise.acl_graph_users import layer_mode  # type: ignore[import-not-found]
+    except ImportError:
+        return True
+    return layer_mode() == "strict"
+
+
+# #8617 ruling 4 — "record the absence instead of inferring it". One line per
+# (process, absence kind): a per-graph line would be a log flood on a fleet of
+# graphs, and NO line at all is the defect this issue paid for.
+_ACL_ABSENCE_ANNOUNCED: set[str] = set()
+
+
+def _announce_acl_absence_once(status: str, graph_id: str, detail: str) -> None:
+    """Log why the per-graph ACL user is missing — once per process per kind.
+
+    ``absent_by_design`` / ``denied`` are WARNINGS (an operator must be able to
+    see that this deployment has no database-level second wall); a plain
+    ``absent`` (embedded store, bare redis, layer down) is INFO."""
+    if status in _ACL_ABSENCE_ANNOUNCED:
+        return
+    _ACL_ABSENCE_ANNOUNCED.add(status)
+    if status == "absent":
+        _logger.info(
+            "per-graph ACL layer absent (%s) — no ACL user for graph %s; "
+            "the app-layer ownership check remains authoritative",
+            detail, graph_id)
+    else:
+        _logger.warning(
+            "per-graph ACL layer %s — graph %s has NO database-level ACL "
+            "user (#8617). Recorded, never fabricated: %s",
+            status, graph_id, detail)
+
+
 def _acl_user_create_hook(graph_id: str, org_id: str, *,
                           strict: bool = False) -> None:
     """C4 seam — create the per-graph ACL user (defense-in-depth).
 
-    Soft (default): failures are logged, never block the mint (the app-layer
-    scope check is authoritative — ACL is defense-in-depth, not a SPOF).
-    Strict (provisioning graph mint): a server-reachable AclLayerError
-    re-raises so the mint rolls back (no graph without its ACL user — E2E
-    indicator 5). Layer-down/absent stays fail-soft in both modes."""
+    The result is CONSUMED, not discarded (#8617): ``provisioned`` returns
+    quietly; ``absent_by_design`` / ``denied`` / ``absent`` are announced once
+    per process and the mint proceeds. There is deliberately no
+    success-by-omission path left — the pre-#8617 body dropped
+    ``create_acl_user()``'s return, so a mint succeeded with no per-graph
+    user and no log line anywhere.
+
+    Soft (default): a raised failure is logged, never blocks the mint (the
+    app-layer scope check is authoritative — ACL is defense-in-depth, not a
+    SPOF). Strict (provisioning graph mint): a server-reachable
+    :class:`AclLayerError` re-raises so the mint rolls back — but ONLY on a
+    layer DECLARED ``strict`` (#8617 ruling 3). A permission REFUSAL
+    (``denied``) never raises in either mode: the owner ruling is explicit
+    that a hosted graph mint must not be rolled back because a user we are not
+    allowed to create was not created."""
     try:
         from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
             AclLayerError,
+            AclStatus,
             create_acl_user,
         )
-        create_acl_user(graph_id, org_id)
     except ImportError:
-        pass  # C4 not shipped — seam dormant
+        return  # C4 not shipped — seam dormant
+    try:
+        result = create_acl_user(graph_id, org_id)
     except AclLayerError as e:
-        if strict:
+        if strict and _acl_layer_declared_strict():
             raise  # provisioning rollback (no graph without its ACL user)
         _logger.warning(
             "ACL user create failed for graph %s (defense-in-depth, "
             "non-blocking): %s", graph_id, e)
+        return
     except Exception as e:
         _logger.warning("ACL user create failed for graph %s (defense-in-depth, non-blocking): %s",
                         graph_id, e)
+        return
+    if result.status is AclStatus.PROVISIONED:
+        return
+    _announce_acl_absence_once(result.status.value, graph_id, result.detail)
 
 
 def _acl_user_drop_hook(graph_id: str) -> None:
@@ -20998,21 +21057,34 @@ def _provision_graph(org: dict, name: str,
         # buried in a log). Import guarded (mirror the hook pattern): an
         # absent module must NEVER mask the original error or skip the
         # generic rollback below (no-orphan invariant).
+        #
+        # #8617: this arm is gated on the layer being DECLARED strict. A
+        # permission REFUSAL is AclLayerDenied, which is deliberately NOT an
+        # AclLayerError subclass, so it can never reach this arm at all (the
+        # hook records it and the mint proceeds — ruling 3). If an
+        # AclLayerError arrives while the layer is not declared strict it is a
+        # code defect, and the generic rollback below still refuses to commit
+        # a half-built graph.
         try:
             from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
                 AclLayerError,
             )
         except ImportError:
             AclLayerError = None  # C4 not shipped — generic path below
-        if AclLayerError is not None and isinstance(e, AclLayerError):
+        if (AclLayerError is not None and isinstance(e, AclLayerError)
+                and _acl_layer_declared_strict()):
             _rollback_graph(org["id"], graph)
             raise HTTPException(
                 status_code=503,
                 detail=("Per-graph ACL provisioning failed — the FalkorDB "
                         "ACL layer rejected the graph user: "
-                        f"{e}. Set a password/requirepass on the FalkorDB "
-                        "default user (per-graph ACL users are theater "
-                        "without a secured default), then retry."),
+                        f"{e}. On a SELF-HOSTED server, secure the default "
+                        "user (requirepass/aclfile) and re-check the ACL "
+                        "recipe, then retry. On FalkorDB CLOUD this remedy "
+                        "does not apply: no credential the app may hold "
+                        "carries +ACL, so declare TORTOISE_ACL_LAYER=off "
+                        "there and the graph mints with the ACL layer "
+                        "absent BY DESIGN (#8617)."),
             ) from e
         # Cross-worker dup-name race (Supabase lane): the partial unique
         # index uq_graphs_org_name_active catches the interleaved INSERT
@@ -37750,7 +37822,10 @@ def _reconcile_acl_users_sync() -> dict:
 
     from typing import Any as _Any
 
-    from tortoise.acl_graph_users import create_acl_user  # type: ignore[import-not-found]
+    from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
+        AclStatus,
+        create_acl_user,
+    )
 
     results: dict[str, _Any] = {}
     for org_id in sorted(org_ids):
@@ -37759,7 +37834,7 @@ def _reconcile_acl_users_sync() -> dict:
         except Exception as e:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
-        ok = skipped = defaults = 0
+        ok = absent_by_design = denied = absent = defaults = 0
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37774,18 +37849,30 @@ def _reconcile_acl_users_sync() -> dict:
                 continue
             try:
                 r = create_acl_user(row["graph_id"], org_id)
-                if r is None:
-                    skipped += 1  # ACL layer absent — fail-soft, reported
-                else:
-                    ok += 1
             except Exception as e:
                 # A RAISED failure (server-reachable AclLayerError class) is
                 # surfaced in the summary — never silently swallowed.
                 _logger.warning("acl reconcile failed for %s/%s: %s",
                                 org_id, row.get("graph_id"), e)
                 errors.append(f"{row.get('graph_id')}: {e}")
-        results[org_id] = {"status": "reconciled", "custom_graphs_ok": ok,
-                            "acl_absent_skipped": skipped,
+                continue
+            # #8617 ruling 4: the absence is RECORDED, in the state it is
+            # actually in. The single pre-#8617 ``acl_absent_skipped`` counter
+            # conflated "not provisionable here" (Cloud), "no module" (bare
+            # redis) and "the credential was refused" — three different
+            # operator actions behind one number.
+            if r.status is AclStatus.PROVISIONED:
+                ok += 1
+            elif r.status is AclStatus.ABSENT_BY_DESIGN:
+                absent_by_design += 1
+            elif r.status is AclStatus.DENIED:
+                denied += 1
+            else:
+                absent += 1
+        results[org_id] = {"status": "reconciled", "provisioned": ok,
+                            "absent_by_design": absent_by_design,
+                            "denied": denied,
+                            "absent": absent,
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "organizations": len(results), "results": results}
@@ -37803,7 +37890,12 @@ async def backups_acl_reconcile(request: Request):
     reuses the stored credential, hosted create-once verifies without
     password churn). This reconcile replays it per ACTIVE graph — the DR
     runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
-    (no server URI / bare redis) is reported, never a 500. Runs off the
+    is REPORTED, never a 500 — and since #8617 the report says which absence
+    it is (`absent_by_design` — this lane declares the layer off, e.g.
+    FalkorDB Cloud; `denied` — a reachable server refused the credential;
+    `absent` — no server URI / bare redis / layer down; `provisioned` — the
+    user exists), instead of the single pre-#8617 `acl_absent_skipped`
+    number that conflated all three. Runs off the
     event loop via ``asyncio.to_thread`` (#2371).
     """
     _check_internal(request)

@@ -530,9 +530,46 @@ def _usable_instant(val) -> bool:
     The extra non-empty test is for the FALSEY half: the ``or _now_iso()``
     this replaces treated ``""`` as "no instant stated", so an empty string
     must keep falling back rather than become a written ``updatedAt``.
+
+    ⛔ This is the gate for an INSTANT (``updatedAt``/``ts``), NOT for a WINDOW
+    BOUND — see `_storable_bound`, which is the same test minus the falsy half.
     """
     from tortoise.projection import _writable_id
     return bool(val) and _writable_id(val)
+
+
+def _storable_bound(val) -> bool:
+    """True when a journal record states a WINDOW BOUND a replay may write.
+
+    A bound is not an instant, and the difference is the falsy half above. An
+    end that names no instant is a LEGAL, STORED end: ``validTo = ""`` /
+    ``"TBD"`` reads as END_UNKNOWN (``tortoise/validity.py``, #9202), and the
+    write path stores it verbatim. `_usable_instant` answers a different
+    question — "may this be written as an ``updatedAt``, or must the fold fall
+    back to its clock?" — so gating a BOUND on it DROPPED ``""`` on replay
+    while the producer wrote it: ``update_knowledge(p, valid_until="")`` left
+    the live node holding the end and the rebuilt node with none, and
+    `check_consistency`'s reference fold reported a content divergence that no
+    replay could clear (#10053 review).
+
+    The DRIVER half is kept, and for the #5048 reason: a value this store cannot
+    hold exactly (`_store_holds_prop_value`, the #8317 bar — a map, a NUL/lone-
+    surrogate string, a value an engine would clamp) states no bound rather than
+    aborting a replay that has already wiped the graph. ``None`` is "the record
+    states no end", which is symmetric-absent with the producer, which writes no
+    column for it. The producer writes every OTHER non-None value, and for one
+    this store cannot hold it DEFERS to the same bar instead of writing it — the
+    #7369 degradation drops the unstorable ``valid_to`` to null before dispatch
+    (with a warning) — so the two predicates agree on every value a write can
+    land. ⛔ Measured, not assumed (#10053 review's UNVERIFIED item):
+    ``update_knowledge(p, valid_until="a\\x00b")`` left LIVE ``validTo=None``,
+    ``rebuild_all`` left ``None``, and `check_consistency` answered
+    ``divergence=None`` — the producer does NOT raise at the parameter boundary,
+    it degrades; the agreement is what this predicate relies on, and
+    `tests/test_4282_dated_retraction_durability.py`
+    ::test_an_end_the_store_cannot_hold_exactly_never_becomes_a_divergence pins it.
+    """
+    return val is not None and _store_holds_prop_value(val)
 
 
 def _journal_instant(ev: dict, key: str = "ts") -> str:
@@ -3002,7 +3039,8 @@ class _EntityHandlers:
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
 
-    def _retract(self, pid: str, now: str | None = None) -> int:
+    def _retract(self, pid: str, now: str | None = None,
+                 valid_to: str | None = None) -> int:
         """Mark a Point as retracted instead of hard-deleting (#689).
 
         Retracted points are hidden from normal reads (get_point, query,
@@ -3043,13 +3081,26 @@ class _EntityHandlers:
         ``now=_now_iso()``). Closing that needs pass-1a to stop re-clocking
         ``updatedAt``, which is the wider #5048 residual for EVERY
         never-retracted Point, not this arm's to invent.
+        ``valid_to`` (#4282) is the WINDOW END the producer named, replayed
+        verbatim as ``validTo`` — the same exact-stamp contract ``now`` follows
+        above, and for the same reason: a rebuild that invented an end (or
+        dropped the caller's) would disagree with the live node. Gated by
+        ``_storable_bound`` — the BOUND's gate, NOT the instant predicate above:
+        an end that names no instant (``""`` / ``"TBD"``) is a legal STORED
+        END_UNKNOWN (#9202) the producer writes, so the falsy half of
+        ``_usable_instant`` dropped it here and made live ≠ rebuild for
+        ``update_knowledge(p, valid_until="")``. The driver half is kept, so a
+        corrupt record states no end rather than aborting the replay.
         """
         stamp = ", n.updatedAt = $now" if _usable_instant(now) else ""
         params: dict = {"id": pid}
         if stamp:
             params["now"] = now
+        window = ", n.validTo = $valid_to" if _storable_bound(valid_to) else ""
+        if window:
+            params["valid_to"] = valid_to
         r = self.g.query(
-            f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}, "
+            f"MATCH (n:Point {{id:$id}}) SET n.status = 'retracted'{stamp}{window}, "
             f"{decay_clause('n')} RETURN count(n)",
             params=params,
         )

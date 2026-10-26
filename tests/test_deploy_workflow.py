@@ -2537,9 +2537,74 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section gives no way to make the capture's own `no_tenant` "
         "impossible — a graph-bound credential is the discriminator"
     )
+    # ⛔ `graph-bound` alone is NOT the discriminator, and the assertion above is
+    # satisfied by the FALSE claim. The control plane is. A graph-bound SELF-HOST
+    # registry credential carries a Falkor `g_<hex>` node id, `record_tenant_for`
+    # returns None for it by design (`control_plane_ids` is False for the
+    # self-host resolver — record_writer.py:648-649), and no `public.graphs` row
+    # exists to file it under — so "a graph-bound credential
+    # cannot land in `no_tenant`" is false, and the paragraph above it lists that
+    # very lane as a designed `no_tenant` producer. Measured (#10071 review P2):
+    # restoring that absolute wording — and separately deleting the counter-example
+    # — left the suite at `99 passed`. The qualifier and the lane that proves it
+    # are the claim, so pin both.
+    assert re.search(
+        r"graph-bound \*\*control-plane\*\* credential cannot land in\s+`no_tenant`\s+"
+        r"\(the self-host registry lane above is a graph-bound key that\s+resolves "
+        r"through no control plane",
+        section,
+    ), (
+        "the `no_tenant` bound is stated as an absolute again — a graph-bound "
+        "self-host registry credential is REFUSED and counted `no_tenant` by design "
+        "(`record_tenant_for` returns None for it, and it can never satisfy the "
+        "`public.graphs` FK), so the section tells an operator to read a designed "
+        "outcome as a fault; the counter-example that makes the qualifier "
+        "checkable is missing or unravelled"
+    )
     assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
         "the bounded arm names no counting site, so a reader cannot check the "
         "claim that `no_tenant` is designed on those lanes"
+    )
+    # The bounded arm must be EXECUTABLE. The first draft sent the operator to
+    # "attribute any `no_tenant` growth … through recipe 1's log line", but that
+    # line (`record_writer.write_live_record`, the `no_tenant` branch) logs only
+    # the env-pair note — no request identity, no org/graph id, not even the
+    # record type — so per-request attribution is impossible from the log and the
+    # arm's only remaining branch reds a healthy deployment (#9585 review P2).
+    assert re.search(r"\*\*no\*\*\s+request\s+identity", section), (
+        "the section claims the `no_tenant` log line can attribute growth to a "
+        "request — it carries no request identity, and of the four "
+        "`record_writer` reasons only `circuit_open` carries the record type, so "
+        "that step cannot be performed"
+    )
+    # The message above states the EVIDENCE for the impossibility (which reasons
+    # carry what), so pin the evidence too — otherwise the parenthetical can be
+    # deleted and the claim stands on an assertion that no longer measures it
+    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
+    # record_writer.py:1218; `malformed_dsn` and `write_failed` log the exception.
+    # NOT :1184 — that is the `no_durable_journal` DEBUG skip, a different site
+    # that would have made this comment claim the opposite of what it means).
+    assert re.search(r"`circuit_open` is the\s+only one that carries the record type", section), (
+        "the section gives no evidence for why the log cannot attribute growth — "
+        "only `circuit_open` carries the record type, so a reader cannot check "
+        "the claim it is asked to act on"
+    )
+    # ⛔ Pin the CLAUSE, not the token: `capture ran **unbound**` alone survives
+    # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
+    # "fail-and-fix whether or not the capture ran **unbound**" — the arm inverted
+    # with the pin still green (#10071 review P1). `only when` is load-bearing.
+    assert re.search(r"fail-and-fix only\s+when the capture ran \*\*unbound\*\*", section), (
+        "the section gives no executable discriminator for `no_tenant` growth — "
+        "an unbound capture is the one state that makes the growth the capture's"
+    )
+    # ⛔ The two pins above are NOT enough on their own: they survive an
+    # inverted prohibition, because a section can say "the line carries **no**
+    # request identity" and "**Do** attribute that growth per request from the
+    # log" at the same time — self-contradictory, and green. Pin the ⛔ clause
+    # itself, which is the sentence that carries the ruling (#10071 review P2).
+    assert re.search(r"⛔ \*\*Do\s+not try to attribute", section), (
+        "the section does not forbid the impossible step it describes — "
+        "per-request attribution from a line that carries no request identity"
     )
 
 

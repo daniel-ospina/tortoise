@@ -234,22 +234,38 @@ below is green.
 user** (`PUT …/users/{username}`), so the old credential still works — zero
 downtime so far.
 
-   ⛔ **Do not assume a preset is sufficient — a `Write`-preset user is not.**
-   This URI becomes the app's `TORTOISE_DB_URI` (`entrypoint.sh` builds it from
-   `FALKORDB_CLOUD_URI`), and `tortoise/acl_graph_users.py::_admin_client()`
-   uses those same credentials as its **admin** connection to provision each
-   graph's per-graph ACL user: `ACL GETUSER` / `ACL SETUSER … reset` /
-   `ACL DELUSER` / `ACL SAVE` (`_ensure_default_user_secured`, `_user_exists_on`,
-   `_setuser`, `drop_acl_user`), behind a `MODULE LIST` capability probe
-   (`_falkordb_present`). The requirement is therefore `_GRAPH_COMMANDS`
-   **plus `+MODULE|LIST` and `+ACL`** — that file is the requirement's home, and
-   the vendor's presets meet neither ("No preset grants `+ACL`"; only **Admin**
-   adds `+MODULE|LIST`). A preset that misses them does not fail loudly: with
-   `MODULE LIST` denied, `create_acl_user()` returns `None` and the mint
-   succeeds with **no per-graph ACL user** — the C4/#2113 isolation layer
-   silently absent. Which credential the Cloud app's ACL provisioning can
-   actually use is **#8617**; until that is settled, do not narrow the ACL below
-   what `tortoise/acl_graph_users.py` requires.
+   ⛔ **On FalkorDB Cloud the per-graph ACL user is NOT provisionable, and the
+   app no longer tries.** `TORTOISE_ACL_LAYER = "off"` in `fly.toml`'s `[env]`
+   (owner decision 2026-10-26, **#8617**): no database credential the app may
+   hold carries `+ACL` — the vendor's presets do not grant it and `ACL` is not
+   in the allowed-commands list — so every attempt was a refusal, and before
+   the decision **every hosted graph mint rolled back** (dashboard *Create
+   graph* 503'd on production `e1e3e80`; the decision re-checked the mechanism
+   at `origin/main@fffcc7c0` — see #8617). With the layer
+   declared off, `create_acl_user()` answers `absent_by_design` *before* it
+   contacts the server, the graph mints, and the absence is **recorded**: one
+   log line per process, and distinct `absent_by_design` / `denied` / `absent`
+   / `provisioned` counters in `POST /v1/internal/backups/acl-reconcile`.
+
+   **What that costs, stated plainly:** on the hosted product there is **no
+   database-level second wall** between graphs. What isolates a graph there is
+   our own code (a key is bound to one graph and every request is checked
+   against it) plus the separate `org_{org_id}_{gid}` namespace. Do not
+   describe the hosted lane as having the per-graph ACL layer — it does not.
+
+   **So the credential in `FALKORDB_CLOUD_URI` must satisfy the app's DATA path
+   only:** `+MODULE|LIST` (the capability probe) and the graph verbs the data
+   plane runs (`GRAPH.QUERY` / `GRAPH.RO_QUERY` / `PING`). It does **not** need
+   `+ACL` — that is the one grant the platform refuses, and requiring it is what
+   broke graph creation.
+
+   **Self-hosted is unchanged** (#8617 ruling 2). `TORTOISE_ACL_LAYER` unset
+   (the default, `strict`) still creates the per-graph user on every graph
+   mint, and *there* the credential genuinely needs `_GRAPH_COMMANDS` **plus
+   `+MODULE|LIST` and `+ACL`** — the requirement's home is
+   `tortoise/acl_graph_users.py` (`_GRAPH_COMMANDS`, `_falkordb_present`,
+   `layer_provisionable`). A `Write`-preset user is still not enough for a
+   self-hosted server.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.
@@ -3334,11 +3350,24 @@ why the two recipes above are the verification and the deploy status is not.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
-   **graph-bound** — its own writes cannot land in `no_tenant` — and attribute any
-   `no_tenant` growth inside the window to a specific request through recipe 1's
-   log line rather than to the capture. Growth with no log line to attribute it
-   to is a fail-and-fix; the route is never `TORTOISE_RECORD_SINGLE_TENANT`, which
-   the #9192 cross-tenant note below forbids.
+   **graph-bound** — a graph-bound **control-plane** credential cannot land in
+   `no_tenant` (the self-host registry lane above is a graph-bound key that
+   resolves through no control plane, so its writes are counted there by
+   design) — and treat `no_tenant` growth as the residual it then is: it is a
+   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
+   not appear. ⛔ **Do
+   not try to attribute that growth per request from the log.** The line an
+   unbound capture produces carries the env-pair diagnosis and **no** request
+   identity and no record type — and `no_tenant` has a second emission, for a
+   malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
+   two requests apart. (Of the four `record_writer` reasons, `circuit_open` is the
+   only one that carries the record type; `malformed_dsn` and `write_failed` carry
+   the exception text instead, and the SDK's `no_journal` line names the record
+   type inside its exception text.)
+   A bar that required per-request attribution would be unexecutable and would
+   red a healthy deployment on its default branch. The route is never
+   `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
+   forbids.
 
 ⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
 versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
