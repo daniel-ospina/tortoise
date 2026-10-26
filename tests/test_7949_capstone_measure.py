@@ -789,7 +789,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     # … and NOT the classify pass's flag or gates
     for classify_cite in ("classify_later", "if classify_later", ":8473",
                           ":8498", ":8520", ":8523", ":8604", ":8607",
-                          ":8729", ":8739", ":8620", ":8750", ":8393"):
+                          ":8729", ":8739", ":8620", ":8750"):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────

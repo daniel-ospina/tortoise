@@ -3305,6 +3305,28 @@ class TestValueVerbSpan2684:
         assert not any("minted endpoint" in w and "no source span" in w
                        for w in r["warnings"]), r["warnings"]
 
+        # (d) …and so does a value-free endpoint on the BAND route, which is the
+        #     leg that pins the report's VALUE guard: (c)'s endpoint resolves to
+        #     NO turn, so it never reaches the mint site's report at all. Without
+        #     `_carries_value(content)` this one gains a false "value-bearing
+        #     minted endpoint … no source span" line — a fabricated absence in
+        #     exactly the stream the #2684 census counts as "reported".
+        #     Measured: patching `_carries_value` to True emits that line here.
+        band_turn = [{"index": 0, "role": "user",
+                      "text": "maybe try intervals for speed and cadence work"}]
+        free = "the team prefers intervals for speed and cadence work"
+        r = v2.execute_embed(
+            {"entities": [], "points": [], "events": [],
+             "operators": [{"src": free, "dst": "the retro doc",
+                            "op_type": "IMPL"}]},
+            {}, session_id="s1", edus=band_turn)
+        pt = {p["content"]: p for p in r["payload"]["points"]}[free]
+        assert not v2._carries_value(free)
+        assert pt["source_turn_id"] == 0 and pt["quote"] == ""   # the band route
+        assert "span_start" not in pt and "span_end" not in pt
+        assert not any("value-bearing minted endpoint" in w
+                       for w in r["warnings"]), r["warnings"]
+
     def test_a_verbatim_minted_anchor_with_no_value_in_its_quote_keeps_ITS_class(
             self):
         """ONE absence, reported as the class that actually happened.
