@@ -1062,7 +1062,7 @@ def _vet_enabled() -> bool:
     evidence key — matching the ``TORTOISE_CLASSIFY_LATER`` precedent
     (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
     Value matching goes through the declared truthy contract (#4097)."""
-    return is_truthy(os.environ.get("TORTOISE_VET"))
+    return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()
 
 
 def _value_gate_enabled() -> bool:
@@ -1089,8 +1089,8 @@ def _default_kind_classifier(model, installed_namespaces=None):
     ``installed_namespaces`` (#5163) is the graph's installed-pack gate
     threaded into the kind index — ``None`` = no gate (the catalog union)."""
     from tortoise.kind_classifier import KindClassifier
-    return KindClassifier(model=model,
-                          installed_namespaces=installed_namespaces)
+    return KindClassifier(model=model, installed_namespaces=installed_namespaces,
+                          tail_decider=_s2_seam_tail_decider())
 
 
 def _render_master(master: dict, story: str | None = None, *,
@@ -8334,7 +8334,7 @@ def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
         return embed_list, {}, [], {}
     try:
         out = _vet_gate.vet_candidates(embed_list, narrative=narrative,
-                                       arbiter=arbiter)
+                                       arbiter=_s2_seam_arbiter(arbiter))
         new_list, apply_warnings = _vet_gate.apply_vet(
             embed_list, out["decisions"], prior=prior)
         stats = {
@@ -10461,3 +10461,59 @@ __all__ = [  # noqa: RUF022
     "SUBJECTS", "EVENTS", "CHAINS",
     "UNCLASSIFIED",
 ]
+
+
+# ── #5087: the S2.2/S2.3 typed-decision seam's two call sites ───────────────
+#
+# Appended at the END of this module on purpose: the capstone evidence bundle
+# (`docs/evidence/7949-capstone/`) cites ~115 LINE NUMBERS in this file, checked
+# by `tests/test_7949_capstone_measure.py`, and an insertion anywhere above them
+# re-stales all of them. A function defined after its caller is fine (calls
+# resolve at run time), so the seam's wiring costs the bundle nothing.
+
+def _s2_seam_armed() -> bool:
+    """Whether `TORTOISE_S2_DECISION_SEAM` is truthy — the seam's ONE arming read.
+
+    ⚠️ **Arming the seam ARMS VET.** `_vet_enabled` ORs this in, because the seam
+    *is* S2.2's arbiter: with `TORTOISE_VET` unset and no arbiter injected,
+    `extract_session_v2` would skip the VET passes entirely and the seam would
+    never be consulted — an armed seam that no gate runs is the inert-enforcer
+    failure class (it reports itself as protection and protects nothing). An
+    operator who wants the classify half only is arming a spend either way, so
+    one flag is the honest shape; `stats["prompt"]` in the classify stats says
+    which half actually answered.
+    """
+    from tortoise import s2_decision_seam
+
+    return s2_decision_seam.seam_enabled()
+
+
+def _s2_seam_arbiter(injected):
+    """Which S2.2 arbiter a pass uses: **injected > armed > none**.
+
+    An explicitly injected arbiter always wins (tests and the capstone probes drive
+    the real gate that way). With none injected, the seam supplies one only when
+    the flag is armed — so the flag's OFF state is exactly today's VET (the
+    mechanical predicate only, every candidate kept) and the write path changes
+    only when an operator arms it.
+    """
+    if injected is not None:
+        return injected
+    if not _s2_seam_armed():
+        return None
+    from tortoise import s2_decision_seam
+
+    return s2_decision_seam.vet_arbiter()
+
+
+def _s2_seam_tail_decider():
+    """S2.3's decision source for the classify tail, or None (the default).
+
+    ``None`` makes ``KindClassifier``'s constructor call identical to its
+    pre-#5087 form, so the flag's off state changes nothing at all.
+    """
+    if not _s2_seam_armed():
+        return None
+    from tortoise import s2_decision_seam
+
+    return s2_decision_seam.classify_decider()

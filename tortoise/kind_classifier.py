@@ -93,12 +93,27 @@ class KindClassifier:
         lam: float = LAMBDA,
         llm_tail: bool = True,
         batch_size: int = ADJUDICATION_BATCH,
+        tail_decider=None,
     ) -> None:
         """``encoder``/``index``/``model`` are the injectable seams: the
         production defaults are the EmbeddingModel-singleton encoder, the
         content-addressed ``KindIndex``, and the session's LLM adapter for
         the adjudication tail. ``llm_tail=False`` runs the deterministic
         kNN/rerank path only (offline eval).
+
+        ``tail_decider`` (#5087) replaces the tail's DECISION SOURCE without
+        touching the tail: a callable ``[(item_id, text, offered_kinds)] ->
+        ({item_id: kind}, stats)`` (see ``s2_decision_seam.classify_decider``;
+        the trailing stats carry the seam's own cost and, importantly, WHICH
+        QUESTION it refused). It is
+        the S2.3 half of the typed-decision seam — a ``choice`` over exactly
+        the kinds the kNN offered, so the decision cannot leave the pack
+        vocabulary by construction rather than by validation. ``None`` (the
+        default, and the whole production state today) keeps the hardcoded
+        prompt + JSON parser below byte-identically. ``llm_tail=False`` stays
+        the switch for *whether* the tail runs at all; this only decides who
+        answers it — and an item the decider leaves unassigned falls through
+        to the same kNN top-1 fallback a failed LLM batch does.
 
         ``installed_namespaces`` (#5163) gates the index's PACK candidate
         set to the graph's installed packs — the same
@@ -119,6 +134,7 @@ class KindClassifier:
         self.lam = lam
         self.llm_tail = llm_tail
         self.batch_size = batch_size
+        self.tail_decider = tail_decider
         self._restrict_cache: dict[str, set[str]] = {}
 
     @staticmethod
@@ -365,7 +381,7 @@ class KindClassifier:
         ``batch_stats["retries"]``) and the parse-level re-prompts
         (nested ``batch_stats["llm"]["retries"]`` — cycle-3 P2: a
         parse-retry on the adjudication tail must reach llm_stats)."""
-        if self.model is None:
+        if self.model is None and self.tail_decider is None:
             for iid, _item, top in tail:
                 stats["assigned_knn"] += 1
                 assignments[iid] = {"kind": top[0][0], "margin": top[0][1], "mode": "knn"}
@@ -382,6 +398,14 @@ class KindClassifier:
             batch_size = ADJUDICATION_BATCH
         for start in range(0, len(tail), batch_size):
             batch = tail[start : start + batch_size]
+            if self.tail_decider is not None:
+                # #5087: the typed-decision seam answers this batch; the LLM
+                # block below (and its spend accounting) is not entered at all,
+                # so `usage` stays the LLM's and the seam's own cost rides in
+                # `stats["seam"]` — two providers, two accumulators, never one
+                # blended number.
+                self._decide_tail_seam(batch, assignments, stats, warnings)
+                continue
             calls += 1
             # Per-batch stats: the LLM spend (attempts/retries/truncated)
             # rides out of _complete_parsed through this dict (previously
@@ -504,6 +528,76 @@ class KindClassifier:
         # stats["adjudication_calls"]); attempts is the spend proxy.
         usage["calls"] = calls
         return calls, usage
+
+    def _decide_tail_seam(self, batch, assignments, stats, warnings) -> None:
+        """The injected typed-decision tail (#5087) for ONE batch.
+
+        The decider answers ONE question per item — a ``choice`` over the kinds
+        the kNN just offered — so the answer cannot leave the pack vocabulary by
+        construction. It is validated AGAIN here against that same offered set:
+        ``s2_decision_seam`` already refuses an out-of-set value, but this seam
+        accepts ANY injected callable, and the invariant "a kind is never
+        minted" has to hold where the kind is written, not one layer away.
+
+        Fail-open, like every other path in this method's caller: an item the
+        decider leaves unassigned (capability unavailable, answer rejected, or
+        a decider that raised) takes the kNN top-1 fallback and is counted.
+        ``mode`` is ``"seam"`` so the artifact says WHICH decision source
+        produced the kind; the aggregate counters stay the classifier's
+        (``assigned_llm`` means "assigned by the model tail", of either kind),
+        and the seam's own spend/refusals ride in ``stats["seam"]`` — additive
+        keys only, the classify-later payload's convention.
+        """
+        seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
+                                         "cost_usd": 0.0, "rejected": []})
+        try:
+            decided, seam_stats = self.tail_decider([
+                (iid, str(item.get("text", "")), [k for k, _s in top])
+                for iid, item, top in batch
+            ])
+        except Exception as e:  # fail-open: the decider must not abort capture
+            warnings.append(
+                f"tail decider failed ({type(e).__name__}: {e}) — kNN top-1 fallback"
+            )
+            stats["classify_errors"] += 1
+            decided, seam_stats = {}, {}
+        if isinstance(seam_stats, dict):
+            calls = seam_stats.get("calls")
+            if isinstance(calls, int) and not isinstance(calls, bool):
+                seam["calls"] += calls
+            cost = seam_stats.get("cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                seam["cost_usd"] += max(0.0, float(cost))
+            rejected = seam_stats.get("schema_rejects")
+            if isinstance(rejected, list):
+                # The seam's own refusals, naming the question that failed —
+                # the record item 3 of #5087 requires and a bare "no assignment"
+                # does not carry.
+                seam["rejected"].extend(str(r) for r in rejected)
+        if not isinstance(decided, dict):
+            decided = {}
+        for iid, _item, top in batch:
+            chosen = decided.get(iid)
+            resolved = None
+            if isinstance(chosen, str):
+                resolved = {k.lower(): k for k, _s in top}.get(chosen.lower())
+            if resolved is None:
+                if chosen is not None:
+                    seam["rejected"].append(f"{iid}:{chosen!r}")
+                    stats["closed_vocab_rejects"] += 1
+                    warnings.append(
+                        f"{iid}: tail decider returned {chosen!r} — "
+                        "not an offered kind; kNN top-1 fallback"
+                    )
+                stats["assigned_knn"] += 1
+                assignments[iid] = {"kind": top[0][0], "margin": top[0][1],
+                                    "mode": "knn"}
+                continue
+            seam["assignments"] += 1
+            stats["assigned_llm"] += 1
+            chosen_sim = next((s for k, s in top if k == resolved), top[0][1])
+            assignments[iid] = {"kind": resolved, "margin": chosen_sim,
+                                "mode": "seam"}
 
     def _fallback(self, item: dict) -> dict:
         """Fail-open terminal: best core kind for the type (the write path's

@@ -973,3 +973,45 @@ code rather than to their notes: the degraded S3 render still instructing *"assu
 **What this does NOT do.** No mechanism was implemented — recording the absences is the output. `sufficiency_router`
 (`#5009`) and `state_value_carve_out` (`#9775`) stay `not-implemented`, so `#5064`'s Target 3 (the attached symptoms
 stop reproducing) is still open; the substrate half is done and should not be redone.
+
+## 2026-10-26 — the S2.2/S2.3 typed-decision seam EXISTS, and the two "seam does not exist" passages are stamped (#5087)
+
+**What changed in the design document.** Two statements that the seam does not exist are now
+historical, and both say so where a reader meets them: §4.2's "`llm_tail` is not the seam"
+subsection carries a **STATUS** stamp at its head, §S2.3's table row records that the adapter is
+built, and the `#5333` G5 subsection's *"the bar is not buildable today"* paragraph now names what
+authorising that pass would still buy (the evidence bar and the relocation — not the seam). **No
+decision was reversed:** O4's admissible set, `SPLIT`'s absence, the `MERGE`/`MERGE-INTO-EXISTING`
+split, S2.3's vocabulary (`documentKind` genres and pack kinds, never `sourceKind`) and S2.2's
+fail-open direction are all served by the seam as recorded.
+
+**What was built.** `tortoise/s2_decision_seam.py` — the adapter (one round trip: `state` + a
+**map** of typed questions, shape copied from a working caller per `#7866`), the two versioned
+prompts (`vet-v1`: `noul` + `score` per candidate; `classify-v1`: a `choice` over the kinds the kNN
+offered), and the validating parser (`type` echo, `[0,1]`, the declared 0–3 scale, membership of
+the offered set — a violation names its question and yields **no verdict**). Consumers are the
+seams that already existed and had no production caller: `vet_gate.vet_candidates(arbiter=…)` and
+`KindClassifier(tail_decider=…)`. Armed only by `TORTOISE_S2_DECISION_SEAM`; **OFF by default**, so
+no rate effect is measurable until an operator arms it. Design record and measured cost:
+`docs/architecture/S2-DECISION-SEAM.md`.
+
+**What it does NOT do (each a recorded decision, not an omission).** No `SPLIT` (absent from O4),
+no `RENARRATE`/coverage verdict (batch-level, and §S2.2 bounds that loop), no `MERGE` (`#5006`'s
+ladder, and §16.4's different evidence bar), nothing at S3 or S5 (S3 is the sole authority on
+new-vs-existing), no retry ladder and no cache.
+
+**Cost, measured rather than quoted.** The seam's own `vet-v1` batch of 40 items / 80 questions
+serializes to 39,484 B ≈ 9,265 input tokens ⇒ **$0.0039 per round trip (~$0.000097/item)**;
+`classify-v1` at 40 tail items ⇒ 23,292 B ≈ 6,112 tokens ⇒ **$0.0026 (~$0.000064/item)**. The price
+per token is the vendor's documented example (`$0.000026 / 62 tokens`, ⇒ `4.19e-7 $/token`)
+cross-checked against a 100-row usage ledger from this machine, whose fit is `4.20e-7 × input_tokens`
+with a maximum absolute error of `$0.000001`. ⚠️ **No live call was made** (no `JEV_API_KEY` on the
+box that wrote this), so the token counts are a `cl100k` proxy (read them ±15%) and the first armed
+call is what produces a receipt — the seam records it in `stats["cost_usd"]`.
+
+**Tests:** two, and both are mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
+answer decides through the REAL `vet_gate` and the REAL `KindClassifier`; an out-of-schema answer
+(wrong primitive / `9.0` on a 0–3 scale / a choice outside the offered set) produces no verdict and
+names its question. Four mutants each redden at least one of them and restore byte-identically — including
+`_noul`'s coercion of a missing probability to `0.0`, which turns a `choice` answer into a
+confident **DISCARD**.
