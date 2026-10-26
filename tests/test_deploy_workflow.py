@@ -2404,12 +2404,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # counter list, the SQL block), so membership tests on them are satisfied
     # without the bar saying anything (#9585 reviews; three assertions were
     # vacuous that way). Each is mutation-proven against a meaning inversion.
-    assert re.search(r"An all-empty reading is NOT a pass", section), (
+    assert re.search(r"An all-empty reading is NOT a pass", flat), (
         "the bar never says an all-empty reading is not a pass — an unarmed "
         "deployment counts nothing at all, so a bar written only as 'no growth' "
         "is vacuously green on the silent-inert deployment this exists to detect"
     )
-    assert re.search(r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:", section), (
+    assert re.search(r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:", flat), (
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
@@ -2438,7 +2438,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "app whose record seam is completely inert, so presence becomes "
         "trivially satisfiable and the bar greens the state it exists to catch"
     )
-    assert re.search(r"The capture that proves presence must be a\s+JOURNALING one", section), (
+    assert re.search(r"The capture that proves presence must be a\s+JOURNALING one", flat), (
         "the bar does not require the proving capture to be a JOURNALING one — a "
         "`capture_session` capture grows `no_durable_journal` at "
         "`write_live_record`'s `if not durable` branch, before any tenant "
@@ -2446,12 +2446,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "never reaches Postgres"
     )
     # The BEFORE-and-after baseline: "growth" has no referent without it.
-    assert re.search(r"read both counters BEFORE the\s+capture and again after", section), (
+    assert re.search(r"read both counters BEFORE the\s+capture and again after", flat), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
         "process's life then reads as this capture's growth"
     )
-    assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", section), (
+    assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
         "told nothing, and that state is the whole point of the section"
     )
@@ -2459,7 +2459,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # presence lead-in is. A phrase-only pin accepted "*Then*, if convenient:" and
     # "*Then*: you need not care about …" (both GREEN), i.e. the half the bar
     # depends on could be voided without a red.
-    assert re.search(r"\*Then\*:\s*\*\*no growth in a reason other than", section), (
+    assert re.search(r"\*Then\*:\s*\*\*no growth in a reason other than", flat), (
         "the bar drops or softens item 2 — with it gone, a `circuit_open` / "
         "`no_tenant` reading passes on the #9264 baseline alone, which is the "
         "state this section exists to catch"
@@ -2480,14 +2480,28 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "growth is a fail-and-fix only for an unbound capture — a reader who "
         "stops at item 2 fails a healthy deployment on its default traffic"
     )
+    # ⛔ The SAME absolute, one paragraph lower (third review cycle, P1): the reason
+    # definitions were introduced by "Those three are always a fail-and-fix", which
+    # re-asserts the unqualified bar the qualifier above just removed — so a reader
+    # who stops at the definitions fails a healthy deployment on the ordinary
+    # unbound traffic the ⚠️ bound excuses, the exact defect #10071 exists to
+    # remove. Measured: the sentence could be reverted with every other pin green.
+    assert re.search(r"None of those three is an exemption of its own", flat), (
+        "the reason definitions still introduce the three as an unconditional "
+        "fail-and-fix, contradicting the ⚠️ bound that qualifies `no_tenant`"
+    )
+    assert not re.search(r"Those three are always a fail-and-fix", flat), (
+        "the unqualified absolute is back — a `no_tenant` growth is a fail-and-fix "
+        "only on the three cases the ⚠️ bound names"
+    )
     # The #9264 `write_failed` exemption bound: without it the documented
     # R1-without-R2 state (writes nothing, counts only `write_failed`) satisfies
     # item 1's *any reason* clause AND the exemption — green with zero rows.
-    assert re.search(r"a\s+deployment that writes no row at all is not passing this bar", section), (
+    assert re.search(r"a\s+deployment that writes no row at all is not passing this bar", flat), (
         "the `write_failed` exemption is unbounded — the R1-without-R2 deployment "
         "writes no row, grows only `write_failed`, and then passes both halves"
     )
-    assert re.search(r"a new `journal_event` / `point` row must still appear", section), (
+    assert re.search(r"a new `journal_event` / `point` row must still appear", flat), (
         "the bar never requires a row to exist, only that no unexpected reason "
         "grew — a deployment writing nothing satisfies that"
     )
@@ -2497,7 +2511,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # lane, `write_live_record` never entered) and `malformed_dsn` (counted when
     # the DSN fails the scheme check) both contradict. Pin the MEANING, not the
     # old phrase: the section must send the reader to the counting site instead.
-    assert re.search(r"its counting site in the code is the\s+authoritative statement", section), (
+    assert re.search(r"its counting site in the code is the\s+authoritative statement", flat), (
         "the section states no authority for the meanings it does not give — "
         "without it a common basis for the reasons is the natural (wrong) reading"
     )
@@ -2514,16 +2528,16 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section defines `malformed_dsn` as a parse failure — `record_dsn()` "
         "does no parsing, only the scheme + host checks"
     )
-    assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", section), (
+    assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", flat), (
         "`malformed_dsn` is not defined by the scheme check it actually is"
     )
-    assert re.search(r"names no host", section), (
+    assert re.search(r"names no host", flat), (
         "the section's `malformed_dsn` definition omits the HOST rule — a "
         "hostless `TORTOISE_RECORD_DSN` (`postgresql://user:pw@`, a clipped "
         "paste) is counted `malformed_dsn`, not `circuit_open`, so a reader "
         "debugging that counter is sent to the wrong cause"
     )
-    assert re.search(r"Nothing else is parsed", section), (
+    assert re.search(r"Nothing else is parsed", flat), (
         "the section does not bound the host rule, so its reader cannot tell "
         "which faults `record_dsn()` catches from the ones only a connection "
         "can find (wrong password / paused project)"
@@ -2537,7 +2551,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # remedy. The bar must bound that arm to the CAPTURE and **rule the
     # per-request attribution out** (`record_writer` logs no request identity),
     # keeping it a fail-and-fix for the capture's own writes.
-    assert re.search(r"BOUND to the proving capture, not to the process", section), (
+    assert re.search(r"BOUND to the proving capture, not to the process", flat), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
         "lever the section offers (`TORTOISE_RECORD_SINGLE_TENANT`) is the "
@@ -2547,15 +2561,15 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # process-global" about the #9192 env pair (line ~2960), so a bare-token arm
     # passed on the PRE-fix wording — a vacuous assertion, caught by the verifier
     # and re-anchored to this clause.
-    assert re.search(r"These counters are \*\*process-global\*\*", section), (
+    assert re.search(r"These counters are \*\*process-global\*\*", flat), (
         "the section does not say the counters are process-global, so a "
         "before/after delta reads as if it measured only the capture"
     )
-    assert re.search(r"graph-bound", section), (
+    assert re.search(r"graph-bound", flat), (
         "the section gives no way to make the capture's own `no_tenant` "
         "impossible — a graph-bound credential is the discriminator"
     )
-    assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
+    assert re.search(r"record_tenant_for|_bind_record_tenant", flat), (
         "the bounded arm names no counting site, so a reader cannot check the "
         "claim that `no_tenant` is designed on those lanes"
     )
@@ -2574,8 +2588,11 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # The message above states the EVIDENCE for the impossibility (which reasons
     # carry what), so pin the evidence too — otherwise the parenthetical can be
     # deleted and the claim stands on an assertion that no longer measures it
-    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
-    # record_writer.py:1184; `malformed_dsn` and `write_failed` log the exception).
+    # (#10071 review P2; third-cycle nit — the citation names the BRANCH, not a
+    # line: this said `record_writer.py:1184`, which on this base is the
+    # `no_durable_journal` closer, because #10025 moved these by 34 lines between
+    # writing and review. `circuit_open`'s own warning logs `record.get("type")`;
+    # `malformed_dsn` and `write_failed` log the exception).
     assert re.search(r"`circuit_open` is the only one that carries the record type", flat), (
         "the section gives no evidence for why the log cannot attribute growth — "
         "only `circuit_open` carries the record type, so a reader cannot check "

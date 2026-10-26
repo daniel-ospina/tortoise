@@ -3311,8 +3311,9 @@ So the bar has **two parts, and BOTH are required**:
    The R1-without-R2 state writes nothing and counts only `write_failed`, so it
    satisfies item 1's *any reason* clause and the exemption above — **a
    deployment that writes no row at all is not passing this bar, whatever the
-   reason breakdown says.** Those three are always a fail-and-fix:
-`no_tenant` = the request carried no tenant, **or** a tenant that was not a full
+   reason breakdown says.** None of those three is an exemption of its own —
+whether a `no_tenant` growth is the capture's OWN is decided by the ⚠️ bound
+below: `no_tenant` = the request carried no tenant, **or** a tenant that was not a full
 org/graph pair, `malformed_dsn` = the value failed `record_dsn()`'s own checks —
 it does **not start with** `postgresql://` / `postgres://`, or it names no host,
 or it carries raw whitespace (`record_backup.libpq_env` refuses the same
