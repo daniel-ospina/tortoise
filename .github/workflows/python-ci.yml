@@ -3307,9 +3307,13 @@ jobs:
           python3 tools/surface_manifest.py render
           git diff --exit-code -- docs/product/mcp-sdk-surface.md
       # ── THE TARGET COMPLIANCE GAP, SURFACED BUT NOT GATING (#4185) ─────────
-      # The gap between the live surface (82/150) and the owner-approved target
-      # (26/40) is genuine, so a REQUIRED check would red `main` and block every
-      # unrelated merge while the migration is in flight. But a check nobody runs
+      # The gap between the live surface and the owner-approved target is genuine, so
+      # a REQUIRED check would red `main` and block every unrelated merge while the
+      # migration is in flight. Neither side's size is restated here on purpose: both
+      # move (#10012 took the SDK from 149 to 147, #3540 took the MCP target from 26
+      # to 27), so a literal in this comment is stale by the next surface change — the
+      # step below prints the live numbers and the deltas on EVERY run, and reads the
+      # target from the two approved documents. But a check nobody runs
       # reports to nobody: this step prints the numbers and the deltas on EVERY
       # run, and `continue-on-error` keeps it informational. The `::error::`
       # annotation still shows up on the run page, so the gap stays visible.

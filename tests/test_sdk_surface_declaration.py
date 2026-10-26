@@ -231,6 +231,13 @@ def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
     delta, and the two measured set sizes must appear. RED on the pre-fix docstring (its
     `The other 109 are the migration gap` line carries no delta label and the text never says
     140), so this is not vacuous.
+
+    #10044 review F2b: `assert str(len(absent)) in doc` was satisfied by the phrase "**30**
+    methods plus …" INSIDE the sentence that then claimed **31** declared names are what
+    Phase 2 implements — so the pin certified the sentence it should have refused. `31` is
+    `40 - 9`, the complement of the approved-and-live OVERLAP: a delta, not a set, and it
+    folded the already-resolving row-1 `Tortoise(...)` into the implement set. The two arms
+    below pin the SET SIZE of the implement statement and refuse the complement-as-set.
     """
     import ast
 
@@ -255,6 +262,23 @@ def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
         f"of methods the migration removes: {unlabelled}. The removals are the "
         f"{len(off_surface)}, and the {len(absent)} absent approved names are IMPLEMENTED, "
         "not removed — say `delta` on any line that quotes 109."
+    )
+    # …and the IMPLEMENT-set statement must quote the measured size, never the complement of
+    # the overlap. Flattened first: the sentence is wrapped, so a per-line assertion would
+    # pin where the line breaks fall rather than what the sentence claims.
+    flat = " ".join(doc.split())
+    overlap = set(declared) & live
+    complement = len(declared) - len(overlap)
+    assert f"remaining {len(absent)} declared methods" in flat, (
+        f"the docstring does not state the implement set as `remaining {len(absent)} "
+        "declared methods` — the size `resolves()` measures (row-1 `Tortoise(...)` is the "
+        "constructor and always resolves, so it is NOT one of the names Phase 2 implements)"
+    )
+    assert f"remaining {complement} " not in flat, (
+        f"the docstring quotes `remaining {complement}` as if it were a set: {complement} is "
+        f"the COMPLEMENT of the {len(overlap)}-method approved-and-live overlap "
+        f"({len(declared)} - {len(overlap)}), a DELTA — the measured implement set is "
+        f"{len(absent)} methods, because `Tortoise(...)` already resolves to the class"
     )
 
 

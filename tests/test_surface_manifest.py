@@ -981,7 +981,8 @@ def test_approval_status_is_the_TARGET_approval_not_a_baseline_stamp(
     """The decision #4185 encodes, pinned: the field describes the TARGET, not this snapshot.
 
     A re-cut over a baseline that is OVER target still writes `approved`, because the owner
-    approved the TARGET (26/40), not the frozen 82/150. This is deliberate, and what makes an
+    approved the TARGET (27 MCP tools / 40 SDK methods), not the frozen 82/150. This is
+    deliberate, and what makes an
     expansion visible is NOT this field — it is (a) the guard reding BEFORE the re-cut when a
     tool is added, and (b) `tools/surface-target-check.py` reding on the gap. Pinned here so
     the semantics are a decision rather than an untested consequence.
@@ -2307,10 +2308,14 @@ def test_a_re_cut_re_emits_the_OVERRIDES_header(monkeypatch, tmp_path, derived_b
     # The growth pin's rationale must survive too — a re-cut that dropped it would leave the
     # next reader with no idea why `high_water_counts` cannot be edited by hand.
     assert "`high_water_counts` is a GROWTH PIN" in written
-    # …and the header must not carry a FORMATTED count of the target (`26 MCP tools` / `40 SDK`):
-    # the target lives in the product docs, read by `tools/surface-target-check.py`, and a
-    # restated literal here would go stale silently. The mandated `OVERRIDES:` marker above is
-    # the only place the owner's `26/40` appears, quoted verbatim as the approval record.
+    # …and, OUTSIDE the mandated `OVERRIDES:` marker, the header must not restate the
+    # RETIRED formatted literals (`26 MCP tools` / `40 SDK`): the target lives in the product
+    # docs, read by `tools/surface-target-check.py`, and a restated literal goes stale
+    # silently — `26/40` is exactly the literal that drifted when the owner raised the MCP
+    # target to 27 (#3540, 2026-10-17). The marker itself quotes the ruling (`27 MCP tools`,
+    # the declared 40 methods) because that is the ONE home a lane reads before adopting a
+    # vendor default; `test_the_overrides_marker_names_the_same_target_in_every_copy` holds
+    # every copy of it to the same text and to `docs/product/canonical-mcp-tools.md`.
     assert "26 MCP tools" not in sm.MANIFEST_HEADER
     assert "40 SDK" not in sm.MANIFEST_HEADER
 
@@ -2337,40 +2342,77 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
+def _overrides_marker_copies() -> dict[str, list[str]]:
+    """Every copy of the `OVERRIDES:` marker, per file, whitespace-flattened.
+
+    The marker is deliberately duplicated as a MECHANISM (`tools/surface-guard.py` may not
+    import the checkout's modules — it is base-ref pinned) and as an ARTIFACT (the header
+    ships in `config/surface-manifest.yml`); the TEXT need not be. Extraction is per file so
+    a copy whose reason clause is the old one cannot borrow the next file's terminator.
+    """
+    start = "OVERRIDES: the frozen-snapshot-as-approval-baseline practice"
+    end = "never from a count beside them."
+    found: dict[str, list[str]] = {}
+    for rel in (
+        "tools/surface_manifest.py",
+        "tools/surface-guard.py",
+        "config/surface-manifest.yml",
+    ):
+        flat = " ".join((ROOT / rel).read_text(encoding="utf-8").split())
+        copies, idx = [], flat.find(start)
+        while idx >= 0:
+            stop = flat.find(end, idx)
+            assert stop >= 0, (
+                f"an OVERRIDES copy in {rel} was truncated before its reason clause — its "
+                "text has drifted from the synchronised copy (the pre-fix "
+                "`tools/surface-guard.py` copies end at `re-confirmed 2026-10-10).`)"
+            )
+            copies.append(flat[idx:stop + len(end)])
+            idx = flat.find(start, idx + 1)
+        found[rel] = copies
+    return found
+
+
 def test_the_overrides_marker_names_the_same_target_in_every_copy():
-    """#10044 review F4: the marker's durable homes must not drift from the artifact copy.
+    """#10044 review F4/F1: the marker's durable homes must not drift from the artifact copy.
 
     `MANIFEST_HEADER` is what a reader of `config/surface-manifest.yml` sees; the module
-    docstrings are "the durable homes" — the copy a maintainer actually opens. This PR
-    updated the header to name BOTH targets (the 27-MCP-tool document AND the declared SDK
-    surface in `tortoise/__all__.py`) and left both docstring copies on the old single-target
-    text, still quoting `26/40` — so the same file told two different stories about where the
-    SDK target comes from, and the stale one was the copy a lane reads before adopting a
-    vendor's default, which is the exact failure the `OVERRIDES:` marker exists to prevent.
+    docstrings are "the durable homes" — the copy a maintainer actually opens. The header
+    names BOTH targets (the 27-MCP-tool document AND the declared SDK surface in
+    `tortoise/__all__.py`) and the docstring copies were left on the old single-target text,
+    still quoting `26/40` — so the same file told two different stories about where the SDK
+    target comes from, and the stale one was the copy a lane reads before adopting a vendor's
+    default, which is the exact failure the `OVERRIDES:` marker exists to prevent.
+
+    The marker is NOT confined to `tools/surface_manifest.py`: `tools/surface-guard.py` keeps
+    its own two copies on purpose (it must not import the checkout's modules — CI restores it
+    from the BASE REF so a PR cannot edit the gate it is judged by), and the header copy ships
+    in the artifact. The duplication is of the MECHANISM, not of the TEXT: the first fix
+    synchronised three copies and left those two saying `26/40`, which is why this scan is
+    per-file over every file that quotes a count. `tools/surface-target-check.py` is excluded
+    deliberately rather than overlooked: its copy is the count-free form ("so no count appears
+    here"), so it cannot drift from a number it does not carry.
 
     Compared on the marker's TEXT with whitespace flattened (the docstring copies are
     wrapped, the header copy is one line), so a reworded-but-equal copy passes and only a
-    divergent one reds. RED on the pre-fix tree: 3 copies, 2 distinct texts, the odd ones
-    out carrying `26/40`.
+    divergent one reds. RED on the pre-fix tree: the two `tools/surface-guard.py` copies end
+    at "re-confirmed 2026-10-10)." and quote `26/40`, so the extraction itself refuses them.
     """
-    source = (ROOT / "tools" / "surface_manifest.py").read_text(encoding="utf-8")
-    flat = " ".join(source.split())
-    start = "OVERRIDES: the frozen-snapshot-as-approval-baseline practice"
-    end = "never from a count beside them."
-    copies, idx = [], flat.find(start)
-    while idx >= 0:
-        stop = flat.find(end, idx)
-        assert stop >= 0, "an OVERRIDES copy was truncated before its reason clause"
-        copies.append(flat[idx:stop + len(end)])
-        idx = flat.find(start, idx + 1)
-    assert len(copies) == 3, (
-        f"expected the artifact copy (MANIFEST_HEADER) plus both durable homes, found "
-        f"{len(copies)} OVERRIDES copies in tools/surface_manifest.py"
+    found = _overrides_marker_copies()
+    assert {rel: len(c) for rel, c in found.items()} == {
+        "tools/surface_manifest.py": 3,
+        "tools/surface-guard.py": 2,
+        "config/surface-manifest.yml": 1,
+    }, (
+        "the OVERRIDES marker moved: expected 3 copies in tools/surface_manifest.py (both "
+        "durable homes + the header), 2 in the base-ref-pinned tools/surface-guard.py and 1 "
+        f"in the shipped artifact, found {found}"
     )
+    copies = [copy for per_file in found.values() for copy in per_file]
     assert len(set(copies)) == 1, (
-        "the OVERRIDES marker names different targets in different copies of the same file "
-        "— a lane reading the docstring copy (the one a maintainer opens) is told a target "
-        "the artifact copy contradicts:\n\n" + "\n\n".join(sorted(set(copies)))
+        "the OVERRIDES marker names different targets in different copies — a lane reading "
+        "the docstring copy (the one a maintainer opens) or the gate's own copy is told a "
+        "target the artifact copy contradicts:\n\n" + "\n\n".join(sorted(set(copies)))
     )
     assert "26/40" not in copies[0], (
         "the marker still quotes the superseded `26/40` target: the MCP target is 27 tools "
@@ -3494,7 +3536,8 @@ def test_the_render_does_not_claim_a_client_cap_binds_a_smaller_surface(tmp_path
 # `tools/surface-guard.py` compares the live declaration to the FROZEN BASELINE — a
 # snapshot of the implementation. It therefore cannot see a surface 3x over the owner's
 # approved target, which is the defect this file's sibling answers:
-# `tools/surface-target-check.py` compares the LIVE surface to the TARGET (26/40) read
+# `tools/surface-target-check.py` compares the LIVE surface to the TARGET (27 MCP tools /
+# 40 SDK methods) read
 # from the two product docs. Co-located here rather than in a new test module so the
 # CI-surfaces manifest does not need a second registration for the same surface.
 

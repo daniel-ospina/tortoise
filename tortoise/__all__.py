@@ -9,10 +9,12 @@ derivable from code.
 WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
     149 public methods are live on `TortoiseSDK` today and 40 are approved, but the two sets
     only overlap in 9: 9 approved methods are implemented and stay, so **140 of the live
-    methods are off the approved surface** — those are what Phase 2 of #4282 REMOVES. (The
-    remaining 31 declared names — 30 methods plus this module's row-1 `Tortoise(...)`, which
-    resolves to the `TortoiseSDK` class rather than a method on it — are the opposite
-    operation: Phase 2 IMPLEMENTS them.) Those 140 off-surface methods are deliberately NOT
+    methods are off the approved surface** — those are what Phase 2 of #4282 REMOVES. The
+    opposite operation is the remaining 30 declared methods, which do not exist on the SDK
+    yet: those are what Phase 2 IMPLEMENTS. (The declaration holds 40 names; the one left
+    over — the owner's row-1 `Tortoise(...)` — resolves to the `TortoiseSDK` class rather
+    than a method on it, so it is present today and Phase 2 neither implements nor removes
+    it.) Those 140 off-surface methods are deliberately NOT
     declared in this module: a declaration that also lists everything that exists cannot
     hold a line, because the gate then answers "the surface is what the surface is" and
     every surplus method is blessed instead of caught.

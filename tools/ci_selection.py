@@ -1053,12 +1053,21 @@ SOURCE_PATTERNS = {
             "tools/sdk_surface.py",
             # #10044 review F1: `tools/sdk_surface_declaration.py` is the APPROVED-surface
             # gate (the owner's 40 in `tortoise/__all__.py` vs the owner's document, and
-            # vs the live `TortoiseSDK`). Its proofs include the WIRING proof — that the
-            # required `surface-guard` job actually calls it — and they lived in
+            # vs the live `TortoiseSDK`). Its own proofs live in
             # `test_sdk_surface_declaration.py`, registered in `api` AND `core` but
             # unreachable, because `tools/` is in NON_PYTHON_PREFIXES: a gate-only diff
             # selected NO surface (`surfaces: []`, `full: false`) and the required job
             # then executed the PR's own edited gate with zero of its tests having run.
+            # They are sufficient on their own — `check(contract_only=True)`'s doctored-
+            # declaration cases red a gate whose `check()` returns [] — with one exception
+            # stated so it is not assumed: the WIRING proof (that the required
+            # `surface-guard` job actually calls this gate) lives in
+            # `tests/test_surface_manifest.py`, whose subject is the call site in
+            # `tools/surface_manifest.py`. It is registered in `core` (and in `slow_files`),
+            # so a `tools/surface_manifest.py` change selects it, and a
+            # `tools/sdk_surface_declaration.py`-only diff — which selects `api` — does not.
+            # This entry does not claim otherwise; it is what makes the `api` registration
+            # of the gate's 17 contract proofs bite.
             # Same silent-drop class (#1349/#3332/#3616) as the generators above, and the
             # one bypass the residual-bypass paragraph in `tools/surface_manifest.py`
             # does not cover. `test_sdk_surface_declaration.py` is already in `api`, so
