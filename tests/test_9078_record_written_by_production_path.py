@@ -2532,10 +2532,10 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
 
     ⚠️ NOT covered here, and deliberately: the onboarding/starter seed runners
     open the org's DEFAULT graph by construction (`_make_sdk(namespace=org_id)`,
-    not this resolver). The default graph need not have a `public.graphs` row,
-    so binding them to a graph-bound key's id would file their rows under a
-    graph they never wrote; naming the default-graph tenant is the open
-    control-plane decision on #9188.
+    not this resolver). Binding them to a graph-bound key's id would file their
+    rows under a graph they never wrote; naming the default-graph tenant for
+    those runners is #10047's scope (the org's `kind='default'` row now exists —
+    these lanes are not wired to it yet).
     """
     from tortoise import hosted_api, supabase_control
 
@@ -2555,9 +2555,12 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
     hosted_api._data_sdk(dict(graph_bound))
     assert bound == [("org-a", "g_row")], bound
 
-    # Default graph (org-wide key / session auth): no graphs row is guaranteed,
-    # so nothing is bound and the write stays refused `no_tenant`. This is the
-    # control-plane decision #9188 escalated, NOT an oversight.
+    # Default graph (org-wide key / session auth): no tenant is bound HERE —
+    # this resolver hands the write its request tenant, and the org-wide answer
+    # on these lanes is #10047's scope. An org-wide MCP credential is named on
+    # its OWN lane (mcp_auth's `_record_tenant_scope` from `default_graph_id`),
+    # which is what keeps this refusal from being the armed-and-silent state
+    # #10025 closed.
     hosted_api._data_sdk({"org_id": "org-a"})
     assert bound == [("org-a", "g_row")], (
         f"a default-graph request bound a tenant nobody named: {bound}")

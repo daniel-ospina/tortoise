@@ -135,24 +135,28 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
 
 Default-graph semantics (the no-migration contract):
 
-- The default graph is **graph 0** — the team's pre-epic namespace. It is
-  DERIVED, never materialized into a tenant data store: supabase mode reads
+- The default graph is **graph 0** — the team's pre-epic namespace. It is not
+  a separate tenant data store: supabase mode's storage key reads
   `teams.graph_name`; registry mode has a `kind='default'` Graph node whose
   namespace IS that stored `graph_name` (the org namespace — `org_{org_id}` /
   `org_{name}`, see the `:Graph` cell above). **No backfill, no data move.**
+  ⚠️ Since #10025 supabase mode DOES materialize a `kind='default'`
+  `graphs` row per organization (`20261028000001`), because the record's layer
+  tables FK to `public.graphs.id` and needed the default graph to have a real,
+  immutable id — its NAME is a user-editable label and identifies nothing. That
+  row holds no graph data: its only data-plane field is `namespace`, the org's
+  storage key.
 - **No per-graph keys (epic #2083 C7 follow-up, #2306):** the default graph
   is NOT key-bindable in either lane — graph-bound mints 404 on the
   kind='default' node/row (`_ensure_graph_exists`). Consequently the
   default row's `key_count` on GET /v1/graphs is ALWAYS 0, and the two
   lanes cannot disagree about it:
-  - Supabase enforces this structurally: `api_keys.graph_id REFERENCES
-    graphs(id)` — the default row's id is the DERIVED literal `'default'`
-    (never a graphs.id), so no api_keys row can reference it; the keys
-    that RESOLVE to the default graph are the TEAM-WIDE rows (graph_id
-    NULL), managed on the API-Keys tab, never counted on a graph row. A
-    kind='default' graphs row exists only after a recording-override
-    upsert (set_graph_recording) and carries its OWN g_ id — any key
-    bound to it references that id, not `'default'`.
+  - Supabase enforces this by the `kind != 'default'` guard in
+    `_ensure_graph_exists`, NOT structurally: `api_keys.graph_id REFERENCES
+    graphs(id)`, and since #10025 the default row HAS a real `g_<16hex>` id a
+    key column COULD reference. The guard is what refuses it. The keys that
+    RESOLVE to the default graph are the TEAM-WIDE rows (graph_id NULL),
+    managed on the API-Keys tab, never counted on a graph row.
   - Registry (selfhost) is the drift surface: the kind='default' node has a
     REAL gid (g_<hex>), so `graph_active_key_count` against it counts
     legacy bound-default APIKey nodes (minted pre-guard / raw

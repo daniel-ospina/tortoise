@@ -41,16 +41,17 @@ WHAT PROVES IT NOW — three legs, deliberately different in kind:
 
 WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 
-* The REST/hosted lane's installer is **#9188**, not this file. It cannot be a
+* The REST/hosted lane's installer is **#10047**, not this file. It cannot be a
   one-line wrap there: an org-wide/session-authenticated request carries no
-  `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only), and
-  the record's layer tables key on `public.graphs.id`. Since #10025 the org's
-  DEFAULT graph does have that row — minted per organization by
-  `20261028000001`, and named on the credential as `default_graph_id` — but the
-  REST/middleware seam here is not yet wired to it, so the org-wide **MCP**
-  credential is pinned in this file as the same refusal. Closing the seam is
-  #9188's scope, and the default-graph question cannot be closed by guessing a
-  tenant id in this layer.
+  `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only). The
+  org-wide **MCP** credential IS named on this lane since #10025 —
+  `resolve_api_key` puts the org's active `kind='default'` row id on the
+  credential as `default_graph_id`, and the pinned legs below assert BOTH
+  directions: named when the control plane resolved the row
+  (`test_an_org_wide_control_plane_key_is_named_by_its_default_graph`), and
+  REFUSED when it did not. What remains #10047's is the REST/middleware installer
+  for the hosted lane; the default-graph question cannot be closed by guessing a
+  tenant id anywhere.
 * The cross-tenant pin at the FOLD (`tests/test_record_projection.py`) is
   #9214's and stays; this file adds the caller-level leg above it.
 """
@@ -211,6 +212,43 @@ def control_plane_lane(monkeypatch):
     return tenants
 
 
+@pytest.fixture
+def org_wide_control_plane_lane(monkeypatch):
+    """A CONTROL-PLANE **org-wide** key whose default graph IS resolvable.
+
+    #10025 materializes the org's default graph as an active `kind='default'`
+    `public.graphs` row, and `resolve_api_key` carries its id on the credential
+    as `default_graph_id`. That is what makes an org-wide credential nameable on
+    this lane — and nothing pinned it: the pre-existing org-wide leg below runs
+    the REGISTRY lane, whose refusal comes from `control_plane_ids=False`, so a
+    refactor that dropped `default_graph_id` would silently return this lane to
+    refusing every write while `/health` still read green (its counters are a
+    DECLINE channel only).
+    """
+    from tortoise import supabase_control as sc
+
+    org_id = "org-wide-cp"
+    default_graph_id = "g_0123456789abcdef"
+    api_key = "tk_org_wide_control_plane"
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: None)
+    monkeypatch.setattr(sc, "resolve_api_key",
+                        lambda _cp, token: ({
+                            "org_id": org_id,
+                            "graph_id": None,
+                            "default_graph_id": default_graph_id,
+                            "graph_namespace": f"org_{org_id}",
+                            "delegation_depth": None,
+                            "scopes": ["graphs:read", "graphs:write"],
+                            "legacy_full_access": True,
+                            "created_by": None,
+                            "suspended_at": None,
+                            "plan": "pro",
+                        } if token == api_key else None))
+    return {"org_id": org_id, "default_graph_id": default_graph_id,
+            "api_key": api_key}
+
+
 def _mounted_test_client(app):
     """Wrap the MCP app in a Starlette Mount at /mcp (mirrors hosted_api).
 
@@ -294,6 +332,39 @@ class TestTheProductionCaller:
             "no production caller of `record_writer.use_record_tenant` — the "
             "record's tenant is ambient again, and on a multi-tenant process "
             "the only way to arm it is the process-global env pair (#9192)")
+
+    def test_an_org_wide_control_plane_key_is_named_by_its_default_graph(
+            self, org_wide_control_plane_lane, record_calls):
+        """#10025: the org-wide CONTROL-PLANE credential is NAMED, not refused.
+
+        The tenant is `(org_id, default_graph_id)` where the id is the one the
+        credential carries — resolved from the org's active `kind='default'`
+        row, never derived from a name and never a constant. Driven at the
+        MIDDLEWARE (the production caller), and asserted on what the record
+        seam was called with, so this fails if the field stops being carried.
+        """
+        lane = org_wide_control_plane_lane
+
+        async def _drive() -> list:
+            from starlette.responses import JSONResponse
+
+            from tortoise.mcp_auth import OrgResolutionMiddleware
+
+            middleware = OrgResolutionMiddleware(app=None, registry_sdk=None)
+
+            async def _call_next(request):
+                write_live_record({"type": "PointAdded"})
+                return JSONResponse({"ok": True})
+
+            await middleware.dispatch(_post_request(lane["api_key"]), _call_next)
+            return record_calls
+
+        calls = asyncio.run(_drive())
+        assert calls == [(lane["org_id"], lane["default_graph_id"])], (
+            "an org-wide control-plane credential must file under its default "
+            "graph's row id — refusing it is the armed-and-silent deployment "
+            "#10025 exists to end, and filing it under anything else is a "
+            "cross-tenant write")
 
     def test_the_env_pair_has_no_reader_outside_the_gated_resolver(self):
         """The gate is only worth anything if a NEW reader cannot bypass it.
@@ -634,18 +705,20 @@ class TestTheArmingModes:
 
     def test_an_org_wide_credential_is_refused_not_guessed(
             self, two_tenant_lane, record_calls, monkeypatch, caplog):
-        """No named graph ⇒ no tenant ⇒ REFUSED, never the org's default graph.
+        """An org-wide credential on the REGISTRY lane is REFUSED, never guessed.
 
-        The record's layer tables key on `public.graphs.id` and the default
-        graph need not have a row, so a default-graph tenant id cannot be
-        derived here. Guessing one is the cross-tenant write this issue is
-        about; refusing is the one failure a live door may have. Naming the
-        default-graph tenant is #9188's.
+        ⚠️ This is the REGISTRY lane: the refusal here comes from the
+        `control_plane_ids=False` id space, not from an unnameable default graph.
+        The control-plane org-wide case is the OPPOSITE direction since #10025
+        and is pinned by
+        `test_an_org_wide_control_plane_key_is_named_by_its_default_graph` two
+        tests up — the two lanes stay one answer each, and neither guesses.
 
         The process here is UNDECLARED (multi-tenant, the default) with no env
         pair, which is the shape a deployment that serves several orgs actually
-        has — the org-wide key resolves no graph, so nothing can name its
-        tenant and the write must not land.
+        has — and the registry lane's `g_<hex>` Falkor ids have no
+        `public.graphs` row, so nothing can name a tenant there and the write
+        must not land.
         """
         reg, tenants = two_tenant_lane
         _clear_record_env(monkeypatch)

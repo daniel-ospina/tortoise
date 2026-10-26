@@ -27,10 +27,22 @@ backfilled:
 
 | Mode | Default graph source | Notes |
 |---|---|---|
-| Supabase | `teams.graph_name` (namespace) + an active `kind='default'` `graphs` row carrying the **stable id** — minted per organization by `20261028000001` (#10025), so no organization is left without one | `graph_metadata` keeps the `'default'` sentinel in `graph_id` and adds `stable_id` beside it; the record tenant is read from that row, never derived from the name |
+| Supabase | `teams.graph_name` (namespace) + an active `kind='default'` `graphs` row carrying the **stable id** — minted for every organization that existed when `20261028000001` (#10025) ran, **and for every organization created afterwards** by `supabase_control.ensure_default_graph_row`, which runs inside `provision_org` / `provision_org_with_token` — the RPC wrappers every provisioning lane routes through (`/v1/register`, `POST /v1/organizations`, agent signup, the onboarding sub-org, the checkout replay) | `graph_metadata` keeps the `'default'` sentinel in `graph_id` and adds `stable_id` beside it; the record tenant is read from that row, never derived from the name |
 | Registry | a `kind='default'` Graph node whose namespace IS the team namespace | created at team provisioning (pre-existing, #518 — predates the epic) |
 
 Consequences (E2E-5 exit gate):
+
+- **Two writes, one direction.** The backfill (`20261028000001`) is idempotent and
+  safe to re-run — it is the **healing path** if a mint ever failed at
+  provisioning (the provisioning hook raises rather than swallowing, so a failed
+  mint is a 500 on create, never a silently unnamed org). Re-running it mints a
+  row for any organization that lacks an active `kind='default'` one.
+
+- **The one real residual:** an organization that already owns a graph *named*
+  `default` gets no second row — that would violate
+  `uq_graphs_org_name_active`. Its default graph then has no id, so the record
+  keeps refusing it `no_tenant` (fail-closed). Remediation: rename the
+  colliding graph, then re-run the migration.
 
 - **No data move** — tenant points/sessions never touch the registry
   migration; the default graph's namespace is unchanged.

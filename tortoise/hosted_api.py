@@ -6876,12 +6876,12 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     across the queue (``_DREAM_RECORD_TENANTS`` / ``_bind_dream_record_tenant``),
     because that drain opens its own SDK. Routes that write the org's DEFAULT
     graph by construction (the onboarding/starter seed runners) are NOT bound,
-    and neither are the background indexing jobs: the default graph need not
-    have a ``public.graphs`` row, so naming it is the open control-plane
-    decision on #9188 — and binding them to a graph-bound key's id would file
-    their rows under a graph they never wrote. (Both seed surfaces reject a
-    graph-bound credential outright, so the residue there is a counted
-    ``no_tenant``, never a misfiled row.)
+    and neither are the background indexing jobs: naming the default graph's
+    record tenant for THOSE runners is #10047's scope (the org now has the row
+    and the id; these lanes are not wired to it yet) — and binding them to a
+    graph-bound key's id would file their rows under a graph they never wrote.
+    (Both seed surfaces reject a graph-bound credential outright, so the
+    residue there is a counted ``no_tenant``, never a misfiled row.)
 
     Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
     request (#5148's rule — the record is a derived, replayable store, and this
@@ -6912,8 +6912,8 @@ def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
 
     Silent by design when the key carries no tenant: that is an
     org-wide/session write, whose graph is the DEFAULT one and whose record
-    tenant is the open control-plane decision on #9188 — not something this
-    helper may guess.
+    tenant is #10047's scope on this lane — not something this helper may
+    guess.
     """
     tenant = _DREAM_RECORD_TENANTS.get(key)
     if tenant is None:
@@ -12259,11 +12259,12 @@ def _ensure_graph_exists(org_id: str, graph_id: str) -> None:
 
     The default graph is bound via an org-wide key (graph_id ABSENT —
     resolution maps it to the default namespace); there is no per-graph key
-    for the default graph. The literal "default" is the supabase seam's
-    DERIVED row id (no graphs row — teams.graph_name) and the registry
-    default node (kind='default', real gid g_<hex>) is not key-bindable, so
-    both 404 here (mirrors delete_graph's kind pre-lookup: a custom graph
-    must be a non-deleted row/node)."""
+    for the default graph. The literal "default" and the registry default
+    node (kind='default', real gid g_<hex>) are not key-bindable, so both 404
+    here (mirrors delete_graph's kind pre-lookup: a custom graph must be a
+    non-deleted row/node). Since #10025 the supabase default graph DOES have a
+    `kind='default'` `graphs` row with a real id — what refuses a mint against
+    it is the `kind != 'default'` guard below, not the absence of a row."""
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
