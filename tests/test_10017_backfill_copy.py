@@ -12,6 +12,7 @@ rather than only through fakes that agree with the implementation.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -239,13 +240,20 @@ def test_an_interleaved_journal_is_refused_not_misnumbered(monkeypatch, tmp_path
         emit("s1", [{"a": 1}, {"b": 2}])
 
 
-def test_an_unproven_position_files_no_row_rather_than_fabricating_one(monkeypatch, tmp_path) -> None:
-    """`EventLog.append` returns None when it cannot prove a position; inventing
-    `1` would collide with a later replay's numbering (#9190)."""
+def test_an_unproven_position_refuses_instead_of_filing_unnumbered_rows(
+        monkeypatch, tmp_path) -> None:
+    """`EventLog.append` returns None when it cannot prove a position, and
+    `position=False` does NOT leave the row unwritten — it emits every LAYER
+    statement and omits only the `journal_event` position row (measured: 6
+    statements at position=False, 8 at True). Writing there files turns whose
+    seq nothing proves — the #9190 drift this phase exists to close — while the
+    run still exits 0. So the copy REFUSES, and `write_records` is never called.
+    """
     calls, _built = _patch_journal(monkeypatch, [None])
     emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
-    assert emit("s1", [{"a": 1}]) is None
-    assert calls[0][1]["position"] is False and calls[0][1]["first_seq"] == 1
+    with pytest.raises(copy_mod.CopyRefused, match="unnumbered"):
+        emit("s1", [{"a": 1}])
+    assert calls == [], "a position was refused and a write was issued anyway"
 
 
 # ── copy_phase: the loop the P0 lived in ──────────────────────────────────
@@ -486,3 +494,109 @@ def test_a_dry_run_needs_no_journal(monkeypatch) -> None:
     with pytest.raises(_ReachedConnect):
         copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
                        "--dry-run"])
+
+
+# ── the record's bookkeeping may never go DOWN ───────────────────────────
+
+def test_the_counts_never_go_down_for_a_session_the_record_already_covers() -> None:
+    """declared=12 attached=0 is the post-#10000 cutover, not a loss.
+
+    With the record armed the capture writes NO turn nodes, so every migrated
+    session has zero attached turns in the graph while its node — and the
+    record — hold the real window length and high-water mark. Writing the
+    measurement there overwrites both: `turn_count` is a COLUMN updated by
+    `ON CONFLICT … DO UPDATE SET`, and `turn_max_index` rides the props tail
+    merged as `props || EXCLUDED.props`. `-1` is worse than absence, because
+    `sdk` reads `coalesce(s.turn_max_index, s.turn_count, 0)` — -1 makes the
+    stale-turn sweep walk nothing, which is the one behaviour #10000 added.
+    """
+    event = copy_mod.build_session_event(
+        "s1", {"turn_count": 12, "turn_max_index": 11}, turn_count=0,
+        max_index=-1, event_id="E")
+    assert event["turn_count"] == 12
+    assert event["turn_max_index"] == 11
+
+
+def test_the_counts_still_rise_to_an_attached_count_above_the_declaration() -> None:
+    """The measured direction the census found (declared=6, attached=12) still wins
+    — the rule is MAX, not "trust the declaration"."""
+    event = copy_mod.build_session_event(
+        "s1", {"turn_count": 6, "turn_max_index": 5}, turn_count=12,
+        max_index=11, event_id="E")
+    assert event["turn_count"] == 12 and event["turn_max_index"] == 11
+
+
+# ── a turn key the record cannot represent refuses the copy ──────────────
+
+def test_a_duplicate_turn_key_refuses_the_whole_copy() -> None:
+    """Two graph nodes for one `node_key` can never both be filed.
+
+    `tools/turn_parity_census.py` cannot represent them either — it merges them
+    and reports the shortfall as a TRUNCATED read (exit 3), which sends the
+    operator to raise RESULTSET_SIZE over a graph that was read completely. The
+    copy must name the real cause instead of half-filing the population.
+    """
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])])
+    with pytest.raises(copy_mod.CopyRefused,
+                       match="more than one node for one turn key"):
+        copy_mod.copy_phase(graph, lambda sid, events: 1, event_id=lambda: "E")
+
+
+# ── landed statements nobody committed are not a copy ────────────────────
+
+def test_statements_with_no_connection_to_commit_refuse() -> None:
+    """`RecordWrite.connection` is None when the CALLER injected the connection —
+    and then no commit happens anywhere in this module. That is the shape that
+    produced the first defect (10 statements executed, 0 commits, exit 0), kept
+    as a refusal so the next caller cannot reintroduce it silently."""
+    outcome = _outcome()
+    with pytest.raises(copy_mod.CopyRefused, match="no connection to commit"):
+        copy_mod._commit_or_refuse(_Write(outcome.APPLIED, 2, None), outcome, "s1")
+
+
+# ── the artifact's verdict ───────────────────────────────────────────────
+
+def _main_harness(monkeypatch, graph):
+    class _DB:
+        def select_graph(self, name):
+            return graph
+
+    monkeypatch.setenv("FALKORDB_CLOUD_URI", "bogus")
+    monkeypatch.setattr(copy_mod.census, "_connect", lambda uri: (_DB(), "shown"))
+    monkeypatch.setattr(copy_mod.census, "_assert_graph_exists",
+                        lambda db, name: None)
+
+
+def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch) -> None:
+    """`off_shape: 3` beside exit 0 reads as "the backfill completed".
+
+    The two sibling gates refuse on the same classes (the census exits 2 and
+    writes no artifact; the parity census exits 2 on its anomaly partition), so
+    the copy carries the verdict in its exit code too — after writing the
+    artifact, which still reports what DID land.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "not-a-turn", {"id": "not-a-turn", "pointKind": "event"},
+                ["s1"])]))
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--dry-run"])
+    assert "off_shape" in str(excinfo.value)
+
+
+def test_a_dry_run_measures_no_position_and_says_so(monkeypatch, capsys) -> None:
+    """A dry run never opens the journal, so it cannot know whether a position
+    could be proven. Reporting a count there fabricates the one number an
+    operator needs before the write."""
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])]))
+    copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                   "--dry-run"])
+    report = json.loads(capsys.readouterr().out)
+    assert report["positions_measured"] is None
+    assert "positioned" not in report
