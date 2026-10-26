@@ -27968,22 +27968,32 @@ class TortoiseSDK:
         compute, so attesting the active embedder would journal a false origin
         (``_write_capture_turns``' own marker, #5004).
 
-        **The property stays a SCALAR; the folded SET goes beside it (#7704
-        review P1).** ``extractedFrom`` is a query convenience matched by
-        EQUALITY (``sdk.query`` / ``paginated_query``: ``n.`extractedFrom` =
-        $extractedFrom``), and an ARRAY is not equality-matchable — so writing
-        the accumulated list there made the survivor invisible to that door for
-        EVERY source it carries, including the one it was created under
-        (measured: ``query(alpha)`` answered before the fold, ``[]`` after;
-        ``extract_turns.py``'s only population read and its ``STARTS WITH``
-        dump went with it). The property therefore keeps the survivor's OWN
-        creating source — the scalar it already held, unchanged by the fold —
-        and the full folded set rides ``extractedFromAll``: the read door keeps
+        **The property keeps the SHAPE it already had; the folded SET goes
+        beside it (#7704 review P1/P2).** ``extractedFrom`` is a query
+        convenience matched by EQUALITY (``sdk.query`` / ``paginated_query``:
+        ``n.`extractedFrom` = $extractedFrom``), and an ARRAY is not
+        equality-matchable — so writing the accumulated list there made the
+        survivor invisible to that door for EVERY source it carries, including
+        the one it was created under (measured: ``query(alpha)`` answered
+        before the fold, ``[]`` after; ``extract_turns.py``'s only population
+        read and its ``STARTS WITH`` dump went with it). A survivor created
+        under a SCALAR therefore keeps that scalar, unchanged by the fold; the
+        full folded set rides ``extractedFromAll``: the read door keeps
         answering, nothing a caller could match before becomes unmatchable, and
         the EDGES stay authoritative either way (#3263). A survivor created
         under ANOTHER source is still not returned for THIS source's ref — the
         same answer ``origin/main`` gave, and the residual #10063 tracks; no
         EQUALITY-query rewrite is made anywhere to paper over it.
+
+        A survivor born from a ref SEQUENCE is the other shape, and it keeps its
+        ARRAY — the shared writer's own rule ("a STRING when a single string was
+        passed … an ARRAY whenever a SEQUENCE was passed — even a one-element
+        one, which is NOT collapsed", ``projection/entities.py``
+        ``_upsert_point_props``, #3263). Collapsing it to its first element
+        would delete N-1 refs from a REPORTED surface (``get_point`` is
+        ``properties(n)``; ``list_drafts`` reads this prop) and silently change
+        the stored property's TYPE (#10010 review P2). The fold therefore
+        preserves the node's own value: scalar as scalar, array as array.
 
         **Journal first (§17.1).** The record is the commit point of a live
         write. The snapshot is the full Point (``get_point`` + the accumulated
@@ -28126,17 +28136,35 @@ class TortoiseSDK:
         new_pairs = _source_version_transit(versions) or []
         pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)
 
-        # The survivor's OWN creating source — the scalar the convenience
-        # property held before the fold, or (for a point born from a SEQUENCE,
-        # whose prop was already an unmatchable array) its first ref. This is
-        # what keeps `query(extractedFrom=…)` answering for the source the
-        # Point was created under; the folded SET is carried beside it.
+        # The survivor's OWN provenance, kept in the SHAPE the node already
+        # had. Two shapes, two reasons, and the fold must not convert one into
+        # the other:
+        #   * a Point created under a SCALAR keeps that scalar — deliberately,
+        #     so `query(extractedFrom=…)` (property EQUALITY) keeps answering
+        #     for the source it was created under; the folded SET rides
+        #     `extractedFromAll` beside it (#7704 review P1).
+        #   * a Point born from a SEQUENCE keeps its ARRAY — that is the shared
+        #     writer's own shape rule ("a STRING when a single string was
+        #     passed … an ARRAY whenever a SEQUENCE was passed — even a
+        #     one-element one, which is NOT collapsed",
+        #     `projection/entities.py::_upsert_point_props`, #3263). Collapsing
+        #     it to its first element would drop N-1 refs from a REPORTED
+        #     surface (`get_point` is `properties(n)`; `list_drafts` reads this
+        #     prop) and silently change the stored property's TYPE — the
+        #     evidence-loss class this fold exists to close, in the one shape no
+        #     pin constructed (#10010 review P2).
+        # Only a survivor holding NO prop at all (a sourceless Point) takes the
+        # first folded ref: there is no earlier shape to preserve, and material
+        # is what makes it readable at all.
         _own = existing.get("extractedFrom")
         if isinstance(_own, str) and _own.strip():
             _primary_ref = _own
-        elif isinstance(_own, (list, tuple)):
-            _primary_ref = next(
-                (r for r in _own if isinstance(r, str) and r.strip()), None)
+        elif isinstance(_own, (list, tuple)) and any(
+                isinstance(r, str) and r.strip() for r in _own):
+            # KEPT AS AN ARRAY, every member intact: no collapse, no type
+            # change. (`_validate_extracted_from` refuses a list with a blank
+            # member at the door, so there is nothing to filter here.)
+            _primary_ref = list(_own)
         else:
             _primary_ref = None
         if _primary_ref is None:

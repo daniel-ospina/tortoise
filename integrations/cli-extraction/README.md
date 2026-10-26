@@ -154,16 +154,28 @@ The transcript is captured user text and is treated as **data**, end to end:
   and will create a new point; a claim whose exact content already exists
   under a different source FOLDS onto the existing point — the fold now WIRES
   this source onto the survivor (#7704: one claim with N sources), and the
-  writer classifies the fold from the point the write RETURNS (any
-  `extractedFrom` ref other than this source), never from a log line. Counted
-  as `folded_onto_other_sources`; `new` counts only genuinely new points.
+  writer classifies the fold from the point the write RETURNS, never from a log
+  line. Two returned shapes mean "folded, not minted": a SCALAR
+  `extractedFrom` naming a source that is not this one (the survivor was created
+  under another source and this fold wired ours beside it — the fold keeps
+  `extractedFrom` the survivor's OWN creating source, a scalar, so the
+  equality-filtered read door keeps answering, and the wired set rides the
+  `extractedFromAll` property), and an ARRAY `extractedFrom` (the survivor was
+  born from a ref SEQUENCE, or holds a prop-only ref no edge addresses). A point
+  this run MINTED carries the scalar ref the writer passed. Counted
+  as `folded_onto_other_sources`; `new` counts points that are under this source
+  and were not before. A fold onto a survivor that had NO provenance of its own
+  adopts this source, so it is reported as `new` rather than as a fold.
   An all-fold batch exits 0 with `folded_onto_existing` and leaves the
   source untiered (nothing new to tier). Note the read-back cannot SEE a
-  folded survivor: the fold leaves `extractedFrom` a list and `query()`
-  matches that property by equality, so the source's own count does not
-  include it (the `:Source` EDGES are the authoritative provenance, #3263).
+  survivor created under ANOTHER source: its `extractedFrom` stays that source
+  and `query()` matches that property by equality, so this source's own count
+  does not include it (the `:Source` EDGES are the authoritative provenance,
+  #3263; the general read-surface gap is #10063).
   An all-empty read-back with **no** fold reports is treated as SDK drift and
-  fails. A write that dies
+  fails. A fold can never be mistaken for a minted point by that guard: a mint
+  stores the scalar ref, which `query()` matches, and an ARRAY prop — the one
+  fold shape the read cannot see — is counted as a fold above. A write that dies
   mid-loop prints a partial receipt (`{"partial": true, "made_ids": [...]}`)
   on stdout before raising, so already-created ids are never lost.
 

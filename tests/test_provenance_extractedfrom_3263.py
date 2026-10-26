@@ -362,6 +362,60 @@ def test_a_fold_keeps_the_read_door_answering(prov):
         "not match it — the EDGES are what carry that fact (#3263)")
 
 
+def test_a_fold_keeps_the_refs_of_a_sequence_born_point(prov):
+    """#10010 review P2 — a fold must not NARROW a sequence-born prop.
+
+    A Point created with a ref SEQUENCE carries an ARRAY ``extractedFrom``:
+    that is the shared writer's own shape rule (``projection/entities.py``
+    ``_upsert_point_props``, #3263 — *"an ARRAY whenever a SEQUENCE was
+    passed — even a one-element one, which is NOT collapsed"*), and
+    ``create_point`` stores the caller's props verbatim. The fold then chose
+    ONE ref to keep and wrote it back, so ``[a, b]`` became ``'a'``: N-1 refs
+    left a REPORTED surface (``get_point`` is ``properties(n)``;
+    ``list_drafts``' ``provenance`` prefers this prop) and the stored property
+    silently changed TYPE. That is the same class this PR exists to close —
+    evidence disappearing from a reported surface — in the one shape no pin
+    constructed: every other fold pin creates under a scalar.
+
+    The fold must KEEP the shape the node had (the folded SET still rides
+    ``extractedFromAll``, and the EDGES remain authoritative, #3263).
+
+    MUTATION: restore the ``elif isinstance(_own, (list, tuple)): _primary_ref =
+    next(...)`` arm and the first assertion below reds — the prop comes back
+    ``'<a>'`` while ``b`` is gone.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    a, b, c = (f"https://example.com/seq-{n}" for n in ("a", "b", "c"))
+    content = "a claim whose provenance arrived as a ref sequence"
+    pid = sdk.create_point("statement", content, extractedFrom=[a, b],
+                           dedup=True)["id"]
+    assert _prop_refs(proj, pid) == [a, b], (
+        "guard: a sequence-create stores an ARRAY (the writer's shape rule): "
+        f"{_prop_refs(proj, pid)!r}")
+
+    sdk.create_point("statement", content, extractedFrom=c, dedup=True)
+    assert _sources_of(proj, pid) == {a, b, c}, \
+        "guard: the second write must be a fold that wires the third ref"
+
+    kept = _prop_refs(proj, pid)
+    assert isinstance(kept, list), (
+        "the fold changed the stored property's TYPE — a sequence-born Point "
+        f"kept an ARRAY before the fold, holds {type(kept).__name__} after")
+    assert sorted(kept) == sorted([a, b]), (
+        "the fold narrowed the Point's own refs — refs that origin/main "
+        f"reported on this surface are gone: {kept!r}")
+    assert sorted(_all_prop_refs(proj, pid)) == sorted([a, b, c]), (
+        "the folded SET must still hold all three refs: "
+        f"{_all_prop_refs(proj, pid)!r}")
+
+    live = _render_row(proj, pid)
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "live != replay on a sequence-born survivor: "
+        f"live={live!r} replayed={_render_row(proj, pid)!r}")
+
+
 def test_dedup_hit_accumulates_the_inferred_session_source(prov):
     """The same fold for the INFERRED ref (``session:<session_id>``).
 
@@ -468,6 +522,60 @@ def test_the_fold_replays_field_by_field(prov):
     assert _render_row(proj, pid) == live, (
         "the journal does not reproduce the row live wrote — replay(journal) "
         f"!= live: live={live!r} replayed={_render_row(proj, pid)!r}")
+
+
+def test_a_fold_with_no_recorded_versions_clears_the_carrier_and_replays(prov):
+    """The EMPTY-``pairs`` arm — ``SET n.sourceVersionTransit = NULL``.
+
+    The one carrier arm with no committed pin (#10010 review: "all carrier pins
+    keep at least one pair"). ``_fold_source_evidence`` writes ``pairs or
+    None``: a ref whose ``:Source`` records no ``contentHash`` contributes NO
+    pair (honest-absent, ``_valid_transit_pairs``' rule), so a fold whose refs
+    are all unversioned must write NULL — i.e. REMOVE the carrier, which is the
+    state a replay of a payload that omits the key leaves behind
+    (``_upsert_point_props`` sets only the keys its payload carries). Measured on
+    the docker lane: ``SET n.p = NULL`` removes the key (``keys(n)`` no longer
+    lists it), and an absent key and a stored null both read back as ``None`` —
+    so live and replay agree in both directions.
+
+    The seed is a STALE pair whose ref is neither an edge nor in the property —
+    the shape the fold must DROP. Keeping it would leave live holding provenance
+    the journal does not, i.e. ``derived != replay(journal)``; that is what the
+    parity assertion below catches (a fold that stopped writing NULL leaves the
+    seed in place: live holds the pair, the replay has none).
+    """
+    from tortoise.projection import _live_write_scope
+
+    sdk, events = prov
+    proj = sdk._get_proj()
+    one, two = "https://example.com/v-one", "https://example.com/v-two"
+    stale = "https://example.com/not-an-edge"
+    content = "a fold whose refs carry no recorded read-version"
+    pid = sdk.create_point("statement", content, extractedFrom=one,
+                           dedup=True)["id"]
+    assert _render_row(proj, pid)["sourceVersionTransit"] is None, \
+        "guard: an unversioned Source must contribute NO carrier pair"
+    # Deliberately UNJOURNALLED: a pair live holds and the journal does not is
+    # exactly what the fold's NULL write has to clear.
+    with _live_write_scope("test-seed"):
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.sourceVersionTransit = $pairs",
+            params={"id": pid, "pairs": [[stale, "hash-stale"]]})
+    assert _render_row(proj, pid)["sourceVersionTransit"] == [
+        [stale, "hash-stale"]]
+
+    sdk.create_point("statement", content, extractedFrom=two, dedup=True)
+    assert _sources_of(proj, pid) == {one, two}, \
+        "guard: the second write must be a fold, not a second Point"
+
+    live = _render_row(proj, pid)
+    assert live["sourceVersionTransit"] is None, (
+        "the fold kept a carrier pair it did not journal — the empty-`pairs` "
+        f"arm must REMOVE the property: {live['sourceVersionTransit']!r}")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "replay(journal) != live on the empty-`pairs` arm: "
+        f"live={live!r} replayed={_render_row(proj, pid)!r}")
 
 
 def test_a_url_variant_of_a_held_ref_is_not_refolded(prov):
