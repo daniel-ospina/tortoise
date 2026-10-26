@@ -3837,6 +3837,16 @@ surfaces:
   # *docs-only* diff, where NO surface is selected at all (#9089 review).
   - test_7949_capstone_measure.py
   - test_7949_capstone_verdict_check.py
+  # #7949 E5: the WRITE-BACK half of E5's criterion — a fresh run of the registered
+  # raw-vs-narrative scorer over the committed arm receipts, compared cell by cell
+  # against the table §10 publishes. The run half was pinned
+  # (`tests/eval/write_path/test_score_qualifiers.py::
+  # test_the_committed_score_artifact_regenerates_byte_identically`); the write-back
+  # half had NO pin, so the architecture doc's decisive table could be retyped or
+  # deleted while every gate stayed green and #7949/#7947 kept citing it. Stdlib
+  # only, no DB/network/model, ~2.4 s. `core` is the home because the diff that can
+  # break it is a `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` edit.
+  - test_7949_e5_section10_writeback.py
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),
   # the shared-hub tree state at measurement time must be recorded as un-recorded,
