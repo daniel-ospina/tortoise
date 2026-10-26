@@ -227,10 +227,10 @@ claims, and only the second one decides the flow.
 **What GoTrue actually does** (read at `supabase/auth`, `internal/utilities/request.go` `IsRedirectURLValid`,
 `internal/api/external.go` `GetReferrer` / `flow_state.Referrer` / `getExternalRedirectURL`):
 
-* the `redirect_to` is matched **whole** against each allow-list glob (compiled with separators `'.'`, `'/'`, so
+- the `redirect_to` is matched **whole** against each allow-list glob (compiled with separators `'.'`, `'/'`, so
   `**` crosses `/` while `*` does not) — only the **fragment** is cut before matching, so the **query string is
   part of the string being matched**;
-* a `redirect_to` that does not match is **not an error**: `GetReferrer` silently falls back (then the `Referer`
+- a `redirect_to` that does not match is **not an error**: `GetReferrer` silently falls back (then the `Referer`
   header, then `config.SiteURL`), and the flow state stores that fallback as the callback destination. The code
   is still minted and still delivered — to the wrong origin.
 
