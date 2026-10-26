@@ -7,7 +7,7 @@ approval record in `docs/product/canonical-mcp-tools.md`, PR 4120). It is
 derivable from code.
 
 WHAT IS NOT IN HERE, AND WHY THAT IS THE POINT
-    149 public methods are live on `TortoiseSDK` today; 40 are approved. The other 109 are
+    147 public methods are live on `TortoiseSDK` today; 40 are approved. The other 107 are
     the migration gap — Phase 2 of #4282 removes them. They are deliberately NOT declared in
     this module: a declaration that also lists everything that exists cannot hold a line,
     because the gate then answers "the surface is what the surface is" and every surplus
@@ -33,7 +33,7 @@ THE GATE
     dropped from here) and against the live class in both directions (a public method that
     is not on the approved surface; an approved method that does not exist on the SDK).
     Both gap directions FAIL by design while the migration is open: the honest reading of
-    this declaration today is "40 approved, 149 live, 109 over target", never "green".
+    this declaration today is "40 approved, 147 live, 107 over target", never "green".
 
     Adding or removing a name here is a **surface change** and needs Daniel's approval FIRST
     (`AGENTS.md` → "MCP/SDK Surface Approval"). The gate makes such a change VISIBLE; it

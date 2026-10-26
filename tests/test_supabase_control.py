@@ -2279,14 +2279,14 @@ class TestTask8Helpers:
         missing graphs table (pre-C1 drift) degrades to default-only."""
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(db_path="unused")
-        # Force the Supabase branch (graph_count routes via
+        # Force the Supabase branch (_graph_count routes via
         # is_supabase_enabled + get_control_plane).
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane", lambda: fake)
         fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         # default only → 1
-        assert sdk.graph_count("team-free-001") == 1
+        assert sdk._graph_count("team-free-001") == 1
         # default + 1 active custom; deleted excluded → 2
         fake.seed("graphs", [{
             "id": "g_abc123def4567890", "org_id": "team-free-001",
@@ -2299,13 +2299,13 @@ class TestTask8Helpers:
             "namespace": "team_team-free-001_g_g_deleted0000000",
             "status": "deleted",
         }])
-        assert sdk.graph_count("team-free-001") == 2
+        assert sdk._graph_count("team-free-001") == 2
         # drift: missing graphs table → default-only (count 1), no raise
         fake2 = FakeControlPlane({"organizations": [dict(FREE_TEAM)]})
         fake2.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane", lambda: fake2)
-        assert sdk.graph_count("team-free-001") == 1
+        assert sdk._graph_count("team-free-001") == 1
 
     def test_graph_metadata_lists_custom_graphs_from_table(self, fake):
         """C1 (#2110): custom graphs table rows (active) ride the seam after
