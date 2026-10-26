@@ -3287,12 +3287,11 @@ class TestValueVerbSpan2684:
         _r, pt = mint("cut latency by 20%")
         addressed = turn[pt["span_start"]:pt["span_end"]]
         assert addressed == "cut latency by 20%", pt
-        assert pt["span_start"] > 0      # not a degenerate offset-0 stamp
-        # NB: the offset-0 case is NOT degenerate — `search_engine.py:1002-1003`
-        # says "``span_start == 0`` is a REAL address and must survive, so the
-        # gate is presence (``is not None``), never truthiness". The line above
-        # only holds because this fixture prepends "we "; it pins that the
-        # resolver found the value at its true offset, NOT that 0 is invalid.
+        # NB: offset 0 is NOT degenerate here — `search_engine.py:1002-1003` says
+        # "``span_start == 0`` is a REAL address and must survive, so the gate is
+        # presence (``is not None``), never truthiness". So the invariant is a
+        # RANGE, never `> 0`: this fixture prepends "we " (span 3), and a turn
+        # that opens with the value legitimately stamps span (0, 18).
         assert 0 <= pt["span_start"] < pt["span_end"] <= len(turn)
         assert v2._carries_value(addressed)
 

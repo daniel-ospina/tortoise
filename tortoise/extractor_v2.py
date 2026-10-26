@@ -7741,8 +7741,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     pt_entry["quote"] = content[:_MAX_QUOTE]
                 # #2684 (Slice B): a MINTED ENDPOINT is a statement Point, so a
                 # VALUE-BEARING one takes the same verbatim-span gate the model
-                # path takes below (``_value_verbatim_span``, stamping at the
-                # ``pt_entry`` build). Before this the mint pre-pass never
+                # path takes ABOVE, in S1/S2 (``_value_verbatim_span``, stamping at
+                # that build; this site is S5, below). Before this the mint pre-pass never
                 # called the gate: measured, ``src='cut latency by 20%'``
                 # against a turn holding that text stamped NO span while
                 # carrying the quote and turn it would address — the

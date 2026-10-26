@@ -678,8 +678,8 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
 
     `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
     UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
-    is `{"enabled": False, "s2": {}, "union": {}}` (`:8459-8474`,
-    `:8823-8837`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    is `{"enabled": False, "s2": {}, "union": {}}` (`:8509-8524`,
+    `:8873-8887`). An acceptance test of "a non-empty dict" therefore takes an OFF
     block as the witness for "the S2.2 VET pass RAN" and prints
     `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
@@ -1154,7 +1154,7 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8454` and `:8474` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8504` and `:8524` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -1324,7 +1324,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8454` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8504` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
