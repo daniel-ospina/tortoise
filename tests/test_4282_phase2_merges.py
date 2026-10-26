@@ -515,6 +515,11 @@ def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
         door, _args, _kwargs = sdk.calls[-1]
         assert door == "create_direct_edge", (
             f"{relation} + operator=False must stay a PLAIN edge, got {door}")
+    # `create_edge` is the same plain-edge storage by another route, so the same
+    # reading holds there: a structural relation asked NOT to grow an operator
+    # gets the plain edge it asked for, rather than a refusal it cannot act on.
+    sdk.link_entities("hasPart", "p1", "p2", operator=False)
+    assert sdk.calls[-1][0] == "create_edge"
 
 
 # ── 5. no arm may accept a parameter it cannot RECORD ────────────────────────
@@ -539,6 +544,17 @@ def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
     ("wasDerivedFrom", {"entity_label": "Event"}, "create_derivation"),
     ("supports", {"source_kind": "document"}, "create_operator"),
     ("IMPL", {"entity_label": "Event"}, "create_direct_edge"),
+    # #10053 review (P2): `operator` was absent from `requested` too, and the two
+    # arms whose writer has NO operator slot came FIRST in the dispatch — so
+    # `link_entities("wasDerivedFrom", a, b, operator=True)` and the provenance
+    # arm both accepted the keyword and wrote the edge anyway. Both spellings,
+    # because neither arm has a storage to choose between (`None` already means
+    # "decide from the relation") — see the verb's own rule at
+    # `TortoiseSDK.link_entities`.
+    ("wasDerivedFrom", {"operator": True}, "create_derivation"),
+    ("wasDerivedFrom", {"operator": False}, "create_derivation"),
+    ("references", {"entity_label": "Event", "operator": True}, "link_source_to_entity"),
+    ("references", {"entity_label": "Event", "operator": False}, "link_source_to_entity"),
 ])
 def test_link_entities_refuses_a_parameter_the_chosen_arm_cannot_record(
         sdk, relation, kwargs, door):

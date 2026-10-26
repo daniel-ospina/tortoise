@@ -13813,6 +13813,16 @@ class TortoiseSDK:
         defaults to ``None`` (= not asked) and is resolved to ``"document"``
         only inside that arm, where it has a meaning.
 
+        ``operator`` obeys the same rule on the two arms whose writer has no
+        operator slot at all — ``wasDerivedFrom`` (``create_derivation``) and
+        ``references`` + ``entity_label`` (``link_source_to_entity``). NEITHER
+        can build or record a carrying operator, so neither has a storage to
+        choose between: both spellings are refused with the arm and the writer
+        named, where both used to be accepted and dropped while the edge was
+        written anyway (#10053 review, P2). The message says to drop the
+        keyword, because on those relations ``None`` — "decide from the
+        relation" — is what the caller already gets.
+
         Returns whatever the chosen writer returns — the merge adds no envelope.
         ``link_source_to_entity`` answers ``None`` and the other arms answer a
         ``dict``, hence the honest ``dict | None`` annotation.
@@ -13836,14 +13846,24 @@ class TortoiseSDK:
         # is why `source_kind` defaults to `None` here and is resolved to
         # `"document"` at its one use site: with the old `"document"` default it
         # would read as ALWAYS requested and refuse every other arm.
+        #
+        # `operator` is listed only on the arms that have a STORAGE to pick:
+        # `create_direct_edge` (the plain side, where `False` is honoured
+        # literally) and `create_operator` (the carrying side, where `True` is
+        # honoured; `False` never reaches it — the MEANING arm refuses it by
+        # name above). `create_edge` keeps it for the same reason as
+        # `create_direct_edge`: a plain edge IS what `operator=False` asked for.
+        # The derivation and provenance arms have no operator slot, so there the
+        # keyword is refused rather than silently dropped (#10053 review, P2).
         _honours: dict[str, frozenset[str]] = {
             "create_direct_edge": frozenset({
                 "direction", "confidence", "weight", "label", "batch_id",
-                "promote_source"}),
-            "create_operator": frozenset({"label", "direction", "promote_source"}),
+                "promote_source", "operator"}),
+            "create_operator": frozenset({
+                "label", "direction", "promote_source", "operator"}),
             "create_derivation": frozenset(),
             "link_source_to_entity": frozenset({"entity_label", "source_kind"}),
-            "create_edge": frozenset(),
+            "create_edge": frozenset({"operator"}),
         }
         requested = {
             name: value for name, value in (
@@ -13855,6 +13875,10 @@ class TortoiseSDK:
         }
         if promote_source is False:
             requested["promote_source"] = False
+        # `operator` is three-state (`None` = decide from the relation), so only a
+        # SPELLED value counts as asking — same rule as `promote_source` above.
+        if operator is not None:
+            requested["operator"] = operator
 
         def _dispatch(door: str, call):
             """Run the arm, or REFUSE what its writer cannot record (#4282).
@@ -13866,12 +13890,21 @@ class TortoiseSDK:
             """
             dropped = sorted(set(requested) - _honours[door])
             if dropped:
+                # `operator` is the one keyword whose ABSENCE carries a meaning
+                # (`None` = decide from the relation), so "call the writer
+                # directly" is not the remedy: that writer has no operator slot
+                # to call into. Say so instead of pointing at a dead end.
+                remedy = (
+                    "Drop `operator` — `None`, the default, already means \"decide "
+                    "from the relation\" — or use a relation the operator arm serves."
+                    if "operator" in dropped else
+                    f"Call `TortoiseSDK.{door}` directly if you need that parameter."
+                )
                 raise ValueError(
                     f"link_entities: the {rel!r} arm writes through `{door}`, which "
                     f"records no {', '.join(dropped)} — refusing rather than "
                     f"returning success for a write that dropped "
-                    f"{'them' if len(dropped) > 1 else 'it'}. Call "
-                    f"`TortoiseSDK.{door}` directly if you need that parameter."
+                    f"{'them' if len(dropped) > 1 else 'it'}. {remedy}"
                 )
             return call()
 
