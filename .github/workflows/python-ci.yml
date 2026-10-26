@@ -703,7 +703,8 @@ jobs:
     # (legacy), read by tests/_live_utils.py.
     # #964: "no job activity" has two distinct causes, neither of which is a
     # missing timeout (timeouts have existed since #798/#880): (1) pytest
-    # output is buffered to /tmp/pytest.log so the job log shows NOTHING for
+    # output is buffered to this job's own `$PYTEST_LOG` (`<runner.temp>/
+    # pytest.log` since #10028) so the job log shows NOTHING for
     # 25-50 min — the heartbeat in the run step below now surfaces liveness;
     # (2) a "pending" run is the GitHub runner QUEUE (main runs serialize via
     # the concurrency group; a backlog of merges queues them) — queue wait is
@@ -1010,7 +1011,7 @@ jobs:
         # OWN 10m watchdog (never the shard's gating one) and the job cap is
         # sized for setup + pre-phase + gating, so the gating run always keeps
         # its full shard budget.
-        # #964: liveness heartbeat. pytest writes to /tmp/pytest.log (for
+        # #964: liveness heartbeat. pytest writes to $PYTEST_LOG (for
         # the guaranteed tail), so the job log shows no output for 25-50
         # min — previously read as "stuck in_progress". The background
         # loop below prints a progress line to the LIVE job log every 5 min
@@ -1056,7 +1057,7 @@ jobs:
           RUNNER_IDENTITY="${RUNNER_NAME:-unknown}/${RUNNER_OS:-unknown}-${RUNNER_ARCH:-unknown}"
           echo "runner class: $RUNNER_CLASS ($RUNNER_IDENTITY); artifact paths under ${RUNNER_TEMP:-/tmp}"
           if [ "$RUNNER_CLASS" = "self-hosted" ]; then
-            echo "::warning title=leg is on the self-hosted pool::this leg runs on $RUNNER_IDENTITY, not a GitHub-hosted runner. The pool measures ~4x hosted per-test on identical nodeids (arm64, 2026-10-25; x64 cells ~1.2x), so a WATCHDOG kill here says the CLASS could not meet the budget — it is not a test verdict and not evidence about this diff. Any test failure it DOES report is real."
+            echo "::warning title=leg is on the self-hosted pool::this leg runs on $RUNNER_IDENTITY, not a GitHub-hosted runner. Measured population (2026-10-25, 654 common nodeids, run 40238275534 vs 40249711042): pool arm64 legs run 4.46x hosted per test (sum 4.05x), x64 cells 1.16x (sum 1.45x). So a WATCHDOG kill here is UNINFORMATIVE about the diff until the same commit is re-run on a class that can meet the budget — a kill that REPRODUCES on a hosted re-run is about the diff. Any test failure this leg DOES report is real."
           fi
           # #964 heartbeat: killed when pytest exits (kill+wait below).
           # Counts are rough live liveness signals — the -r fEs summary block
@@ -1341,7 +1342,7 @@ jobs:
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) on runner class '$RUNNER_CLASS' ($RUNNER_IDENTITY) — last test lines above ===================="
             if [ "$RUNNER_CLASS" = "self-hosted" ]; then
-              echo "(this leg was killed by ITS OWN budget on the self-hosted pool, which measures ~4x hosted per-test — re-running it on the same class re-runs the kill; a hosted re-run is the honest test of the diff)"
+              echo "(killed by its own budget on the self-hosted pool — uninformative about the diff, and NOT a pass: a hosted re-run of this same commit is what decides it, and a kill that reproduces THERE is about the diff)"
             fi
           fi
           echo "==================== pytest exit code: $rc ===================="
@@ -1349,7 +1350,7 @@ jobs:
           # ($SECONDS = seconds since THIS step's bash shell started) — the
           # E2E-5 wall-regression signal (job wall alone can hide a step
           # that silently rides the shard's watchdog). Recorded BOTH as the file
-          # /tmp/step_wall.txt (the artifact contract the P3 canary
+          # $PYTEST_STEP_WALL (the artifact contract the P3 canary
           # classifier consumes — cycle-6 P1-7: artifacts only, never a
           # $GITHUB_OUTPUT across jobs) and as steps.pytest-run.outputs.
           echo "$SECONDS" > "$PYTEST_STEP_WALL"
@@ -1404,7 +1405,7 @@ jobs:
         # #1477: non-gating upload so ci-timing.yml can extract per-file
         # durations (--durations=15 section) from the REAL run. if: always() +
         # continue-on-error + if-no-files-found: ignore ⇒ this step can never
-        # red the gate (the early-exit path writes no /tmp/pytest.log).
+        # red the gate (the early-exit path writes no $PYTEST_LOG).
         # Epic #1647 Task 6 (cycle-5 P1-7): ships the FULL artifact set the
         # P3 canary classifier consumes — pytest log + junitxml + expected
         # nodeids + step wall. #6135: the artifact name is per-SHARD
@@ -1494,7 +1495,7 @@ jobs:
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (measured on the fast job's flags — 0
-        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # occurrences in $PYTEST_LOG and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
         # so a future xdist admission cannot truncate a peer's record wholesale
