@@ -169,7 +169,10 @@ on them would be recording a capability we did not ship.
 
 **Discharged by the run on 2026-10-26 (`run-2026-10-26/INDEX.md`) except where noted:**
 
-1. Step 1 — sign-up, workspace naming, `team-named` closing (browser). → **DONE** (`step1*`).
+1. Step 1 — sign-up, workspace naming, `team-named` closing (browser). → **DONE for `team-named`**
+   (`step1*`, observed as **state** — `completed_steps` in `step7-graphs-and-step5-onboarding-state.txt`).
+   **Sign-up and workspace naming remain unexercised** — the run started from an existing org, so no
+   sign-up was performed (see the row-1 paragraph above).
 2. Step 2 — narrowing packs and the persisted `configured` flag (browser + tenant).
    *The premise* is MEASURED (census rows 2a-2e); what is uncovered is the click. → **DONE for 2b**
    (`step2g`–`step2o`: narrow → save → reload → restore); **2a remains a FAIL** on `#8617`.
