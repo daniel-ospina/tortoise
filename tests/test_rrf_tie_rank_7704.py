@@ -37,7 +37,7 @@ score there — the two paths disagree about identical evidence.
 ⛔ **What this file is, and is NOT.** The defect is measured; *what to do about
 it* is **RULED, not open** — #7704 OWNER RULING (2026-10-25, comment
 `6402104535`): the twin case is a **duplication defect, not a ranking-semantics
-one**, and *"options A / B / C / D are CLOSED as answers to this issue — none is
+one**, and *"[O]ptions A / B / C / D are CLOSED as answers to this issue — none is
 authorised here … tie-averaged ranks are not required once duplicate entries do
 not exist"*. So this file does **not** wait on a decision about ordering, and
 the pin **must not be used to justify tie-averaging (option D)**. What closes
@@ -54,16 +54,21 @@ decides any of it: the pin below is ``xfail(strict=True, raises=AssertionError)`
 so the shipped behaviour is EXECUTABLE and cannot drift silently, while the suite
 stays green.
 
-The pin stays ARMED until the duplication fix lands — it is the switch that
-forces the follow-through, and it reds on the WRONG follow-through first:
+The pin stays ARMED, and it reds on the WRONG follow-through first:
 
 * **tie-averaged ranks (option D, CLOSED)** — the xfail test XPASSes,
   ``strict=True`` reds the build immediately. That red is the ruling firing, not
   a licence: do NOT remove the marker for it. The route for tie-averaging is a
   REOPEN argued in #7704's own home.
-* **the dedup fix this ruling actually asks for** — the same XPASS path, and
-  *that* change removes the marker together with the #2102 E2E-1 restatement,
-  replacing the pin with one asserting **one claim, N sources**.
+* **the dedup fix this ruling actually asks for** — dedup does NOT reach this
+  pin. It is a WRITE-PATH change (identity + provenance, #9998/#9437/#9879),
+  while this pin calls ``rrf_fusion`` directly on two DISTINCT ids carrying
+  equal scores, so no dedup change can move it: what makes it XPASS is a
+  fusion-side remedy, i.e. the closed option D. The ruling's instruction for
+  the dedup change is therefore a DELIBERATE act, and it calls it *"proposal,
+  not a decision"*: delete this marker and replace the pin with one asserting
+  **one claim, N sources**, together with the #2102 E2E-1 restatement. Never a
+  silent green.
 
 The three green guards below hold ANY change here to its invariants (a
 generator leg is not swallowed, a leg that DID rank the rows apart is still
@@ -103,8 +108,6 @@ respected, and a tie group does not displace a row the legs ranked lower).
   ``test_bm25_lexical_8488.py`` is registered under ``core`` AND ``carve_out``,
   so it DOES run in the embedded carve-out leg of the same remedy PR, and its
   red appears where the remedy can see it.
-* **accept-and-restate** — delete the xfail pin together with the #2102 E2E-1
-  restatement. Deleting it is a deliberate act, never a silent green.
 """
 from __future__ import annotations
 
@@ -126,9 +129,11 @@ _STRATEGIES = ["fts", "vector"]
         "relevance (1.61% apart) — the shipped behaviour is the defect. The "
         "remedy is RULED: dedup identity + provenance accumulation (owner "
         "ruling 2026-10-25, comment 6402104535), NOT tie-averaged ranks "
-        "(option D is CLOSED). This reds the moment ANY fix lands; it stays "
-        "armed until the dedup change, which removes the marker and replaces "
-        "this pin with one asserting one claim, N sources. See the docstring."
+        "(option D is CLOSED). It XPASSes on a FUSION-side remedy — option D "
+        "first — and dedup never reaches it (a write-path change over two "
+        "DISTINCT ids). It stays armed until the dedup change, which deletes "
+        "this marker and replaces the pin with one asserting one claim, N "
+        "sources. See the docstring."
     ),
 )
 def test_identical_leg_scores_must_not_produce_different_fused_scores():

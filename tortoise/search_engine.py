@@ -2814,7 +2814,7 @@ def rrf_fusion(
     # mechanism's promise.
     #
     # ⛔ THE RULING (owner, 2026-10-25 — comment 6402104535 on #7704): the twin
-    # case is a DUPLICATION defect, not a ranking one, and "options A / B / C / D
+    # case is a DUPLICATION defect, not a ranking one, and "[O]ptions A / B / C / D
     # are CLOSED as answers to this issue — none is authorised here … tie-averaged
     # ranks are not required once duplicate entries do not exist", with the armed
     # pin "must not be used to justify tie-averaging (option D)". So do NOT
@@ -2835,11 +2835,13 @@ def rrf_fusion(
     # tie-break, which ``temporal_leg`` consumes positionally (#2976).
     #
     # The equal-evidence invariant itself is pinned by
-    # ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)``, ARMED until the
-    # duplication fix lands: re-enacting a remedy XPASSes and reds the suite, so
-    # the marker comes off deliberately — in the change that lands dedup, where
-    # the pin is replaced by one asserting the intended state); the measured
-    # magnitudes live on #7704. Do not read this comment as a decision either way.
+    # ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)``, ARMED: a
+    # FUSION-side remedy XPASSes and reds the suite — option D first, which is
+    # the point. Dedup never reaches that pin, which calls ``rrf_fusion``
+    # directly on two DISTINCT ids with equal scores, so the marker comes off
+    # deliberately: in the change that lands dedup, where the pin is replaced by
+    # one asserting the intended state); the measured magnitudes live on #7704.
+    # Do not read this comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.

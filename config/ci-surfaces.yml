@@ -4347,10 +4347,10 @@ surfaces:
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
-  # `xfail(strict=True)` pin stays ARMED until the duplication fix lands — the
-  # owner ruling CLOSED remedy options A-D, so the pin forces the dedup
-  # follow-through and never a ranking remedy). Registered under `core` for the
-  # #3518 reason above:
+  # `xfail(strict=True)` pin stays ARMED, and it reds on a FUSION-side remedy
+  # (the owner ruling CLOSED options A-D) rather than on the dedup fix, which is
+  # a write-path change and never reaches it — deleting the pin is a deliberate
+  # act in that change). Registered under `core` for the #3518 reason above:
   # `tortoise/search_engine.py` (where `rrf_fusion` lives) matches no
   # SOURCE_PATTERNS entry and falls to the `core` fallback, so a
   # search_engine.py-only PR would otherwise never run this pin. Hermetic (no
