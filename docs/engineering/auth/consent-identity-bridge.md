@@ -273,10 +273,11 @@ oversight.**
 - [ ] `CONSENT_TOKEN_SECRET` exists on **both** the `tortoise-dashboard` Pages project and the hosted API,
       and `config/required-bindings.yml` declares it (the deploy preflight then fails closed until it does).
 - [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value — NOT the service-role key and NOT the anon key
-      (§2.3). The hosted API refuses a value that equals a service-role key it can see (typed 503, and
-      the description names the collision), but the anon key is embedded in the consent page and is
-      not in the API's environment, so **that** half can only be checked by the human doing this step.
-      Skipping it turns the verifier into a forgery oracle for anyone who loaded the page.
+      (§2.3). The hosted API refuses a value equal to any of them that it can see (typed 503 whose
+      description names the collision; it reads `SUPABASE_ANON_KEY` itself, for the consent page).
+      This box is still the operator's for the case the API cannot see — a Pages project whose env
+      carries a value the API's env does not. Skipping it turns the verifier into a forgery oracle
+      for anyone who loaded the page.
 - [ ] `docs/ops/auth-email-flows.md` §3's table is complete against the live allowlist (it claims to be the
       required set).
 
@@ -290,7 +291,7 @@ is costed, and the sign-in fallback origin is settled with its record corrected.
 | Remaining step | Why it is its own unit |
 |---|---|
 | 1. The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the accepted-`kid` allowlist (the "rotation is `kid`-scoped" half of §2.3 — today every `kid` is accepted) + the manifest declaration | infrastructure, outside a code diff; the mechanism choice is §2.3 |
-| 2. `POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params) | the AS half; testable in Python (`tests/test_oauth_*`), and it must land **before** any page change so the bearer path stays live meanwhile |
+| 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
 | 3. The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce | the BFF half; static-gated only (the repo's existing status for all BFF code) |
 | 4. The page rewrite (delete §7's rows, keep the org picker + the #5734 refusal copy, add the mint call and the terminal-loop guard) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. `SCOPE.md` §9 class 4(i) — attested client identity | a product decision (which clients are attested, and what an unattested one may claim), filed separately |
@@ -319,8 +320,9 @@ contract rather than of the implementation:
   `issue_auth_code` — so a token minted while the visitor was approving team A can be redeemed
   naming team B, but only a team the asserted user actually belongs to; `scope` by neither of those,
   only by `validate_scope` against `SCOPES_ACCEPTED` before identity is read, so a redemption body
-  may widen `mcp` to `mcp offline_access` (a refresh-token-capable grant) regardless of what the
-  page displayed. Step 4's page must therefore present NEITHER as token-attested, and widening the
+  may name a different scope than the page displayed. (Do NOT read that as "blocking
+  `offline_access` is the mitigation": `mcp` alone already gets a refresh token — the token response
+  always emits one — so a divergence in scope is not a capability boundary step 4 can draw.) Step 4's page must therefore present NEITHER as token-attested, and widening the
   bind set (or binding the minted scope to the displayed one) is a spec decision, not an
   implementation one.
 - **a failure after the nonce is spent consumes it.** The `jti` is recorded before the code is

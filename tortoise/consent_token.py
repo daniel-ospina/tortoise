@@ -117,7 +117,10 @@ _MAX_TOKEN_BYTES = 8192
 _MAX_JTI_CHARS = 256
 #: The in-process register's bound. Pruning runs first; a FULL register refuses (503) rather than
 #: evicting a live `jti`, because evicting one re-enables the replay this store exists to stop.
-#: Only the mint can fill it (it requires the secret), so this is not an attacker-reachable cap.
+#: It is filled by REDEMPTION, not by minting — every accepted assertion spends one entry, and that
+#: needs the secret. So it is not anonymously reachable; a caller who can drive the mint route could
+#: still spend the cap and answer every other caller 503 on this instance for up to TTL+leeway.
+#: Bounded and fail-closed, and the pressure disappears with §2.3's shared store (step 1).
 _MAX_STORE_ENTRIES = 4096
 
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -127,19 +130,25 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 #: Keys that must never ALSO be the consent HMAC key — §2.3: "It must **not** be the service-role
 #: key (key reuse across purposes) and must **not** be the anon key (the consent page embeds it in
-#: HTML, so it is public)". The anon key is not in this process's environment, so this half can only
-#: be checked where it IS known (the page origin); §8's checklist carries that half for the operator.
-_REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
+#: HTML, so it is public)". BOTH halves are checked here: the hosted API reads `SUPABASE_ANON_KEY`
+#: into the consent page's `__SUPABASE_ANON_KEY__` placeholder, so it is in this process's
+#: environment too — an earlier version of this tuple claimed otherwise and would have left the
+#: WORSE half unguarded (that key is public by construction: everyone who opens `/oauth/authorize`
+#: receives it). §8's human checklist still carries the cross-deployment case, where the Pages
+#: project's env differs from the API's.
+_REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_ANON_KEY")
 
 
 def consent_token_secret_problem() -> str | None:
     """Why the arm is unavailable, or ``None`` when it can be used (§2.3).
 
     A REUSED key is treated as *not provisioned* rather than as a working arm. §2.3 makes a
-    dedicated secret a ``must``, and the failure it guards is silent and total: the anon key is
-    embedded in the consent page's HTML, so a ``CONSENT_TOKEN_SECRET`` copied from it turns this
-    verifier into a forgery oracle — anyone who loaded the page could assert any ``sub`` with any
-    ``bind``, and ``sub`` is the only identity input on the token arm. Refusing here costs one
+    dedicated secret a ``must``, and the failure it guards is silent and total: a
+    ``CONSENT_TOKEN_SECRET`` copied from the anon key turns this verifier into a forgery oracle —
+    that key is public by construction (the consent page embeds it), so anyone who loaded the page
+    could assert any ``sub`` with any ``bind``, and ``sub`` is the only identity input on the token
+    arm. A reused service-role key is the same class from the other direction: one leak of the
+    wider credential silently becomes an assertion signing key. Refusing here costs one
     typed 503 and one restart with the right value; accepting it costs every account.
     """
     secret = os.environ.get(_SECRET_ENV, "").strip()

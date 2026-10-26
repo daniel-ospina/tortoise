@@ -2009,6 +2009,17 @@ def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch
     problem = consent_token_secret_problem()
     assert problem and "DEDICATED" in problem and "SUPABASE_SERVICE_ROLE_KEY" in problem, problem
 
+    # ⛔ …and the ANON key, which is the WORSE half (§2.3): it is public by construction, because the
+    # consent page embeds it — `hosted_api.py` reads `SUPABASE_ANON_KEY` into the page's
+    # `__SUPABASE_ANON_KEY__` placeholder, so it IS in this process's environment. An earlier
+    # version of this guard claimed it was not, and so left exactly this case unguarded (measured,
+    # review round 3).
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", _TEST_SECRET)
+    assert consent_token_secret() is None, "the PUBLIC anon key must never sign assertions"
+    problem = consent_token_secret_problem()
+    assert problem and "SUPABASE_ANON_KEY" in problem, problem
+
 
 def test_a_token_without_a_kid_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
     """§2.1 puts `kid` in the header for rotation (§2.3); a mint without one is refused."""
