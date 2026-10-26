@@ -39,11 +39,18 @@ SELECTOR = Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"
 
 
 def _run(args: list[str], cwd: Path, stdin: str = "") -> subprocess.CompletedProcess:
+    # #10012: inherit the ambient env and override only what this pin controls. A
+    # stripped `env={...}` was never the thing being asserted, and it broke the pin on a
+    # runner whose `pip install` landed in the interpreter's USER site: the child then
+    # lost `yaml` (and HOME/`PYTHONPATH` with it) while the parent imported it fine, so
+    # all 12 pins in this file reded on the harness instead of on the selection.
+    env = {**os.environ,
+           "CI_SELECTION_ARTIFACT_DIR": str(cwd / ".ci-selection"),
+           "PATH": "/usr/bin:/bin"}
     return subprocess.run(
         [sys.executable, str(SELECTOR), *args],
         input=stdin, capture_output=True, text=True, cwd=str(cwd),
-        env={"CI_SELECTION_ARTIFACT_DIR": str(cwd / ".ci-selection"),
-             "PATH": "/usr/bin:/bin"},
+        env=env,
     )
 
 

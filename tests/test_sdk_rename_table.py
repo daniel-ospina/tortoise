@@ -186,7 +186,7 @@ CITES_ANCHOR_LITERAL: dict[str, tuple[str, str]] = {
     'r7': ('beta-sdk-surface.md', '| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |'),
     'r8': ('beta-sdk-surface.md', '| `events_poll` | → row 11 `poll_events`. |'),
     'r9': ('beta-sdk-surface.md', "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |"),
-    't_n2': ('canonical-sdk-methods.md', '| N2 | `graph` | `list_memory_graphs`, `graph_count`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |'),
+    't_n2': ('canonical-sdk-methods.md', '| N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |'),
     't_r3': ('canonical-sdk-methods.md', '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` |'),
     't_r5': ('canonical-sdk-methods.md', '| R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` |'),
     't_r6': ('canonical-sdk-methods.md', '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` |'),
@@ -264,7 +264,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'r7': '| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |',
     'r8': '| `events_poll` | → row 11 `poll_events`. |',
     'r9': "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |",
-    't_n2': '| N2 | `graph` | `list_memory_graphs`, `graph_count`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |',
+    't_n2': '| N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |',
     't_r3': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `get_historical_knowledge` | keep, collapse — absorbs the confidence reads and both provenance methods |',
     't_r5': '| R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |',
     't_r6': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |',
@@ -306,7 +306,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
 }
 
 
-# The COMPLETE row → (target, citation text) binding, for all 149 rows. Pinning the
+# The COMPLETE row → (target, citation text) binding, for all 147 rows. Pinning the
 # quotes by citation KEY was not enough: nothing pinned WHICH key a row selected, and
 # where two keys share a `named` member (`w3`/`w3_cut`, `w4`/`w4_index_sessions`) a
 # key swap kept the target, the basis AND the pinned quote set intact — so row 23
@@ -375,7 +375,6 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'get_session': ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`, except where a genuinely different shape is returned. \\|”'),
     'get_source_reliability': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `assess_source`, `set_source_tier`, `get_source_reliability` \\| 3 \\| → `manage_source_trust` for the setter; reads via `list_sources`. \\|”'),
     'graph_active_key_count': ('list_keys', '`beta-sdk-surface.md` — “\\| `graph_key_ids`, `graph_active_key_count` \\| 2 \\| Console diagnostics. Both fold into `list_keys`. \\|”'),
-    'graph_count': ('list_memory_graphs', '`beta-sdk-surface.md` — “\\| `count_memory_graphs` \\| The plan is unlimited on builder plans, so its stated purpose — checking an allowance — does not exist. `list_memory_graphs` answers "how many" for any real N. \\|”'),
     'graph_delete': ('delete_memory_graph', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
     'graph_key_ids': ('list_keys', '`beta-sdk-surface.md` — “\\| `graph_key_ids`, `graph_active_key_count` \\| 2 \\| Console diagnostics. Both fold into `list_keys`. \\|”'),
     'index_directory': ('index_sources_from_directory', '`canonical-sdk-methods.md` — “\\| W4 \\| `index_files` \\| #12 \\| `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` \\| keep — **2 self-declared DEPRECATED** \\|”'),
@@ -416,7 +415,6 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'org_create': ('', '—'),
     'org_delete': ('', "`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing. `org_delete` is **settled**: an end-customer must never be able to delete the builder's account. **The builder's own account closure is a console operation** — not in the SDK. \\|”"),
     'org_get': ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\| — \\| admin \\|”'),
-    'org_list': ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\| — \\| admin \\|”'),
     'org_update': ('', "`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing. `org_delete` is **settled**: an end-customer must never be able to delete the builder's account. **The builder's own account closure is a console operation** — not in the SDK. \\|”"),
     'paginated_query': ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
     'poll_events': ('poll_events', '`beta-sdk-surface.md` — “\\| `events_poll` \\| → row 11 `poll_events`. \\|”'),
@@ -737,8 +735,8 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
 
     drifted = tmp_path / "sdk-rename-table.md"
     text = DOC.read_text(encoding="utf-8")
-    assert "149 public methods" in text
-    drifted.write_text(text.replace("149 public methods", "151 public methods"),
+    assert "147 public methods" in text
+    drifted.write_text(text.replace("147 public methods", "151 public methods"),
                        encoding="utf-8")
 
     rc = sdk_rename_table.main(["--check", "--out", str(drifted)])
@@ -812,7 +810,6 @@ TARGETS_LITERAL: dict[str, str] = {
     'get_session': 'get_entity',
     'get_source_reliability': 'list_knowledge',
     'graph_active_key_count': 'list_keys',
-    'graph_count': 'list_memory_graphs',
     'graph_delete': 'delete_memory_graph',
     'graph_key_ids': 'list_keys',
     'index_directory': 'index_sources_from_directory',
@@ -853,7 +850,6 @@ TARGETS_LITERAL: dict[str, str] = {
     'org_create': '',
     'org_delete': '',
     'org_get': 'get_organisation_account',
-    'org_list': 'get_organisation_account',
     'org_update': '',
     'paginated_query': 'list_knowledge',
     'poll_events': 'poll_events',
@@ -965,7 +961,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'get_session': ('deprecated', 'public', 'stated', 'retain'),
     'get_source_reliability': ('deprecated', 'public', 'stated', 'retain'),
     'graph_active_key_count': ('deprecated', 'public', 'stated', 'retain'),
-    'graph_count': ('deprecated', 'public', 'derived', 'retain'),
     'graph_delete': ('deprecated', 'public', 'stated', 'retain'),
     'graph_key_ids': ('deprecated', 'public', 'stated', 'retain'),
     'index_directory': ('deprecated', 'public', 'stated', 'retain'),
@@ -1006,7 +1001,6 @@ AXES_LITERAL: dict[str, tuple[str, str, str, str]] = {
     'org_create': ('—', '—', 'unbacked', '—'),
     'org_delete': ('removed', 'internal', 'stated', 'delete'),
     'org_get': ('deprecated', 'public', 'derived', 'retain'),
-    'org_list': ('deprecated', 'public', 'derived', 'retain'),
     'org_update': ('removed', 'internal', 'stated', 'delete'),
     'paginated_query': ('deprecated', 'public', 'stated', 'retain'),
     'poll_events': ('stable', 'public', 'stated', 'retain'),
@@ -1154,7 +1148,7 @@ C3B_DETERMINATIONS_LITERAL: dict[str, str] = {
 C4_EVIDENCE_LITERAL: dict[str, str] = {
     'recall_legs': ('`retrieval_legs`', 'beta-sdk-surface.md', '\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|'),
     'stale': ('`stale_points`', 'beta-sdk-surface.md', '\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|'),
-    'count_memory_graphs': ('`graph_count`', 'beta-sdk-surface.md', '\\| `count_memory_graphs` \\| The plan is unlimited on builder plans, so its stated purpose — checking an allowance — does not exist. `list_memory_graphs` answers "how many" for any real N. \\|'),
+    'count_memory_graphs': ('`list_memory_graphs`', 'beta-sdk-surface.md', '\\| `count_memory_graphs` \\| The plan is unlimited on builder plans, so its stated purpose — checking an allowance — does not exist. `list_memory_graphs` answers "how many" for any real N. \\|'),
     'set_memory_graph_name': ('`update_memory_graph`', 'beta-sdk-surface.md', '\\| `set_memory_graph_name`, `set_memory_graph_backend`, `count_memory_graphs` \\| 3 \\| See "Provisioning" above. \\|'),
     'set_memory_graph_backend': ('**none**', 'beta-sdk-surface.md', '\\| `set_memory_graph_name`, `set_memory_graph_backend`, `count_memory_graphs` \\| 3 \\| See "Provisioning" above. \\|'),
     'index_sources': ('`index_directory`', 'beta-sdk-surface.md', '\\| `index_sources` (bare) \\| 1 \\| Renamed → `index_sources_from_directory`, so the index/mine distinction is unmissable. \\|'),
@@ -1240,11 +1234,11 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
         "the destination summary moved: "
         f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
     )
-    assert "**32 groups** over **148** named members" in doc, (
+    assert "**32 groups** over **146** named members" in doc, (
         "the structural note's canonical-group counts are gone"
     )
-    assert "149 = the 149-method surface" in doc, (
-        "the structural note no longer reconciles its members to the 149-method surface"
+    assert "147 = the 147-method surface" in doc, (
+        "the structural note no longer reconciles its members to the 147-method surface"
     )
     # C6 sits between C5 and the structural notes; terminate the C5 slice at C6 so a
     # `W11` mention in the contested section cannot leak into the wildcard set.
@@ -1315,7 +1309,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
     """
     rows = part_a_rows()
     names = [r["name"] for r in rows]
-    assert len(rows) == 149, f"Part A has {len(rows)} rows, expected the 149-method surface"
+    assert len(rows) == 147, f"Part A has {len(rows)} rows, expected the 147-method surface"
     assert len(set(names)) == len(names), (
         "Part A lists a method twice — `--check` cannot see a duplicated row because the "
         "duplicate is in the constant too"
@@ -1324,7 +1318,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
 
 
 def test_the_whole_mapping_is_pinned() -> None:
-    """Every one of the 149 `method → destination` pairs equals the pinned literal.
+    """Every one of the 147 `method → destination` pairs equals the pinned literal.
 
     The representative-pin test guards group defaults; this guards the exceptions.
     Without it a row can be reassigned to a different target while its citation
@@ -1646,9 +1640,9 @@ def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     # Digit-BOUNDED, not substring: `"150 public methods" in text` also passes when the
     # render produces `1150 public methods`, so the pin did not hold the number.
     for pattern in (
-        r"(?<![\d])149 public methods",
+        r"(?<![\d])147 public methods",
         r"(?<![\d])40 target methods",
-        r"(?<![\d])111 of the 149 are renames",
+        r"(?<![\d])109 of the 147 are renames",
         r"\*\*9\*\* are already targets \(unchanged\)",
         r"\*\*25\*\* are discarded with a rationale \(lifecycle `removed` · "
         r"visibility `internal` · delete `delete`\)",
@@ -1674,8 +1668,8 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
     ordinals = [int(m) for m in re.findall(r"^\| (\d+) \|", part_a, re.M)]
-    assert ordinals == list(range(1, 150)), (
-        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..149"
+    assert ordinals == list(range(1, 148)), (
+        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..147"
     )
     c1 = text.split("### C1")[1].split("### C2")[0]
     assert c1.count("| no `def` on `TortoiseSDK` today |") == 31, (
@@ -1685,7 +1679,7 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     for name, referent in (
         ("recall_legs", "`retrieval_legs`"),
         ("stale", "`stale_points`"),
-        ("count_memory_graphs", "`graph_count`"),
+        ("count_memory_graphs", "`list_memory_graphs`"),
         ("set_memory_graph_name", "`update_memory_graph`"),
         ("set_memory_graph_backend", "**none**"),
         ("index_sources", "`index_directory`"),
@@ -1758,7 +1752,7 @@ def test_group_column_matches_the_canonical_inventory() -> None:
 
 
 def test_part_b_counts_match_the_rows_they_list() -> None:
-    """Part B's counts must equal the members it lists, and the total must be 149."""
+    """Part B's counts must equal the members it lists, and the total must be 147."""
     rows = []
     total = None
     for line in _section("Part B — destination counts").splitlines():
@@ -1776,10 +1770,10 @@ def test_part_b_counts_match_the_rows_they_list() -> None:
         rows.append((dest.strip("`"), re.findall(r"`([a-z_][a-z0-9_]*)`", names),
                      int(count)))
     assert rows, "parsed no Part B rows"
-    assert total == 149, f"Part B's total row says {total}, expected 149"
+    assert total == 147, f"Part B's total row says {total}, expected 147"
     bad = [(d, len(ms), c) for d, ms, c in rows if len(ms) != c]
     assert not bad, f"Part B counts disagree with the members listed: {bad}"
-    assert sum(c for _, _, c in rows) == 149
+    assert sum(c for _, _, c in rows) == 147
 
     by_target: dict[str, set[str]] = {}
     for r in part_a_rows():
@@ -1798,11 +1792,11 @@ def test_basis_split_is_the_literal() -> None:
     """
     derived = {r["name"] for r in part_a_rows() if r["basis"] == "derived"}
     assert derived == {
-        "apikey_create", "apikey_list", "apikey_revoke", "graph_count",
+        "apikey_create", "apikey_list", "apikey_revoke",
         "invitation_accept", "invitation_create", "invitation_get_by_id",
         "invitation_get_by_token", "invitation_list", "invitation_revoke",
         "membership_create", "membership_delete", "membership_list",
-        "org_get", "org_list", "signup_token_lookup", "signup_token_recover",
+        "org_get", "signup_token_lookup", "signup_token_recover",
         "signup_token_revoke", "stale_points",
     }
 
@@ -1916,7 +1910,6 @@ def test_load_bearing_mappings_are_literal() -> None:
         "recall_subgraph": "",
         "file_decision": "write_question",
         "file_human_approval": "record_decision",
-        "graph_count": "list_memory_graphs",
         "list_memory_graphs": "list_memory_graphs",
         "backfill_v25": "",
         "supersede_point": "supersede_knowledge",
@@ -1965,7 +1958,7 @@ def test_every_group_has_a_pinned_representative() -> None:
         "W15": ("mitigate_operator", "adjust_relationship"),
         "W17": ("ulid", ""),
         "N1": ("org_create", ""),
-        "N2": ("graph_count", "list_memory_graphs"),
+        "N2": ("graph_delete", "delete_memory_graph"),
         "N3": ("membership_create", "add_member"),
         "N4": ("apikey_create", "create_key"),
         "N5": ("invitation_create", ""),
@@ -2545,11 +2538,11 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
     assert "uv run python tools/sdk_rename_table.py          # regenerate this file" in doc
     assert ("uv run python tools/sdk_rename_table.py --check  # verify, non-zero on "
             "drift") in doc
-    # The structural reconciliation must name its 32 groups and 148 members, and say
-    # how `backfill_v25` (the Archived-table member) reconciles to the 149-method surface.
-    assert "partitions the surface into **32 groups** over **148** named members" in doc
+    # The structural reconciliation must name its 32 groups and 146 members, and say
+    # how `backfill_v25` (the Archived-table member) reconciles to the 147-method surface.
+    assert "partitions the surface into **32 groups** over **146** named members" in doc
     assert "`backfill_v25` is in its Archived table instead" in doc
-    assert "149 = the 149-method surface" in doc
+    assert "147 = the 147-method surface" in doc
 
 
 def test_table_header_rows_are_read() -> None:

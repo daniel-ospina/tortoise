@@ -20668,7 +20668,7 @@ async def _graph_quota_gate(org: dict) -> None:
     a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
     at free=1/solo=2, dormant until a finite pro/org cap exists).
 
-    Known mode divergence (review #2b arch, recorded): sdk.graph_count's
+    Known mode divergence (review #2b arch, recorded): sdk._graph_count's
     Supabase branch drift-swallows to 1 (default-only) on ANY read error
     — C1's pre-C1-schema compat — so this 500 branch is registry-mode
     reachable but Supabase-lane dormant during a degraded control plane
@@ -20683,7 +20683,7 @@ async def _graph_quota_gate(org: dict) -> None:
     if max_graphs is None:
         return  # unlimited (pro/org)
     try:
-        count = _make_sdk(namespace="registry").graph_count(org["id"])
+        count = _make_sdk(namespace="registry")._graph_count(org["id"])
     except Exception as e:
         _logger.error("graph count failed (fail-closed #686): team=%s error=%s",
                       org["id"], e)
@@ -20806,7 +20806,7 @@ def _provision_graph(org: dict, name: str,
         max_graphs = limits.get("max_graphs")
         if max_graphs is not None:
             try:
-                after = sdk.graph_count(org["id"])
+                after = sdk._graph_count(org["id"])
             except Exception as e:
                 _logger.error(
                     "post-insert re-count failed (fail-closed #686): "
