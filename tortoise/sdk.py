@@ -13720,6 +13720,507 @@ class TortoiseSDK:
             return self.delete_point(id)
         return self.delete_entity(id)
 
+    # ── Phase 2.2 (#4282) — the four merges INTO the approved 40 ──────────
+    #
+    # ⛔ THESE ADD NOTHING TO THE SURFACE. Each name below is already a row of
+    # the owner's approved list (`docs/product/beta-sdk-surface.md` rows 12, 19,
+    # 22, 24) and already declared in `tortoise/__all__.py`; three of them were
+    # the "approved and declared but it does NOT exist on TortoiseSDK" half of
+    # `tools/sdk_surface_declaration.py`'s gap, and this is Phase 2 closing it.
+    # No fourth spelling is invented and no absorbed name is invented either —
+    # every dispatch target below is a method that exists today, named in the
+    # absorption ledger of `beta-sdk-surface.md` ("Discarded — and why").
+    #
+    # THE SHAPE IS THE SAME FOR ALL FOUR: one public name, a dispatch on the
+    # CALLER'S SEMANTIC INTENT (the type, the relation, the temporal field),
+    # and zero duplicated graph logic — the narrow door does the write exactly
+    # as it did before, so a caller who used the narrow name and a caller who
+    # uses the merged name land in the same place. `create_entity` (row 12,
+    # `type=` over the five `create_*` constructors) was built this way in epic
+    # #888 W2 and is the shape the other three follow.
+
+    # ── link_entities — the support/contradict family (ONTOLOGY §8) ────────
+    #
+    # ⛔ THE MEANING AND THE MECHANISM ARE DIFFERENT SLOTS, and merging them is
+    # the P0 defect this table exists to close (#10053): `create_operator`'s
+    # `op_type` accepts IMPL / NAND (plus the part/whole kinds) and NOTHING
+    # ELSE, so dispatching `supports` / `refutes` straight into `op_type` raised
+    # `ValueError` on EVERY call of this arm — the merge's central claim never
+    # executed. The MEANING rides `semantics=`, and the MECHANISM is READ from
+    # `pack_registry.SEMANTICS_MECHANISMS` (supports → IMPL, refutes → NAND),
+    # never transcribed here: a local copy is how the two slots drift apart.
+    _EPISTEMIC_RELATION_MEANINGS: ClassVar[dict[str, str]] = {
+        "SUPPORTS": "supports",
+        "MUTUALLYSUPPORTIVE": "mutuallySupportive",
+        "REFUTES": "refutes",
+        "MUTUALLYEXCLUSIVE": "mutuallyExclusive",
+    }
+
+    # Spelled as if they were in the family above, but ONTOLOGY §8 gives them no
+    # meaning — hence no mechanism, since `SEMANTICS_MECHANISMS` is keyed on the
+    # MEANING. They are REFUSED BY NAME, with the documented spelling offered:
+    # guessing would decide whether the target's confidence is raised or lowered
+    # on the basis of a typo, and silently falling through to `create_edge`
+    # would mint a bare edge for an epistemic intent that then has no mechanism
+    # to carry at all (the shape #10053's review refused to attest).
+    _EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING: ClassVar[dict[str, str]] = {
+        "SUPPORT": "'supports' (IMPL) — or 'mutuallySupportive' (IMPL) if the "
+                   "support runs both ways",
+        "CONTRADICTS": "'refutes' (NAND, the directed attack) or "
+                       "'mutuallyExclusive' (NAND, the mutual restatement) — "
+                       "ONTOLOGY §8 spells its NAND row as 'A contradicts B', "
+                       "which is PROSE about the mechanism, not a meaning",
+    }
+
+    def link_entities(self, relation: str, from_id: str, to_id: str, *,
+                      operator: bool | None = None,
+                      direction: str | None = None,
+                      confidence: float | None = None,
+                      weight: float | None = None,
+                      label: str | None = None,
+                      batch_id: str | None = None,
+                      entity_label: str | None = None,
+                      source_kind: str | None = None,
+                      promote_source: bool = True) -> dict | None:
+        """Connect two nodes — **the relation decides how**, not the caller.
+
+        The approved surface has one linking verb (row 19). It absorbs the four
+        connection writers that used to be separate calls, and it picks between
+        them from ``relation`` alone:
+
+          - ``wasDerivedFrom`` → :meth:`create_derivation` (the `(dst)-[:wasDerivedFrom]->(src)`
+            writer — the direction is the ontology's, not the caller's).
+          - ``IMPL`` / ``NAND`` without ``operator=True`` → :meth:`create_direct_edge`
+            (the operator-less half: a bare edge, per ONTOLOGY §5.3/v3.5 §8).
+          - a **Point↔Point support/contradict** relation (``supports`` /
+            ``refutes`` / ``mutuallySupportive`` / ``mutuallyExclusive``), or
+            ``operator=True`` → :meth:`create_operator` (an operator Point
+            carrying the edge). This is the ontology's rule, not a preference: an
+            operator is created **iff** there is a mitigation, or the edge is
+            Point↔Point support/contradict — so a structural relation never
+            grows one by accident.
+
+            ⚠️ The relation names a **meaning**, so it is passed as
+            ``semantics=`` and the **mechanism** is read from
+            ``pack_registry.SEMANTICS_MECHANISMS`` (``supports`` → ``IMPL``,
+            ``refutes`` → ``NAND``). It is *not* handed to ``op_type``, whose set
+            is IMPL/NAND/the part-whole kinds: a meaning is not a mechanism, and
+            the two are deliberately separate layers (#7852, #9963). A
+            support/contradict spelling ONTOLOGY §8 gives no meaning
+            (``SUPPORT``, ``CONTRADICTS``) is **refused by name**, with the
+            documented spelling named in the error — never guessed, and never
+            downgraded to a plain edge.
+          - ``references`` with an explicit ``entity_label`` → :meth:`link_source_to_entity`,
+            the PROVENANCE writer. This is the one arm where the choice is not
+            cosmetic: the bare ``create_edge`` path mints a ``references`` edge
+            with **no ``sourceVersion`` anchor and nothing will add one later**
+            (see :meth:`create_edge`), so a caller who names the entity label gets
+            the anchored writer. ``create_edge`` remains reachable, but only when
+            the caller does not ask for the anchor.
+          - anything else → :meth:`create_edge` (a typed structural edge, PLAIN —
+            the relation is validated there against the declared-relations set,
+            so an unknown relation is a refusal from the writer, not a guess here).
+
+        ``operator`` is the ONE explicit override: it exists because IMPL/NAND is
+        the only relation with two legitimate storages (with or without a
+        carrying operator), and a caller who needs to mitigate the edge later
+        must be able to say so. ``None`` (the default) means "decide from the
+        relation"; it is not a third mode.
+
+        On a relation that carries a MEANING (``supports``, ``refutes``,
+        ``mutuallySupportive``, ``mutuallyExclusive``) the MECHANISM decides the
+        storage, so ``operator=False`` is REFUSED there rather than overruled —
+        the caller does not choose (``beta-sdk-surface.md`` row 19, ONTOLOGY §8).
+        ``True`` is accepted and changes nothing: the meaning already requires
+        the carrying operator. On the two arms that build **no** operator at all
+        (``wasDerivedFrom`` → ``create_derivation``, ``references`` with an
+        ``entity_label`` → ``link_source_to_entity``) ``True`` is REFUSED, not
+        dropped: there is no carrying operator on those writers for it to
+        select, so honouring it is not possible and ignoring it would return
+        success for a write that stored a subset of the call (the rule below).
+
+        ⛔ **A parameter an arm cannot RECORD is refused, never dropped.** The
+        five writers take different parameter sets, so a keyword this signature
+        accepts may mean nothing to the arm that fires. Silently accepting it
+        would return success for a write that stored a subset of the call — the
+        fail-silent class, on the verb that is meant to be the single linking
+        entry point. ``confidence``/``weight``/``label``/``batch_id``/
+        ``direction``/``promote_source`` are honoured by the
+        ``create_direct_edge`` arm, ``label``/``direction``/``promote_source`` by
+        the ``create_operator`` arm, and NONE of them by the derivation,
+        provenance or plain-edge arms; asking for one there raises a
+        ``ValueError`` that names the arm and the writer. ``operator=True`` is
+        honoured by the ``create_operator`` arm alone — the arm that IS that
+        writer — and refused on the derivation and provenance arms. ``entity_label`` and
+        ``source_kind`` belong to the PROVENANCE arm alone — naming either on
+        another relation is refused rather than ignored. ``source_kind``
+        defaults to ``None`` (= not asked) and is resolved to ``"document"``
+        only inside that arm, where it has a meaning.
+
+        Returns whatever the chosen writer returns — the merge adds no envelope.
+        ``link_source_to_entity`` answers ``None`` and the other arms answer a
+        ``dict``, hence the honest ``dict | None`` annotation.
+        """
+        rel = (relation or "").strip()
+        if not rel:
+            raise ValueError("link_entities: relation is required")
+        if not from_id or not to_id:
+            raise ValueError("link_entities: from_id and to_id are required")
+
+        # What each arm can actually RECORD (#4282). A parameter the caller set
+        # that the chosen writer has no home for is refused by `_dispatch`
+        # below, never accepted-and-dropped. `None` is this signature's "not
+        # asked"; `promote_source=True` is its default, so only an explicit
+        # False counts as asking.
+        #
+        # `entity_label` / `source_kind` are in `requested` too (#10053 review,
+        # P2): the PROVENANCE arm is the only one with a slot for them, and the
+        # other four dropped them silently — `link_entities("hasPart", a, b,
+        # entity_label="Event")` returned success having ignored the label. That
+        # is why `source_kind` defaults to `None` here and is resolved to
+        # `"document"` at its one use site: with the old `"document"` default it
+        # would read as ALWAYS requested and refuse every other arm.
+        _honours: dict[str, frozenset[str]] = {
+            "create_direct_edge": frozenset({
+                "direction", "confidence", "weight", "label", "batch_id",
+                "promote_source"}),
+            # `operator` is honoured HERE and only here (#10053 review, P3): this
+            # is the arm whose writer BUILDS the carrying operator, so an
+            # explicit `True` is exactly what it does. Every other door records
+            # no carrying operator, so `True` there is refused by `_dispatch`.
+            "create_operator": frozenset({
+                "label", "direction", "promote_source", "operator"}),
+            "create_derivation": frozenset(),
+            "link_source_to_entity": frozenset({"entity_label", "source_kind"}),
+            "create_edge": frozenset(),
+        }
+        requested = {
+            name: value for name, value in (
+                ("direction", direction), ("confidence", confidence),
+                ("weight", weight), ("label", label),
+                ("batch_id", batch_id), ("entity_label", entity_label),
+                ("source_kind", source_kind),
+            ) if value is not None
+        }
+        if promote_source is False:
+            requested["promote_source"] = False
+        # #10053 review (P3): `operator` was the one parameter outside
+        # `requested`, so `_dispatch` could never refuse it — and the provenance
+        # and derivation arms return BEFORE it is read, so `operator=True` there
+        # was accepted and forwarded nowhere. Only `True` is added: on those two
+        # arms `False` is already the true statement (they build no carrying
+        # operator, so "no operator" is exactly what they do), while `True` is a
+        # request they have no home for. The IMPL/NAND plain-edge arm is
+        # unreachable with `True` (`operator is not True`), so `create_direct_edge`
+        # never needs it in its honoured set.
+        if operator is True:
+            requested["operator"] = True
+
+        def _dispatch(door: str, call):
+            """Run the arm, or REFUSE what its writer cannot record (#4282).
+
+            `fail-silent` is the one class a merge must never add: on this verb
+            a dropped keyword returns success for a write that stored a subset
+            of the call, with nothing for the caller to notice. Name the arm,
+            the writer and the parameters instead.
+            """
+            dropped = sorted(set(requested) - _honours[door])
+            if dropped:
+                # `operator` gets its own counsel: "call the writer directly" is
+                # false advice for it — `create_derivation` takes no `operator`
+                # either, so there is no call to make. What the caller wants is
+                # a DIFFERENT relation, and naming it is the only fix there is.
+                advice = (
+                    " There is no carrying operator on this arm at all — if you "
+                    "need one, name an epistemic relation ('supports', "
+                    "'refutes', 'mutuallySupportive', 'mutuallyExclusive'), "
+                    "which builds it."
+                    if "operator" in dropped else
+                    f" Call `TortoiseSDK.{door}` directly if you need that "
+                    f"parameter."
+                )
+                raise ValueError(
+                    f"link_entities: the {rel!r} arm writes through `{door}`, which "
+                    f"records no {', '.join(dropped)} — refusing rather than "
+                    f"returning success for a write that dropped "
+                    f"{'them' if len(dropped) > 1 else 'it'}.{advice}"
+                )
+            return call()
+
+        # Provenance writer first: it is the only arm whose edge carries the
+        # sourceVersion anchor, and it is only reachable when the caller named
+        # the entity label (the signal that they are linking a SOURCE).
+        if rel == "references" and entity_label:
+            return _dispatch(
+                "link_source_to_entity",
+                lambda: self.link_source_to_entity(
+                    source_url=from_id, entity_id=to_id,
+                    entity_label=entity_label,
+                    source_kind=source_kind or "document"))
+
+        if rel == "wasDerivedFrom":
+            # create_derivation(src_id, dst_id) writes (dst)-[:wasDerivedFrom]->(src).
+            return _dispatch(
+                "create_derivation",
+                lambda: self.create_derivation(from_id, to_id))
+
+        upper = rel.upper()
+        if upper in ("IMPL", "NAND") and operator is not True:
+            return _dispatch(
+                "create_direct_edge",
+                lambda: self.create_direct_edge(
+                    upper, from_id, to_id, direction=direction,
+                    confidence=confidence, weight=weight, label=label,
+                    batch_id=batch_id, promote_source=promote_source))
+
+        # An epistemic relation that needs a carrying operator builds one;
+        # everything else stays PLAIN. The set is the ontology's rule (operator iff
+        # mitigation, or Point↔Point support/contradict), NOT `CORE_OPERATOR_LABELS`
+        # — that set also contains STRUCTURAL predicates (`ownedBy`, `hasPart`,
+        # `dependsOn`, `related` …), so using it here would grow an operator on a
+        # relation the reification rule says must stay a plain edge.
+        #
+        # #10053: the MEANING names the edge; `SEMANTICS_MECHANISMS` fixes the
+        # MECHANISM. Both are passed, in their OWN slots — `semantics=` for the
+        # meaning, the registry's mechanism for `op_type`. Passing the meaning as
+        # `op_type` (what this arm did) is refused by `create_operator` on every
+        # call, so the arm never worked.
+        meaning = self._EPISTEMIC_RELATION_MEANINGS.get(upper)
+        if meaning is not None:
+            from tortoise.pack_registry import SEMANTICS_MECHANISMS
+
+            # #10053 review (P3): `operator` used to be read for the first time
+            # BELOW this arm, so `False` — the one spelling a caller would use
+            # to FORBID the carrying operator — was accepted here and ignored:
+            # the arm built the operator anyway, with no error and no warning,
+            # on the single family where the neighbouring IMPL/NAND arm HONOURS
+            # `False`. Same-keyword-two-meanings is the class `_dispatch` below
+            # exists to refuse, so it is refused here too rather than left to a
+            # docstring that says what the code does not do.
+            if operator is False:
+                raise ValueError(
+                    f"link_entities: relation {rel!r} carries the MEANING "
+                    f"{meaning!r}, and an epistemic relation ALWAYS needs its "
+                    f"carrying operator "
+                    f"(pack_registry.SEMANTICS_MECHANISMS -> "
+                    f"{SEMANTICS_MECHANISMS[meaning]!r}) — `operator=False` "
+                    f"asks for a plain edge, which would mint an epistemic "
+                    f"edge with no mechanism to carry it. The RELATION chooses "
+                    f"its storage, not the caller (beta-sdk-surface.md row 19, "
+                    f"ONTOLOGY §8). Drop `operator` — `None` means 'decide "
+                    f"from the relation' — or use a structural relation if a "
+                    f"plain edge is what you actually want."
+                )
+
+            return _dispatch(
+                "create_operator",
+                lambda: self.create_operator(
+                    SEMANTICS_MECHANISMS[meaning], from_id, [to_id], label=label,
+                    direction=direction or "bidirectional",
+                    promote_source=promote_source, semantics=meaning))
+
+        if upper in self._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING:
+            hint = self._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING[upper]
+            raise ValueError(
+                f"link_entities: relation {rel!r} asks for a "
+                f"support/contradict edge, but ONTOLOGY §8 gives it no MEANING "
+                f"— so it has no mechanism either, and this door will not pick "
+                f"one: the mechanism is what decides whether the target's "
+                f"confidence is RAISED or LOWERED. The documented spellings are "
+                f"'supports' (IMPL), 'mutuallySupportive' (IMPL), 'refutes' "
+                f"(NAND) and 'mutuallyExclusive' (NAND) — "
+                f"pack_registry.SEMANTICS_MECHANISMS. Use {hint}."
+            )
+
+        if operator is True:
+            return _dispatch(
+                "create_operator",
+                lambda: self.create_operator(
+                    upper, from_id, [to_id], label=label,
+                    direction=direction or "bidirectional",
+                    promote_source=promote_source))
+
+        return _dispatch(
+            "create_edge", lambda: self.create_edge(rel, from_id, to_id))
+
+    def update_knowledge(self, id: str, *, valid_until: str | None = None,
+                         invalid_at: str | None = None,
+                         corrected_by_id: str | None = None,
+                         annotation: dict | None = None,
+                         **props) -> dict:
+        """Change what a stored thing says — **a node or a link** — or retract it.
+
+        The approved surface has one revise verb (row 22) and **retraction is a
+        temporal field on it, not a separate verb** (Zep's shape; ``withdraw_knowledge``
+        was removed from the plan for exactly this reason). It absorbs:
+
+          - ``update_point`` / ``update_entity`` → :meth:`update`, which already
+            dispatches on the resolved label (a Point takes the point-lifecycle
+            arm, an entity the plain-property arm). Nothing is re-implemented here.
+          - ``retract_point`` → ``valid_until=`` **or** ``invalid_at=`` with no
+            successor: a tombstone (``status='retracted'``, the node STAYS). The
+            instant is the window's END and it is CARRIED, never discarded — it
+            is written as the point's ``validTo`` and journalled on the record,
+            so a rebuild replays the same window. Retraction therefore means
+            "this claim stopped holding at <instant>", not just a status flip.
+          - ``invalidate_point`` → the same field **plus** ``corrected_by_id=``:
+            the node is marked outdated and linked to its replacement; the
+            instant is the predecessor's window end, written the same way.
+          - link annotation → ``annotation={'bias':…, 'precision':…,
+            'consistency':…, 'directness':…}``, which is :meth:`annotate_operator`.
+            Annotating a link is an update on it; ``adjust_relationship`` is the
+            separate verb for *strength*.
+
+        The rule the merge encodes (``beta-sdk-surface.md`` row 24): **retract when
+        nothing replaced the claim, supersede when a specific successor did, delete
+        when it must not be retained.** ``supersede_knowledge`` and
+        ``delete_knowledge`` stay separate verbs because they destroy or replace —
+        this one always keeps the record.
+
+        ⛔ **One arm per call — a keyword the chosen arm cannot RECORD is refused,
+        never dropped.** The three arms write different things (a property bag, the
+        four annotation dimensions, a window end + tombstone), so a call that names
+        two of them used to return success having recorded only one: an
+        ``annotation`` beside ``**props`` or beside a temporal field lost the props
+        or the retraction, and a temporal field beside ``**props`` lost the props.
+        Each is a ``ValueError`` naming what the arm could not carry, with the two
+        calls that do record both — the same rule :meth:`link_entities` applies
+        (#10053 review, P2). Compose them in the order the lifecycle allows: a
+        property/window update FIRST, the terminal stamp SECOND (#7819 refuses a
+        temporal re-stamp on an already-terminal claim). And the temporal field
+        names exactly ONE end: ``valid_until=`` and ``invalid_at=`` are two
+        spellings of the same ``validTo``, so two DIFFERENT values in one call are
+        a conflict and are refused as well, rather than one of them being dropped.
+        """
+        if annotation is not None:
+            if not isinstance(annotation, dict):
+                raise ValueError(
+                    "update_knowledge: annotation must be a dict of epistemic "
+                    "dimensions")
+            # All four are REQUIRED positional parameters of
+            # `annotate_operator`, so a partial dict used to raise `TypeError:
+            # missing 3 required positional arguments` — or, for a typo'd key,
+            # `TypeError: unexpected keyword` — out of a public verb whose every
+            # other malformed input raises `ValueError` (#4282). Validate the
+            # KEYS here and refuse in the same class, naming what is missing.
+            allowed = ("bias", "precision", "consistency", "directness")
+            unknown = sorted(set(annotation) - set(allowed))
+            missing = [name for name in allowed if name not in annotation]
+            if unknown or missing:
+                problem = (f"unknown dimension(s) {unknown}" if unknown
+                           else f"missing dimension(s) {missing}")
+                raise ValueError(
+                    f"update_knowledge: annotation takes exactly "
+                    f"{', '.join(allowed)} — {problem}. A partial rating is not "
+                    f"a smaller update: annotate_operator requires all four, and "
+                    f"leaving them unset is the neutral default (factor 1.0), so "
+                    f"pass all four or none.")
+            # ⛔ The annotation arm RETURNS here, so everything beside
+            # `annotation=` used to be accepted and dropped (#10053 review, P2):
+            # `update_knowledge(op, content="new", annotation={...})` annotated
+            # the link and lost the content, and `update_knowledge(op,
+            # annotation={...}, invalid_at=..., corrected_by_id=...)` annotated
+            # and never retracted — including discarding `corrected_by_id`, which
+            # this same function refuses on its own one branch below. An
+            # annotate_operator call has no slot for any of them, so refuse by
+            # name instead of returning success for half the call.
+            beside = sorted(
+                name for name, value in (
+                    ("valid_until", valid_until), ("invalid_at", invalid_at),
+                    ("corrected_by_id", corrected_by_id), *props.items(),
+                ) if value is not None
+            )
+            if beside:
+                raise ValueError(
+                    f"update_knowledge: annotation= is the annotate_operator arm, "
+                    f"which records the four epistemic dimensions and nothing "
+                    f"else — it cannot carry {', '.join(beside)}. Refusing rather "
+                    f"than returning success for a call that recorded only part "
+                    f"of it: an annotation and a revision are two different "
+                    f"changes, so send them as two calls (this is the same rule "
+                    f"`link_entities` applies to a keyword its arm cannot record).")
+            return self.annotate_operator(id, **annotation)
+
+        # The temporal field IS the window end, so it must reach the writer that
+        # stamps `validTo`. It used to gate the branch and then be thrown away:
+        # `update_knowledge(p, valid_until="2027-01-01")` retracted the point
+        # immediately and stored no end at all, and the `corrected_by_id` arm
+        # stamped `validTo = now` instead of the caller's instant (#4282).
+        #
+        # ⛔ TWO window ends are a CONFLICT, not a precedence (#10053 review, P2).
+        # The docstring states them as alternatives ("valid_until= **or**
+        # invalid_at=") and nothing enforced it: `update_knowledge(p,
+        # valid_until=A, invalid_at=B)` returned success having written B and
+        # dropped A — the same "a call that stored part of what it said"
+        # class this method refuses everywhere else (the annotation arm, the
+        # temporal-beside-props arm). Both values ARE recordable, so the refusal
+        # is about the CONFLICT, not about an arm that cannot carry it. Equal
+        # values agree and pass through.
+        if (valid_until is not None and invalid_at is not None
+                and valid_until != invalid_at):
+            raise ValueError(
+                f"update_knowledge: valid_until={valid_until!r} and "
+                f"invalid_at={invalid_at!r} name two different window ends for "
+                f"one claim, and this verb writes exactly one `validTo`. "
+                f"Refusing rather than returning success for a call that "
+                f"recorded only part of it: they are two spellings of the SAME "
+                f"field, so pass one (or two equal values), never a "
+                f"contradiction.")
+        end = invalid_at if invalid_at is not None else valid_until
+        if end is not None:
+            # The temporal arm's writers (`retract_point` / `invalidate_point`)
+            # record the window end and the tombstone; they take no property bag,
+            # so `**props` used to be dropped here too (#10053 review, P2):
+            # `update_knowledge(p, content="corrected text", valid_until=D)`
+            # retracted the point and lost the text. Refuse rather than silently
+            # store a subset — and say WHICH way to get both: a window update and
+            # a terminal stamp are two revisions, and #7819 makes the order
+            # matter, so composing them is the caller's call, not this verb's
+            # guess.
+            if props:
+                raise ValueError(
+                    f"update_knowledge: a temporal field (valid_until=/invalid_at=) "
+                    f"retracts or invalidates the claim, and its writer records the "
+                    f"window end only — it cannot carry {', '.join(sorted(props))}. "
+                    f"Refusing rather than returning success for a retraction that "
+                    f"stored none of them: call `update_knowledge(id, "
+                    f"**props)` for the property change and then this call for the "
+                    f"window, in that order (a terminal claim refuses a temporal "
+                    f"re-stamp, #7819).")
+            if corrected_by_id:
+                return self.invalidate_point(id, corrected_by_id, valid_to=end)
+            return self.retract_point(id, valid_to=end)
+
+        if corrected_by_id:
+            raise ValueError(
+                "update_knowledge: corrected_by_id needs a temporal field — pass "
+                "invalid_at= or valid_until= with it (that is what makes it a "
+                "supersede-in-place rather than a silent no-op)")
+
+        return self.update(id, **props)
+
+    def delete_knowledge(self, id: str) -> bool:
+        """Remove knowledge — **a node or a link**. Hard removal; there is no undo.
+
+        The approved surface has one removal verb (row 24). It absorbs
+        ``delete_point`` and ``delete_point_wrapped`` (and, for an epistemic link,
+        the operator Point's delete) into :meth:`delete`, which resolves the label
+        first and then takes the arm the node needs — the Point arm keeps the tag
+        GC, the ``PointRetracted`` subscriber signal and the JSONL hard-delete
+        record; the entity arm hard-deletes as ``delete_entity`` always did.
+
+        A LINK is removable here because an epistemic link IS a Point
+        (``is_operator=true``), so its id routes through the Point arm (#6131). A
+        **plain structural edge** carries no id in this model — there is nothing to
+        name — so it is removed by deleting the node that holds it, which is the
+        documented boundary and not a gap this verb can close.
+
+        Returns True if a node was found and removed, False otherwise. Raises
+        exactly what the narrow doors raise (``WriteNotLandedError`` on an
+        unconfirmed destruction) — a merge must not soften a guarantee.
+        """
+        return self.delete(id)
+
     @_declares_apply_first_write_lane("update_point")
     def update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
@@ -15103,7 +15604,8 @@ class TortoiseSDK:
                 and status not in TERMINAL_EXCLUDED_STATUSES
                 else (status or "live"))
 
-    def _assert_window_start_not_inverted(self, point_id: str, now: str) -> None:
+    def _assert_window_start_not_inverted(self, point_id: str, now: str,
+                                          *, door: str = "invalidate_point") -> None:
         """#5358: refuse an INVERTED predecessor window BEFORE any mutation.
 
         The stamp block in ``invalidate_point`` writes ``validTo = now`` from
@@ -15114,6 +15616,12 @@ class TortoiseSDK:
         ``_covers`` then covers NO instant and the point silently disappears
         from every temporal query while the system reports honest absence
         (#4021's sibling, separate root).
+
+        ``door`` (#4282) names the writer in the refusal, because
+        ``retract_point`` passes a caller-named window end through the SAME
+        guard: a message that said "invalidate_point … retract_point is the
+        window-agnostic route" would name the wrong door AND recommend the call
+        the caller had just made.
 
         The comparison reuses the READ path's measure — ``_created_sort_key``,
         the SAME key ``_covers`` orders with — and its PRESENCE predicate
@@ -15177,19 +15685,28 @@ class TortoiseSDK:
             try:
                 validate_validity_window(stored_vf, now)
             except ValueError:
+                if door == "retract_point":
+                    advice = (
+                        "The window end is the caller's here, so pass a "
+                        "valid_to that is not before it, or omit valid_to for "
+                        "an undated tombstone.")
+                else:
+                    advice = (
+                        f"retract_point is the window-agnostic route (it does "
+                        f"not touch the window): call "
+                        f"retract_point({point_id!r}) instead.")
                 raise ValueError(
-                    f"invalidate_point: cannot invalidate {point_id!r} — its "
-                    f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
-                    f"stamping validTo=now would persist an inverted window "
-                    f"(validTo < validFrom) and the point would disappear "
-                    f"from every temporal query. retract_point is the "
-                    f"window-agnostic route (it does not touch the window): "
-                    f"call retract_point({point_id!r}) instead."
+                    f"{door}: cannot write the window end for {point_id!r} — its "
+                    f"validFrom {stored_vf!r} is AFTER the requested end "
+                    f"({now!r}), so stamping validTo={now!r} would persist an "
+                    f"inverted window (validTo < validFrom) and the point would "
+                    f"disappear from every temporal query. {advice}"
                 ) from None
 
     @_declares_live_write_lane("invalidate_point")
     def invalidate_point(self, id: str, corrected_by_id: str,
-                         *, valid_to_precision: str | None = None) -> dict:
+                         *, valid_to_precision: str | None = None,
+                         valid_to: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
         §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `PointInvalidated`
@@ -15232,6 +15749,14 @@ class TortoiseSDK:
         state ("this ended, but I cannot date it"). When that marker is given
         the #5358 inverted-window precondition is skipped: no end is written,
         so no inversion is possible.
+
+        ``valid_to=`` (#4282) is the caller's WINDOW END: the instant the claim
+        stopped holding. It replaces the ``now`` fallback in the stamp — and only
+        there, since ``expiredAt``/``updatedAt`` record when the graph LEARNED of
+        the end, not when the claim ended. It reaches the record through
+        ``valid_to=`` on ``PointInvalidated`` (the §17.5 carrier), so a rebuild
+        replays the caller's instant rather than its own clock, and the #5358
+        inversion guard runs against the value that is actually stored.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -15262,12 +15787,16 @@ class TortoiseSDK:
         from .validity import normalize_precision as _normalize_precision
         end_precision = _normalize_precision(
             valid_to_precision, field="valid_to_precision")
-        stamp_valid_to = None if end_precision == _PREC_UNKNOWN else now
+        # #4282: a caller-named instant IS the window end; `now` is the fallback
+        # for a caller who named none. Resolved BEFORE the #5358 inversion guard,
+        # which must measure the value that is about to be stored.
+        end_instant = valid_to if valid_to is not None else now
+        stamp_valid_to = None if end_precision == _PREC_UNKNOWN else end_instant
         # #5358: refuse an INVERTED predecessor window BEFORE any mutation.
         # The check is shared with the MCP dry-run preview
         # (`_preview_invalidate`) so the writer and its preview cannot drift.
         if stamp_valid_to is not None:
-            self._assert_window_start_not_inverted(id, now)
+            self._assert_window_start_not_inverted(id, stamp_valid_to)
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
         # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
@@ -16158,7 +16687,7 @@ class TortoiseSDK:
         }
 
     @_declares_live_write_lane("retract_point")
-    def retract_point(self, id: str) -> dict:
+    def retract_point(self, id: str, *, valid_to: str | None = None) -> dict:
         """Tombstone-retract a Point: status='retracted' (point stays in graph).
 
         §17.1 LANE (#9124): JOURNAL-FIRST, declared. `PointRetracted` is
@@ -16186,6 +16715,15 @@ class TortoiseSDK:
         Raises ValueError if the point is missing, is an operator node, or is
         already terminal (the shared terminal vocabulary: a status in
         live.TERMINAL_EXCLUDED_STATUSES OR the legacy outdated=true flag).
+
+        ``valid_to=`` (#4282) is the caller's WINDOW END — the instant the claim
+        stopped holding, which is what "retraction is a temporal field" means
+        once the field is read rather than merely tested. It is stamped as the
+        point's ``validTo`` in the same CAS ``SET`` (the node is still live here,
+        so this is not the #7819 terminal re-stamp that verb refuses) and carried
+        on the ``PointRetracted`` record, so a rebuild replays the caller's
+        instant instead of losing it. ``updatedAt`` keeps its own meaning: the
+        graph's clock for when it LEARNED of the retraction.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -16203,9 +16741,36 @@ class TortoiseSDK:
         # a second read here, and a third at replay, made live/rebuild/fold
         # hold three different stamps for one retraction.
         _now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #4282: refuse an INVERTED window BEFORE any mutation (the same shared
+        # guard `invalidate_point` / `supersede_point` use, #5358) — a retraction
+        # that names an end before the stored start would persist a window
+        # covering no instant, which is exactly what that guard exists to stop.
+        if valid_to is not None:
+            self._assert_window_start_not_inverted(id, valid_to, door="retract_point")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
-        self._emit_event("PointRetracted", {"id": id}, id=id, recorded_ts=_now)
+        #
+        # ⛔ `valid_to` must ride the JOURNAL, not only the change-feed payload
+        # (#10053 review, P1 — settled by executing the durability gate).
+        # `_emit_event`'s POSITIONAL `payload=` reaches the `:GraphEvent` store
+        # ONLY: the JSONL record is assembled from `point` / `id` / `**extra`.
+        # So `_emit_event("PointRetracted", {"id": id, "valid_to": …}, id=id)`
+        # journalled a record with NO window end — measured: the live node held
+        # `validTo`, the rebuilt node had none, and `derived = replay(journal)`
+        # was FALSE for every dated retraction. The kwargs form is what
+        # `invalidate_point` already uses (`ts=…, valid_to=…`), and it emits the
+        # SAME graph payload (`{"id": id, **extra}`) while also putting the key
+        # on the record — which is what `record_projection`'s `from_payload` and
+        # both replay folds read.
+        #
+        # An UNDATED retraction passes no key at all, so its record stays
+        # byte-identical to before: presence is ownership, and the folds' shared
+        # `_storable_bound` gate already treats "absent" and "null" alike (and
+        # keeps an END_UNKNOWN spelling such as `""`, which the INSTANT
+        # predicate `_usable_instant` would drop — #10053 review).
+        _window = {} if valid_to is None else {"valid_to": valid_to}
+        self._emit_event("PointRetracted", {"id": id, **_window},
+                         id=id, recorded_ts=_now, **_window)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
         # a concurrent retract/supersede/invalidate can't both pass validation
         # and have a terminal overwrite. #2498: the CAS now uses the SAME
@@ -16253,9 +16818,12 @@ class TortoiseSDK:
             lambda: proj.g.query(
                 "MATCH (n:Point {id:$id}) "
                 f"WHERE {_terminal_excluded('n.status')} "
-                "SET n.status = 'retracted', n.updatedAt = $now, "
-                f"{decay_clause('n')} RETURN properties(n)",
-                params={"id": id, "now": _now}),
+                "SET n.status = 'retracted', n.updatedAt = $now"
+                + (", n.validTo = $valid_to" if valid_to is not None else "")
+                + f", {decay_clause('n')} RETURN properties(n)",
+                params={"id": id, "now": _now,
+                        **({"valid_to": valid_to}
+                           if valid_to is not None else {})}),
             what="retract_point CAS SET",
             # #8854 review P1: empty `result_set` is ambiguous — "matched a
             # terminal node" (the legitimate ValueError below) or "matched

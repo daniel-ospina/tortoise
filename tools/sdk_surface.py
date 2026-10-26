@@ -10,9 +10,11 @@ misdirected**, and each claim is wrong for a reason that is checkable:
   * `tortoise/__init__.py` binds six names (`__version__`, `os`, `RELATIVE_PATH_ERROR`,
     `enforce_embedded_fork_safety`, `fork_safe_serverconfig`, `atexit_fast_close`) and
     carries **no `__all__`** — so does `tortoise/sdk.py`.
-  * The 147 are **methods on the `TortoiseSDK` class** in `tortoise/sdk.py` (340 `def`
-    statements in the class body, 147 of them public). A module-level `__all__` physically
-    cannot name them, so adding one would declare nothing about the surface that drifted.
+  * The live public methods (150 when this was last measured — the number MOVES, which is
+    the whole point of this file) are **methods on the `TortoiseSDK` class** in
+    `tortoise/sdk.py` (343 `def` statements in the class body, 150 of them public). A
+    module-level `__all__` physically cannot name them, so adding one would declare nothing
+    about the surface that drifted.
   * The surface consumed in production is the CLASS body: `tests/test_surface_resolution.py`
     resolves `getattr(TortoiseSDK, entry.sdk_method)`.
 
@@ -52,10 +54,10 @@ disagreement in either direction:
      (#3863).
 
 AST and REFLECTION are not the same question, and nothing reconciled them until this file.
-They agree exactly today (147 / 147). They are not guaranteed to keep agreeing: a public
-attribute attached to the class OUTSIDE its body is visible to reflection and invisible to the
-AST walk, which is precisely where a `dir()`-only gate and an AST-only gate would silently
-part company.
+They agree exactly at the last measurement (150 / 150). They are not guaranteed to keep
+agreeing: a public attribute attached to the class OUTSIDE its body is visible to reflection
+and invisible to the AST walk, which is precisely where a `dir()`-only gate and an AST-only
+gate would silently part company.
 
 WHAT THIS IS NOT
 ----------------

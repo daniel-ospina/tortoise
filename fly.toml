@@ -200,6 +200,20 @@ kill_timeout = 30
   # UNSET here too: the hosted lane is multi-tenant and carries its tenant per
   # request, so a process-global pair would misfile every tenant's rows (#9192).
   TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_CLOUD_URI → FalkorDB Cloud
+  # ── #8617 (owner decision, 2026-10-26): this deployment DECLARES the
+  # per-graph ACL layer unavailable. FalkorDB Cloud grants no credential the
+  # app may hold `+ACL` ("No preset grants +ACL"; `ACL` is not in the
+  # allowed-commands list), so the per-graph ACL user cannot be created here —
+  # and insisting on it rolled back EVERY hosted graph mint (production 503s
+  # measured on e1e3e80, #8617). `off` ⇒ `create_acl_user()` returns
+  # `absent_by_design` before any server contact, the mint proceeds, and the
+  # absence is logged once per process + reported by the ACL reconcile instead
+  # of being inferred. Self-hosted and the docker test lane leave this unset
+  # (default `strict` — the per-graph ACL user is still created there, and
+  # nothing about that recipe changes). ⛔ NOT a secret — it must NOT enter
+  # .github/scripts/fly-managed-secrets.txt (a Fly secret would shadow this
+  # versioned value; see the manifest's `fly-toml-env` note).
+  TORTOISE_ACL_LAYER = "off"
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
   # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded
   # headers — Fly-Client-IP for per-IP limiters (#1081) and

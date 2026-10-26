@@ -781,8 +781,19 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "PointRetracted": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
                   literals=(("status", "retracted"),),
-                  from_payload=frozenset()),
-        note="tombstone — the node is KEPT (the hard delete is EntityMutated)",
+                  from_payload=frozenset({"valid_to"})),
+        note="tombstone — the node is KEPT (the hard delete is EntityMutated). "
+             "#4282: `valid_to` rides the payload when the retraction named a "
+             "WINDOW END (the `valid_until`/`invalid_at` field on "
+             "`update_knowledge`, beta row 22) — the caller's instant is the "
+             "datum, so the record carries it and the fold replays it verbatim "
+             "instead of a rebuild losing it; the DECLARATION half is pinned by "
+             "`tests/test_4282_phase2_merges.py`, and the PARITY half (the "
+             "producer really puts the key on the record, the rebuild really "
+             "restores it, and the durability gate stays clean) by "
+             "`tests/test_4282_dated_retraction_durability.py` — a declared "
+             "`from_payload` on a record that never carries the key is exactly "
+             "the vacuous shape that file exists to prevent",
     ),
     "PointSuperseded": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
