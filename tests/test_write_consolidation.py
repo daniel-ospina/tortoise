@@ -532,11 +532,13 @@ class TestMcpHandlers:
         # that token, destroys the node. The protocol's own depth lives in
         # tests/test_deletion_confirmation.py — here it is exercised end to end
         # through the real handlers, so the round-trip cannot silently regress
-        # to "deleted on the first call".
+        # to "deleted on the first call" (the pre-#9660 contract this test used
+        # to assert) rather than relaxed to `d.get("deleted") is not None`.
         d = tortoise_delete(nid)
         assert "error" not in d, d
         assert d.get("dry_run") is True, d
         assert d.get("deleted") is not True, d
+        assert d.get("id") == nid, d
         token = d.get("confirmation")
         assert token, d
         confirmed = tortoise_delete(nid, confirmation=token)

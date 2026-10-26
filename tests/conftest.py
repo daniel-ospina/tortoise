@@ -225,14 +225,61 @@ _projection_mod.install_thread_stamp()
 # frame-keyed carve-out exemption cannot see worker-thread stacks.
 
 
+from tests import _live_gate  # noqa: E402
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Record the running test module's stem on the current thread (#1686)."""
+    """Record the running test module's stem on the current thread (#1686),
+    then refuse a live-storage SKIP (#1436).
+
+    tryfirst, and both jobs share this hook, because the ordering IS the fix:
+    pytest resolves skip/skipif marks in the skipping plugin's tryfirst
+    `pytest_runtest_setup`, before any fixture is set up — so a gate that lived
+    in a session fixture (the shape `_p4_uri_required` uses) is never reached by
+    a module whose tests are all mark-skipped. Measured on this box: an
+    identical URI-less run reds 18 hermetic tests and reports "14 skipped",
+    rc=0, for a live file. See tests/_live_gate.py.
+    """
     try:
         stem = (item.module.__name__.rsplit(".", 1)[-1]
                 if item.module is not None else None)
     except AttributeError:
         stem = None
     _projection_mod._record_current_test_stem(stem)
+    _live_gate.refuse_live_skip(item)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_collectreport(report):
+    """Refuse a whole-module live-storage SKIP (#1436, #5084 remainder).
+
+    A `pytest.skip(..., allow_module_level=True)` gate is decided during
+    COLLECTION, one phase before the mark hook above: no item is created, so
+    neither `pytest_runtest_setup` nor the `_p4_uri_required` session fixture
+    ever runs, and pytest reports the module as a skip (rc=5 when it is the
+    only selection, **rc=0 in a MIXED selection** — the shape a lane actually
+    runs, and the shape pinned below). Without this, the in-process gate covers
+    only the reason class, while CI's junitxml matcher enforces the reason AND
+    collection classes — the CI/lane asymmetry `tests/_live_gate.py` exists to
+    remove. (The matcher's third class, `is_embedder_reason_violation`, stays
+    CI-only ON PURPOSE: a missing optional extra must remain a skip in a lane,
+    and `tests/test_live_storage_fail_closed.py` pins those reasons as
+    legitimate.)
+
+    A WRAPPER, not `tryfirst`, because the outcome mutation has to happen
+    BEFORE pytest's own accounting: `Session.pytest_collectreport` is itself a
+    `tryfirst` impl and increments `testsfailed` on a report that is already
+    failed, and only `testsfailed` decides the exit code. Mutating in a normal
+    or tryfirst impl could register a red report that still exits 0 — the exact
+    false GREEN this PR removes. `tests/test_live_storage_fail_closed.py` pins
+    the rc with a child pytest run, so an ordering change fails there.
+    """
+    message = _live_gate.collection_violation(report)
+    if message is not None:
+        report.outcome = "failed"
+        report.longrepr = message
+    return (yield)
 
 
 def pytest_runtest_teardown(item, nextitem):
