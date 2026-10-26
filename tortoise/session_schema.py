@@ -142,6 +142,10 @@ SESSION_PROPERTIES: tuple[str, ...] = (
     # ── capture shape (the shared primitive, #3551) ──
     "created_at",
     "turn_count",
+    # #10000: the id-space high-water mark. `turn_count` is a WINDOW LENGTH, not a
+    # max turn index, so the stale-turn sweep (the one behaviour that used to walk
+    # the turn nodes) needs this to survive the turns leaving the graph.
+    "turn_max_index",
     "is_episodic",
     "harness",
     "capture_lane",
@@ -179,7 +183,8 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
         kind="capture",
         lane="hosted + sdk (the shared primitive)",
         properties=frozenset({
-            "created_at", "turn_count", "is_episodic", "harness",
+            "created_at", "turn_count", "turn_max_index", "is_episodic",
+            "harness",
             "capture_lane", "actor_user_id", "machine_id", "model",
             "client_captured_at", "client_captured_at_source", "source",
         }),
@@ -205,6 +210,18 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "`capture_redactions` on the Session in the SAME statement as the "
             "turns, so the count and the rows it describes cannot be separated "
             "by a later failure (#4911)."),
+    ),
+    SessionWriter(
+        key="tortoise/sdk.py::_SESSION_REDACTIONS_CYPHER",
+        kind="writer",
+        lane="capture (SDK + hosted)",
+        properties=frozenset({"capture_redactions"}),
+        note=(
+            "#10000: the half of the capture write that STAYS on the graph once "
+            "the turns become record rows. It exists so the redaction count still "
+            "has a live carrier on the same statement boundary, and so the "
+            "`_TURN_WRITE_CYPHER` declaration above remains the FALLBACK path "
+            "rather than dead code."),
     ),
     SessionWriter(
         key="tortoise/hosted_api.py::_capture_session_impl",

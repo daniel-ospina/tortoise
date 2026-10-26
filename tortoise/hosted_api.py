@@ -60,6 +60,10 @@ from tortoise import (
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
+
+# #10000: the record's turn read (lazy-imported at the call site so every
+# deployment without a record DSN pays nothing)
+from tortoise import record_read as _record_read
 from tortoise.abuse import (
     _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
     _window_env,  # #5493 window knobs must never fail open
@@ -5637,6 +5641,156 @@ def _backup_watcher_health() -> dict:
         }
 
 
+def _record_health() -> dict:
+    """#9548: is the Postgres record ARMED on THIS deployment? — for /health.
+
+    The record's arming is PRESENCE-based on purpose (`record_writer` decision
+    2): unset ⇒ ``NOT_ARMED`` ⇒ zero statements, no connection attempt, no
+    exception. That is the right default, and it has one cost that has now been
+    paid: **an unarmed deployment and an armed-and-healthy one are byte-identical
+    from outside the process** — so `TORTOISE_RECORD_DSN` stayed unset on the
+    hosted app through a P0 (#9548) without anything going red, and the runbook
+    had to tell an operator to read `fly logs` greps to discover it. This block
+    is the missing read: the facts, on the surface an operator already curls.
+
+    It reports the seam's OWN answer, never a second opinion — ``record_dsn()``
+    is the single arming rule, so this cannot say "armed" for a value the write
+    path would refuse. It collects **no I/O** (#2850): an env read, a string
+    check and in-memory counters — never a connection, never a thread hand-off,
+    so an unreachable record cannot delay or fail a liveness probe.
+
+    Facts, NOT a verdict on reachability — and the boundary is exact, because
+    the first draft of this block said ``armed`` meant "a usable DSN is present"
+    while the predicate behind it checked the SCHEME only (#9548 review P1). A
+    clipped paste (``postgresql://user:pw@``) therefore read ``armed: true``,
+    ``ok: true``, ``status: ok`` for a value that can never reach the pooler —
+    the same false green this block exists to end, one level in. It is fixed at
+    the root rather than by rewording: ``record_dsn()`` now also refuses a value
+    that names no host, so:
+
+      * ``armed``      — the seam ACCEPTED the value: a Postgres scheme AND a
+        host (``record_writer.record_dsn``'s scheme + HOST rules). ``False`` +
+        ``error: null`` is the supported default-off state; ``False`` +
+        ``error`` is a value that was SET and the seam REFUSED — a typo'd
+        scheme, a hostless paste, or a value carrying raw whitespace.
+        ⚠️ STILL not "the record works": a dead host, a paused project and a
+        wrong password all read ``armed: true``. Only a CONNECTION can tell
+        those apart, and this block must never open one — the counters below and
+        the runbook's SQL row count are what say so.
+      * ``dsn``        — the 8-hex fingerprint of the value, or ``None``. Never
+        the value: it names the secret without disclosing it, so an operator
+        can tell the deployed value from a stale one.
+      * ``single_tenant_declared`` — whether this deployment stated that it
+        serves exactly ONE record tenant (#9192). Multi-tenant (``False``) is
+        the fail-closed default the hosted app MUST stay on; it is what makes
+        the process-global org/graph env pair be refused instead of misused.
+      * the three record counters, under the SAME names ``metrics()`` publishes
+        (#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so
+        without them indicator (b) of #9548 (``record_write_failures`` = 0) has
+        no reader at all on the deployment it is claimed about. Each is
+        ``None`` when it could not be READ, never ``{}``: an unread counter and
+        a zero are different facts, and the obvious consumer
+        (``counts.get("write_failed", 0)``) would read the second from the first
+        (#9548 review P2).
+        ⚠️ All three are FAILURE/decline channels — there is no positive
+        ``record_writes`` counter anywhere in ``monitoring.py``, so a zero here
+        does NOT evidence that a row was written. An armed-and-writing
+        deployment and one that has never written both read ``{}``; indicator
+        (b) needs the runbook's SQL row count beside it.
+      * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
+        Kept distinct from ``error`` so the documented pairing
+        (*``error`` non-null ⇔ set-but-unusable value*) stays true.
+      * ``tenancy_error`` — why ``single_tenant_declared`` could not be read, or
+        ``None``. ``False`` means "multi-tenant", which is the SAFE answer, so
+        publishing it for a read that failed would render a broken safety check
+        as a pass — the same fail-open shape as an unread counter, one field
+        over (#9548 review P2).
+
+    ``ok`` is False when the value was SET and refused, when the counters could
+    not be read, and when the tenancy resolution could not be read — a
+    monitoring surface that cannot read its own state must not report healthy,
+    that being fail-open on the monitoring path itself. All three fold into
+    ``status`` (the ``backup_watcher`` rule: off-by-policy stays ``ok``,
+    "wanted but broken" degrades). A refused DSN is exactly the silent-arming
+    defect this exists to end: it is counted ``malformed_dsn`` on every capture
+    and the record stays empty while the operator believes it is armed.
+
+    Never raises and never 5xxes — a health path must always answer.
+    """
+    try:
+        from tortoise import record_writer
+        from tortoise.monitoring import (
+            record_non_journal_skip_counts,
+            record_position_unproven_count,
+            record_write_failure_counts,
+        )
+    except Exception as exc:  # liveness must answer, always
+        # NOTHING could be evaluated — the seam itself did not import. So `error`
+        # here does not carry the pairing's meaning (*a value was SET and the
+        # seam REFUSED it*); it says so in words, because an operator must not
+        # be sent to rotate a secret over an import failure (#9548 review P2).
+        reason = f"the record's arming state could not be read: {exc}"[:200]
+        return {"armed": False, "ok": False, "dsn": None,
+                "single_tenant_declared": False,
+                "record_write_failures": None,
+                "record_non_journal_skips": None,
+                "record_position_unproven": None,
+                "counters_error": reason, "tenancy_error": reason,
+                "error": reason}
+    # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
+    # placed after `"error": None` silently OVERWROTE the record-level error
+    # with a counter error and dropped the three counter keys entirely (#9548
+    # review P2) — an unreachable branch must not ship a contradictory shape.
+    block: dict = {
+        "armed": False,
+        "ok": True,
+        "dsn": None,
+        "single_tenant_declared": False,
+        "record_write_failures": None,
+        "record_non_journal_skips": None,
+        "record_position_unproven": None,
+        "counters_error": None,
+        "tenancy_error": None,
+        "error": None,
+    }
+    try:
+        block["record_write_failures"] = record_write_failure_counts()
+        # The sibling keys, not folded into the counter above: a
+        # `no_durable_journal` decline is the HEALTHY M2 lane and a
+        # `position_unproven` append is healed by a replay, so neither may
+        # move the zero that means "no record row was lost" (#9231/#9307).
+        block["record_non_journal_skips"] = record_non_journal_skip_counts()
+        block["record_position_unproven"] = record_position_unproven_count()
+    except Exception as exc:  # liveness must answer, always
+        block["counters_error"] = str(exc)[:200]
+        block["ok"] = False
+    try:
+        block["single_tenant_declared"] = record_writer.single_tenant_declared()
+    except Exception as exc:
+        # `False` means "multi-tenant", which is the SAFE and expected hosted
+        # answer (#9192) — so swallowing a failed read here publishes a broken
+        # safety check as a PASS, with no marker anywhere in the payload
+        # (#9548 review P2, the same shape fixed for the counters above).
+        block["ok"] = False
+        block["tenancy_error"] = str(exc)[:200]
+    try:
+        dsn = record_writer.record_dsn()
+    except record_writer.RecordWriteError as exc:
+        # SET and refused by the seam: not "off by policy". The error already
+        # carries a fingerprint, never the value.
+        block["ok"] = False
+        block["error"] = str(exc)[:200]
+        return block
+    except Exception as exc:  # liveness must answer, always
+        block["ok"] = False
+        block["error"] = str(exc)[:200]
+        return block
+    if dsn is not None:
+        block["armed"] = True
+        block["dsn"] = record_writer.dsn_fingerprint(dsn)
+    return block
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -5675,7 +5829,8 @@ async def health():
     # ``_health_probe_loop`` refresher, not from the check.
     #
     # The response shape is unchanged for deploy/dashboard consumers:
-    # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
+    # ``{"status", "db"}`` — ``probe``, ``loop_stale_ms``, ``record`` and the
+    # other sub-blocks are additive.
     # It never 5xxes: a dead DB is "degraded", never a killed process.
 
     Watcher check (#2877): a dead/never-started backup watcher is the SAME
@@ -5694,6 +5849,14 @@ async def health():
     ``_change_feed_health``): a single tenant's refused store write is not this
     process's liveness, and restarting the worker over it would destroy the only
     place the acknowledgement can be made.
+
+    Record check (#9548): ``record`` reports whether the Postgres record is
+    ARMED on this deployment, plus the three record counters — the same class as
+    ``change_feed`` (state that lives inside the process, or in an env var only
+    the process can resolve) and the same class as ``backup_watcher`` (a
+    durability seam whose "off" state must be distinguishable from "on"). See
+    ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
+    counter snapshot, or an unread tenancy resolution degrades ``status``.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5708,9 +5871,12 @@ async def health():
     except Exception:
         loop_age_ms = None
     watcher = _backup_watcher_health()
-    return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
+    record = _record_health()
+    return {"status": "ok" if (db.get("ok") and watcher["ok"] and record["ok"])
+            else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
-            "backup_watcher": watcher, "change_feed": _change_feed_health()}
+            "backup_watcher": watcher, "change_feed": _change_feed_health(),
+            "record": record}
 
 
 @app.get("/health/ready")
@@ -18012,6 +18178,27 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
+def _record_holds_turns() -> bool:
+    """#10000: does the RECORD hold captured turns (rather than the graph)?
+
+    The same capability question the capture writer asks, asked from the read
+    side: turns reach the record only through the per-turn `PointAdded` records,
+    which require a configured journal, and the record must be ARMED
+    (`TORTOISE_RECORD_DSN`). When either is absent the graph is what holds them
+    and every read stays exactly as it was before #10000.
+    """
+    from tortoise.record_writer import record_dsn as _dsn
+
+    return _dsn() is not None
+
+
+def _open_record():
+    """The record's bounded connection door (imported lazily: it needs psycopg2)."""
+    from tortoise.record_serve import open_record
+
+    return open_record()
+
+
 @app.get("/v1/sessions/{session_id}")
 async def get_session_detail(session_id: str, org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """Get a single session with its conversation turns and extracted points (#714).
@@ -18106,29 +18293,67 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         ).result_set)
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
-    # Turn points (events) — ordered by turn index embedded in the id
-    turn_rows = await asyncio.to_thread(
-        lambda: proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-            params={"sid": session_id},
-        ).result_set)
+    # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
+    # capture writer asks. With the record armed, the turns are RECORD rows (the
+    # per-turn `PointAdded` records) and the graph holds none, so this read must
+    # come from the record; unarmed, it reads the graph exactly as before, which
+    # makes the pre-arming deployment byte-identical.
     turns = []
-    for tr in turn_rows:
-        tid = tr[0]
-        content = tr[1] or ""
-        created_at = tr[2]
-        # Split "[role] content". The inverse lives in `tortoise.sdk` next to the
-        # writer (`_capture_turn_texts`) so the stored format and this read have
-        # ONE definition — a client comparing a stored turn against a served
-        # detail depends on the two agreeing (#4675).
-        role, body = _capture_turn_role_text(content)
-        turns.append({
-            "id": tid,
-            "role": role,
-            "content": body,
-            "created_at": created_at,
-        })
+    _record_turns = None
+    if _record_holds_turns():
+        try:
+            def _read_record_turns():
+                conn = _open_record()
+                try:
+                    return list(_record_read._turns(
+                        conn, org["org_id"], org["graph_id"], session_id))
+                finally:
+                    conn.close()
+
+            _record_turns = await asyncio.to_thread(_read_record_turns)
+        except Exception:
+            # Fail SOFT to the graph: a record that cannot answer must not blank a
+            # transcript the cache still holds. This fallback is the transitional
+            # half of #10000 and disappears with the graph-side purge step.
+            _record_turns = None
+            _logger.warning(
+                "session %s turns read from the record failed — serving the graph "
+                "copy for this request", session_id, exc_info=True)
+    if _record_turns is not None:
+        for _t in _record_turns:
+            turns.append({
+                "id": _t.turn_id,
+                # The record stores the framed text and the speaker separately, so
+                # the SAME inverse gives the same role/body this endpoint served
+                # from the graph (#4675 parity).
+                "role": (_t.speaker
+                         or _capture_turn_role_text(_t.content)[0]),
+                "content": _t.body,
+                "created_at": _t.created_at,
+            })
+    else:
+        # Turn points (events) — ordered by turn index embedded in the id
+        turn_rows = await asyncio.to_thread(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+                "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+                params={"sid": session_id},
+            ).result_set)
+        for tr in turn_rows:
+            tid = tr[0]
+            content = tr[1] or ""
+            created_at = tr[2]
+            # Split "[role] content". The inverse lives in `tortoise.sdk` next to
+            # the writer (`_capture_turn_texts`) so the stored format and this read
+            # have ONE definition — a client comparing a stored turn against a
+            # served detail depends on the two agreeing (#4675).
+            role, body = _capture_turn_role_text(content)
+            turns.append({
+                "id": tid,
+                "role": role,
+                "content": body,
+                "created_at": created_at,
+            })
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
