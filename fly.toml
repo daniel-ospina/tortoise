@@ -212,9 +212,15 @@ kill_timeout = 30
   # end-customer isolation claim rests on): the app-layer ownership check
   # (`_assert_graph_owned`), the per-graph namespace, and the per-graph key —
   # see docs/authorization-architecture.md §2.1 and #8617.
-  # ⛔ CONFIG, NOT A SECRET: it must NOT enter
-  # .github/scripts/fly-managed-secrets.txt (there is no Fly secret of this name
-  # to shadow, and the drift gate keys on names Fly reports as secrets).
+  # ⛔ CONFIG, NOT A SECRET: it is versioned HERE and declared
+  # `fly-toml-env` in .github/scripts/fly-managed-secrets.txt — the route for a
+  # non-secret `[env]` value. That declaration is load-bearing twice: the drift
+  # gate then FAILS if a Fly secret of this name is ever created (a secret
+  # shadows `[env]`, so this value would stop being what the app reads), and
+  # `check-fly-machine-env.py` — which iterates only `fly-toml-env` names —
+  # asserts the RUNNING machine actually carries it. Undeclared, an out-of-band
+  # revert or a stale machine would silently fall back to `strict` and re-break
+  # every hosted graph mint with nothing turning red (#4568 class).
   TORTOISE_ACL_LAYER = "off"
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
   # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded

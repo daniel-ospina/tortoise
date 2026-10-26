@@ -602,6 +602,16 @@ def _no_ambient_record_arming(monkeypatch):
     for name in ("TORTOISE_RECORD_DSN", "TORTOISE_RECORD_ORG_ID",
                  "TORTOISE_RECORD_GRAPH_ID", "TORTOISE_RECORD_SINGLE_TENANT"):
         monkeypatch.delenv(name, raising=False)
+    # #10093: the per-graph ACL layer's DECLARED posture is the same hazard —
+    # a lane carrying `TORTOISE_ACL_LAYER=off` (the hosted value, and the one a
+    # reader of fly.toml is most likely to export locally) would turn every
+    # self-hosted ACL test into a vacuous `absent` result AND red the docker
+    # lane's probe. Cleared per test; a test that wants a posture sets it with
+    # `monkeypatch.setenv`, which is the only way it can reach a test now.
+    monkeypatch.delenv("TORTOISE_ACL_LAYER", raising=False)
+    from tortoise import acl_graph_users
+    acl_graph_users._unknown_mode_warned = False
+    acl_graph_users._drop_failure_logged = False
     from tortoise import record_writer
     record_writer._close_live_breaker()
     yield

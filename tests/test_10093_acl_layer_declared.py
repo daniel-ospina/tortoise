@@ -183,24 +183,69 @@ class TestCreateAclUserDiscriminatedResult:
         assert cloud.calls == []
 
     def test_denied_is_a_result_not_an_absence(self, cloud):
+        """A REFUSED SETUSER is `denied` — the layer exists and this credential
+        may not provision it (the Cloud shape: MODULE LIST answers, ACL does not)."""
         _layer_mode("best_effort")
         r = acl.create_acl_user(f"g-{uuid.uuid4().hex[:8]}",
                                 f"t-{uuid.uuid4().hex[:8]}")
         assert r["status"] == "denied"
+        assert r["reason_kind"] == "setuser_denied"
         assert "NOPERM" in r["reason"]
         assert cloud.acl_calls()  # it DID try — that is the reported fact
+
+    def test_a_refused_probe_is_absent_and_NOT_fatal_in_strict(
+            self, monkeypatch):
+        """A credential that cannot even run `MODULE LIST` is "not provisionable
+        here", not a failed provisioning attempt — and it must NOT fail a mint
+        under `strict`, which is precisely today's behaviour (#10093 review)."""
+        _layer_mode("strict")
+        client = CloudClient(module_denied=True)
+        monkeypatch.setattr(acl, "_admin_client", lambda: client)
+        r = acl.create_acl_user("g1", "t1")
+        assert r["status"] == "absent"
+        assert r["reason_kind"] == "probe_denied"
+        assert client.acl_calls() == []  # it never reached SETUSER
 
     def test_absent_when_no_server_uri(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         r = acl.create_acl_user(f"g-{uuid.uuid4().hex[:8]}",
                                 f"t-{uuid.uuid4().hex[:8]}")
         assert r["status"] == "absent"
+        assert r["reason_kind"] == "no_uri"
         assert "URI" in r["reason"]
 
-    def test_result_keeps_the_pre_10093_mapping_shape(self, cloud):
-        """Compatibility pin: the credential keys are still readable as a
-        mapping (`r["username"]`), which every existing caller does."""
-        assert isinstance(acl.create_acl_user("g1", "t1"), dict)
+    def test_absent_when_declared_off_carries_its_own_kind(self):
+        """`absent` is not one thing: the report needs to tell "declared off"
+        from "snapped mid-op" (a transient fault) — hence `reason_kind`."""
+        _layer_mode("off")
+        assert acl.create_acl_user("g1", "t1")["reason_kind"] == \
+            "declared_off"
+
+    def test_result_keeps_the_pre_10093_mapping_shape(self, monkeypatch):
+        """Compatibility pin: a PROVISIONED result still carries the credential
+        keys as a mapping (`r["username"]` / `r["password"]` / `r["graph"]`),
+        which every pre-#10093 caller reads."""
+
+        class _Accepts:
+            def __init__(self):
+                self.calls = []
+
+            def execute_command(self, *args, **kwargs):
+                self.calls.append(args)
+                verb = str(args[0]).upper()
+                if verb == "MODULE":
+                    return [[b"name", b"graph"]]
+                if verb == "ACL" and str(args[1]).upper() == "GETUSER":
+                    return None  # no such user yet
+                return True  # SETUSER / SAVE succeed
+
+        monkeypatch.setattr(acl, "_admin_client", lambda: _Accepts())
+        r = acl.create_acl_user("g1", "t1")
+        assert r["status"] == "provisioned"
+        assert r["username"] == "tenant_g1"
+        assert r["graph"] == "org_t1_g1"
+        assert r["password"] and len(r["password"]) == 48
+        assert isinstance(r, dict)
 
 
 # ── Part 2: `tortoise/hosted_api.py` — the mint consumes the result ───────
@@ -283,6 +328,39 @@ class TestHostedMintSurvivesTheDeclaredOffLayer:
         assert cloud.acl_calls()  # it tried — the record is of a real attempt
 
 
+class TestNonStrictPosturesNeverFailTheMint:
+    """The two arms that make `off`/`best_effort` non-failing — a future edit
+    that re-raises in either one would re-break the production lane."""
+
+    def test_off_logs_one_notice_per_process(self, env, caplog):
+        _layer_mode("off")
+        with caplog.at_level(logging.INFO, logger="tortoise.hosted_api"):
+            assert _mint(env, "off-one")["key_plaintext"]
+            assert _mint(env, "off-two")["key_plaintext"]
+        notices = [r for r in caplog.records
+                   if "DECLARED off" in r.getMessage()]
+        assert len(notices) == 1, [r.getMessage() for r in notices]
+
+    def test_best_effort_survives_a_recipe_error(self, env, monkeypatch,
+                                                 caplog):
+        """A REACHABLE server refusing the recipe (the open-`nopass` default,
+        say) is `AclLayerError`, not a denial: under `best_effort` it is logged
+        once and the mint still succeeds — the graph exists and has its key."""
+        from tortoise.acl_graph_users import AclLayerError
+        _layer_mode("best_effort")
+
+        def _boom(graph_id, org_id):
+            raise AclLayerError("default ACL user is open (nopass)")
+
+        monkeypatch.setattr(acl, "create_acl_user", _boom)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            result = _mint(env, "recipe-error-graph")
+        assert result["key_plaintext"].startswith("tk_")
+        assert _graph_rows(env["tid"], "recipe-error-graph")
+        assert any("ACL user create failed" in r.getMessage()
+                   for r in caplog.records)
+
+
 class TestStrictRestoresTodaysRollback:
     """Acceptance 4: `strict` is today's behaviour, exactly — so the setting
     is a seam and not a dead flag."""
@@ -330,9 +408,10 @@ class TestReconcileReportsThreeStates:
                         "ns": f"org_{env['tid']}_{gid}"},
             )
         by_graph = {
-            "g_absent": {"status": "absent",
+            "g_absent": {"status": "absent", "reason_kind": "declared_off",
                          "reason": "TORTOISE_ACL_LAYER=off"},
-            "g_denied": {"status": "denied", "reason": _DENIAL},
+            "g_denied": {"status": "denied", "reason_kind": "setuser_denied",
+                         "reason": _DENIAL},
             "g_ok": {"status": "provisioned", "username": "tenant_g_ok"},
         }
         monkeypatch.setattr(acl, "create_acl_user",
@@ -344,14 +423,49 @@ class TestReconcileReportsThreeStates:
         assert res["provisioned"] == 1
         assert res["absent_by_design"] == 1
         assert res["denied"] == 1
+        assert res["layer_down"] == 0
         assert "acl_absent_skipped" not in res
 
+    def test_a_server_that_vanished_is_not_certified_as_by_design(
+            self, env, monkeypatch):
+        """#10093 review: a TRANSIENT fault must not be reported as a deliberate
+        boundary — the DR verification step reads these counters."""
+        import tortoise.hosted_api as ha
+        from tortoise.sdk import TortoiseSDK
 
-class TestDropIsSkippedWhereTheLayerCannotExist:
-    """A layer that cannot be created cannot need dropping: an `off` lane must
-    not log a refusal on every graph delete."""
+        TortoiseSDK(namespace="registry")._get_registry().query(
+            "CREATE (g:Graph {id:'g_down', org_id:$tid, kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"gid": "g_down", "tid": env["tid"],
+                    "ns": f"org_{env['tid']}_g_down"},
+        )
+        monkeypatch.setattr(
+            acl, "create_acl_user",
+            lambda gid, org: {"status": "absent", "reason_kind": "layer_down",
+                              "reason": "the server went away mid-provisioning"})
+        monkeypatch.setattr(ha, "_backup_config_safe", lambda: {})
 
-    def test_drop_issues_no_acl_command_when_off(self, cloud):
+        res = ha._reconcile_acl_users_sync()["results"][env["tid"]]
+        assert res["layer_down"] == 1
+        assert res["absent_by_design"] == 0
+
+
+class TestDropStillRevokesWhereTheLayerIsDeclaredOff:
+    """#10093 review: a layer that cannot be CREATED now may still hold users
+    created under an earlier posture, so the delete path still attempts the
+    revocation — what the declared-off posture buys is log quiet (one warning
+    per process), never a skipped credential."""
+
+    def test_drop_attempts_the_revocation_once_logged(self, cloud, caplog):
         _layer_mode("off")
-        acl.drop_acl_user("g1")
-        assert cloud.calls == []
+        with caplog.at_level(logging.DEBUG, logger="tortoise.acl"):
+            acl.drop_acl_user("g1")
+            acl.drop_acl_user("g2")
+            acl.drop_acl_user("g3")
+        # Every delete issues the command (best-effort, never 500s) …
+        assert len([c for c in cloud.calls if str(c[0]).upper() == "ACL"]) == 3
+        # … but the refusal is warned ONCE per process, not once per delete.
+        warnings = [r for r in caplog.records
+                    if r.levelno == logging.WARNING
+                    and "ACL DELUSER failed" in r.getMessage()]
+        assert len(warnings) == 1

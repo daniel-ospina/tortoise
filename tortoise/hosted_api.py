@@ -37704,6 +37704,7 @@ def _reconcile_acl_users_sync() -> dict:
     from typing import Any as _Any
 
     from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
+        ABSENT_LAYER_DOWN,
         ACL_USER_ABSENT,
         ACL_USER_DENIED,
         create_acl_user,
@@ -37716,7 +37717,7 @@ def _reconcile_acl_users_sync() -> dict:
         except Exception as e:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
-        ok = absent = denied = defaults = 0
+        ok = absent = denied = down = defaults = 0
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37744,7 +37745,14 @@ def _reconcile_acl_users_sync() -> dict:
                 elif status == ACL_USER_ABSENT or r is None:
                     # `r is None` = a pre-#10093 stub/older module: an absent
                     # layer, reported as such (never as success).
-                    absent += 1
+                    # A server that VANISHED mid-op is not "by design" — it is a
+                    # transient fault, and counting it here would certify a
+                    # broken layer as a deliberate boundary (#10093 review).
+                    if isinstance(r, dict) and \
+                            r.get("reason_kind") == ABSENT_LAYER_DOWN:
+                        down += 1
+                    else:
+                        absent += 1
                 else:
                     ok += 1
             except Exception as e:
@@ -37756,6 +37764,7 @@ def _reconcile_acl_users_sync() -> dict:
         results[org_id] = {"status": "reconciled", "provisioned": ok,
                             "absent_by_design": absent,
                             "denied": denied,
+                            "layer_down": down,
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "organizations": len(results), "results": results}

@@ -64,6 +64,10 @@ _ACL_LAYER_ENV = "TORTOISE_ACL_LAYER"
 _ACL_LAYER_MODES = ("off", "best_effort", "strict")
 _ACL_LAYER_DEFAULT = "strict"
 _unknown_mode_warned = False
+# A refused DELUSER is bounded to ONE warning per process (#10093): a lane that
+# cannot run ACL refuses on every graph delete, and a per-delete warning is the
+# log flood that reads like a live defect.
+_drop_failure_logged = False
 
 # The tri-state the graph-module probe answers (#10093) — the three reasons the
 # ACL layer can be missing, which used to collapse into `False`:
@@ -78,6 +82,16 @@ ACL_LAYER_DENIED = "denied"
 ACL_USER_PROVISIONED = "provisioned"
 ACL_USER_ABSENT = "absent"
 ACL_USER_DENIED = "denied"
+
+# Why an `absent` result is absent — a machine-readable ``reason_kind`` so a
+# REPORT can distinguish "this deployment does not provision the layer" from
+# "the server vanished mid-op" (a transient fault that must not be certified as
+# a deliberate boundary — #10093 review). ``denied`` carries ``setuser_denied``.
+ABSENT_DECLARED_OFF = "declared_off"
+ABSENT_NO_URI = "no_uri"
+ABSENT_NO_GRAPH_MODULE = "no_graph_module"
+ABSENT_PROBE_DENIED = "probe_denied"
+ABSENT_LAYER_DOWN = "layer_down"
 
 
 def layer_provisionable() -> str:
@@ -487,6 +501,7 @@ def create_acl_user(graph_id: str, org_id: str) -> AclUserResult:
     if layer_provisionable() == "off":
         return AclUserResult(
             status=ACL_USER_ABSENT,
+            reason_kind=ABSENT_DECLARED_OFF,
             reason=("the per-graph ACL layer is declared unavailable on this "
                     f"deployment ({_ACL_LAYER_ENV}=off) — no credential we "
                     "may hold can provision it here (#10093/#8617)"),
@@ -495,19 +510,30 @@ def create_acl_user(graph_id: str, org_id: str) -> AclUserResult:
     if client is None:
         return AclUserResult(
             status=ACL_USER_ABSENT,
+            reason_kind=ABSENT_NO_URI,
             reason=("no server URI (embedded redislite) or an unsupported "
                     "URI scheme — there is no per-graph ACL layer here"),
         )
     presence = _falkordb_present(client)
     if presence == ACL_LAYER_DENIED:
+        # A REFUSED probe is "not provisionable here with this credential", not
+        # a failed provisioning attempt: we cannot even see whether the module
+        # is there. Deliberately NOT `denied` (= a SETUSER refusal) and
+        # deliberately not fatal — pre-#10093 this was the silent-skip path, and
+        # the declared-posture contract (STRICT = today's behaviour exactly)
+        # keeps it non-fatal while the state is now RECORDED instead of
+        # inferred (``reason_kind``) — #10093 review.
         return AclUserResult(
-            status=ACL_USER_DENIED,
-            reason=("the server refused the module probe (NOPERM) — the "
-                    "credential may not inspect or provision the ACL layer"),
+            status=ACL_USER_ABSENT,
+            reason_kind=ABSENT_PROBE_DENIED,
+            reason=("the server refused the module probe (NOPERM) — this "
+                    "credential may not inspect the ACL layer, so it is not "
+                    "provisionable here"),
         )
     if presence != ACL_LAYER_PRESENT:
         return AclUserResult(
             status=ACL_USER_ABSENT,
+            reason_kind=ABSENT_NO_GRAPH_MODULE,
             reason=("the server has no falkordb graph module (bare redis) — "
                     "a per-graph ACL user would protect nothing"),
         )
@@ -526,12 +552,14 @@ def create_acl_user(graph_id: str, org_id: str) -> AclUserResult:
         try:
             ok = _setuser(client, username, graph_name, password)
         except AclLayerDenied as e:
-            return AclUserResult(status=ACL_USER_DENIED, username=username,
-                                 graph=graph_name, reason=str(e))
+            return AclUserResult(status=ACL_USER_DENIED,
+                                 reason_kind="setuser_denied",
+                                 username=username, graph=graph_name,
+                                 reason=str(e))
         if not ok:
             return AclUserResult(  # layer down mid-op — fail-soft
-                status=ACL_USER_ABSENT, username=username,
-                graph=graph_name,
+                status=ACL_USER_ABSENT, reason_kind=ABSENT_LAYER_DOWN,
+                username=username, graph=graph_name,
                 reason="the server went away mid-provisioning (connection "
                        "failure) — the layer is down, not refused")
         _acl_save(client)
@@ -545,11 +573,14 @@ def create_acl_user(graph_id: str, org_id: str) -> AclUserResult:
     try:
         ok = _setuser(client, username, graph_name, password)
     except AclLayerDenied as e:
-        return AclUserResult(status=ACL_USER_DENIED, username=username,
-                             graph=graph_name, reason=str(e))
+        return AclUserResult(status=ACL_USER_DENIED,
+                             reason_kind="setuser_denied",
+                             username=username, graph=graph_name,
+                             reason=str(e))
     if not ok:
         return AclUserResult(  # layer down mid-op — fail-soft
-            status=ACL_USER_ABSENT, username=username, graph=graph_name,
+            status=ACL_USER_ABSENT, reason_kind=ABSENT_LAYER_DOWN,
+            username=username, graph=graph_name,
             reason="the server went away mid-provisioning (connection "
                    "failure) — the layer is down, not refused")
     _registry_store_credential(org_id, graph_id, username, password)
@@ -601,12 +632,13 @@ def drop_acl_user(graph_id: str) -> None:
     tombstones the row/node before this fires). Best-effort: a committed
     delete never 500s on a drop failure.
 
-    #10093: when the deployment DECLARES the layer unavailable, no command is
-    issued at all — a layer that cannot be created cannot need dropping, and a
-    refusal logged on every delete is noise that reads like a live defect.
+    #10093 review: the revocation is STILL attempted where the layer is
+    declared off. "Cannot be created here" is a statement about provisioning
+    now, not about users created under an earlier posture — and leaving a live
+    `tenant_<gid>` server credential behind on delete is worse than one refused
+    command. What the refused case costs is therefore bounded at ONE warning per
+    process (the per-delete warning was the real noise), never silence.
     """
-    if layer_provisionable() == "off":
-        return
     client = _admin_client()
     if client is None:
         return
@@ -615,8 +647,14 @@ def drop_acl_user(graph_id: str) -> None:
         client.execute_command("ACL", "DELUSER", username)
         _acl_save(client)
     except Exception as e:
-        logger.warning("ACL DELUSER failed for %s (best-effort on delete): %s",
-                       username, e)
+        global _drop_failure_logged
+        if not _drop_failure_logged:
+            _drop_failure_logged = True
+            logger.warning(
+                "ACL DELUSER failed for %s (best-effort on delete; logged "
+                "once per process): %s", username, e)
+        else:
+            logger.debug("ACL DELUSER failed again for %s: %s", username, e)
 
 
 def acl_user_config(graph_id: str) -> dict | None:

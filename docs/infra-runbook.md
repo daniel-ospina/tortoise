@@ -236,36 +236,49 @@ downtime so far.
 
    ⛔ **What the app needs this credential for (re-measured 2026-10-26, #10093).**
    The URI becomes the app's `TORTOISE_DB_URI` (`entrypoint.sh` builds it from
-   `FALKORDB_CLOUD_URI`) and it is the **only** connection the app makes: graph
-   reads/writes, i.e. `_GRAPH_COMMANDS`
-   (`+GRAPH.QUERY +GRAPH.RO_QUERY +PING`) and **not `+ACL`, and not
-   `+MODULE|LIST`**: the per-graph ACL layer is **declared off on this
-   deployment** (`TORTOISE_ACL_LAYER = "off"` in `fly.toml`) because **no
-   credential the app may hold can provision it on FalkorDB Cloud** — no preset
-   grants `+ACL` and `ACL` is not in the vendor's allowed-commands list
-   (owner decision recorded on **#8617**, implemented by **#10093**). A `Write`
-   preset remains insufficient for a different reason: it is not the ACL
-   requirement any more, it is the graph-command set.
+   `FALKORDB_CLOUD_URI`) and it is the **only** connection the app makes. It
+   needs the **whole data-plane command set the app issues** — `GRAPH.QUERY`,
+   `GRAPH.RO_QUERY`, `PING`, plus **`GRAPH.LIST`** (`db.list_graphs()` — the
+   drill-graph GC and listing reads, `hosted_api.py` `_run_drill_graph_gc`) and
+   **`GRAPH.DELETE`** (`select_graph(name).delete()` — graph delete and the
+   purge sweep; `_drop_org_graph_impl`). ⚠️ Do **not** derive this requirement
+   from `_GRAPH_COMMANDS` in `tortoise/acl_graph_users.py`: that constant is the
+   **per-graph TENANT user's** allowlist (deliberately minimal — `GRAPH.LIST` /
+   `GRAPH.DELETE` denied, #2652), not the app credential's. Do not assume a
+   preset is enough — check the candidate's command list against the five
+   commands above (the vendor's preset table is the source; `Write` is not
+   sufficient by default, and `Admin` adds `+MODULE|LIST` on top).
+
+   What the credential does **not** need, and cannot be granted, is `+ACL`
+   (nor `+MODULE|LIST` for ACL purposes): the per-graph ACL layer is **declared
+   off on this deployment** (`TORTOISE_ACL_LAYER = "off"` in `fly.toml`) because
+   **no credential the app may hold can provision it on FalkorDB Cloud** — no
+   preset grants `+ACL` and `ACL` is not in the vendor's allowed-commands list
+   (owner decision recorded on **#8617**, implemented by **#10093**).
 
    What that means when you rotate:
 
-   - **Managed Cloud (this runbook):** pick a user with the graph commands. Do
-     not hunt for `+ACL` — it cannot be granted, and asking for it is what used
-     to turn a rotation into an outage.
+   - **Managed Cloud (this runbook):** pick a user with the data-plane command
+     set above. Do not hunt for `+ACL` — it cannot be granted, and asking for it
+     is what used to turn a rotation into an outage.
    - **Self-hosted / docker (`TORTOISE_ACL_LAYER` unset ⇒ `strict`):** nothing
      about the recipe changes — `tortoise/acl_graph_users.py` is the
-     requirement's home, and the layer still needs `_GRAPH_COMMANDS` **plus
-     `+MODULE|LIST` and `+ACL`**, plus a password-secured `default` user.
+     requirement's home, and the per-graph layer still needs `_GRAPH_COMMANDS`
+     **plus `+MODULE|LIST` and `+ACL`** on the **app** credential, plus a
+     password-secured `default` user. A credential that cannot even run
+     `MODULE LIST` is not fatal there: the layer is reported `absent` with
+     `reason_kind: probe_denied` and the mint still succeeds (that is the
+     pre-#10093 behaviour, kept under `strict`).
 
    Verify the state — not the logs' absence — after a rotation or a deploy:
-   `POST /v1/internal/backups/acl-reconcile` must report
-   `absent_by_design` for every custom graph on the Cloud lane (with
-   `errors: []`), **never** `denied` and never a silent `0`. `absent_by_design`
-   means "this deployment does not provision the layer" — a fact, recorded;
-   `denied` means the credential was refused, which on this lane is a
-   misconfiguration to escalate. The app also logs one
-   `per-graph ACL layer is DECLARED off` line per process at the first graph
-   mint.
+   `POST /v1/internal/backups/acl-reconcile` must report `absent_by_design`
+   equal to the number of custom graphs on the Cloud lane, with `denied: 0`,
+   `layer_down: 0` and `errors: []`. `absent_by_design` means "this deployment
+   does not provision the layer" — a fact, recorded; `denied` means the
+   credential was refused; `layer_down` means the server vanished mid-op (a
+   transient fault, never a boundary) — either of the last two is something to
+   escalate. The app also logs one `per-graph ACL layer is DECLARED off` line
+   per process at the first graph mint.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.
