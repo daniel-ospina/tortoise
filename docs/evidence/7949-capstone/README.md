@@ -139,7 +139,10 @@ it), and `tortoise/extractor_v2.py:8288-8292` (the **VET** surface, as the S2.2 
 it). **They no longer resolve on `main`** at this head.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-`8861-8867` here, not in the log. That is deliberate: a scored log is a measurement record and the bundle's rule is
+the `result["classify_later"]` block at `8873-8879` here, not in the log. (The SYMBOL is what makes
+this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
+`_BUNDLE_HISTORICAL`, deliberately — so a reader re-deriving it must land on the block the sentence
+names, not on the number alone.) That is deliberate: a scored log is a measurement record and the bundle's rule is
 that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a
 number in place. Read this README (and the probes it pins) for CURRENT cites; read the log for the
 numbers measured at `e0fc940b5`. A re-run under a new `<new-head8>` is the supersede path.

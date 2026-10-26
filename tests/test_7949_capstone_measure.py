@@ -788,8 +788,8 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     assert "_run_vet_pass" in vet_cause, vet_cause
     # … and NOT the classify pass's flag or gates
     for classify_cite in ("classify_later", "if classify_later", ":8473",
-                          ":8498", ":8520", ":8604", ":8607", ":8729",
-                          ":8739", ":8620", ":8750"):
+                          ":8498", ":8520", ":8523", ":8604", ":8607",
+                          ":8729", ":8739", ":8620", ":8750", ":8393"):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
@@ -801,7 +801,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     assert ":8729" in classify_cause, classify_cause
     # … and NOT the VET pass's flag, pass function or gates
     for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8504", ":8524", ":8592", ":8714", ":8390"):
+                     ":8504", ":8524", ":8592", ":8714", ":8390", ":8393"):
         assert vet_cite not in classify_cause, (vet_cite, classify_cause)
 
     # Different text, so neither cause can stand in for the other: a version
@@ -1148,9 +1148,11 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 #
 # ⚠️ Coverage is every cite that NAMES ITS FILE (`sdk.py`, `edges.py`,
 # `extractor_v2.py` — the three sources the bundle prints numbers for), in all
-# FOUR documents a reader is sent into: the README, both probes, and the
-# `docs/00_index.md` row that is the entry point to this bundle (only THAT row —
-# the index routes 142 table rows, and another epic's
+# FIVE documents a reader is sent into: the README, both probes, the
+# `docs/00_index.md` row that is the entry point to this bundle, and the
+# extractor's shared design doc `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
+# (two row-scoped documents, not whole: the index routes 142 table rows and the
+# architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
 # continuation (the docs write `` `extractor_v2.py:8454` and `:8474` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
@@ -1470,12 +1472,13 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     the numbers here name their base.
     The `extractor_v2.py` cites are correct at this head, so those rules cannot red
     on `main`; they are the tripwire for the NEXT insertion above the live cites
-    (`extractor_v2.py:8346` the entry point, `:8423` the classify flag, `:8454`
-    the vet flag). They bite: with the README's `` `extractor_v2.py:8454` `` moved
+    (the entry point, the classify flag, the vet flag — named by SYMBOL, never by
+    a number: a number quoted here would be the very drift this paragraph is
+    about, and it was, twice). They bite: with the README's vet-flag cite moved
     to `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'continue',
-    which carries none of ['vet_enabled = (']` (measured at this head; an earlier
-    round quoted an older read of `7913`, which the extractor's own growth had
-    since moved).
+    which carries none of ['vet_enabled = (']` (measured at a head on which 7913
+    was that comment; an earlier round quoted an older read of it, which the
+    extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
     `sdk.py:13217` to `12401` reds it, and before this leg nothing read that row.
     """
