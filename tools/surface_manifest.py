@@ -219,7 +219,7 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 MANIFEST_HEADER = (
     "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.\n"
     "#\n"
-    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today (149)\n"
+    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today\n"
     "# because the required `surface-guard` job compares the live class against them and is run\n"
     "# from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The\n"
     "# APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row\n"

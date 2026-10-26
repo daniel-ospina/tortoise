@@ -749,6 +749,7 @@ _EXPECTED_TOOL_SITES = {
     "graph-scripts/pre_migration_snapshot.py": 2,  # two pre-existing bounded sites
     "graph-scripts/smoke_test.py": 1,            # the server-mode liveness client
     "tools/ask_shape_rate.py": 1,                # the scratch-graph GRAPH.DELETE
+    "tools/backfill_graph_turns.py": 1,          # #10017's read-only pre-delete census
     "tools/edge_census.py": 2,                   # GRAPH.LIST + the measurement handle
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound

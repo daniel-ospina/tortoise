@@ -30,7 +30,20 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
+INVENTORY_DOC = ROOT / "docs" / "product" / "canonical-sdk-methods.md"
 SDK_SRC = ROOT / "tortoise" / "sdk.py"
+
+#: The floor of the RECORDED universe: every name this phase has accounted for, once.
+#:
+#: 155 = the 149-method surface the #4282 phase-2 ledger started from (the "149 today"
+#: in `beta-sdk-surface.md`) + the 6 names retired before it (they left at an earlier
+#: phase, so they are not part of that 149). Each name is counted exactly once: it is
+#: public today, or it is in `RETIRED_SDK_METHODS`, or it is in `REMOVED_SDK_METHODS`.
+#:
+#: It is a FLOOR, not an equality, on purpose: a name ADDS to the surface legitimately
+#: (through the approved path and its own gate) and must not red this pin, while a name
+#: that LEAVES without landing in one of the two records drops the total by one.
+ACCOUNTED_SURFACE_FLOOR = 155
 
 #: The owner-approved target table — `| 30 | `update_memory_graph` | … |`. Row
 #: number → target name. Read from the doc, never typed: a rename's replacement must be
@@ -205,6 +218,70 @@ def test_each_retired_name_left_the_public_surface() -> None:
     assert not still_live, (
         f"declared retired but still defined on `TortoiseSDK`: {still_live}. The map is a "
         "record of what LEFT the surface; a name still present must not be in it."
+    )
+
+
+def test_every_removal_is_recorded_and_documented() -> None:
+    """A name that left with NO replacement must still be ACCOUNTED FOR.
+
+    This is the complement the map never had (#4282 phase 2.3):
+    `test_each_retired_name_left_the_public_surface` pins map → surface, so it catches a
+    record for a LIVE name. Nothing pinned surface → record, so `graph_count` and
+    `org_list` left the surface with no entry anywhere and the departure was silent.
+
+    Three directions here: the record may not name a live method, the two records may
+    not overlap (a name is renamed OR removed, never both), and each removed name must
+    also be accounted for in the non-owner inventory — so a junk entry cannot be used
+    to satisfy the count pin below.
+
+    Non-vacuity: on the pre-#4282-2.3 tree this test fails twice over — `REMOVED_SDK_METHODS`
+    does not exist, and `graph_count` / `org_list` are still public methods.
+    """
+    from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS, retirement_hint
+
+    public = _public_methods()
+    still_live = sorted(set(REMOVED_SDK_METHODS) & public)
+    assert not still_live, (
+        f"declared removed but still defined on `TortoiseSDK`: {still_live}. The record "
+        "is of what LEFT the surface; a name still present must not be in it."
+    )
+    both = sorted(set(REMOVED_SDK_METHODS) & set(RETIRED_SDK_METHODS))
+    assert not both, (
+        f"a name is recorded as BOTH renamed and removed: {both}. A departure has one "
+        "shape — a replacement to name, or none."
+    )
+    inventory = INVENTORY_DOC.read_text(encoding="utf-8")
+    unaccounted = sorted(n for n in REMOVED_SDK_METHODS if f"`{n}`" not in inventory)
+    assert not unaccounted, (
+        f"removed from the surface with no trace in {INVENTORY_DOC.name}: {unaccounted}. "
+        "A removal with no replacement owes at least a RECORD; the inventory is the "
+        "non-owner document a reader reaches for what exists."
+    )
+    hinted = sorted(n for n in REMOVED_SDK_METHODS if retirement_hint(n) is not None)
+    assert not hinted, (
+        f"a REMOVED name emits a retirement hint: {hinted}. These have no approved "
+        "replacement, so a hint would name a destination the owner never approved."
+    )
+
+
+def test_the_accounted_surface_never_shrinks() -> None:
+    """Every name this phase has accounted for stays accounted for, exactly once.
+
+    The direction that matters is the decrement: a method deleted from `TortoiseSDK`
+    without a record drops this total by one, which is the silent departure the two
+    records exist to prevent. Surface GROWTH cannot red this pin (it is a floor), so it
+    does not duplicate the approved-addition gate.
+    """
+    from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
+
+    accounted = (
+        len(_public_methods()) + len(RETIRED_SDK_METHODS) + len(REMOVED_SDK_METHODS)
+    )
+    assert accounted >= ACCOUNTED_SURFACE_FLOOR, (
+        f"the recorded surface has SHRUNK to {accounted} (floor "
+        f"{ACCOUNTED_SURFACE_FLOOR}): a public method disappeared without landing in "
+        "`RETIRED_SDK_METHODS` (a rename — it must name its replacement) or "
+        "`REMOVED_SDK_METHODS` (internalised or deleted — it must say why)."
     )
 
 
