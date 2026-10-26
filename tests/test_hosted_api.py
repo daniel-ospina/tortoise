@@ -1504,6 +1504,136 @@ class TestPointsCreate:
         assert calls[0][1] == [r.json()["id"]], \
             "the created point must be the enqueued dirty root"
 
+    def test_create_point_carries_the_org_wide_default_tenant_to_the_dream(
+            self, client, monkeypatch):
+        """#10025 review F2: an ORG-WIDE key's dream records are NAMED, not refused.
+
+        The dream pass opens its own SDK, so the enqueueing request has to carry
+        the record tenant across the queue. The call site gated that carry on
+        `graph_namespace`, i.e. on `org["graph_id"]` — and an org-wide API KEY
+        (the shape the issue measured on all 128 production keys) has none, so
+        nothing was carried and every `ConfidenceChanged` the pass emitted was
+        refused `no_tenant`, silently, while two docstrings claimed otherwise.
+
+        Route level on purpose: the resolver's own shape table is pinned in
+        `test_10025_graph_identity.py`; this pins the WIRE — that the point-write
+        handler hands the resolved tenant to `_enqueue_dream` for the org-wide
+        credential instead of `None`. `_resolve_record_tenant` is stubbed so the
+        assertion is about the call site, not about whether this host has
+        Supabase configured.
+
+        ⛔ This test must leave the PROCESS-GLOBAL dream state exactly as it
+        found it (`_DREAM_QUEUES` / `_DREAM_RECORD_TENANTS` / `_DREAM_TASKS`) and
+        must not start a drain. Both were #10027 CI reds at `96f6d91a1` (job
+        121608127165):
+
+        * the first shape POPPED `_DREAM_TASKS[org]` and cancelled it. That dict
+          is shared by every test in the session, so the entry is usually a
+          PREVIOUS test's task whose loop is already closed — `Task.cancel()`
+          schedules a callback on that loop and raises `RuntimeError: Event loop
+          is closed`, out of this test's `finally`.
+        * calling the real `_enqueue_dream` with real roots SPAWNS
+          `_dream_worker` on this test's loop; the worker wakes after the
+          fixture has closed that loop and popped `TORTOISE_DB_PATH`, so its
+          `_make_sdk` re-mints the keepalive anchor for a path no later test
+          expects (#1950 class) and the session reads a stale, empty graph.
+
+        So the spy calls the real `_enqueue_dream` with `dirty_roots=[]` — its
+        documented no-op early return — which still proves the real signature
+        accepts what the route passes, while enqueuing nothing. The carry
+        itself (the queue key and `_DREAM_RECORD_TENANTS`) is pinned by
+        `test_9078_record_written_by_production_path.py::test_the_dream_drain_
+        carries_the_enqueueing_requests_tenant`, which runs on a loop of its own
+        and cancels its own tasks.
+        """
+        import tortoise.hosted_api as ha
+
+        row = "g_0123456789abcdef"
+        monkeypatch.setattr(ha, "_resolve_record_tenant",
+                            lambda org: (org["org_id"], row))
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, default_graph_id=row)
+
+        # What the SESSION already had, so this test can put it back: these are
+        # process globals shared with every other test in the run.
+        _preexisting = (dict(ha._DREAM_TASKS), dict(ha._DREAM_RECORD_TENANTS),
+                        dict(ha._DREAM_QUEUES))
+
+        # A PEER test's abandoned drain, in the exact shape CI had it: a task
+        # whose event loop is already CLOSED (a previous test's TestClient
+        # portal, torn down with the task still pending). `cancel()` on such a
+        # task schedules a callback on that dead loop and raises — the measured
+        # #10027 red, `RuntimeError: Event loop is closed`. Modelled rather than
+        # built from a real dead loop so the pin adds no `Task was destroyed but
+        # it is pending` / `coroutine was never awaited` noise of its own.
+        class _TaskOnAClosedLoop:
+            def cancel(self) -> None:
+                raise RuntimeError("Event loop is closed")
+
+            def done(self) -> bool:
+                return False
+
+            def cancelled(self) -> bool:
+                return False
+
+        stale_task = _TaskOnAClosedLoop()
+        ha._DREAM_TASKS[TEST_ORG_ID] = stale_task
+
+        before = (dict(ha._DREAM_TASKS), dict(ha._DREAM_RECORD_TENANTS),
+                  dict(ha._DREAM_QUEUES))
+        seen: list[dict] = []
+        real_enqueue = ha._enqueue_dream
+
+        def _spy(org_id, dirty_roots, **kwargs):
+            seen.append(kwargs)
+            # No-op path on purpose (see the docstring): the real function,
+            # the real kwargs, and NO drain spawned for this test to leak.
+            return real_enqueue(org_id, [], **kwargs)
+
+        monkeypatch.setattr(ha, "_enqueue_dream", _spy)
+        try:
+            r = client.post("/v1/points",
+                            json={"content": "org-wide dream tenant"})
+            assert r.status_code == 200, r.text
+
+            after = (dict(ha._DREAM_TASKS), dict(ha._DREAM_RECORD_TENANTS),
+                     dict(ha._DREAM_QUEUES))
+            assert after == before, (
+                "the point-write route left PROCESS-GLOBAL dream state behind; "
+                "a later test in this session then drains it (or cancels a task "
+                "on a closed loop) — see #10027 CI reds: "
+                f"tasks/tenants/queues {before} -> {after}")
+            assert ha._DREAM_TASKS.get(TEST_ORG_ID) is stale_task, (
+                "a peer test's queued drain was dropped or replaced — "
+                f"{ha._DREAM_TASKS.get(TEST_ORG_ID)!r}")
+            assert not stale_task.cancelled(), (
+                "this test cancelled a task it did not create; on a closed "
+                "loop that raises `RuntimeError: Event loop is closed` "
+                "(#10027 CI red)")
+        finally:
+            # Put the session's own state back (in place — these mappings are
+            # module globals other tests hold references to).
+            # `strict=True`: `_preexisting` is built from the same three
+            # mappings, so a length mismatch is a bug in THIS test's snapshot,
+            # not a state both sides are allowed to disagree on — truncation
+            # here would silently leave one global unrestored (B905).
+            for _mapping, _snapshot in zip(
+                    (ha._DREAM_TASKS, ha._DREAM_RECORD_TENANTS,
+                     ha._DREAM_QUEUES), _preexisting, strict=True):
+                _mapping.clear()
+                _mapping.update(_snapshot)
+
+        assert len(seen) == 1, seen
+        # The org-wide key rides the ORG-KEYED drain, whose SDK
+        # (`_open_sdk` → `_make_sdk(namespace=org_id)`) opens the same graph
+        # `_data_sdk` opened for this request — so carrying the default tenant
+        # names the graph the pass actually writes.
+        assert seen[0].get("graph_namespace") is None, seen[0]
+        assert seen[0].get("record_tenant") == (TEST_ORG_ID, row), (
+            "an org-wide API key's dream pass is left unnamed, so every record "
+            "it emits is refused `no_tenant` on the default graph #10025 gave "
+            f"an id: {seen[0]}")
+
     def test_create_point_with_explicit_kind(self, client):
         r = client.post(
             "/v1/points", json={"content": "a decision", "kind": "decision"}
@@ -2909,11 +3039,37 @@ class TestListApiKeysSupabase:
 class TestDreamEndpoint:
     """POST /v1/dream — trigger EP stabilization (#85)."""
 
-    def test_dream_incremental(self, client):
+    def test_dream_incremental(self, client, monkeypatch):
         # #5049: `POST /v1/dream` is not exempt from the transport wait bound.
         # A 504 refusal is a non-answer (the handler may still complete), so the
         # verdict is INCONCLUSIVE — this was one of the four reds #8122 measured
         # as `assert 504 == 200` at a full-file run.
+        #
+        # ⛔ #10027 CI red: this used to dream an EMPTY per-test graph, which is
+        # not the incremental ("local") shape at all. With no dirty root to
+        # hydrate, the I1 router resolves `full`, and a graph with no anchors
+        # short-circuits to the empty-scan result (`{batches: 0,
+        # converged_all: True, scanned_count: 0}`) — no `converged`, no
+        # `iterations`. It only ever passed by reading a DIRTY graph left in a
+        # reused embedded anchor by an earlier test in the file, so the
+        # assertion measured ambient process state rather than this route's
+        # incremental contract (job 121608127165 measured the empty-scan body
+        # here). Seed the dirty root the mode router needs, on THIS test's
+        # graph: `credibility` is explicit because the fail-closed calibration
+        # gate (#344/#1157) demands an authored baseline before an EP surface
+        # runs. The write-triggered drain is stubbed out so nothing clears the
+        # flag between the write and the pass (its `_dream_worker` is a
+        # different subject, and starting one here leaks a task past this
+        # test's loop).
+        import tortoise.hosted_api as ha
+
+        async def _no_drain(org_id, key=None):  # pragma: no cover - never runs
+            return None
+
+        monkeypatch.setattr(ha, "_dream_worker", _no_drain)
+        w = client.post("/v1/points", json={"content": "incremental dream seed",
+                                            "credibility": "gold"})
+        assert w.status_code == 200, w.text
         r = require_answered(client.post("/v1/dream"),
                              what="POST /v1/dream answered")
         assert r.status_code == 200, r.text
@@ -7562,6 +7718,78 @@ class TestProvisioningService:
         finally:
             gen.close()
 
+    def test_mint_succeeds_when_the_acl_layer_is_declared_off(self, tmp_path,
+                                                              monkeypatch):
+        """#8617 rulings 1/3: on a lane that DECLARES the per-graph ACL layer
+        unavailable (`TORTOISE_ACL_LAYER=off`, which `fly.toml` sets for the
+        hosted app), a graph mint is NOT rolled back for the credential we are
+        not allowed to use.
+
+        The refusal is simulated, not discovered: on FalkorDB Cloud every mint
+        reaches a credential that lacks `+ACL` (measured on production,
+        e1e3e80 — see #8617), and this test must not depend on a live Cloud
+        call. The SAME refusal is then replayed with the layer left at its
+        default `strict`, which is the self-hosted posture: there the mint still
+        rolls back and 503s (no graph without its ACL user), so this test also
+        pins that the change did not disarm the self-hosted lane.
+
+        Mutation behind this test: drop `_acl_layer_declared_strict()` from the
+        hook's strict arm — the declared-off create below 503s with the graph
+        rolled back, i.e. the exact production defect this issue is.
+        """
+        import tortoise.hosted_api as ha_mod
+        from tortoise.acl_graph_users import AclLayerError
+
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            contacted: list[str] = []
+
+            def _cloud_refusal(graph_id, org_id):
+                contacted.append(graph_id)
+                raise AclLayerError(
+                    "ACL SETUSER refused for graph org_x (user=tenant_x): "
+                    "NOPERM this user has no permissions to run the "
+                    "'acl|setuser' command")
+
+            monkeypatch.setattr("tortoise.acl_graph_users.create_acl_user",
+                                _cloud_refusal)
+            monkeypatch.setattr(ha_mod, "_ACL_ABSENCE_ANNOUNCED", set())
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            headers = {"Authorization": f"Bearer {key['api_key']}"}
+
+            # (a) DECLARED OFF — the refusal is recorded and the mint proceeds.
+            monkeypatch.setenv("TORTOISE_ACL_LAYER", "off")
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
+                        json={"name": "acl-off"}, headers=headers)
+            assert r.status_code == 201, r.text
+            gid = r.json()["graph"]["id"]
+            assert gid in contacted, (
+                "the ACL create seam never ran — this would pass for the "
+                "wrong reason (a dormant hook, not a declared-off layer)")
+            # The graph is NOT rolled back (ruling 3) and its key is usable.
+            rows = sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.status",
+                params={"gid": gid, "tid": tid}).result_set
+            assert rows and rows[0][0] != "deleted", rows
+            assert r.json()["key_plaintext"].startswith("tk_")
+
+            # (b) The same refusal with the default (strict) posture is still a
+            # rollback: self-hosted behaviour is unchanged (ruling 2).
+            monkeypatch.delenv("TORTOISE_ACL_LAYER", raising=False)
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
+                        json={"name": "acl-strict"}, headers=headers)
+            assert r.status_code == 503, r.text
+            assert "TORTOISE_ACL_LAYER=off" in r.json()["detail"], r.json()
+            rolled = sdk._get_registry().query(
+                "MATCH (g:Graph {org_id:$tid}) RETURN g.name",
+                params={"tid": tid}).result_set
+            assert "acl-strict" not in {row[0] for row in rolled}, \
+                "the strict lane must still roll back — no graph without its " \
+                "ACL user (self-hosted behaviour is unchanged)"
+        finally:
+            gen.close()
+
     def test_child_policy_strips_escalation_scopes(self, tmp_path):
         """W1: graphs:create requested on the MINTED key is stripped (child
         policy) — the minted key can never escalate."""
@@ -8094,8 +8322,10 @@ class TestGraphLifecycle:
         (graph_id = the default node's real gid — minted pre-#2112 guard
         or via a raw control-plane write) exists. Pre-fix the registry lane
         surfaced such nodes as a count on the default row (the capstone
-        "1") while the supabase lane structurally cannot (api_keys.graph_id
-        REFERENCES graphs(id); 'default' is a DERIVED id, never a row id) —
+        "1") while the supabase lane refuses such a bind (api_keys.graph_id
+        REFERENCES graphs(id), and since #10025 the default row HAS a real
+        g_<16hex> id a key column COULD reference — the `kind != 'default'`
+        guard in `_ensure_graph_exists` is what refuses it, not the schema) —
         the two lanes disagreed about the same cell.
 
         Manageability half: the bound-default key stays LISTABLE and
@@ -8379,8 +8609,9 @@ class TestC3KeyLifecycle:
         """422 on an off-allowlist scope; 404 on a graph-bound mint to an
         unknown graph OR the literal "default" (the default graph is bound
         by a team-wide key — graph_id absent — never a per-graph mint; the
-        supabase "default" id is a DERIVED row with no graphs-table row, so
-        an api_keys FK to it would 500)."""
+        literal "default" is not a `graphs.id` at all, and since #10025 the
+        default row's REAL g_ id is refused by `_ensure_graph_exists`'s
+        `kind='default'` guard — the FK no longer refuses it)."""
         gen = self._setup(tmp_path)
         _sdk, tid, tc = next(gen)
         try:

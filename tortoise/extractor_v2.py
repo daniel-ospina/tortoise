@@ -7739,6 +7739,46 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 pt_entry["source_turn_id"] = _turn
                 if _verbatim:
                     pt_entry["quote"] = content[:_MAX_QUOTE]
+                # #2684 (Slice B): a MINTED ENDPOINT is a statement Point, so a
+                # VALUE-BEARING one takes the same verbatim-span gate the model
+                # path takes ABOVE, in S1/S2 (``_value_verbatim_span``, stamping at
+                # that build; this site is S5, below). Before this the mint pre-pass never
+                # called the gate: measured, ``src='cut latency by 20%'``
+                # against a turn holding that text stamped NO span while
+                # carrying the quote and turn it would address — the
+                # aggregation-numerator class this slice exists to protect,
+                # losing its address on the one emit site the census cannot
+                # see (it reads S2 receipts; minted endpoints are created here,
+                # in S5).
+                #
+                # The absence is reported HERE for the band route because this
+                # site is what discards the resolver's own absence text (its
+                # warnings go to ``_scratch``), and ``_value_verbatim_span``'s
+                # band warning needs a non-empty quote — which the band route
+                # deliberately leaves empty (never a fabricated excerpt). So
+                # without this line a value-bearing minted endpoint loses its
+                # span with NOTHING said about it: no span, no warning.
+                #
+                # ⛔ But this site reports ONLY the silence — never a class the
+                # gate already named. ``_value_verbatim_span`` has TWO
+                # reporting absences of its own (the band pass, and a VERBATIM
+                # anchor whose quoted text carries no value, e.g. the value
+                # sits past this quote's ``_MAX_QUOTE`` clamp); appending this
+                # site's "without a verbatim anchor" over either of them would
+                # contradict the class just reported and count one absence
+                # twice — and send a repairer to re-anchor text that WAS
+                # anchored verbatim. So the guard is the gate's own output:
+                # report only when the call added no warning of its own.
+                _warnings_before = len(warnings)
+                _span = _value_verbatim_span(content, pt_entry["quote"], _turn,
+                                             edus, warnings=warnings)
+                if _span is not None:
+                    pt_entry["span_start"], pt_entry["span_end"] = _span
+                elif len(warnings) == _warnings_before and _carries_value(content):
+                    warnings.append(
+                        f"value-bearing minted endpoint ({where}) resolved to "
+                        f"turn {_turn} without a verbatim anchor — it carries "
+                        "no source span (the value cannot be re-read verbatim)")
         payload_points.append(pt_entry)
         point_ids[n] = pid
         # `_resolve` probes the UNTRUNCATED ref, so register that key too when

@@ -27,10 +27,79 @@ backfilled:
 
 | Mode | Default graph source | Notes |
 |---|---|---|
-| Supabase | `teams.graph_name` (derived id literal `'default'`; NO `graphs` row) | `graph_metadata`/`default_graph_id` derive it |
+| Supabase | `teams.graph_name` (namespace) + an active `kind='default'` `graphs` row carrying the **stable id** — minted for every organization that existed when `20261028000001` (#10025) ran, **and for every organization created afterwards** by `supabase_control.ensure_default_graph_row`, which runs inside `provision_org` / `provision_org_with_token` — the RPC wrappers every provisioning lane routes through (`/v1/register`, `POST /v1/organizations`, agent signup, the onboarding sub-org, the checkout replay) | `graph_metadata` keeps the `'default'` sentinel in `graph_id` and adds `stable_id` beside it; the record tenant is read from that row, never derived from the name |
 | Registry | a `kind='default'` Graph node whose namespace IS the team namespace | created at team provisioning (pre-existing, #518 — predates the epic) |
 
 Consequences (E2E-5 exit gate):
+
+- **Two writes, one direction.** The backfill (`20261028000001`) is idempotent and
+  safe to re-run — it is the **explicit healing path** if a mint ever failed at
+  provisioning. Re-running it mints a row for any organization that lacks an
+  active `kind='default'` one — **except** for the two blocked shapes in the
+  residual list below, where the mint collides on a unique index instead of
+  fighting it (it does not guess): a graph already *named* `default`, and a
+  `kind='default'` row whose status is neither `active` nor `deleted`. The
+  second is reported by the migration as a WARNING naming the org(s), so a
+  re-run that cannot heal an org says so rather than reporting a silent success.
+
+- **A failed mint never fails the organization.** `ensure_default_graph_row`
+  itself raises (a mint must not claim success for an unpersisted graph), but
+  both provisioning wrappers call it through
+  `supabase_control._mint_default_graph_row_best_effort`, which logs at ERROR and
+  returns `None`. Raising out of `provision_org` would be worse than the missing
+  row: its RPC has already committed org + membership + api_keys, while every
+  caller reads a raise as "nothing was provisioned" and compensates
+  destructively — `/v1/register` deletes the data-plane graph, agent signup
+  loses the only copy of the plaintext key, and the retry is then refused
+  (`409 already_registered`). The mint cannot run before the RPC either:
+  `graphs.team_id` is `NOT NULL REFERENCES public.teams(id)`, so the org row it
+  names does not exist until the RPC commits.
+
+- **A missed mint heals itself on first use.** `resolve_api_key` calls the mint
+  when `default_graph_id_for` finds no row for an org-wide key, so the unnamed
+  window is one request long rather than permanent (and the migration re-run
+  above stays available for an org that never authenticates). Until it is
+  healed the record keeps refusing that org `no_tenant` — fail-closed, and now
+  logged, never silent.
+
+- **Two real residuals.** Both leave an organization with no id for its
+  default graph, so the record keeps refusing it `no_tenant` (fail-closed, and
+  it never files under a guessed tenant). Neither is produced by a supported
+  path; both are reported rather than healed.
+
+  1. **A graph already *named* `default`.** A second row would violate
+     `uq_graphs_org_name_active`. Remediation: rename the colliding graph, then
+     re-run the migration.
+  2. **A `kind='default'` row whose status is neither `active` nor `deleted`**
+     (e.g. `'archived'` — `graphs.status` is free text with no CHECK, and
+     `soft_delete_graph` only ever writes `'deleted'`). The backfill's guards
+     test `status='active'` while `uq_graphs_org_default_active` tests
+     `status <> 'deleted'`, so the insert collides and is skipped: the org gets
+     **no** active row, and the runtime self-heal cannot fix it either
+     (`ensure_default_graph_row`'s adopt arm requires `status='active'` and
+     re-raises otherwise). The migration emits a **WARNING naming the
+     organization(s)** — a tenant that refuses every write must not be silent.
+     Remediation: correct that row's status (or tombstone it), then re-run the
+     migration (idempotent).
+
+- **"The default row" is singular, and the database now says so.** Every reader
+  takes the FIRST row (`default_graph_id_for`, `graph_metadata`,
+  `set_graph_name`/`set_graph_recording`), and until #10025 nothing enforced
+  that: `uq_graphs_org_name_active` is on `(org_id, name)`, while
+  `set_graph_name` inserts the user's CHOSEN name and the backfill/mint insert
+  `'default'` — different names, so two *live* `kind='default'` rows for one org
+  were legal and reachable from two ordinary supported paths committing
+  concurrently. `20261028000001` adds
+  `uq_graphs_org_default_active ON public.graphs (org_id) WHERE kind = 'default'
+  AND status <> 'deleted'` as the backstop: a second live row now collides
+  (both the resolver's self-heal and `set_graph_name`'s insert arm already
+  converge onto the winner), and a **tombstone beside an active row stays
+  legal** — the defensive shape the code's readers are written around.
+  ⚠️ If the migration aborts, its own pre-check named the offending org(s):
+  that database already carried two live default rows, which no supported path
+  produces. Resolve them first (`UPDATE public.graphs SET status = 'deleted'
+  WHERE ...` on all but the row `default_graph_id_for` names), then re-run — the
+  file is one transaction, so nothing was half-applied.
 
 - **No data move** — tenant points/sessions never touch the registry
   migration; the default graph's namespace is unchanged.
@@ -47,6 +116,29 @@ Consequences (E2E-5 exit gate):
   "there is no per-graph key for the default graph").
 
 ## 2. Migration mechanics (Supabase lane)
+
+`20261028000001_graphs_default_row_stable_id.sql` (#10025) — the default
+row's id, and the invariant its readers assume:
+
+```sql
+-- fail-closed pre-check: name the org(s) that already carry two live default
+-- rows, then stop the whole file (Supabase applies a migration in ONE
+-- transaction, so a raise mid-file leaves nothing half-applied)
+DO $$ … RAISE EXCEPTION '… organization(s) % already carry more than one
+        live kind='default' graphs row' … $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_org_default_active
+    ON public.graphs (org_id) WHERE kind = 'default' AND status <> 'deleted';
+INSERT INTO public.graphs (id, org_id, name, kind, namespace, status, recording)
+SELECT … FROM public.organizations o WHERE … NOT EXISTS (…) …
+ON CONFLICT DO NOTHING;   -- a concurrent writer's row IS the row we wanted
+```
+
+The index is built BEFORE the backfill, so the backfill's conflict arm is
+arbitrated by it too (Graphs held 1 row in production, so the non-concurrent
+build is instant; `CREATE INDEX CONCURRENTLY` cannot run inside the single
+transaction Supabase applies a migration file in — which is the property the
+`ON CONFLICT` safety relies on). Both halves are executed against real
+Postgres by `supabase/tests/20261028000001_graphs_default_row_stable_id.sql`.
 
 `supabase/migrations/20260901000001_graphs_and_key_scopes.sql` is
 **pure-additive**:

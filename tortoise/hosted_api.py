@@ -2824,9 +2824,10 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
     ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
     resolved by the enqueueing request from its own credential. The drain can
     only open a graph, not a tenant, so this is where the answer has to be
-    carried across the queue. ``None`` (an org-wide/session credential, which
-    names no graph) records nothing and the drain's writes are refused
-    `no_tenant` — the default-graph question, not a guess.
+    carried across the queue. ``None`` (a SESSION/JWT or OAuth ``oat_``
+    credential — post-#10025 an org-wide API KEY names the default graph, so it
+    is NOT this case) records nothing and the drain's writes are refused
+    `no_tenant` — a named refusal, not a guess.
     """
     if not dirty_roots:
         return
@@ -6843,6 +6844,55 @@ def _resolve_record_tenant(org: dict) -> tuple[str, str] | None:
         return None
 
 
+def _dream_record_tenant(org: dict,
+                         graph_namespace: str | None) -> tuple[str, str] | None:
+    """The record tenant the DREAM DRAIN must carry for THIS request, or ``None``.
+
+    The dream pass is the REST lane's SECOND writer: `_enqueue_dream` carries
+    the answer across the queue and `_bind_dream_record_tenant` puts it on the
+    SDK the drain opens. Without it every record that pass emits
+    (``ConfidenceChanged``) is refused ``no_tenant`` on the very graph whose
+    credential named it, while the request's own writes are filed correctly —
+    an armed lane refusing silently, which is the class #10025 exists to close.
+
+    ⚠️ This USED to gate the carry on `graph_namespace` alone, i.e. on
+    `org["graph_id"]`: an org-wide API KEY has no ``graph_id``, so its tenant
+    was never carried and its dream records stayed refused while two docstrings
+    claimed the opposite. That gate also over-refused the very shape it was
+    written for. The rule is not "only graph-bound credentials carry a
+    tenant" — it is **the tenant must name the graph the drain opens**, and the
+    two branches of the drain are:
+
+    * ``graph_namespace`` set → the drain opens THAT custom graph
+      (``_open_sdk`` → ``_make_sdk(graph_name=gns)``), and the credential's own
+      answer names it (a present ``graph_id`` answers or refuses — see
+      :func:`tortoise.record_writer.record_tenant_for`);
+    * ``graph_namespace`` None → the drain opens the ORG-WIDE graph
+      (``_open_sdk`` → ``_make_sdk(namespace=org_id)``), which is BYTE-IDENTICAL
+      to what `_data_sdk` opens for the same credential on this very request
+      (`_make_sdk(namespace=org_id)`) — so an org-wide API KEY's
+      ``default_graph_id`` names exactly the graph the pass will write. That is
+      #10025's whole premise, and the REST request lane already files its rows
+      that way (`_bind_record_tenant`, reached from `_data_sdk`).
+
+    The ONE shape that must NOT carry a tenant is a **graph-bound credential
+    with a falsy namespace**: `graph_namespace` is then None, so the enqueue
+    lands on the ORG-WIDE key whose drain opens the default graph, while the
+    credential's tenant would name the custom graph the request meant to write
+    — filing the pass's rows under a graph it never touched (the #9188 N3
+    hazard). `_data_sdk` refuses that org first with 403 GRAPH_NOT_FOUND, so it
+    is latent rather than live; refusing the carry keeps it that way.
+
+    Fail-soft for the same reason its sibling is (#5148's rule): the record is
+    a derived, replayable store, and a resolution fault must never fail the
+    request about to write. ``None`` is a NAMED refusal counted ``no_tenant``
+    (#9192), never a guess.
+    """
+    if org.get("graph_id") and not graph_namespace:
+        return None
+    return _resolve_record_tenant(org)
+
+
 def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     """Hand the record the SAME tenant this request's data write goes to (#9188).
 
@@ -6876,12 +6926,17 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     across the queue (``_DREAM_RECORD_TENANTS`` / ``_bind_dream_record_tenant``),
     because that drain opens its own SDK. Routes that write the org's DEFAULT
     graph by construction (the onboarding/starter seed runners) are NOT bound,
-    and neither are the background indexing jobs: the default graph need not
-    have a ``public.graphs`` row, so naming it is the open control-plane
-    decision on #9188 — and binding them to a graph-bound key's id would file
-    their rows under a graph they never wrote. (Both seed surfaces reject a
-    graph-bound credential outright, so the residue there is a counted
-    ``no_tenant``, never a misfiled row.)
+    and neither are the background indexing jobs: naming the default graph's
+    record tenant for THOSE runners is #10047's scope — not because the default
+    graph lacks an id (it has one since #10025, and an org-wide API KEY names it
+    through ``_data_sdk`` below), but because those runners build their own SDK
+    (``_make_sdk(namespace=org_id)``) and never see the request's credential.
+    The same is true of the SESSION/JWT and OAuth ``oat_`` credentials, which
+    carry no ``default_graph_id`` at all. Binding a runner to a graph-bound
+    key's id would file its rows under a graph it never wrote, so the residue
+    there is a counted ``no_tenant``, never a misfiled row. (Both seed surfaces
+    reject a graph-bound credential outright, so that residue cannot even be
+    reached from them.)
 
     Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
     request (#5148's rule — the record is a derived, replayable store, and this
@@ -6910,10 +6965,11 @@ def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
     an armed hosted deployment refuses every dream-emitted record `no_tenant`
     for a graph whose credential named it.
 
-    Silent by design when the key carries no tenant: that is an
-    org-wide/session write, whose graph is the DEFAULT one and whose record
-    tenant is the open control-plane decision on #9188 — not something this
-    helper may guess.
+    Silent by design when the key carries no tenant: that is a SESSION/JWT or
+    OAuth ``oat_`` write — credentials that carry no ``default_graph_id``
+    (#10047) — so the tenant is not something this helper may guess. An
+    org-wide API KEY is NOT this case: since #10025 it names the default graph,
+    and the enqueue carried that tenant here.
     """
     tenant = _DREAM_RECORD_TENANTS.get(key)
     if tenant is None:
@@ -6955,10 +7011,18 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     declaration — so the Postgres record files the write under the same graph
     the data went to. It is carried by value because this lane resolves the
     tenant at this depth (inside the offload, for the capture path) and its
-    auth seam holds no `with` to hang an ambient scope on. The default-graph
-    half is deliberately NOT bound (no `public.graphs` row is guaranteed);
-    naming it is a control-plane decision, and until it is made the write is
-    refused `no_tenant` rather than filed under a tenant nobody chose.
+    auth seam holds no `with` to hang an ambient scope on.
+
+    ⚠️ WHAT THE ORG-WIDE HALF ACTUALLY DOES, on the credential that reaches
+    here. An org-wide **API KEY** (``tt_``/``tk_``, ``graph_id`` None) DOES get
+    a tenant bound since #10025: ``resolve_api_key`` puts the org's active
+    ``kind='default'`` row id on the credential as ``default_graph_id``, and
+    ``record_tenant_for`` names it — measured, not assumed. What stays unbound
+    is the shape that carries no such field: a SESSION/PAT credential
+    (``_session_user_org`` resolves `org_id` + tier only) and an OAuth ``oat_``
+    token (``tortoise.oauth.resolve_oauth_access_token`` never calls
+    ``resolve_api_key``). Those are #10047's scope, and for them the write is
+    refused ``no_tenant`` rather than filed under a tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
@@ -9578,13 +9642,15 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # custom-graph key's write must drain the custom graph, never the org
     # default (sdk is the _data_sdk-resolved graph).
     #
-    # #9188 review N3: the namespace and the record tenant come from ONE value,
-    # because they must name the same graph. Gating the tenant on
-    # `org["graph_id"]` alone would let a graph-bound credential with a falsy
-    # namespace land its tenant on the ORG-WIDE key — whose drain opens the
-    # DEFAULT graph — i.e. file the pass's rows under a graph it never wrote.
-    # (`_data_sdk` refuses that org first with 403 GRAPH_NOT_FOUND, so it is
-    # latent rather than live; tying the two arguments keeps it that way.)
+    # `_dream_record_tenant` keeps that tie: a graph-bound credential whose
+    # namespace is falsy is the one shape whose tenant is refused, because the
+    # enqueue then falls back to the ORG-WIDE key (default graph) while its
+    # tenant would name the custom graph. An org-wide API KEY is NOT that
+    # shape — its drain opens `_make_sdk(namespace=org_id)`, the same graph
+    # `_data_sdk` opened for this request, so #10025's `default_graph_id` names
+    # it and the carry is correct rather than a guess.
+    # (`_data_sdk` refuses the falsy-namespace org first with 403
+    # GRAPH_NOT_FOUND, so that shape is latent rather than live.)
     _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
@@ -9597,8 +9663,7 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
                    # drain knows it (`_open_sdk` opens a namespace, not a
                    # tenant), and an armed lane otherwise refuses every
                    # dream-emitted record `no_tenant`.
-                   record_tenant=(_resolve_record_tenant(org)
-                                  if _dream_ns else None))
+                   record_tenant=_dream_record_tenant(org, _dream_ns))
     # Log audit event
     await _async_audit(
         request, org["org_id"], "point_create",
@@ -12259,11 +12324,12 @@ def _ensure_graph_exists(org_id: str, graph_id: str) -> None:
 
     The default graph is bound via an org-wide key (graph_id ABSENT —
     resolution maps it to the default namespace); there is no per-graph key
-    for the default graph. The literal "default" is the supabase seam's
-    DERIVED row id (no graphs row — teams.graph_name) and the registry
-    default node (kind='default', real gid g_<hex>) is not key-bindable, so
-    both 404 here (mirrors delete_graph's kind pre-lookup: a custom graph
-    must be a non-deleted row/node)."""
+    for the default graph. The literal "default" and the registry default
+    node (kind='default', real gid g_<hex>) are not key-bindable, so both 404
+    here (mirrors delete_graph's kind pre-lookup: a custom graph must be a
+    non-deleted row/node). Since #10025 the supabase default graph DOES have a
+    `kind='default'` `graphs` row with a real id — what refuses a mint against
+    it is the `kind != 'default'` guard below, not the absence of a row."""
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -12288,32 +12354,91 @@ def _ensure_graph_exists(org_id: str, graph_id: str) -> None:
         raise HTTPException(status_code=404, detail="Unknown graph")
 
 
+def _acl_layer_declared_strict() -> bool:
+    """#8617: the ACL layer's DECLARED posture — ``TORTOISE_ACL_LAYER`` is
+    ``strict`` (the default) only when this deployment expects the per-graph
+    ACL user to be creatable.
+
+    An unreachable ``acl_graph_users`` (module absent) answers True: the
+    rollback arms below only run for an ``AclLayerError``, which cannot exist
+    without that module."""
+    try:
+        from tortoise.acl_graph_users import layer_mode  # type: ignore[import-not-found]
+    except ImportError:
+        return True
+    return layer_mode() == "strict"
+
+
+# #8617 ruling 4 — "record the absence instead of inferring it". One line per
+# (process, absence kind): a per-graph line would be a log flood on a fleet of
+# graphs, and NO line at all is the defect this issue paid for.
+_ACL_ABSENCE_ANNOUNCED: set[str] = set()
+
+
+def _announce_acl_absence_once(status: str, graph_id: str, detail: str) -> None:
+    """Log why the per-graph ACL user is missing — once per process per kind.
+
+    ``absent_by_design`` / ``denied`` are WARNINGS (an operator must be able to
+    see that this deployment has no database-level second wall); a plain
+    ``absent`` (embedded store, bare redis, layer down) is INFO."""
+    if status in _ACL_ABSENCE_ANNOUNCED:
+        return
+    _ACL_ABSENCE_ANNOUNCED.add(status)
+    if status == "absent":
+        _logger.info(
+            "per-graph ACL layer absent (%s) — no ACL user for graph %s; "
+            "the app-layer ownership check remains authoritative",
+            detail, graph_id)
+    else:
+        _logger.warning(
+            "per-graph ACL layer %s — graph %s has NO database-level ACL "
+            "user (#8617). Recorded, never fabricated: %s",
+            status, graph_id, detail)
+
+
 def _acl_user_create_hook(graph_id: str, org_id: str, *,
                           strict: bool = False) -> None:
     """C4 seam — create the per-graph ACL user (defense-in-depth).
 
-    Soft (default): failures are logged, never block the mint (the app-layer
-    scope check is authoritative — ACL is defense-in-depth, not a SPOF).
-    Strict (provisioning graph mint): a server-reachable AclLayerError
-    re-raises so the mint rolls back (no graph without its ACL user — E2E
-    indicator 5). Layer-down/absent stays fail-soft in both modes."""
+    The result is CONSUMED, not discarded (#8617): ``provisioned`` returns
+    quietly; ``absent_by_design`` / ``denied`` / ``absent`` are announced once
+    per process and the mint proceeds. There is deliberately no
+    success-by-omission path left — the pre-#8617 body dropped
+    ``create_acl_user()``'s return, so a mint succeeded with no per-graph
+    user and no log line anywhere.
+
+    Soft (default): a raised failure is logged, never blocks the mint (the
+    app-layer scope check is authoritative — ACL is defense-in-depth, not a
+    SPOF). Strict (provisioning graph mint): a server-reachable
+    :class:`AclLayerError` re-raises so the mint rolls back — but ONLY on a
+    layer DECLARED ``strict`` (#8617 ruling 3). A permission REFUSAL
+    (``denied``) never raises in either mode: the owner ruling is explicit
+    that a hosted graph mint must not be rolled back because a user we are not
+    allowed to create was not created."""
     try:
         from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
             AclLayerError,
+            AclStatus,
             create_acl_user,
         )
-        create_acl_user(graph_id, org_id)
     except ImportError:
-        pass  # C4 not shipped — seam dormant
+        return  # C4 not shipped — seam dormant
+    try:
+        result = create_acl_user(graph_id, org_id)
     except AclLayerError as e:
-        if strict:
+        if strict and _acl_layer_declared_strict():
             raise  # provisioning rollback (no graph without its ACL user)
         _logger.warning(
             "ACL user create failed for graph %s (defense-in-depth, "
             "non-blocking): %s", graph_id, e)
+        return
     except Exception as e:
         _logger.warning("ACL user create failed for graph %s (defense-in-depth, non-blocking): %s",
                         graph_id, e)
+        return
+    if result.status is AclStatus.PROVISIONED:
+        return
+    _announce_acl_absence_once(result.status.value, graph_id, result.detail)
 
 
 def _acl_user_drop_hook(graph_id: str) -> None:
@@ -20842,21 +20967,34 @@ def _provision_graph(org: dict, name: str,
         # buried in a log). Import guarded (mirror the hook pattern): an
         # absent module must NEVER mask the original error or skip the
         # generic rollback below (no-orphan invariant).
+        #
+        # #8617: this arm is gated on the layer being DECLARED strict. A
+        # permission REFUSAL is AclLayerDenied, which is deliberately NOT an
+        # AclLayerError subclass, so it can never reach this arm at all (the
+        # hook records it and the mint proceeds — ruling 3). If an
+        # AclLayerError arrives while the layer is not declared strict it is a
+        # code defect, and the generic rollback below still refuses to commit
+        # a half-built graph.
         try:
             from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
                 AclLayerError,
             )
         except ImportError:
             AclLayerError = None  # C4 not shipped — generic path below
-        if AclLayerError is not None and isinstance(e, AclLayerError):
+        if (AclLayerError is not None and isinstance(e, AclLayerError)
+                and _acl_layer_declared_strict()):
             _rollback_graph(org["id"], graph)
             raise HTTPException(
                 status_code=503,
                 detail=("Per-graph ACL provisioning failed — the FalkorDB "
                         "ACL layer rejected the graph user: "
-                        f"{e}. Set a password/requirepass on the FalkorDB "
-                        "default user (per-graph ACL users are theater "
-                        "without a secured default), then retry."),
+                        f"{e}. On a SELF-HOSTED server, secure the default "
+                        "user (requirepass/aclfile) and re-check the ACL "
+                        "recipe, then retry. On FalkorDB CLOUD this remedy "
+                        "does not apply: no credential the app may hold "
+                        "carries +ACL, so declare TORTOISE_ACL_LAYER=off "
+                        "there and the graph mints with the ACL layer "
+                        "absent BY DESIGN (#8617)."),
             ) from e
         # Cross-worker dup-name race (Supabase lane): the partial unique
         # index uq_graphs_org_name_active catches the interleaved INSERT
@@ -21982,11 +22120,15 @@ async def delete_graph(graph_id: str, org_id: str,
     from tortoise.supabase_control import (
         graph_key_ids as sb_graph_key_ids,
     )
-    # Default-graph guard: the Supabase derived id is the literal
-    # 'default' (no row exists — derived from organizations.graph_name); the
-    # registry kind='default' node carries a random gid. Guard BOTH: the
-    # literal id (mode-agnostic callers may use either) AND a kind lookup
-    # (else registry default → 404, P1 review note).
+    # Default-graph guard. The Supabase ``graph_id`` a caller may hold for the
+    # default graph is the literal sentinel 'default' (still what
+    # ``graph_metadata`` emits in that field, so existing callers may pass it);
+    # the registry kind='default' node carries a random gid. ⚠️ Since #10025 a
+    # `kind='default'` `public.graphs` row DOES exist (one per organization, so
+    # the record's FK can name it) and it has a REAL id — so "no row exists" is
+    # no longer what protects it, exactly as on `supabase_control.delete_graph_row`.
+    # Guard BOTH: the literal id (mode-agnostic callers may use either) AND the
+    # kind lookup (else registry default → 404, P1 review note).
     if graph_id == "default":
         raise HTTPException(status_code=403,
                             detail="Cannot delete the default graph")
@@ -37521,7 +37663,10 @@ def _reconcile_acl_users_sync() -> dict:
 
     from typing import Any as _Any
 
-    from tortoise.acl_graph_users import create_acl_user  # type: ignore[import-not-found]
+    from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
+        AclStatus,
+        create_acl_user,
+    )
 
     results: dict[str, _Any] = {}
     for org_id in sorted(org_ids):
@@ -37530,7 +37675,7 @@ def _reconcile_acl_users_sync() -> dict:
         except Exception as e:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
-        ok = skipped = defaults = 0
+        ok = absent_by_design = denied = absent = defaults = 0
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37545,18 +37690,30 @@ def _reconcile_acl_users_sync() -> dict:
                 continue
             try:
                 r = create_acl_user(row["graph_id"], org_id)
-                if r is None:
-                    skipped += 1  # ACL layer absent — fail-soft, reported
-                else:
-                    ok += 1
             except Exception as e:
                 # A RAISED failure (server-reachable AclLayerError class) is
                 # surfaced in the summary — never silently swallowed.
                 _logger.warning("acl reconcile failed for %s/%s: %s",
                                 org_id, row.get("graph_id"), e)
                 errors.append(f"{row.get('graph_id')}: {e}")
-        results[org_id] = {"status": "reconciled", "custom_graphs_ok": ok,
-                            "acl_absent_skipped": skipped,
+                continue
+            # #8617 ruling 4: the absence is RECORDED, in the state it is
+            # actually in. The single pre-#8617 ``acl_absent_skipped`` counter
+            # conflated "not provisionable here" (Cloud), "no module" (bare
+            # redis) and "the credential was refused" — three different
+            # operator actions behind one number.
+            if r.status is AclStatus.PROVISIONED:
+                ok += 1
+            elif r.status is AclStatus.ABSENT_BY_DESIGN:
+                absent_by_design += 1
+            elif r.status is AclStatus.DENIED:
+                denied += 1
+            else:
+                absent += 1
+        results[org_id] = {"status": "reconciled", "provisioned": ok,
+                            "absent_by_design": absent_by_design,
+                            "denied": denied,
+                            "absent": absent,
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "organizations": len(results), "results": results}
@@ -37574,7 +37731,12 @@ async def backups_acl_reconcile(request: Request):
     reuses the stored credential, hosted create-once verifies without
     password churn). This reconcile replays it per ACTIVE graph — the DR
     runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
-    (no server URI / bare redis) is reported, never a 500. Runs off the
+    is REPORTED, never a 500 — and since #8617 the report says which absence
+    it is (`absent_by_design` — this lane declares the layer off, e.g.
+    FalkorDB Cloud; `denied` — a reachable server refused the credential;
+    `absent` — no server URI / bare redis / layer down; `provisioned` — the
+    user exists), instead of the single pre-#8617 `acl_absent_skipped`
+    number that conflated all three. Runs off the
     event loop via ``asyncio.to_thread`` (#2371).
     """
     _check_internal(request)

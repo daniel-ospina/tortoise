@@ -108,13 +108,19 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   `call_next`, from the `(org_id, graph_id)` that lane already resolves per
   request — so a write anywhere under the request, on the loop or on a
   context-copying pool worker, is filed under the REQUEST's tenant. It is
-  installed only when the resolution NAMED a graph — an org-wide credential has
-  no `public.graphs` row the record could key on, so its write is refused
-  (`no_tenant`) rather than guessed — and only on the CONTROL-PLANE lane: the
-  self-host registry's `graph_id` is a Falkor `g_<hex>` node id with no
-  `public.graphs` row, so installing it would be a row the FK cannot satisfy.
-  The hosted REST lane has no installer yet and the default-graph tenant id is
-  unnamed — #9188.
+  installed only when the resolution NAMED a graph, and only on the
+  CONTROL-PLANE lane: the self-host registry's `graph_id` is a Falkor `g_<hex>`
+  node id with no `public.graphs` row, so installing it would be a row the FK
+  cannot satisfy. Since #10025 an org-wide credential is no longer outside
+  that: its tenant is read from `default_graph_id`, the org's active
+  `kind='default'` `public.graphs` row that `20261028000001` materializes and
+  provisioning mints (`supabase_control.ensure_default_graph_row`), and an org
+  with no such row still refuses (`no_tenant`) rather than guessing. The
+  hosted REST lane carries the SAME pair by value rather than through this
+  `ContextVar` — `hosted_api._data_sdk` → `sdk._bind_record_tenant` — which is
+  the seam its `TortoiseSDK` reads. Unwired still: a SESSION/JWT credential and
+  an OAuth `oat_` token (neither carries a `default_graph_id`) and the
+  seed/index runners that build their own SDK — #10047.
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
   consults the env pair ONLY when the deployment declared itself single-tenant
   (`record_writer.single_tenant_declared()` → `TORTOISE_RECORD_SINGLE_TENANT`,
@@ -775,8 +781,19 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "PointRetracted": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
                   literals=(("status", "retracted"),),
-                  from_payload=frozenset()),
-        note="tombstone — the node is KEPT (the hard delete is EntityMutated)",
+                  from_payload=frozenset({"valid_to"})),
+        note="tombstone — the node is KEPT (the hard delete is EntityMutated). "
+             "#4282: `valid_to` rides the payload when the retraction named a "
+             "WINDOW END (the `valid_until`/`invalid_at` field on "
+             "`update_knowledge`, beta row 22) — the caller's instant is the "
+             "datum, so the record carries it and the fold replays it verbatim "
+             "instead of a rebuild losing it; the DECLARATION half is pinned by "
+             "`tests/test_4282_phase2_merges.py`, and the PARITY half (the "
+             "producer really puts the key on the record, the rebuild really "
+             "restores it, and the durability gate stays clean) by "
+             "`tests/test_4282_dated_retraction_durability.py` — a declared "
+             "`from_payload` on a record that never carries the key is exactly "
+             "the vacuous shape that file exists to prevent",
     ),
     "PointSuperseded": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
