@@ -2353,7 +2353,6 @@ def test_the_overrides_marker_names_the_same_target_in_every_copy():
     divergent one reds. RED on the pre-fix tree: 3 copies, 2 distinct texts, the odd ones
     out carrying `26/40`.
     """
-    sm = _load_manifest_tool()
     source = (ROOT / "tools" / "surface_manifest.py").read_text(encoding="utf-8")
     flat = " ".join(source.split())
     start = "OVERRIDES: the frozen-snapshot-as-approval-baseline practice"

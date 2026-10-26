@@ -47,6 +47,13 @@ THE GATE
     cannot make it approved.
 """
 
+# ruff: noqa: F822, RUF022  — `__all__` here names CLASS MEMBERS of `TortoiseSDK`,
+# not module-level bindings (F822's assumption: this module is a DECLARATION, not a
+# namespace — see WHY A MODULE AND NOT THE PACKAGE `__all__` above), and its order IS
+# the owner's document order (`docs/product/beta-sdk-surface.md` rows 1-40), so
+# sorting it (RUF022) would rewrite the transcription the gate compares against.
+# The set is reconciled by `tools/sdk_surface_declaration.py`, never by `import *`.
+
 #: The approved SDK surface — `docs/product/beta-sdk-surface.md` rows 1-40, in that order.
 #: 40 names. The gate refuses any disagreement with that document, in either direction.
 __all__ = (

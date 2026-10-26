@@ -4933,7 +4933,15 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
     )
     small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
     old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
-    assert small == WATCHDOG_FLOOR_MIN == 17, small
+    # The FLOOR is a DERIVED value, not a taste: 2.9× the largest single fast
+    # file (the derivation `tools/ci_selection.py`'s constant block states). It
+    # was 15 while the largest was 310.7 s; the 2026-10-26 sweep raised the
+    # largest to `test_calibration.py` at 390.0 s, so 15 no longer cleared the
+    # 2.5× asserted below and the floor moved to the value its own derivation
+    # requires — ceil(390.0 × 2.9 / 60) = 19 (2.92×). The pin stays a pin: it
+    # names the number the derivation produced, so the NEXT move has to be
+    # argued here too (#9172 owns any further raise).
+    assert small == WATCHDOG_FLOOR_MIN == 19, small
     assert small < old_two, "the smaller shard must not inherit the old budget"
     assert old_two == WATCHDOG_CEILING_MIN == 55
     # the floor must clear the #6133 floor (the largest single fast file) with

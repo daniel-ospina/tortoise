@@ -196,12 +196,15 @@ SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
 # margin. The FLOOR clears the largest single fast file with headroom, so the
 # watchdog can never kill a shard below the #6133 floor: it was 2.9× the then
 # largest file (`310.7 s`), and the 2026-10-26 durations refresh (#10026) raised
-# the largest fast file to `test_calibration.py` at `390.0 s` — 17 min keeps
-# 2.62×, above the 2.5× the `test-slow` proof pins
+# the largest fast file to `test_calibration.py` at `390.0 s`. The floor is a
+# DERIVATION, not a preference, so it moved to the number its own stated factor
+# requires — `ceil(390.0 × 2.9 / 60) = 19` min, 1140 s / 390.0 s = 2.92× — not to
+# a value hand-picked to clear the 2.5× the `test-slow` proof pins
 # (`test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`,
 # which DERIVES the largest file from this manifest rather than trusting this
-# comment). A refresh that pushes the largest file past ~408 s reds that test on
-# purpose: the floor is a derivation, not a preference.
+# comment). A refresh that pushes the largest file past ~456 s reds that test on
+# purpose. Raising the floor further is a CI-budget decision (#9172), not
+# something a weight refresh smuggles in.
 #
 # ⛔ 1.8 IS NO LONGER ACCEPTED (#6145). The CEILING can clamp a budget BELOW
 # `WATCHDOG_HEADROOM`, and `watchdog_headroom_issues` now REDS that state —
@@ -212,7 +215,7 @@ SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
 # stays 55m so the worst-case leg stays inside the job's outer
 # `timeout-minutes` — the invariant REFUSES rather than widening it.
 WATCHDOG_HEADROOM = 2.0
-WATCHDOG_FLOOR_MIN = 17
+WATCHDOG_FLOOR_MIN = 19
 WATCHDOG_CEILING_MIN = 55
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
