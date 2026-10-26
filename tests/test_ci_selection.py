@@ -5618,7 +5618,18 @@ def test_expect_uri_gated_iff_uri():
     guard = next(s for s in steps
                  if s.get("name", "").startswith("Skip-fail guard"))
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in guard["run"]
-    assert "--manifest /tmp/expected-nodeids.txt" in guard["run"]
+    # ⛔ THE GUARD MUST READ THE MANIFEST THE MANIFEST STEP WROTE — the PATH is not
+    # the contract, the PAIRING is (2026-10-25). Both now ride the job's
+    # `$PYTEST_MANIFEST` (= `${{ runner.temp }}/expected-nodeids.txt`) instead of the
+    # global `/tmp/expected-nodeids.txt`: on a self-hosted runner several jobs share
+    # ONE `/tmp`, so a fixed name let this guard compare against ANOTHER job's
+    # manifest and red on a mismatch belonging to no test it ran (#7815). Asserting
+    # the literal would re-open that clobber; asserting the pairing is what keeps
+    # the guard honest once the path is per-runner.
+    assert "--manifest \"$PYTEST_MANIFEST\"" in guard["run"]
+    assert (
+        '--output "$PYTEST_MANIFEST"' in manifest["run"]
+    ), "the manifest step and the skip-fail guard must share ONE path variable"
     # The canary producer is gated to half b + post-merge (cycle-5 P1-7
     # option (b): exactly ONE leg writes, no last-writer-wins clobber).
     # #4367: the nightly schedule trigger was removed, so post-merge is

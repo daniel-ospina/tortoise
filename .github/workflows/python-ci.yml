@@ -618,6 +618,44 @@ jobs:
     # step). This outer cap therefore bounds SETUP plus the pre-phase, not a
     # fixed 55m gating budget.
     timeout-minutes: 90
+    # ⛔ PER-RUNNER ARTIFACT PATHS, NOT `/tmp/...` (measured 2026-10-25).
+    #
+    # Every pytest artifact this job writes used to be a GLOBAL literal under
+    # `/tmp`. On a GitHub-hosted runner that is harmless — the VM is the job's.
+    # On this repo it is NOT: `scripts/ci_runner_gate.sh` attaches
+    # `ubuntu-latest` to the self-hosted pool, and several runner INSTALLS on one
+    # host share ONE `/tmp` (measured: a `pi-runner-vm-2` job's own shell ran
+    # under `/home/…/actions-runner-2`, while its `tail /tmp/pytest.log` printed
+    # an `actions-runner-4` session header — another job's file), so a
+    # concurrently scheduled leg truncates and interleaves this one's log.
+    #
+    # Three consequences, all observed on run 40238275534 and its siblings:
+    #   * the heartbeat counter is another leg's (`test (g)` reported
+    #     `433 passed` → `21 passed` → `416 passed` on consecutive ticks, which
+    #     one pytest session cannot do);
+    #   * a WATCHDOG kill's `grep -c PASSED` counts, its tail and the
+    #     `pytest-attribution.sh` in-flight list describe a DIFFERENT shard, so
+    #     the leg cannot name what it was doing when it died;
+    #   * #7815's skip-fail guard reads `expected-nodeids.txt` / `junit.xml`
+    #     written by another job, and reports a manifest mismatch that belongs to
+    #     no test this leg ran.
+    #
+    # `runner.temp` is `<runner_install>/_work/_temp`, and a self-hosted runner
+    # executes ONE job at a time, so this is per-JOB unique even when the host is
+    # shared. It is what `.github/scripts/pytest-attribution.sh` names as the
+    # durable fix for its own "NAMED RESIDUAL" (its three ownership signals
+    # exist only because the path is global).
+    #
+    # The rc / files / hygiene reports next to these already moved to
+    # `${RUNNER_TEMP}`; this finishes the migration for the artifacts the
+    # verdict and the guards are read from.
+    env:
+      PYTEST_LOG: ${{ runner.temp }}/pytest.log
+      PYTEST_JUNIT: ${{ runner.temp }}/junit.xml
+      PYTEST_JUNIT_LF: ${{ runner.temp }}/junit-lf.xml
+      PYTEST_MANIFEST: ${{ runner.temp }}/expected-nodeids.txt
+      PYTEST_STEP_WALL: ${{ runner.temp }}/step_wall.txt
+      PYTEST_CANARY: ${{ runner.temp }}/canary-producer.json
     # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
     # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
     # green while EP tests never ran — masked #1382). Two services cover BOTH probe
@@ -842,7 +880,7 @@ jobs:
           fi
           # Reuse contract: the skip-guard step's empty-file check reads this.
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output "$PYTEST_MANIFEST"
         env:
           # `--emit-manifest` spawns `pytest --collect-only` as a SUBPROCESS, so
           # it inherits THIS step's env. A file gating itself on the DB URI skips
@@ -892,7 +930,7 @@ jobs:
               "event": "${{ github.event_name }}",
               "full": "${{ needs.changes.outputs.full }}",
           }
-          with open("/tmp/canary-producer.json", "w") as fh:
+          with open(os.environ["PYTEST_CANARY"], "w") as fh:
               json.dump(marker, fh, indent=2)
           print("canary producer: docker shard " + marker["half"] + " qualified (post-merge, full="
                 + marker["full"] + ")")
@@ -974,14 +1012,33 @@ jobs:
           # writes the same file; this write is the authoritative post-hoc
           # record the skip-guard step's empty-file gate reads).
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
+          # ── WHICH RUNNER CLASS CARRIES THIS LEG (measured 2026-10-25) ────
+          # A watchdog kill on the self-hosted pool is a CLASS kill, not a test
+          # verdict, and it currently costs a triage cycle to establish that:
+          # 35 of the 52 red self-hosted legs across the last 39 Python CI runs
+          # ended in a watchdog kill (24 × rc137 + 11 × rc124), and the pool
+          # measures ~4x hosted per-test on the SAME nodeids (junit sum ratio
+          # 4.05x over 654 common testcases, arm64 `pi-runner-vm-3`, run
+          # 40238275534 vs hosted 40249711042). Stating the class up front, and
+          # again on the kill banner, is what lets a reader (and the merge rail)
+          # attribute the red without opening a 10k-line log.
+          #
+          # This is EVIDENCE, never a gate: it emits, it does not decide. The leg
+          # still runs, and its status is still pytest's own rc.
+          RUNNER_CLASS="${RUNNER_ENVIRONMENT:-unknown}"
+          RUNNER_IDENTITY="${RUNNER_NAME:-unknown}/${RUNNER_OS:-unknown}-${RUNNER_ARCH:-unknown}"
+          echo "runner class: $RUNNER_CLASS ($RUNNER_IDENTITY); artifact paths under ${RUNNER_TEMP:-/tmp}"
+          if [ "$RUNNER_CLASS" = "self-hosted" ]; then
+            echo "::warning title=leg is on the self-hosted pool::this leg runs on $RUNNER_IDENTITY, not a GitHub-hosted runner. The pool measures ~4x hosted per-test on identical nodeids (arm64, 2026-10-25; x64 cells ~1.2x), so a WATCHDOG kill here says the CLASS could not meet the budget — it is not a test verdict and not evidence about this diff. Any test failure it DOES report is real."
+          fi
           # #964 heartbeat: killed when pytest exits (kill+wait below).
           # Counts are rough live liveness signals — the -r fEs summary block
           # re-lists failures, so FAILED may double-count on the last tick;
           # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
               sleep 300
-              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
-              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              p=$(grep -c ' PASSED' "$PYTEST_LOG" 2>/dev/null || true)
+              f=$(grep -c ' FAILED' "$PYTEST_LOG" 2>/dev/null || true)
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
@@ -1110,7 +1167,7 @@ jobs:
             # Its OWN watchdog (10m), NOT the shard's gating watchdog
             # (`matrix.watchdog_minutes`): a handful of last-failed tests must
             # never eat the gating run's budget.
-            timeout -s INT -k 10 10m stdbuf -oL python -m pytest "${LF_NODEIDS[@]}" -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit-lf.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+            timeout -s INT -k 10 10m stdbuf -oL python -m pytest "${LF_NODEIDS[@]}" -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT_LF" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
             LF_RC=$?
             echo "last-failed fast-fail phase: rc=$LF_RC"
             # #6142 P2: rc 4 means pytest could not FIND one of the nodeids and
@@ -1133,7 +1190,7 @@ jobs:
           # against a key matches nothing and prunes nothing — which is how the
           # first cut of this fix shipped, silently. Normalise BOTH sides.
           try:
-              log = pathlib.Path("/tmp/pytest.log").read_text(errors="replace")
+              log = pathlib.Path(os.environ["PYTEST_LOG"]).read_text(errors="replace")
           except OSError:
               sys.exit(0)
           root = os.path.realpath(os.getcwd())
@@ -1180,33 +1237,33 @@ jobs:
             # failure), 3 (internal error) — is a failing pre-phase.
             if [ "$LF_RC" -ne 0 ] && [ "$LF_RC" -ne 2 ] && [ "$LF_RC" -ne 4 ] && [ "$LF_RC" -ne 5 ] && [ "$LF_RC" -ne 124 ] && [ "$LF_RC" -ne 137 ]; then
               echo "==================== pytest summary (last-failed, tail) ===================="
-              tail -n 200 /tmp/pytest.log
+              tail -n 200 "$PYTEST_LOG"
               # #3470: EVERY `/tmp/*.log` tail in these workflows reports through
               # the reporter, and the pre-phase is no exception — omitting this
               # call is exactly the silent-omission hole #3470 exists to close
               # (and `tests/test_pytest_attribution.py` reds on it by design,
               # because this leg's failure set is a SUBSET of the half).
               # One definition: pytest-attribution.sh.
-              bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$LF_RC"
+              bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$LF_RC"
               echo "==================== pytest failure nodeids ===================="
-              grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+              grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
               echo "ci-selection: last-failed-subset (#6142) — this half ran only its previous failures; the FULL half did NOT run in this job"
               echo "$LF_RC" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
               kill $HB_PID 2>/dev/null || true
               wait $HB_PID 2>/dev/null || true
-              echo "$SECONDS" > /tmp/step_wall.txt
+              echo "$SECONDS" > "$PYTEST_STEP_WALL"
               echo "step_wall=$SECONDS" >> "$GITHUB_OUTPUT"
               echo "==================== pytest exit code: $LF_RC (last-failed fast-fail) ===================="
               exit $LF_RC
             fi
             if [ "$LF_RC" -eq 2 ] || [ "$LF_RC" -eq 124 ] || [ "$LF_RC" -eq 137 ]; then
-              passed=$(grep -c ' PASSED' /tmp/pytest.log)
-              failed=$(grep -c ' FAILED' /tmp/pytest.log)
-              errored=$(grep -c ' ERROR' /tmp/pytest.log)
+              passed=$(grep -c ' PASSED' "$PYTEST_LOG")
+              failed=$(grep -c ' FAILED' "$PYTEST_LOG")
+              errored=$(grep -c ' ERROR' "$PYTEST_LOG")
               echo "==================== WATCHDOG: last-failed pre-phase interrupted/killed (rc=$LF_RC; $passed passed, $failed failed, $errored errored) — inconclusive, falling through to the FULL half ===================="
             fi
           fi
-          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" --dist loadscope -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" --dist loadscope -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -1229,7 +1286,7 @@ jobs:
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
-          tail -n 300 /tmp/pytest.log
+          tail -n 300 "$PYTEST_LOG"
           # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
           # post-summary interpreter-exit noise fills it and pushes BOTH the
           # session summary and the `-r fEs` report above the cut, so the log
@@ -1237,7 +1294,7 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -1246,16 +1303,19 @@ jobs:
           # THIS job log, so without the nodeids it sees an unattributable
           # failure and refuses — a refusal, not a comparison (#4453).
           echo "==================== pytest failure nodeids ===================="
-          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+          grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
           # so the banner never printed on the real kill path).
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
-            passed=$(grep -c ' PASSED' /tmp/pytest.log)
-            failed=$(grep -c ' FAILED' /tmp/pytest.log)
-            errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            passed=$(grep -c ' PASSED' "$PYTEST_LOG")
+            failed=$(grep -c ' FAILED' "$PYTEST_LOG")
+            errored=$(grep -c ' ERROR' "$PYTEST_LOG")
+            echo "==================== WATCHDOG: pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) on runner class '$RUNNER_CLASS' ($RUNNER_IDENTITY) — last test lines above ===================="
+            if [ "$RUNNER_CLASS" = "self-hosted" ]; then
+              echo "(this leg was killed by ITS OWN budget on the self-hosted pool, which measures ~4x hosted per-test — re-running it on the same class re-runs the kill; a hosted re-run is the honest test of the diff)"
+            fi
           fi
           echo "==================== pytest exit code: $rc ===================="
           # Epic #1647 Task 6 (cycle-5 P2-5): capture the pytest-step wall
@@ -1265,7 +1325,7 @@ jobs:
           # /tmp/step_wall.txt (the artifact contract the P3 canary
           # classifier consumes — cycle-6 P1-7: artifacts only, never a
           # $GITHUB_OUTPUT across jobs) and as steps.pytest-run.outputs.
-          echo "$SECONDS" > /tmp/step_wall.txt
+          echo "$SECONDS" > "$PYTEST_STEP_WALL"
           echo "step_wall=$SECONDS" >> "$GITHUB_OUTPUT"
           exit $rc
         env:
@@ -1333,11 +1393,11 @@ jobs:
         with:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
           path: |
-            /tmp/pytest.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
-            /tmp/step_wall.txt
-            /tmp/canary-producer.json
+            ${{ runner.temp }}/pytest.log
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
+            ${{ runner.temp }}/step_wall.txt
+            ${{ runner.temp }}/canary-producer.json
           if-no-files-found: ignore
 
       - name: Upload canary-producer artifacts (producer shard only, #6135)
@@ -1354,10 +1414,10 @@ jobs:
         with:
           name: pytest-canary-producer
           path: |
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
-            /tmp/step_wall.txt
-            /tmp/canary-producer.json
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
+            ${{ runner.temp }}/step_wall.txt
+            ${{ runner.temp }}/canary-producer.json
           if-no-files-found: ignore
 
       - name: "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
@@ -1382,9 +1442,9 @@ jobs:
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+              python3 tools/skip-guard.py "$PYTEST_LOG" --junitxml="$PYTEST_JUNIT" --manifest "$PYTEST_MANIFEST"
             else
-              python3 tools/skip-guard.py /tmp/pytest.log
+              python3 tools/skip-guard.py "$PYTEST_LOG"
             fi
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"

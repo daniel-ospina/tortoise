@@ -1101,7 +1101,17 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
 #: that merely mentions the spelling cannot be counted as a site.
+#:
+#: ⛔ A LEG'S LOG MAY BE A PER-RUNNER PATH, NOT A `/tmp` LITERAL (2026-10-25). The
+#: `test` job writes through `$PYTEST_LOG` (= `${{ runner.temp }}/pytest.log`) because a
+#: `/tmp/pytest.log` literal is SHARED between concurrent jobs on a self-hosted runner,
+#: which made the kill's own counts and tail describe another shard. The capture is the
+#: same capture (and owes the same reporter call), so the SITE is matched on either
+#: spelling — the alternative was a guard that reports "a leg was dropped" when a path
+#: was hardened, which is exactly the false signal this floor must not emit.
 _TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
+#: The per-runner indirection a hardened job writes through, as it appears in a `tail`.
+_RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
 #: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
 #: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
@@ -1130,6 +1140,12 @@ def capture_site(line: str) -> str | None:
     if match is None:
         return None
     target = match.group(1)
+    if target == _RUNNER_TEMP_LOG:
+        # A per-runner path: the leg still owes the reporter a call, and the
+        # window assertion below compares this same token (the call is
+        # `--log "$PYTEST_LOG"`), so the pairing is checked exactly as it is for
+        # a literal `/tmp/*.log`.
+        return target
     if not (target.startswith("/tmp/") and target.endswith(".log")):
         return None
     return target
