@@ -1,0 +1,55 @@
+# Per-question outcomes of the 2026-10-25 pilot (50 type-stratified questions).
+# Derived from the run report (pilot50.report.json); the derivation command is in
+# the parent README (section 9). Columns:
+#   question_id  question_type  judge_label  session_recall_at_5  recall_all_at_5
+question_id	question_type	judge_label	session_recall_at_5	recall_all_at_5
+6a1eabeb	knowledge-update	False	0.500000	0
+6aeb4375	knowledge-update	True	1.000000	1
+71315a70	knowledge-update	True	1.000000	1
+830ce83f	knowledge-update	True	0.500000	0
+852ce960	knowledge-update	False	1.000000	1
+89941a93	knowledge-update	True	1.000000	1
+945e3d21	knowledge-update	False	1.000000	1
+d7c942c3	knowledge-update	True	0.500000	0
+0a995998	multi-session	False	0.666667	0
+3a704032	multi-session	False	1.000000	1
+6d550036	multi-session	True	0.000000	0
+aae3761f	multi-session	True	0.666667	0
+b5ef892d	multi-session	True	1.000000	1
+e831120c	multi-session	False	1.000000	1
+gpt4_59c863d7	multi-session	True	0.750000	0
+gpt4_d84a3211	multi-session	False	0.250000	0
+gpt4_f2262a51	multi-session	False	0.333333	0
+1903aded	single-session-assistant	True	1.000000	1
+4c36ccef	single-session-assistant	True	1.000000	1
+6ae235be	single-session-assistant	True	1.000000	1
+7161e7e2	single-session-assistant	True	1.000000	1
+7e00a6cb	single-session-assistant	True	1.000000	1
+89527b6b	single-session-assistant	True	1.000000	1
+c4f10528	single-session-assistant	True	1.000000	1
+e9327a54	single-session-assistant	True	1.000000	1
+06878be2	single-session-preference	False	1.000000	1
+0edc2aef	single-session-preference	False	1.000000	1
+195a1a1b	single-session-preference	True	1.000000	1
+32260d93	single-session-preference	False	1.000000	1
+35a27287	single-session-preference	False	1.000000	1
+75832dbd	single-session-preference	False	1.000000	1
+8a2466db	single-session-preference	True	1.000000	1
+afdc33df	single-session-preference	False	1.000000	1
+118b2229	single-session-user	True	1.000000	1
+1e043500	single-session-user	True	1.000000	1
+51a45a95	single-session-user	False	1.000000	1
+58bf7951	single-session-user	True	1.000000	1
+58ef2f1c	single-session-user	True	1.000000	1
+6ade9755	single-session-user	True	1.000000	1
+6f9b354f	single-session-user	True	1.000000	1
+c5e8278d	single-session-user	True	1.000000	1
+e47becba	single-session-user	True	1.000000	1
+0bc8ad92	temporal-reasoning	True	0.666667	0
+71017276	temporal-reasoning	True	1.000000	1
+af082822	temporal-reasoning	False	1.000000	1
+b46e15ed	temporal-reasoning	False	0.500000	0
+gpt4_4929293a	temporal-reasoning	True	1.000000	1
+gpt4_59149c77	temporal-reasoning	True	1.000000	1
+gpt4_f49edff3	temporal-reasoning	True	1.000000	1
+gpt4_fa19884c	temporal-reasoning	True	1.000000	1
