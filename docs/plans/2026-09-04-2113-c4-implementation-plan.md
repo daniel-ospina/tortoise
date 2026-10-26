@@ -43,6 +43,24 @@ C5, documented).
   when the server IS reachable but SETUSER errors (a real recipe/perm
   failure) — a down ACL layer is never a SPOF (epic §5.5: app spine
   authoritative).
+  - ⚠️ **SUPERSEDED AS APPLIED TO THE MANAGED-CLOUD LANE (#10093, 2026-10-26).**
+    D3's last clause — *"STRICT raise only when the server IS reachable but
+    SETUSER errors"* — is unsatisfiable on FalkorDB Cloud: **no credential the
+    app may hold can run `ACL`** (no preset grants `+ACL`; `ACL` is not in the
+    vendor's allowed-commands list), so "reachable but refused" is the NORMAL
+    state there, not a recipe failure. D3 also assumed the direct-ACL path is
+    *"the seam both modes share"* (see this plan's scope line) — that
+    assumption is what the 2026-10-26 production reproduction disproved. What
+    replaced it, per the owner decision recorded on **#8617**: the layer is
+    **declared** per deployment (`TORTOISE_ACL_LAYER=off|best_effort|strict`,
+    default `strict`), a permission refusal is its own reported state
+    (`AclLayerDenied` / `create_acl_user` → `denied`), and a hosted mint is
+    **not** rolled back for a user no credential may create. D1/D2/D4-D7 stand,
+    and on self-hosted/docker (`strict`, the default) D3's contract is exactly
+    what still runs. Implementation: `tortoise/acl_graph_users.py`
+    (`layer_provisionable`), `tortoise/hosted_api.py`
+    (`_acl_user_create_hook`, `_provision_graph`, `_reconcile_acl_users_sync`),
+    `fly.toml` `[env]`, `tests/test_10093_acl_layer_declared.py`.
 - **D4 (credential storage):** generated 32-hex password stored server-side
   with the graph: registry mode → Graph node props `acl_user`/`acl_pass`
   (SET on the minted node). Supabase mode → NO row columns in C4 (the hosted

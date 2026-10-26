@@ -2376,7 +2376,14 @@ class TestDrAclReconcile:
         body = r.json()
         assert body["status"] == "reconciled"
         org_res = body["results"]["team_x"]
-        assert org_res["custom_graphs_ok"] == 1
+        # #10093: `custom_graphs_ok`/`acl_absent_skipped` (one conflated skip
+        # counter) became three distinct states — provisioned / absent_by_design
+        # / denied — so "not provisionable here" is never reported as a failure
+        # or as success-by-omission.
+        assert org_res["provisioned"] == 1
+        assert org_res["absent_by_design"] == 0
+        assert org_res["denied"] == 0
+        assert "acl_absent_skipped" not in org_res
         assert org_res["default_skipped"] == 1
         # the ACTIVE custom graph is rebuilt; the tombstone is never touched
         assert ("g_a", "team_x") in calls

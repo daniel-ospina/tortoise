@@ -200,6 +200,22 @@ kill_timeout = 30
   # UNSET here too: the hosted lane is multi-tenant and carries its tenant per
   # request, so a process-global pair would misfile every tenant's rows (#9192).
   TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_CLOUD_URI → FalkorDB Cloud
+  # ── #10093 (implements the owner decision recorded on #8617, 2026-10-26) ──
+  # The per-graph ACL layer is NOT provisionable on FalkorDB Cloud: no preset
+  # grants `+ACL` and `ACL` is not in the vendor's allowed-commands list, so
+  # every attempt is a refused command. Pre-#10093 that refusal was read as "the
+  # layer is broken, roll the mint back", and EVERY hosted graph creation 503'd
+  # with "Per-graph ACL provisioning failed". Declared OFF here, the app stops
+  # attempting it and the absence is RECORDED (reconcile: `absent_by_design`,
+  # never a silent success) instead of inferred per mint.
+  # What still isolates a graph on this lane (unchanged, and the set the
+  # end-customer isolation claim rests on): the app-layer ownership check
+  # (`_assert_graph_owned`), the per-graph namespace, and the per-graph key —
+  # see docs/authorization-architecture.md §2.1 and #8617.
+  # ⛔ CONFIG, NOT A SECRET: it must NOT enter
+  # .github/scripts/fly-managed-secrets.txt (there is no Fly secret of this name
+  # to shadow, and the drift gate keys on names Fly reports as secrets).
+  TORTOISE_ACL_LAYER = "off"
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
   # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded
   # headers — Fly-Client-IP for per-IP limiters (#1081) and

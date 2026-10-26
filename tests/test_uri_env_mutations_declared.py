@@ -141,6 +141,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # fold the assertion onto a shared server graph. The delenv IS the point;
     # the fixture-param monkeypatch auto-restores (no lane leak).
     "test_destructive_wipe_guard.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #10093: the ACL layer's "no server URI ⇒ absent (with the reason)" arm is
+    # a unit-level assertion about `create_acl_user`'s result, not a lane choice
+    # for the registry writes — the delenv IS the input, and it is scoped to a
+    # single test with the fixture-param monkeypatch (auto-restored).
+    "test_10093_acl_layer_declared.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #9664 capstone connector (the ChatGPT onboarding journey): the test drives
     # the REAL HTTP app + tenancy resolver + record seam against a local SQLite
     # db (`TORTOISE_DB_PATH` to a tmp_path), so it forces the EMBEDDED lane — the

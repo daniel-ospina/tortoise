@@ -98,6 +98,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # rename would seed a DIFFERENT graph than the routes under test read.
     "test_pack_selection_by_graph.py": {"registry": "prod-coupled"},
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
+    # #10093: the Team/Graph control-plane nodes are seeded and read through the
+    # CANONICAL `registry` namespace, because the code under test
+    # (`hosted_api._provision_graph` / `_reconcile_acl_users_sync`) resolves that
+    # same namespace — a `test_*` rename would seed a different graph than the
+    # mint reads. Same `prod-coupled` class as test_pack_selection_by_graph.
+    "test_10093_acl_layer_declared.py": {"registry": "prod-coupled"},
     "test_index_docs_api.py": {"registry": "index-docs"},
     # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
     # the registry control-plane graph (the same graph `_get_registry()` and the

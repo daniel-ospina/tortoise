@@ -234,22 +234,38 @@ below is green.
 user** (`PUT …/users/{username}`), so the old credential still works — zero
 downtime so far.
 
-   ⛔ **Do not assume a preset is sufficient — a `Write`-preset user is not.**
-   This URI becomes the app's `TORTOISE_DB_URI` (`entrypoint.sh` builds it from
-   `FALKORDB_CLOUD_URI`), and `tortoise/acl_graph_users.py::_admin_client()`
-   uses those same credentials as its **admin** connection to provision each
-   graph's per-graph ACL user: `ACL GETUSER` / `ACL SETUSER … reset` /
-   `ACL DELUSER` / `ACL SAVE` (`_ensure_default_user_secured`, `_user_exists_on`,
-   `_setuser`, `drop_acl_user`), behind a `MODULE LIST` capability probe
-   (`_falkordb_present`). The requirement is therefore `_GRAPH_COMMANDS`
-   **plus `+MODULE|LIST` and `+ACL`** — that file is the requirement's home, and
-   the vendor's presets meet neither ("No preset grants `+ACL`"; only **Admin**
-   adds `+MODULE|LIST`). A preset that misses them does not fail loudly: with
-   `MODULE LIST` denied, `create_acl_user()` returns `None` and the mint
-   succeeds with **no per-graph ACL user** — the C4/#2113 isolation layer
-   silently absent. Which credential the Cloud app's ACL provisioning can
-   actually use is **#8617**; until that is settled, do not narrow the ACL below
-   what `tortoise/acl_graph_users.py` requires.
+   ⛔ **What the app needs this credential for (re-measured 2026-10-26, #10093).**
+   The URI becomes the app's `TORTOISE_DB_URI` (`entrypoint.sh` builds it from
+   `FALKORDB_CLOUD_URI`) and it is the **only** connection the app makes: graph
+   reads/writes, i.e. `_GRAPH_COMMANDS`
+   (`+GRAPH.QUERY +GRAPH.RO_QUERY +PING`) and **not `+ACL`, and not
+   `+MODULE|LIST`**: the per-graph ACL layer is **declared off on this
+   deployment** (`TORTOISE_ACL_LAYER = "off"` in `fly.toml`) because **no
+   credential the app may hold can provision it on FalkorDB Cloud** — no preset
+   grants `+ACL` and `ACL` is not in the vendor's allowed-commands list
+   (owner decision recorded on **#8617**, implemented by **#10093**). A `Write`
+   preset remains insufficient for a different reason: it is not the ACL
+   requirement any more, it is the graph-command set.
+
+   What that means when you rotate:
+
+   - **Managed Cloud (this runbook):** pick a user with the graph commands. Do
+     not hunt for `+ACL` — it cannot be granted, and asking for it is what used
+     to turn a rotation into an outage.
+   - **Self-hosted / docker (`TORTOISE_ACL_LAYER` unset ⇒ `strict`):** nothing
+     about the recipe changes — `tortoise/acl_graph_users.py` is the
+     requirement's home, and the layer still needs `_GRAPH_COMMANDS` **plus
+     `+MODULE|LIST` and `+ACL`**, plus a password-secured `default` user.
+
+   Verify the state — not the logs' absence — after a rotation or a deploy:
+   `POST /v1/internal/backups/acl-reconcile` must report
+   `absent_by_design` for every custom graph on the Cloud lane (with
+   `errors: []`), **never** `denied` and never a silent `0`. `absent_by_design`
+   means "this deployment does not provision the layer" — a fact, recorded;
+   `denied` means the credential was refused, which on this lane is a
+   misconfiguration to escalate. The app also logs one
+   `per-graph ACL layer is DECLARED off` line per process at the first graph
+   mint.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.

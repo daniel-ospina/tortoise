@@ -59,7 +59,9 @@ if _server_uri_set():
     _HAS_FALKORDB = False
     for _attempt in range(5):
         _probe = acl._admin_client()
-        if _probe is not None and acl._falkordb_present(_probe):
+        # #10093: the probe is TRI-STATE (present/absent/denied) — every value
+        # is a truthy string, so compare against the constant, never truthiness.
+        if _probe is not None and acl._falkordb_present(_probe) == "present":
             _HAS_FALKORDB = True
             break
         _time.sleep(2)
