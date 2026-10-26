@@ -34,11 +34,24 @@ from __future__ import annotations
 
 import pytest
 
-from tortoise import __all__ as declaration
+from tools.sdk_surface_declaration import load_declaration
 from tortoise.sdk import TortoiseSDK
+
+#: The approved surface, read the SUPPORTED way — by path, through the gate's own loader.
+#: ⛔ Never `from tortoise import __all__`: that imports the MODULE `tortoise.__all__`, and the
+#: import system then binds it onto the package as `tortoise.__all__`, which breaks
+#: `from tortoise import *` for the rest of the process and reds
+#: `test_sdk_surface_declaration.py::test_loading_the_declaration_by_path_does_not_shadow_star_import`
+#: — the test that exists precisely to catch this. Found by running this file together with
+#: that one; alone, each passed.
+DECLARATION: tuple[str, ...] = tuple(load_declaration()["__all__"])
 
 #: The four merge targets — `docs/product/beta-sdk-surface.md` rows 12, 19, 22, 24.
 MERGES = ("create_entity", "link_entities", "update_knowledge", "delete_knowledge")
+
+#: A complete annotation — `annotate_operator` requires all four dimensions, so a partial
+#: dict is refused for a DIFFERENT reason and would mask the accept-and-drop cases below.
+_FULL_ANNOTATION = {"bias": 0.1, "precision": 0.2, "consistency": 0.3, "directness": 0.4}
 
 
 def _sdk() -> TortoiseSDK:
@@ -84,10 +97,10 @@ def sdk(monkeypatch):
 
 
 def test_the_four_merges_are_rows_of_the_approved_40_and_the_declaration_is_unchanged():
-    assert len(declaration.__all__) == 40, (
+    assert len(DECLARATION) == 40, (
         "the approved declaration is 40 names; a merge must not change it")
     for name in MERGES:
-        assert name in declaration.__all__, f"{name} must already be approved"
+        assert name in DECLARATION, f"{name} must already be approved"
     for name in MERGES:
         assert callable(getattr(TortoiseSDK, name, None)), (
             f"approved and declared but absent from TortoiseSDK: {name}")
@@ -455,6 +468,15 @@ def test_operator_true_on_a_relation_with_no_mechanism_is_refused():
     ("supports", {"batch_id": "b1"}, "create_operator"),
     ("references", {"entity_label": "Event", "label": "cited"}, "link_source_to_entity"),
     ("references", {"entity_label": "Event", "confidence": 0.4}, "link_source_to_entity"),
+    # #10053 review (P2): `entity_label` / `source_kind` belong to the PROVENANCE arm
+    # alone. They were absent from `requested`, so every other arm accepted and
+    # ignored them — `link_entities("hasPart", a, b, entity_label="Event")`
+    # returned success for a plain edge with the label dropped.
+    ("hasPart", {"entity_label": "Event"}, "create_edge"),
+    ("hasPart", {"source_kind": "document"}, "create_edge"),
+    ("wasDerivedFrom", {"entity_label": "Event"}, "create_derivation"),
+    ("supports", {"source_kind": "document"}, "create_operator"),
+    ("IMPL", {"entity_label": "Event"}, "create_direct_edge"),
 ])
 def test_link_entities_refuses_a_parameter_the_chosen_arm_cannot_record(
         sdk, relation, kwargs, door):
@@ -480,6 +502,28 @@ def test_the_operator_arm_still_records_the_attributes_it_can(sdk):
     door, _args, kwargs = sdk.calls[-1]
     assert door == "create_operator"
     assert kwargs["label"] == "backed" and kwargs["direction"] == "->"
+
+
+def test_the_provenance_arm_still_records_the_label_and_the_kind(sdk):
+    """The refusal above is scoped: the one arm with a slot for them still gets them.
+
+    `source_kind` defaults to `None` in the signature (the "not asked" sentinel that
+    makes the refusal possible at all), so the arm must resolve it — the narrow door's
+    own default is `"document"`, and dropping it to `None` here would change what the
+    provenance writer records.
+    """
+    sdk.link_entities("references", "https://x", "e1", entity_label="Event")
+    door, _args, kwargs = sdk.calls[-1]
+    assert door == "link_source_to_entity"
+    assert kwargs["entity_label"] == "Event"
+    assert kwargs["source_kind"] == "document", (
+        "the arm must resolve the not-asked sentinel to the writer's own default")
+
+    sdk.calls.clear()
+    sdk.link_entities("references", "https://x", "e1", entity_label="Person",
+                      source_kind="profile")
+    assert sdk.calls[-1][2] == {"source_url": "https://x", "entity_id": "e1",
+                                "entity_label": "Person", "source_kind": "profile"}
 
 
 # ── 6. the temporal FIELD's value is the datum, not just the branch selector ──
@@ -520,7 +564,15 @@ def test_the_merge_exposes_the_temporal_field_and_forwards_its_value():
 
 
 def test_the_retraction_record_carries_the_window_end():
-    """A window end that is not journalled is lost on the next rebuild."""
+    """A window end that is not journalled is lost on the next rebuild.
+
+    This pins the DECLARATION only. Whether the producer actually puts the key on the
+    record is a different question, and it is answered by execution in
+    `tests/test_4282_dated_retraction_durability.py` — where it was FALSE until
+    `retract_point` stopped passing `valid_to` as a change-feed-only `payload=`
+    (a declared `from_payload` on a record that never carries the key is exactly the
+    vacuous shape this file must not rely on).
+    """
     from tortoise.record_projection import RECORD_MUTATIONS
 
     mutation = RECORD_MUTATIONS["PointRetracted"]
@@ -528,6 +580,43 @@ def test_the_retraction_record_carries_the_window_end():
     assert "valid_to" in written, (
         "PointRetracted must carry the caller's `valid_to`, or a rebuild replays "
         "the tombstone with no window end while the live node has one")
+
+
+# ── 6b. one arm per call: a keyword the chosen arm cannot carry is REFUSED ──────
+#
+# #10053 review (P2). `update_knowledge` has three arms (property bag / annotation /
+# temporal window + tombstone) and each RETURNS from its branch, so everything named
+# beside it used to be accepted and dropped — the same fail-silent class
+# `link_entities`' `_dispatch` already refuses. `link_entities` refuses; this verb now
+# does too, in the same `ValueError` class and with the same rule.
+
+
+def test_the_annotation_arm_refuses_properties_it_cannot_carry(sdk):
+    """`annotate_operator` takes the four dimensions and nothing else.
+
+    Before: `update_knowledge(op, content="new text", annotation={…})` annotated the
+    link, DISCARDED the content and returned success.
+    """
+    with pytest.raises(ValueError, match="cannot carry content"):
+        sdk.update_knowledge("op1", annotation=_FULL_ANNOTATION, content="new text")
+    assert sdk.calls == [], "a refusal must not fall through to a write"
+
+
+def test_the_annotation_arm_refuses_a_temporal_field_beside_it(sdk):
+    """Before: this ANNOTATED and never retracted — discarding `corrected_by_id` too,
+    which the same function refuses on its own when no temporal field accompanies it."""
+    with pytest.raises(ValueError, match="cannot carry"):
+        sdk.update_knowledge("op1", annotation=_FULL_ANNOTATION,
+                             invalid_at="2026-01-01", corrected_by_id="p2")
+    assert sdk.calls == []
+
+
+def test_a_temporal_field_refuses_properties_it_cannot_carry(sdk):
+    """Before: `update_knowledge(p, content="corrected text", valid_until=…)`
+    retracted the point and silently lost the text the caller asked to store."""
+    with pytest.raises(ValueError, match="cannot carry content"):
+        sdk.update_knowledge("p1", valid_until="2026-01-01", content="corrected text")
+    assert sdk.calls == [], "a refusal must not reach a writer"
 
 
 # ── 7. malformed annotation input is ValueError, like every other refusal ────

@@ -1198,8 +1198,9 @@ def _fold_journal(events: list[dict]) -> dict:
         keys the payload carries, except `content`/`is_operator`/`op_type`,
         which it sets UNCONDITIONALLY — so a snapshot that omits those RESETS
         them, and this arm pins them the same way.
-      PointRetracted  — `_retract` (`_apply_one`'s arm sets the same three:
-        status, `VACUITY_BELIEF`, and the #5048 recorded `updatedAt`):
+      PointRetracted  — `_retract` (`_apply_one`'s arm sets the same four:
+        status, `VACUITY_BELIEF`, the #5048 recorded `updatedAt`, and the #4282
+        `validTo` window end):
         `status='retracted'` + the `decay_clause` belief decay, which is why
         this arm exists at all rather than deferring to `_apply_one`.
       PointSuperseded — `_fold_point_superseded`: requires `new_id` (a
@@ -1406,6 +1407,24 @@ def _fold_journal(events: list[dict]) -> dict:
                 # is excluded from comparison.)
                 if _usable_instant(ev.get("ts")):
                     entry["updatedAt"] = ev["ts"]
+                # #4282 (PR #10053 review, P1): the WINDOW END a dated retraction
+                # carries, mirrored from the same record through the SAME gate both
+                # replay engines use (`projection/__init__.py`'s `_apply_one` arm and
+                # `projection/entities.py`'s `_retract` both write `validTo` under
+                # `_usable_instant`). Without this the key was GRAPH-ONLY: it is in
+                # neither `_EXCLUSION_REASONS` nor `_ONE_SIDED_REASONS` nor
+                # `_WRITER_DEFAULTS` nor `_GRAPH_DEFAULTED_PROPS`, and `_compare_views`
+                # iterates the union of both sides, so every faithful graph produced
+                # `divergence="content"` naming `validTo` — and the verdict's own
+                # advice ("replay the journal") could never clear it, because replay
+                # writes the key onto the GRAPH. That is the #5048/#3817 class, one
+                # level down: not just "the field is excluded from comparison" but
+                # "the reference cannot state a field the graph is required to have".
+                # A `None`/corrupt value writes nothing, exactly as the two replay
+                # arms write no column for it, so the legacy ts-less/no-end path stays
+                # symmetric-absent.
+                if _usable_instant(ev.get("valid_to")):
+                    entry["validTo"] = ev["valid_to"]
             elif t == "PointSuperseded":
                 entry["status"] = "superseded"
             if t in ("PointSuperseded", "PointInvalidated"):

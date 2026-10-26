@@ -13743,7 +13743,7 @@ class TortoiseSDK:
                       label: str | None = None,
                       batch_id: str | None = None,
                       entity_label: str | None = None,
-                      source_kind: str = "document",
+                      source_kind: str | None = None,
                       promote_source: bool = True) -> dict | None:
         """Connect two nodes — **the relation decides how**, not the caller.
 
@@ -13800,7 +13800,11 @@ class TortoiseSDK:
         ``create_direct_edge`` arm, ``label``/``direction``/``promote_source`` by
         the ``create_operator`` arm, and NONE of them by the derivation,
         provenance or plain-edge arms; asking for one there raises a
-        ``ValueError`` that names the arm and the writer.
+        ``ValueError`` that names the arm and the writer. ``entity_label`` and
+        ``source_kind`` belong to the PROVENANCE arm alone — naming either on
+        another relation is refused rather than ignored. ``source_kind``
+        defaults to ``None`` (= not asked) and is resolved to ``"document"``
+        only inside that arm, where it has a meaning.
 
         Returns whatever the chosen writer returns — the merge adds no envelope.
         ``link_source_to_entity`` answers ``None`` and the other arms answer a
@@ -13817,20 +13821,29 @@ class TortoiseSDK:
         # below, never accepted-and-dropped. `None` is this signature's "not
         # asked"; `promote_source=True` is its default, so only an explicit
         # False counts as asking.
+        #
+        # `entity_label` / `source_kind` are in `requested` too (#10053 review,
+        # P2): the PROVENANCE arm is the only one with a slot for them, and the
+        # other four dropped them silently — `link_entities("hasPart", a, b,
+        # entity_label="Event")` returned success having ignored the label. That
+        # is why `source_kind` defaults to `None` here and is resolved to
+        # `"document"` at its one use site: with the old `"document"` default it
+        # would read as ALWAYS requested and refuse every other arm.
         _honours: dict[str, frozenset[str]] = {
             "create_direct_edge": frozenset({
                 "direction", "confidence", "weight", "label", "batch_id",
                 "promote_source"}),
             "create_operator": frozenset({"label", "direction", "promote_source"}),
             "create_derivation": frozenset(),
-            "link_source_to_entity": frozenset(),
+            "link_source_to_entity": frozenset({"entity_label", "source_kind"}),
             "create_edge": frozenset(),
         }
         requested = {
             name: value for name, value in (
                 ("direction", direction), ("confidence", confidence),
                 ("weight", weight), ("label", label),
-                ("batch_id", batch_id),
+                ("batch_id", batch_id), ("entity_label", entity_label),
+                ("source_kind", source_kind),
             ) if value is not None
         }
         if promote_source is False:
@@ -13863,7 +13876,8 @@ class TortoiseSDK:
                 "link_source_to_entity",
                 lambda: self.link_source_to_entity(
                     source_url=from_id, entity_id=to_id,
-                    entity_label=entity_label, source_kind=source_kind))
+                    entity_label=entity_label,
+                    source_kind=source_kind or "document"))
 
         if rel == "wasDerivedFrom":
             # create_derivation(src_id, dst_id) writes (dst)-[:wasDerivedFrom]->(src).
@@ -13960,6 +13974,18 @@ class TortoiseSDK:
         when it must not be retained.** ``supersede_knowledge`` and
         ``delete_knowledge`` stay separate verbs because they destroy or replace —
         this one always keeps the record.
+
+        ⛔ **One arm per call — a keyword the chosen arm cannot RECORD is refused,
+        never dropped.** The three arms write different things (a property bag, the
+        four annotation dimensions, a window end + tombstone), so a call that names
+        two of them used to return success having recorded only one: an
+        ``annotation`` beside ``**props`` or beside a temporal field lost the props
+        or the retraction, and a temporal field beside ``**props`` lost the props.
+        Each is a ``ValueError`` naming what the arm could not carry, with the two
+        calls that do record both — the same rule :meth:`link_entities` applies
+        (#10053 review, P2). Compose them in the order the lifecycle allows: a
+        property/window update FIRST, the terminal stamp SECOND (#7819 refuses a
+        temporal re-stamp on an already-terminal claim).
         """
         if annotation is not None:
             if not isinstance(annotation, dict):
@@ -13984,6 +14010,30 @@ class TortoiseSDK:
                     f"a smaller update: annotate_operator requires all four, and "
                     f"leaving them unset is the neutral default (factor 1.0), so "
                     f"pass all four or none.")
+            # ⛔ The annotation arm RETURNS here, so everything beside
+            # `annotation=` used to be accepted and dropped (#10053 review, P2):
+            # `update_knowledge(op, content="new", annotation={...})` annotated
+            # the link and lost the content, and `update_knowledge(op,
+            # annotation={...}, invalid_at=..., corrected_by_id=...)` annotated
+            # and never retracted — including discarding `corrected_by_id`, which
+            # this same function refuses on its own one branch below. An
+            # annotate_operator call has no slot for any of them, so refuse by
+            # name instead of returning success for half the call.
+            beside = sorted(
+                name for name, value in (
+                    ("valid_until", valid_until), ("invalid_at", invalid_at),
+                    ("corrected_by_id", corrected_by_id), *props.items(),
+                ) if value is not None
+            )
+            if beside:
+                raise ValueError(
+                    f"update_knowledge: annotation= is the annotate_operator arm, "
+                    f"which records the four epistemic dimensions and nothing "
+                    f"else — it cannot carry {', '.join(beside)}. Refusing rather "
+                    f"than returning success for a call that recorded only part "
+                    f"of it: an annotation and a revision are two different "
+                    f"changes, so send them as two calls (this is the same rule "
+                    f"`link_entities` applies to a keyword its arm cannot record).")
             return self.annotate_operator(id, **annotation)
 
         # The temporal field IS the window end, so it must reach the writer that
@@ -13993,6 +14043,25 @@ class TortoiseSDK:
         # stamped `validTo = now` instead of the caller's instant (#4282).
         end = invalid_at if invalid_at is not None else valid_until
         if end is not None:
+            # The temporal arm's writers (`retract_point` / `invalidate_point`)
+            # record the window end and the tombstone; they take no property bag,
+            # so `**props` used to be dropped here too (#10053 review, P2):
+            # `update_knowledge(p, content="corrected text", valid_until=D)`
+            # retracted the point and lost the text. Refuse rather than silently
+            # store a subset — and say WHICH way to get both: a window update and
+            # a terminal stamp are two revisions, and #7819 makes the order
+            # matter, so composing them is the caller's call, not this verb's
+            # guess.
+            if props:
+                raise ValueError(
+                    f"update_knowledge: a temporal field (valid_until=/invalid_at=) "
+                    f"retracts or invalidates the claim, and its writer records the "
+                    f"window end only — it cannot carry {', '.join(sorted(props))}. "
+                    f"Refusing rather than returning success for a retraction that "
+                    f"stored none of them: call `update_knowledge(id, "
+                    f"**props)` for the property change and then this call for the "
+                    f"window, in that order (a terminal claim refuses a temporal "
+                    f"re-stamp, #7819).")
             if corrected_by_id:
                 return self.invalidate_point(id, corrected_by_id, valid_to=end)
             return self.retract_point(id, valid_to=end)
@@ -16554,10 +16623,27 @@ class TortoiseSDK:
         if valid_to is not None:
             self._assert_window_start_not_inverted(id, valid_to, door="retract_point")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
-        # only after the input contract validates). `valid_to` rides the record so
-        # the replay folds the SAME window (#4282).
-        self._emit_event("PointRetracted", {"id": id, "valid_to": valid_to},
-                         id=id, recorded_ts=_now)
+        # only after the input contract validates).
+        #
+        # ⛔ `valid_to` must ride the JOURNAL, not only the change-feed payload
+        # (#10053 review, P1 — settled by executing the durability gate).
+        # `_emit_event`'s POSITIONAL `payload=` reaches the `:GraphEvent` store
+        # ONLY: the JSONL record is assembled from `point` / `id` / `**extra`.
+        # So `_emit_event("PointRetracted", {"id": id, "valid_to": …}, id=id)`
+        # journalled a record with NO window end — measured: the live node held
+        # `validTo`, the rebuilt node had none, and `derived = replay(journal)`
+        # was FALSE for every dated retraction. The kwargs form is what
+        # `invalidate_point` already uses (`ts=…, valid_to=…`), and it emits the
+        # SAME graph payload (`{"id": id, **extra}`) while also putting the key
+        # on the record — which is what `record_projection`'s `from_payload` and
+        # both replay folds read.
+        #
+        # An UNDATED retraction passes no key at all, so its record stays
+        # byte-identical to before: presence is ownership, and the folds' shared
+        # `_usable_instant` gate already treats "absent" and "null" alike.
+        _window = {} if valid_to is None else {"valid_to": valid_to}
+        self._emit_event("PointRetracted", {"id": id, **_window},
+                         id=id, recorded_ts=_now, **_window)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
         # a concurrent retract/supersede/invalidate can't both pass validation
         # and have a terminal overwrite. #2498: the CAS now uses the SAME
