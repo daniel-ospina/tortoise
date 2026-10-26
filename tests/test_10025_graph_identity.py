@@ -160,7 +160,7 @@ def test_a_custom_graphs_stable_id_is_its_row_id() -> None:
                     "kind": "custom", "namespace": "team_org-1_g_custom",
                     "status": "active", "recording": None}],
     })
-    custom = [r for r in graph_metadata(cp, "org-1") if r["kind"] == "custom"][0]
+    custom = next(r for r in graph_metadata(cp, "org-1") if r["kind"] == "custom")
     assert custom["graph_id"] == "g_custom"
     assert custom["stable_id"] == "g_custom"
 
