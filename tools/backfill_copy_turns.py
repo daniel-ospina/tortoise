@@ -50,10 +50,11 @@ left nodes the record can never hold:
 * ``2``  REFUSED. Either a BLOCKING anomaly class is nonzero (``off_shape``,
   ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
   store), or the copy stopped on a write it could not prove: a truncated read, an
-  unproven journal position, a non-contiguous segment, a record that was not
-  armed, a record that executed statements nobody committed, a commit that
-  throws (the driver's own ``psycopg2.Error`` — a connection that died on the
-  commit round trip), or the record seam itself raising
+  unproven journal position, a non-contiguous segment, an append that throws
+  (the journal's own ``OSError`` — ENOSPC/EIO/short write, so no position can be
+  proven), a record that was not armed, a record that executed statements nobody
+  committed, a commit that throws (the driver's own ``psycopg2.Error`` — a
+  connection that died on the commit round trip), or the record seam itself raising
   (``RecordWriteError``/``RecordConnectError`` — unreachable, refusing, or
   rolling back at session N of M), or a ``--journal`` that does not name an
   existing, non-empty file (positions are per ``(org_id, graph_id)``; a fresh
@@ -277,42 +278,54 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # is `DO UPDATE SET created_at = EXCLUDED.created_at`, so a present null
     # BLANKS a real time the record already holds on a re-run. Omitting the key
     # leaves an existing value alone and still writes NULL on a first insert.
+    #
+    # ⛔ The payload above is copied VERBATIM, so the rule is ENFORCED here, not
+    # merely hoped for: a graph property spelled `created_at`/`createdAt` with a
+    # null value would otherwise reach `_split_properties`, which snake-cases it
+    # into `col_values["created_at"] = None` with no value filter
+    # (`record_projection.py:1452-1462`) — the blanking write this paragraph
+    # forbids, while `copy_phase` reported the same session under
+    # `created_at_absent`. Popping BOTH spellings is what makes the claim true of
+    # a present null and not only of an absent key.
+    for absent in ("created_at", "createdAt"):
+        if absent in event and event[absent] is None:
+            event.pop(absent)
     # ⛔ The record's bookkeeping NEVER goes DOWN. `turn_count` is a COLUMN and
     # `turn_max_index` rides the props tail; the record's upsert is
     # `ON CONFLICT … DO UPDATE SET` and its tail merge is
     # `props = session.props || EXCLUDED.props`, so a smaller number written
-    # here OVERWRITES the truth. The case that destroys is the post-#10000
-    # cutover: with the record armed the capture writes NO turn nodes, so the
-    # ATTACHED count is 0 for every session already migrated, while the node —
-    # and the record — hold the real window length and high-water mark. A `-1`
-    # is worse than leaving it out: `sdk` reads
-    # `coalesce(s.turn_max_index, s.turn_count, 0)`, so -1 makes the stale-turn
-    # sweep walk nothing at all (#10000 is exactly why it exists).
+    # here OVERWRITES the truth. A `-1` is worse than leaving it out: `sdk`
+    # reads `coalesce(s.turn_max_index, s.turn_count, 0)`, so -1 makes the
+    # stale-turn sweep walk nothing at all (#10000 is exactly why it exists).
     #
-    # MAX, not the measurement: the census measured 21 sessions declaring FEWER
-    # turns than they carry (declared=6, attached=12), which the raw attached
-    # count fixes and the raw declared value would preserve — so take the larger
-    # of the two. Neither number is ever rewritten downward.
+    # WHEN THE COUNT IS WRITTEN: only when the graph MEASURED at least one
+    # attached turn. Nothing below can be established from a declaration alone:
     #
-    # ⛔ AND A NUMBER THE GRAPH CANNOT VOUCH FOR IS OMITTED, never written. `max()`
-    # only protects against the graph's OWN declaration; it cannot protect against
-    # what the RECORD already holds. The re-run after the delete phase is the case
-    # that destroys: the graph's turn nodes are gone (`attached=0`) and a legacy
-    # `:Session` node declares no `turn_max_index`, so `0` would overwrite a real
-    # `turn_count=12` through `DO UPDATE SET turn_count = EXCLUDED.turn_count`, and
-    # `-1` would overwrite the real high-water mark through the props merge — which
-    # is WORSE than absence, because `sdk` reads
-    # `coalesce(s.turn_max_index, s.turn_count, 0)` and a negative mark makes the
-    # stale-turn sweep walk nothing at all (#10000 exists to keep it working).
-    # Omitting the key is what `created_at` above already does: the column is not
-    # in the INSERT's column list, so `DO UPDATE` never names it and an existing
-    # value survives; a first insert takes the column's own NULL, which is the
-    # honest "no count was ever stated".
+    # * `max(declared, attached)` is still needed — the census measured 21
+    #   sessions declaring FEWER turns than they carry (declared=6, attached=12),
+    #   and the declaration would preserve the wrong number.
+    # * But `max()` protects only against the graph's OWN declaration; it cannot
+    #   protect against what the RECORD already holds. With `attached=0` the only
+    #   number available IS the declaration — the one the census proved drifts
+    #   LOW — so writing `max(declared, 0)` walks a real `turn_count=12` down to
+    #   `6` through `DO UPDATE SET turn_count = EXCLUDED.turn_count`, and
+    #   `turn_max_index` down through the props merge. Measured on the census's
+    #   own population: run 1 writes `{"turn_count": 12, "turn_max_index": 11}`;
+    #   the post-prune re-run (turn nodes gone, `declared=6`) writes `6`. That is
+    #   the case this module's contract forbids, and it is reachable: the tool is
+    #   re-runnable by design and the delete phase runs against the same graph.
+    # * So the guard is the MEASUREMENT, not the declaration: `attached > 0`
+    #   means the graph can still vouch for a window length, and `max()` then only
+    #   ever raises it. With `attached == 0` the graph proves nothing about a
+    #   window it no longer holds, so the keys are OMITTED — the column is not in
+    #   the INSERT's column list, `DO UPDATE` never names it, an existing value
+    #   survives (pinned through the record's own statement emitter below), and a
+    #   first insert takes the column's own NULL: the honest "no count was ever
+    #   stated", which is what `created_at` above already argues for.
     declared_count = census._int_or_none(props.get("turn_count")) or 0
     declared_max = census._int_or_none(props.get("turn_max_index"))
-    if declared_count or turn_count:
+    if turn_count > 0:
         event["turn_count"] = max(declared_count, turn_count)
-    if declared_max is not None or max_index >= 0:
         event["turn_max_index"] = max(
             declared_max if declared_max is not None else -1, max_index)
     return event
@@ -482,7 +495,23 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
     writer = RecordWriter(dsn=dsn)
 
     def emit(session_id: str, events: list[dict]):
-        positions = [log.append(event) for event in events]
+        try:
+            positions = [log.append(event) for event in events]
+        except Exception as exc:
+            # The append is a WRITE, and `EventLog`'s own failure classes are the
+            # filesystem's — `_write_record` raises `OSError` on a short write,
+            # and `FileIO` raises on ENOSPC/EIO/ESTALE/EACCES (the volumes this
+            # path is hardened for). None of those is a class `main` catches, so
+            # an uncaught one is a traceback and exit 1 ("the tool cannot
+            # start") with NO artifact, on a run that already committed N-1
+            # sessions. Convert to this module's refusal: the events may or may
+            # not have been appended, which is the same retry caveat the
+            # unproven-position message carries.
+            raise CopyRefused(
+                f"{session_id}: the journal append failed ({type(exc).__name__}) "
+                "— no position can be proven, so nothing may be filed; note that "
+                f"some of the {len(events)} event(s) may already be appended and "
+                "a retry appends them again") from exc
         first = positions[0] if positions else None
         if first is None:
             # ⛔ REFUSE, never write. `position=False` does NOT leave the row

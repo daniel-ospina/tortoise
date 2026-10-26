@@ -479,6 +479,62 @@ def test_a_mistyped_journal_is_a_refusal_not_a_traceback(
     assert not out.exists()
 
 
+def test_a_journal_append_that_throws_is_a_refusal_with_an_artifact(
+        monkeypatch, tmp_path, capsys) -> None:
+    """The append is a WRITE too — ENOSPC/EIO/short write is a refusal, not a crash.
+
+    `EventLog`'s own failure classes are the filesystem's (`_write_record`
+    raises `OSError` on a short write; `FileIO` raises on ENOSPC/EIO/ESTALE/
+    EACCES), and none of them is a class `main` catches — so an uncaught one
+    escaped as exit `1` ("the tool cannot start") with NO artifact. Driven
+    through `main`, against the real `_journal_emit` with only the log swapped.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    import tortoise.log as log_mod
+
+    class _NoSpace(log_mod.EventLog):
+        def append(self, event):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(log_mod, "EventLog", _NoSpace)
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(journal), "--out", str(out)])
+    assert excinfo.value.code == 2      # REFUSED, not "cannot start" (1)
+    assert "journal append failed" in capsys.readouterr().err
+    report = json.loads(out.read_text())
+    assert report["sessions"] == 0      # nothing landed, and the artifact says so
+    assert "journal append failed" in report["refused"]
+
+
+def test_a_present_null_created_at_never_reaches_the_payload() -> None:
+    """The claim is about a PRESENT null, not only an absent key.
+
+    A graph property spelling `created_at`/`createdAt` with a null value went
+    straight into the payload (the payload is copied verbatim), and
+    `_split_properties` snake-cases it into `col_values["created_at"] = None`
+    with no value filter — the `DO UPDATE SET created_at = EXCLUDED.created_at`
+    blanking write the block above forbids, while the same run reported the
+    session under `created_at_absent`.
+    """
+    for props in ({"created_at": None}, {"createdAt": None}):
+        event = copy_mod.build_session_event(
+            "s1", props, turn_count=0, max_index=-1, event_id="E")
+        assert "created_at" not in event and "createdAt" not in event
+    # A real time is still carried verbatim — this is a null filter, not a drop.
+    kept = copy_mod.build_session_event(
+        "s1", {"created_at": "2026-10-20T00:00:00Z"}, turn_count=0,
+        max_index=-1, event_id="E")
+    assert kept["created_at"] == "2026-10-20T00:00:00Z"
+
+
 def test_a_failed_session_write_aborts_the_copy_instead_of_being_counted() -> None:
     graph = _FakeGraph(
         sessions=[(1, "s1", {}), (2, "s2", {})],
@@ -674,23 +730,38 @@ def test_a_dry_run_needs_no_journal(monkeypatch) -> None:
 
 # ── the record's bookkeeping may never go DOWN ───────────────────────────
 
-def test_the_counts_never_go_down_for_a_session_the_record_already_covers() -> None:
-    """declared=12 attached=0 is the post-#10000 cutover, not a loss.
+def test_the_counts_are_omitted_when_the_graph_measured_no_turn() -> None:
+    """declared=12 attached=0 is the post-#10000 cutover — OMIT, don't re-assert.
 
     With the record armed the capture writes NO turn nodes, so every migrated
     session has zero attached turns in the graph while its node — and the
-    record — hold the real window length and high-water mark. Writing the
-    measurement there overwrites both: `turn_count` is a COLUMN updated by
-    `ON CONFLICT … DO UPDATE SET`, and `turn_max_index` rides the props tail
-    merged as `props || EXCLUDED.props`. `-1` is worse than absence, because
-    `sdk` reads `coalesce(s.turn_max_index, s.turn_count, 0)` — -1 makes the
-    stale-turn sweep walk nothing, which is the one behaviour #10000 added.
+    record — hold the real window length and high-water mark. The ONLY number
+    left here is the declaration, which the census proved drifts LOW, so
+    writing it walks a real `turn_count` down through `DO UPDATE SET
+    turn_count = EXCLUDED.turn_count` and `turn_max_index` down through
+    `props || EXCLUDED.props`. Omitting both is what keeps the record's own
+    value: the column is never named by the upsert (below).
     """
     event = copy_mod.build_session_event(
         "s1", {"turn_count": 12, "turn_max_index": 11}, turn_count=0,
         max_index=-1, event_id="E")
-    assert event["turn_count"] == 12
-    assert event["turn_max_index"] == 11
+    assert "turn_count" not in event and "turn_max_index" not in event
+
+
+def test_a_low_declaration_cannot_walk_the_record_down() -> None:
+    """The census's own population, on the path that destroys: declared=6.
+
+    21 production sessions declare FEWER turns than they carry
+    (declared=6, attached=12). After the delete phase the attached turns are
+    gone, so the same session presents as declared=6, attached=0 — and
+    `max(6, 0)` is 6, which would overwrite the `turn_count=12` run 1 wrote.
+    The guard is therefore the MEASUREMENT: with `attached == 0` nothing is
+    written, whatever the node declares.
+    """
+    event = copy_mod.build_session_event(
+        "s1", {"turn_count": 6, "turn_max_index": 5}, turn_count=0,
+        max_index=-1, event_id="E")
+    assert "turn_count" not in event and "turn_max_index" not in event
 
 
 def test_the_counts_still_rise_to_an_attached_count_above_the_declaration() -> None:
@@ -782,6 +853,22 @@ def test_statements_with_no_connection_to_commit_refuse() -> None:
     outcome = _outcome()
     with pytest.raises(copy_mod.CopyRefused, match="no connection to commit"):
         copy_mod._commit_or_refuse(_Write(outcome.APPLIED, 2, None), outcome, "s1")
+
+
+def test_a_caller_that_owns_the_transaction_is_not_accused_of_skipping_it() -> None:
+    """`owns_connection=False` is the injecting caller's case, and it is PINNED.
+
+    The parameter is a documented contract with no in-tree caller today (this
+    module always passes `conn=None`, so the seam opens the transaction). An
+    unexercised branch inside a function whose job is to REFUSE reads as proven
+    when it has never run — so the branch gets a test: a caller that injected
+    its own connection has already committed it, and this refusal must not
+    accuse it of committing nothing.
+    """
+    outcome = _outcome()
+    write = _Write(outcome.APPLIED, 2, None)
+    assert copy_mod._commit_or_refuse(
+        write, outcome, "s1", owns_connection=False) is write
 
 
 # ── the artifact's verdict ───────────────────────────────────────────────
