@@ -122,6 +122,15 @@ def test_a_valid_typed_answer_produces_the_expected_verdict():
     assert classified["stats"]["closed_vocab_rejects"] == 0
     assert classified["stats"]["seam"]["assignments"] == 1
     assert classified["stats"]["seam"]["calls"] == 1
+    # The record that makes arming measurable: the VET half carries its spend and
+    # its bands out through ``batch`` (the gate's own contract), and each half
+    # names the prompt version that decided, so a prompt change is visible in the
+    # artifact rather than inferred from the rollout date.
+    assert out["batch"]["seam"]["prompt"] == seam.VET_PROMPT
+    assert out["batch"]["seam"]["calls"] == 1
+    assert out["batch"]["seam"]["cost_usd"] > 0.0
+    assert out["batch"]["seam"]["bands"] == seam.DEFAULT_BANDS.as_record()
+    assert classified["stats"]["seam"]["prompt"] == seam.CLASSIFY_PROMPT
     offered = seen[-1]["questions"]["kind_c0"]["criteria"]
     assert set(offered) < set(FIXTURE_SPEC), (
         "the offered set is the kNN candidate list (top-5), not the whole vocabulary")
@@ -160,14 +169,21 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
 
     assert "DISCARD" not in out["stats"]["by_outcome"], (
         "an unusable answer must never become a drop — a wrong drop is memory loss")
+    degraded = out["batch"]["seam"]["degraded"]
+    by_text = {d["text"]: iid for iid, d in out["decisions"].items()}
     for text, question in (("Decided: the cache stays warm across restarts.", "keep_c0"),
                            ("See above.", "atomic_c1")):
         decision = decisions[text]
-        assert decision["outcome"] == "NOOP"
-        assert decision["rule_id"] == seam.RULE_SCHEMA_REJECT
-        assert question in decision["reason"], (
-            f"the failing question must be named, got {decision['reason']!r}")
+        # NO verdict (not a NOOP verdict): a verdict word is something the gate
+        # APPLIES, so a degraded NOOP would overwrite the mechanical #4899
+        # DISCARD — see the composition test below. The item keeps its default.
+        assert decision["outcome"] == "KEEP"
+        assert decision["rule_id"] == vet_gate.RULE_FAIL_OPEN
+        assert question in degraded[by_text[text]], (
+            f"the failing question must be named, got {degraded!r}")
     assert out["stats"]["candidates"] == 2  # both candidates reached the gate
+    assert out["batch"]["seam"]["schema_rejects"] == ["keep_c0", "atomic_c1"]
+    assert out["batch"]["seam"]["by_outcome"] == {}, "a degraded item produced no verdict"
 
     # S2.3: the model answers with a kind nobody offered.
     clf = _classifier(seam.classify_decider(transport=_transport({
@@ -207,8 +223,34 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
         [{"id": "p0", "text": "a claim"}],
         transport=lambda _payload: {"model": "jev-2", "answers": {}},
     )[0]
-    assert [(v["outcome"], v["rule_id"]) for v in unpinned] == [
-        ("NOOP", seam.RULE_UNAVAILABLE)], "an unverified model's answer is no verdict"
+    assert [(v["outcome"], v["rule_id"]) for v in unpinned] == [], (
+        "an unverified model's answer is no verdict at all, not a NOOP one")
+
+    # ⛔ THE COMPOSITION FLOOR (regression: an armed seam with no usable answer
+    # must not RESCIND the mechanical #4899 predicate). `vet_candidates` applies
+    # arbiter verdicts over the mechanical pass (``decisions[iid].update(...)``),
+    # so a degraded item that emitted a NOOP *verdict* would turn a discard into a
+    # keep on a key outage — an outage silently protecting what a working
+    # predicate dropped. With the flag armed and the transport raising, the
+    # identifier-only candidate must still be DISCARD, with its own rule id.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+    identifier_only = {"points": [{"content": "a1b2c3d4e5f6a7b8c9d0"}]}
+
+    def _down(_payload):
+        raise seam.Unavailable("no key")
+
+    out = vet_gate.vet_candidates(identifier_only, narrative="", arbiter=seam.vet_arbiter(
+        transport=_down))
+    only = next(iter(out["decisions"].values()))
+    assert (only["outcome"], only["rule_id"]) == ("DISCARD", "value.identifier_only.hash"), (
+        "an unavailable seam must not override the mechanical predicate: "
+        f"got {only['outcome']}/{only['rule_id']}")
+    assert only["counterfactual"].startswith("would have shipped"), (
+        "a discard that survives must stay explainable")
+    seam_record = out["batch"]["seam"]
+    assert seam_record["unavailable"] == 1 and seam_record["by_outcome"] == {}
+    assert seam_record["prompt"] == seam.VET_PROMPT
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
 
 
 if __name__ == "__main__":  # pragma: no cover

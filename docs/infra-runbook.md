@@ -306,7 +306,7 @@ documented exception, not a silent one:
 |---|---|---|
 | `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
 | `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
-| `JEV_API_KEY` | `tools/collision_preflight.py` (`$JEV_API_KEY`, else the repo-root `.env`) | the pre-dispatch gate is a local tool — the repo-root `.env` is its documented home (declared in `.env.example`) |
+| `JEV_API_KEY` | `tortoise/s2_decision_seam.py` (internal, OFF unless `TORTOISE_S2_DECISION_SEAM`; `$JEV_API_KEY`, else the repo-root `.env`) | the S2.2/S2.3 seam runs inside the local extractor — the repo-root `.env` is its documented home (declared in `.env.example`). The former consumer, `tools/collision_preflight.py`, no longer calls JEV at all (`#8175`), so this row and `.env.example` now agree |
 | `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
 
 **Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;

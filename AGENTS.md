@@ -408,8 +408,10 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 - **In-repo use:** ✅ **one, internal and OFF by default** — `tortoise/s2_decision_seam.py` (`#5087`)
   is the S2.2/S2.3 seam: `vet-v1` (`noul` + `score` per candidate) and `classify-v1` (a `choice`
   over the kinds the kNN offered), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
-  `vet_gate.vet_candidates(arbiter=…)` and `KindClassifier(tail_decider=…)`. What it does, what it
-  does not do, and its measured cost: `docs/architecture/S2-DECISION-SEAM.md`. **Do not rebuild it.**
+  `vet_gate.vet_candidates(arbiter=…)` and `KindClassifier(tail_decider=…)`. That flag arms S2.2
+  unconditionally (it overrides an explicit `TORTOISE_VET=0`, because the seam *is* the arbiter) and
+  arms S2.3 only where a `KindClassifier` is built (`TORTOISE_CLASSIFY_LATER=1`). What it does, what
+  it does not do, and its measured cost: `docs/architecture/S2-DECISION-SEAM.md`. **Do not rebuild it.**
   ⛔ **The previous use is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
   lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0`, prompt version

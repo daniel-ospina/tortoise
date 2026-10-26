@@ -1755,19 +1755,27 @@ def test_the_two_flags_are_unset_on_every_deploy_surface():
     """
     for rel in ("fly.toml", ".github/scripts/fly-managed-secrets.txt"):
         text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
-        for flag in ("TORTOISE_VET", "TORTOISE_VALUE_GATE"):
+        for flag in ("TORTOISE_VET", "TORTOISE_VALUE_GATE",
+                     "TORTOISE_S2_DECISION_SEAM"):
             assert flag not in text, (
                 f"{rel} now sets {flag}: the deployed configuration is the flags-ON "
                 "arm, so the probe's arm table and E1-E2.md's note must stop saying "
-                "production leaves both OFF")
+                "production leaves all of them OFF")
 
 
 def test_the_flags_are_off_when_unset(monkeypatch):
-    """Unset ⇒ off-path, which is why ``before`` is the deploy — measured, not asserted."""
+    """Unset ⇒ off-path, which is why ``before`` is the deploy — measured, not asserted.
+
+    All THREE S2.2 switches are deleted, not the two the arm table names: #5087
+    added ``TORTOISE_S2_DECISION_SEAM`` as a second contributor to
+    ``_vet_enabled``, so a leftover ambient value would arm the seam inside the
+    arm this test calls OFF (and an armed seam is a network call and a spend).
+    """
     from tortoise import extractor_v2
 
     monkeypatch.delenv("TORTOISE_VET", raising=False)
     monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    monkeypatch.delenv("TORTOISE_S2_DECISION_SEAM", raising=False)
     assert extractor_v2._vet_enabled() is False
     assert extractor_v2._value_gate_enabled() is False
     monkeypatch.setenv("TORTOISE_VET", "1")

@@ -1057,11 +1057,11 @@ def _s4_delta_enabled() -> bool:
 def _vet_enabled() -> bool:
     """#5005: the call-time S2.2 VET toggle.
 
-    Unset/0 → the gate is entirely off-path: the VET passes do not run, the
-    list is untouched, and the only result delta is the additive ``vet``
-    evidence key — matching the ``TORTOISE_CLASSIFY_LATER`` precedent
-    (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
-    Value matching goes through the declared truthy contract (#4097)."""
+    Unset/0 (no #5087 seam flag) → the gate is entirely off-path: the VET
+    passes do not run, the list untouched, and the only result delta is the
+    additive ``vet`` evidence key — matching ``TORTOISE_CLASSIFY_LATER``
+    (``#1695`` Task 5). Truthy per #4097. #5087 adds a SECOND contributor:
+    ``TORTOISE_S2_DECISION_SEAM`` arms the arbiter, so it arms VET even vs 0."""
     return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()
 
 
@@ -10474,14 +10474,19 @@ __all__ = [  # noqa: RUF022
 def _s2_seam_armed() -> bool:
     """Whether `TORTOISE_S2_DECISION_SEAM` is truthy — the seam's ONE arming read.
 
-    ⚠️ **Arming the seam ARMS VET.** `_vet_enabled` ORs this in, because the seam
-    *is* S2.2's arbiter: with `TORTOISE_VET` unset and no arbiter injected,
-    `extract_session_v2` would skip the VET passes entirely and the seam would
-    never be consulted — an armed seam that no gate runs is the inert-enforcer
-    failure class (it reports itself as protection and protects nothing). An
-    operator who wants the classify half only is arming a spend either way, so
-    one flag is the honest shape; `stats["prompt"]` in the classify stats says
-    which half actually answered.
+    ⚠️ **Arming the seam ARMS VET unconditionally.** `_vet_enabled` ORs this in,
+    because the seam *is* S2.2's arbiter: with `TORTOISE_VET` unset and no
+    arbiter injected, `extract_session_v2` would skip the VET passes entirely
+    and the seam would never be consulted — an armed seam that no gate runs is
+    the inert-enforcer failure class (it reports itself as protection and
+    protects nothing). Two consequences, stated because they surprise a reader:
+    this flag **overrides an explicit `TORTOISE_VET=0`** (it is a new contributor
+    to `_vet_enabled`, not a rider on it), and it does **not** by itself arm S2.3
+    — the tail decider only exists where a `KindClassifier` is constructed, i.e.
+    under `TORTOISE_CLASSIFY_LATER=1` or an injected classifier. There is no
+    classify-only arming; arming both halves is one flag, and each half's record
+    names which one answered (`result["vet"][*]["batch"]["seam"]` for VET,
+    `stats["seam"]["prompt"]` for the tail).
     """
     from tortoise import s2_decision_seam
 

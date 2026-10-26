@@ -15,16 +15,26 @@ reads it through :class:`Bands`, whose defaults are written down below and
 which the caller may override. The model cannot invent a kind, because
 :func:`_choice` only accepts a member of the set the caller offered.
 
-**The request shape is copied from a working caller, never from prose.**
-``questions`` is a **map** (name → question), not an array, and every question
-carries ``instructions``; a ``score`` question also carries a 2–10 entry
-``criteria`` array, low→high. Those are the three shapes that 400 if you copy
-the documentation instead of a caller (``#7866``: the array form returns
-``questions must be a map``; a question without ``instructions`` returns
-``needs instructions``). The response is ``{model, answers, usage}`` with one
-entry per question name, each echoing its own ``type`` — which is what
-:func:`_noul` / :func:`_score` / :func:`_choice` validate against, so an answer
-of the wrong primitive fails closed rather than being coerced.
+**The request shape is copied from a working caller, never from prose — and
+where it could not be, it says so.** ``questions`` is a **map** (name →
+question), not an array, and every question carries ``instructions``; a
+``score`` question also carries a 2–10 entry ``criteria`` array, low→high. Those
+are the three shapes that 400 if you copy the documentation instead of a caller
+(``#7866``: the array form returns ``questions must be a map``; a question
+without ``instructions`` returns ``needs instructions``), and the ``noul`` /
+``score`` shapes are the ones that caller exercised live. The response is
+``{model, answers, usage}`` with one entry per question name, each echoing its
+own ``type`` — which is what :func:`_noul` / :func:`_score` / :func:`_choice`
+validate against, so an answer of the wrong primitive fails closed rather than
+being coerced.
+
+Two shapes are **not** previously-exercised and are taken from the vendor's own
+reference page as fetched on 2026-10-26: the ``choice`` question's ``criteria``
+**map** (kind → description) and the ``model``-echo pin in :func:`_decide`. The
+deleted in-repo caller (``tools/collision_preflight.py``, #8175) used ``noul``
+only, so if either shape is wrong the first armed call returns 400 →
+:class:`Unavailable` → the declared fallback, and that first call is what
+settles it. Nothing here decides a label on an unverified shape.
 
 **Failure policies — both belong to the STEPS (§4.4), not to this module.**
 This module never decides which way a step fails; it only refuses to invent a
@@ -34,20 +44,26 @@ label, which is the one direction that is unsafe under every policy:
 step                         capability unavailable (no key / 429 /      answer unparseable or out of schema
                              timeout / 5xx / model-pin mismatch)
 ===========================  =========================================  ==========================================
-**S2.2 VET**                 every candidate records ``NOOP``,            ``NOOP`` with rule id
-                             rule id ``seam.unavailable`` — nothing is     ``seam.schema_reject`` and the
-                             dropped                                      failing question NAMED in the reason
+**S2.2 VET**                 **no verdict** for the candidate — it keeps    **no verdict**, and the failing
+                             whatever the gate already decided           question is NAMED in
+                             (mechanical DISCARD included); the failure  ``batch["seam"]["degraded"]``
+                             is counted in ``batch["seam"]``
 **S2.3 CLASSIFY**            no assignment → the caller's kNN top-1       same; the kind is never minted and
                              fallback, the design's named mechanical      the assignment is left to the kNN path
                              fast path
 ===========================  =========================================  ==========================================
 
-``NOOP`` is the correct word for both degraded cases, not ``KEEP``: a decision
-*was* attempted and it changes nothing (``vet_gate``'s own definition of NOOP),
-so the run's evidence says the gate consulted a model and got nothing usable,
-rather than claiming a deliberate keep. Nothing in this module can emit
-``DISCARD`` without a parsed, in-schema, in-band answer — *a wrong keep is
-noise; a wrong drop is memory loss* (§S2.2).
+**A degraded VET says nothing, and that is the only safe word.** An earlier
+shape of this module emitted a ``NOOP`` for each degraded candidate; that is a
+*verdict*, and ``vet_gate`` applies arbiter verdicts over the mechanical pass
+(``decisions[iid].update(verdict)``), so a ``NOOP`` would have **rescinded the
+``#4899`` identifier-only DISCARD** on a key outage — an outage silently
+keeping what a working predicate had dropped, and erasing the rule id that
+explains it. Omitting the verdict instead leaves every candidate exactly where
+the gate put it, and the failure is recorded once, by name, in
+``batch["seam"]``. Nothing in this module can emit ``DISCARD`` without a
+parsed, in-schema, in-band answer — *a wrong keep is noise; a wrong drop is
+memory loss* (§S2.2).
 
 **Deliberately NOT here** (each is a recorded decision, not an omission):
 ``SPLIT`` (absent from O4's vocabulary, so atomicity can only *veto a drop*,
@@ -103,10 +119,12 @@ TIMEOUT = 30.0
 VET_PROMPT = "vet-v1"
 CLASSIFY_PROMPT = "classify-v1"
 
-#: Rule ids recorded on the two degraded paths (the fourth column of the table
-#: in the module docstring). Recognisable in ``vet_gate``'s decisions, so a
-#: reader can count how often the seam was consulted and produced nothing.
+#: Rule id on a real verdict — the seam's answers are recognisable in
+#: ``vet_gate``'s decisions, so a reader can tell what decided an item.
 RULE_SEAM = "seam.arbiter"
+#: Prefixes of the two degraded records in ``stats["degraded"]``. A degraded
+#: item gets NO verdict (see the module docstring): these name the way it
+#: degraded and, for a rejected answer, which question failed.
 RULE_UNAVAILABLE = "seam.unavailable"
 RULE_SCHEMA_REJECT = "seam.schema_reject"
 
@@ -135,9 +153,10 @@ def seam_enabled() -> bool:
 
     Off is the production default and the reason is in :data:`ENV_FLAG`'s
     comment: this is a network call and a spend on the write path. Arming it is
-    the operator's act, and the run's own evidence (``stats["prompt"]`` /
-    ``stats["cost_usd"]`` on the classify stats, the seam rule ids in VET's
-    decisions) is what makes the effect measurable.
+    the operator's act, and the run's own evidence is what makes the effect
+    measurable: the seam's record rides ``result["vet"][*]["batch"]["seam"]``
+    (VET) and ``stats["seam"]`` (classify), each naming its ``prompt``,
+    ``bands``, ``calls`` and ``cost_usd``.
     """
     return is_truthy(os.environ.get(ENV_FLAG))
 
@@ -152,8 +171,8 @@ class Bands:
     "how likely is this a durable claim?", and what to *do* at 0.6 is a policy
     this repo has argued about (``#4899``, ``#2453``), not something a
     probability can settle. Written down here, overridable per call, and
-    recorded in ``stats["bands"]`` so a decision carries the band it was read
-    through.
+    recorded in ``stats["bands"]`` (surfaced as ``batch["seam"]["bands"]`` for
+    VET) so a decision carries the band it was read through.
 
     - ``keep_min`` — ``noul >= keep_min`` ⇒ ``KEEP``.
     - ``discard_max`` — ``noul < discard_max`` ⇒ *eligible* for ``DISCARD``,
@@ -464,12 +483,13 @@ def vet_verdicts(
     ``{"id", "outcome", "rule_id", "reason"}`` and ``outcome`` is a member of
     ``vet_gate.OUTCOMES`` (this module never invents a verdict word either).
 
-    **Every candidate gets exactly one verdict**, including on the degraded
-    paths: an item left out would be indistinguishable from a model that had
-    nothing to say about it, and that is the silent-negative this fleet keeps
-    paying for. The degraded verdicts are ``NOOP`` (nothing changes) with a rule
-    id that says which way it degraded and, for a rejected answer, which
-    question failed.
+    **A candidate gets a verdict only from a parsed, in-schema answer.** On the
+    two degraded paths it gets **none** — not a ``NOOP``: a verdict word is
+    something ``vet_gate`` applies over the mechanical ``#4899`` pass, so a
+    degraded ``NOOP`` would rescind an identifier-only DISCARD. The failure is
+    recorded instead in ``stats["degraded"]`` (item id → what went wrong, with
+    the failing question named), which :func:`vet_arbiter` carries out to
+    ``batch["seam"]``.
     """
     stats: dict = {
         "prompt": VET_PROMPT,
@@ -480,6 +500,7 @@ def vet_verdicts(
         "cost_usd": 0.0,
         "unavailable": 0,
         "schema_rejects": [],
+        "degraded": {},
         "by_outcome": {},
     }
     verdicts: list[dict] = []
@@ -504,15 +525,12 @@ def vet_verdicts(
             answers, usage = _decide(payload, transport=transport, timeout=timeout)
         except Unavailable as exc:
             # The whole chunk degrades together: the answers of a failed call do
-            # not exist, so a per-item guess would be an invention.
+            # not exist, so a per-item guess would be an invention — and no
+            # verdict at all, so nothing the gate already decided is rescinded.
             stats["unavailable"] += 1
             for candidate in chunk:
-                verdicts.append({
-                    "id": str(candidate.get("id") or ""),
-                    "outcome": "NOOP",
-                    "rule_id": RULE_UNAVAILABLE,
-                    "reason": f"{VET_PROMPT} unavailable ({exc}) — nothing dropped",
-                })
+                stats["degraded"][str(candidate.get("id") or "")] = (
+                    f"{RULE_UNAVAILABLE} {VET_PROMPT} ({exc})")
             continue
         stats["calls"] += 1
         _add_cost(stats, usage)
@@ -523,12 +541,10 @@ def vet_verdicts(
                 atomic = _score(answers, f"atomic_c{pos}", ATOMICITY_LEVELS)
             except SchemaViolation as exc:
                 # FAIL CLOSED: no verdict word is derived from an unusable
-                # answer. NOOP is recorded (not silence) and the question is
-                # named, so the gate's decisions stay auditable.
+                # answer. Recorded by item (not silence) with the question
+                # named, so the gate's decisions stay auditable and untouched.
                 stats["schema_rejects"].append(exc.question)
-                verdicts.append({"id": iid, "outcome": "NOOP",
-                                 "rule_id": RULE_SCHEMA_REJECT,
-                                 "reason": f"{VET_PROMPT} {exc}"})
+                stats["degraded"][iid] = f"{RULE_SCHEMA_REJECT} {VET_PROMPT} {exc}"
                 continue
             outcome, reason = vet_verdict(keep, atomic, bands)
             verdicts.append({"id": iid, "outcome": outcome,
@@ -551,14 +567,21 @@ def vet_arbiter(
     expects (``arbiter(candidates, narrative)``), so the seam is consumed
     through the contract that already exists rather than a new one.
 
-    No ``batch`` verdict is returned: ``RENARRATE`` is §S2.2's once-only loop and
-    is not this seam's to request.
+    No ``RENARRATE`` is ever requested: that is §S2.2's once-only loop and is
+    not this seam's to ask for. The batch channel is used for the **record**
+    instead — ``batch["seam"]`` carries this pass's ``prompt``, ``model``,
+    ``bands``, ``calls``, ``cost_usd``, ``unavailable``, ``schema_rejects`` and
+    ``degraded``, which ``vet_candidates`` copies verbatim into its returned
+    ``batch`` and ``_run_vet_pass`` stores as ``result["vet"][*]["batch"]
+    ["seam"]``. Without that, the VET half's spend would be accumulated and
+    thrown away, and the flag's whole point — measure before trusting — would be
+    unsatisfiable for the half that asks two questions per candidate.
     """
     def arbiter(candidates: list[dict], narrative: str) -> dict:
-        verdicts, _stats = vet_verdicts(
+        verdicts, stats = vet_verdicts(
             candidates, narrative, transport=transport, bands=bands,
             batch_size=batch_size, timeout=timeout)
-        return {"verdicts": verdicts, "batch": {}}
+        return {"verdicts": verdicts, "batch": {"seam": stats}}
 
     return arbiter
 

@@ -391,7 +391,13 @@ def run_arm(embed_list: dict, *, vet: bool, arbiter=None) -> dict:
     """Drive the real pipeline once, with the gate flags set for this arm."""
     from tortoise import extractor_v2 as v2
 
-    env_keys = ("TORTOISE_VET", "TORTOISE_VALUE_GATE", "TORTOISE_CLASSIFY_LATER")
+    # EVERY switch for S2.2, not just the two the arm names: #5087's
+    # ``TORTOISE_S2_DECISION_SEAM`` also makes ``_vet_enabled()`` True (it is the
+    # arbiter), so an ambient value would arm a network call and a spend inside an
+    # arm this function declares OFF — and the census checker then refuses the log
+    # because the arm prints ``enabled=yes`` beside ``mechanical enabled=False``.
+    env_keys = ("TORTOISE_VET", "TORTOISE_VALUE_GATE", "TORTOISE_CLASSIFY_LATER",
+                "TORTOISE_S2_DECISION_SEAM")
     saved = {k: os.environ.get(k) for k in env_keys}
     for k in env_keys:
         os.environ.pop(k, None)

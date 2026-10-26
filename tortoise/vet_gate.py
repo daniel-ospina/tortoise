@@ -507,6 +507,17 @@ def vet_candidates(embed_list: object, *,
         if outcome in BATCH_OUTCOMES:
             batch["outcome"] = outcome
             batch["outcome_reason"] = str(arbiter_batch.get("reason") or "")
+        # The rest of the arbiter's batch payload RIDES. It used to be dropped,
+        # which left an arbiter no channel for its own record — an arbiter's
+        # spend, its prompt version and its refusals had nowhere to go (#5087,
+        # found by review: ``seam_arbiter`` accumulated ``cost_usd`` and threw it
+        # away). Additive and collision-safe: a mechanical ``check_batch`` fact
+        # is NEVER overwritten by an arbiter key, and the verdict channel stays
+        # ``outcome``/``outcome_reason`` above.
+        for key, value in arbiter_batch.items():
+            if key in ("outcome", "reason") or key in batch:
+                continue
+            batch[key] = value
 
     # The counterfactual: what a DISCARD removes, stated so it is recoverable.
     for d in decisions.values():

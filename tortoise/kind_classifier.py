@@ -49,6 +49,7 @@ constants — frozen on the calibrate split before the A/B per the plan.
 from __future__ import annotations
 
 import json
+import math
 
 # ── D0-3-calibratable thresholds (frozen before the A/B) ───────────────────
 SIM_FLOOR = 0.30  # below top-1 similarity → unclassified terminal
@@ -76,6 +77,24 @@ def _default_encoder():
 
 def _sections_for(item_type: str) -> tuple[str, ...]:
     return TYPE_SECTIONS.get(str(item_type or "").lower(), ("objects", "subjects"))
+
+
+def _finite_cost(value: object) -> float | None:
+    """A non-negative, finite cost, or ``None`` — never an exception.
+
+    An injected decider can report anything, and ``float(10**400)`` raises
+    ``OverflowError`` because a JSON int is arbitrarily large. This method's
+    contract is fail-open: a bad cost must cost the counter, not the batch.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        cost = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    if not math.isfinite(cost) or cost < 0.0:
+        return None
+    return cost
 
 
 class KindClassifier:
@@ -545,11 +564,21 @@ class KindClassifier:
         ``mode`` is ``"seam"`` so the artifact says WHICH decision source
         produced the kind; the aggregate counters stay the classifier's
         (``assigned_llm`` means "assigned by the model tail", of either kind),
-        and the seam's own spend/refusals ride in ``stats["seam"]`` — additive
-        keys only, the classify-later payload's convention.
+        and the seam's own record rides in ``stats["seam"]`` — additive keys
+        only, the classify-later payload's convention. That record carries
+        ``prompt`` / ``unavailable`` / ``degraded`` as well as the spend, because
+        "endpoint down" and "nothing was offered" are otherwise the same
+        reading (all-zero counters) and neither names the prompt that decided.
+
+        The seam re-chunks at its own :data:`s2_decision_seam.BATCH_MAX` (40,
+        the validated shape), so a classifier batch of up to 50 can become two
+        seam calls. That is intended: the inner bound is the one the request
+        shape was measured at, and ``calls`` reports what actually happened.
         """
         seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
-                                         "cost_usd": 0.0, "rejected": []})
+                                         "cost_usd": 0.0, "rejected": [],
+                                         "items": 0, "unavailable": 0,
+                                         "degraded": {}})
         try:
             decided, seam_stats = self.tail_decider([
                 (iid, str(item.get("text", "")), [k for k, _s in top])
@@ -565,9 +594,24 @@ class KindClassifier:
             calls = seam_stats.get("calls")
             if isinstance(calls, int) and not isinstance(calls, bool):
                 seam["calls"] += calls
-            cost = seam_stats.get("cost_usd")
-            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-                seam["cost_usd"] += max(0.0, float(cost))
+            items = seam_stats.get("items")
+            if isinstance(items, int) and not isinstance(items, bool):
+                seam["items"] += items
+            unavailable = seam_stats.get("unavailable")
+            if isinstance(unavailable, int) and not isinstance(unavailable, bool):
+                seam["unavailable"] += unavailable
+            # A cost is bounded like every other number the seam reads: an
+            # injected decider may report an unbounded int (float(10**400)
+            # raises OverflowError) and this method must never raise (fail-open).
+            cost = _finite_cost(seam_stats.get("cost_usd"))
+            if cost is not None:
+                seam["cost_usd"] += cost
+            prompt = seam_stats.get("prompt")
+            if isinstance(prompt, str) and prompt:
+                seam["prompt"] = prompt
+            degraded = seam_stats.get("degraded")
+            if isinstance(degraded, dict):
+                seam["degraded"].update({str(k): str(v) for k, v in degraded.items()})
             rejected = seam_stats.get("schema_rejects")
             if isinstance(rejected, list):
                 # The seam's own refusals, naming the question that failed —
