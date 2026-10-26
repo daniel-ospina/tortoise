@@ -2782,7 +2782,7 @@ class _EntityHandlers:
         if _src and _annotator_value_ok(_src):
             sets.append("s.source=coalesce(s.source, $v_source)")
             params["v_source"] = _src
-        for prop in ("turn_count", "harness", "entity_links_attempted",
+        for prop in ("turn_count", "turn_max_index", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
                      "capture_extractor", "capture_redactions"):
             val = ev.get(prop)

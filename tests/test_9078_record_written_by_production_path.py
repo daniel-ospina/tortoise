@@ -1115,9 +1115,15 @@ def test_the_sdk_forwarding_hop_requires_the_ordinal(wiring):
         "`_write_record_projection(seq=...)` regained a default — a caller that "
         "omits it then writes no position row, silently (#9190)")
     source = (REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    with_default = source.replace("seq: int | None) -> None:",
-                                 "seq: int | None = None) -> None:", 1)
-    assert with_default != source, "the signature spelling changed — re-point this leg"
+    # The mutation targets the PARAMETER spelling and stops before the return
+    # annotation: the pin is about `seq` having no default, and a return type
+    # that changes (it is `Any | None` since #10011, so the record write's
+    # report can be read) must not make the leg miss its own subject.
+    target = "seq: int | None) ->"
+    assert source.count(target) == 1, (
+        "`_write_record_projection`'s `seq` spelling moved — re-point this leg, "
+        "it must mutate the ONE forwarding hop that owns the ordinal")
+    with_default = source.replace(target, "seq: int | None = None) ->", 1)
     fired = module.ordinal_argument_problems(
         ast.parse(with_default, filename="tortoise/sdk.py"), "tortoise/sdk.py")
     assert fired and "WITH A DEFAULT" in fired[0], fired

@@ -60,10 +60,6 @@ from tortoise import (
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
-
-# #10000: the record's turn read (lazy-imported at the call site so every
-# deployment without a record DSN pays nothing)
-from tortoise import record_read as _record_read
 from tortoise.abuse import (
     _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
     _window_env,  # #5493 window knobs must never fail open
@@ -18179,24 +18175,137 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
 
 
 def _record_holds_turns() -> bool:
-    """#10000: does the RECORD hold captured turns (rather than the graph)?
+    """#10000: is the RECORD armed for captured turns?
 
-    The same capability question the capture writer asks, asked from the read
-    side: turns reach the record only through the per-turn `PointAdded` records,
-    which require a configured journal, and the record must be ARMED
-    (`TORTOISE_RECORD_DSN`). When either is absent the graph is what holds them
-    and every read stays exactly as it was before #10000.
+    Read-side ARMING test only — the record must be configured
+    (``TORTOISE_RECORD_DSN``). ⛔ It is NOT the authority on which store HOLDS
+    this session's turns, and must not be used as one: the write can be REFUSED
+    (no tenant, an open breaker, an unreachable database) and a session can
+    predate the arming, so an armed record may still hold nothing. `get_session_detail`
+    decides the store from the READ's answer, never from this flag.
+
+    A MALFORMED DSN is not "armed": :func:`record_writer.record_dsn` raises for a
+    configured-but-unusable value, and letting that escape here would turn a
+    record misconfiguration into a 500 on a read that the graph can serve.
     """
+    from tortoise.record_writer import RecordWriteError
     from tortoise.record_writer import record_dsn as _dsn
 
-    return _dsn() is not None
+    try:
+        return _dsn() is not None
+    except RecordWriteError:
+        return False
 
 
-def _open_record():
-    """The record's bounded connection door (imported lazily: it needs psycopg2)."""
-    from tortoise.record_serve import open_record
+def _read_record_turns(org: dict, session_id: str) -> list:
+    """The record's verbatim turns for one session — SCOPED, always.
 
-    return open_record()
+    ⛔ It goes through :func:`tortoise.record_serve.read_session_turns`, which owns
+    open → scope → read → close as ONE unit (#10011 review, P0). This function
+    used to open the record itself and hand the connection to
+    ``record_read._turns``, which installs no tenant: under the production app
+    role (RLS) that read returns ZERO rows, so a captured session was served an
+    EMPTY transcript. Never open the record from here again — the scope has to
+    sit between the open and the read, and the door puts it there.
+    """
+    from tortoise.record_serve import read_session_turns
+
+    return list(read_session_turns(org_id=org["org_id"],
+                                   graph_id=org["graph_id"],
+                                   session_id=session_id))
+
+
+async def _session_turns(org: dict, session_id: str, proj) -> list[dict]:
+    """A session's transcript, from the store that actually HOLDS it (#10000).
+
+    ⛔ AN EMPTY RECORD ANSWER IS NOT AN EMPTY TRANSCRIPT (#10011 review, P0).
+    The previous shape treated the record's `()` as an authoritative answer
+    (`if _record_turns is not None`), which conflated two different facts and
+    served a transcript the graph still held as `turns: []`:
+
+      (a) the record ANSWERED and holds no turn for this session — a session
+          captured before the record was armed, or one whose record write was
+          REFUSED, so the graph is where its turns are;
+      (b) the record did NOT answer (unreachable, unscopable) — the same.
+
+    So the store is decided from the ANSWER: the record when it returns turns,
+    the graph otherwise, and `[]` only when BOTH are empty (a genuinely
+    empty session). A duplicate is recoverable; a blanked transcript is not.
+
+    The record read is SCOPED — `record_serve.read_session_turns` owns
+    open → tenant scope → read → close. An unscoped read under the production
+    app role returns zero rows, which is exactly the absence the record's own
+    door refuses to invent, so an unscoped door would make every armed session
+    look like case (a).
+
+    Extracted HERE rather than inline in the handler so the decision is
+    testable without an authenticated app: the P0 this replaces was invisible to
+    the suite precisely because nothing exercised the read.
+    """
+    turns: list[dict] = []
+    record_turns: list | None = None
+    #: 'unarmed' (never consulted) · 'record' (answered with turns) ·
+    #: 'empty' (answered, no turn) · 'unanswered' (raised).
+    record_answer = "unarmed"
+    if _record_holds_turns():
+        try:
+            record_turns = await asyncio.to_thread(
+                _read_record_turns, org, session_id)
+            record_answer = "record" if record_turns else "empty"
+        except Exception:
+            # Fail SOFT to the graph: a record that cannot answer must not blank
+            # a transcript the cache still holds. This fallback is the
+            # transitional half of #10000 and disappears with the graph-side
+            # purge step.
+            record_turns = None
+            record_answer = "unanswered"
+            _logger.warning(
+                "session %s turns read from the record failed — serving the graph "
+                "copy for this request", session_id, exc_info=True)
+    if record_turns:
+        for _t in record_turns:
+            turns.append({
+                "id": _t.turn_id,
+                # The record stores the framed text and the speaker separately,
+                # so the SAME inverse gives the same role/body the graph arm
+                # below serves (#4675 parity).
+                "role": (_t.speaker
+                         or _capture_turn_role_text(_t.content)[0]),
+                "content": _t.body,
+                "created_at": _t.created_at,
+            })
+        return turns
+    # Turn points (events) — ordered by turn index embedded in the id
+    turn_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set)
+    for tr in turn_rows:
+        tid = tr[0]
+        content = tr[1] or ""
+        created_at = tr[2]
+        # Split "[role] content". The inverse lives in `tortoise.sdk` next to
+        # the writer (`_capture_turn_texts`) so the stored format and this read
+        # have ONE definition — a client comparing a stored turn against a
+        # served detail depends on the two agreeing (#4675).
+        role, body = _capture_turn_role_text(content)
+        turns.append({
+            "id": tid,
+            "role": role,
+            "content": body,
+            "created_at": created_at,
+        })
+    if record_answer == "empty" and turns:
+        # The armed record holds no turn for a session the graph still has: the
+        # pre-arming population, or a capture whose record write was refused.
+        # INFO, not a warning — this is the arming migration in progress, and
+        # the count is what makes it measurable.
+        _logger.info(
+            "session %s: the armed record holds no turn, so %d turn(s) were "
+            "served from the graph", session_id, len(turns))
+    return turns
 
 
 @app.get("/v1/sessions/{session_id}")
@@ -18293,67 +18402,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         ).result_set)
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
-    # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
-    # capture writer asks. With the record armed, the turns are RECORD rows (the
-    # per-turn `PointAdded` records) and the graph holds none, so this read must
-    # come from the record; unarmed, it reads the graph exactly as before, which
-    # makes the pre-arming deployment byte-identical.
-    turns = []
-    _record_turns = None
-    if _record_holds_turns():
-        try:
-            def _read_record_turns():
-                conn = _open_record()
-                try:
-                    return list(_record_read._turns(
-                        conn, org["org_id"], org["graph_id"], session_id))
-                finally:
-                    conn.close()
-
-            _record_turns = await asyncio.to_thread(_read_record_turns)
-        except Exception:
-            # Fail SOFT to the graph: a record that cannot answer must not blank a
-            # transcript the cache still holds. This fallback is the transitional
-            # half of #10000 and disappears with the graph-side purge step.
-            _record_turns = None
-            _logger.warning(
-                "session %s turns read from the record failed — serving the graph "
-                "copy for this request", session_id, exc_info=True)
-    if _record_turns is not None:
-        for _t in _record_turns:
-            turns.append({
-                "id": _t.turn_id,
-                # The record stores the framed text and the speaker separately, so
-                # the SAME inverse gives the same role/body this endpoint served
-                # from the graph (#4675 parity).
-                "role": (_t.speaker
-                         or _capture_turn_role_text(_t.content)[0]),
-                "content": _t.body,
-                "created_at": _t.created_at,
-            })
-    else:
-        # Turn points (events) — ordered by turn index embedded in the id
-        turn_rows = await asyncio.to_thread(
-            lambda: proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-                "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-                params={"sid": session_id},
-            ).result_set)
-        for tr in turn_rows:
-            tid = tr[0]
-            content = tr[1] or ""
-            created_at = tr[2]
-            # Split "[role] content". The inverse lives in `tortoise.sdk` next to
-            # the writer (`_capture_turn_texts`) so the stored format and this read
-            # have ONE definition — a client comparing a stored turn against a
-            # served detail depends on the two agreeing (#4675).
-            role, body = _capture_turn_role_text(content)
-            turns.append({
-                "id": tid,
-                "role": role,
-                "content": body,
-                "created_at": created_at,
-            })
+    # #10000: WHICH STORE holds the turns is a CAPABILITY question, and it is
+    # answered by what the READ RETURNS, not by a flag (#10011 review, P0).
+    # The decision, its fallback, and the reasons they are shaped that way live
+    # in `_session_turns` — ONE place, so the endpoint cannot drift from the
+    # SDK's twin read (`TortoiseSDK._read_captured_session`).
+    turns = await _session_turns(org, session_id, proj)
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).

@@ -176,6 +176,7 @@ __all__ = [
     "parity_difference",
     "read_node",
     "read_point",
+    "read_session_turns",
     "reset_fallback_counts",
     "serve_mode",
     "serve_point",
@@ -599,6 +600,59 @@ def open_record(record_dsn: str | None = None) -> Any:
         raise RecordUnavailable(
             f"the record could not be opened ({type(e).__name__}) — an absence "
             f"is NOT established") from e
+
+
+def read_session_turns(*, org_id: str, graph_id: str, session_id: str,
+                       record_dsn: str | None = None) -> tuple[Any, ...]:
+    """ONE session's verbatim turns, read from the record — THE turn-read door.
+
+    ⛔ THIS FUNCTION EXISTS BECAUSE THE SAME READ WAS WRITTEN TWICE AND ONE COPY
+    FORGOT THE SCOPE (#10011 review, P0). `open_record()` only CONNECTS and sets
+    a statement timeout; it does NOT install the tenant. `record_read._turns`
+    filters on ``org_id``/``graph_id`` explicitly, but that WHERE clause is not
+    the tenancy boundary: the ``*_app_tenant`` policies are, and they evaluate
+    the tenant GUC that only
+    :func:`tortoise.record_projection.scope_connection` installs (and then reads
+    back, and then verifies the connecting role cannot bypass). On a connection
+    that never ran that prologue the policies match nothing, so under the
+    production app role an UNSCOPED turn read returns ZERO rows —
+    and a zero-row read is exactly the absence :func:`record_serve.read_node`
+    promises never to invent. Measured on an isolated ``postgres:17`` as
+    ``tortoise_record_app``: one turn row present, ``open_record()`` +
+    ``_turns`` returned ``()``, while the same connection after
+    `record_projection.scope_connection` returned the row.
+
+    So the door is assembled ONCE, here, next to the opener it pairs with:
+    open → scope (the record's own prologue, the ONE function both record doors
+    use, #9600) → read → close. A caller that opens the record itself must not
+    be able to reach a turn read without the scope in between, and the two
+    production readers (``hosted_api.get_session_detail`` and
+    ``TortoiseSDK._read_captured_session``) both come through this function.
+
+    ``()`` is an ANSWER — the scoped record holds no turn for this session —
+    and the caller must not read it as "the transcript is empty": the store
+    that holds the turns is a CAPABILITY question (#10000), and a session
+    captured before the record was armed has its turns in the GRAPH. Callers
+    fall back to the graph on a truthy test, never on ``is not None``.
+
+    Raises :class:`RecordServeError` / :class:`RecordUnavailable` from the
+    opener and :class:`tortoise.record_projection.RecordProjectionError` from
+    the scope when the connection could not be scoped (a bypassing role, an
+    autocommit connection that dropped the GUC) — a failure to read, never an
+    empty answer.
+    """
+    from .record_projection import scope_connection
+    from .record_read import _turns
+
+    conn = open_record(record_dsn)
+    try:
+        scope_connection(conn, org_id)
+        return _turns(conn, org_id, graph_id, session_id)
+    finally:
+        # `_turns` only SELECTs, so there is nothing to commit; the close aborts
+        # the read transaction that carried the transaction-local tenant GUC.
+        with contextlib.suppress(Exception):
+            conn.close()
 
 
 def _rows(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:

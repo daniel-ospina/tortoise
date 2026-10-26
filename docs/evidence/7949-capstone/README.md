@@ -193,8 +193,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8843-8847`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:13217` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8833-8839` and dropped at the same fold, `tortoise/sdk.py:13217` |
+| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8843-8847`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:13339` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8833-8839` and dropped at the same fold, `tortoise/sdk.py:13339` |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -260,7 +260,7 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution (the surface is emitted
-unconditionally at `:8833`/`:8843` and dropped at `sdk.py:13217`) and the "where the fix must
+unconditionally at `:8833`/`:8843` and dropped at `sdk.py:13339`) and the "where the fix must
 target" line are unchanged.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -285,7 +285,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:475`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2432-2457`,
-reached from the capture path at `sdk.py:13498` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:13620` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -606,7 +606,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt that hides four steps)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:12389`; called at `:11426`) →
+`sdk._extract_session_v2` (`sdk.py:12511`; called at `:11426`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:8356`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
@@ -622,7 +622,7 @@ number's resolution is checked against the tree when it is re-derived.)
 | S0 READ | `_edus_from_conversation` `:8467` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:8500` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:8524` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:8553` | `result["vet"]` — built at `extractor_v2.py:8843-8847`, DROPPED at the meta fold `sdk.py:13217` | ❌ **#9116** |
+| S2.2 VET | `_run_vet_pass` `:8553` | `result["vet"]` — built at `extractor_v2.py:8843-8847`, DROPPED at the meta fold `sdk.py:13339` | ❌ **#9116** |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:8569` | `result["classify_later"]` — built at `extractor_v2.py:8833-8839`, dropped at the same fold | ❌ **#9116** |
 | S3 RESOLVE | `search_graph` `:8585` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
 | S5 CONNECT | `execute_embed` `:8805` (+ `run_s4` `:8606` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
@@ -635,9 +635,9 @@ That is a property of the caller's receipt, not of §4.4 or of the pipeline: the
 BUILT unconditionally, and the surface the probe is handed does not say so. The drop is one layer
 ABOVE the extractor: it builds
 `result["vet"]` and `result["classify_later"]` and the SDK's meta fold
-(`tortoise/sdk.py:13217`, `"stats": out.get("stats") or {}` inside `_extract_session_v2`) copies
+(`tortoise/sdk.py:13339`, `"stats": out.get("stats") or {}` inside `_extract_session_v2`) copies
 `stats` and `error_census` only — so **#9116's fix targets
-`sdk.py:13217`** (the `"stats": out.get("stats")` line of `_extract_session_v2`), not
+`sdk.py:13339`** (the `"stats": out.get("stats")` line of `_extract_session_v2`), not
 `extractor_v2.py`. `capstone_measure.py` witnesses four of them from `stats`
 and the live graph and reports the remaining two as unobserved with their file:line, which is why
 the SCORED table exists at all while the WITNESS of two steps does not.

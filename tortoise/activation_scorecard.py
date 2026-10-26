@@ -40,8 +40,11 @@ stage  granularity        source        evidence
 ===== ================== ============= ==========================================
 1      session            graph         ``(:Session)`` exists in the window
        ``captured``                     -> the client sent a session
-2      session            graph         >= 1 ``(:Point {pointKind:'event'})`` wired
-       ``stored``                       by ``CONTAINS`` -> the transcript is durable
+2      session            graph         >= 1 turn for the session -> the
+       ``stored``                       transcript is durable. Read from
+                                        ``s.turn_count`` (written on BOTH
+                                        stores) with the turn-node count as
+                                        the fallback -- see ``FUNNEL_QUERY``.
 3      session            graph         >= 1 non-episodic ``Point`` wired by
        ``memory_produced``              ``CONTAINS`` -> extraction produced a claim
 4      org / time         Supabase      >= 1 retrieval-tool ``mcp_tool_call`` AFTER
@@ -274,7 +277,32 @@ FUNNEL_QUERY = (
     "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
     f"WHERE {STAGE3_PREDICATE} "
     "RETURN s.id, s.created_at, "
-    "count(DISTINCT t) AS turn_points, count(DISTINCT p) AS extracted "
+    # #10000/#10011 review: stage 2 asks whether the TRANSCRIPT IS DURABLE, and
+    # that is no longer a property of the graph. With the record armed the
+    # capture writes the turns to Postgres and NO turn node exists, so
+    # `count(DISTINCT t)` was 0 for every armed session — the published
+    # scorecard reported `stored_sessions: 0` and `turn_points_total: 0` for
+    # sessions whose transcript was captured successfully, i.e. a confident zero
+    # for a store the query does not look at (the same blank-transcript defect
+    # as the detail read, from another door).
+    #
+    # `s.turn_count` is written by the capture writer on BOTH paths (record and
+    # graph), so it is the one property that answers "did this session's
+    # transcript land?" whichever store holds it; the node count stays as the
+    # fallback for a Session that predates the property. Both count the SAME
+    # fact, so `coalesce` cannot prefer one over a disagreeing other — and an
+    # armed session with the property set no longer trips the
+    # `memory_without_transcript` anomaly in `stage_counts`.
+    #
+    # ⚠️ `max(s.turn_count)`, not bare `s.turn_count`: MEASURED on FalkorDB, a
+    # grouping key does not resolve inside an expression that also contains an
+    # aggregate — `coalesce(s.turn_count, count(DISTINCT t), 0)` returned 0 for a
+    # node whose property reads 2. One Session per group means `max()` of its own
+    # property is that property, so the aggregate form is exact rather than a
+    # tolerance, and the ROW SHAPE is unchanged (4 columns), so
+    # `stage_counts`/`assemble` and their fixtures are untouched.
+    "coalesce(max(s.turn_count), count(DISTINCT t), 0) AS turn_points, "
+    "count(DISTINCT p) AS extracted "
     "ORDER BY s.id"
 )
 
