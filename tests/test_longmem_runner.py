@@ -6940,6 +6940,55 @@ def test_resume_seed_counts_calls_once():
         spend_guard.reset()
 
 
+def test_hard_stop_exit_code_is_distinct_from_the_dense_leg():
+    """#8486 F1 (review round 3, finding 1). ``HARD_STOP_EXIT``'s own comment
+    claims it is distinct from the dense-leg code "so a wrapper can tell
+    'stopped on purpose' from 'the host is broken'" — and both were 4, which is
+    the ``retrieve.MODEL_ENCODE_FAILED_EXIT`` the README documents as
+    "MODEL_ENCODE_FAILED (exit 4)".
+
+    The two remedies are OPPOSITE: a spend stop means "raise the ceiling and
+    re-run the SAME command to resume", a dense-leg encode failure means "this
+    host/artifact is not a resume point". A wrapper keyed on ``== 4`` would act
+    on a resumable spend stop as though the host were broken."""
+    import tools.longmem_eval.run as run_mod
+    from tools.longmem_eval import retrieve
+
+    assert run_mod.HARD_STOP_EXIT != retrieve.MODEL_ENCODE_FAILED_EXIT
+
+
+def test_resume_seeds_the_ceiling_from_a_replica_only_checkpoint():
+    """#8486 F1 (review round 3, finding 2). The A4 replicas exist for exactly
+    the window where the checkpoint's ``usage_overhead`` is SHORT: the failure
+    entry's flocked upsert landed but the trailing checkpoint save did not
+    (kill -9 / OOM / hard timeout).
+
+    RED before the fix: ``_fold_checkpoint_usage`` folded those replicas into
+    the COLLECTOR only and seeded the ceiling from ``usage_overhead`` alone, so
+    the resumed run started below money it had already paid and could exceed
+    the pre-registered ceiling by that shortfall — while the report's own cost
+    section (collector view) showed the higher figure."""
+    import tools.longmem_eval.run as run_mod
+
+    spend_guard.reset()
+    lme_usage.get_collector().reset()
+    try:
+        spend_guard.arm(10.0)
+        replica = {"by_stage": {"reader": {"deepseek": {
+            "deepseek-flash": {"prompt_tokens": 400_000,
+                               "completion_tokens": 2_000,
+                               "calls": 1, "usage_present": True}}}}}
+        # no ``usage_overhead`` in the checkpoint at all — replica only
+        run_mod._fold_checkpoint_usage(
+            {}, {}, [{"question_id": "q1", "usage": replica}])
+        usd, priced, _ = spend_guard.spend()
+        assert priced is True
+        assert usd > 0, "the ceiling ignored spend that exists only on a replica"
+    finally:
+        spend_guard.reset()
+        lme_usage.get_collector().reset()
+
+
 def test_unpriced_lane_refuses_under_a_ceiling_never_meters_zero():
     """#8486 F1, the residual: a model with no ``PRICING_MAP`` entry is
     UNKNOWN spend, not free. Under an armed ceiling it must refuse.

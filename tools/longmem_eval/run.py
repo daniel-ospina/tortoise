@@ -198,8 +198,13 @@ BACKOFF_CAP_S = 30.0
 
 #: #8486 F1: the exit code of a run aborted by the hard spend stop (distinct
 #: from the dense-leg code so a wrapper can tell "stopped on purpose" from
-#: "the host is broken").
-HARD_STOP_EXIT = 4
+#: "the host is broken"). The dense leg owns 4 (``retrieve.
+#: MODEL_ENCODE_FAILED_EXIT``), and the two remedies are OPPOSITE — a spend
+#: stop means "raise the ceiling and re-run the same command to resume", a
+#: dense-leg failure means "this host/artifact is not a resume point". 5 is
+#: unclaimed; keep this assertion true (``test_hard_stop_exit_code_is_
+#: distinct_from_the_dense_leg``).
+HARD_STOP_EXIT = 5
 
 # ── #1786 (R2/R3): whole-question retry + resume-claim constants ─────────
 #: R2 full-jitter start-spread max (s) — pinned ≥ the maximum expected
@@ -2504,13 +2509,11 @@ def _fold_checkpoint_usage(data: dict, outcomes: dict[str, dict],
     payload = data.get("usage_overhead")
     if isinstance(payload, dict) and payload:
         collector.merge_overhead_payload(payload)
-        # #8486 F1: the abandoned process already PAID for those rows — the
-        # resumed run's spend ceiling counts them, or a long run could spend
-        # the whole ceiling again on every restart.
-        spend_guard.seed_payload(payload)
     for o in outcomes.values():
         # #8486 F1: completed questions keep their spend on the outcome, not
-        # in the collector — seed the ceiling's total from them too.
+        # in the collector — seed the ceiling's total from them too. A
+        # breaker-open outcome carries NO ``llm_usage`` (only the success path
+        # sets it), so this cannot overlap the replica fold below.
         _env = o.get("llm_usage")
         if isinstance(_env, dict):
             spend_guard.seed(_env)
@@ -2523,6 +2526,20 @@ def _fold_checkpoint_usage(data: dict, outcomes: dict[str, dict],
         rep = f.get("usage")
         if isinstance(rep, dict) and isinstance(rep.get("by_stage"), dict):
             collector.fold_replica(f["question_id"], rep["by_stage"])
+    # #8486 F1 (review round 3, finding 2): the ceiling is seeded from the
+    # collector's overhead store AFTER the replica folds, not from the
+    # checkpoint payload alone. The replicas exist for exactly the window where
+    # that payload is SHORT (the failure entry's flocked upsert landed, the
+    # trailing checkpoint save did not), and folding them into the collector
+    # without seeding the ceiling leaves the resumed run starting BELOW money
+    # it already paid — it would then exceed the pre-registered ceiling by that
+    # shortfall, while the report's own cost section (collector view) showed the
+    # higher figure. Seeding once from the store is also what keeps this
+    # idempotent: ``fold_replica`` is shortfall-only, every drain POPS, and each
+    # qid's rows therefore live in the store exactly once.
+    seeded = collector.overhead_payload()
+    if seeded:
+        spend_guard.seed_payload(seeded)
 
 
 def _validate_failures_schema(failures_raw: Any, *, checkpoint: Path) -> list[dict]:
