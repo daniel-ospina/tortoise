@@ -244,6 +244,12 @@ def test_a_point_that_is_not_this_sessions_turn_is_not_counted_as_one() -> None:
     assert report["turn_ids_of_another_session"] == ["s2_t99"]
     assert report["totals"]["turn_ids_off_shape"] == 1
     assert report["totals"]["turn_ids_of_another_session"] == 1
+    # The THIRD class is the one where the owner IS a member: wired to the right
+    # session AND to a session that is not its owner. This fixture holds no such
+    # point (`s1_t0` is wired to s1 only; `s2_t99` is not wired to s2 at all),
+    # so the list is empty — the non-empty arm is pinned in the multi-wired test.
+    assert report["member_ids_of_another_session"] == []
+    assert report["totals"]["member_ids_of_another_session"] == 0
 
 
 def test_a_multi_wired_point_is_one_turn_and_survives_a_page_boundary(
@@ -258,11 +264,12 @@ def test_a_multi_wired_point_is_one_turn_and_survives_a_page_boundary(
     FalkorDB (a fake that hands back queued rows cannot express either).
     """
     monkeypatch.setattr(census_mod, "_PAGE_SIZE", 1)
-    sessions = [("s1", 2, 1), ("s2", 0, None)]
+    sessions = [("s1", 2, 1), ("s2", 0, None), ("s3", 0, None)]
     turns = [
         ("s1", "s1_t0", 3, 0, "event"),
         ("s1", "s1_t1", 4, 0, "event"),
         ("s2", "s1_t0", 3, 0, "event"),   # the SAME point, wired into s2 too
+        ("s3", "s1_t0", 3, 0, "event"),   # ... and into s3
     ]
     graph = _FakeGraph(sessions, turns)
     report = census_mod.census(graph, "g")
@@ -273,6 +280,10 @@ def test_a_multi_wired_point_is_one_turn_and_survives_a_page_boundary(
     # attached, on-shape, but not s2's turn — reported, never folded in
     assert report["per_session"]["s2"]["turns"] == 0
     assert report["per_session"]["s2"]["non_turn_members"] == 1
+    # ... and NAMED, once per point: `s1_t0` is wired into both s2 and s3, and a
+    # point wired into three sessions is ONE finding, not one per membership.
+    assert report["member_ids_of_another_session"] == ["s1_t0"]
+    assert report["totals"]["member_ids_of_another_session"] == 1
     # page size 1: two point rows are TWO pages, plus the empty page that ends
     # the loop. A pair-per-row read would have needed three rows to say the same
     # thing — and would have lost the third to the keyset advance.
@@ -378,6 +389,10 @@ def test_turns_not_carrying_point_kind_event_are_measured_not_filtered() -> None
     assert report["per_session"]["s1"]["turns"] == 2          # both key cleanly
     assert report["per_session"]["s1"]["turns_not_point_kind_event"] == 1
     assert report["totals"]["turns_not_point_kind_event"] == 1
+    # NAMED, not only counted: this class sits INSIDE the delete set, so a bare
+    # number is not something `verify` (or an operator) can inspect before an
+    # irreversible sweep — every sibling anomaly class carries its ids.
+    assert report["turn_ids_not_point_kind_event"] == ["s1_t1"]
 
 
 def test_an_unconvertible_index_is_reported_not_raised() -> None:
@@ -494,6 +509,12 @@ def test_a_truncated_read_is_refused_and_never_written(monkeypatch,
 #: "measured" from "filtered on" (#10017 decision relay, 2026-10-26T08:44:26Z).
 _KIND_FILTER_RE = re.compile(r"pointKind\s*=")
 
+#: The census population's POLARITY. `assert "is_episodic" in q` accepts
+#: `= false`, which measures the COMPLEMENT of the delete set and would hand
+#: `verify` a baseline of every point the sweep does NOT remove (measured: the
+#: shipped test passed 33/33 with all four statements flipped).
+_EPISODIC_RE = re.compile(r"p\.is_episodic\s*=\s*(true|false)")
+
 
 def test_the_statements_measure_what_the_report_claims() -> None:
     """The fake graph cannot catch a query that stops measuring the right thing.
@@ -530,6 +551,36 @@ def test_the_statements_measure_what_the_report_claims() -> None:
             "a pointKind filter narrows the census to a subset of the delete "
             f"set, so CLEAN would no longer mean parity: {stmt}"
         )
+
+    # POLARITY, by VALUE — not by the presence of the name. The four statements
+    # that carry the population predicate are the two paged reads and the two
+    # one-row aggregates that cross-check them; each must read `= true`, i.e.
+    # the DELETE set, never its complement.
+    def where_of(query: str) -> str:
+        body = query.split("WHERE", 1)[1]
+        for keyword in ("WITH", "RETURN", "ORDER BY"):
+            body = body.split(keyword, 1)[0]
+        return body
+
+    turns_count_q = next(q for q in graph.queries if "count(DISTINCT p)" in q)
+    orphan_count_q = next(q for q in graph.queries if "NOT (:Session)" in q
+                          and "count(p)" in q)
+    for query in (turns_q, turns_count_q, orphan_q, orphan_count_q):
+        match = _EPISODIC_RE.search(where_of(query))
+        assert match and match.group(1) == "true", (
+            "the population must be the DELETE set (`p.is_episodic = true`); "
+            f"found {match.group(0) if match else 'no predicate'} in the WHERE "
+            f"clause of: {query}")
+
+    # ... and each aggregate must measure the SAME population as the read it
+    # guards (the relay's third clause). A cross-check over a different
+    # predicate cannot see a truncated read of the set that is actually swept.
+    for read_q, count_q in ((turns_q, turns_count_q),
+                            (orphan_q, orphan_count_q)):
+        assert (_EPISODIC_RE.search(where_of(read_q)).group(0)
+                == _EPISODIC_RE.search(where_of(count_q)).group(0)), (
+            f"the cross-check measures a different population than the read: "
+            f"{read_q} vs {count_q}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

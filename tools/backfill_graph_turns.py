@@ -40,6 +40,13 @@ from — so the census validates THAT shape rather than assuming it. A point
 attached to a session whose id does not key as one of ITS turns is NOT counted
 as a turn: it is counted apart (`non_turn_members`), because folding it in is
 how a session that lost turns reads as complete.
+
+Every anomaly class in the artifact is NAMED as well as counted: a count with no
+id beside it is not a finding the `verify` phase can act on before an
+irreversible delete. `turn_ids_off_shape`, `turn_ids_of_another_session`,
+`orphan_turn_ids`, `turn_ids_not_point_kind_event` and
+`member_ids_of_another_session` each carry the ids, and the totals carry the
+matching numbers.
 """
 
 from __future__ import annotations
@@ -298,6 +305,8 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
     per_session: dict[str, dict] = {}
     off_shape: list[str] = []
     other_session: list[str] = []
+    not_point_kind: list[str] = []
+    foreign_member: list[str] = []
     for _internal_id, pid, chars, has_emb, kind, sids in rows:
         pid = "" if pid is None else str(pid)
         sids = [str(s) for s in (sids or ())]
@@ -322,6 +331,15 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
                     "non_turn_members"] += 1
             other_session.append(pid)
             continue
+        if any(sid != owner for sid in sids):
+            # ATTACHED and on-shape, but wired to at least one session that is
+            # not its owner: the copy rebuilds it under its OWN session, so the
+            # foreign wiring is a finding — NAMED once per point (a point wired
+            # into three sessions is one finding, not three) beside the
+            # membership count `non_turn_members` keeps. Same reason
+            # `orphan_turn_ids` is a list: a count with no id beside it is the
+            # opposite of the finding.
+            foreign_member.append(pid)
         for sid in sids:
             bucket = per_session.setdefault(sid, _empty_bucket())
             if sid != owner:
@@ -334,6 +352,9 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
             bucket["embedded"] += 1 if has_emb else 0
             if kind != "event":
                 bucket["turns_not_point_kind_event"] += 1
+                # NAMED, not just counted: these are inside the delete set, so
+                # a number with no id cannot be inspected before the sweep.
+                not_point_kind.append(pid)
             bucket["indexes_seen"] = max(bucket["indexes_seen"], index)
             # `first_key`/`last_key` are the ids at the LOWEST/HIGHEST INDEX, not
             # the lexicographically-first/last id (`s1_t9` sorts after `s1_t10`,
@@ -437,6 +458,7 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
         "orphan_turns": len(orphan_ids),
         "turn_ids_off_shape": len(off_shape),
         "turn_ids_of_another_session": len(other_session),
+        "member_ids_of_another_session": len(foreign_member),
     }
     return {
         "graph": graph_name,
@@ -449,6 +471,8 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
         "orphan_turn_ids": orphan_ids,
         "turn_ids_off_shape": off_shape,
         "turn_ids_of_another_session": other_session,
+        "turn_ids_not_point_kind_event": not_point_kind,
+        "member_ids_of_another_session": foreign_member,
     }
 
 
@@ -518,7 +542,8 @@ def main(argv: list[str] | None = None) -> int:
           f"whose turn ids are not contiguous over their OWN window "
           f"(last index - first index + 1 != attached turns)")
     print(f"non-'event'    : {t['turns_not_point_kind_event']} keyed turn(s) "
-          f"whose pointKind is not 'event' (the product readers do not count those)")
+          f"whose pointKind is not 'event' (the product readers do not count "
+          f"those; ids in the artifact)")
     if t["sessions_in_count_mismatch"]:
         for sid, d in list(report["count_mismatch"].items())[:5]:
             print(f"   {sid}: declared={d['declared']} attached={d['attached']}"
