@@ -61,6 +61,42 @@ LIVE_URI_SKIP_REASON = (
 _PORT_ENV = "TORTOISE_TEST_DOCKER_PORT"
 _LEGACY_PORT_ENV = "TORTOISE_TEST_LEGACY_PORT"
 _HOST_ENV = "TORTOISE_TEST_DOCKER_HOST"
+# ── #5084 remainder: the password axis of the same seam ────────────────────
+#
+# The port seam above lets a private `tools/test_lane.py` container be
+# ADDRESSED, but the URI builders below spell the docker lane's credential
+# inline (`docker://:falkordb@…`), and the private container starts WITHOUT
+# `requirepass` — so a probe aimed at it could not authenticate even with its
+# port exported. MEASURED (2026-10-25, a live private lane on 127.0.0.1:16401,
+# `TORTOISE_TEST_DOCKER_PORT=16401`): the module probe raised
+# `redis.exceptions.AuthenticationError: AUTH <password> called without any
+# password configured for the default user`, which the module's
+# `except Exception` turned into `Live FalkorDB (Docker) not available` — 14
+# tests skipped, rc=0. That is #5084's own recorded remaining work (see
+# tools/test_lane.py's SCOPE section), and it is the same silent-skip class the
+# in-process gate (tests/_live_gate.py) now refuses.
+#
+# `""` is a REAL value here — it renders `docker://:@h:p`, the empty-userinfo
+# spelling the tool's own export prints — so unset and empty must stay
+# distinguishable and this read must never use `or`.
+_PASSWORD_ENV = "TORTOISE_TEST_DOCKER_PASSWORD"
+
+
+class _EnvDefault:
+    """Sentinel default: "read the docker-lane password seam at CALL time".
+
+    A sentinel is required because `None` and `""` are both MEANINGFUL
+    passwords in this module (`None` = no userinfo at all, `""` = empty
+    userinfo), so neither can double as "unspecified".
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "ENV_DEFAULT"
+
+
+ENV_DEFAULT = _EnvDefault()
 
 
 def docker_port() -> int:
@@ -107,7 +143,19 @@ LEGACY_PORT = legacy_port()
 SERVICE_HOST = service_host()
 
 
-def docker_base_uri(*, password: str | None = "falkordb",
+def docker_password() -> str:
+    """The docker-lane service password, read at CALL time.
+
+    ``TORTOISE_TEST_DOCKER_PASSWORD`` wins when present (``""`` included);
+    otherwise the historical literal ``"falkordb"``, so every existing URI
+    string — and every test that compares one — is unchanged on a lane that
+    does not set the seam. Read at call time so a monkeypatched env works.
+    """
+    value = os.environ.get(_PASSWORD_ENV)
+    return "falkordb" if value is None else value
+
+
+def docker_base_uri(*, password: str | _EnvDefault | None = ENV_DEFAULT,
                     host: str | None = None) -> str:
     """The passworded docker-lane URI WITHOUT a graph path.
 
@@ -123,6 +171,8 @@ def docker_base_uri(*, password: str | None = "falkordb",
     are different strings, so a site that compares them keeps comparing like
     with like.
     """
+    if isinstance(password, _EnvDefault):
+        password = docker_password()
     userinfo = "" if password is None else f":{password}@"
     return f"docker://{userinfo}{host or service_host()}:{docker_port()}"
 
@@ -134,7 +184,7 @@ def legacy_base_uri(*, password: str | None = "",
     return f"docker://{userinfo}{host or service_host()}:{legacy_port()}"
 
 
-def docker_uri(graph: str, *, password: str | None = "falkordb",
+def docker_uri(graph: str, *, password: str | _EnvDefault | None = ENV_DEFAULT,
                host: str | None = None) -> str:
     """A passworded docker-lane URI for `graph` at the live service port."""
     return f"{docker_base_uri(password=password, host=host)}/{graph}"

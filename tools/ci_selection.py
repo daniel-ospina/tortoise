@@ -313,6 +313,19 @@ SHARED_MODULES = (
     # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
     # cannot see it and this registration has to be made by hand.
     "tests/_change_feed_isolation.py",
+    # this PR (#1436 / #5084 remainder): the in-process live-skip gate
+    # (`tests/_live_gate.py`) is imported at conftest MODULE level and is applied
+    # from `pytest_runtest_setup` — i.e. it runs before EVERY test on EVERY
+    # surface (api, ep, sdk, onboarding, eval, battery), not just `core`. Same
+    # class as `_verdict.py` / `_signal_hygiene.py` / `_canonical_store_guard.py` /
+    # `_change_feed_isolation.py` above, and enforced by the same AST ratchet
+    # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`):
+    # it is not a `test_*.py` file, so the manifest never classifies it — without
+    # this entry a change to the gate would select `core` only and an api/eval/ep
+    # break it induced would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class). The gate's own blast radius is
+    # the whole suite: it can RED any test that skips on a live-storage reason.
+    "tests/_live_gate.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

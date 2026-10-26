@@ -29,12 +29,20 @@ SCOPE — NOT THE WHOLE SUITE (do not oversell)
 ----------------------------------------------------------------------------------
 Tests that resolve their target from ``TORTOISE_DB_URI`` are isolated by exporting
 it. Tests that build a URI through ``tests/_live_utils.py`` instead key on
-``TORTOISE_TEST_DOCKER_PORT`` (default 6379) and a ``falkordb`` password, so they
-still address the SHARED instance and their graphs still accumulate there; this
-tool exports neither variable, and it starts the private container without
-``requirepass``, so the seam's default password could not authenticate against it
-even if its port were exported. Closing that seam is #5084's remaining work — this
-tool is the isolation half of it, not the whole fix.
+``TORTOISE_TEST_DOCKER_PORT`` (default 6379) and a password, so a lane that
+exported only the URI still addressed the SHARED instance and its graphs still
+accumulated there — and the probe against THIS container could not even
+authenticate, because it starts without ``requirepass`` while the seam's default
+credential is ``falkordb`` (measured: `AuthenticationError: AUTH <password>
+called without any password configured`, which a module's `except Exception`
+turned into "Live FalkorDB (Docker) not available" → 14 skipped, rc=0).
+``uri`` therefore exports BOTH seam variables as well:
+``TORTOISE_TEST_DOCKER_PORT`` (the container's assigned port) and
+``TORTOISE_TEST_DOCKER_PASSWORD=''`` (this container has no password configured,
+and `tests/_live_utils.docker_password` reads that seam). Still out of reach:
+sites that spell the shared URI LITERALLY (`docker://:falkordb@localhost:6379/…`)
+instead of going through ``_live_utils``; the seam cannot reach a hardcoded
+string, so those stay on the shared instance until they are converted.
 
 (No module counts appear here on purpose: a `grep` is not a count until its
 pattern AND its population are pinned, so the MECHANISM above is the durable
@@ -2173,6 +2181,14 @@ def cmd_up(args: argparse.Namespace) -> int:
     print(f"test-lane: {name} on 127.0.0.1:{port} (graphs={shown})",
           file=sys.stderr)
     print(f"export TORTOISE_DB_URI='{uri_for(port, args.graph)}'")
+    # The other half of the same seam (#5084's recorded remaining work): tests
+    # that build a URI through `tests/_live_utils.py` key on
+    # TORTOISE_TEST_DOCKER_PORT and a password, and this container runs without
+    # `requirepass` — so without these two lines the private lane is invisible
+    # to them and they fall back to the SHARED instance (or skip). `''` is the
+    # contract for "no password configured"; `docker_password()` reads it.
+    print(f"export TORTOISE_TEST_DOCKER_PORT='{port}'")
+    print("export TORTOISE_TEST_DOCKER_PASSWORD=''")
     return 0
 
 

@@ -3939,6 +3939,7 @@ surfaces:
   - test_lint_config.py
   - test_lint_tripwire.py
   - test_list_contexts.py
+  - test_live_storage_fail_closed.py  # #1436/#5084: the in-process live-storage gate. A live-requiring file used to degrade to "N skipped", rc=0 (measured: tests/test_ep_directional.py "14 skipped", against a shared instance PRESENT but at its maxmemory ceiling), because the P4 URI gate is a SESSION FIXTURE and pytest resolves skipif marks before any fixture is set up. tests/_live_gate.py applies tools/skip-guard.py's own verdict (one policy, two enforcement points) in a tryfirst runtest_setup. Fast/hermetic: no Docker, no graph, no network — the failing direction is made deterministic by aiming the lane probe at a CLOSED port, and the two ends are child pytest runs.
   - test_lme_m6_evidence.py
   - test_longmem_costing.py
   - test_longmem_errors.py
@@ -7619,6 +7620,7 @@ durations:
   test_skip_guard.py: 32.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 38.9
   test_admin_return_to.py: 16.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.4
   test_admin_origin_redirect.py: 12.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.1
+  test_live_storage_fail_closed.py: 2.0  # unmeasured — new in this PR (#1436 posture applied to the suite / #5084's remaining seam). A file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default: the file is ADDED to the `core` surface above, so it enters `fast_pool()` and `tools/ci_selection.py --integrity` reports it as manifest drift ("❌ manifest drift: ['test_live_storage_fail_closed.py']") until it carries a weight. What the weight covers: 43 cases (16 test functions — 14 plain plus `test_verdict_table` ×12 and `test_collection_verdict_table` ×17), DB-free and network-free — the gate's decision tables over hand-built items (mark class and COLLECTION class), plus SEVEN child pytest runs (a live file and a whole-module-abort file, each in its failing direction and its `TORTOISE_TEST_CARVE_OUT=1` direction, and the three SCOPE pins — an opt-in `tests/e2e` module, a module-level `importorskip` abort, and a `--rootdir` relocation whose nodeid loses the `tests/` prefix) whose cost is the child's conftest import, not a container. LOCAL reading recorded as provenance and deliberately NOT adopted: 33.19 s on this box under fleet load, 9.78 s on the same box when quieter — a ~3.4x spread, which is exactly the load-dependent shape the header warns about. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
   test_longmem_usage_e2e.py: 5.6  # ci-timing top-15 2026-10-21 (run 39467226356): top-15 saw 1 of 3 testcases = 5.2s in the largest single job (not summed across legs), a LOWER bound; kept 5.6
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 11.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.9
