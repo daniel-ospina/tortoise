@@ -152,5 +152,9 @@ recorded so nobody later cites it as one.
 * Several frames are **byte-identical** (the same state captured twice, e.g. the four
   `step10-capture-disclosure-chatgpt*` frames, `step3b`/`step3d`). They are kept because the filenames
   are the step's chain of custody.
+* **One filename mis-describes its frame, and the index follows the pixels, not the name:**
+  `step4j-authorize-page-old-signin-design-…135207.png` is the **app dashboard** (`app.premiselabs.co`,
+  *"No connection observed yet"*), captured in the same second as `step4i`. Read step 4's row for what
+  each frame shows.
 * `skill-tortoise-onboarding.md` (66,457 bytes) is the document that was pasted into ChatGPT for step 6,
   fetched from `https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md` (HTTP 200).
