@@ -294,6 +294,19 @@ Steps 2→4 must land together or not at all: a page that half-reads a token and
 the "strictly worse than not starting" state #3559 recorded for `main.jsx`. Step 2 alone is safe (additive,
 bearer path untouched); step 4 is where the flow changes.
 
+**Step 2 is DELIVERED** by #3524 (`tortoise/consent_token.py` + the token arm of the
+`/oauth/consent` handler), and its guarantees are EXECUTED — not merely anchored — by
+`tests/test_oauth_consent_bridge.py`. Two conditions an operator must know, both recorded there:
+
+- the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API. Unset, the arm
+  answers a typed `503 temporarily_unavailable` and the bearer path is untouched — never a 500, and
+  never a silent fall-through to the bearer;
+- single-use is **per process** until §2.3's shared `jti` store (step 1) lands. The register is the
+  seam step 1 replaces; until then this step is not fit for a multi-instance AS.
+
+Steps 3 → 4 remain, and step 4 still lands last: a page that half-reads a token and half-reads the
+old cookie is the "strictly worse than not starting" state.
+
 ## 10. Integration docs
 
 | Item | Value |

@@ -40762,6 +40762,30 @@ async def oauth_consent(request: Request):
     """Consent confirmation (P2): verifies the browser session JWT via the
     shared JWKS path, resolves the org (RFC 8707, D4), mints a single-use
     PKCE-bound authorization code, returns {code, state} for the redirect.
+
+    #3524 §9 step 2 — IDENTITY HAS TWO ACCEPTED SOURCES, and the bearer is
+    unchanged. A `consent_token` in the JSON body (spec
+    `docs/engineering/auth/consent-identity-bridge.md` §2.1) is a signed,
+    bound, single-use assertion minted on the session origin; when it is
+    present it is the ONLY identity input, and the code is minted with the
+    token's bound params (§9 step 2). When it is absent this function runs
+    exactly as it did before the bridge existed — same order, same errors,
+    same response — because that path is the only one live in production.
+    The arm is unavailable (typed 503, never a 500 and never a silent
+    fall-through) when `CONSENT_TOKEN_SECRET` is unset (§2.3).
+
+    WIRE CONTRACT for §9 steps 3/4 (the spec pins the token's CONTENT, not its
+    transport): the body carries `consent_token`, and the four authorize params
+    it binds are presented alongside it in the body exactly as the bearer path
+    presents them (`client_id`, `redirect_uri`, `code_challenge`,
+    `code_challenge_method`, `state`). §2.2 requires each of those to be
+    PRESENTED at redemption — the token proves the flow, it does not replace the
+    request. The response shape is identical on both arms.
+
+    ⛔ Do NOT read the token on the consent page here or anywhere else yet:
+    a page that half-reads a token and half-reads the old cookie is the
+    "strictly worse than not starting" state §9 records for #3559. The page
+    rewrite is §9 step 4.
     """
     from tortoise.oauth import (
         OAuthError,
@@ -40814,16 +40838,69 @@ async def oauth_consent(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent params")
-    # The browser session JWT — same JWKS/ES256+RS256 verification the session
-    # endpoints use (D2: reuse session_auth verify; no new auth stack).
-    user = await verify_session_jwt(request)
+    # ── identity: the bearer (unchanged) or a consent token (§9 step 2) ──────
+    # `mint` is the identity + the values the code is bound to. `bind`
+    # (`client_id`, `redirect_uri`, `code_challenge`, `state`) is what a consent
+    # token must match (§2.2); the bearer path takes the same four from the
+    # request, exactly as it did before #3524.
+    consent_token = body.get("consent_token")
+    if consent_token is None:
+        # The bearer path, byte-for-byte as it was before #3524: same identity
+        # source, same order, same mint arguments. §9 step 2 is ADDITIVE.
+        user = await verify_session_jwt(request)
+        mint = {
+            "client_id": client["id"],
+            "user_id": user["user_id"],
+            "redirect_uri": body["redirect_uri"],
+            "code_challenge": body["code_challenge"],
+            "state": body.get("state"),
+        }
+    else:
+        # §2.1/§2.2/§9 step 2 — verify, then mint with the BOUND params.
+        from tortoise.consent_token import (
+            consume_consent_jti,
+            verify_consent_token,
+        )
+        try:
+            assertion = verify_consent_token(consent_token, presented={
+                "client_id": body.get("client_id") or "",
+                "redirect_uri": body.get("redirect_uri") or None,
+                "code_challenge": body.get("code_challenge") or None,
+                "state": body.get("state"),
+            })
+            # §2.2/§2.3 — the nonce is spent HERE, and this position is the
+            # contract: every refusal above (params, token, binding) has already
+            # happened, so a request that could never mint cannot burn the token,
+            # and it is spent BEFORE the insert so one consent can never yield
+            # two codes. Nothing between this line and `issue_auth_code` can
+            # refuse.
+            await consume_consent_jti(assertion["jti"], assertion["exp"])
+        except OAuthError as exc:
+            return _oauth_error_response(exc)
+        except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
+            return _oauth_unconverted_failure(exc, where="oauth/consent token")
+        bound = assertion["bind"]
+        mint = {
+            # The CLIENT is the resolved row — the same authority the bearer
+            # path uses and what /oauth/token compares against. §2.2's
+            # `bind.client_id` equality was checked above, so this row IS the
+            # client the token named; taking the token's raw string instead
+            # would bypass the resolved (revocation-filtered) row.
+            "client_id": client["id"],
+            # §2.2: `sub` is the only thing the token may establish.
+            "user_id": assertion["sub"],
+            # §9 step 2: "issue_auth_code with the *bound* params".
+            "redirect_uri": bound["redirect_uri"],
+            "code_challenge": bound["code_challenge"],
+            "state": bound["state"],
+        }
     try:
         code, _org_id = issue_auth_code(
-            cp, client_id=client["id"], user_id=user["user_id"],
+            cp, client_id=mint["client_id"], user_id=mint["user_id"],
             base=_oauth_base(request),
-            redirect_uri=body["redirect_uri"],
-            code_challenge=body["code_challenge"],
-            state=body.get("state"),
+            redirect_uri=mint["redirect_uri"],
+            code_challenge=mint["code_challenge"],
+            state=mint["state"],
             scope=body.get("scope") or client.get("scope") or "mcp",
             resource=body.get("resource") or None,
         )
@@ -40831,8 +40908,8 @@ async def oauth_consent(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent mint")
-    return {"code": code, "state": body.get("state"),
-            "redirect_uri": body["redirect_uri"],
+    return {"code": code, "state": mint["state"],
+            "redirect_uri": mint["redirect_uri"],
             # #3443: the destination the browser must be sent to, rebuilt from
             # the registered URI — ADDITIVE, so an existing consumer reading
             # `redirect_uri` (the presented value, still what the code is bound
