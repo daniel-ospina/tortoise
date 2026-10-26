@@ -92,6 +92,11 @@ MIGRATIONS = [
     # `key_property` re-declared). A probe Postgres without it keys the semantic
     # layer by `name` while the read parses `id` from these files.
     "20261027000001_record_semantic_id_key.sql",
+    # #10017's cache tier (`ALTER TABLE public.point ADD COLUMN cache_tier`).
+    # Omitted, this probe's Postgres has no tier column while the shipped cache
+    # projection reads one — and the reader that must SKIP a `record_only` row
+    # has nothing to skip it by.
+    "20261029000001_record_point_cache_tier.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

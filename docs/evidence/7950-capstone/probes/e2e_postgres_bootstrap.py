@@ -72,6 +72,15 @@ MIGRATIONS = [
     # probe Postgres without it keys Object/Subject by `name` while the shipped
     # read binds `id`. Applied here for the same reason as the tenancy file.
     "20261027000001_record_semantic_id_key.sql",
+    # #10017's cache tier: `ALTER TABLE public.point ADD COLUMN cache_tier` plus
+    # a forward re-declaration of the `props_no_derived` refusal. This is the
+    # migration that makes the omission CATASTROPHIC rather than merely unequal:
+    # `_props_from_row` has three destinations and "no fourth", so the shipped
+    # cache projection raises `UnknownRecordColumn` on a Postgres that has the
+    # COLUMN but not the REFUSAL — the refusal is what tells the reader the
+    # column is placed, not unplaceable. A probe without this file therefore
+    # fails inside the shipped reader, not at a diff.
+    "20261029000001_record_point_cache_tier.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 
