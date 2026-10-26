@@ -155,8 +155,11 @@ def test_create_entity_still_refuses_a_type_it_does_not_absorb(monkeypatch):
         # `ownedBy` is in CORE_OPERATOR_LABELS — that set mixes the two vocabularies.
         ("ownedBy", "create_edge", lambda a, k: a[0] == "ownedBy"),
         ("hasPart", "create_edge", lambda a, k: a[0] == "hasPart"),
-        # Point↔Point support/contradict is the ontology's operator case.
-        ("supports", "create_operator", lambda a, k: a[0] == "SUPPORTS"),
+        # Point↔Point support/contradict is the ontology's operator case — and
+        # the relation is a MEANING, so `op_type` carries the MECHANISM the
+        # registry fixes for it, never the meaning itself (#10053).
+        ("supports", "create_operator",
+         lambda a, k: a[0] == "IMPL" and k["semantics"] == "supports"),
     ],
 )
 def test_link_entities_routes_each_relation_to_the_door_it_absorbed(
@@ -189,6 +192,107 @@ def test_link_entities_does_not_mint_an_unanchored_references_edge_when_the_labe
 def test_link_entities_refuses_an_empty_relation(sdk):
     with pytest.raises(ValueError, match="relation is required"):
         sdk.link_entities("", "src", "dst")
+
+
+# ── 2b-bis. the support/contradict FAMILY routes by MEANING (#10053 P0) ──────
+#
+# The arm used to dispatch these spellings STRAIGHT into `create_operator`'s
+# `op_type`, whose accepted set is IMPL/NAND/the part-whole kinds — so every one
+# of them raised `ValueError` and the merge's central claim never executed
+# (measured: the P0 finding on #10053). The meaning belongs in `semantics=` and
+# the MECHANISM comes from `pack_registry.SEMANTICS_MECHANISMS`, which is READ
+# here — never re-transcribed, because a local copy is exactly how the two slots
+# drifted apart.
+
+#: (relation the caller spells, the MEANING it names, the MECHANISM that meaning fixes).
+EPISTEMIC_RELATIONS = (
+    ("supports", "supports", "IMPL"),
+    ("SUPPORTS", "supports", "IMPL"),
+    ("refutes", "refutes", "NAND"),
+    ("REFUTES", "refutes", "NAND"),
+    ("mutuallySupportive", "mutuallySupportive", "IMPL"),
+    ("MUTUALLYSUPPORTIVE", "mutuallySupportive", "IMPL"),
+    ("mutuallyExclusive", "mutuallyExclusive", "NAND"),
+    ("MUTUALLYEXCLUSIVE", "mutuallyExclusive", "NAND"),
+)
+
+#: The spellings the arm used to CLAIM. ONTOLOGY §8 gives them no meaning, so no
+#: mechanism exists for them: they must be refused BY NAME, and the error must
+#: name the documented spelling (`CONTRADICTS` is §8's PROSE for NAND, ambiguous
+#: between the directed and the mutual reading — so it cannot pick one).
+UNMAPPED_EPISTEMIC_SPELLINGS = (
+    ("SUPPORT", "supports"),
+    ("support", "supports"),
+    ("CONTRADICTS", "refutes"),
+    ("contradicts", "refutes"),
+)
+
+
+@pytest.mark.parametrize(("relation", "meaning", "mechanism"), EPISTEMIC_RELATIONS)
+def test_link_entities_passes_the_meaning_and_the_mechanism_in_their_own_slots(
+        sdk, relation, meaning, mechanism):
+    """`semantics=` carries the MEANING, `op_type=` carries the MECHANISM, and they agree."""
+    from tortoise.pack_registry import SEMANTICS_MECHANISMS
+
+    sdk.link_entities(relation, "src", "dst")
+    door, args, kwargs = sdk.calls[-1]
+    assert door == "create_operator", (
+        f"{relation} is Point↔Point support/contradict — it must carry an operator, got {door}")
+    assert args[0] == mechanism, (
+        f"{relation} must resolve to its documented mechanism {mechanism!r}, got {args[0]!r}")
+    assert args[0] == SEMANTICS_MECHANISMS[meaning], (
+        "the mechanism must come from SEMANTICS_MECHANISMS, not from a local table")
+    assert kwargs["semantics"] == meaning, (
+        f"{relation} must be recorded as the MEANING {meaning!r}, got {kwargs.get('semantics')!r}")
+    assert args[1] == "src" and args[2] == ["dst"]
+
+
+@pytest.mark.parametrize(("relation", "_meaning", "_mechanism"), EPISTEMIC_RELATIONS)
+def test_the_routed_op_type_clears_the_real_create_operator_guard(relation, _meaning, _mechanism):
+    """The REAL `create_operator`, not the spy, must not refuse what this arm passes it.
+
+    `create_operator` validates `op_type` BEFORE any graph access, which is what made
+    the defect observable with no database — so the same property proves the fix: a
+    bare SDK must now get PAST the guard and die on the missing projection instead.
+    """
+    inst = _sdk()
+    with pytest.raises(Exception) as exc:
+        TortoiseSDK.link_entities(inst, relation, "src", "dst")
+    assert "op_type must be" not in str(exc.value), (
+        f"{relation} was still handed to `op_type`: {exc.value}")
+    assert "_proj" in str(exc.value), (
+        f"{relation} should have reached the write path (graph access), got {exc.value!r}")
+
+
+@pytest.mark.parametrize(("relation", "documented"), UNMAPPED_EPISTEMIC_SPELLINGS)
+def test_a_support_spelling_with_no_documented_meaning_is_refused_by_name(
+        sdk, relation, documented):
+    """No mechanism is invented, and the relaton is never downgraded to a plain edge."""
+    with pytest.raises(ValueError) as exc:
+        sdk.link_entities(relation, "src", "dst")
+    message = str(exc.value)
+    assert relation in message, f"the refusal must name the relation, got {message!r}"
+    assert documented in message, (
+        f"the refusal must name the documented spelling {documented!r}, got {message!r}")
+    assert sdk.calls == [], "a refused relation must not reach a writer"
+
+
+def test_every_routed_spelling_names_a_meaning_the_ontology_declares():
+    """Derived, not transcribed: the arm may only route meanings that declare a mechanism."""
+    from tortoise.pack_registry import SEMANTICS_MECHANISMS, SEMANTICS_VALUES
+
+    for meaning in TortoiseSDK._EPISTEMIC_RELATION_MEANINGS.values():
+        assert meaning in SEMANTICS_VALUES, f"{meaning!r} is not a Layer-2 meaning"
+        assert meaning in SEMANTICS_MECHANISMS, (
+            f"{meaning!r} is routed by link_entities but declares no mechanism — the arm "
+            "would have nothing to put in op_type")
+
+
+def test_the_refused_spellings_are_not_silently_mapped_to_a_meaning():
+    """The two refusals stay refusals: no alias table crept in for them."""
+    for relation, _documented in UNMAPPED_EPISTEMIC_SPELLINGS:
+        assert relation.upper() in TortoiseSDK._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING
+        assert relation.upper() not in TortoiseSDK._EPISTEMIC_RELATION_MEANINGS
 
 
 # ── 2c. update_knowledge — the revise verb, with retraction as a FIELD ───────

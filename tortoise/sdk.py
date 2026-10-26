@@ -13702,6 +13702,39 @@ class TortoiseSDK:
     # `type=` over the five `create_*` constructors) was built this way in epic
     # #888 W2 and is the shape the other three follow.
 
+    # ── link_entities — the support/contradict family (ONTOLOGY §8) ────────
+    #
+    # ⛔ THE MEANING AND THE MECHANISM ARE DIFFERENT SLOTS, and merging them is
+    # the P0 defect this table exists to close (#10053): `create_operator`'s
+    # `op_type` accepts IMPL / NAND (plus the part/whole kinds) and NOTHING
+    # ELSE, so dispatching `supports` / `refutes` straight into `op_type` raised
+    # `ValueError` on EVERY call of this arm — the merge's central claim never
+    # executed. The MEANING rides `semantics=`, and the MECHANISM is READ from
+    # `pack_registry.SEMANTICS_MECHANISMS` (supports → IMPL, refutes → NAND),
+    # never transcribed here: a local copy is how the two slots drift apart.
+    _EPISTEMIC_RELATION_MEANINGS: ClassVar[dict[str, str]] = {
+        "SUPPORTS": "supports",
+        "MUTUALLYSUPPORTIVE": "mutuallySupportive",
+        "REFUTES": "refutes",
+        "MUTUALLYEXCLUSIVE": "mutuallyExclusive",
+    }
+
+    # Spelled as if they were in the family above, but ONTOLOGY §8 gives them no
+    # meaning — hence no mechanism, since `SEMANTICS_MECHANISMS` is keyed on the
+    # MEANING. They are REFUSED BY NAME, with the documented spelling offered:
+    # guessing would decide whether the target's confidence is raised or lowered
+    # on the basis of a typo, and silently falling through to `create_edge`
+    # would mint a bare edge for an epistemic intent that then has no mechanism
+    # to carry at all (the shape #10053's review refused to attest).
+    _EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING: ClassVar[dict[str, str]] = {
+        "SUPPORT": "'supports' (IMPL) — or 'mutuallySupportive' (IMPL) if the "
+                   "support runs both ways",
+        "CONTRADICTS": "'refutes' (NAND, the directed attack) or "
+                       "'mutuallyExclusive' (NAND, the mutual restatement) — "
+                       "ONTOLOGY §8 spells its NAND row as 'A contradicts B', "
+                       "which is PROSE about the mechanism, not a meaning",
+    }
+
     def link_entities(self, relation: str, from_id: str, to_id: str, *,
                       operator: bool | None = None,
                       direction: str | None = None,
@@ -13723,11 +13756,23 @@ class TortoiseSDK:
           - ``IMPL`` / ``NAND`` without ``operator=True`` → :meth:`create_direct_edge`
             (the operator-less half: a bare edge, per ONTOLOGY §5.3/v3.5 §8).
           - a **Point↔Point support/contradict** relation (``supports`` /
-            ``refutes`` / ``mutuallySupportive``), or ``operator=True`` →
-            :meth:`create_operator` (an operator Point carrying the edge). This is
-            the ontology's rule, not a preference: an operator is created **iff**
-            there is a mitigation, or the edge is Point↔Point support/contradict
-            — so a structural relation never grows one by accident.
+            ``refutes`` / ``mutuallySupportive`` / ``mutuallyExclusive``), or
+            ``operator=True`` → :meth:`create_operator` (an operator Point
+            carrying the edge). This is the ontology's rule, not a preference: an
+            operator is created **iff** there is a mitigation, or the edge is
+            Point↔Point support/contradict — so a structural relation never
+            grows one by accident.
+
+            ⚠️ The relation names a **meaning**, so it is passed as
+            ``semantics=`` and the **mechanism** is read from
+            ``pack_registry.SEMANTICS_MECHANISMS`` (``supports`` → ``IMPL``,
+            ``refutes`` → ``NAND``). It is *not* handed to ``op_type``, whose set
+            is IMPL/NAND/the part-whole kinds: a meaning is not a mechanism, and
+            the two are deliberately separate layers (#7852, #9963). A
+            support/contradict spelling ONTOLOGY §8 gives no meaning
+            (``SUPPORT``, ``CONTRADICTS``) is **refused by name**, with the
+            documented spelling named in the error — never guessed, and never
+            downgraded to a plain edge.
           - ``references`` with an explicit ``entity_label`` → :meth:`link_source_to_entity`,
             the PROVENANCE writer. This is the one arm where the choice is not
             cosmetic: the bare ``create_edge`` path mints a ``references`` edge
@@ -13778,9 +13823,35 @@ class TortoiseSDK:
         # — that set also contains STRUCTURAL predicates (`ownedBy`, `hasPart`,
         # `dependsOn`, `related` …), so using it here would grow an operator on a
         # relation the reification rule says must stay a plain edge.
-        if operator is True or upper in (
-                "SUPPORTS", "SUPPORT", "REFUTES", "CONTRADICTS",
-                "MUTUALLYSUPPORTIVE", "MUTUALLYEXCLUSIVE"):
+        #
+        # #10053: the MEANING names the edge; `SEMANTICS_MECHANISMS` fixes the
+        # MECHANISM. Both are passed, in their OWN slots — `semantics=` for the
+        # meaning, the registry's mechanism for `op_type`. Passing the meaning as
+        # `op_type` (what this arm did) is refused by `create_operator` on every
+        # call, so the arm never worked.
+        meaning = self._EPISTEMIC_RELATION_MEANINGS.get(upper)
+        if meaning is not None:
+            from tortoise.pack_registry import SEMANTICS_MECHANISMS
+
+            return self.create_operator(
+                SEMANTICS_MECHANISMS[meaning], from_id, [to_id], label=label,
+                direction=direction or "bidirectional",
+                promote_source=promote_source, semantics=meaning)
+
+        if upper in self._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING:
+            hint = self._EPISTEMIC_SPELLINGS_WITHOUT_A_MEANING[upper]
+            raise ValueError(
+                f"link_entities: relation {rel!r} asks for a "
+                f"support/contradict edge, but ONTOLOGY §8 gives it no MEANING "
+                f"— so it has no mechanism either, and this door will not pick "
+                f"one: the mechanism is what decides whether the target's "
+                f"confidence is RAISED or LOWERED. The documented spellings are "
+                f"'supports' (IMPL), 'mutuallySupportive' (IMPL), 'refutes' "
+                f"(NAND) and 'mutuallyExclusive' (NAND) — "
+                f"pack_registry.SEMANTICS_MECHANISMS. Use {hint}."
+            )
+
+        if operator is True:
             return self.create_operator(
                 upper, from_id, [to_id], label=label,
                 direction=direction or "bidirectional",
