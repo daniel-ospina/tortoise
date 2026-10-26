@@ -4152,6 +4152,23 @@ def ensure_default_graph_row(cp, org_id: str,
     return graph_id
 
 
+#: How long a mint that COULD NOT succeed is not re-attempted for the same org
+#: (#10025 review round 13, F3). The auth-path self-heal would otherwise re-pay
+#: the attempt — 3 synchronous control-plane point reads plus a WARNING, or plus
+#: an ERROR with a traceback on a broken `graphs` table — on EVERY authenticated
+#: request for an org whose mint cannot succeed, for ever: all 128 production
+#: keys are org-wide, so that is unbounded log volume on the very channel the
+#: #10025 diagnosis depended on, on a path no successful request can clear.
+#:
+#: ⚠️ This cache only ever suppresses a redundant WRITE attempt. The READ
+#: (`default_graph_id_for`) still runs on every request, so a row that appears by
+#: any other route (the migration re-run, an operator fix) is picked up
+#: immediately — the cache can never hide a healing, it can only stop re-trying
+#: a mint the org provably could not get.
+_DEFAULT_ROW_MINT_RETRY_S = 300.0
+_DEFAULT_ROW_MINT_RETRY: dict[str, float] = {}
+
+
 def _mint_default_graph_row_best_effort(cp, org_id: str,
                                        graph_name: str | None = None, *,
                                        context: str) -> str | None:
@@ -4168,10 +4185,25 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
     ⛔ The failure is logged at ERROR, naming the org, because the opposite
     failure is the one #10025 exists to close: an org whose record refuses
     every write with no signal anywhere.
+
+    A failed attempt is not re-tried for the same org for
+    :data:`_DEFAULT_ROW_MINT_RETRY_S` — see that constant: two of this
+    function's exits are PERMANENT for the org (a live graph already named
+    ``default``; an empty ``organizations.graph_name``) and a broken table is
+    not fixed by the next request either, so the auth path must not pay and log
+    the attempt per request. The row is still READ on every request.
     """
+    now = time.monotonic()
+    last_attempt = _DEFAULT_ROW_MINT_RETRY.get(org_id)
+    if last_attempt is not None and (now - last_attempt) < _DEFAULT_ROW_MINT_RETRY_S:
+        _logger.debug(
+            "default graphs row for org %s: not re-attempting (%s) — last "
+            "attempt %.0fs ago", org_id, context, now - last_attempt)
+        return None
     try:
-        return ensure_default_graph_row(cp, org_id, graph_name)
+        row_id = ensure_default_graph_row(cp, org_id, graph_name)
     except Exception:
+        _record_default_row_mint_failure(org_id, now)
         _logger.error(
             "default graphs row NOT minted for org %s (%s): the org's record "
             "writes stay refused `no_tenant` until its next API-key request "
@@ -4179,6 +4211,26 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
             "caller itself SUCCEEDED and must not be failed for this",
             org_id, context, exc_info=True)
         return None
+    if row_id is None:
+        # A deliberate no-op (name collision / no namespace): permanent for this
+        # org, and the mint itself already logged the reason at WARNING.
+        _record_default_row_mint_failure(org_id, now)
+    else:
+        _DEFAULT_ROW_MINT_RETRY.pop(org_id, None)
+    return row_id
+
+
+def _record_default_row_mint_failure(org_id: str, now: float) -> None:
+    """Mark an org's mint as un-retryable for the retry window.
+
+    Bounded on purpose: an unbounded dict keyed by org is a leak in a
+    long-lived process, so expired entries are pruned once it grows.
+    """
+    _DEFAULT_ROW_MINT_RETRY[org_id] = now
+    if len(_DEFAULT_ROW_MINT_RETRY) > 1024:
+        for stale in [oid for oid, ts in _DEFAULT_ROW_MINT_RETRY.items()
+                      if (now - ts) >= _DEFAULT_ROW_MINT_RETRY_S]:
+            _DEFAULT_ROW_MINT_RETRY.pop(stale, None)
 
 
 def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
@@ -4402,10 +4454,18 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
     except Exception:
         # Convergent upsert (mirror set_graph_recording): a concurrent write
         # created the kind='default' row first — re-read + PATCH the winner.
+        # ⚠️ `status = 'active'` is load-bearing HERE too, for the reason stated
+        # on the primary read above: a status-blind re-read adopts whichever
+        # `kind='default'` row the server happens to return first, so on the
+        # tombstone-beside-active shape it would PATCH the tombstone, return
+        # True, and answer 200 for a rename no active-only reader will ever
+        # show. Adopting nothing here is the honest outcome — the `raise`
+        # surfaces the real insert error.
         rows = cp.query(
             "graphs", select=["id"],
             filters=[("org_id", "eq", org_id),
-                     ("kind", "eq", "default")],
+                     ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
         )
         if rows:
             cp.query(
@@ -4490,11 +4550,15 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
     except Exception:
         # Review P2 (convergent upsert): a concurrent PATCH observed no row
         # and POSTed first — re-read + PATCH the winner instead of surfacing
-        # a duplicate-key 500 (idempotent convergence).
+        # a duplicate-key 500 (idempotent convergence). `status = 'active'` for
+        # the same reason as the primary read: adopting a tombstone here would
+        # report success for an override no reader can see (see
+        # `set_graph_name`'s identical note).
         rows = cp.query(
             "graphs", select=["id"],
             filters=[("org_id", "eq", org_id),
-                     ("kind", "eq", "default")],
+                     ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
         )
         if rows:
             cp.query(

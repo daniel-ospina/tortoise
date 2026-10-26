@@ -523,8 +523,12 @@ def test_a_missed_mint_is_healed_by_the_next_api_key_resolution() -> None:
     """
     from tests.fake_control_plane import FakeControlPlane
     from tortoise.auth import lookup_hash
-    from tortoise.supabase_control import resolve_api_key
+    from tortoise.supabase_control import (
+        _DEFAULT_ROW_MINT_RETRY,
+        resolve_api_key,
+    )
 
+    _DEFAULT_ROW_MINT_RETRY.clear()   # module state; do not depend on test order
     key = "tt_selfheal0123456789"
     cp = FakeControlPlane({
         "organizations": [{"id": "org-1", "name": "One", "tier": "free",
@@ -556,7 +560,12 @@ def test_an_unreadable_control_plane_still_refuses_a_tenant() -> None:
     fails the auth that carried it."""
     from tests.fake_control_plane import FakeControlPlane
     from tortoise.auth import lookup_hash
-    from tortoise.supabase_control import resolve_api_key
+    from tortoise.supabase_control import (
+        _DEFAULT_ROW_MINT_RETRY,
+        resolve_api_key,
+    )
+
+    _DEFAULT_ROW_MINT_RETRY.clear()   # module state; do not depend on test order
 
     class _NoGraphsCP(FakeControlPlane):
         def query(self, table, *a, **kw):  # type: ignore[override]
@@ -581,3 +590,54 @@ def test_an_unreadable_control_plane_still_refuses_a_tenant() -> None:
     assert resolved["default_graph_id"] is None
     assert record_tenant_for(
         resolved, control_plane_ids=True) is None
+
+
+def test_a_mint_that_cannot_succeed_is_not_retried_on_every_request() -> None:
+    """#10025 review round 13, F3: the self-heal is COST-BOUNDED, not per-request.
+
+    Two of `ensure_default_graph_row`'s exits are permanent for the org (a live
+    graph already named `default`; an empty `organizations.graph_name`) and a
+    broken table is not fixed by the next request either. Without a retry window
+    every authenticated request for such an org — and every production key is
+    org-wide — pays 3 control-plane reads plus a WARNING (or an ERROR with a
+    traceback) for ever, on the channel the #10025 diagnosis itself reads.
+
+    ⚠️ The window must suppress only the WRITE attempt: the READ still runs, so a
+    row that appears by another route (the migration re-run) is picked up at
+    once. Both halves are asserted here.
+    """
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import (
+        _DEFAULT_ROW_MINT_RETRY,
+        resolve_api_key,
+    )
+
+    _DEFAULT_ROW_MINT_RETRY.clear()
+    key = "tt_selfheal0123456789"
+    # No `graph_name` ⇒ the mint is a permanent no-op for this org.
+    cp = FakeControlPlane({
+        "organizations": [{"id": "org-1", "name": "One", "tier": "free"}],
+        "api_keys": [], "graphs": [],
+    })
+    cp.seed("api_keys", [{
+        "id": "key-1", "org_id": "org-1", "lookup_hash": lookup_hash(key),
+        "key_prefix": key[:10], "created_via": "bootstrap",
+        "created_by": "user-1", "expires_at": None, "revoked_at": None,
+    }])
+
+    resolve_api_key(cp, key)
+    after_first = cp.query_count
+    resolve_api_key(cp, key)
+    # The second request must not re-pay the mint's guard reads.
+    assert cp.query_count - after_first == 3, (
+        f"the self-heal re-attempted on the second request "
+        f"({cp.query_count - after_first} queries, expected the 3-read "
+        f"resolution only)")
+
+    # The READ is never suppressed: a row that appears by another route is
+    # picked up on the very next request, while the window is still open.
+    cp.seed("graphs", [{"id": "g_healed", "org_id": "org-1",
+                        "name": "default", "kind": "default",
+                        "status": "active", "namespace": "org_org-1"}])
+    assert resolve_api_key(cp, key)["default_graph_id"] == "g_healed"
