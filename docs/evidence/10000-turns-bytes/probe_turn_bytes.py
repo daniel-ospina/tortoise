@@ -45,9 +45,14 @@ WHAT IT MEASURES, and why in this shape.
     the census says "none", and the record row count says the transcript arrived
     somewhere.
 
-RUN IT (a fresh, private FalkorDB — never the shared one):
+RUN IT (a fresh, private FalkorDB — never the shared one). Two steps on purpose:
+``test_lane.py``'s own USAGE forbids the one-line ``eval "$(…)"`` form, because a FAILED
+run prints nothing on stdout, ``eval ""`` returns 0, and a PREVIOUSLY exported
+``TORTOISE_DB_URI`` (commonly the SHARED lane) is then silently measured while the
+command looks like it succeeded:
 
-    eval "$(uv run python tools/test_lane.py uri)"          # exports TORTOISE_DB_URI
+    uri="$(uv run python tools/test_lane.py uri)" || exit 1   # exports on stdout, status on ||
+    eval "$uri"
     # armed arm only: a Postgres carrying the record migrations
     export TEST_RECORD_DB_URI=postgresql://record:record@127.0.0.1:5432/record
     uv run --extra postgres python \\

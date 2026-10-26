@@ -44,9 +44,14 @@ and the committed `expected_rows` is `sessions × turns` = `1,000`.
 - **The control holds.** The unarmed arm is the pre-change behaviour by design, and it measures
   within **0.3%** of the parent commit (888 B/session, 0.28%) — so the delta is the change and not the
   instrument. It also means
-  a deployment that never arms the record pays exactly what it paid before.
-- **Only 37.8% of what the removed turn node costs is payload.** The text (1,509.5 B/turn) plus its `float32` vector
-  (1,536 B/turn) is 3,045.5 of the 8,052 B/turn the change takes out; the rest is graph structure — the
+  a deployment that never arms the record runs the same writer and lands within **0.28%** of what it
+  paid before — not identically, since the 888 B/session is real run-to-run variance.
+- **Only 37.8% of the per-turn cost *before* the change is payload — 42.0% of what the change
+  actually removes.** The text (1,509.5 B/turn) plus its `float32` vector (1,536 B/turn) is
+  3,045.5 B/turn. The turn write cost **8,052** B/turn before (`322,063 ÷ 40`), so payload is 37.8% of
+  that; what the change **removes** is 8,052 − 801 = **7,251** B/turn, because the armed arm still
+  spends 801 B/turn on the journal's `:GraphEvent` carrier — and against *that* denominator payload is
+  42.0%. Everything else is graph structure — the
   node block, the attribute block, the label matrices, the `CONTAINS` edge and the HNSW entry. **That
   subtraction is the argument for placement over compression:** shrinking or truncating the stored text
   was never going to reach this number, and removing the *node* does.
@@ -104,11 +109,13 @@ The nodes already in live graphs are untouched by any of this and are #10017's d
   | after, unarmed | 321,212 · 321,033 · 321,175 | **0.06%** | 0.02% |
   | after, armed | 32,003 · 32,032 · 33,513 | **4.7%** | 3.1% |
 
-  ⚠️ **The armed arm is the noisy one** — 4.7% run-to-run at ~32 KB, where a fixed ~1,500 B of allocator
-  bookkeeping is a large fraction. That is why its figure is quoted as measured and never dressed as a
-  precision bound, and why the comparison that carries the claim is the **90.0% delta** — 290,031 B per
-  session against a worst per-run spread of **1,510 B**, ≈**192×** in absolute bytes (≈19× as a ratio of
-  the two quoted percentages). That is ~2 orders of magnitude, and two is the number to quote.
+  ⚠️ **The armed arm is the noisy one** — 4.7% run-to-run at ~32 KB, against **0.47%** and **0.06%** for
+  the two ~321–322 KB arms. **No mechanism is claimed for that difference:** the same three-run protocol
+  produced absolute spreads of 1,507 B, 179 B and 1,510 B, which does not separate a small-arm fraction
+  effect from ordinary allocator variance, and the earlier "fixed allocator bookkeeping" reading is not
+  supported by the two larger arms. That is why the armed figure is quoted as measured and never dressed
+  as a precision bound, and why the comparison carrying the claim is the **90.0% delta** — 290,031 B per
+  session against a worst per-run spread of **1,510 B**, ≈**192×** (2.3 orders of magnitude).
 - **One run per arm is committed, and here is which one.** `measurement-before.json` is `before` run
   **2**, `measurement-after-unarmed.json` is run **3**, `measurement-after-armed.json` is run **2**
   (`…_r2` / `…_r3` in each `namespace`). The quoted per-arm figure in the table above **is** that
@@ -123,7 +130,9 @@ The nodes already in live graphs are untouched by any of this and are #10017's d
 
 ```bash
 cd <worktree>
-eval "$(uv run python tools/test_lane.py uri)"                 # a private FalkorDB; exports TORTOISE_DB_URI
+uri="$(uv run python tools/test_lane.py uri)" || exit 1   # start; capture the export line
+                                                          # two steps on purpose — see test_lane.py USAGE
+eval "$uri"                                             # a private FalkorDB; exports TORTOISE_DB_URI
 # the armed arm only — any Postgres; the migrations are applied by the same helper the record tests use
 export TEST_RECORD_DB_URI=postgresql://record:record@127.0.0.1:5432/record
 
