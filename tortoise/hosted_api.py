@@ -12382,9 +12382,14 @@ def _acl_user_create_hook(graph_id: str, org_id: str, *,
                           strict: bool = False) -> dict | None:
     """C4 seam — create the per-graph ACL user (defense-in-depth).
 
-    Returns the discriminated :class:`AclUserResult` (or ``None`` when the seam
-    is dormant) so the caller can RECORD the outcome; nothing treats absence as
-    success-by-omission (#10093).
+    Returns the discriminated :class:`AclUserResult` so the caller can RECORD
+    the outcome; nothing treats absence as success-by-omission (#10093). ``None``
+    is returned in four DIFFERENT cases, none of them a success claim: the seam
+    is dormant (module absent), the layer is declared ``off``, a recipe error was
+    logged and swallowed (non-strict callers), or the call raised unexpectedly
+    and was swallowed. A caller that needs to REPORT rather than log should read
+    :func:`tortoise.acl_graph_users.create_acl_user` directly — as the
+    reconcile operator does.
 
     The DECLARED posture decides whether an unprovisionable layer can fail a
     mint — not the per-mint discovery:
@@ -12422,7 +12427,10 @@ def _acl_user_create_hook(graph_id: str, org_id: str, *,
         _log_acl_layer_once(
             "off", logging.WARNING,
             "per-graph ACL layer is DECLARED off (TORTOISE_ACL_LAYER=off): no "
-            "per-graph ACL user is created or dropped. Isolation rests on the "
+            "per-graph ACL user is created. A graph delete still ATTEMPTS the "
+            "revocation — a user minted under an earlier posture must not "
+            "survive deletion — so a refused DELUSER on this lane is the "
+            "declared-off arm, not a new failure. Isolation rests on the "
             "app-layer ownership check + the per-graph namespace + per-graph "
             "keys (#8617 decision, implemented by #10093). This is logged "
             "once per process.")
@@ -12460,8 +12468,11 @@ def _acl_user_create_hook(graph_id: str, org_id: str, *,
             "back — no credential this deployment may hold can provision it "
             "here): %s", graph_id, result.get("reason"))
     elif status == ACL_USER_ABSENT:
+        # Keyed by the reason too: "declared off", "bare redis", "no URI" and
+        # "the credential was denied the probe" are different facts, and one
+        # line for the first of them would hide the other three (#10093 review).
         _log_acl_layer_once(
-            f"absent:{mode}", logging.INFO,
+            f"absent:{mode}:{result.get('reason_kind')}", logging.INFO,
             "per-graph ACL layer not provisionable here (recorded as absent, "
             "not as a failure): %s", result.get("reason"))
     return result
@@ -37707,6 +37718,7 @@ def _reconcile_acl_users_sync() -> dict:
         ABSENT_LAYER_DOWN,
         ACL_USER_ABSENT,
         ACL_USER_DENIED,
+        ACL_USER_PROVISIONED,
         create_acl_user,
     )
 
@@ -37718,6 +37730,7 @@ def _reconcile_acl_users_sync() -> dict:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
         ok = absent = denied = down = defaults = 0
+        absent_reasons: dict[str, int] = {}
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37748,13 +37761,30 @@ def _reconcile_acl_users_sync() -> dict:
                     # A server that VANISHED mid-op is not "by design" — it is a
                     # transient fault, and counting it here would certify a
                     # broken layer as a deliberate boundary (#10093 review).
-                    if isinstance(r, dict) and \
-                            r.get("reason_kind") == ABSENT_LAYER_DOWN:
+                    kind = (r.get("reason_kind") if isinstance(r, dict)
+                            else None) or "unknown"
+                    if kind == ABSENT_LAYER_DOWN:
                         down += 1
                     else:
                         absent += 1
-                else:
+                        # The decision asks for the ABSENCE KINDS to be
+                        # distinguishable, not just counted: "not provisionable
+                        # here" (declared off / no URI) reads very differently
+                        # from "the credential was denied the probe" (an
+                        # under-privileged app credential) and from "bare
+                        # Redis" (nothing to protect). One total cannot say
+                        # which, so the kinds ride alongside it.
+                        absent_reasons[kind] = absent_reasons.get(kind, 0) + 1
+                elif status in (None, ACL_USER_PROVISIONED):
+                    # `status is None` = a pre-#10093 stub dict (the DR tests'
+                    # shape): provisioned, as that shape always meant.
                     ok += 1
+                else:
+                    # NEVER an unknown state as success (#10093 review): a
+                    # fourth status must surface as an error, not as "rebuilt".
+                    errors.append(
+                        f"{row.get('graph_id')}: unrecognised ACL status "
+                        f"{status!r}")
             except Exception as e:
                 # A RAISED failure (server-reachable AclLayerError class) is
                 # surfaced in the summary — never silently swallowed.
@@ -37763,6 +37793,7 @@ def _reconcile_acl_users_sync() -> dict:
                 errors.append(f"{row.get('graph_id')}: {e}")
         results[org_id] = {"status": "reconciled", "provisioned": ok,
                             "absent_by_design": absent,
+                            "absent_reasons": absent_reasons,
                             "denied": denied,
                             "layer_down": down,
                             "default_skipped": defaults,

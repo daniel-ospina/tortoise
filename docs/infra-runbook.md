@@ -262,23 +262,31 @@ downtime so far.
      set above. Do not hunt for `+ACL` — it cannot be granted, and asking for it
      is what used to turn a rotation into an outage.
    - **Self-hosted / docker (`TORTOISE_ACL_LAYER` unset ⇒ `strict`):** nothing
-     about the recipe changes — `tortoise/acl_graph_users.py` is the
-     requirement's home, and the per-graph layer still needs `_GRAPH_COMMANDS`
-     **plus `+MODULE|LIST` and `+ACL`** on the **app** credential, plus a
-     password-secured `default` user. A credential that cannot even run
-     `MODULE LIST` is not fatal there: the layer is reported `absent` with
+     about the recipe changes. The **app** credential needs the SAME whole
+     data-plane set named above (NOT `_GRAPH_COMMANDS` — that constant is the
+     per-graph tenant user's allowlist) **plus `+MODULE|LIST` and `+ACL`**, which
+     is what lets the app provision each graph's user; `tortoise/acl_graph_users.py`
+     remains the recipe's home, and the server needs a password-secured
+     `default` user. A credential that cannot even run `MODULE LIST` is not
+     fatal there: the layer is reported `absent` with
      `reason_kind: probe_denied` and the mint still succeeds (that is the
      pre-#10093 behaviour, kept under `strict`).
 
    Verify the state — not the logs' absence — after a rotation or a deploy:
    `POST /v1/internal/backups/acl-reconcile` must report `absent_by_design`
-   equal to the number of custom graphs on the Cloud lane, with `denied: 0`,
-   `layer_down: 0` and `errors: []`. `absent_by_design` means "this deployment
-   does not provision the layer" — a fact, recorded; `denied` means the
-   credential was refused; `layer_down` means the server vanished mid-op (a
-   transient fault, never a boundary) — either of the last two is something to
-   escalate. The app also logs one `per-graph ACL layer is DECLARED off` line
-   per process at the first graph mint.
+   equal to the number of custom graphs on the Cloud lane, with
+   `absent_reasons: {"declared_off": <same number>}`, `denied: 0`,
+   `layer_down: 0` and `errors: []`. Each counter is a different FACT:
+   `absent_by_design` = "this deployment does not provision the layer" (a
+   boundary), and `absent_reasons` says WHICH boundary — `declared_off`,
+   `no_uri`, `no_graph_module` (bare Redis), or `probe_denied` (the app
+   credential cannot even run `MODULE LIST` — an under-privileged credential,
+   not a boundary). `denied` = the provisioning command was refused;
+   `layer_down` = the server vanished mid-op (transient, never a boundary).
+   Anything other than `declared_off` on this lane, or any `denied` /
+   `layer_down` / non-empty `errors`, is something to escalate. The app also
+   logs one `per-graph ACL layer is DECLARED off` line per process at the first
+   graph mint.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.

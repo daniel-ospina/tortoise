@@ -361,6 +361,23 @@ class TestNonStrictPosturesNeverFailTheMint:
                    for r in caplog.records)
 
 
+class TestAProbeRefusalNeverFailsAMintEvenUnderStrict:
+    """The consequence half of the round-1 P2 fix: mapping the probe refusal to
+    `absent` is only half of it — a MINT must still succeed. Pinned at the mint
+    because a mutation that re-raises on an `absent` result under `strict`
+    restores the original outage and no other test reds (#10093 review)."""
+
+    def test_strict_mint_succeeds_when_the_probe_is_refused(
+            self, env, monkeypatch):
+        _layer_mode("strict")
+        client = CloudClient(module_denied=True)
+        monkeypatch.setattr(acl, "_admin_client", lambda: client)
+        result = _mint(env, "probe-denied-graph")
+        assert result["key_plaintext"].startswith("tk_")
+        assert _graph_rows(env["tid"], "probe-denied-graph")  # not rolled back
+        assert [c for c in client.calls if str(c[0]).upper() == "ACL"] == []
+
+
 class TestStrictRestoresTodaysRollback:
     """Acceptance 4: `strict` is today's behaviour, exactly — so the setting
     is a seam and not a dead flag."""
@@ -422,9 +439,31 @@ class TestReconcileReportsThreeStates:
         res = report["results"][env["tid"]]
         assert res["provisioned"] == 1
         assert res["absent_by_design"] == 1
+        assert res["absent_reasons"] == {"declared_off": 1}
         assert res["denied"] == 1
         assert res["layer_down"] == 0
         assert "acl_absent_skipped" not in res
+
+    def test_an_unrecognised_status_is_an_error_never_a_success(
+            self, env, monkeypatch):
+        """#10093 review: a fourth status must never be counted as `provisioned`
+        — that is absence reported as success, the one thing the issue forbids."""
+        import tortoise.hosted_api as ha
+        from tortoise.sdk import TortoiseSDK
+
+        TortoiseSDK(namespace="registry")._get_registry().query(
+            "CREATE (g:Graph {id:'g_odd', org_id:$tid, kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"gid": "g_odd", "tid": env["tid"],
+                    "ns": f"org_{env['tid']}_g_odd"},
+        )
+        monkeypatch.setattr(acl, "create_acl_user",
+                            lambda gid, org: {"status": "something-new"})
+        monkeypatch.setattr(ha, "_backup_config_safe", lambda: {})
+
+        res = ha._reconcile_acl_users_sync()["results"][env["tid"]]
+        assert res["provisioned"] == 0
+        assert res["errors"], res
 
     def test_a_server_that_vanished_is_not_certified_as_by_design(
             self, env, monkeypatch):
