@@ -431,8 +431,10 @@ def test_a_partially_refused_capture_is_served_from_both_stores(
         turn_count=2,
         reason="the record states 2 turn(s) but holds only 1 — a partial "
                "transcript")
+    # The door's private signature carries the tail witness; this leg pins the
+    # UNION, so the stand-in accepts it and ignores it.
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
-                        lambda self, sid: landed_only)
+                        lambda self, sid, **kw: landed_only)
     detail = sdk.get_session("split") or {}
     assert [t["id"] for t in detail.get("turn_points", [])] == [
         "split_t0", "split_t1"], (
@@ -678,11 +680,29 @@ def test_a_short_record_answer_is_not_an_answer():
                                        session_id="sess")
     assert not answer.answered, "an interior hole was served as complete"
 
+    # TAIL — a refused HIGHEST turn, and the one shape NONE of the above can
+    # see: `turn_count` is a WINDOW length (an append wrote `_t2`/`_t3` with
+    # `turn_count=2`), the surviving rows are contiguous from 0, and `_t3` is
+    # ABOVE `max(held)` — so only the id-space high-water mark witnesses it.
+    tail_rows = [_turn_row(0, "[user] a"), _turn_row(1, "[assistant] b"),
+                 _turn_row(2, "[user] c")]
+    tail = _RlsConn(narrative=[(None, None, 0, 2)], turn_rows=tail_rows)
+    answer = record_read.session_turns(tail, org_id="org-1", graph_id="g-1",
+                                       session_id="sess", turn_max_index=3)
+    assert not answer.answered, (
+        "a missing TAIL was served as complete: the record stops at index 2 "
+        "while the session's turn ids reach 3, so `_t3` is readable through no "
+        "door")
+    assert "tail is missing" in answer.reason
+    assert [t.turn_id for t in answer.turns] == ["sess_t0", "sess_t1",
+                                                 "sess_t2"], (
+        "the partial rows were dropped instead of carried for the merge")
+
     whole = _RlsConn(narrative=[(None, None, 0, 2)],
                      turn_rows=[_turn_row(0, "[user] a"),
                                 _turn_row(1, "[assistant] b")])
     answer = record_read.session_turns(whole, org_id="org-1", graph_id="g-1",
-                                       session_id="sess")
+                                       session_id="sess", turn_max_index=1)
     assert answer.answered and len(answer.turns) == 2, (
         "a complete row set was refused")
 
@@ -749,7 +769,66 @@ def test_the_endpoint_and_the_sdk_read_the_same_store():
         assert "merge_turn_payloads" in src, (
             f"{name} serves ONE store's rows: a partial record answer must be "
             "merged with the other store's, not served instead of them")
+        assert "turn_max_index" in src, (
+            f"{name} does not hand the record read the id-space high-water "
+            "mark, so a refused HIGHEST turn answers COMPLETE and the tail is "
+            "readable through no door (#10000 review P2)")
     assert "_record_turn_answer" in sdk_src
+
+
+def test_the_write_breaker_cannot_be_read_as_a_record_without_turns(monkeypatch):
+    """⛔ P1: `circuit_open` is a WRITE cost bound, not "the record holds nothing".
+
+    The breaker exists because a capture emits N journal records and each one
+    paid a connect timeout (``LIVE_WRITE_BREAKER_SECONDS``). It is measured on
+    the last 60 s of THIS process, so it cannot answer where a session's turns
+    are — and a serving read that asked it answered "the graph" for an armed
+    deployment whose record holds the turns, serving `turns: []` for a session
+    stored perfectly, with no log line and no counter. Both directions are
+    pinned here: the WRITE path keeps its bound, and the READ path asks anyway.
+    """
+    import tortoise.record_writer as rw
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u@h:1/db")
+    rw._close_live_breaker()
+    rw._trip_live_breaker()
+    try:
+        assert rw.record_holds_turns(
+            journal_configured=True, tenant=("org-1", "g-1")) is False, (
+            "the capture writer must keep the breaker: it is what bounds N "
+            "connect timeouts inside one capture")
+        assert rw.live_write_refusal(tenant=("org-1", "g-1")) == "circuit_open"
+        # The READER's question — one request, one bounded connect, and the
+        # record's own answer decides.
+        assert rw.record_holds_turns(
+            journal_configured=True, tenant=("org-1", "g-1"),
+            consult_breaker=False) is True
+        assert rw.live_write_refusal(
+            tenant=("org-1", "g-1"), consult_breaker=False) is None
+    finally:
+        rw._close_live_breaker()
+
+
+def test_neither_serving_read_inherits_the_write_breaker():
+    """The two doors that can blank a transcript must pass `consult_breaker=False`.
+
+    Pinned at the DOORS, not only at the seam: the flag exists on
+    `record_writer`, so a door that forgets it is exonerated by the seam test
+    above while still serving the empty transcript (#10000 review P1).
+    """
+    import inspect
+
+    import tortoise.hosted_api as ha
+
+    for name, fn in (
+            ("hosted_api._record_tenant_for_read", ha._record_tenant_for_read),
+            ("sdk.TortoiseSDK._record_turn_answer",
+             sdk_mod.TortoiseSDK._record_turn_answer)):
+        src = inspect.getsource(fn)
+        assert "consult_breaker=False" in src, (
+            f"{name} asks the record's capability WITH the write breaker, so a "
+            "transient write-side outage makes it decide the record holds no "
+            "turns — an empty transcript from the store that holds it")
 
 
 def test_the_prior_vector_read_is_scoped_and_returns_what_the_record_holds():

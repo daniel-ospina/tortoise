@@ -428,18 +428,23 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
     assert r1.status_code == 200, r1.text
 
     real_query = _GuardedGraph.query
-    # ⛔ THE NEEDLE NAMES THE READ'S OWN RETURN CLAUSE, NOT THE OLD QUERY'S TEXT
-    # (#10000). This leg injects the failure by matching the prior-count read's
-    # cypher, so it must name what that read is TODAY: #10000 rewrote it to
+    # ⛔ THE NEEDLE MUST NAME THE ONE READ THIS LEG INJECTS INTO (#10000). It
+    # names the prior-count read, which #10000 rewrote to
     # `coalesce(s.turn_max_index, s.turn_count, 0), count(t)` (the meter reads the
     # session's own turn account, not a node walk, or an armed deployment reads 0
-    # for every session and a replay is billed as a write). The previous needle
-    # (`is_episodic = true RETURN count(t)`) stopped occurring, the fault stopped
-    # firing, the read succeeded, `prior == len(windowed)` and the meter was
-    # CORRECTLY skipped — so the leg reddened on its own disarmed trigger while
-    # the behaviour it defends still held. Re-point the needle when the read's
-    # query changes; never delete the leg.
-    needle = "RETURN coalesce(s.turn_max_index, s.turn_count, 0)"
+    # for every session and a replay is billed as a write).
+    #
+    # ⛔ TWO READS PROJECT THE MARK, SO THE MARK ALONE NAMES NEITHER. A bare
+    # `coalesce(s.turn_max_index, s.turn_count, 0)` also matches
+    # `sdk._write_session_and_turns`' prior-mark read (the #1920 stale-turn
+    # bound), which spans an implicit string-literal concatenation — so a
+    # line-grep misses it, and this leg passed `assert fired` on the WRONG read
+    # while injecting a graph failure into the stale-turn sweep as well. What is
+    # unique to the prior-count read is the pair: the node walk it counts beside
+    # the mark it reads. Re-point the needle when that read's query changes;
+    # never delete the leg, and never widen it back to the mark alone —
+    # `assert len(fired) == 1` below is what says so.
+    needle = "WHERE t.is_episodic = true RETURN coalesce(s.turn_max_index"
     fired: list[str] = []
 
     def flaky(self, cypher, *a, **kw):
@@ -458,6 +463,11 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
         "the injected failure never fired — the prior-count read's cypher moved "
         f"and `{needle}` no longer names it; re-point this needle, do not delete "
         "the leg (without it this leg pins nothing)")
+    assert len(fired) == 1, (
+        f"the needle matched {len(fired)} reads — it must name ONLY the "
+        "prior-count read; a match on `sdk._write_session_and_turns`' prior-mark "
+        "read injects a graph failure into the stale-turn sweep as well, so this "
+        "leg would go on passing after ITS read moved")
     assert meter, (
         "the failed prior-count read must fall back to 0 and let the meter "
         "OVER-count — never 500 and never silently skip"

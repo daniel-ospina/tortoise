@@ -1009,6 +1009,7 @@ LIVE_WRITE_REFUSALS: tuple[str, ...] = (
 
 def _live_write_verdict(
     *, durable: bool = True, tenant: tuple[str, str] | None = None,
+    consult_breaker: bool = True,
 ) -> tuple[str | None, tuple[str, str] | None, Any]:
     """``(why an armed live write is refused before any socket, its tenant, detail)``.
 
@@ -1032,6 +1033,22 @@ def _live_write_verdict(
     ``no_tenant_carried``, ``None`` otherwise. It is returned rather than
     re-derived by the reporter, because a second derivation is a second chance
     to report a value the verdict never saw.
+
+    ⛔ ``consult_breaker=False`` IS FOR READERS (#10000 review P1). Every other
+    arm above names a fact about the DEPLOYMENT or the TENANT, and therefore
+    about where a past capture's turns went. ``circuit_open`` names a fact about
+    the last 60 s of THIS process — a WRITE-side cost bound
+    (:data:`LIVE_WRITE_BREAKER_SECONDS`: one connect timeout per journal record
+    on the capture thread), which says nothing about where a transcript already
+    lives. A reader that inherits it decides "the record holds nothing" without
+    asking, from a signal that cannot answer — the deployment was armed, the
+    record holds the turns, and one failed capture connect blanked the
+    transcript for 60 s with no log line and no counter. So the read doors
+    (``hosted_api._record_tenant_for_read``, ``sdk._record_turn_answer``) pass
+    ``False`` and ASK the record: a read pays at most one bounded connect for
+    one request, and a record that then fails is reported by the read's own
+    fail-soft arm instead of being pre-judged here. Nothing on the write path
+    may pass it — the breaker is exactly the bound the write needs.
     """
     try:
         armed = record_dsn() is not None
@@ -1051,16 +1068,19 @@ def _live_write_verdict(
         return "no_tenant_carried", None, resolved
     if resolved is None:
         return "no_tenant", None, None
-    if _breaker_is_open():
+    if consult_breaker and _breaker_is_open():
         # A recent connect FAILED. Refuse locally: the journal already holds the
         # record, a replay heals it, and paying the connect timeout once per
-        # record is what turns a degraded record into a wedged capture.
+        # record is what turns a degraded record into a wedged capture. A READER
+        # opts out (see `consult_breaker` above): it has one request, not N
+        # records, and this refusal is not evidence about a stored transcript.
         return "circuit_open", None, None
     return None, resolved, None
 
 
 def live_write_refusal(*, durable: bool = True,
-                       tenant: tuple[str, str] | None = None) -> str | None:
+                       tenant: tuple[str, str] | None = None,
+                       consult_breaker: bool = True) -> str | None:
     """Why an armed live write would be REFUSED (``None`` ⇒ it will be tried).
 
     The public half of :func:`_live_write_verdict`, for a caller that needs the
@@ -1077,12 +1097,18 @@ def live_write_refusal(*, durable: bool = True,
     ALONE is deciding before the write. Read the write's own outcome
     (:func:`write_live_record`'s return) for the rest, and keep an alternative
     store for what it reports it did not do.
+
+    ``consult_breaker=False`` is a READER's statement: a write breaker is not
+    evidence about where a stored transcript is (see
+    :func:`_live_write_verdict`).
     """
-    return _live_write_verdict(durable=durable, tenant=tenant)[0]
+    return _live_write_verdict(durable=durable, tenant=tenant,
+                               consult_breaker=consult_breaker)[0]
 
 
 def record_holds_turns(*, journal_configured: bool, durable: bool = True,
-                       tenant: tuple[str, str] | None = None) -> bool:
+                       tenant: tuple[str, str] | None = None,
+                       consult_breaker: bool = True) -> bool:
     """Can the RECORD hold a capture's TURNS for this tenant, right now?
 
     ⛔ ONE declaration, THREE callers — the capture writer that DECIDES where a
@@ -1106,6 +1132,13 @@ def record_holds_turns(*, journal_configured: bool, durable: bool = True,
       DSN, a tenant, a closed connect breaker). A reason it names is a write this
       record will refuse, so its turns stay in the graph.
 
+    ⛔ THE BREAKER HALF IS A WRITE FACT AND A READER MUST NOT INHERIT IT. The
+    capture writer asks this with the default (``consult_breaker=True``); a READ
+    door passes ``consult_breaker=False``, because "a connect failed in the last
+    60 s" does not move a transcript that is already stored — and reading it as
+    "the record holds nothing" blanked healthy transcripts, silently, for the
+    length of the breaker (#10000 review P1).
+
     ⛔ ``True`` is a PREFLIGHT, not a promise: a connect can still fail. The
     writer therefore re-reads what each write actually reported; a reader has
     the stronger evidence instead (`record_read.session_turns` says whether the
@@ -1113,7 +1146,8 @@ def record_holds_turns(*, journal_configured: bool, durable: bool = True,
     """
     if not journal_configured:
         return False
-    return live_write_refusal(durable=durable, tenant=tenant) is None
+    return live_write_refusal(durable=durable, tenant=tenant,
+                              consult_breaker=consult_breaker) is None
 
 
 def _report_live_write_refusal(reason: str, record_type: Any,

@@ -262,7 +262,7 @@ class TurnAnswer:
 
 
 def session_turns(conn: Any, *, org_id: str, graph_id: str,
-                  session_id: str) -> TurnAnswer:
+                  session_id: str, turn_max_index: int | None = None) -> TurnAnswer:
     """THE turn read for a serving door: scope, read, and say whether it answered.
 
     ⛔ THE TENANT SCOPE IS INSTALLED HERE, by this function, because a turn read
@@ -284,17 +284,29 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     ``answered`` is decided by the record's OWN account of the session:
     :func:`_turns` returning rows is an answer only when those rows COVER the
     session's turns — a contiguous run from index 0 long enough for the
-    `turn_count` the same row states; with no rows, the answer is only the
-    record's when `public.session_narrative` holds this session's `turn_count` —
-    the column the capture's `SessionRecorded` writes
+    `turn_count` the same row states, AND reaching the id space's high-water
+    mark when the caller can name it (`turn_max_index`); with no rows, the
+    answer is only the record's when `public.session_narrative` holds this
+    session's `turn_count` — the column the capture's `SessionRecorded` writes
     (`record_projection._narrative_statements`). A count of 0 says "this session
     has no turns"; a positive count with no rows, or no count row at all, says
     "this record did not answer for these turns" and leaves the decision to the
-    caller. A row set that is short of the count, or that does not start at
-    index 0 (the `turn_offset` append shape) or has a HOLE in the middle (a
-    per-turn write refused between two that landed), is a PARTIAL answer: it is
-    reported as not-answered and carries the rows it does hold, so the caller
-    merges them with the other store instead of serving them alone.
+    caller. A row set that is short of the count, that does not start at
+    index 0 (the `turn_offset` append shape), that has a HOLE in the middle (a
+    per-turn write refused between two that landed), or that stops BELOW the
+    id-space high-water mark (a refused HIGHEST turn — the shape `turn_count`
+    cannot see, see :func:`_shortfall`) is a PARTIAL answer: it is reported as
+    not-answered and carries the rows it does hold, so the caller merges them
+    with the other store instead of serving them alone.
+
+    ⛔ THE TAIL NEEDS A WITNESS THIS STORE DOES NOT HOLD (#10000 review P2).
+    ``turn_count`` is a WINDOW length, so this record's own row cannot see a
+    missing HIGHEST index; the datum is the graph `:Session`'s
+    ``turn_max_index`` (inclusive, monotone up, written by the capture MERGE and
+    restored by the fold), which the two serving doors already read. It is a
+    CALLER argument rather than a record column because this module reads the
+    record only — and ``None`` (a session captured before the mark existed)
+    degrades to the checks above rather than inventing one.
     """
     from tortoise.record_projection import scope_connection
 
@@ -305,7 +317,7 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
     turns = _turns(conn, org_id, graph_id, session_id)
     turn_count = row[3] if row is not None and isinstance(row[3], int) else None
     if turns:
-        shortfall = _shortfall(turns, turn_count)
+        shortfall = _shortfall(turns, turn_count, turn_max_index)
         if shortfall is None:
             return TurnAnswer(answered=True, turns=turns, turn_count=turn_count,
                               reason="turn rows")
@@ -325,11 +337,12 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
                 "session — it did not answer"))
 
 
-def _shortfall(turns: Sequence[Turn], turn_count: int | None) -> str | None:
+def _shortfall(turns: Sequence[Turn], turn_count: int | None,
+               turn_max_index: int | None = None) -> str | None:
     """WHY these rows are not the session's whole transcript — or ``None``.
 
-    Two facts make a row set incomplete, and both are detectable from what the
-    read already fetched, so neither needs a second store to ask:
+    Three facts make a row set incomplete, and each is decidable from a datum
+    this read already has, so none needs a second store to ask:
 
     * it is SHORTER than the count the record itself states on the narrative row
       (`len(turns) < turn_count`) — the shape a mid-capture refusal leaves, where
@@ -337,10 +350,21 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None) -> str | None:
     * it does not cover index ``0 .. max(index)`` — the `turn_offset` append
       shape (`_t2`/`_t3` in the record, `_t0`/`_t1` still in the graph), where
       `turn_count` is the WINDOW length and therefore cannot see the gap, and an
-      interior hole left by one refused write between two that landed.
+      interior hole left by one refused write between two that landed;
+    * it stops BELOW the id space's high-water mark
+      (``max(index) < turn_max_index``) — a refused HIGHEST turn. ⛔ THIS ONE is
+      invisible to the other two AND to the row set itself (#10000 review P2):
+      a missing tail is ABOVE ``max(held)``, and the run stays ``0 .. max(held)``
+      with `len(rows) >= turn_count` (a WINDOW length) whenever an append window
+      is partially refused — `{_t0,_t1}` plus an append window `{_t2,_t3}` whose
+      `_t3` was refused is `turn_count=2` and three contiguous rows, with the
+      fourth turn readable through no door. The mark is the only witness, and it
+      is the graph `:Session`'s, which is why it is a parameter (``None`` when
+      the caller cannot name it — degrade, never invent).
 
-    A record that HOLDS FEWER than its own count, or whose ids start above 0 or
-    skip an index, has not answered for the session — see ``TurnAnswer``.
+    A record that HOLDS FEWER than its own count, or whose ids start above 0,
+    skip an index, or stop short of the mark has not answered for the session —
+    see ``TurnAnswer``.
     """
     if turn_count is not None and len(turns) < turn_count:
         return (f"the record states {turn_count} turn(s) but holds only "
@@ -354,6 +378,10 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None) -> str | None:
         shown = ", ".join(str(i) for i in missing[:5])
         return (f"the record holds {len(turns)} turn(s) but not the whole run "
                 f"(no turn row for index {shown}) — a partial transcript")
+    if turn_max_index is not None and max(held) < turn_max_index:
+        return (f"the record's turn rows stop at index {max(held)} while the "
+                f"session's turn ids reach {turn_max_index} — the tail is "
+                "missing, so this is a partial transcript")
     return None
 
 

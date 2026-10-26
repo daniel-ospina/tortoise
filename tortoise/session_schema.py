@@ -639,7 +639,8 @@ RETROFIT_VERDICTS: dict[str, dict[str, str]] = {
 }
 
 
-def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
+def audit_session_retrofit(g, *, graph: str | None = None,
+                           tenant: tuple[str, str] | None = None) -> dict[str, Any]:
     """Quantify the three D9 retrofit classes over ONE graph.
 
     ``g`` is a FalkorDB graph handle (``sdk._get_proj().g``). Read-only: this
@@ -651,6 +652,12 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
     ``retro_quantifiable: False`` plus its reason rather than a number that
     would read like an attribution. The short-turn class carries the same
     marker when the turns are RECORD rows (see :func:`_graph_cannot_count_turns`).
+
+    ``tenant`` is the record tenant to ask about, for a caller that KNOWS it —
+    an operator process has no request scope, so a multi-tenant deployment
+    leaves it unnamed and the short-turn class abstains instead of measuring the
+    graph (see :func:`_graph_cannot_count_turns`). Default ``None`` means "ask
+    the writer's own resolution", which is correct on the single-tenant lane.
     """
     total = int(g.query("MATCH (s:Session) RETURN count(s)").result_set[0][0])
 
@@ -668,7 +675,7 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
     # trains its reader to ignore the class. It is reported NOT MEASURABLE
     # instead, with no graph count issued for it; the honest figure lives in the
     # record (§9.1/D1) and belongs to #10000's measurement step.
-    unmeasurable = _graph_cannot_count_turns()
+    unmeasurable = _graph_cannot_count_turns(tenant)
     if unmeasurable is not None:
         short_block: dict[str, Any] = {
             "candidates_measured": 0,
@@ -775,7 +782,7 @@ def audit_session_retrofit(g, *, graph: str | None = None) -> dict[str, Any]:
         },
     }
 
-def _graph_cannot_count_turns() -> str | None:
+def _graph_cannot_count_turns(tenant: tuple[str, str] | None = None) -> str | None:
     """Why a graph turn count is not evidence here — or ``None`` if it is.
 
     #10000's store decision is a CAPABILITY question (`record_writer.
@@ -784,30 +791,53 @@ def _graph_cannot_count_turns() -> str | None:
     no turn node for it, so counting turn nodes measures the migration rather
     than the transcript.
 
-    ⛔ ``journal_configured=True`` is passed deliberately, and it is the one
-    assumption here. This audit runs in the OPERATOR's process and cannot see
-    the journal of the process that captured the sessions it reads — so the rule
-    biases toward "not measurable", which is the safe direction: a class that
-    says it could not measure is visible and actionable, while a number derived
-    from a store that no longer holds the turns reads as a finding and trains its
-    reader to ignore the whole audit. The unarmed case is unaffected (nothing is
-    armed, so the graph is still the turn store and the count is evidence).
+    ⛔ TWO ASSUMPTIONS, AND THE SECOND ONE USED TO BIAS THE OTHER WAY (#10000
+    review P2). ``journal_configured=True`` is the first, taken deliberately:
+    this audit runs in the OPERATOR's process and cannot see the journal of the
+    process that captured the sessions it reads, so the rule biases toward "not
+    measurable", which is the safe direction — a class that says it could not
+    measure is visible and actionable, while a number derived from a store that
+    no longer holds the turns reads as a finding and trains its reader to ignore
+    the whole audit.
+
+    The TENANT is the second, and it must not be assumed. This process has no
+    request scope, so on an armed MULTI-tenant deployment ``record_tenant()`` is
+    ``None``; asking the capability question with it answered ``no_tenant``,
+    which is not "the record cannot hold turns" — it is "this process cannot
+    name whose turns they are". Reading that as measurable measured the GRAPH,
+    whose ``count(t)`` is 0 for every session captured since arming, and printed
+    a 100 % false positive as a number. So a refusal that names the TENANT (or
+    the moment) abstains too, and a caller that knows the tenant passes it.
+
+    Only two refusals are evidence that the graph is still the turn store: an
+    unarmed record (nothing to write to) and a malformed DSN (the door refuses
+    every write, so the writer falls back to the graph).
     """
     try:
-        from tortoise.record_writer import record_holds_turns, record_tenant
+        from tortoise.record_writer import live_write_refusal, record_tenant
 
-        if record_holds_turns(journal_configured=True, durable=True,
-                              tenant=record_tenant()):
-            return (
-                "the turns are RECORD rows on this deployment (#10000): the "
-                "capture writer puts them in the record and writes no turn "
-                "node, so a graph count would report every session as short. "
-                "The figure lives in the record's own turn rows "
-                "(`record_read.session_turns`), not in this graph."
-            )
+        resolved = tenant if tenant is not None else record_tenant()
+        refusal = live_write_refusal(durable=True, tenant=resolved)
     except Exception:  # pragma: no cover - an import/env failure is "not armed"
         return None
-    return None
+    if refusal is None:
+        return (
+            "the turns are RECORD rows on this deployment (#10000): the "
+            "capture writer puts them in the record and writes no turn "
+            "node, so a graph count would report every session as short. "
+            "The figure lives in the record's own turn rows "
+            "(`record_read.session_turns`), not in this graph."
+        )
+    if refusal in ("unarmed", "malformed_dsn"):
+        return None
+    return (
+        f"the record is ARMED but this audit cannot ask it for the turns "
+        f"(`{refusal}`): an operator process has no request scope, so on a "
+        "multi-tenant deployment the record tenant is unknown here — and a "
+        "graph count would report every session captured since arming as "
+        "short. Pass the tenant explicitly, or measure the record's own turn "
+        "rows (`record_read.session_turns`)."
+    )
 
 
 def iter_declared_properties() -> Iterable[str]:

@@ -37455,7 +37455,13 @@ class TortoiseSDK:
             # The SDK read is BOUND to `SESSION_READ_FIELDS` by the parity
             # test, so this lane cannot serve a different vocabulary from the
             # hosted endpoint it mirrors.
-            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
+            # #10000 review P2: APPENDED (sess[12]) and NOT served — the turn
+            # read's id-space TAIL witness. `turn_count` is a WINDOW length, so
+            # a refused HIGHEST turn is invisible to it; `turn_max_index` is the
+            # mark the capture MERGE writes and the fold restores, so the record
+            # read can see a missing tail.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane, "
+            "s.turn_max_index",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -37479,7 +37485,13 @@ class TortoiseSDK:
         turn_points: list[dict] = []
         from tortoise.record_read import merge_turn_payloads, turn_payloads
 
-        _answer = self._record_turn_answer(session_id)
+        # The id-space high-water mark (sess[12], the `:Session` read above) is
+        # the TAIL witness the record's own `turn_count` cannot be: `None` when
+        # this session predates the mark, which makes the tail check abstain
+        # (#10000 review P2).
+        _answer = self._record_turn_answer(
+            session_id,
+            turn_max_index=sess[12] if isinstance(sess[12], int) else None)
         if _answer is not None and _answer.answered:
             turn_points = turn_payloads(_answer.turns)
         else:
@@ -37564,7 +37576,8 @@ class TortoiseSDK:
             "source": source,
         }
 
-    def _record_turn_answer(self, session_id: str):
+    def _record_turn_answer(self, session_id: str, *,
+                            turn_max_index: int | None = None):
         """This session's turns AS THE RECORD ANSWERS THEM, or ``None``.
 
         The SDK half of #10000's read switch: the hosted endpoint and this
@@ -37583,7 +37596,8 @@ class TortoiseSDK:
         question about the wrong process — `None`, the graph — and the graph holds
         no turn node, because the record took them: an empty transcript for a
         captured session, mutely. So the gate is the record's capability for this
-        tenant (`live_write_refusal`: armed DSN + tenant + closed breaker) and
+        tenant (`live_write_refusal`: armed DSN + tenant; the WRITE breaker is
+        deliberately not consulted — see its `consult_breaker`) and
         `session_turns.answered` is the AUTHORITY on whether this session's turns
         are in there. A record that is unarmed — the graph-only lane — is still
         answered `None` with no round trip, and a record that stays silent falls
@@ -37591,6 +37605,12 @@ class TortoiseSDK:
         (Asking is not the same as trusting: the durability half is a WRITE
         precondition and lives in `_write_capture_turns`, where it decides the
         store.)
+
+        ``turn_max_index`` is the caller's `:Session` read (sess[12]), passed
+        straight through: the record's `turn_count` is a WINDOW length and
+        cannot witness a missing TAIL, so the id-space high-water mark is the
+        only datum that can, and the door that already read it supplies it
+        (#10000 review P2).
 
         Deliberately fail-soft: a record that raises must not blank a transcript
         the graph still holds, and the exception is logged rather than swallowed.
@@ -37607,15 +37627,26 @@ class TortoiseSDK:
         # `durable=True` is this read door's statement about the WRITER's side:
         # whether the capturing process could journal is not observable here, and
         # the record's own answer is what decides. A refusal (unarmed, malformed
-        # DSN, open breaker) is the graph-only lane and costs no round trip.
-        if live_write_refusal(durable=True, tenant=tenant) is not None:
+        # DSN) is the graph-only lane and costs no round trip.
+        #
+        # ⛔ `consult_breaker=False` — A READER MUST NOT INHERIT THE WRITE
+        # BREAKER (#10000 review P1). `circuit_open` is a cost bound on the write
+        # path, not a fact about where this session's turns are: asked with it,
+        # an armed deployment whose record holds the turns answered `None` here
+        # for 60 s after one failed capture connect, the caller served the
+        # graph's (non-existent) turn nodes, and its `_answer is not None`
+        # WARNING never fired — a silently empty transcript. Asking costs one
+        # bounded connect per read, and a failure is logged below.
+        if live_write_refusal(durable=True, tenant=tenant,
+                              consult_breaker=False) is not None:
             return None
         org_id, graph_id = tenant
         conn = None
         try:
             conn = open_record()
             return session_turns(conn, org_id=org_id, graph_id=graph_id,
-                                 session_id=session_id)
+                                 session_id=session_id,
+                                 turn_max_index=turn_max_index)
         except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
                 "session %s: the record turn read failed — serving the graph "

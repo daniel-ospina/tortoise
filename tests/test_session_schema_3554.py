@@ -849,6 +849,43 @@ def test_the_short_turn_class_is_not_measured_from_the_graph_when_armed(
         "the class is unmeasurable here and must SAY why, not print a number")
 
 
+def test_the_short_turn_class_abstains_when_the_audit_cannot_name_the_tenant(
+        monkeypatch) -> None:
+    """⛔ P2: an ARMED deployment read from a process with no request scope.
+
+    The tenant is a second assumption, and it biases the OTHER way from
+    ``journal_configured=True``. An operator process has no request scope, so on
+    a multi-tenant deployment ``record_tenant()`` is ``None``; asking the
+    capability question with it answered ``no_tenant`` — which is not "the record
+    cannot hold turns", it is "this process cannot name whose turns they are".
+    Read as measurable, the class was measured from the GRAPH, whose ``count(t)``
+    is 0 for every session captured since arming: a 100 % false positive printed
+    as a number, on the deployment this audit targets.
+    """
+    import tortoise.record_writer as rw
+
+    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: "no_tenant")
+    monkeypatch.setattr(rw, "record_tenant", lambda: None)
+    short = session_schema.audit_session_retrofit(_FakeGraph())["short_turn_count"]
+    assert short["retro_quantifiable"] is False, (
+        "an armed record with no tenant in scope was measured from the graph")
+    assert short["all_short"] == 0 and short["candidates_measured"] == 0
+    assert "no_tenant" in (short["reason"] or ""), (
+        "the abstention must name WHY it could not ask, not print a number")
+
+    # A caller that KNOWS the tenant says so and gets the real verdict back:
+    # armed with this tenant ⇒ the turns are record rows ⇒ still not measurable
+    # from the graph.
+    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: None)
+    short = session_schema.audit_session_retrofit(
+        _FakeGraph(), tenant=("org-1", "g-1"))["short_turn_count"]
+    assert short["retro_quantifiable"] is False
+    # ... and the unarmed lane is STILL measured (the abstention is not blanket).
+    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: "unarmed")
+    short = session_schema.audit_session_retrofit(_FakeGraph())["short_turn_count"]
+    assert short["retro_quantifiable"] is True
+
+
 def test_the_short_turn_class_is_still_measured_on_a_graph_only_deployment(
         monkeypatch) -> None:
     """The unarmed lane keeps the measurement it always had (no regression)."""

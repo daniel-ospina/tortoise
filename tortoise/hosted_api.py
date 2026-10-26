@@ -18199,8 +18199,17 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
         return None
     journal_path = _resolve_event_log_path(
         namespace=None, graph_name=org.get("graph_namespace"))
+    # ⛔ THE WRITE BREAKER IS NOT ASKED HERE (#10000 review P1). `circuit_open`
+    # says a connect failed within the last 60 s — a bound on the COST of the
+    # write path (one timeout per journal record), and no evidence about where a
+    # transcript that is already stored lives. Inheriting it made a serving read
+    # decide "the record holds nothing" without asking, so an armed deployment
+    # whose record holds the turns served `turns: []` for 60 s with no log line
+    # and no counter. This door ASKS instead: one request pays at most one
+    # bounded connect, and a record that then fails is reported by the fail-soft
+    # arm below (WARNING + the graph copy), never pre-judged as absence.
     if not record_holds_turns(journal_configured=journal_path is not None,
-                              tenant=tenant):
+                              tenant=tenant, consult_breaker=False):
         return None
     return tenant
 
@@ -18276,7 +18285,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "s.capture_ok, s.capture_extractor, "
             # #3516: the capture-provenance triplet, APPENDED AFTER #3520's pair
             # (sess[9..11]) — #3520 holds sess[7]/sess[8].
-            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
+            "s.client_captured_at, s.client_captured_at_source, "
+            # #10000 review P2: APPENDED (sess[12]), and NOT served — the turn
+            # read's id-space TAIL witness. `turn_count` is a WINDOW length, so
+            # a refused HIGHEST turn is invisible to it; `turn_max_index` is the
+            # mark the capture MERGE writes and the fold restores, read here so
+            # `record_read.session_turns` can see a missing tail.
+            "s.capture_lane, s.turn_max_index",
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
@@ -18325,6 +18340,11 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # the read must file under the SAME tenant the capture writer used, or it
     # answers from a tenant nothing was written to (`_record_tenant_for_read`).
     _read_tenant = _record_tenant_for_read(org)
+    # The id-space high-water mark (sess[12], the `:Session` read above), cast
+    # the way the rest of this module reads a nullable integer column: an
+    # absent/non-int value is ``None`` ("this session predates the mark"), which
+    # makes the tail check abstain rather than invent a bound.
+    _turn_max_index = sess[12] if isinstance(sess[12], int) else None
     if _read_tenant is not None:
         try:
             def _read_record_turns():
@@ -18332,7 +18352,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 try:
                     return _record_read.session_turns(
                         conn, org_id=_read_tenant[0], graph_id=_read_tenant[1],
-                        session_id=session_id)
+                        session_id=session_id,
+                        # The TAIL witness, from the `:Session` read above
+                        # (sess[12]): without it a partially-refused append
+                        # window answers COMPLETE and the refused highest turn
+                        # is readable through no door (#10000 review P2).
+                        turn_max_index=_turn_max_index)
                 finally:
                     conn.close()
 
