@@ -43,7 +43,7 @@ that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-to
 | The page mints session material client-side | `supabaseClient.auth.signInWithPassword` / `signInWithOAuth`, `oauth.py:2640-2820` |
 | The page reads the session back out of the cookie | `storage: cookieStorage, storageKey: COOKIE_NAME`, `oauth.py:2439-2440` |
 | The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2838-2845`; `/oauth/consent/preview` `oauth.py:2516-2522` |
-| The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers.get("Authorization", "")` (`:600`) and nothing else |
+| The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers.get("Authorization", "")` (`:600`) and nothing else. ⚠️ Measured BEFORE §9 step 2: `POST /oauth/consent` also accepts a bound consent token now — see §10 *Redemption*. `/oauth/consent/preview` remains bearer-only |
 | `/oauth/authorize` carries **no** identity | `GET /oauth/authorize` (`@app.get("/oauth/authorize")` in `hosted_api.py`) — the authorize handler reads query params only |
 
 Under the BFF the browser holds one credential it cannot read: a host-only `__Host-session` cookie on
@@ -305,9 +305,9 @@ bearer path untouched); step 4 is where the flow changes.
 `tests/test_oauth_consent_bridge.py`. Two conditions an operator must know, both recorded there:
 
 - the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API **and is a dedicated
-  value** (§2.3; a value equal to a service-role key or to `SUPABASE_ANON_KEY` — both are in this
-  process's environment, and the anon key is the one the consent page publishes — is treated as
-  unprovisioned). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
+  value of at least 32 characters** (§2.3; a value equal to a service-role key or to
+  `SUPABASE_ANON_KEY` — both are in this process's environment, and the anon key is the one the
+  consent page publishes — is treated as unprovisioned, and so is a key too short to be one). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
   and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
 - single-use is **per process** until §2.3's shared `jti` store (step 1) lands. The register is the
   seam step 1 replaces; until then this step is not fit for a multi-instance AS.

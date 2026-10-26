@@ -138,6 +138,14 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 #: project's env differs from the API's.
 _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_ANON_KEY")
 
+#: The shortest secret this arm will use. A FLOOR, not an entropy measurement: it catches the
+#: copy-paste-a-word class (measured with `CONSENT_TOKEN_SECRET=a`: a token HMAC'd with `"a"` was
+#: accepted and minted a code). HMAC-SHA256 with a guessable key is the same forgery oracle the
+#: reuse check above exists to prevent, reached by a different operator mistake — and this function
+#: already owns "an operator set this to the wrong value", so it owns this one too. 32 characters is
+#: the digest size in characters; nothing legitimately shorter is a 256-bit key.
+_MIN_SECRET_CHARS = 32
+
 
 def consent_token_secret_problem() -> str | None:
     """Why the arm is unavailable, or ``None`` when it can be used (§2.3).
@@ -158,6 +166,9 @@ def consent_token_secret_problem() -> str | None:
         if secret == os.environ.get(name, "").strip():
             return (f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
                     "arm is treated as unprovisioned rather than trusting a reused key")
+    if len(secret) < _MIN_SECRET_CHARS:
+        return (f"{_SECRET_ENV} is {len(secret)} characters — a key shorter than "
+                f"{_MIN_SECRET_CHARS} is guessable, so the arm is treated as unprovisioned")
     return None
 
 

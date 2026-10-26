@@ -1498,7 +1498,9 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
 # contract in §2.1 is small enough to state independently.
 # ═══════════════════════════════════════════════════════════════════════════
 
-_TEST_SECRET = "consent-token-secret-for-tests"
+#: Long enough to be a key: the arm refuses a secret shorter than 32 characters (a guessable
+#: HMAC key is the same forgery oracle as a reused one), so a fixture secret must clear that floor.
+_TEST_SECRET = "consent-token-secret-for-tests-0123456789"
 #: §2.1 — the session origin, "the minting authority". A token from anywhere else is the `iss`
 #: failure §2.2 names, so the look-alike below is a real shape, not a placeholder.
 _ISSUER = "https://app.premiselabs.co"
@@ -1793,6 +1795,11 @@ def test_a_token_bound_to_a_state_the_request_drops_is_refused(bridge_client, mi
     ({"jti": ""}, "jti"),
     # §2.2 `sub` — the identity. Without it the AS has no input at all.
     ({"sub": ""}, "sub"),
+    # §2.2 `jti` — its `_MAX_JTI_CHARS` cap is the register's only bound on key size, and deleting
+    # it left the suite GREEN (measured, fresh review round 5).
+    ({"jti": "x" * 300}, "jti"),
+    # §2.1 `email` — optional, but if present it must be a string; the check had no test.
+    ({"email": 12345}, "email"),
 ])
 def test_a_claim_that_breaks_the_contract_is_refused(bridge_client, mint_spy, bearer_refuses,
                                                      overrides: dict, needle: str) -> None:
@@ -1825,6 +1832,28 @@ def test_a_malformed_bind_is_refused(bridge_client, mint_spy, bearer_refuses,
     r = _post_token(tc, token, bind)
     assert r.status_code == 401, r.text
     assert "bind" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_a_non_string_bind_state_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§2.1 — `bind.state` is a string or null, and this guard is LOAD-BEARING.
+
+    `_bind_mismatch` cannot catch this case: a `state` of `7` in the token and `7` in the request
+    compare EQUAL, so the mismatch branch passes and the value reaches `issue_auth_code` and is
+    echoed to the page. Deleting the type check left the suite green and minted a code (measured,
+    fresh review round 5) — so it gets its own test, presenting the same non-string value on both
+    sides, which is the only shape where the type guard is the sole refuser.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    confused = bind | {"state": 7}
+    token = _signed(_claim_set(bind, bind=confused))
+
+    r = _post_token(tc, token, confused)
+    assert r.status_code == 401, r.text
+    assert "bind.state" in r.json()["error_description"], r.text
     assert mint_spy == []
 
 
@@ -2019,6 +2048,25 @@ def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch
     assert consent_token_secret() is None, "the PUBLIC anon key must never sign assertions"
     problem = consent_token_secret_problem()
     assert problem and "SUPABASE_ANON_KEY" in problem, problem
+
+
+def test_a_guessably_short_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """§2.3 — a key short enough to guess is the same forgery oracle as a reused one.
+
+    Measured before this guard: with `CONSENT_TOKEN_SECRET=a`, a token HMAC'd with `"a"` was
+    ACCEPTED and minted an authorization code. The floor is a length check, not an entropy
+    measurement — it catches the copy-paste-a-word class, which is the realistic mistake.
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "a")
+    assert consent_token_secret() is None
+    problem = consent_token_secret_problem()
+    assert problem and "shorter" in problem, problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token_secret() == _TEST_SECRET
+    assert consent_token_secret_problem() is None
 
 
 def test_a_token_without_a_kid_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
