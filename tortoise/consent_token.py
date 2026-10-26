@@ -56,9 +56,12 @@ REFUSALS (all typed, all fail-closed)
     the bearer path (which would answer "missing session token" to a request that never had one).
 
 OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on the hosted API:
-  * ``CONSENT_TOKEN_SECRET`` — a dedicated secret, HMAC-SHA256 signing key. Must NOT be the
-    service-role key (key reuse across purposes) or the anon key (§2.3: the consent page embeds
-    the anon key in HTML). Unset ⇒ the arm is unavailable and the bearer path is unaffected.
+  * ``CONSENT_TOKEN_SECRET`` — a dedicated secret, HMAC-SHA256 signing key, **at least 32
+    characters** (a shorter value is treated as unprovisioned: a guessable key is the same forgery
+    oracle as a reused one — the floor is a length heuristic, not a strength guarantee, so pick a
+    generated value). Must NOT be the service-role key (key reuse across purposes) or the anon key
+    (§2.3: the consent page embeds the anon key in HTML). Unset ⇒ the arm is unavailable and the
+    bearer path is unaffected.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
   * the shared `jti` store from §9 step 1 — without it, single-use is per-process (above).
@@ -142,8 +145,12 @@ _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABA
 #: copy-paste-a-word class (measured with `CONSENT_TOKEN_SECRET=a`: a token HMAC'd with `"a"` was
 #: accepted and minted a code). HMAC-SHA256 with a guessable key is the same forgery oracle the
 #: reuse check above exists to prevent, reached by a different operator mistake — and this function
-#: already owns "an operator set this to the wrong value", so it owns this one too. 32 characters is
-#: the digest size in characters; nothing legitimately shorter is a 256-bit key.
+#: already owns "an operator set this to the wrong value", so it owns this one too.
+#: ⚠️ It is a LENGTH heuristic, NOT a strength bound, and the number is not a bit-count: 32
+#: characters is 128 bits if the value is hex and ~190 if base64url, while the digest itself is 32
+#: BYTES (43–64 characters encoded). So `"passwordpasswordpasswordpassword"` clears this floor and
+#: is still ~2^19 guesses. It refuses words and short strings, which is the mistake worth catching;
+#: it cannot tell you the key is strong — that is the operator's job (§8).
 _MIN_SECRET_CHARS = 32
 
 
