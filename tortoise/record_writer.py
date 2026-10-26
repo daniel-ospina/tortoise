@@ -90,8 +90,10 @@ and half-owning it is how a record silently loses rows.
 **OVERRIDES:** one door deliberately departs from this decision — the LIVE door
 (`write_live_record`). It runs after the caller's journal append has already
 committed (§17.1 makes the append the commit point), so raising there would
-hand a producer an exception for a write that PERSISTED (#5148's rule). It
-counts ``write_failed``/``circuit_open`` and warns instead, which keeps the
+hand a producer an exception for a write that PERSISTED — the one SDK caller
+(`TortoiseSDK._write_record_projection`) already treats a record fault as
+"never a reason to fail the caller's write". It counts
+``write_failed``/``circuit_open`` and warns instead, which keeps the
 ``degraded`` vs ``unconfigured`` distinction on the counter surface rather than
 the exception surface. `write_records`/`RecordWriter.write` — the path a caller
 with an open transaction uses — still FAILS exactly as this decision says.
@@ -371,7 +373,9 @@ class RecordWriteOutcome(StrEnum):
     ``REFUSED``    the record IS armed and this call did not write (a refused
                    tenant, an open breaker, a declined scratch journal, a
                    malformed DSN, a failed statement). Added for the LIVE door
-                   (#8447), which may not raise (#5148) and used to return
+                   (#8447), which may not raise — see this module's decision 3
+                   OVERRIDES and §17.1 of `docs/architecture/STORAGE-ARCHITECTURE.md`:
+                   the caller's append IS the commit point — and used to return
                    ``None`` — the value that means NOT_ARMED — so a caller could
                    not tell "off by policy" from "refused"; read why off
                    :attr:`RecordWrite.refusal`.
@@ -389,7 +393,9 @@ class RecordWrite:
 
     ⛔ THE LIVE DOOR REPORTS ITS REFUSALS IN THIS TYPE (#8447).
     :func:`write_live_record` runs after the caller's journal append is the
-    commit point, so it may not raise (#5148) — but it may not return ``None``
+    commit point (decision 3 OVERRIDES above; §17.1 of
+    `docs/architecture/STORAGE-ARCHITECTURE.md`), so it may not raise — but it
+    may not return ``None``
     either, because that is this module's spelling for *not armed: nothing was
     attempted, off by policy*. An ARMED write that did not happen comes back as
     ``outcome=REFUSED``, ``applied is False``, and ``refusal`` naming which
@@ -435,12 +441,12 @@ class RecordWrite:
         supported state); a ``REFUSED`` call was armed and did not write, and
         :attr:`refusal` says WHY, but the five refusal tokens are not one
         severity: ``malformed_dsn`` / ``no_tenant`` / ``circuit_open`` /
-        ``write_failed`` are FAILURES (counted on ``record_write_failures`` —
-        except the malformed CARRIED-pair ``no_tenant`` arm, which warns without
-        counting), while ``no_durable_journal`` is a healthy-armed DECLINE
-        counted on ``record_non_journal_skips`` — that lane has no journal by
-        design, so nothing a replay could restore is missing (#9231 review P2,
-        and the vocabulary note in
+        ``write_failed`` are FAILURES, all four counted on
+        ``record_write_failures`` (BOTH ``no_tenant`` arms count — the nil tenant
+        and the malformed CARRIED pair), while ``no_durable_journal`` is a
+        healthy-armed DECLINE counted on ``record_non_journal_skips`` — that lane
+        has no journal by design, so nothing a replay could restore is missing
+        (#9231 review P2, and the vocabulary note in
         :func:`monitoring.record_record_write_failure`). A consumer must
         branch on :attr:`refusal`, not on ``applied is False``, before calling a
         decline an error. Either way a caller that needs the record to exist
