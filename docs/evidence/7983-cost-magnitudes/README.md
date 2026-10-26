@@ -90,6 +90,16 @@ Points carry a vector; content is **1,121.4 B over the 49.0% of Points that carr
 the footprint needs the second**: `avg()` skips NULLs, so applying the carrying mean to every node
 would overstate the row by its dominant column.
 
+> ⚠️ **BASIS (2026-10-26, #10017):** these figures were cut on a schema WITHOUT
+> `public.point.cache_tier` and its partial index `idx_point_graph_tier`. The
+> probe's migration list is pinned EQUAL to `record_projection.RECORD_MIGRATIONS`,
+> so a re-run today INCLUDES both: the column adds ~6 B/row, and the partial index
+> is inside `pg_total_relation_size`, which is what the per-tenant footprint is
+> summed from. Measured direction ≈ **+3-4%**, i.e. ≈2,200 B/node rather than
+> 2,136 - not re-measured here. The figures below are a correct measurement of the
+> schema that existed on the date they were cut, not of the schema today; re-run
+> the probe before quoting them as current.
+
 | measured | value | base |
 |---|---|---|
 | planted content width | **1,133 B** over the **49.0%** that carry content · **555 B over ALL** | calibrated to the dogfood's two means (1,121.4 / 549.1) and measured back. ⚠️ The dogfood **19,061 B tail is NOT planted** (no TOAST regime) ⇒ the footprint is a **LOWER BOUND** for a tenant that hits it |
