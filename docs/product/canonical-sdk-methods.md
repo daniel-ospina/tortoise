@@ -20,9 +20,9 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 149
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 147
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and an
-alongside that, an **earlier target sketch** (32 groups over 148 names).
+alongside that, an **earlier target sketch** (32 groups over 146 names).
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
 > Where the two disagree, that doc governs. They really do disagree: this sketch says
@@ -42,10 +42,12 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **149** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **149** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **147** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **147** |
 
-The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, and the arithmetic is
+The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
+2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
+unscoped tenant list `org_list` was deleted), and the arithmetic is
 the migration's own shape rather than drift: four legacy names retired
 (`graph_list`, `graph_restore`, `graph_set_name`, `graph_set_recording`) for three
 canonical targets (`list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`),
@@ -149,8 +151,8 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | # | Namespace | Members |
 |---|---|---|
-| N1 | `org` | `org_create`, `org_get`, `org_list`, `org_update`, `org_delete`, `migrate_orgs_to_registry` |
-| N2 | `graph` | `list_memory_graphs`, `graph_count`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
+| N1 | `org` | `org_create`, `org_get`, `org_update`, `org_delete`, `migrate_orgs_to_registry` |
+| N2 | `graph` | `list_memory_graphs`, `graph_delete`, `restore_memory_graph`, `trash_graphs`, `update_memory_graph`, `graph_key_ids`, `graph_active_key_count` |
 | N3 | `membership` | `membership_create`, `membership_get`, `membership_list`, `membership_update_role`, `membership_delete` |
 | N4 | `apikey` | `apikey_create`, `apikey_list`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_create`, `invitation_list`, `invitation_get_by_token`, `invitation_get_by_id`, `invitation_accept`, `invitation_revoke`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` |
@@ -334,10 +336,10 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 7. **Every retirement observed involved a warning or a parallel surface — never a silent rename.**
 8. **A raw escape hatch exists in the majority — 9/14**.
 
-**Where this lands for us.** 149 public methods on one flat class is ~5.5× the largest flat
+**Where this lands for us.** 147 public methods on one flat class is ~5.4× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The sketch above does exactly that: **32 groups over 148
+**collapse the aliases**. The sketch above does exactly that: **32 groups over 146
 names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging; the retired primitives stop resolving — a call raises with the
 hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The
@@ -360,7 +362,7 @@ Found while building this list. None is fixed here — this document changes no 
    behaviour, recorded in the `OVERRIDES:` note under *reads and writes never share a tool* in
    `docs/product/canonical-mcp-tools.md`. What remains is the METHOD-name half (a name beginning
    `get_`/`compute_` that writes), which the rename pass below owns.
-2. **The control plane writes on first use.** Every registry-backed read (`org_list`,
+2. **The control plane writes on first use.** Every registry-backed read (`org_get`,
    `list_memory_graphs`, `apikey_list`, `membership_list`, `invitation_list`, and others) calls into
    a registry helper that on a cold handle issues `CREATE INDEX` statements. Idempotent, but
    a read that writes.

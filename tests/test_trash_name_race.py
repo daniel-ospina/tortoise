@@ -87,11 +87,11 @@ def test_supabase_duplicate_key_maps_to_409(sb_client, as_owner, monkeypatch):
             "Supabase control-plane query failed (graphs): HTTP 409")
 
     # The #2503 quota gate (now on main, merged after this branch forked) runs
-    # _graph_quota_gate → _make_sdk().graph_count BEFORE the lane flip — so
+    # _graph_quota_gate → _make_sdk()._graph_count BEFORE the lane flip — so
     # _make_sdk must return a counting stub (default-only: the deleted custom
     # consumes no quota), not None.
     class _StubSdk:
-        def graph_count(self, org_id):
+        def _graph_count(self, org_id):
             return 1
 
     monkeypatch.setattr("tortoise.hosted_api._make_sdk",
@@ -115,7 +115,7 @@ def test_restore_false_flip_already_active_returns_409_not_410(
     as_owner()
 
     class _StubSdk:
-        def graph_count(self, org_id):
+        def _graph_count(self, org_id):
             return 1
 
     monkeypatch.setattr("tortoise.hosted_api._make_sdk",

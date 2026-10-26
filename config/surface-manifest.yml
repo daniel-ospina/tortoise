@@ -1,6 +1,6 @@
 # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.
 #
-# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today (149)
+# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today
 # because the required `surface-guard` job compares the live class against them and is run
 # from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The
 # APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row
@@ -28,7 +28,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: a792ea1923134d9f4ac4a551b976e5f328763441
+cut_at_commit: d426db97cc2766b5f35a70f2cc81bfdac2e6bdb9
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -532,7 +532,7 @@ approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
   tools: 81
-  sdk_public_methods: 149
+  sdk_public_methods: 147
   retired: 18
   keyword_distribution:
     fetch: 14
@@ -4248,29 +4248,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:graph_count
-  method: graph_count
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.graph_count.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:graph_delete
   method: graph_delete
   approved: false
@@ -5191,29 +5168,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:org_list
-  method: org_list
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.org_list.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:org_update
   method: org_update
   approved: false

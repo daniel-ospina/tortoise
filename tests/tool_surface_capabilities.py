@@ -325,7 +325,7 @@ _MUTATING = re.compile(r"\b(CREATE|MERGE|DETACH\s+DELETE|DELETE|SET|REMOVE|DROP)
 # sufficient on its own — a bare `CREATE (g:Graph {...})` has no MATCH hint.
 # Schema DDL (CREATE INDEX/CONSTRAINT) is deliberately NOT matched: _get_registry()
 # lazily runs _ensure_registry_indexes(), so counting DDL as mutation would make
-# every control-plane READ (org_list, graph_list, apikey_list, …) a "mutator"
+# every control-plane READ (graph_list, apikey_list, org_get, …) a "mutator"
 # and false-red a legitimate read tool after the cutover.  The schema bootstrap
 # is not a tool-surface node write.
 _MUTATING_STRONG = re.compile(r"\b(CREATE|MERGE)\s*[\(\{]|DETACH\s+DELETE")

@@ -8200,7 +8200,7 @@ class TestProvisioningConcurrency:
             statuses = [r.status_code for r in results]
             assert statuses.count(201) == 0, f"oversubscribed: {statuses}"
             assert statuses.count(409) == 8, statuses
-            assert sdk.graph_count(tid) <= 2
+            assert sdk._graph_count(tid) <= 2
         finally:
             gen.close()
 
@@ -8218,7 +8218,7 @@ class TestProvisioningConcurrency:
             assert statuses.count(201) == 1, f"expected exactly 1 win: " \
                 f"{statuses}"
             assert statuses.count(409) == 7, statuses
-            assert sdk.graph_count(tid) <= 2
+            assert sdk._graph_count(tid) <= 2
         finally:
             gen.close()
 
