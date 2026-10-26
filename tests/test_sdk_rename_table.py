@@ -1238,7 +1238,7 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
         "the structural note's canonical-group counts are gone"
     )
     assert "147 = the 147-method surface" in doc, (
-        "the structural note no longer reconciles its members to the 149-method surface"
+        "the structural note no longer reconciles its members to the 147-method surface"
     )
     # C6 sits between C5 and the structural notes; terminate the C5 slice at C6 so a
     # `W11` mention in the contested section cannot leak into the wildcard set.
@@ -1318,7 +1318,7 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
 
 
 def test_the_whole_mapping_is_pinned() -> None:
-    """Every one of the 149 `method → destination` pairs equals the pinned literal.
+    """Every one of the 147 `method → destination` pairs equals the pinned literal.
 
     The representative-pin test guards group defaults; this guards the exceptions.
     Without it a row can be reassigned to a different target while its citation
@@ -2538,8 +2538,8 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
     assert "uv run python tools/sdk_rename_table.py          # regenerate this file" in doc
     assert ("uv run python tools/sdk_rename_table.py --check  # verify, non-zero on "
             "drift") in doc
-    # The structural reconciliation must name its 32 groups and 148 members, and say
-    # how `backfill_v25` (the Archived-table member) reconciles to the 149-method surface.
+    # The structural reconciliation must name its 32 groups and 146 members, and say
+    # how `backfill_v25` (the Archived-table member) reconciles to the 147-method surface.
     assert "partitions the surface into **32 groups** over **146** named members" in doc
     assert "`backfill_v25` is in its Archived table instead" in doc
     assert "147 = the 147-method surface" in doc

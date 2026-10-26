@@ -26,9 +26,9 @@ Derived (computed, never typed):
   * the **method set** — an AST walk of the `TortoiseSDK` class body (via
     `tools.bridge_table._sdk_targets`, the Phase 0.1 walker; a second copy would be a
     second answer to "what is the public surface" and the two would drift);
-  * the def count — **339** `def` statements in
-    the class body, of which **149** are public (no leading underscore). The 335
-    non-dunder count is 339 minus the 4 dunders; this file derives both from the
+  * the def count — **340** `def` statements in
+    the class body, of which **147** are public (no leading underscore). The 336
+    non-dunder count is 340 minus the 4 dunders; this file derives both from the
     class body and never types them;
   * the **40 targets** — parsed out of `docs/product/beta-sdk-surface.md` (the
     owner-approved surface), not re-typed here;

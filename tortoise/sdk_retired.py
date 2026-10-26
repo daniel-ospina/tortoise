@@ -19,18 +19,37 @@ map is separate and deliberately tiny:
 
   * a product module must not import a build tool, and that table reads two product docs
     at import time;
-  * the table maps names that still EXIST. This map holds only names that have **already
-    left** the surface — the ones ``__getattr__`` will actually be asked about.
+  * the table maps names that still EXIST. This module holds only names that have
+    **already left** the surface, in the two shapes a departure takes:
+
+      - :data:`RETIRED_SDK_METHODS` — a RENAME. The name left and a customer-visible
+        replacement exists, so ``__getattr__`` FAILS and NAMES it (#3836 (c)). These
+        are the names ``__getattr__`` will actually be asked about.
+      - :data:`REMOVED_SDK_METHODS` — a departure with NO replacement to name: the
+        method went INTERNAL (``graph_count`` → ``_graph_count``, kept for the plan
+        quota) or was DELETED (``org_list`` — it returned every tenant and had zero
+        callers). No hint is emitted for these, and that is deliberate rather than an
+        omission: this is not a ``#3836 (c)`` retirement, the rename hint's wording
+        ("use X instead") would be false for a method that is deliberately not coming
+        back in any form, and ``retirement_hint`` has no way to say "no replacement".
+        They are recorded all the same — the point of this module is that every
+        departure is ACCOUNTED FOR, not that every departure has a hint.
 
 ``tests/test_sdk_retirement.py`` pins every entry here to the owner-approved
-``docs/product/beta-sdk-surface.md`` — each name carries the ledger region that
+``docs/product/beta-sdk-surface.md`` — each RETIRED name carries the ledger region that
 authorises it (``RETIRED_SDK_APPROVALS``), and the gate checks that the region is
 present VERBATIM in that document, that it names the retired name, and that the
 replacement is one of the numbered target rows the region points at. An entry cannot
-be added here that the owner has not approved: an unapproved rename would otherwise
+be added there that the owner has not approved: an unapproved rename would otherwise
 fail every caller of a live method with a hint pointing at a name the owner never
 approved. A green run is a CONSISTENCY CHECK against that document, never consent to
 edit it.
+
+The REMOVAL record has no such owner document to quote (the ruling deletes the name and
+names no replacement), so it is pinned differently, in the direction that was missing
+before #4282 phase 2.3: the gate requires each entry to name a method that has really
+left the surface, to be accounted for in the inventory, and to keep the recorded-
+universe count whole — so a departure cannot go unrecorded the way these two did.
 """
 
 from __future__ import annotations
@@ -47,11 +66,14 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     "restore_point_at": "get_historical_knowledge",
     # #4282 phase 2.3 — the memory-graph read. Approved by the beta doc's rename
     # ledger group row (`graph_delete`, `graph_restore`, `graph_list`,
-    # `graph_set_name` → rows 30–33 `*_memory_graph*`). `graph_count` is NOT
-    # here: its destination is `list_memory_graphs` too, but folding it is a
-    # BEHAVIOUR change (it is a quota meter that excludes tombstoned graphs
-    # while the selfhost `list_memory_graphs` returns them), not a rename —
-    # deferred.
+    # `graph_set_name` → rows 30–33 `*_memory_graph*`).
+    #
+    # `graph_count` is NOT here, and it is no longer "deferred": the owner's
+    # 2026-10-25 ruling settled it — the counter is kept INTERNAL as
+    # `_graph_count` rather than folded into `list_memory_graphs`, because folding
+    # is a BEHAVIOUR change (the meter excludes tombstoned graphs while the
+    # selfhost `list_memory_graphs` returns them), not a rename. It is recorded in
+    # REMOVED_SDK_METHODS below, with no hint.
     "graph_list": "list_memory_graphs",
     # #4282 phase 2.3 — trash restore.
     "graph_restore": "restore_memory_graph",
@@ -60,6 +82,29 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # `graph_set_recording` by its own discarded-row entry, which names row 30.
     "graph_set_name": "update_memory_graph",
     "graph_set_recording": "update_memory_graph",
+}
+
+#: removed public name -> why it is gone, and what a caller does instead (prose only).
+#:
+#: These left the surface WITHOUT a replacement to name, so they are NOT
+#: :data:`RETIRED_SDK_METHODS` entries and ``retirement_hint`` must keep returning
+#: ``None`` for them (a hint would claim an approved rename that does not exist).
+#: What they owe the next reader is a RECORD, so that a name disappearing from
+#: ``TortoiseSDK`` is never silent — `tests/test_sdk_retirement.py` pins every entry
+#: here to the non-owner inventory (`docs/product/canonical-sdk-methods.md`) and pins
+#: the accounted universe, so a future departure cannot skip this table either.
+REMOVED_SDK_METHODS: dict[str, str] = {
+    "graph_count": (
+        "#4282 phase 2.3 (owner ruling 2026-10-25): kept INTERNAL as `_graph_count` "
+        "for the plan-limit check. A customer counts by calling `list_memory_graphs` — "
+        "which is why this is not a rename: the counter excludes tombstoned graphs "
+        "while `list_memory_graphs` returns them, so folding would change the number."
+    ),
+    "org_list": (
+        "#4282 phase 2.3 (owner ruling 2026-10-25): DELETED. It returned every tenant "
+        "on the account and had zero callers; the ruling ships no account-list call "
+        "in beta, so there is deliberately no replacement to name."
+    ),
 }
 
 #: retired name -> the owner-approved region of `docs/product/beta-sdk-surface.md`

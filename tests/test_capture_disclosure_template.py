@@ -25,6 +25,8 @@ Each test names the mutation that turns it RED.
 from __future__ import annotations
 
 import json
+import os
+import site
 import subprocess
 import sys
 import tomllib
@@ -39,6 +41,30 @@ SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
 MIRROR = (REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "skills"
           / "tortoise-onboarding" / "SKILL.md")
 MAIN_JSX = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
+
+
+def _child_env(**overrides: str) -> dict[str, str]:
+    """A child env that still imports what THIS process imports (#10012).
+
+    `env={"HOME": tmp, "PATH": …}` reads as hermetic and is not: Python resolves its
+    *user* site from HOME, and the `.pth` hooks `pip install -e .` writes into that site
+    are what make `import tortoise` resolve. So on a runner whose install landed in the
+    user site (a shared self-hosted runner whose tool dir the job user cannot write),
+    redirecting HOME uninstalls every package for the child while the same interpreter
+    imports them fine in the parent — the pin then reds on the harness instead of on the
+    behaviour it is about. Measured 2026-10-26: `python -m tortoise` in the child →
+    "No module named 'tortoise'", and the same mechanism cost 12 pins in
+    `tests/test_ci_selection_changed_files_9109.py` (`No module named 'yaml'`).
+
+    The fix is to hand the child the import roots the PARENT already resolved — its
+    `sys.path` verbatim. That covers site-packages, the user site and every editable
+    install regardless of which of them the install used, so the pin no longer depends
+    on where the runner put the packages. The product's own config isolation is
+    untouched: it reads HOME (`Path.home()`), which still points at the tmp dir.
+    """
+    env = dict(overrides)
+    env.setdefault("PYTHONPATH", os.pathsep.join(p for p in sys.path if p))
+    return env
 
 
 def _static_runs(template: str) -> list[str]:
@@ -422,7 +448,7 @@ class TestCliRender:
         Mutation: gate the subcommand behind the api_key check (the pattern the
         other `session` verbs use) — the CLI then exits 1 instead of printing.
         """
-        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(tmp_path)}
+        env = _child_env(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(tmp_path))
         r = subprocess.run(
             [sys.executable, "-m", "tortoise", "session", "disclosure",
              "--harness", "pi"],
@@ -431,6 +457,39 @@ class TestCliRender:
         assert r.returncode == 0, (r.stdout, r.stderr)
         assert "What is recorded" in r.stdout
         assert "your own Tortoise store" in r.stdout, r.stdout
+
+    def test_the_redirected_home_still_keeps_the_interpreter_s_packages(self, tmp_path):
+        """Instrument check for `_child_env` — the failure that fix removed (#10012).
+
+        Two arms. The FIRST pins the premise: a redirected HOME really does move the
+        user site, so the hazard is real wherever the install landed there. The SECOND
+        pins the remedy through the pin that actually broke: a child with a tmp HOME
+        must still import a dependency of this package (`yaml` is the one CI measured).
+        Delete the pass-through in `_child_env` and the second arm reds on exactly the
+        runner that produced the failure.
+        """
+        home = tmp_path / "empty-home"
+        home.mkdir()
+        moved = subprocess.run(
+            [sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True)
+        assert moved.returncode == 0, moved.stderr
+        assert moved.stdout.strip() != site.getusersitepackages(), (
+            "a redirected HOME no longer moves the interpreter's user site — the hazard "
+            "`_child_env` exists for is gone, so this pin is stale rather than green"
+        )
+
+        env = _child_env(HOME=str(home), PATH="/usr/bin:/bin")
+        assert env["PYTHONPATH"].split(os.pathsep) == [p for p in sys.path if p], (
+            "the child is no longer handed this process's import roots, so any package a "
+            "redirected HOME hides (the user site) is unreachable for it"
+        )
+        r = subprocess.run([sys.executable, "-c", "import yaml"], env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, (
+            f"the child lost a dependency this process imports: {r.stderr}")
+
 
     @pytest.mark.parametrize("kind", ["disclosure", "confirmation", "declined"])
     def test_every_branch_kind_renders(self, keyless, capsys, kind):
