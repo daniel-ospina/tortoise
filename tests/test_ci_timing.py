@@ -5975,3 +5975,89 @@ def test_no_pin_means_each_row_keeps_its_own_reading() -> None:
         "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
     assert "  test_pinned.py: 2.2" in text, (
         "a row was re-based from a sibling's reading with no pin declaring it")
+
+
+# ── …and a cut may not leave HALF a parenthesis behind ────────────────────
+#
+# `_repair_adopted_note` bounds a clause by ` — `/`; `/`. ` and drops it whole. When
+# the dropped clause carried one half of a paren pair, the survivor kept the other
+# half: `#4649: 169.5s wall for the whole file)` (the `(` went with the clause) or
+# `#7951: … 7.39s wall (measured at the rebase head` (the `)` went with it). One
+# refresh left 16 rows like this — 1 on main before it — reported as P3 on #10055's
+# review: provenance-text damage, not a behaviour defect, but still a record that
+# reads as though a sentence was truncated, because it was.
+#
+# The pair is punctuation, not a claim, so the orphaned HALF is dropped and the
+# surviving claims are left exactly as they are.
+_PAREN_CUT_MANIFEST = """\
+surfaces:
+  core:
+    - test_orphan_closer.py
+    - test_orphan_opener.py
+    - test_spanning_pair.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_orphan_closer.py: 2.0  # #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here because the sweep only samples push-to-main runs. Do NOT drop the row (#4348 trap).
+  test_orphan_opener.py: 2.0  # #7951: 19 tests, 7.39s wall (measured at the rebase head; locally measured on the private lane at 8.0s). Keep this row.
+  test_spanning_pair.py: 2.0  # #7766: a pair (that spans two clauses; the closer lands in a kept one) is not a cut casualty.
+"""
+
+
+def _balanced(note: str) -> bool:
+    return note.count("(") == note.count(")")
+
+
+def test_a_cut_note_does_not_keep_half_a_parenthesis() -> None:
+    """#10055 review (P3): dropping a clause must not orphan its paren.
+
+    The reviewer measured 17 rows on the refresh head carrying an unbalanced `)`
+    against 1 on main, e.g. `test_url_keyed_source_write_4649.py`
+    (`#4649: 169.5s wall for the whole file); …`) whose `(` sat in the clause the
+    repair cut — and 4 more whose `(` was orphaned the other way round.
+
+    Non-vacuity (measured by making `_balance_cut_parens` the identity, i.e. the
+    pre-fix behaviour): `test_orphan_closer.py` rendered
+    `…169.5s wall for the whole file). Needed here…` and `test_orphan_opener.py`
+    rendered `…7.39s wall (measured at the rebase head; Keep this row…` — both
+    fail the balance assertion below.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _PAREN_CUT_MANIFEST,
+        {"test_orphan_closer.py": 4.3, "test_orphan_opener.py": 7.4},
+        "2026-10-26T00:00:00Z", sample_label="ci-timing junit-census+top-15 2026-10-26 (run 1)")
+
+    closer = _rendered_note(text, "test_orphan_closer.py")
+    assert _balanced(closer), f"the cut orphaned a `)` — half a pair is not a record: {closer}"
+    assert "169.5s wall for the whole file. Needed here" in closer, (
+        f"the surviving claim was re-worded instead of just losing its paren: {closer}")
+    assert "Do NOT drop the row (#4348 trap)" in closer, (
+        f"the #4348 do-not-drop instruction was cut with the stale claim: {closer}")
+
+    opener = _rendered_note(text, "test_orphan_opener.py")
+    assert _balanced(opener), f"the cut orphaned a `(` — half a pair is not a record: {opener}"
+    assert "7.39s wall measured at the rebase head" in opener, (
+        f"the surviving claim was re-worded instead of just losing its paren: {opener}")
+
+    # …and a pair that legitimately SPANS two kept clauses is not a cut casualty:
+    # the scan is over the whole survivor, so a closer in a later clause still pairs
+    # with the opener in an earlier one and nothing is dropped.
+    spanning = _rendered_note(text, "test_spanning_pair.py")
+    assert spanning == "  test_spanning_pair.py: 2.0  # #7766: a pair (that spans two clauses; the closer lands in a kept one) is not a cut casualty.", spanning
+
+
+def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
+    """The SIBLING cutter has the same obligation (`_strip_stale_basis_claim`).
+
+    Non-vacuity: pre-fix this returns the note unchanged apart from the cut, ending
+    `… private lane); required for …` / opening `… (measured on …` with no partner.
+    """
+    stripped = ci_timing._strip_stale_basis_claim(
+        "  # #2350: this value is a CI measurement since the 2026-10-17 refresh "
+        "(measured on the private lane); required for the durations coverage half")
+    assert _balanced(stripped), stripped
+    assert "required for the durations coverage half" in stripped, stripped

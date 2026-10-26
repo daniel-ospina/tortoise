@@ -1986,7 +1986,52 @@ def _strip_stale_basis_claim(tail: str) -> str:
     head = body[:left].rstrip().rstrip("—,;. ").rstrip()
     rest = body[right:].lstrip(" ;—,.").strip()
     kept = f"{head}; {rest}" if head and rest else (head or rest)
-    return f"{prefix}{kept}" if kept else ""
+    if not kept:
+        return ""
+    return f"{prefix}{_balance_cut_parens(kept)}"
+
+
+# ── a CUT must not leave half a parenthesis behind ────────────────────────
+#
+# Both cutters above bound a clause by ` — `/`; `/`. ` and drop it whole. When the
+# dropped clause carried ONE half of a paren pair, the survivor kept the other half
+# and the note came out truncated: `#4649: 169.5s wall for the whole file)` (the `(`
+# was in the cut clause), or `#7951: 19 tests, 7.39s wall (measured at the rebase
+# head` (the closer was). The 2026-10-26 refresh left 16 such rows (main had 1),
+# reported as P3 on #10055's review: "provenance-text damage, not a behaviour
+# defect", but damage to the record all the same — a dangling `)` reads as a typo
+# and hides that a sentence was cut.
+#
+# The pair is PUNCTUATION, not a claim: dropping the orphaned half leaves every
+# surviving claim true and unchanged, which is the same rule the cutters follow for
+# the clauses themselves (drop the stale part, keep the record). Nothing is
+# re-worded and no instruction is re-added.
+def _balance_cut_parens(text: str) -> str:
+    """Drop the parenthesis halves a clause cut orphaned.
+
+    Scoped to the text SURVIVING a cut, so a pair that legitimately spans two kept
+    clauses is left alone — the scan is over the whole survivor, not per clause.
+    """
+    unclosed: list[int] = []
+    orphaned: set[int] = set()
+    for i, ch in enumerate(text):
+        if ch == "(":
+            unclosed.append(i)
+        elif ch == ")":
+            if unclosed:
+                unclosed.pop()
+            else:
+                orphaned.add(i)
+    orphaned.update(unclosed)          # an opener whose closer went with a clause
+    if not orphaned:
+        return text
+    out = "".join(ch for i, ch in enumerate(text) if i not in orphaned)
+    # Dropping a half can leave the seams doubled: `file) ; the` -> `file ; the`,
+    # `wall (measured` -> `wall  measured`, `case );` -> `case ;`. The normalisation
+    # is unconditional but this function is only reached once a drop HAS happened,
+    # so a note that lost no paren keeps its own spacing exactly.
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return re.sub(r"\s+([,.;:])", r"\1", out)
 
 
 # ── the UNMEASURED-STATE note, and the adoption that falsifies it ───────────
@@ -2095,7 +2140,7 @@ def _repair_adopted_note(tail: str) -> str:
         rendered = kept[0][1]
     for sep, text in kept[1:]:
         rendered = f"{rendered}{sep or '; '}{text}"
-    return f"  # {rendered}"
+    return f"  # {_balance_cut_parens(rendered)}"
 
 
 def _restate_unmeasured_marker(tail: str) -> str:
