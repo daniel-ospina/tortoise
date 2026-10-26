@@ -504,9 +504,13 @@ def test_the_provisioning_wrappers_survive_a_failed_mint() -> None:
     next API-key request self-heals it.
 
     Driven through the REAL wrappers with a control plane whose `graphs` table
-    is unreadable, so the raise would come from the mint and nowhere else.
+    is unreadable, so the raise would come from the mint and nowhere else — and
+    asserted to have REACHED the mint (the retry window is the only observable
+    that proves it), because "did not raise" is equally satisfied by a wrapper
+    that never calls it.
     """
     from tests.fake_control_plane import FakeControlPlane
+    from tortoise import supabase_control as sc
 
     class _NoGraphsCP(FakeControlPlane):
         """The provision RPC works; the `graphs` table does not."""
@@ -518,12 +522,29 @@ def test_the_provisioning_wrappers_survive_a_failed_mint() -> None:
 
     for wrapper in (provision_org, provision_org_with_token):
         cp = _NoGraphsCP()
+        org_id = f"org-f1-{wrapper.__name__}"
         extra = {"p_signup_token_hash": "sha256:token-hash"} \
             if wrapper is provision_org_with_token else {}
         # Must NOT raise: the org is provisioned, only the default row is not.
-        wrapper(cp, **_provision_params("org-f1"), **extra)
-        assert default_graph_id_for(cp, "org-f1") is None, (
+        # A DISTINCT org per wrapper, deliberately: `_DEFAULT_ROW_MINT_RETRY` is
+        # process state, so re-using one org id would let the first iteration's
+        # recorded failure answer "not re-attempting" for the second — the
+        # signup arm would then never reach the mint and could not distinguish
+        # "routes through the best-effort helper" from "skipped for any
+        # reason", which is exactly what this test claims to prove.
+        wrapper(cp, **_provision_params(org_id), **extra)
+        assert default_graph_id_for(cp, org_id) is None, (
             "the unreadable table answered a tenant")
+        # ⚠️ The "did not raise" half above is satisfied by a wrapper that never
+        # calls the mint at all — measured: deleting the call from
+        # `provision_org_with_token` leaves it green. This is the assertion that
+        # makes the arm falsifiable: an org reaches the retry window ONLY by
+        # `_mint_default_graph_row_best_effort` having RUN and recorded its
+        # failure. (No `clear()` per iteration: distinct orgs are distinct keys,
+        # and conftest's autouse fixture resets the window per test.)
+        assert org_id in sc._DEFAULT_ROW_MINT_RETRY, (
+            f"{wrapper.__name__} never reached the mint — the best-effort "
+            "route this test claims to prove is not exercised")
 
 
 def test_a_missed_mint_is_healed_by_the_next_api_key_resolution() -> None:
@@ -724,3 +745,70 @@ def test_the_backfill_survives_a_concurrent_writer() -> None:
         "would abort the whole migration transaction, for every org")
     assert "NOT EXISTS" in backfill, (
         "the backfill lost its existence guard — it is no longer idempotent")
+
+# ── The convergent mint's adopt arm (#10025 review, at-head) ────────────────
+# The guards above the insert are a read-then-write, so a concurrent winner
+# makes the INSERT lose on a unique index; the adopt arm then re-reads and
+# returns the winner. The winner need not be named 'default': `set_graph_name`'s
+# insert arm mints `kind='default'` under the USER'S chosen name, so a rename
+# committing inside that window leaves an ACTIVE default row called e.g.
+# `Team HQ`. A `name = 'default'` filter on the adopt read misses it, re-raises,
+# and logs "the org is unnamed" for an org that IS nameable — a false alarm on
+# the one channel the #10025 diagnosis depended on.
+
+
+class _WinnerLandsAfterTheGuards(_FakeCP):
+    """The winner's row commits AFTER this mint's guards read, BEFORE its insert.
+
+    Models exactly the interleaving the convergent arm exists for: `graphs` GETs
+    answer from the pre-commit snapshot (empty) until an insert has been
+    ATTEMPTED, and see the committed winner from then on.
+    """
+
+    def __init__(self, tables=None, fail=None) -> None:
+        super().__init__(tables=tables, fail=fail)
+        self.post_attempted = False
+
+    def query(self, table, method="GET", filters=None, **kw):  # type: ignore[override]
+        if table == "graphs" and method == "POST":
+            self.post_attempted = True
+        elif table == "graphs" and method == "GET" and not self.post_attempted:
+            return []
+        return super().query(table, method=method, filters=filters, **kw)
+
+
+def test_the_adopt_arm_adopts_a_differently_named_winner() -> None:
+    """A concurrent RENAME winner is adopted, not rejected.
+
+    With a `name = 'default'` filter the adopt read returned zero rows here, so
+    the mint raised and logged "the org's record writes stay refused `no_tenant`"
+    for an org that `default_graph_id_for` names immediately. The read is org +
+    kind + live-status (no name) — the same one `set_graph_name`'s convergent arm
+    performs.
+    """
+    cp = _WinnerLandsAfterTheGuards(
+        tables={"graphs": [{"id": "g_renamed", "org_id": "org-adopt",
+                            "name": "Team HQ", "kind": "default",
+                            "namespace": "org_org-adopt", "status": "active"}]},
+        fail={("graphs", "POST"): 'duplicate key value violates unique '
+                                 'constraint "uq_graphs_org_default_active"'})
+    assert ensure_default_graph_row(cp, "org-adopt", "org_org-adopt") == "g_renamed"
+
+
+def test_the_adopt_arm_does_not_adopt_a_tombstone() -> None:
+    """…but a TOMBSTONED default row is not a winner.
+
+    `status <> 'deleted'` in the adopt read plus the `== 'active'` loop guard
+    stop a rename racing a soft-delete from handing back the tombstone: the org
+    really is unnamed then, so the insert error must surface rather than being
+    reported as a successful mint.
+    """
+    cp = _WinnerLandsAfterTheGuards(
+        tables={"graphs": [{"id": "g_tomb", "org_id": "org-adopt-tomb",
+                            "name": "Team HQ", "kind": "default",
+                            "namespace": "org_org-adopt-tomb",
+                            "status": "deleted"}]},
+        fail={("graphs", "POST"): 'duplicate key value violates unique '
+                                 'constraint "uq_graphs_org_name_active"'})
+    with pytest.raises(RuntimeError):
+        ensure_default_graph_row(cp, "org-adopt-tomb", "org_org-adopt-tomb")

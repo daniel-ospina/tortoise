@@ -131,22 +131,12 @@ SELECT tests.assert(
   '#10025: the backfill skipped the org instead of aborting the migration');
 
 -- §2b of the migration NAMES such orgs in a WARNING, because "skipped" is the
--- same outcome as "nothing to do" in a green deploy log. The predicate is
--- asserted here so the diagnostic cannot drift into naming nobody (a warning
--- that never fires is worse than none: it reads as "no stranded orgs").
-SELECT tests.assert(
-  (SELECT string_agg(s.org_id, ', ')
-     FROM (SELECT g.org_id
-             FROM public.graphs g
-            WHERE g.kind = 'default'
-              AND g.status NOT IN ('active', 'deleted')
-              AND NOT EXISTS (
-                   SELECT 1 FROM public.graphs a
-                    WHERE a.org_id = g.org_id
-                      AND a.kind = 'default'
-                      AND a.status = 'active')
-            GROUP BY g.org_id) s) = '10025-archived-guard',
-  '#10025: the stranded-org diagnostic names exactly the org §2 skipped');
+-- same outcome as "nothing to do" in a green deploy log. That diagnostic is
+-- asserted by the HARNESS (`validate.mjs`, "#10025 §2b" step), which reads the
+-- DO block OUT OF THE MIGRATION FILE and executes it with notices captured —
+-- deliberately not here: a copy of the block's predicate in this suite would go
+-- green if the migration's block were deleted or narrowed, which is the one
+-- failure the diagnostic exists to make visible.
 
 -- ── 5. The backfill still does its job, and is idempotent ──────────────────
 INSERT INTO public.organizations (id, name, graph_name)

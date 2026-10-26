@@ -4065,6 +4065,15 @@ def ensure_default_graph_row(cp, org_id: str,
     first use rather than lasting forever; (3) re-running ``20261028000001``
     or re-provisioning (both idempotent) heals it explicitly — documented in
     ``docs/ops/multi-graph-migration-runbook.md``.
+    ⚠️ (2) and (3) hold for a TRANSIENT miss only. For the two PERSISTENT
+    residuals (a graph already named ``default``; a ``kind='default'`` row
+    whose status is neither ``active`` nor ``deleted``) NEITHER heals it: this
+    function returns ``None``/raises for the first and the migration's index
+    blocks the second, so the operator fix in that runbook's "Two real
+    residuals" (rename the colliding graph / correct the row's status, then
+    re-run) is the only path. The error text in
+    :func:`_mint_default_graph_row_best_effort` states that split, because the
+    operator's loudest channel must not promise a healing that cannot happen.
     """
     rows = cp.query(
         "graphs", select=["id", "status"],
@@ -4123,17 +4132,27 @@ def ensure_default_graph_row(cp, org_id: str,
         # Convergent upsert (the same arm `set_graph_name` uses below): the
         # guards above are read-then-write, so a CONCURRENT mint for the same
         # org — a client retry, or provisioning racing an operator re-run of
-        # `20261028000001` — sees no row, inserts, and loses on
-        # `uq_graphs_org_name_active`. That is not an unpersisted graph: the
-        # winner's row is exactly the one this call was trying to create, so
-        # adopt it rather than turning a replay-safe mint into a provisioning
-        # 500. Any OTHER insert failure still raises (`insert_graph`'s
-        # contract: a mint must not claim success for an unpersisted graph).
+        # `20261028000001` — sees no row, inserts, and loses on one of TWO
+        # arbiters: `uq_graphs_org_name_active`, or (since #10025)
+        # `uq_graphs_org_default_active` (`(org_id) WHERE kind='default' AND
+        # status <> 'deleted'`) when the winner is a default row under any name.
+        # That is not an unpersisted graph: the winner's row is exactly the one
+        # this call was trying to create, so adopt it rather than turning a
+        # replay-safe mint into a provisioning 500. Any OTHER insert failure
+        # still raises (`insert_graph`'s contract: a mint must not claim
+        # success for an unpersisted graph).
+        #
+        # ⚠️ NO `name = 'default'` filter, deliberately: `set_graph_name`'s
+        # insert arm mints `kind='default'` under the USER'S chosen name, so a
+        # rename that wins this race leaves an ACTIVE default row called e.g.
+        # `Team HQ`. Filtering on the name would miss it, re-raise, and log
+        # "the org is unnamed" for an org that IS nameable — a false alarm on
+        # the one channel the #10025 diagnosis depended on. This is the read
+        # `set_graph_name`'s own convergent arm performs (org + kind + active).
         try:
             rows = cp.query(
                 "graphs", select=["id", "status"],
                 filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
-                         ("name", "eq", "default"),
                          ("status", "neq", "deleted")],
             )
         except Exception:
@@ -4206,9 +4225,17 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
         _record_default_row_mint_failure(org_id, now)
         _logger.error(
             "default graphs row NOT minted for org %s (%s): the org's record "
-            "writes stay refused `no_tenant` until its next API-key request "
-            "self-heals it, or 20261028000001 is re-run (idempotent) — the "
-            "caller itself SUCCEEDED and must not be failed for this",
+            "writes stay refused `no_tenant` until it is healed — a TRANSIENT "
+            "cause (an unreadable table, a race) heals on the org's next "
+            "API-key request, which re-attempts the mint. The two PERSISTENT "
+            "shapes do not: a graph already named 'default', and a "
+            "kind='default' row whose status is neither 'active' nor "
+            "'deleted' — a re-run of 20261028000001 skips those too (it "
+            "cannot mint beside them), so the operator fix is the one in "
+            "docs/ops/multi-graph-migration-runbook.md 'Two real residuals' "
+            "(rename the colliding graph, or correct that row's status, then "
+            "re-run). The caller itself SUCCEEDED and must not be failed for "
+            "this",
             org_id, context, exc_info=True)
         return None
     if row_id is None:

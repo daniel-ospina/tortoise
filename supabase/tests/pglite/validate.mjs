@@ -732,6 +732,82 @@ for (const suite of suites) {
   }
 }
 
+// ── #10025 §2b: the stranded-org diagnostic EXECUTES, from the migration text ─
+// §2b warns (rather than mends) for an organization whose only `kind='default'`
+// row carries a status that is neither 'active' nor 'deleted': the backfill's
+// guards test `status='active'` while `uq_graphs_org_default_active` tests
+// `status <> 'deleted'`, so the insert collides and `ON CONFLICT DO NOTHING`
+// skips the org — the permanently `no_tenant` state that migration exists to
+// remove, arriving under a green deploy. A warning nobody asserts is
+// indistinguishable from no warning, so this reads the block OUT OF THE
+// MIGRATION FILE and runs it here, on the same database the suites just used:
+//   · the stranded shape must produce ONE warning NAMING the org
+//   · an org with an ACTIVE default row beside an archived one must stay silent
+//   · a tombstone-only org must stay silent
+// It executes the artifact, not a copy of its predicate (a copy goes green if
+// the block is deleted or narrowed — the failure mode is the diagnostic itself
+// disappearing), and a missing block fails this step by name.
+{
+  const STRAND_MIG = '20261028000001_graphs_default_row_stable_id.sql';
+  const strandText = readFileSync(`${MIG_DIR}/${STRAND_MIG}`, 'utf8');
+  const markerAt = strandText.indexOf('-- ── 2b.');
+  const blockFrom = markerAt < 0 ? -1 : strandText.indexOf('DO $$', markerAt);
+  const blockTo = blockFrom < 0 ? -1 : strandText.indexOf('END $$;', blockFrom);
+  if (blockFrom < 0 || blockTo < 0) {
+    console.error(`✗ ${STRAND_MIG}: §2b (the stranded-org diagnostic) is GONE — the only migration-time signal for an organization whose default row can never be minted`);
+    process.exit(1);
+  }
+  const STRAND_BLOCK = strandText.slice(blockFrom, blockTo + 'END $$;'.length);
+
+  const strandProbe = async (shapes) => {
+    await db.exec(`DELETE FROM public.graphs WHERE org_id LIKE '10025-strand-%';`);
+    await db.exec(`DELETE FROM public.organizations WHERE id LIKE '10025-strand-%';`);
+    const orgs = new Map();
+    for (const [org, graphName, status] of shapes) {
+      orgs.set(org, [...(orgs.get(org) ?? []), [graphName, status]]);
+    }
+    let n = 0;
+    for (const [org, graphs] of orgs) {
+      await db.exec(`INSERT INTO public.organizations (id, name, graph_name) VALUES ('${org}', '${org}', 'org_${org}');`);
+      for (const [graphName, status] of graphs) {
+        n += 1;
+        await db.exec(`INSERT INTO public.graphs (id, org_id, name, kind, namespace, status) VALUES ('g_strand${n}', '${org}', '${graphName}', 'default', 'org_${org}', '${status}');`);
+      }
+    }
+    const notices = [];
+    await db.exec(STRAND_BLOCK, { onNotice: (msg) => notices.push(String(msg.message ?? msg)) });
+    return notices;
+  };
+
+  // NOTE the "healed" fixture is an org with an ACTIVE default row only: an
+  // active row BESIDE an archived one is not representable once §1's index
+  // exists (§1 is what makes it impossible), so the diagnostic's silence is
+  // asserted against the shapes the schema still permits.
+  const stranded = await strandProbe([['10025-strand-a', 'old name', 'archived']]);
+  const healed = await strandProbe([['10025-strand-b', 'default', 'active']]);
+  const tombstoned = await strandProbe([['10025-strand-c', 'default', 'deleted']]);
+  const twoStranded = await strandProbe([['10025-strand-d', 'x', 'archived'],
+                                         ['10025-strand-e', 'y', 'paused']]);
+
+  if (stranded.length !== 1 || !stranded.join(' ').includes('10025-strand-a')) {
+    console.error(`✗ #10025 §2b: the stranded-org diagnostic did not name the org (notices: ${JSON.stringify(stranded)})`);
+    process.exit(1);
+  }
+  if (healed.length !== 0 || tombstoned.length !== 0) {
+    console.error(`✗ #10025 §2b: the diagnostic fired for a healthy org (healed: ${JSON.stringify(healed)}, tombstoned: ${JSON.stringify(tombstoned)})`);
+    process.exit(1);
+  }
+  if (twoStranded.length !== 1
+      || !twoStranded[0].includes('10025-strand-d')
+      || !twoStranded[0].includes('10025-strand-e')) {
+    console.error(`✗ #10025 §2b: two stranded orgs were not reported together (notices: ${JSON.stringify(twoStranded)})`);
+    process.exit(1);
+  }
+  await db.exec(`DELETE FROM public.graphs WHERE org_id LIKE '10025-strand-%';
+                 DELETE FROM public.organizations WHERE id LIKE '10025-strand-%';`);
+  console.log('✓ #10025 §2b: the migration\'s stranded-org WARNING fires for the stranded shape and stays silent otherwise');
+}
+
 // ── 0011 duplicate-name guard (PR #874 review P1) ──
 // The unique index must reject a second org with the same name (registry
 // sdk.org_create parity — two orgs sharing org_{name} would share a
