@@ -813,10 +813,10 @@ rows:
     full control.'
   dependency: declares TortoiseSDK.recall_state (resolves)
   lifecycle: active
-  used_by: agents, eval-harness, tooling, docs
+  used_by: never called, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -840,10 +840,10 @@ rows:
     omit query, set kind → all Points of kind.'
   dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
   lifecycle: active
-  used_by: never called, eval-harness, tooling, docs
+  used_by: agents, eval-harness, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by eval-harness, tooling — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -895,10 +895,10 @@ rows:
     path.'
   dependency: declares TortoiseSDK.index_directory (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1409,10 +1409,10 @@ rows:
     canonical fetch-by-id tool.
   dependency: declares TortoiseSDK.get_entity (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: graph
   proposed: true
   exemption: false
@@ -1617,10 +1617,10 @@ rows:
     operators by input set.'
   dependency: declares TortoiseSDK.ingest (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1698,10 +1698,10 @@ rows:
     the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1778,10 +1778,10 @@ rows:
     Omit section → compact combined summary. topics requires entity_id.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2849,10 +2849,10 @@ rows:
     to the graph; corpus mode walks the server filesystem — stdio/CLI only (excluded from tenant HTTP).
   dependency: declares TortoiseSDK.mine_corpus (resolves)
   lifecycle: active
-  used_by: agents, tooling, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false

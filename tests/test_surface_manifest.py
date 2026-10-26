@@ -3477,6 +3477,22 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 150
 
 
+def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
+    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150.
+
+    #10053 review (P3): at that head it read 147 while the class and the manifest both
+    said 150, so the doc that tells a reader where the canonical SDK list lives named a
+    surface that no longer existed. The number is a DERIVATION here — the same
+    `live_surface()` instrument `sdk_surface.py --check` uses — so the sentence cannot
+    go stale again without a red.
+    """
+    text = (ROOT / "docs" / "product" / "canonical-mcp-tools.md").read_text(encoding="utf-8")
+    typed = re.findall(r"declares \*\*(\d+)\*\* public\s+methods", text)
+    assert len(typed) == 1, f"expected the one sequencing-step count, found {typed}"
+    live = _load_target_check().live_surface()
+    assert int(typed[0]) == live["sdk"] == _manifest()["counts"]["sdk_public_methods"]
+
+
 def test_the_compliance_check_is_RED_on_todays_gap(capsys):
     """#4185's whole point: the live surface does NOT match the approved target.
 
