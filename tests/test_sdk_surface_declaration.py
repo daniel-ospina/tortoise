@@ -192,7 +192,7 @@ def test_the_absence_failure_is_NOT_vacuous():
 
 
 def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 149 live. Not green, and not vague."""
+    """#4282's true state: 40 approved, 152 live. Not green, and not vague."""
     declared = _declaration()["__all__"]
     live = _live()
     problems = _problems()
@@ -204,9 +204,9 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
     # verify nothing at all. Each literal carries its own premise note —
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    assert len(live) == 149, "the live surface moved — update this premise (it pins today's gap)"
+    assert len(live) == 152, "the live surface moved — update this premise (it pins today's gap)"
     assert len(off_surface) == 140, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 30, "the gap moved — update this premise (it pins today's gap)"
+    assert len(absent) == 27, "the gap moved — update this premise (it pins today's gap)"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
