@@ -39,8 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from tests import _live_gate
-from tests import _live_utils
+from tests import _live_gate, _live_utils
 
 ROOT = Path(__file__).resolve().parents[1]
 #: 14 tests, every one of them mark-skipped by the module-level availability
