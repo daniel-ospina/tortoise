@@ -129,6 +129,18 @@ _DATE_VARIANT_RE = re.compile(
 #: unmistakable — #9202's named fault, refused with the number named as the fix.
 _EPOCH_AS_STRING_RE = re.compile(r"^-?\d{9,}$")
 
+#: The span inside which offering `pass the NUMBER <n>` is a TRUE repair (#10079
+#: review P2): 1900-01-01T00:00:00Z .. 2100-01-01T00:00:00Z, in SECONDS — which
+#: is the unit the field reads a NUMBER as. An end is an authored belief about
+#: when a fact stopped being true, so a bound outside this span is not a date
+#: anyone authored; at those magnitudes the digits are a millisecond epoch or a
+#: compact timestamp, and prescribing the number would store a confidently wrong
+#: instant instead of the intended one. Bounded rather than derived from
+#: `date.fromtimestamp` because that raises PlatformError/OverflowError on some
+#: platforms for precisely the values this guard has to classify.
+_EPOCH_SECONDS_SANE_MIN = -2208988800
+_EPOCH_SECONDS_SANE_MAX = 4102444800
+
 #: The forms the field accepts, quoted into EVERY refusal: a refusal that does
 #: not name the repair manufactures a retry loop (§7 trap 2).
 #:
@@ -425,10 +437,33 @@ def read_caller_end(value: object, declared_precision: object = None,
                 "ISO-8601 time-of-day, so the whole value names no instant",
             ) from None
         if _EPOCH_AS_STRING_RE.match(token):
+            # ⛔ THE REPAIR IS ONLY OFFERED WHEN IT LANDS SOMEWHERE SANE
+            # (#10079 review P2). This arm used to prescribe
+            # `pass the NUMBER {int(token)}` unconditionally, which is correct
+            # only for a SECONDS epoch. Measured: `"1719792000000"` (13 digits,
+            # a JS `Date.now()` in MILLISECONDS) was refused and handed the
+            # repair `pass the NUMBER 1719792000000` — which the door then
+            # ACCEPTS as seconds and stores at year 56,468, reading
+            # `end_state="known"` with no error, and any render of that bound
+            # raises `ValueError: year 56468 is out of range`. A repair that
+            # manufactures the wrong instant is the retry-loop class this door
+            # exists to prevent (§7 trap 2), so a digit-count match is not
+            # enough to recommend a number.
+            seconds = int(token)
+            if _EPOCH_SECONDS_SANE_MIN <= seconds <= _EPOCH_SECONDS_SANE_MAX:
+                raise _end_refusal(
+                    value,
+                    f"this is a Unix epoch supplied as a STRING, which names no "
+                    f"instant — pass the NUMBER {seconds} instead of a string",
+                ) from None
             raise _end_refusal(
                 value,
-                f"this is a Unix epoch supplied as a STRING, which names no "
-                f"instant — pass the NUMBER {int(token)} instead of a string",
+                f"this is a {len(token.lstrip('-'))}-digit numeric string, which "
+                "names no instant. It is not offered back as a number because at "
+                "that magnitude the number would not be the instant you meant: a "
+                "13-digit value is a MILLISECOND epoch (divide by 1000) and a "
+                "14-digit one is usually a compact YYYYMMDDHHMMSS, while the "
+                "field reads a NUMBER as SECONDS since 1970",
             ) from None
     raise _end_refusal(
         value,

@@ -9760,12 +9760,26 @@ class TortoiseSDK:
                         # defect measured at the #9964 review: the re-run of this
                         # very call returned `temporal_not_applied` ONLY, while
                         # its first run reported `kind_other_layer` too).
+                        # ⛔ AND NO END RECEIPT (#10079 review P2). Shaping was
+                        # COMPUTED from the caller's props at the top of this
+                        # door, but this branch applies NOTHING — the fold that
+                        # would have stored the shaped end was refused by
+                        # #7819 just above. `valid_to_shaped` is defined as the
+                        # receipt of an end that WAS shaped INTO THE STORED
+                        # record (config/surface-manifest.yml), so emitting it
+                        # here told the caller their end was now the canonical
+                        # un-datable one while the stored window still ended on
+                        # its original date and read `known` — a receipt that
+                        # reports an action that did not happen is the exact
+                        # betrayal the ruling's §0 orders refused (#9202).
+                        # `temporal_not_applied` is the honest signal here, and
+                        # it rides this same reply.
                         return _with_end_receipt({
                             **self.get_point(pid),
                             **_merge_advisories(
                                 self._temporal_not_applied_advisory(pid),
                                 _kind_layer_advisory(_layer_note, pid)),
-                        }, _end_receipt)
+                        }, None)
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)

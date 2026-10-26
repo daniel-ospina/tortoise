@@ -2295,3 +2295,78 @@ def test_supersede_refusal_message_survives_scrub(sdk):
     # the remedy is named, and it exists
     assert "retract_point" in msg
     assert hasattr(sdk, "retract_point")
+
+
+# ---------------------------------------------------------------------------
+# #9202 review P2 regressions — two repairs that were wrong in KIND, not degree
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("digits,shape_word", [
+    ("1719792000000", "MILLISECOND"),
+    ("20240101120000", "YYYYMMDDHHMMSS"),
+])
+def test_epoch_as_string_refuses_without_prescribing_the_wrong_number(digits, shape_word):
+    """#10079 review P2 — the repair must not manufacture a different instant.
+
+    The epoch-as-string arm used to prescribe ``pass the NUMBER <n>`` for ANY
+    9+-digit string. For a millisecond epoch that repair is not a fix: the field
+    reads a NUMBER as SECONDS, so following it stored year 56468 and read
+    ``end_state="known"`` with no error. A repair that lands somewhere other
+    than the intent is the retry-loop class the door exists to prevent.
+    """
+    from tortoise.validity import read_caller_end
+
+    with pytest.raises(ValueError) as excinfo:
+        read_caller_end(digits)
+
+    msg = str(excinfo.value)
+    # the number is NOT offered back as the repair ...
+    assert f"pass the NUMBER {digits}" not in msg, msg
+    # ... and the shape that would have misled the caller is named instead
+    assert shape_word in msg, msg
+
+
+def test_epoch_as_string_still_prescribes_the_number_when_it_is_the_true_repair():
+    """The narrowed repair must not cost the caller the working one.
+
+    A SECONDS epoch inside the authored-range span is still handed back as
+    ``pass the NUMBER <n>``, because there the number IS the instant they meant.
+    """
+    from tortoise.validity import read_caller_end
+
+    with pytest.raises(ValueError) as excinfo:
+        read_caller_end("1719792000")
+
+    assert "pass the NUMBER 1719792000" in str(excinfo.value)
+
+
+def test_no_end_receipt_when_the_shaped_end_was_never_STORED(sdk):
+    """#10079 review P2 — a receipt may not report an action that did not happen.
+
+    A dedup fold that resolves to an already-terminal claim is REFUSED (#7819):
+    nothing is applied. The door still shapes the caller's ``TBD`` in memory, and
+    used to return ``valid_to_shaped`` on that reply — telling the caller their
+    end was now the canonical un-datable one while the record still ended on its
+    original date and read ``known``. The honest signal on that path is
+    ``temporal_not_applied``, which rides the same reply; the shaping receipt
+    must be ABSENT. Reachability is pinned below, so this cannot pass silently by
+    never entering the branch.
+    """
+    content = "end-receipt on a refused fold"
+    first = sdk.create_point("statement", content, status="superseded")
+    assert first.get("id"), first
+
+    reply = sdk.create_point("statement", content, status="superseded",
+                             dedup=True, validTo="TBD",
+                             validFrom="2024-02-02")
+
+    codes = [a.get("code") for a in (reply.get("advisories") or [])]
+    # ⛔ reachability first: if this branch was never entered, the assertion
+    # below would pass for the wrong reason.
+    assert "temporal_not_applied" in codes, (
+        "did not reach the refused terminal fold — the receipt assertion would "
+        f"be vacuous: {reply.get('advisories')}")
+    assert "valid_to_shaped" not in reply, (
+        "a shaping receipt was emitted for an end that was never stored: "
+        f"{reply.get('valid_to_shaped')!r}")
