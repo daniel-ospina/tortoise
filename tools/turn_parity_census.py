@@ -286,18 +286,13 @@ _RECORD_TURNS_COLUMNS = ("node_key", "content", "speaker", "status",
 #: The record census query — the same predicate family `record_read._turns`
 #: uses, corpus-wide: tenant-scoped, `is_episodic IS TRUE`, turn keys only
 #: (the anchored shape is re-derived in Python, one rule for both stores).
+#: The SELECT list is DERIVED from `_RECORD_TURNS_COLUMNS` and must stay that
+#: way: a hand-spelled copy sitting below this one shadowed it (last assignment
+#: wins), so the executing statement was no longer the one built from the
+#: contract — editing the tuple would have left the query behind, selecting
+#: columns the census no longer names. One declaration, and it is the binding.
 _RECORD_TURNS_SQL = (
     "SELECT " + ", ".join(_RECORD_TURNS_COLUMNS) + " "
-    "FROM public.point "
-    "WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE"
-)
-
-#: The record census query — the same predicate family `record_read._turns`
-#: uses, corpus-wide: tenant-scoped, `is_episodic IS TRUE`, turn keys only
-#: (the anchored shape is re-derived in Python, one rule for both stores).
-_RECORD_TURNS_SQL = (
-    "SELECT node_key, content, speaker, status, created_at, embedding, "
-    "       point_kind, is_episodic "
     "FROM public.point "
     "WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE"
 )
@@ -436,7 +431,11 @@ def read_graph_turns(uri: str | None, db_path: str | None,
                 "a silent 'no vector'")
         try:
             vec = [float(v) for v in embedding] if embedding is not None else None
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
+            # `OverflowError` for an integer past binary64's range — the record
+            # leg already catches it (`_embedding_parity`); a value the leg
+            # cannot classify is a refusal on BOTH sides, never a traceback a
+            # caller reads as the exit-1 "bad flags" code.
             raise CensusError(
                 f"turn {tid}: the graph embedding holds a non-numeric "
                 f"component ({exc}) — an absence is NOT established") from exc
@@ -791,7 +790,14 @@ def main(argv: list[str] | None = None) -> int:
     # axis refuses a wrong tenant loudly; the graph axis must refuse a wrong
     # target too, so an empty graph is exit 3 unless the operator says the
     # draining is expected (#10017's post-purge re-run).
-    if not graph["nodes"] and not args.expect_empty:
+    # ... and `unidentifiable` is part of that population: a graph whose
+    # episodic nodes ALL came back without a usable `t.id` is not an EMPTY
+    # graph, and reporting it as "ZERO is_episodic nodes" would be factually
+    # wrong about the target. Those nodes are `non_string_id` anomalies, which
+    # REFUSE the census below (exit 2) — the accurate verdict, and a message
+    # the operator can act on.
+    if (not graph["nodes"] and not graph.get("unidentifiable")
+            and not args.expect_empty):
         sys.stderr.write(
             "turn_parity_census: the graph holds ZERO is_episodic nodes — an "
             "absence is NOT established (a wrong --graph-name / --db-path is "

@@ -20,6 +20,7 @@ row the store returns). An unpinned door is exactly how an unscoped read
 
 from __future__ import annotations
 
+import ast
 import sys
 import types
 from pathlib import Path
@@ -357,6 +358,25 @@ def test_a_zero_turn_graph_is_not_evidence(monkeypatch):
     assert tpc.main(_argv("--expect-empty")) == 0
 
 
+def test_an_ALL_unidentifiable_graph_is_not_reported_as_an_EMPTY_graph(
+        monkeypatch, capsys):
+    """The population is "episodic nodes", not "keyable episodic nodes".
+
+    Every `unidentifiable` node was invisible to the zero-node guard, so a
+    graph whose episodic nodes ALL lacked a usable `t.id` exited 3 with "the
+    graph holds ZERO is_episodic nodes" — factually wrong about the target,
+    and it sends the operator at a wrong `--graph-name` instead of at the nodes
+    the graph actually holds. Those nodes are `non_string_id` anomalies, which
+    REFUSE the census: exit 2, with the ids listed and nothing certified.
+    """
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {}, "unidentifiable": [{"id": "2", "id_type": "int"}]})
+    monkeypatch.setattr(tpc, "read_record_turns", lambda *a, **k: {
+        "rows_by_key": {}, "non_turn_shaped": 0})
+    assert tpc.main(_argv()) == 2
+    assert "ZERO is_episodic nodes" not in capsys.readouterr().err
+
+
 def test_a_graph_read_row_of_the_wrong_shape_is_an_unreadable_side(
         monkeypatch):
     """An unclassifiable row must not be skipped into a smaller population."""
@@ -405,6 +425,23 @@ def test_a_non_sequence_graph_vector_refuses_rather_than_reading_as_absent(
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
     assert "not a sequence" in str(exc.value)
+
+
+def test_an_OVERLARGE_graph_component_REFUSES_it_does_not_crash(monkeypatch):
+    """`float(v)` overflows for an int past binary64's range: refuse, do not crash.
+
+    The record leg catches `OverflowError` (`_embedding_parity`); the graph leg
+    caught only `TypeError`/`ValueError`, so a component it could not convert
+    escaped as a traceback with exit 1 ("usage / IO error") instead of the
+    `CensusError` → exit 3 that an unclassifiable side must produce.
+    """
+    rows = [[1, "s1_t0", "[user] body of s1_t0", "user", "draft",
+             "2026-10-25T00:00:00+00:00", "event", [10 ** 400], False,
+             ["s1"]]]
+    _patch_proj(monkeypatch, _PagedG(rows))
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, None)
+    assert "non-numeric" in str(exc.value)
 
 
 # ── the graph leg's TOTALITY (RESULTSET_SIZE is silent — #5062's class) ────
@@ -722,6 +759,33 @@ def test_the_record_leg_goes_through_the_scoped_door(monkeypatch):
     # The turn key is grouped; the non-turn episodic row is counted, not lost.
     assert sorted(out["rows_by_key"]) == ["s1_t0"]
     assert out["non_turn_shaped"] == 1
+
+
+def test_the_executed_record_SQL_is_DERIVED_from_the_column_contract():
+    """ONE declaration: the executed query is built from `_RECORD_TURNS_COLUMNS`.
+
+    That tuple is documented as the single source of the SELECT list AND as the
+    contract checked against the cursor's `description`. The module carried a
+    second, hand-spelled `_RECORD_TURNS_SQL` BELOW the derived one, and Python
+    keeps the LAST assignment — so the executing statement was the handwritten
+    copy while the comment above it described an invariant the query did not
+    use. The two were SQL-equivalent, so nothing red; the day the tuple gained
+    or renamed a column the query would keep selecting the old set, and the
+    moved-schema guard could not see it (the old column is still `description`'d
+    — it is the census that stops naming it).
+    """
+    source = (Path(__file__).resolve().parent.parent
+              / "tools" / "turn_parity_census.py").read_text(encoding="utf-8")
+    bindings = [node for node in ast.parse(source).body
+                if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name)
+                        and target.id == "_RECORD_TURNS_SQL"
+                        for target in node.targets)]
+    assert len(bindings) == 1, (
+        f"_RECORD_TURNS_SQL is bound {len(bindings)} times at module level — "
+        "a later binding shadows the one derived from _RECORD_TURNS_COLUMNS")
+    assert tpc._RECORD_TURNS_SQL.split(" FROM ")[0] == (
+        "SELECT " + ", ".join(tpc._RECORD_TURNS_COLUMNS))
 
 
 def test_a_scope_refusal_is_an_unreadable_side_not_an_empty_record(monkeypatch):
