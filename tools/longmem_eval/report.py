@@ -2526,7 +2526,15 @@ def build_report(
             "judge_call_shape": "official evaluate_qa.py: messages=[user], "
                                 "n=1, temperature=0, max_tokens=10 — no "
                                 "response_format (JSON mode), no system "
-                                "message",
+                                "message; on a provider whose models reason "
+                                "by DEFAULT (api.deepseek.com) the transport "
+                                "additionally sends thinking:{type:disabled} "
+                                "— without it the 10-token budget is spent "
+                                "on hidden reasoning and the empty answer "
+                                "grades 'no' for every question (measured "
+                                "2026-10-25; the official OpenAI judge is "
+                                "unaffected, its request is byte-identical "
+                                "to evaluate_qa.py)",
             "reader_context_format": "official gen.py shape: 'Current Date: "
                                      "{question_date}' header + per-session "
                                      "date annotation on every retrieved chunk "

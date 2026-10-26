@@ -62,7 +62,11 @@ from tortoise.ingest import _PROVIDERS
 # reader/product adapters — judge.py is tools-side; tortoise never imports it).
 from tortoise.models import _emit_usage_sink
 
-from .reader import _parse_model_spec, _resolve_provider
+from .reader import (
+    THINKING_BY_DEFAULT_KEY_ENVS,
+    _parse_model_spec,
+    _resolve_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +401,14 @@ class OfficialJudgeModel:
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
         self.timeout = timeout
+        # Whether this endpoint's models reason by default and would starve the
+        # official 10-token completion budget — the judge starves it exactly as
+        # the reader starves its 500-token budget, so both transports read ONE
+        # declaration (``reader.THINKING_BY_DEFAULT_KEY_ENVS``, where the
+        # measurements behind it live). Always False for the OFFICIAL judge
+        # (``openai:gpt-4o-2024-08-06``): its request stays byte-identical to
+        # evaluate_qa.py.
+        self.disables_thinking = api_key_env in THINKING_BY_DEFAULT_KEY_ENVS
         # #2185: additive usage-capture seam (no-op unless the harness binds
         # it). NO last_* mirrors — the transport stays byte-verbatim so
         # published LongMemEval numbers stay comparable.
@@ -404,13 +416,22 @@ class OfficialJudgeModel:
 
     def build_request(self, user: str) -> dict:
         """The official kwargs — a single user message, nothing else."""
-        return {
+        req = {
             "model": self.id,
             "messages": [{"role": "user", "content": user}],
             "n": 1,
             "temperature": 0,
             "max_tokens": 10,
         }
+        if self.disables_thinking:
+            # The one addition, and only where the provider reasons by default:
+            # without it the 10-token budget is consumed by hidden reasoning and
+            # ``content`` returns empty, which the benchmark's label rule
+            # (``'yes' in response.lower()``) grades as "no" — every question
+            # wrong, for a reason that is not the model's answer. Measured
+            # 2026-10-25; see ``_THINKING_BY_DEFAULT_KEY_ENVS``.
+            req["thinking"] = {"type": "disabled"}
+        return req
 
     @staticmethod
     def parse_response(data: dict) -> str:

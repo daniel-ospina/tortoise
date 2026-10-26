@@ -1766,6 +1766,33 @@ def test_official_judge_call_shape():
     assert req["temperature"] == 0
     assert req["max_tokens"] == 10
     assert "response_format" not in req  # no JSON mode
+    # #8486 (2026-10-25): the OFFICIAL judge's request carries no provider
+    # extras — a thinking-disable here would be a shape deviation on the one
+    # provider whose shape must be verbatim.
+    assert "thinking" not in req
+
+
+def test_judge_disables_thinking_on_a_reasoning_by_default_provider():
+    """A judge on a reasoning-by-default provider MUST disable thinking.
+
+    Measured 2026-10-25 against api.deepseek.com under this exact call shape
+    (max_tokens=10): both served ids returned ``content=''`` with
+    ``finish_reason='length'`` and the whole budget in hidden reasoning, while
+    the same request with ``thinking:{type:disabled}`` returned ``'yes'`` with
+    ``finish_reason='stop'`` and 1 completion token. The benchmark's label rule
+    is ``'yes' in response.lower()``, so an empty content grades every question
+    WRONG — a 0% accuracy that is a transport artifact, not a measurement.
+    """
+    m = OfficialJudgeModel(
+        id="deepseek-v4-pro", base_url="https://api.deepseek.com/v1",
+        api_key_env="DEEPSEEK_API_KEY")
+    req = m.build_request("Is the response correct?")
+    assert req["thinking"] == {"type": "disabled"}
+    # …and the official shape is otherwise untouched by the addition.
+    assert req["messages"] == [
+        {"role": "user", "content": "Is the response correct?"}]
+    assert (req["n"], req["temperature"], req["max_tokens"]) == (1, 0, 10)
+    assert "response_format" not in req
 
 
 def test_llm_judge_sends_only_the_anscheck_prompt():
