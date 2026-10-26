@@ -204,9 +204,12 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # the contested signal = reverses #3019's id tie-break, which ``temporal_leg.py``
 # consumes positionally (#2976); (4) restate the promise = CLOSED for #7704, and
 # the ruling does not re-specify the #2102 E2E-1 indicator's wording at all —
-# "No hard rule is to be written in its place". What actually closes the
-# measured defect is dedup identity + provenance accumulation (#9998, #9437,
-# #9879).  Pinned by
+# "No hard rule is to be written in its place, and none is to be enforced as an
+# absolute ordering guarantee". What actually closes the measured defect is dedup
+# identity + provenance accumulation (#9998, #9437, #9879) — a WRITE-PATH change
+# that cannot reach the pin below, so deleting it is a deliberate follow-up that
+# change must carry, tracked on #7704.  The page-scoped accounting above is
+# pinned by
 # ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this
