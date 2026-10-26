@@ -830,8 +830,108 @@ def test_the_counts_still_rise_to_an_attached_count_above_the_declaration() -> N
     assert event["turn_count"] == 12 and event["turn_max_index"] == 11
 
 
+def test_a_count_the_record_already_holds_is_never_written_down() -> None:
+    """The `max()` also has to beat the RECORD's value, not just the graph's.
+
+    The upsert is absolute (`DO UPDATE SET turn_count = EXCLUDED.turn_count`, and
+    `props = session.props || EXCLUDED.props`), so `max(declared, attached)`
+    alone walks a record that already holds 20 down to the graph's 12 — reachable
+    through the #9390 window (the record write landed, the graph `:Session` MERGE
+    did not) and through a graph restored from an older backup. `_record_floor`
+    is the third number in the max, and this is the assertion that it is in the
+    max at all: without it the event below carries 12/11.
+    """
+    event = copy_mod.build_session_event(
+        "s1", {"turn_count": 6, "turn_max_index": 5}, turn_count=12,
+        max_index=11, event_id="E",
+        floor={"turn_count": 20, "turn_max_index": 19})
+    assert event["turn_count"] == 20 and event["turn_max_index"] == 19
+    # … and a floor BELOW the graph's measurement never lowers it either.
+    low = copy_mod.build_session_event(
+        "s1", {}, turn_count=12, max_index=11, event_id="E",
+        floor={"turn_count": 3, "turn_max_index": 2})
+    assert low["turn_count"] == 12 and low["turn_max_index"] == 11
+    # An UNMEASURED floor changes nothing — the first copy's case, and a dry
+    # run's, which opens no record connection at all.
+    for empty in (None, {}):
+        none = copy_mod.build_session_event(
+            "s1", {"turn_count": 6}, turn_count=12, max_index=11,
+            event_id="E", floor=empty)
+        assert (none["turn_count"], none["turn_max_index"]) == (12, 11)
+
+
+def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:
+    """`turn_count` lives on TWO tables; a floor read from one leaves the other free.
+
+    `SessionRecorded` writes `turn_count` to `public.session` AND to
+    `public.session_narrative` (`_narrative_statements`), and `turn_max_index`
+    names no column at all — it rides the `public.session` props tail, so it is
+    read out of the jsonb rather than selected as a column that does not exist.
+    """
+    from tortoise import record_writer as rw
+
+    seen: dict = {}
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params):
+            seen["sql"], seen["params"] = sql, params
+
+        def fetchall(self):
+            return [("s1", 20, "19"), ("s1", 8, None), ("s2", None, None)]
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def close(self):
+            seen["closed"] = True
+
+    def _connect(self, dsn):
+        seen["dsn"] = dsn
+        return _Conn()
+
+    monkeypatch.setattr(rw.RecordWriter, "__init__",
+                        lambda self, dsn=None, connect=None: setattr(
+                            self, "dsn", dsn))
+    monkeypatch.setattr(rw.RecordWriter, "connect", _connect)
+
+    floor = copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+    # BOTH homes, and the tenant is the pair it was told to use.
+    assert "public.session " in seen["sql"]
+    assert "public.session_narrative" in seen["sql"]
+    assert seen["params"] == ("o", "gid", "o", "gid")
+    assert seen["closed"] is True
+    # The LARGEST value either home holds is the floor; a NULL is "nothing held"
+    # and never becomes a 0 that could then be written over a real count.
+    assert floor["s1"] == {"turn_count": 20, "turn_max_index": 19}
+    assert floor["s2"] == {}
+
+
+def test_an_unreadable_record_floor_is_a_refusal_not_a_blind_copy(monkeypatch) -> None:
+    """An unmeasured floor must not degrade to `{}` — that IS the lowering write."""
+    from tortoise import record_writer as rw
+
+    def _boom(self, dsn):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(rw.RecordWriter, "__init__",
+                        lambda self, dsn=None, connect=None: setattr(
+                            self, "dsn", dsn))
+    monkeypatch.setattr(rw.RecordWriter, "connect", _boom)
+    with pytest.raises(copy_mod.CopyRefused, match="could not be read"):
+        copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+
+
 def test_a_count_the_graph_cannot_vouch_for_is_never_written() -> None:
-    """`max()` protects against the graph's DECLARATION — not against the RECORD.
+    """`max()` over the graph alone protects only against its DECLARATION.
+
+    The other half — the RECORD's own value — is `_record_floor`, pinned above.
 
     The re-run after the delete phase is the case that destroys: the turn nodes
     are gone (`attached=0`) and a legacy `:Session` node declares no
@@ -882,6 +982,39 @@ def test_a_graph_property_beats_the_default_it_collides_with() -> None:
 
 
 # ── a turn key the record cannot represent refuses the copy ──────────────
+
+def test_a_turn_whose_session_was_not_read_refuses_the_copy() -> None:
+    """A session created between the two paged reads must not be filed blind.
+
+    The emit loop falls back to `sessions.get(sid, {})`, so without this refusal
+    the turn's session is filed as an id-only `SessionRecorded`: no `harness`, no
+    `capture_lane`, no `created_at`, no `capture_redactions`. Every anomaly class
+    reads zero, `created_at_absent` skips it (that report is gated on `sid in
+    sessions`), the run exits 0 — and the parity gate cannot see it either,
+    because it compares TURNS. After the delete phase that provenance is gone.
+    """
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {"id": "s1", "harness": "claude"})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])])
+    with pytest.raises(copy_mod.CopyRefused,
+                       match="were not in the session read"):
+        copy_mod.copy_phase(graph, lambda sid, events: 1, event_id=lambda: "E")
+
+
+def test_the_floor_reaches_the_event_copy_phase_emits() -> None:
+    """The floor is threaded per session, not looked up inside `_journal_emit`."""
+    graph = _FakeGraph(
+        sessions=[(1, "s1", {"turn_count": 6})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])])
+    sent: dict = {}
+    copy_mod.copy_phase(
+        graph, lambda sid, evs: sent.setdefault(sid, evs) and 1,
+        event_id=lambda: "E",
+        record_floor={"s1": {"turn_count": 20, "turn_max_index": 19}})
+    assert sent["s1"][0]["turn_count"] == 20
+    assert sent["s1"][0]["turn_max_index"] == 19
+
 
 def test_a_duplicate_turn_key_refuses_the_whole_copy() -> None:
     """Two graph nodes for one `node_key` can never both be filed.
@@ -944,6 +1077,40 @@ def _main_harness(monkeypatch, graph):
     monkeypatch.setattr(copy_mod.census, "_connect", lambda uri: (_DB(), "shown"))
     monkeypatch.setattr(copy_mod.census, "_assert_graph_exists",
                         lambda db, name: None)
+    # The floor read opens a RECORD connection, and these tests drive `main` with
+    # an injected emit instead of a database. `{}` is "the record holds nothing"
+    # — the clamp itself and the read are pinned separately, so no main-path test
+    # silently depends on a real Postgres.
+    monkeypatch.setattr(copy_mod, "_record_floor", lambda *a, **k: {})
+
+
+def test_main_reads_the_floor_for_the_tenant_it_was_told_to(monkeypatch, tmp_path) -> None:
+    """The floor's tenant is the SAME pair the copy writes under, not the graph's.
+
+    `--graph`, `--org-id` and `--graph-id` are three independent arguments; a
+    floor read against a defaulted tenant would clamp against another tenant's
+    counts and is the silent inheritance this module refuses everywhere else.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    monkeypatch.setattr(copy_mod, "_journal_emit",
+                        lambda *a, **k: (lambda sid, events: 5))
+    seen: list = []
+
+    def _floor(dsn, org_id, graph_id):
+        seen.append((dsn, org_id, graph_id))
+        return {}
+
+    monkeypatch.setattr(copy_mod, "_record_floor", _floor)
+    out = tmp_path / "summary.json"
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id",
+                          "gid", "--journal", str(journal), "--out",
+                          str(out)]) == 0
+    assert seen == [("postgresql://u:p@db/record", "o", "gid")]
 
 
 def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch, capsys) -> None:

@@ -83,6 +83,13 @@ MB at the largest production graph (6,432 turns), not a constant.
   again with fresh event ids. The record stays correct; the journal's replay
   truth set carries duplicates. There is no idempotency key on the append, so
   this phase cannot dedupe a retry — it is a recorded bound (#10017).
+* The record's own counts are READ before the loop (``_record_floor``), because
+  the upsert is absolute and `max()` over the graph alone can walk a value the
+  record already holds DOWN: one extra connection and one query per run, and a
+  read that cannot be made REFUSES rather than copying blind. A ``--dry-run``
+  measures neither journal positions nor the floor (it opens no record
+  connection at all), so its counts are the graph-side numbers the copy WOULD
+  write, not the clamped ones.
 * The graph's own journal is the graph's REPLAY source. Appending ``PointAdded``
   to it means a later ``rebuild()`` re-creates the turns this migration deletes
   from the graph. That is a design consequence recorded on #10017, not a
@@ -147,6 +154,19 @@ _SESSION_DERIVED = ("turn_count", "turn_max_index")
 #: Keys the envelope owns.
 _SESSION_ENVELOPE = ("id", "event_id", "type", "ts", "initiated_by",
                      "projection_version", "contains_session")
+
+#: The counts the RECORD already holds — the floor a copy may never lower.
+#: `turn_count` is a COLUMN on both homes (`SessionRecorded` writes it to
+#: `public.session` AND to `public.session_narrative`); `turn_max_index` names no
+#: column, so it rides the `public.session` props TAIL and is read out of the
+#: jsonb (a props key is stored VERBATIM — `record_projection._split_properties`).
+_RECORD_FLOOR_SQL = (
+    "SELECT node_key, turn_count, props->>'turn_max_index' "
+    "FROM public.session WHERE org_id = %s AND graph_id = %s "
+    "UNION ALL "
+    "SELECT session_id, turn_count, NULL "
+    "FROM public.session_narrative WHERE org_id = %s AND graph_id = %s"
+)
 
 
 class CopyRefused(RuntimeError):
@@ -247,9 +267,76 @@ def classify_copy(rows) -> tuple[dict, dict]:
     return by_session, anomalies
 
 
+def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
+    """The counts the record ALREADY holds, read once per run.
+
+    ⛔ WHY THIS READ EXISTS. The record's upsert is ABSOLUTE —
+    ``DO UPDATE SET turn_count = EXCLUDED.turn_count``, and the tail is
+    ``props = session.props || EXCLUDED.props`` so EXCLUDED wins a collision. So
+    ``max(declared, attached)`` protects against the GRAPH's own declaration and
+    **cannot** protect against the RECORD's value: a record already holding 20
+    (a capture whose record write landed while the graph's ``:Session`` MERGE did
+    not — #9390 — or a graph restored from an older backup) is walked DOWN to the
+    graph's 12 by a re-run, and the stale-turn sweep then reads a shorter range
+    than the real one (``sdk`` reads ``coalesce(turn_max_index, turn_count, 0)``,
+    so the surplus it exists to remove is never seen — #10000).
+
+    Both homes are read because the same `SessionRecorded` sets `turn_count` on
+    each (`record_projection._narrative_statements`), and a floor measured from
+    one of them would leave the other free to go down.
+
+    A read that cannot be MADE refuses. An unmeasured floor is exactly the state
+    this function exists to remove, so falling back to `{}` would silently
+    restore the lowering write — the fail-open shape this whole phase is about.
+    """
+    from tortoise.record_writer import RecordWriteError, RecordWriter
+
+    try:
+        # THE SEAM'S OWN connector, not a second `psycopg2.connect`: it is the one
+        # place the driver choice and the `connect_timeout` bound live, and a copy
+        # that opened its own connection could wait forever on a bound the rest of
+        # the record path enforces.
+        writer = RecordWriter(dsn=dsn)
+        conn = writer.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_RECORD_FLOOR_SQL,
+                            (org_id, graph_id, org_id, graph_id))
+                rows = cur.fetchall()
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    except Exception as exc:
+        # Our own seam's messages are DSN-free by construction, so they are
+        # quoted; a DRIVER's message can carry the host, and this module never
+        # echoes a DSN (see the `--dsn-env` shape check in `main`).
+        detail = str(exc) if isinstance(exc, RecordWriteError) else type(exc).__name__
+        raise CopyRefused(
+            "the record's own counts could not be read, so a re-run cannot be "
+            f"proven not to lower them ({detail}) — refusing rather than writing "
+            "a value the record may already exceed") from exc
+    floor: dict[str, dict] = {}
+    for session_id, turn_count, turn_max_index in rows:
+        held = floor.setdefault(str(session_id), {})
+        count = census._int_or_none(turn_count)
+        mark = census._int_or_none(turn_max_index)
+        if count is not None:
+            held["turn_count"] = max(held.get("turn_count", count), count)
+        if mark is not None:
+            held["turn_max_index"] = max(held.get("turn_max_index", mark), mark)
+    return floor
+
+
 def build_session_event(session_id: str, props: dict, *, turn_count: int,
-                        max_index: int, event_id: str) -> dict:
-    """``SessionRecorded`` — the record row's source, and the sweep's mark."""
+                        max_index: int, event_id: str,
+                        floor: dict | None = None) -> dict:
+    """``SessionRecorded`` — the record row's source, and the sweep's mark.
+
+    ``floor`` is the record's own value for this session (`_record_floor`). It
+    is folded into the same `max()` as the graph's, because the DB never sees
+    the comparison: the upsert writes whatever this dict says over whatever the
+    row holds.
+    """
     # EVERY graph property is carried, minus the two the copy derives and minus
     # the envelope's keys. The record's OWN split (`_split_properties`) places a
     # property naming a column into that column and the rest into `props`, so a
@@ -305,8 +392,10 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # * `max(declared, attached)` is still needed — the census measured 21
     #   sessions declaring FEWER turns than they carry (declared=6, attached=12),
     #   and the declaration would preserve the wrong number.
-    # * But `max()` protects only against the graph's OWN declaration; it cannot
-    #   protect against what the RECORD already holds. With `attached=0` the only
+    # * But `max()` over the graph alone protects only against the graph's OWN
+    #   declaration — it cannot protect against what the RECORD already holds, and
+    #   `floor` above is what closes that: it is folded into the same `max()` for
+    #   every write below. With `attached=0` the only
     #   number available IS the declaration — the one the census proved drifts
     #   LOW — so writing `max(declared, 0)` walks a real `turn_count=12` down to
     #   `6` through `DO UPDATE SET turn_count = EXCLUDED.turn_count`, and
@@ -316,8 +405,9 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     #   the case this module's contract forbids, and it is reachable: the tool is
     #   re-runnable by design and the delete phase runs against the same graph.
     # * So the guard is the MEASUREMENT, not the declaration: `attached > 0`
-    #   means the graph can still vouch for a window length, and `max()` then only
-    #   ever raises it. With `attached == 0` the graph proves nothing about a
+    #   means the graph can still vouch for a window length, and `max()` against
+    #   the floor then only ever raises it. With `attached == 0` the graph proves
+    #   nothing about a
     #   window it no longer holds, so the keys are OMITTED — the column is not in
     #   the INSERT's column list, `DO UPDATE` never names it, an existing value
     #   survives (pinned through the record's own statement emitter below), and a
@@ -330,11 +420,18 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # the other must not be handed a synthetic `-1` (the value the block above
     # calls worse than absence). `copy_phase` can only produce the coupled pair,
     # so this guard is what makes the module-level contract true on its own.
+    # THE FLOOR IS PART OF THE MAX, not a separate branch: three numbers can each
+    # be the largest — what the graph declares, what the graph still attaches,
+    # and what the record already holds — and the write must beat all three or it
+    # goes down. `or 0` / `or -1` are the "nothing held" spelling, so an
+    # unmeasured floor (a dry run, a first copy) changes nothing.
     if turn_count > 0:
-        event["turn_count"] = max(declared_count, turn_count)
+        event["turn_count"] = max(declared_count, turn_count,
+                                  (floor or {}).get("turn_count") or 0)
     if max_index >= 0:
         event["turn_max_index"] = max(
-            declared_max if declared_max is not None else -1, max_index)
+            declared_max if declared_max is not None else -1, max_index,
+            (floor or {}).get("turn_max_index") or -1)
     return event
 
 
@@ -376,7 +473,8 @@ def build_turn_event(session_id: str, props: dict, *, event_id: str) -> dict:
     }
 
 
-def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
+def copy_phase(graph, emit, *, page_size: int | None = None, event_id,
+               record_floor: dict | None = None) -> dict:
     """File every accepted turn into the record. Additive, re-runnable.
 
     ``emit(session_id, events)`` is the only side effect. The PRODUCTION emitter
@@ -400,6 +498,26 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
                         census._count(graph, census._TURNS_COUNT_QUERY)[1])
 
     by_session, anomalies = classify_copy(rows)
+    # ⛔ A TURN WHOSE SESSION THE SESSION LEG DID NOT READ REFUSES THE COPY. The
+    # session read is paged and cross-checked BEFORE the turn read runs, so a
+    # session a live writer created in between appears only in `by_session` — and
+    # the emit loop's `sessions.get(sid, {})` then hands `build_session_event` an
+    # EMPTY dict: an id-only `SessionRecorded` is filed carrying none of the
+    # capture provenance (`harness`, `capture_lane`, `capture_redactions`,
+    # `created_at`), every anomaly class reads zero, `created_at_absent` misses it
+    # (that report is gated on `sid in sessions`), and the run exits 0. Once the
+    # graph is pruned that provenance is gone and nothing can see the hole —
+    # `tools/turn_parity_census.py` compares TURNS. So this takes the remedy the
+    # journal leg already takes for a concurrent writer: refuse, and say to
+    # re-run with the writer stopped.
+    unread = sorted(set(by_session) - set(sessions))
+    if unread:
+        raise CopyRefused(
+            f"{len(unread)} session(s) own turns in this read but were not in the "
+            f"session read: {', '.join(unread[:5])}"
+            f"{' …' if len(unread) > 5 else ''} — their capture provenance cannot "
+            "be copied, and filing them without it would lose it permanently. A "
+            "live writer interleaved with the copy; re-run with it stopped")
     # ⛔ A DUPLICATE turn key REFUSES the copy. The record can hold one row per
     # ``node_key``, so the loser can never be filed — and
     # ``tools/turn_parity_census.py`` cannot represent two nodes under one key
@@ -445,7 +563,8 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id) -> dict:
             stats["created_at_absent"].append(sid)
         events = [build_session_event(
             sid, props, turn_count=len(indexes),
-            max_index=indexes[-1] if indexes else -1, event_id=event_id())]
+            max_index=indexes[-1] if indexes else -1, event_id=event_id(),
+            floor=(record_floor or {}).get(sid))]
         events += [build_turn_event(sid, bucket[i], event_id=event_id())
                    for i in indexes]
         try:
@@ -714,7 +833,15 @@ def main(argv: list[str] | None = None) -> int:
         # verdict (exit 2 with the reason) instead of as a traceback (exit 1).
         emit = (lambda sid, events: None) if args.dry_run else _journal_emit(
             args.journal, dsn, args.org_id, args.graph_id)
-        stats = copy_phase(graph, emit, event_id=ulid)
+        # The record's OWN counts, before anything is emitted: the upsert is
+        # absolute, so a copy that does not know the floor can only be trusted
+        # not to lower it when the graph happens to hold the larger number.
+        # Skipped on a dry run, which opens no record connection at all (and so
+        # reports the graph-side numbers the copy WOULD write, not the clamped
+        # ones); it refuses on a real run rather than copying blind.
+        floor = (None if args.dry_run
+                 else _record_floor(dsn, args.org_id, args.graph_id))
+        stats = copy_phase(graph, emit, event_id=ulid, record_floor=floor)
     except (census.CensusError, CopyRefused, RecordWriteError) as exc:
         # A refusal is a VERDICT, not a crash: exit 2 with the reason, so the
         # operator (or a CI chain) reads what happened instead of a traceback —
