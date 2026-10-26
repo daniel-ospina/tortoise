@@ -867,18 +867,20 @@ def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:
     `public.session_narrative` (`_narrative_statements`), and `turn_max_index`
     names no column at all — it rides the `public.session` props tail, so it is
     read out of the jsonb rather than selected as a column that does not exist.
+
+    ⛔ The two doors are the record's OWN (`record_serve.open_record`,
+    `record_projection.scope_connection`) and they are faked as FUNCTIONS. The
+    first version of this pair monkeypatched `RecordWriter.connect` on the CLASS —
+    an attribute that exists as a dataclass FIELD holding `None` in production,
+    so the test harness supplied exactly the callable the real seam does not have
+    and the whole copy refused (`TypeError`) on every non-dry run with the suite
+    green. Never patch the seam's internals here; patch what production calls.
     """
-    from tortoise import record_writer as rw
+    from tortoise import record_projection, record_serve
 
     seen: dict = {}
 
     class _Cursor:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
         def execute(self, sql, params):
             seen["sql"], seen["params"] = sql, params
 
@@ -886,22 +888,26 @@ def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:
             return [("s1", 20, "19"), ("s1", 8, None), ("s2", None, None)]
 
     class _Conn:
-        def cursor(self):
-            return _Cursor()
-
         def close(self):
             seen["closed"] = True
 
-    def _connect(self, dsn):
+    def _open(dsn):
         seen["dsn"] = dsn
         return _Conn()
 
-    monkeypatch.setattr(rw.RecordWriter, "__init__",
-                        lambda self, dsn=None, connect=None: setattr(
-                            self, "dsn", dsn))
-    monkeypatch.setattr(rw.RecordWriter, "connect", _connect)
+    def _scope(conn, org_id):
+        seen["scope"] = (type(conn).__name__, org_id)
+        return _Cursor()
+
+    monkeypatch.setattr(record_serve, "open_record", _open)
+    monkeypatch.setattr(record_projection, "scope_connection", _scope)
 
     floor = copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+    # The opener got the DSN it was told to use (never the environment's).
+    assert seen["dsn"] == "postgresql://u@db/r"
+    # The R6 SCOPE is installed for the tenant being read — without it the app
+    # role's RLS policies filter every row and zero rows reads as "empty record".
+    assert seen["scope"] == ("_Conn", "o")
     # BOTH homes, and the tenant is the pair it was told to use.
     assert "public.session " in seen["sql"]
     assert "public.session_narrative" in seen["sql"]
@@ -915,15 +921,27 @@ def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:
 
 def test_an_unreadable_record_floor_is_a_refusal_not_a_blind_copy(monkeypatch) -> None:
     """An unmeasured floor must not degrade to `{}` — that IS the lowering write."""
-    from tortoise import record_writer as rw
+    from tortoise import record_projection, record_serve
 
-    def _boom(self, dsn):
+    def _boom(dsn):
         raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(rw.RecordWriter, "__init__",
-                        lambda self, dsn=None, connect=None: setattr(
-                            self, "dsn", dsn))
-    monkeypatch.setattr(rw.RecordWriter, "connect", _boom)
+    monkeypatch.setattr(record_serve, "open_record", _boom)
+    with pytest.raises(copy_mod.CopyRefused, match="could not be read"):
+        copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+
+    # A scope that cannot be VERIFIED is the same refusal, not a zero-row floor:
+    # the policies treat an unset GUC as "no rows", so reading on past a failed
+    # scope is how the lowering write comes back.
+    class _Conn:
+        def close(self):
+            pass
+
+    def _unscoped(conn, org_id):
+        raise RuntimeError("the record's scope could not be verified")
+
+    monkeypatch.setattr(record_serve, "open_record", lambda dsn: _Conn())
+    monkeypatch.setattr(record_projection, "scope_connection", _unscoped)
     with pytest.raises(copy_mod.CopyRefused, match="could not be read"):
         copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
 

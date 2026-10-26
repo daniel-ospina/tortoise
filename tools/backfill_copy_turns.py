@@ -285,32 +285,58 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
     each (`record_projection._narrative_statements`), and a floor measured from
     one of them would leave the other free to go down.
 
+    The read goes through `record_serve.open_record` and
+    `record_projection.scope_connection` — the record's own bounded opener and its
+    VERIFIED R6 tenant scope — because a bare connection reads ZERO rows on the
+    app role and a zero-row read is a SUCCESSFUL read.
+
     A read that cannot be MADE refuses. An unmeasured floor is exactly the state
     this function exists to remove, so falling back to `{}` would silently
     restore the lowering write — the fail-open shape this whole phase is about.
     """
-    from tortoise.record_writer import RecordWriteError, RecordWriter
+    from tortoise import record_projection, record_serve
+    from tortoise.record_serve import RecordServeError
+    from tortoise.record_writer import RecordWriteError
 
     try:
-        # THE SEAM'S OWN connector, not a second `psycopg2.connect`: it is the one
-        # place the driver choice and the `connect_timeout` bound live, and a copy
-        # that opened its own connection could wait forever on a bound the rest of
-        # the record path enforces.
-        writer = RecordWriter(dsn=dsn)
-        conn = writer.connect(dsn)
+        # ⛔ THE SAME DOOR THE REST OF THE RECORD IS READ THROUGH, not a second
+        # `psycopg2.connect` and not `RecordWriter.connect` (a dataclass FIELD,
+        # `None` unless a test injects a hook — calling it is a TypeError, which
+        # would make every real run refuse before copying a row). Two properties
+        # live in these two calls:
+        #
+        # * `open_record` is the ONE bounded opener: it resolves the DSN through
+        #   `record_writer.record_dsn` (so "armed" cannot mean two things), opens
+        #   with the `CONNECT_TIMEOUT_SECONDS` bound, and sets a
+        #   `statement_timeout` so a wedged database cannot hang the run.
+        # * `scope_connection` installs AND VERIFIES the tenant scope (#9600).
+        #   Without it this SELECT reads ZERO ROWS on the app role:
+        #   `public.session` and `public.session_narrative` are RLS-enabled with an
+        #   `org_id = current_setting('app.current_org_id', true)` policy, and an
+        #   unset GUC makes the predicate NULL — so the rows are FILTERED, not an
+        #   error. A zero-row read is a SUCCESSFUL read, so the empty floor would
+        #   come back as "the record holds nothing" and the lowering write this
+        #   function exists to prevent would go ahead, reported clean — the
+        #   measured #9801 shape ("counted ZERO rows under the `*_app_tenant`
+        #   policies, and reported the record as EMPTY").
+        conn = record_serve.open_record(dsn)
         try:
-            with conn.cursor() as cur:
-                cur.execute(_RECORD_FLOOR_SQL,
-                            (org_id, graph_id, org_id, graph_id))
-                rows = cur.fetchall()
+            cursor = record_projection.scope_connection(conn, org_id)
+            cursor.execute(_RECORD_FLOOR_SQL,
+                           (org_id, graph_id, org_id, graph_id))
+            rows = cursor.fetchall()
         finally:
             with contextlib.suppress(Exception):
                 conn.close()
     except Exception as exc:
-        # Our own seam's messages are DSN-free by construction, so they are
-        # quoted; a DRIVER's message can carry the host, and this module never
-        # echoes a DSN (see the `--dsn-env` shape check in `main`).
-        detail = str(exc) if isinstance(exc, RecordWriteError) else type(exc).__name__
+        # Our own seam's messages are DSN-free by construction (they name a class,
+        # a label, or the missing extra), so they are quoted — the operator needs
+        # "install the 'postgres' extra" and not "RecordServeError". A DRIVER's
+        # message can carry the host, and this module never echoes a DSN (see the
+        # `--dsn-env` shape check in `main`).
+        detail = (str(exc)
+                  if isinstance(exc, (RecordWriteError, RecordServeError))
+                  else type(exc).__name__)
         raise CopyRefused(
             "the record's own counts could not be read, so a re-run cannot be "
             f"proven not to lower them ({detail}) — refusing rather than writing "
