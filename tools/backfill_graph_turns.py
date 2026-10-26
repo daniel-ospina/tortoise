@@ -47,6 +47,27 @@ irreversible delete. `turn_ids_off_shape`, `turn_ids_of_another_session`,
 `orphan_turn_ids`, `turn_ids_not_point_kind_event` and
 `member_ids_of_another_session` each carry the ids, and the totals carry the
 matching numbers.
+
+AN ANOMALY REFUSES THE CENSUS (exit 2), and no artifact is written
+The delete sweep #10017 records is `MATCH (p:Point) WHERE p.is_episodic = true
+DETACH DELETE p` — **no kind filter**. Every class above is a node INSIDE that
+set which this comparison never covered, so a zero exit beside one would read as
+"the census passed" over a population it did not measure. That is the same
+fail-open the paging and the count cross-checks exist for, reached by a
+different route. `CLEAN` means *measured the whole delete set and it all
+matched* — never *measured part of it and the part matched* — which is the
+recorded decision on #10017 (an anomaly is reported by id and refuses with
+`refused_for: ["outside_population"]`, exit 2) and the verdict `origin/main`'s
+`tools/turn_parity_census.py` already produces. The operator resolves the named
+nodes and re-runs for a real 0; the artifact is withheld until then, so nothing
+that looks like pass evidence exists.
+
+EXIT CODES: `0` census measured in full, CLEAN, and written; `2` REFUSED — an
+anomaly class is non-zero (the delete set holds nodes nothing compared), in
+which case no artifact is written; `1` a usage/target/read refusal — a
+sessionless graph, a missing graph, a bad `--uri-env`, an unset variable, an
+unsupported URI scheme, or a read that disagrees with the server's own count
+(`CensusError`: truncated, so an absence is not established).
 """
 
 from __future__ import annotations
@@ -70,7 +91,6 @@ import argparse
 import json
 import os
 import re
-import urllib.parse as up
 
 #: A turn id in the shape the SDK mints: ``<session_id>_t<index>``.
 #:
@@ -165,6 +185,51 @@ class CensusError(RuntimeError):
     """
 
 
+#: Every anomaly class that REFUSES the census (exit 2) — the recorded decision
+#: on #10017 (comment 2026-10-26T08:44:26Z: an anomaly class is reported BY ID
+#: and REFUSES with ``refused_for: ["outside_population"]``, exit 2), and the
+#: shape `tools/turn_parity_census.py` already ships on main.
+#:
+#: ⛔ The sweep this census gates is `MATCH (p:Point) WHERE p.is_episodic =
+#: true DETACH DELETE p` — **no kind filter**. Every total listed here counts
+#: nodes INSIDE that delete set which this comparison never covered: a
+#: non-turn member wired to a session, an id off the key shape, an id belonging
+#: to another session, an orphan, and a keyed turn whose `pointKind` is not
+#: `'event'` (the product readers do not count those). Exiting 0 beside an
+#: unrefused subset is the same fail-open the paging exists for, reached by a
+#: different route: the artifact an operator's runbook reads as "the census
+#: passed" would have been produced over a population the census did not
+#: compare, while the delete is broader than any count in it.
+#:
+#: The alternative — certifying anomalies as a footnote on a pass — puts the
+#: decision of what each class means back on whoever keys an exit code.
+_REFUSING_TOTALS = (
+    "non_turn_members",
+    "orphan_turns",
+    "turn_ids_off_shape",
+    "turn_ids_of_another_session",
+    "turns_not_point_kind_event",
+    # NOT a distinct population: a multi-wired point counts a membership (above)
+    # AND is named here, so it is listed for candour — a non-zero here can never
+    # be the only anomaly, but a total that refused on one name and not the
+    # other is the kind of asymmetry a later reader "tidies" into a fail-open.
+    "member_ids_of_another_session",
+)
+
+#: The artifact keys that NAME the ids behind `_REFUSING_TOTALS`, so a refusal
+#: is actionable before an irreversible delete. `non_turn_members` is missing on
+#: purpose: it counts (session, point) MEMBERSHIPS, and its points are named by
+#: the four id lists below beside `member_ids_of_another_session` (a multi-wired
+#: point is one finding, not one per wiring).
+_REFUSING_IDS = (
+    "turn_ids_off_shape",
+    "turn_ids_of_another_session",
+    "turn_ids_not_point_kind_event",
+    "orphan_turn_ids",
+    "member_ids_of_another_session",
+)
+
+
 def _paged_rows(graph, query: str, batch: int):
     """Every row of ``query``, keyset-paged on its ``id()`` column.
 
@@ -214,16 +279,51 @@ def _cross_check(leg: str, measured: int, aggregate: int) -> None:
             "partial parity baseline, so this census is refused, not written.")
 
 
+def _endpoint(uri: str):
+    """THE canonical URI → endpoint derivation (#2974) — never a re-parse.
+
+    ⛔ This tool measures a production graph and its artifact gates an
+    irreversible delete, so *which instance it dialed* is part of the evidence.
+    The repo has ONE derivation, ``tortoise.projection.resolve_db_endpoint``
+    (``FalkorProjection.from_uri`` and ``backup._bgsave`` both call it), and
+    every sibling measurement tool uses it (``tools/edge_census.py``,
+    ``tools/engine_probe.py``, ``tools/ask_shape_rate.py``). This call site used
+    to hand-roll the parse, and that re-derivation diverged from the product in
+    three measurable ways, one of them fail-open:
+
+    * ``docker://`` — the scheme in ``.env.example`` and the one
+      ``tools/test_lane.py`` prints for a private lane — was REFUSED here, so
+      the census could not run against either documented local deployment
+      style;
+    * ``falkor(s)://`` — a scheme the product REFUSES
+      (``tests/test_engine_probe.py`` pins that refusal) — was ACCEPTED here;
+      with ``falkor:///path`` the parse yields ``hostname is None``, which went
+      straight to ``FalkorDB(host=None, …)`` and its localhost default: a
+      mistyped URI silently measured a LOCAL instance and produced an artifact
+      plus exit 0, which is the hardcoded-localhost class this resolver exists
+      to prevent;
+    * a port-less URI defaulted to ``6379`` here and ``16379`` in the product,
+      so the census dialed a different instance than the thing it measures.
+
+    A ``ValueError`` from the resolver (an unsupported scheme) is a refusal, not
+    a traceback: it names the expected schemes and never echoes the URI, which
+    carries a credential.
+    """
+    from tortoise.projection import resolve_db_endpoint
+
+    try:
+        return resolve_db_endpoint(uri)
+    except ValueError as exc:
+        raise SystemExit(f"census: {exc}") from None
+
+
 def _connect(uri: str):
-    """Open the graph store from a redis/falkor URI (TLS when `rediss`)."""
+    """Open the graph store from a redis/docker URI (TLS when `rediss`)."""
     from falkordb import FalkorDB
 
     from tortoise.projection import _bounded_server_socket_kwargs
 
-    u = up.urlparse(uri)
-    if u.scheme not in ("redis", "rediss", "falkor", "falkors"):
-        raise SystemExit(
-            f"census: unsupported URI scheme {u.scheme!r} — expected redis(s)://")
+    endpoint = _endpoint(uri)
     # #8118: the read bound comes from the product's ONE resolver, not from this
     # call site. ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands
     # it to redis-py explicitly, so an unbounded client parks a production census
@@ -232,13 +332,13 @@ def _connect(uri: str):
     # "read a live graph and change nothing" contract cannot tolerate: the
     # operator sees a hang with no diagnosis, on the phase that gates a delete.
     return FalkorDB(
-        host=u.hostname,
-        port=u.port or 6379,
-        username=up.unquote(u.username) if u.username else None,
-        password=up.unquote(u.password) if u.password else None,
-        ssl=(u.scheme in ("rediss", "falkors")),
+        host=endpoint.host,
+        port=endpoint.port,
+        username=endpoint.username,
+        password=endpoint.password,
+        ssl=endpoint.ssl,
         **_bounded_server_socket_kwargs(),
-    ), f"{u.scheme}://{u.hostname}:{u.port or 6379}"
+    ), f"{endpoint.host}:{endpoint.port}" + (" (TLS)" if endpoint.ssl else "")
 
 
 def _int_or_none(value):
@@ -460,6 +560,14 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
         "turn_ids_of_another_session": len(other_session),
         "member_ids_of_another_session": len(foreign_member),
     }
+    # ⛔ CLEAN means measured the WHOLE delete set and it all matched — never
+    # measured part of it and the part matched. `origin/main`'s
+    # `tools/turn_parity_census.py` — the #10017 purge gate — refuses on exactly
+    # this rule (`refused_for: ["outside_population"]`, exit 2); two censuses for
+    # one destructive gate that answer differently on the same graph is how an
+    # operator obeys the wrong one.
+    refused_for = (["outside_population"]
+                   if any(totals[k] for k in _REFUSING_TOTALS) else [])
     return {
         "graph": graph_name,
         "totals": totals,
@@ -473,6 +581,11 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
         "turn_ids_of_another_session": other_session,
         "turn_ids_not_point_kind_event": not_point_kind,
         "member_ids_of_another_session": foreign_member,
+        # The verdict is IN THE ARTIFACT as well as in the exit code: a report
+        # that carries its own refusal cannot be read as CLEAN evidence by a
+        # consumer that only looks at `totals`.
+        "verdict": "REFUSED" if refused_for else "CLEAN",
+        "refused_for": refused_for,
     }
 
 
@@ -549,6 +662,35 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   {sid}: declared={d['declared']} attached={d['attached']}"
                   f"  declared_max_index={d['declared_max_index']}"
                   f" max_index_seen={d['max_index_seen']}")
+    # NAME the ids behind every refusing total, not just the counts: these nodes
+    # are in the delete set and were never compared, so the operator has to be
+    # able to look at them. Printed for BOTH verdicts — a refused census is the
+    # one whose ids matter most.
+    for key in _REFUSING_IDS:
+        ids = report[key]
+        if ids:
+            shown_ids = ", ".join(ids[:5])
+            more = " …" if len(ids) > 5 else ""
+            print(f"  OUTSIDE {key}: {len(ids)} — {shown_ids}{more}")
+    if report["refused_for"]:
+        # ⛔ REFUSED, and NO ARTIFACT: the report `verify` compares against must
+        # be one the census measured in full. An anomaly is a node in the delete
+        # set (`is_episodic = true`, the recorded sweep's predicate) that this
+        # comparison never covered, so writing the artifact while exiting 0 — or
+        # exiting non-zero beside a written artifact a runbook could pick up —
+        # is the fail-open the recorded decision on #10017 forbids. The operator
+        # resolves the named nodes and re-runs for a real 0.
+        fired = [k for k in _REFUSING_TOTALS if t[k]]
+        sys.stderr.write(
+            "census: REFUSED (" + ", ".join(report["refused_for"]) + ") — "
+            + ", ".join(f"{t[k]} {k}" for k in fired)
+            + ". These nodes are inside the delete set (is_episodic = true, no "
+              "kind filter) and this census did NOT compare them, so CLEAN "
+              "cannot be claimed over them. No artifact was written. Resolve "
+              "the named ids (reported above, and by id in the report), then "
+              "re-run. `tools/turn_parity_census.py` is the #10017 purge gate "
+              "and refuses on the same rule.\n")
+        raise SystemExit(2)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, sort_keys=True)

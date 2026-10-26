@@ -758,3 +758,244 @@ def test_the_id_rule_is_stricter_than_the_records_own_reader() -> None:
     assert _turn_index("sess_t3_t7", "sess") == 7
     m = census_mod._TURN_ID_RE.match("sess_t3_t7")
     assert m is None or m.group("session") != "sess"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The REFUSAL — every anomaly class is INSIDE the delete set
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The sweep #10017 records is `MATCH (p:Point) WHERE p.is_episodic = true
+# DETACH DELETE p` — NO kind filter. So every class below is a node the sweep
+# removes and this census never compared. Exiting 0 beside one of them is the
+# fail-open the paging exists to prevent, reached by another route: the artifact
+# would say "the census passed" about a population it did not measure. The
+# recorded decision on #10017 requires the refusal (`outside_population`, exit
+# 2), and `origin/main`'s `tools/turn_parity_census.py` already ships it.
+
+#: One minimal population per refusing total. Each is the SMALLEST graph that
+#: trips its class, so a class that silently stopped refusing has a case of its
+#: own rather than being covered by a neighbour.
+_REFUSAL_CASES = {
+    # a point wired into a session that is not its owner, alongside the owner:
+    # ONE turn (counted for `s1`), and a foreign membership nothing compares.
+    "non_turn_members": (
+        [("s1", 1, 0), ("s2", 0, None)],
+        [("s1", "s1_t0", 1, 0, "event"), ("s2", "s1_t0", 1, 0, "event")],
+        ()),
+    # an episodic point with NO session edge: the copy has no session to rebuild
+    # it under, so it is a silent orphan line in the parity check.
+    "orphan_turns": (
+        [("s1", 1, 0)],
+        [("s1", "s1_t0", 1, 0, "event")],
+        ["s1_t1"]),
+    # an id the record cannot key at all.
+    "turn_ids_off_shape": (
+        [("s1", 1, 0)],
+        [("s1", "s1_t0", 1, 0, "event"), ("s1", "not-a-turn-key", 1, 0, "event")],
+        ()),
+    # a well-formed turn id belonging to a DIFFERENT session.
+    "turn_ids_of_another_session": (
+        [("s1", 0, None)],
+        [("s1", "s2_t0", 1, 0, "event")],
+        ()),
+    # keyed as a turn, but not `pointKind = 'event'`: the product's own turn
+    # readers (`sdk._capture_turn_ids`, `audit_session_retrofit`) do not count
+    # it, and the sweep still deletes it — the decision's `non_turn_point_kind`.
+    "turns_not_point_kind_event": (
+        [("s1", 1, 0)],
+        [("s1", "s1_t0", 1, 0, "memory")],
+        ()),
+}
+
+
+@pytest.mark.parametrize("total", sorted(_REFUSAL_CASES))
+def test_every_anomaly_class_REFUSES_the_census(total: str) -> None:
+    """An anomaly is not a footnote on a pass — it is the verdict.
+
+    Parametrized over the classes by NAME, so dropping one from the refusal
+    (`_REFUSING_TOTALS`) reds here instead of quietly returning a CLEAN census
+    over nodes the delete will remove.
+    """
+    sessions, turns, orphans = _REFUSAL_CASES[total]
+    report = census_mod.census(
+        _FakeGraph(sessions, turns, orphan_ids=orphans), "g")
+
+    assert report["totals"][total] > 0, f"{total} did not fire in its own case"
+    assert report["verdict"] == "REFUSED"
+    assert report["refused_for"] == ["outside_population"], (
+        "the vocabulary is the purge gate's own (`origin/main`'s "
+        "tools/turn_parity_census.py), so an operator reading two censuses for "
+        "one destructive gate reads the same answer from both")
+
+    # NOTHING measured is left outside the refusal: every non-zero ANOMALY total
+    # in the case is inside the refusing set. A class reported beside a zero exit
+    # is exactly the subset the delete acts on unseen. (`sessions_without_turns`
+    # and friends are MEASUREMENTS, not anomalies — a session that lost its turns
+    # is compared, and `verify` has both numbers for it.)
+    measurements = {
+        "sessions_with_turns", "sessions_declared", "sessions_without_turns",
+        "sessions_declared_and_empty", "sessions_in_count_mismatch",
+        "sessions_with_id_space_holes", "turns", "chars", "embedded",
+    }
+    measured = {k for k, v in report["totals"].items() if v}
+    assert measured - measurements <= set(census_mod._REFUSING_TOTALS), (
+        measured - measurements - set(census_mod._REFUSING_TOTALS))
+
+
+def test_a_CLEAN_census_is_not_refused_by_the_refusal_itself() -> None:
+    """The negative control: without it, a tool that refused everything passes."""
+    report = census_mod.census(
+        _FakeGraph([("s1", 1, 0)], [("s1", "s1_t0", 1, 0, "event")]), "g")
+    assert report["verdict"] == "CLEAN"
+    assert report["refused_for"] == []
+    assert not any(report["totals"][k] for k in census_mod._REFUSING_TOTALS)
+
+
+def test_main_REFUSES_with_exit_2_and_writes_no_artifact(
+        monkeypatch, tmp_path) -> None:
+    """exit 0 + a written artifact beside an unrefused subset is the finding.
+
+    An operator's runbook reads `--out` as "the census passed", so a refusal has
+    to leave NO artifact behind — a written one would be picked up as CLEAN
+    evidence by whatever runs next, which is how a partial comparison becomes
+    authorization for an irreversible delete.
+    """
+    sessions, turns, orphans = _REFUSAL_CASES["turns_not_point_kind_event"]
+    out = tmp_path / "census.json"
+    with pytest.raises(SystemExit) as refusal:
+        _run_main(monkeypatch,
+                  _FakeDB(_FakeGraph(sessions, turns, orphan_ids=orphans)),
+                  ["census", "--graph", "g", "--uri-env", "CENSUS_TEST_URI",
+                   "--out", str(out)])
+    assert refusal.value.code == 2, (
+        "2 is REFUSED — the same code the #10017 purge gate uses, so a caller "
+        "keying on the exit status cannot read this census's refusal as a "
+        f"usage error: {refusal.value!r}")
+    assert not out.exists(), "a refused census must not leave an artifact"
+
+
+def test_the_refusal_NAMES_the_ids_an_operator_must_resolve(
+        monkeypatch, capsys) -> None:
+    """A refusal with no id beside it is not actionable before a delete."""
+    sessions, turns, orphans = _REFUSAL_CASES["turn_ids_off_shape"]
+    with pytest.raises(SystemExit) as refusal:
+        _run_main(monkeypatch,
+                  _FakeDB(_FakeGraph(sessions, turns, orphan_ids=orphans)),
+                  ["census", "--graph", "g", "--uri-env", "CENSUS_TEST_URI"])
+    assert refusal.value.code == 2
+    captured = capsys.readouterr()
+    printed = captured.out + captured.err
+    assert "not-a-turn-key" in printed, printed
+    assert "REFUSED" in printed and "outside_population" in printed, printed
+
+
+def test_the_two_censuses_for_one_delete_gate_speak_the_same_vocabulary() -> None:
+    """`turn_parity_census.py` (main) and this census must not disagree.
+
+    They describe ONE destructive gate. If this one exited 0 where the purge
+    gate refuses, an operator would have two artifacts and no rule for which one
+    binds — so the refusal key is read from the sibling's own source rather than
+    paraphrased here.
+    """
+    sibling = _TOOL.parent / "turn_parity_census.py"
+    if not sibling.exists():  # pragma: no cover — main before #10029 merged
+        pytest.skip("the #10017 purge gate is not on this branch")
+    src = sibling.read_text(encoding="utf-8")
+    assert '"outside_population"' in src
+    assert census_mod.census(
+        _FakeGraph(*_REFUSAL_CASES["orphan_turns"][:2],
+                   orphan_ids=_REFUSAL_CASES["orphan_turns"][2]),
+        "g")["refused_for"] == ["outside_population"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The ENDPOINT — the product's ONE derivation, never a local re-parse (#2974)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_endpoint_comes_from_the_products_resolver() -> None:
+    """`docker://` is a product scheme and was REFUSED by the local parse.
+
+    `docker://` is the form in `.env.example` and the form `tools/test_lane.py`
+    prints as this repo's private-lane URI, so a hand-rolled allow-list made the
+    census unrunnable against both documented local deployment styles — while
+    the sibling that reuses `resolve_db_endpoint` could run them.
+    """
+    endpoint = census_mod._endpoint(
+        "docker://:falkordb@localhost:6379/tortoise")
+    assert (endpoint.host, endpoint.port) == ("localhost", 6379)
+    assert endpoint.password == "falkordb"
+
+
+def test_a_portless_uri_takes_the_PRODUCTS_default_port() -> None:
+    """6379 here vs 16379 in the product = measuring a different instance.
+
+    The census answers "which graph did we measure?" before an irreversible
+    delete, so its default endpoint cannot be its own opinion.
+    """
+    from tortoise.projection import resolve_db_endpoint
+
+    endpoint = census_mod._endpoint("redis://db.example.com")
+    assert endpoint.port == resolve_db_endpoint("redis://db.example.com").port
+    assert endpoint.port == 16379
+
+
+def test_the_scheme_set_is_the_products_own() -> None:
+    """`falkor(s)://` is NOT a product scheme, and admitting it was FAIL-OPEN.
+
+    With `falkor:///path` the local parse yielded `hostname is None`, which went
+    straight to `FalkorDB(host=None, …)` — the client's own localhost default. A
+    mistyped URI therefore measured a LOCAL instance and produced an artifact
+    plus exit 0. `tests/test_engine_probe.py` pins the product's refusal.
+    """
+    from tortoise.config import SUPPORTED_URI_SCHEMES
+
+    for scheme in SUPPORTED_URI_SCHEMES:
+        endpoint = census_mod._endpoint(f"{scheme}://:pw@db.example.com:6379/g")
+        assert (endpoint.host, endpoint.port) == ("db.example.com", 6379)
+    assert "falkor" not in SUPPORTED_URI_SCHEMES
+
+    for scheme in ("falkor", "falkors", "http"):
+        with pytest.raises(SystemExit) as refused:
+            census_mod._endpoint(f"{scheme}://user:SUPERSECRETPW@db.example.com")
+        message = str(refused.value)
+        assert "Unsupported scheme" in message, message
+        assert "SUPERSECRETPW" not in message, message
+
+
+def test_TLS_still_comes_from_the_resolved_scheme() -> None:
+    assert census_mod._endpoint("rediss://db.example.com:6379").ssl is True
+    assert census_mod._endpoint("redis://db.example.com:6379").ssl is False
+
+
+def test_no_URI_parse_is_hand_rolled_in_this_tool() -> None:
+    """The finding was a second derivation of the same call — pinned as text.
+
+    A behavioural pin alone would pass again the moment someone re-added a
+    parse for one branch; this asserts the tool holds NO parse at all, so the
+    only path from a URI to an endpoint is `resolve_db_endpoint`.
+    """
+    source = _TOOL.read_text(encoding="utf-8")
+    assert "urlparse" not in source, (
+        "the URI → endpoint derivation is the product's "
+        "(tortoise.projection.resolve_db_endpoint), never a local re-parse "
+        "(#2974) — a second derivation is how one call site hardcoded an "
+        "embedded localhost")
+
+
+def test_every_refusing_total_has_its_own_case_or_a_stated_reason() -> None:
+    """A class added to the refusal without a case would be unproven.
+
+    `member_ids_of_another_session` names the SAME rows `non_turn_members`
+    counts (a multi-wired point is one membership and one id), so it cannot fire
+    alone — the multi-wiring case covers both. Everything else must have its own
+    minimal population above.
+    """
+    covered_by_a_case = set(_REFUSAL_CASES)
+    assert covered_by_a_case | {"member_ids_of_another_session"} == set(
+        census_mod._REFUSING_TOTALS), (
+        "every refusing class needs a proof case (or a stated subset reason): "
+        f"{set(census_mod._REFUSING_TOTALS) - covered_by_a_case - {'member_ids_of_another_session'}}")
+    sessions, turns, _orphans = _REFUSAL_CASES["non_turn_members"]
+    report = census_mod.census(_FakeGraph(sessions, turns), "g")
+    assert report["totals"]["member_ids_of_another_session"] == 1
+    assert report["totals"]["non_turn_members"] == 1
