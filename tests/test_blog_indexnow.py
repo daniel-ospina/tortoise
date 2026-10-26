@@ -165,7 +165,11 @@ for (const c of cases) {
       if (method === 'POST') {
         const body = JSON.parse(String(init.body));
         Object.assign(row, body);
-        return Response.json([{ id: row.id, slug: row.slug || slug }]);
+        // The store is the authority on the row's identity: it may normalise the
+        // slug, and the notification must use what the STORE returned. `createdSlug`
+        // lets a case make the two differ, so a url built from the request cannot
+        // pass unnoticed.
+        return Response.json([{ id: row.id, slug: c.createdSlug || row.slug || slug }]);
       }
       if (method === 'PATCH') {
         const body = JSON.parse(String(init.body));
@@ -336,12 +340,20 @@ CASES: dict[str, dict] = {
     # submitted": it must skip, and it must log (the module's "every read is
     # logged" contract, and the only way the runbook's grep can see it).
     "state_no_row": {"status": "draft", "stateNoRow": True, "steps": [{"status": "published"}]},
-    # ── the create path (deliberately NOT instrumented) ───────────────────
-    # `POST /blog/api/posts` with status=published publishes immediately, and it
-    # does NOT notify: #9680 names the PATCH transition as the trigger. Pinned so
-    # the disclosed gap cannot silently become an instrumented path (or silently
-    # stay one) without a test changing alongside it.
+    # ── the create path (#9803 ruling: "became live" is the trigger, not "a PATCH
+    # did it") ──────────────────────────────────────────────────────────────
+    # `POST /blog/api/posts` with status=published lands a publicly readable row,
+    # so it notifies. #9680 had left it un-instrumented; the owner reversed that,
+    # and the reversal is recorded on #9680 with an OVERRIDES line. Both directions
+    # stay pinned: remove the create's notification and the case below reds; make a
+    # create notify regardless of status and `draft_create` reds.
     "direct_publish_create": {
+        "post": {"title": "Created published", "body": "body text", "slug": "indexnow-slug", "status": "published"},
+    },
+    # The store may normalise the slug on insert; the notification must use the
+    # identity the STORE returned, not the request body it was given.
+    "direct_publish_create_renamed_by_store": {
+        "createdSlug": "canonical-slug",
         "post": {"title": "Created published", "body": "body text", "slug": "indexnow-slug", "status": "published"},
     },
     # The other half of that pair: a DRAFT create makes nothing public, so it must
@@ -1110,6 +1122,24 @@ def test_a_direct_publish_create_notifies(results) -> None:
     assert len(res["submissions"]) == 1, (
         "a create born published is a publish transition and must submit ONCE — got "
         f"{len(res['submissions'])}: {_submitted_urls(res)}"
+    )
+
+    submission = res["submissions"][0]
+    assert submission["url"] == ENDPOINT, (
+        f"the submission must go to the IndexNow endpoint, not {submission['url']}"
+    )
+    assert submission["body"]["urlList"] == [f"{SITE}/blog/indexnow-slug"], (
+        "the create must submit the CANONICAL url — /blog/<the row's slug> — got "
+        f"{submission['body']['urlList']}. A request-derived slug or a wrong path "
+        "passes a bare count assertion"
+    )
+    assert submission["body"]["host"] == SITE.removeprefix("https://"), submission["body"]["host"]
+
+    renamed = results["direct_publish_create_renamed_by_store"]
+    assert renamed["statuses"] == [201], renamed["statuses"]
+    assert [s["body"]["urlList"] for s in renamed["submissions"]] == [[f"{SITE}/blog/canonical-slug"]], (
+        "the submitted url must come from the row the STORE returned, not the "
+        f"request slug: {[s['body']['urlList'] for s in renamed['submissions']]}"
     )
 
     draft = results["draft_create"]

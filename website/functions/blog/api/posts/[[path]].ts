@@ -428,8 +428,11 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUnti
   // left exactly one way to put a page live and submit nothing — the owner's
   // ruling on #9803 is that "became live" is the trigger, whichever write did it.
   // `hold_for_review` cannot be combined with `status: published` (validation
-  // refuses it), so a created-published row is always live; the guard is still
-  // written against the row the store returned, not the request body.
+  // refuses it), so a created-published row is always live. The status tested is
+  // `isDirect` — the VALIDATED request value, which is the same value written to
+  // `row.status` a few lines up, so the predicate and the insert cannot disagree;
+  // the STORE supplies the row's identity (`id`, `slug`), which is what the
+  // notification needs.
   if (isDirect && post?.id && post.slug) {
     waitUntil(
       notifyPublished({
