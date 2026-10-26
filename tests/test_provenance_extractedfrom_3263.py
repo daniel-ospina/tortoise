@@ -19,6 +19,7 @@ FTS/vector leg needed).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sys
@@ -65,16 +66,20 @@ def _sources_of(proj, pid: str) -> set[str]:
 def _render_row(proj, pid: str) -> dict:
     """The row the fold writes, as the replay comparison must see it.
 
-    ``extractedFrom`` (the property), ``sourceVersionTransit`` (the carrier,
-    #5256) and every edge's recorded read-version — the three surfaces
+    ``extractedFrom`` (the convenience property), ``extractedFromAll`` (the
+    folded SET, #7704 review P1), ``sourceVersionTransit`` (the carrier,
+    #5256) and every edge's recorded read-version — the surfaces
     ``_fold_source_evidence`` touches. Shared so the parity pins cannot drift
-    apart from each other.
+    apart from each other; the two ref surfaces are compared SEPARATELY because
+    live and replay must agree on each of them independently.
     """
     props = proj.g.query(
         "MATCH (p:Point {id:$id}) RETURN p.extractedFrom, "
-        "p.sourceVersionTransit", params={"id": pid}).result_set[0]
+        "p.sourceVersionTransit, p.extractedFromAll",
+        params={"id": pid}).result_set[0]
     return {
         "extractedFrom": props[0],
+        "extractedFromAll": props[2],
         "sourceVersionTransit": props[1],
         "edges(url, sourceVersion)": sorted(
             (r[0], r[1]) for r in proj.g.query(
@@ -214,9 +219,31 @@ def test_rebuild_preserves_session_source_is_episodic(prov):
 
 
 def _prop_refs(proj, pid: str):
-    """The Point's own ``extractedFrom`` node property (the reported surface)."""
+    """The Point's own ``extractedFrom`` node property (the reported surface).
+
+    ⛔ A SCALAR after a fold holds refs (#7704 review P1): the survivor's own
+    creating source. ``sdk.query`` / ``paginated_query`` match this property by
+    EQUALITY (``n.`extractedFrom` = $extractedFrom``), and an ARRAY is not
+    equality-matchable — `test_a_fold_keeps_the_read_door_answering` is the pin
+    that the read door still answers. The folded SET is ``_all_prop_refs``.
+    """
     got = proj.g.query(
         "MATCH (p:Point {id:$id}) RETURN p.extractedFrom",
+        params={"id": pid}).result_set
+    return got[0][0] if got else None
+
+
+def _all_prop_refs(proj, pid: str):
+    """The FOLDED ref set on the node (``extractedFromAll``, #7704 review P1).
+
+    The second ref surface the fold writes: the convenience property keeps ONE
+    matchable scalar, so the full set a fold produced rides here. The EDGES
+    remain authoritative (#3263) — this is a query convenience beside the
+    scalar, and the pins assert it against ``_sources_of`` rather than instead
+    of it.
+    """
+    got = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.extractedFromAll",
         params={"id": pid}).result_set
     return got[0][0] if got else None
 
@@ -268,17 +295,71 @@ def test_dedup_hit_accumulates_the_second_source(prov):
     assert _sources_of(proj, pid) == {
         "https://example.com/alpha", "https://example.com/beta"}, \
         "the fold dropped the second source — the evidence difference is LOST"
-    # The prop is the surface `list_drafts` reports; it must agree with the
-    # edges (a SEQUENCE is now the accumulated list, never a scalar).
-    assert sorted(_prop_refs(proj, pid)) == [
+    # The prop is the surface `list_drafts` reports AND the surface
+    # `query(extractedFrom=…)` matches by EQUALITY: it stays the scalar the
+    # Point was created under, with the folded set beside it (#7704 review P1).
+    assert _prop_refs(proj, pid) == "https://example.com/alpha", (
+        "the convenience property must stay the survivor's own creating "
+        f"source: {_prop_refs(proj, pid)!r}")
+    assert sorted(_all_prop_refs(proj, pid)) == [
         "https://example.com/alpha", "https://example.com/beta"]
 
     live = _provenance(proj)
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert _provenance(proj) == live, \
         "the accumulated provenance did not survive a rebuild (live != rebuild)"
-    assert sorted(_prop_refs(proj, pid)) == [
+    assert _prop_refs(proj, pid) == "https://example.com/alpha"
+    assert sorted(_all_prop_refs(proj, pid)) == [
         "https://example.com/alpha", "https://example.com/beta"]
+
+
+def test_a_fold_keeps_the_read_door_answering(prov):
+    """#7704 review P1: the fold must not make its own survivor unfindable.
+
+    ``sdk.query`` / ``paginated_query`` (SDK **and** MCP) filter with
+    ``n.`extractedFrom` = $extractedFrom`` — an EQUALITY match — and an ARRAY
+    is not equality-matchable. Writing the accumulated LIST into that property
+    therefore dropped the survivor out of a PUBLIC read door for every source
+    it carries, INCLUDING the one it was created under, and before that fold
+    ``origin/main`` answered: a matchable scalar became an unmatchable array.
+
+    The same regression reached ``integrations/cli-extraction/extract_turns.py``:
+    ``_source_points`` (the writer's only population read — ``total_for_source``
+    and ``new`` under-report) and ``dump``'s
+    ``WHERE p.extractedFrom STARTS WITH 'codex://'``, a string operator applied
+    to a list.
+
+    ⛔ The fix is NOT a CONTAINS rewrite inside ``query``: the property stays
+    the scalar it always was (the survivor's own creating source) and the
+    folded set rides ``extractedFromAll``. A survivor created under ANOTHER
+    source is still not returned under THIS one's ref — the answer
+    ``origin/main`` gave, and the residual #10063 tracks — but nothing that
+    answered before the fold stops answering.
+
+    MUTATION: write ``accumulated`` back into the property (the pre-fix arm) and
+    the three read-door assertions below red while the edges stay green.
+    """
+    sdk, _events = prov
+    alpha, beta = ("https://example.com/alpha", "https://example.com/beta")
+    content = "the fold must not hide the survivor from the read door"
+    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+                           dedup=True)["id"]
+    assert [p["id"] for p in sdk.query(extractedFrom=alpha)] == [pid], \
+        "guard: the creating source must answer BEFORE the fold"
+
+    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+
+    assert [p["id"] for p in sdk.query(extractedFrom=alpha)] == [pid], (
+        "the fold made the survivor unfindable under the source it was "
+        "CREATED under — the property is no longer equality-matchable")
+    page = sdk.paginated_query(extractedFrom=alpha)
+    assert [p["id"] for p in page["results"]] == [pid], (
+        "paginated_query went the same way — the whole read door, not one "
+        f"method: {sorted(page)!r}")
+    assert sdk.query(extractedFrom=beta) == [], (
+        "#10063 residual, asserted so it cannot silently change shape: the "
+        "property holds ONE creating source, so the OTHER source's ref does "
+        "not match it — the EDGES are what carry that fact (#3263)")
 
 
 def test_dedup_hit_accumulates_the_inferred_session_source(prov):
@@ -473,9 +554,12 @@ def test_a_fold_keeps_the_carrier_of_a_variant_spelled_held_ref(prov):
     assert _sources_of(proj, pid) == {clean, second}, \
         "guard: the second write must be a fold, not a second Point"
 
-    assert _prop_refs(proj, pid) == [raw, second], (
+    assert _all_prop_refs(proj, pid) == [raw, second], (
         "the fold REWROTE the caller's provenance spelling into the "
-        f"resolver's — the node owns that spelling: {_prop_refs(proj, pid)!r}")
+        f"resolver's — the node owns that spelling: {_all_prop_refs(proj, pid)!r}")
+    assert _prop_refs(proj, pid) == raw, (
+        "the convenience property must keep the scalar spelling the Point was "
+        f"created under: {_prop_refs(proj, pid)!r}")
     live = _render_row(proj, pid)
     assert live["sourceVersionTransit"] == [[raw, "hash-one"],
                                             [second, "hash-two"]], (
@@ -605,7 +689,10 @@ def test_a_fold_adopts_and_WIRES_a_prop_only_ref(prov):
         "the fold dropped a ref the caller had declared on the property (or "
         f"left it unwired): {_sources_of(proj, pid)}")
     live = _render_row(proj, pid)
-    assert set(live["extractedFrom"]) == {held, prop_only, second}, live
+    assert set(live["extractedFromAll"]) == {held, prop_only, second}, live
+    assert live["extractedFrom"] == prop_only, (
+        "the convenience property is the scalar the node carried when the fold "
+        f"ran (the moved ref), not the folded set: {live['extractedFrom']!r}")
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert _render_row(proj, pid) == live, (
         "live != replay after adopting a prop-only ref — the record's ref list "
@@ -613,7 +700,42 @@ def test_a_fold_adopts_and_WIRES_a_prop_only_ref(prov):
         f"replayed={_render_row(proj, pid)!r}")
 
 
-def test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute(prov):
+def _install_store_width_encoder(monkeypatch, sdk) -> int:
+    """A deterministic encoder of the STORE's declared width, over the seam.
+
+    ``create_point`` reaches its vector through ``tortoise.embeddings`` →
+    ``encode_for_row`` → the module-global ``compute_embedding`` seam, so
+    patching it here exercises the **server-computed** path: the write stores
+    the vector and leaves ``embedding_verbatim`` ABSENT. That is what makes
+    ``embedding_preserved`` load-bearing in
+    ``test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute`` — a
+    CALLER-supplied vector short-circuits ``stamp_journal_embedding`` on
+    ``embedding_verbatim`` before it ever looks at the marker (#7704 review
+    P2).
+
+    ⛔ The width must be the STORE's, asked of the store, because
+    ``_degrade_to_width`` DROPS a vector whose width is not
+    ``required_embedding_dim`` (it does not truncate it). A hardcoded width is
+    what made the pin this replaces pass only on the index-less embedded
+    carve-out and fail on every store with a Point HNSW index (384) — green in
+    the lane that hid the defect, red in CI (#7704 review P1).
+    """
+    from tortoise import embeddings as _emb
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    width = sdk._get_proj().required_embedding_dim or EMBEDDING_DIM
+
+    def _encode(content: str) -> list[float]:
+        raw = hashlib.sha256(f"tortoise-7704::{content}".encode()).digest()
+        buf = (raw * (width // len(raw) + 1))[:width]
+        return [((byte / 255.0) - 0.5) for byte in buf]
+
+    monkeypatch.setattr(_emb, "compute_embedding", _encode)
+    return width
+
+
+def test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute(
+        prov, monkeypatch):
     """The re-emitted ``PointAdded`` PRESERVES the vector, never attests it.
 
     The fold computes no vector: ``snapshot["embedding"]`` is the node's
@@ -630,16 +752,35 @@ def test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute(prov):
     Frozen before (#7704 review P1): the fold's record carried
     ``embedding_model``/``embedding_revision``/``embedding_text_hash`` for a
     vector it never computed, and no ``embedding_preserved``.
+
+    ⛔ The vector is SERVER-computed (a deterministic encoder of the store's own
+    width over the ``compute_embedding`` seam), so ``embedding_verbatim`` is
+    absent and ``embedding_preserved`` is the ONLY thing standing between the
+    fold's record and a false attestation. That is the mutation this pin is
+    for: drop the marker (``snapshot["embedding_preserved"] = True`` →
+    ``if False``) and the identity keys appear, reddening the final assertion.
+    With a caller-supplied vector the verbatim flag short-circuits first, the
+    identity keys stay absent either way, and only the marker assertion reds —
+    a pin on a marker that never exercises the behaviour it names (#7704 review
+    P2). Measured before: the fixture seeded ``embedding=[0.5] * 8``, which the
+    store's width guard drops whole, so the record carried NO vector at all and
+    ``test (d)`` was red in the PR's own CI at this head.
     """
     import json
 
     sdk, events = prov
     log_path = os.path.join(str(events), "events.jsonl")
+    width = _install_store_width_encoder(monkeypatch, sdk)
     first_ref, second_ref = ("https://example.com/emb-one",
                              "https://example.com/emb-two")
     content = "the fold must not attest an origin it did not compute"
     pid = sdk.create_point("statement", content, extractedFrom=first_ref,
-                           embedding=[0.5] * 8, dedup=True)["id"]
+                           dedup=True)["id"]
+    stored = sdk.get_point(pid).get("embedding")
+    assert stored is not None and len(stored) == width, (
+        "guard: the create must STORE a vector of the store's own width "
+        f"({width}) — the width guard drops a mismatch instead of truncating "
+        f"it, and a fold cannot carry what the node does not hold: {stored!r}")
     sdk.create_point("statement", content, extractedFrom=second_ref,
                      dedup=True)
 
@@ -653,12 +794,20 @@ def test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute(prov):
     fold = folds[-1]["point"]
     assert fold.get("embedding") is not None, (
         "guard: this pin is about a fold that CARRIES the existing vector")
+    assert not fold.get("embedding_verbatim"), (
+        "guard: the load-bearing case is a SERVER-computed vector — with "
+        "`embedding_verbatim` set, `stamp_journal_embedding` short-circuits "
+        f"before it reads the marker: {sorted(fold)!r}")
+    # The BEHAVIOUR first, the marker second: the marker exists to suppress
+    # these three keys, and a pin that reds only on the marker cannot show that
+    # the failure it names ever happened in its own fixture.
+    for key in ("embedding_model", "embedding_revision", "embedding_text_hash"):
+        assert key not in fold, (
+            f"the fold attested {key} for a vector it never computed — a FALSE "
+            "origin that silences the R1 model-change warning: " + repr(sorted(fold)))
     assert fold.get("embedding_preserved") is True, (
         "the fold's record is CREATING and holds a vector it did not compute — "
         "it must say the vector was PRESERVED: " + repr(sorted(fold)))
-    for key in ("embedding_model", "embedding_revision", "embedding_text_hash"):
-        assert key not in fold, (
-            f"the fold attested {key} for a vector it never computed")
 
 
 def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
@@ -765,9 +914,12 @@ def test_dedup_hit_keeps_prop_and_edges_truthful(prov):
     proj = sdk._get_proj()
     pid = first["id"]
     assert _sources_of(proj, pid) == {"session:sess-dedup"}
-    assert _prop_refs(proj, pid) == ["session:sess-dedup"], (
-        "the property must state exactly what the edges wire — no prop-only "
-        "lie in either direction")
+    assert _prop_refs(proj, pid) == "session:sess-dedup", (
+        "the property must state one matchable ref — no prop-only lie in either "
+        f"direction: {_prop_refs(proj, pid)!r}")
+    assert _all_prop_refs(proj, pid) == ["session:sess-dedup"], (
+        "the folded SET is written even for a one-ref fold, so the two surfaces "
+        f"cannot be told apart by shape: {_all_prop_refs(proj, pid)!r}")
 
     live = _provenance(proj)
     proj.rebuild_all(str(events), confirm_destructive=True)
@@ -1049,6 +1201,31 @@ def test_create_point_rejects_non_string_extractedfrom_prewrite(prov):
     after = sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     assert after == before, "a rejected Point was still written (orphan)"
+
+
+def test_a_tenant_cannot_supply_the_folded_ref_set(prov):
+    """``extractedFromAll`` is the FOLD's own record — never a caller prop.
+
+    The replay derives the ``extractedFrom`` EDGES from it (``_upsert_point_edges``
+    → ``_point_all_source_refs``), so a tenant-supplied array would put the
+    snapshot's edges ahead of the writes: live wires ``extractedFrom`` only, a
+    rebuild wires the array too, and `derived = replay(journal)` goes false on a
+    graph nobody folded — the same parity break the ``sourceVersionTransit``
+    reject closes (#5256), which is why it joins that reject list instead of
+    riding the open-set passthrough.
+    """
+    sdk, _events = prov
+    before = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    with pytest.raises(ValueError, match="server-managed provenance"):
+        sdk.create_point(
+            "statement", "a forged folded set",
+            extractedFrom="https://example.com/x",
+            extractedFromAll=["https://example.com/x",
+                              "https://example.com/y"])
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == before, \
+        "a rejected Point was still written (orphan)"
 
 
 def test_create_point_treats_blank_ref_as_absent(prov):

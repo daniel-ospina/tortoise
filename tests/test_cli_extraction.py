@@ -755,21 +755,25 @@ class TestWriterContract(unittest.TestCase):
         receipt = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(receipt["new"], 1)
         self.assertEqual(receipt["folded_onto_other_sources"], 1)
-        # #7704: the fold KEEPS the new source instead of dropping it, so the
-        # survivor's own provenance now NAMES both sources. Pinned through the
-        # public doors the writer itself uses (the equality-filtered read-back
-        # cannot see a multi-ref point, which is exactly why
-        # `folded_onto_other_sources` has to be derived from the write result).
+        # #7704: the fold KEEPS the new source instead of dropping it. Two
+        # surfaces, pinned separately: the `extractedFrom` property stays the
+        # survivor's OWN creating source — a SCALAR, so the equality-filtered
+        # read-back keeps answering for it — and the folded SET rides
+        # `extractedFromAll` (#7704 review P1; writing the set into the
+        # equality-matched property hid the survivor from the read door, which
+        # is why `folded_onto_other_sources` is derived from the write result).
         check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
         try:
             hits = check.query(content=shared, include_retracted=True)
         finally:
             check.close()
         self.assertEqual(len(hits), 1, hits)
-        refs = hits[0].get("extractedFrom")
-        if isinstance(refs, str):
-            refs = [refs]
-        self.assertEqual(sorted(refs or []), sorted([other, self.source]),
+        self.assertEqual(hits[0].get("extractedFrom"), other,
+                         "the convenience property must stay the survivor's own "
+                         "creating source — the pre-existing point was created "
+                         "under `other` before this writer folded onto it")
+        self.assertEqual(sorted(hits[0].get("extractedFromAll") or []),
+                         sorted([other, self.source]),
                          "the fold lost the claim's new source")
         # all-fold batch on a FRESH source: exits 0 via the
         # folded_onto_existing path (this source has no points of its own)

@@ -482,6 +482,9 @@ warnings_seen = []
 # write RETURNS — a dedup hit returns the existing point's id, and the fold
 # WIRES this run's source onto it — so a returned point whose `extractedFrom`
 # names any OTHER source is a cross-source fold. No message template involved.
+# (That property is the survivor's OWN creating source, a scalar — the folded
+# set rides `extractedFromAll`, #7704 review P1 — so this reads "the survivor
+# was created under a source that is not ours", which is the fold itself.)
 folded = []
 class _Collect(logging.Handler):
     def emit(self, record):
@@ -536,11 +539,16 @@ try:
     _noise = [f'{name}: {msg}' for name, msg in _new_warnings
               if not name.startswith(_WRITE_PATH_LOGGERS)]
     # `new` counts points that are under this source and were not before. A
-    # folded survivor is NOT among them: the fold leaves `extractedFrom` a LIST
-    # and `query(extractedFrom=…)` matches that property by EQUALITY, so the
-    # survivor is not returned by this read at all (measured — the `:Source`
-    # EDGES are the authoritative provenance, #3263). `after - before` therefore
-    # already excludes folds; `folded_onto_other_sources` is what reports them.
+    # survivor FOLDED from another source is NOT among them: the fold keeps the
+    # `extractedFrom` property the survivor's OWN creating source — a scalar, so
+    # `query(extractedFrom=…)`'s EQUALITY match still answers for it — and
+    # carries the folded set on `extractedFromAll` (#7704 review P1). This
+    # source's ref therefore lives on the EDGES, never in the equality-matched
+    # property. ⚠️ DEPENDS ON #10063: once a read can ask for the folded set (the
+    # edges, or `extractedFromAll`), a folded survivor WILL count as `new` here
+    # and `after - before` stops excluding folds. Until then the `:Source` EDGES
+    # are the authoritative provenance (#3263), this read sees the creating
+    # source only, and `folded_onto_other_sources` is what reports the folds.
     receipt = {'written': len(made), 'new': after - before,
                'total_for_source': after,
                'non_live_hits': non_live, 'ids': made[:5]}
@@ -554,11 +562,16 @@ try:
         # here and they must not be confused:
         #   * ALL-FOLD — every call folded onto a point that already existed under
         #     OTHER sources. The fold KEEPS the evidence now (it wires this source
-        #     onto the survivor, #7704) — but the surviving point's
-        #     `extractedFrom` PROPERTY becomes a LIST and `query(extractedFrom=…)`
-        #     matches that property by equality, so a folded survivor is not
-        #     returned by this read. A legitimate all-fold run: nothing NEW under
-        #     this source, so nothing to tier or propagate.
+        #     onto the survivor, #7704), but the survivor's `extractedFrom`
+        #     PROPERTY stays its OWN creating source (a scalar, deliberately
+        #     equality-matchable — #7704 review P1) and the folded set rides
+        #     `extractedFromAll`, so `query(extractedFrom=<this source>)` does not
+        #     return it. ⚠️ DEPENDS ON #10063: this branch is CORRECT only while
+        #     the population read is the equality property; a read over the
+        #     folded set would make an all-fold run report points, and this
+        #     `after == 0` arm would stop firing for it. A legitimate all-fold
+        #     run today: nothing NEW under this source, so nothing to tier or
+        #     propagate.
         #   * DRIFT — create_point calls succeeded, the SDK reported no folds, and
         #     the read-back still finds nothing (e.g. `extractedFrom` stopped
         #     being a queryable property). That must fail, never exit 0.

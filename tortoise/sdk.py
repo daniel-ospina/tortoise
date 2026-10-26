@@ -4794,9 +4794,15 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # (`sourceVersion`, `sourceVersions`, `sourceVersionTransit`): the plural
     # spelling is the natural caller guess (mirrors `extractedFrom`'s own
     # accepts-list/str shape) and must not slip through as an unknown prop.
+    # #7704: `extractedFromAll` joins them. It is the FOLD's own record of the
+    # ref set the fold wrote — `_upsert_point_edges` re-derives the
+    # `extractedFrom` edges from it on replay, so a caller-supplied value would
+    # put the SNAPSHOT'S edges ahead of the writes: live wires `extractedFrom`
+    # only, the replay wires the array too, and `derived = replay(journal)` goes
+    # false on a graph nobody folded.
     _source_version_keys = [k for k in
                             ("sourceVersion", "sourceVersions",
-                             "sourceVersionTransit")
+                             "sourceVersionTransit", "extractedFromAll")
                             if k in props]
     if _source_version_keys:
         raise ValueError(
@@ -18820,7 +18826,8 @@ class TortoiseSDK:
         # rather than a mid-write one, and it covers EVERY section, including the
         # ones that never reach `_sanitize_props` at all. Rejected on every
         # spelling.
-        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit"):
+        for _svk in ("sourceVersion", "sourceVersions", "sourceVersionTransit",
+                     "extractedFromAll"):
             # #7925 review round 5: the door depth, not the top level — a
             # single-wrapped `props: {"sourceVersion": …}` reached
             # `_sanitize_props` and raised after earlier items committed
@@ -27961,6 +27968,23 @@ class TortoiseSDK:
         compute, so attesting the active embedder would journal a false origin
         (``_write_capture_turns``' own marker, #5004).
 
+        **The property stays a SCALAR; the folded SET goes beside it (#7704
+        review P1).** ``extractedFrom`` is a query convenience matched by
+        EQUALITY (``sdk.query`` / ``paginated_query``: ``n.`extractedFrom` =
+        $extractedFrom``), and an ARRAY is not equality-matchable — so writing
+        the accumulated list there made the survivor invisible to that door for
+        EVERY source it carries, including the one it was created under
+        (measured: ``query(alpha)`` answered before the fold, ``[]`` after;
+        ``extract_turns.py``'s only population read and its ``STARTS WITH``
+        dump went with it). The property therefore keeps the survivor's OWN
+        creating source — the scalar it already held, unchanged by the fold —
+        and the full folded set rides ``extractedFromAll``: the read door keeps
+        answering, nothing a caller could match before becomes unmatchable, and
+        the EDGES stay authoritative either way (#3263). A survivor created
+        under ANOTHER source is still not returned for THIS source's ref — the
+        same answer ``origin/main`` gave, and the residual #10063 tracks; no
+        EQUALITY-query rewrite is made anywhere to paper over it.
+
         **Journal first (§17.1).** The record is the commit point of a live
         write. The snapshot is the full Point (``get_point`` + the accumulated
         refs), re-emitted as a ``PointAdded`` — the SAME shape the capture
@@ -28102,7 +28126,23 @@ class TortoiseSDK:
         new_pairs = _source_version_transit(versions) or []
         pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)
 
-        snapshot = {**existing, "extractedFrom": accumulated}
+        # The survivor's OWN creating source — the scalar the convenience
+        # property held before the fold, or (for a point born from a SEQUENCE,
+        # whose prop was already an unmatchable array) its first ref. This is
+        # what keeps `query(extractedFrom=…)` answering for the source the
+        # Point was created under; the folded SET is carried beside it.
+        _own = existing.get("extractedFrom")
+        if isinstance(_own, str) and _own.strip():
+            _primary_ref = _own
+        elif isinstance(_own, (list, tuple)):
+            _primary_ref = next(
+                (r for r in _own if isinstance(r, str) and r.strip()), None)
+        else:
+            _primary_ref = None
+        if _primary_ref is None:
+            _primary_ref = accumulated[0] if accumulated else None
+        snapshot = {**existing, "extractedFrom": _primary_ref,
+                    "extractedFromAll": accumulated}
         # #7704 review P1: the fold computes NO vector — `existing["embedding"]`
         # is the node's EXISTING one, read back through `get_point` — so this
         # re-emitted `PointAdded` must not attest an origin. `_emit_event`
@@ -28164,9 +28204,10 @@ class TortoiseSDK:
                 lambda: proj.g.query(
                     "MATCH (n:Point {id:$id}) "
                     "SET n.extractedFrom = $ref, "
+                    "    n.extractedFromAll = $all, "
                     "    n.sourceVersionTransit = $sv",
-                    params={"id": pid, "ref": accumulated,
-                            "sv": pairs or None}),
+                    params={"id": pid, "ref": _primary_ref,
+                            "all": accumulated, "sv": pairs or None}),
                 what="create_point dedup provenance prop",
             )
         _logger.info(

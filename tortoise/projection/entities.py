@@ -1033,6 +1033,23 @@ def _point_source_refs(extracted_from) -> list:
     return [r for r in refs if r]
 
 
+def _point_all_source_refs(p: dict) -> list:
+    """The Point's FULL held ref set for a journal payload (#7704).
+
+    A dedup fold keeps the convenience property a SCALAR (the survivor's own
+    creating source) and carries the folded set on ``extractedFromAll``, so the
+    writers that must see every ref — the ``#5256`` carrier filter and the edge
+    fold — read THIS, and a payload from before that split (no
+    ``extractedFromAll``) still reads its refs off ``extractedFrom``. Returning
+    the convenience refs as the fallback rather than ``[]`` is what keeps a
+    scalar-prop record whose carrier is intact from silently losing it.
+    """
+    all_refs = p.get("extractedFromAll")
+    if isinstance(all_refs, (list, tuple)) and all_refs:
+        return [r for r in all_refs if r]
+    return _point_source_refs(p.get("extractedFrom"))
+
+
 def _point_source_transit(p: dict):
     """#5256: the carrier to WRITE for a journal payload — the shape-validated
     ``sourceVersionTransit`` pairs, gated on the Point OWNING an
@@ -1059,7 +1076,7 @@ def _point_source_transit(p: dict):
     pairs = _valid_transit_pairs(p.get("sourceVersionTransit"))
     if pairs is None:
         return None
-    refs = _point_source_refs(p.get("extractedFrom"))
+    refs = _point_all_source_refs(p)
     if not refs:
         return None
     kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]
@@ -1611,7 +1628,8 @@ class _EntityHandlers:
         "direction_basis",
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
-        "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        "extractedFrom", "extractedFromAll", "is_episodic",
+        "_nid", "_graph_id",
         # #2897 (OD-4 disposition #3856: ADOPT — a Tag is first-class data by
         # construction: a SHARED, MERGEd node is data. The ontology specifies
         # an `:Object` subclass while the code creates a bare `:Tag`; that
@@ -2207,8 +2225,22 @@ class _EntityHandlers:
         # an earlier version of this comment said "the single-source case",
         # which wrongly implied one-element sequences collapse.)
         source_ref = p.get("extractedFrom")
+        # #7704: the folded ref SET, beside the convenience scalar — a LIST by
+        # contract, so it is written by an explicit clause here rather than by
+        # the open-set passthrough (`_POINT_LIST_PROPS` is deliberately EMPTY,
+        # and the list policy would drop it before the declared-key check).
+        all_refs = p.get("extractedFromAll")
+        _ef_clauses: list[str] = []
+        _ef_params: dict = {"id": p["id"]}
         if source_ref:
-            self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
+            _ef_clauses.append("n.extractedFrom = $ref")
+            _ef_params["ref"] = source_ref
+        if isinstance(all_refs, (list, tuple)) and all_refs:
+            _ef_clauses.append("n.extractedFromAll = $all")
+            _ef_params["all"] = list(all_refs)
+        if _ef_clauses:
+            self.g.query("MATCH (n:Point {id:$id}) SET " + ", ".join(_ef_clauses),
+                         params=_ef_params)
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
@@ -2361,7 +2393,7 @@ class _EntityHandlers:
         # `s.contentHash` (the Source may have advanced since live time). A
         # malformed/falsy payload contributes NO anchor rather than crashing
         # `dict(...)` or stamping a non-str value.
-        source_ref = p.get("extractedFrom")
+        source_ref = _point_all_source_refs(p) or None
         if source_ref:
             # The SHARED `_point_source_transit` selector: the all-or-nothing
             # `_valid_transit_pairs` shape check — a non-empty list of
