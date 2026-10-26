@@ -36,8 +36,8 @@ from __future__ import annotations
 import pytest
 
 from tortoise import cache_projection as cp
-from tortoise.log import EventLog
 from tortoise import record_projection as rp
+from tortoise.log import EventLog
 from tortoise.projection.entities import _EntityHandlers
 from tortoise.record_projection import (
     _RECORD_ONLY_KEYS,

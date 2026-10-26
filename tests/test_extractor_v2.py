@@ -3253,6 +3253,123 @@ class TestValueVerbSpan2684:
         assert "span_start" not in pt and "span_end" not in pt
         assert not any("carries no value" in w for w in r["warnings"])
 
+    def test_a_value_bearing_MINTED_endpoint_carries_the_span_or_says_it_cannot(
+            self):
+        """ACCEPTANCE, on the ONE emit site #2684 scoped but never gated: a
+        minted operator endpoint is a statement **Point**, so a value-bearing
+        one owes the same span-or-a-reported-absence as a model-emitted point.
+
+        Neither half held before. The mint pre-pass spent its resolver call into
+        a SCRATCH warnings list (the generic "no resolvable source turn" text
+        describes an emitted point losing its E3 anchor, not a mint, so it was
+        deliberately discarded) and never called ``_value_verbatim_span`` at
+        all — so a value-bearing endpoint that WAS verbatim-anchored carried
+        ``quote`` + ``source_turn_id`` and no address, and its band route
+        carried no address AND said nothing (that function's band warning needs
+        a non-empty quote, and the band route deliberately leaves the quote
+        empty). Both legs measured on the shipped code: no span, no warning.
+
+        The census cannot see this population — it reads the S2 receipts, and
+        minted endpoints are created in S5 — so its "0 silent absences" was
+        never a statement about them.
+        """
+        turn = "we cut latency by 20% last quarter and the team noticed"
+        edus = [{"index": 0, "role": "user", "text": turn}]
+
+        def mint(src):
+            embed = {"entities": [], "points": [], "events": [],
+                     "operators": [{"src": src, "dst": "the retro doc",
+                                    "op_type": "IMPL"}]}
+            r = v2.execute_embed(embed, {}, session_id="s1", edus=edus)
+            return r, {p["content"]: p for p in r["payload"]["points"]}[src]
+
+        # (a) verbatim-anchored and value-bearing -> a real address, re-readable
+        _r, pt = mint("cut latency by 20%")
+        addressed = turn[pt["span_start"]:pt["span_end"]]
+        assert addressed == "cut latency by 20%", pt
+        # NB: offset 0 is NOT degenerate here — `search_engine.py:1002-1003` says
+        # "``span_start == 0`` is a REAL address and must survive, so the gate is
+        # presence (``is not None``), never truthiness". So the invariant is a
+        # RANGE, never `> 0`: this fixture prepends "we " (span 3), and a turn
+        # that opens with the value legitimately stamps span (0, 18).
+        assert 0 <= pt["span_start"] < pt["span_end"] <= len(turn)
+        assert v2._carries_value(addressed)
+
+        # (b) band-resolved (not verbatim) -> no address, and the absence is
+        #     REPORTED rather than silent
+        r, pt = mint("cut latency 20%")
+        assert pt["source_turn_id"] == 0          # resolved by the band
+        assert "span_start" not in pt and "span_end" not in pt
+        assert any("value-bearing minted endpoint" in w and "no source span" in w
+                   for w in r["warnings"]), r["warnings"]
+
+        # (c) the value-free majority keeps its pre-change shape: a non
+        #     value-bearing endpoint mints no span and gains no *span-absence*
+        #     warning (its pre-change no-anchor warning stays — this endpoint
+        #     resolves to no turn, so it never reaches the report at all)
+        r, pt = mint("the retro cadence")
+        assert "span_start" not in pt and "span_end" not in pt
+        assert not any("minted endpoint" in w and "no source span" in w
+                       for w in r["warnings"]), r["warnings"]
+
+        # (d) …and so does a value-free endpoint on the BAND route, which is the
+        #     leg that pins the report's VALUE guard: (c)'s endpoint resolves to
+        #     NO turn, so it never reaches the mint site's report at all. Without
+        #     `_carries_value(content)` this one gains a false "value-bearing
+        #     minted endpoint … no source span" line — a fabricated absence in
+        #     exactly the stream the #2684 census counts as "reported".
+        #     Measured: patching `_carries_value` to True emits that line here.
+        band_turn = [{"index": 0, "role": "user",
+                      "text": "maybe try intervals for speed and cadence work"}]
+        free = "the team prefers intervals for speed and cadence work"
+        r = v2.execute_embed(
+            {"entities": [], "points": [], "events": [],
+             "operators": [{"src": free, "dst": "the retro doc",
+                            "op_type": "IMPL"}]},
+            {}, session_id="s1", edus=band_turn)
+        pt = {p["content"]: p for p in r["payload"]["points"]}[free]
+        assert not v2._carries_value(free)
+        assert pt["source_turn_id"] == 0 and pt["quote"] == ""   # the band route
+        assert "span_start" not in pt and "span_end" not in pt
+        assert not any("value-bearing minted endpoint" in w
+                       for w in r["warnings"]), r["warnings"]
+
+    def test_a_verbatim_minted_anchor_with_no_value_in_its_quote_keeps_ITS_class(
+            self):
+        """ONE absence, reported as the class that actually happened.
+
+        The mint site adds its absence text only when the shared gate reported
+        NOTHING — otherwise a verbatim anchor whose quoted text carries no
+        value (here: the value sits past the ``_MAX_QUOTE`` clamp, so the
+        quote is real but value-free) would be reported TWICE and the second
+        line would contradict the first: "resolved verbatim, but the quoted
+        text carries no value" followed by "without a verbatim anchor". The
+        two classes are deliberately distinct (#2684 Slice B) — re-anchoring
+        cannot repair the first, the clamp or the endpoint's length can — so
+        collapsing them sends a repairer to the wrong fix.
+        """
+        # A verbatim-anchored mint whose first _MAX_QUOTE chars hold no value;
+        # the value is in the tail, i.e. outside the quote that gets stamped.
+        content = ("we keep the retro notes short every single week "
+                   * 6).strip() + " so we cut latency by 20%"
+        turn = content[:v2._MAX_QUOTE] + " and the team noticed"
+        assert not v2._carries_value(content[:v2._MAX_QUOTE])
+        assert v2._carries_value(content)
+        edus = [{"index": 0, "role": "user", "text": turn}]
+        r = v2.execute_embed(
+            {"entities": [], "points": [], "events": [],
+             "operators": [{"src": content, "dst": "the retro doc",
+                            "op_type": "IMPL"}]},
+            {}, session_id="s1", edus=edus)
+        pt = {p["content"]: p for p in r["payload"]["points"]}[content]
+        assert "span_start" not in pt and "span_end" not in pt
+        absences = [w for w in r["warnings"]
+                    if "no source span" in w or "no verbatim anchor" in w]
+        assert len(absences) == 1, absences
+        assert "resolved verbatim in turn 0" in absences[0], absences[0]
+        assert not any("minted endpoint" in w and "no source span" in w
+                       for w in r["warnings"]), r["warnings"]
+
 
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 
