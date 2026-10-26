@@ -2,54 +2,58 @@
 """The approved-surface declaration is a GATE, not a comment (#4282 phase 1.1).
 
 WHAT IT CHECKS
-    `tortoise/__all__.py` declares three things, and this tool reconciles all three against
-    the live class, in **both directions** each:
+    `tortoise/__all__.py` declares the **40 approved SDK methods** and nothing else. This
+    tool reconciles that declaration against the two things it can be wrong about, in BOTH
+    directions each:
 
-      1. `__all__` — the **40 approved** SDK names, transcribed from
-         `docs/product/beta-sdk-surface.md` rows 1-40. Compared against that document, so
-         the declaration cannot be padded, reordered away from, or silently re-derived.
-      2. `APPROVED_PENDING` — approved names with no `def` on `TortoiseSDK` yet (the tracked
-         gaps). Must equal `approved − live`, exactly: a declared name that vanished and a
-         name that was quietly marked "pending" are different defects and are reported
-         differently.
-      3. `OFF_SURFACE` — the removal backlog: live public methods that are NOT approved.
-         Must equal `live − approved`, exactly. This is what makes an **ADDITION** visible.
+      1. THE OWNER'S DOCUMENT (`docs/product/beta-sdk-surface.md` rows 1-40) — the contract.
+         A name in `__all__` that the owner did not approve, or an approved name dropped
+         from `__all__`, is a CONTRACT violation. This must never be red; it is what makes
+         the declaration the owner's list rather than a re-derivation.
+      2. THE LIVE CLASS (`dir(TortoiseSDK)`, executed) — the migration gap.
+         * a public SDK method that is NOT in `__all__`  ->  an ADDITION or backlog that the
+           approved surface does not cover (149 - 40 = 109 today);
+         * a name in `__all__` with NO `def` on the class   ->  an approved method that does
+           not exist yet (30 today; `Tortoise` is the constructor and always resolves).
 
-WHY THE THIRD SET IS THE POINT (#10034)
-    A declaration of the 40 alone can only ever say "149 live vs 40 target, over target" —
-    which is true of a surface that is half-migrated and equally true of a surface somebody
-    added to yesterday. Nothing in that comparison can name an added method. Declaring the
-    backlog too makes the two observations distinct, and the gate names the offender:
+WHY BOTH DIRECTION-2 CHECKS FAIL, HONESTLY (#10034 rework)
+    An earlier draft of this gate carried two extra ledger blocks — an `OFF_SURFACE`
+    removal backlog and an `APPROVED_PENDING` gap list — inside `tortoise/__all__.py`, so
+    that a live-but-unapproved method could be *listed* and the run stayed green. That
+    defeated the purpose: the declaration then described **210 names** (40 approved + 30
+    pending + 140 backlog), the manifest was cut from `approved | backlog`, and "there is
+    a method I never approved" became indistinguishable from "there is a method the
+    migration has not removed yet" at the exact place the line has to be held. The
+    approved target has to be the 40 alone, and the gap has to be REPORTED, not absorbed.
 
-        live − approved − OFF_SURFACE  ->  an ADDITION that was not approved
-        OFF_SURFACE − (live − approved) ->  a removal that the ledger was not decremented for
+    So today this gate is RED — by design, with every offender named. That is the true
+    state of #4282: 40 approved, 149 live. It goes green when Phase 2 removes the surplus
+    and implements the 30 approved-but-absent methods, not before.
 
-    The backlog is a statement of what EXISTS off-target, not an approval and not a removal
-    decision. It may only SHRINK (`OFF_SURFACE_HIGH_WATER`).
-
-WHY THE PINS (#10034, and the reason both are needed)
-    `PENDING_HIGH_WATER` stops the cheapest bypass of all: deleting an approved method and
-    marking it "pending" satisfies the set equality above and would otherwise be green.
-    `OFF_SURFACE_HIGH_WATER` stops the other: adding a method and listing it in the backlog.
-    Both pins may only be LOWERED by a migration that lands; raising one is a deliberate,
-    reviewable act in an approving PR. Neither is derivable — they are ceilings on a
-    decision, which is the same construction `config/surface-manifest.yml`'s
-    `high_water_counts` already uses.
+WHAT RUNS IN REQUIRED CI (`check --contract-only`)
+    `tools/surface_manifest.py check` runs in the required `surface-guard` job and calls
+    the CONTRACT half only (`contract_problems`): the declaration must still be the
+    owner's exact 40. The gap is not silently dropped there — it is printed with its
+    counts, and it is red in this tool's full `check` and in `tools/surface-target-check.py`
+    (the compliance instrument, deliberately outside the required gate while the gap is
+    open — see that tool's docstring). A permanently red required job would just be a
+    permanently ignored one.
 
 WHAT IT IS NOT
-    Not an approval. A green run means the declaration, the document and the class agree —
-    it cannot tell an approved addition from an unapproved one, because both look like
-    "doc + declaration + code updated together". Daniel's approval is what carries the
-    approval (`docs/product/canonical-mcp-tools.md`); this is the invariant that makes the
-    surface change VISIBLE, and the reason it can no longer happen by accident.
+    Not an approval. A green run means the declaration is the owner's document; it cannot
+    tell an approved addition from an unapproved one, because both look like "doc +
+    declaration + code updated together". Daniel's approval is what carries the approval
+    (`docs/product/canonical-mcp-tools.md`); this gate makes a surface change VISIBLE.
 
 Usage:
-    uv run python tools/sdk_surface_declaration.py check
-    uv run python tools/sdk_surface_declaration.py check --declaration path/to/__all__.py
-    uv run python tools/sdk_surface_declaration.py show      # the three declared sets
+    uv run python tools/sdk_surface_declaration.py check                    # contract + gap (red today)
+    uv run python tools/sdk_surface_declaration.py check --contract-only    # the required-CI contract
+    uv run python tools/sdk_surface_declaration.py show                     # the declared sets
+    uv run python tools/sdk_surface_declaration.py baseline                 # re-render the baseline doc
+    uv run python tools/sdk_surface_declaration.py baseline --check         # is the baseline doc stale?
 
-Exit 0 = declaration, document and class agree.
-Exit 1 = they disagree, or the evidence cannot be read (a refusal, never a skip).
+Exit 0 = the check that was asked for holds. Exit 1 = it does not, or the evidence cannot be
+read (a refusal, never a skip).
 """
 
 from __future__ import annotations
@@ -75,6 +79,7 @@ sys.path.insert(0, str(ROOT))
 
 DECLARATION_FILE = ROOT / "tortoise" / "__all__.py"
 BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
+BASELINE_DOC = ROOT / "docs" / "product" / "sdk-surface-baseline.md"
 
 #: The name under which the SDK constructor is served. `beta-sdk-surface.md` row 1 is
 #: written `Tortoise(...)` — the class the caller constructs — while every other row is a
@@ -129,19 +134,22 @@ def approved_from_doc(path: Path | None = None) -> list[str]:
     names = [name for _, name in rows]
     if len(set(names)) != len(names):
         duplicates = sorted({n for n in names if names.count(n) > 1})
-        raise DeclarationUnreadable(
-            f"{path} lists a name more than once: {duplicates[:5]}"
-        )
+        raise DeclarationUnreadable(f"{path} lists a name more than once: {duplicates[:5]}")
     return names
 
 
 def load_declaration(path: Path | None = None) -> dict:
-    """Import the declaration module from a path, and return its three declared sets.
+    """Import the declaration module from a path, and return the declared set.
 
     Loaded by PATH, never as `import tortoise.__all__`: the package import binds the name
     `tortoise.__all__` to this module object, and a test (or a doctored copy) points the
     gate at a different file. Loading by path keeps the gate reading the evidence it was
     given.
+
+    The module must declare `__all__` and NOTHING ELSE that looks like a second surface.
+    The previous draft's `OFF_SURFACE` / `APPROVED_PENDING` blocks are refused by name
+    here rather than merely deleted: a re-introduction is the exact regression this gate
+    exists to catch, and an error that names the defect is cheaper than a review.
     """
     path = Path(path or DECLARATION_FILE)
     if not path.exists():
@@ -160,27 +168,21 @@ def load_declaration(path: Path | None = None) -> dict:
         raise DeclarationUnreadable(
             f"could not execute {path}: {type(exc).__name__}: {exc}"
         ) from exc
-    out = {}
-    for field in ("__all__", "APPROVED_PENDING", "OFF_SURFACE"):
-        value = getattr(module, field, None)
-        if not isinstance(value, (tuple, list)) or not all(
-            isinstance(n, str) for n in value
-        ):
+    for banned in ("OFF_SURFACE", "APPROVED_PENDING"):
+        if hasattr(module, banned):
             raise DeclarationUnreadable(
-                f"{path} does not declare `{field}` as a tuple/list of str "
-                f"(got {type(value).__name__})"
+                f"{path} declares `{banned}` — the declaration is the APPROVED 40 and may "
+                "not also carry a ledger of what exists (that would bless the surplus, "
+                "#10044). The baseline of what exists lives in "
+                f"{BASELINE_DOC.relative_to(ROOT)}."
             )
-        out[field] = list(value)
-    for field in ("PENDING_HIGH_WATER", "OFF_SURFACE_HIGH_WATER"):
-        value = getattr(module, field, None)
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise DeclarationUnreadable(
-                f"{path} does not declare `{field}` as an int (got {value!r}) — a ceiling "
-                "that cannot be read must not be treated as absent."
-            )
-        out[field] = value
-    out["path"] = path
-    return out
+    value = getattr(module, "__all__", None)
+    if not isinstance(value, (tuple, list)) or not all(isinstance(n, str) for n in value):
+        raise DeclarationUnreadable(
+            f"{path} does not declare `__all__` as a tuple/list of str "
+            f"(got {type(value).__name__})"
+        )
+    return {"__all__": list(value), "path": path}
 
 
 def measure_live() -> set[str]:
@@ -203,35 +205,20 @@ def resolves(name: str, live: set[str]) -> bool:
     return name in live or name == CONSTRUCTOR
 
 
-def problems(
-    declared: list[str],
-    pending: list[str],
-    off_surface: list[str],
-    live: set[str],
-    doc_names: list[str],
-    pending_high_water: int,
-    off_surface_high_water: int,
-) -> list[str]:
-    """Every way the declaration, the document and the class can disagree.
+def duplicates(names: list[str]) -> list[str]:
+    return sorted({n for n in names if names.count(n) > 1})
 
-    Pure, so the three verdicts (an addition, a vanished declared method, a no-op) are
-    exercised against the REAL declaration with one injected difference, instead of each
-    test rehearsing a whole copy of the artifact.
+
+def contract_problems(declared: list[str], doc_names: list[str]) -> list[str]:
+    """The declaration IS the owner's list — the part that must never be red.
+
+    Both directions: a name added here is an unapproved surface change; a name missing here
+    is an approved method the declaration dropped.
     """
     found: list[str] = []
-
-    for label, names in (
-        ("__all__", declared),
-        ("APPROVED_PENDING", pending),
-        ("OFF_SURFACE", off_surface),
-    ):
-        duplicates = sorted({n for n in names if names.count(n) > 1})
-        if duplicates:
-            found.append(f"{label} lists a name more than once: {duplicates[:8]}")
-
-    # 1. The declaration IS the owner's list. Both directions: a name added here is an
-    #    unapproved surface change; a name missing here is an approved method the
-    #    declaration has dropped.
+    dup = duplicates(declared)
+    if dup:
+        found.append(f"__all__ lists a name more than once: {dup[:8]}")
     declared_set = set(declared)
     doc_set = set(doc_names)
     for name in sorted(declared_set - doc_set):
@@ -244,101 +231,127 @@ def problems(
             f"{name}: approved in {BETA_DOC.name} but MISSING from __all__ — the "
             "declaration dropped an approved method"
         )
+    return found
 
-    # 2. Status is MEASURED, never claimed: `APPROVED_PENDING` is exactly the approved
-    #    names that do not resolve on the class today.
-    live_declared = {n for n in declared_set if resolves(n, live)}
-    absent_declared = declared_set - live_declared
-    pending_set = set(pending)
-    for name in sorted(absent_declared - pending_set):
-        found.append(
-            f"{name}: declared in __all__ and NOT listed in APPROVED_PENDING, but it does "
-            "not exist on TortoiseSDK — an approved method may not vanish"
-        )
-    for name in sorted(pending_set & live_declared):
-        found.append(
-            f"{name}: listed in APPROVED_PENDING but it DOES exist on TortoiseSDK — move it "
-            "out of the gap list in the same change that implements it"
-        )
-    for name in sorted(pending_set - declared_set):
-        found.append(
-            f"{name}: listed in APPROVED_PENDING but it is not on the approved surface at "
-            "all — the gap list may only draw from __all__"
-        )
 
-    # 3. The backlog is exactly `live − approved`, both directions. This is the rule that
-    #    makes an ADDITION nameable and forces the ledger to be decremented on a removal.
-    off_set = set(off_surface)
-    expected_off = live - declared_set
-    for name in sorted(expected_off - off_set):
-        found.append(
-            f"{name}: PUBLIC on TortoiseSDK but on neither the approved surface nor the "
-            "off-surface backlog — an addition needs Daniel's approval BEFORE it lands "
-            "(AGENTS.md -> MCP/SDK Surface Approval)"
-        )
-    for name in sorted(off_set - expected_off):
-        found.append(
-            f"{name}: listed in OFF_SURFACE but it is not a live off-surface method — "
-            "delete the entry (the backlog records what exists, and it may only shrink)"
-        )
+def gap_problems(declared: list[str], live: set[str]) -> list[str]:
+    """The migration gap, in both directions — red until Phase 2 closes it.
 
-    # 4. The pins. Both sets may only shrink, so neither can absorb the other's defect.
-    if len(pending_set) > pending_high_water:
+    This is the check whose absence let the earlier draft look green: a live public method
+    the owner never approved must FAIL and be NAMED, and an approved method with no `def`
+    on the class must FAIL and be NAMED.
+    """
+    found: list[str] = []
+    declared_set = set(declared)
+    for name in sorted(live - declared_set):
         found.append(
-            f"APPROVED_PENDING grew to {len(pending_set)} (high-water "
-            f"{pending_high_water}) — an approved method cannot be turned into a gap; "
-            "removing one is a surface change that needs Daniel's approval"
+            f"TortoiseSDK.{name}: PUBLIC on TortoiseSDK but NOT on the approved surface — "
+            "either it is migration backlog (Phase 2 removes it) or it is an addition, and "
+            "an addition needs Daniel's approval BEFORE it lands (AGENTS.md -> MCP/SDK "
+            "Surface Approval)"
         )
-    if len(off_set) > off_surface_high_water:
+    for name in sorted(declared_set - {n for n in declared_set if resolves(n, live)}):
         found.append(
-            f"OFF_SURFACE grew to {len(off_set)} (high-water {off_surface_high_water}) — "
-            "the backlog may only shrink; an addition cannot be absorbed by listing it here"
+            f"{name}: approved and declared but it does NOT exist on TortoiseSDK — an "
+            "approved method may not be absent; implement it (Phase 2) or reopen the "
+            "approval, never drop it from the declaration"
         )
     return found
+
+
+def problems(declared: list[str], live: set[str], doc_names: list[str]) -> list[str]:
+    """Every way the declaration, the document and the class can disagree. Pure."""
+    return contract_problems(declared, doc_names) + gap_problems(declared, live)
 
 
 def check(
     declaration_path: Path | None = None,
     doc_path: Path | None = None,
     live: set[str] | None = None,
+    *,
+    contract_only: bool = False,
 ) -> list[str]:
     """Read the evidence and return every problem (empty = clean)."""
     declaration = load_declaration(declaration_path)
     doc_names = approved_from_doc(doc_path)
+    found = contract_problems(declaration["__all__"], doc_names)
+    if contract_only:
+        return found
     if live is None:
         live = measure_live()
-    return problems(
-        declared=declaration["__all__"],
-        pending=declaration["APPROVED_PENDING"],
-        off_surface=declaration["OFF_SURFACE"],
-        live=live,
-        doc_names=doc_names,
-        pending_high_water=declaration["PENDING_HIGH_WATER"],
-        off_surface_high_water=declaration["OFF_SURFACE_HIGH_WATER"],
-    )
+    return found + gap_problems(declaration["__all__"], live)
 
 
-def declared_live_methods(declaration_path: Path | None = None) -> set[str]:
-    """The declared LIVE public method set — `approved ∩ live` plus the backlog.
+def rendered_baseline(
+    declared: list[str] | None = None, live: set[str] | None = None
+) -> str:
+    """The baseline-of-what-exists document, rendered from a measurement.
 
-    This is what `tools/surface_manifest.py cut` derives the manifest's `sdk:` rows from,
-    so the frozen baseline is cut FROM the declaration rather than from a bare `dir()`.
-    Names that are declared but do not exist are not invented here: `cut` refuses when this
-    set disagrees with the class (see `check`).
+    This is the artifact the previous draft folded into `tortoise/__all__.py`. It is a
+    SEPARATE, generated document on purpose: it describes today, it is not an approval, and
+    it may only shrink.
     """
-    declaration = load_declaration(declaration_path)
-    return (set(declaration["__all__"]) | set(declaration["OFF_SURFACE"])) & measure_live()
+    declared = list(declared if declared is not None else load_declaration()["__all__"])
+    live = set(live if live is not None else measure_live())
+    approved_live = sorted(n for n in declared if resolves(n, live))
+    approved_absent = sorted(n for n in declared if not resolves(n, live))
+    backlog = sorted(live - set(declared))
+    lines = [
+        "# SDK surface baseline — what exists today, NOT the target",
+        "",
+        "**GENERATED** by `tools/sdk_surface_declaration.py baseline` (tortoise #4282 Phase",
+        "0.4/1.1). Never edit by hand — `baseline --check` reds if this file is stale.",
+        "",
+        "> ⚠️ **This is a baseline, not an approval, and not a second declaration.** It records",
+        "> the public SDK surface as it exists today so the gap to the owner's target can be",
+        "> tracked while #4282 Phase 2 removes it. The **approved target is",
+        "> `tortoise/__all__.py`** — 40 methods, owner ruling 2026-09-21",
+        "> (`docs/product/beta-sdk-surface.md`, approval record in",
+        "> `docs/product/canonical-mcp-tools.md`). Nothing is approved by being listed here.",
+        "> **This list may only SHRINK.**",
+        "",
+        "| measured | count |",
+        "|---|---|",
+        f"| approved methods (the target) | {len(declared)} |",
+        f"| live public methods on `TortoiseSDK` | {len(live)} |",
+        f"| approved and implemented (incl. the `Tortoise` constructor) | {len(approved_live)} |",
+        f"| approved but not implemented yet | {len(approved_absent)} |",
+        f"| live and NOT approved (migration backlog) | {len(backlog)} |",
+        "",
+        "## Approved but not implemented yet",
+        "",
+        "The owner approved these; no `def` exists on `TortoiseSDK` under the canonical name.",
+        "Phase 2 implements them.",
+        "",
+    ]
+    lines += [f"- `{name}`" for name in approved_absent] or ["*(none)*"]
+    lines += [
+        "",
+        "## Live and NOT approved — the migration backlog",
+        "",
+        "Public on `TortoiseSDK` today, absent from the approved 40. Phase 2 removes them;",
+        "the count above is the honest measure of the gap.",
+        "",
+    ]
+    lines += [f"- `{name}`" for name in backlog] or ["*(none)*"]
+    lines.append("")
+    return "\n".join(lines)
 
 
 def cmd_check(args: argparse.Namespace) -> int:
     try:
-        found = check(args.declaration, args.doc)
+        found = check(args.declaration, args.doc, contract_only=args.contract_only)
     except DeclarationUnreadable as exc:
         print(f"::error::{exc}")
         print(f"REFUSED {exc}")
         return 1
+    declared = load_declaration(args.declaration)["__all__"]
     if found:
-        print("::error::the declared SDK surface, the approved document and the class disagree")
+        print(
+            "::error::the declared SDK surface, the approved document and the class disagree"
+            if not args.contract_only
+            else "::error::the declaration is not the owner's approved list"
+        )
         for problem in found:
             print(f"FAIL {problem}")
         print(
@@ -347,9 +360,30 @@ def cmd_check(args: argparse.Namespace) -> int:
             "Daniel's approval FIRST (AGENTS.md -> MCP/SDK Surface Approval)."
         )
         return 1
+    try:
+        live = measure_live()
+    except DeclarationUnreadable as exc:
+        print(f"::error::{exc}")
+        print(f"REFUSED {exc}")
+        return 1
+    if args.contract_only:
+        print(
+            f"OK CONTRACT — the declaration is the owner's {len(declared)} approved methods, "
+            "unchanged."
+        )
+        # The gap is PRINTED even in contract mode so a green required job can never read
+        # as "the surface is on target".
+        over = sorted(live - set(declared))
+        absent = sorted(n for n in declared if not resolves(n, live))
+        print(
+            f"GAP (expected until #4282 Phase 2) — {len(over)} live method(s) off the approved "
+            f"surface, {len(absent)} approved method(s) not implemented. Full red: "
+            "`uv run python tools/sdk_surface_declaration.py check`."
+        )
+        return 0
     print(
-        "OK — 40 approved methods declared, the gap list and the removal backlog match the "
-        "live class."
+        f"OK — the declaration is the owner's {len(declared)} approved methods, and the live "
+        f"class matches it exactly ({len(live)} public methods)."
     )
     return 0
 
@@ -363,12 +397,39 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(f"REFUSED {exc}")
         return 1
     approved_live = sorted(n for n in declaration["__all__"] if resolves(n, live))
+    absent = [n for n in declaration["__all__"] if not resolves(n, live)]
     print(f"declaration: {declaration['path']}")
     print(f"  __all__             {len(declaration['__all__'])} approved (doc says {len(doc_names)})")
     print(f"  implemented today   {len(approved_live)}: {approved_live}")
-    print(f"  APPROVED_PENDING    {len(declaration['APPROVED_PENDING'])} tracked gap(s)")
-    print(f"  OFF_SURFACE         {len(declaration['OFF_SURFACE'])} off-target method(s)")
+    print(f"  approved, absent    {len(absent)}")
+    print(f"  live off-surface    {len(live - set(declaration['__all__']))}")
     print(f"  live on TortoiseSDK {len(live)}")
+    return 0
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:
+    try:
+        text = rendered_baseline()
+    except DeclarationUnreadable as exc:
+        print(f"::error::{exc}")
+        print(f"REFUSED {exc}")
+        return 1
+    if args.check:
+        try:
+            committed = Path(args.doc_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"::error::could not read {args.doc_file}: {exc}")
+            return 1
+        if committed != text:
+            print(
+                f"FAIL {args.doc_file} is STALE — it does not match the measurement. Re-render "
+                "it with `uv run python tools/sdk_surface_declaration.py baseline`."
+            )
+            return 1
+        print(f"OK — {args.doc_file} matches the measured surface.")
+        return 0
+    Path(args.doc_file).write_text(text, encoding="utf-8")
+    print(f"wrote {args.doc_file}")
     return 0
 
 
@@ -380,7 +441,17 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--declaration", default=None)
         p.add_argument("--doc", default=None)
+        if name == "check":
+            p.add_argument(
+                "--contract-only",
+                action="store_true",
+                help="check only that the declaration is the owner's list (the required-CI half)",
+            )
         p.set_defaults(func=func)
+    b = sub.add_parser("baseline", help="render the baseline-of-what-exists document")
+    b.add_argument("--doc-file", default=str(BASELINE_DOC))
+    b.add_argument("--check", action="store_true", help="verify the committed file is not stale")
+    b.set_defaults(func=cmd_baseline)
     args = parser.parse_args(argv[1:])
     return args.func(args)
 

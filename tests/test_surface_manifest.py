@@ -3445,17 +3445,13 @@ def _write_declaration_fixture(path: Path, *, count: int) -> Path:
     """A stand-in `tortoise/__all__.py` carrying `count` approved names (#10034).
 
     The SDK leg of the target is read from the DECLARATION, so a test that moves the target
-    has to move it where the target now lives. Only `__all__`'s length matters to
-    `read_targets`; the other blocks are present so the module is the real shape.
+    has to move it where the target now lives. The module is the real shape: `__all__` and
+    nothing else (#10044 — a second ledger is refused by `load_declaration`).
     """
     names = tuple(f"approved_method_{i}" for i in range(count))
     path.write_text(
         "from __future__ import annotations\n"
-        f"__all__ = {names!r}\n"
-        "APPROVED_PENDING = __all__\n"
-        "OFF_SURFACE = ()\n"
-        "PENDING_HIGH_WATER = 999\n"
-        "OFF_SURFACE_HIGH_WATER = 0\n",
+        f"__all__ = {names!r}\n",
         encoding="utf-8",
     )
     return path

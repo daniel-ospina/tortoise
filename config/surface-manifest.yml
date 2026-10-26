@@ -1,5 +1,12 @@
 # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.
 #
+# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today (149)
+# because the required `surface-guard` job compares the live class against them and is run
+# from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The
+# APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row
+# with `approved: false` is migration backlog, not consent. An unapproved addition reds
+# `tools/sdk_surface_declaration.py check` and the `approved` flag on a re-cut row.
+#
 # The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by
 # `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.
 # Do not hand-edit the four values: `check` compares them against the document, so a
@@ -21,7 +28,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 73d110a2f5fe03b07203459e594b9880644def8b
+cut_at_commit: a792ea1923134d9f4ac4a551b976e5f328763441
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -2838,6 +2845,7 @@ rows:
   cluster_canonical: null
 - name: sdk:annotate_ask_hits
   method: annotate_ask_hits
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -2860,6 +2868,7 @@ rows:
   class: internal
 - name: sdk:annotate_operator
   method: annotate_operator
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -2882,6 +2891,7 @@ rows:
   class: agent-reachable
 - name: sdk:apikey_create
   method: apikey_create
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -2904,6 +2914,7 @@ rows:
   class: agent-reachable
 - name: sdk:apikey_list
   method: apikey_list
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -2926,6 +2937,7 @@ rows:
   class: no-caller-found
 - name: sdk:apikey_revoke
   method: apikey_revoke
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -2948,6 +2960,7 @@ rows:
   class: control-plane
 - name: sdk:apikey_verify
   method: apikey_verify
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -2970,6 +2983,7 @@ rows:
   class: internal
 - name: sdk:approve_merge
   method: approve_merge
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -2992,6 +3006,7 @@ rows:
   class: agent-reachable
 - name: sdk:assess_source
   method: assess_source
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3014,6 +3029,7 @@ rows:
   class: agent-reachable
 - name: sdk:audit
   method: audit
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3036,6 +3052,7 @@ rows:
   class: agent-reachable
 - name: sdk:backfill_about_entities
   method: backfill_about_entities
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3058,6 +3075,7 @@ rows:
   class: no-caller-found
 - name: sdk:backfill_sources
   method: backfill_sources
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3080,6 +3098,7 @@ rows:
   class: no-caller-found
 - name: sdk:backfill_v25
   method: backfill_v25
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3102,6 +3121,7 @@ rows:
   class: agent-reachable
 - name: sdk:batch_create_points
   method: batch_create_points
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3124,6 +3144,7 @@ rows:
   class: no-caller-found
 - name: sdk:belief_timeline
   method: belief_timeline
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3146,6 +3167,7 @@ rows:
   class: agent-reachable
 - name: sdk:calibrate_summary
   method: calibrate_summary
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3168,6 +3190,7 @@ rows:
   class: agent-reachable
 - name: sdk:calibration_passed
   method: calibration_passed
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3190,6 +3213,7 @@ rows:
   class: internal
 - name: sdk:capture_session
   method: capture_session
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3212,6 +3236,7 @@ rows:
   class: internal
 - name: sdk:check_structure
   method: check_structure
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3234,6 +3259,7 @@ rows:
   class: agent-reachable
 - name: sdk:checkpoint
   method: checkpoint
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3256,6 +3282,7 @@ rows:
   class: agent-reachable
 - name: sdk:cleanup_expired_invitations
   method: cleanup_expired_invitations
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3278,6 +3305,7 @@ rows:
   class: no-caller-found
 - name: sdk:close
   method: close
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -3301,6 +3329,7 @@ rows:
   class: agent-reachable
 - name: sdk:commit_session
   method: commit_session
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3323,6 +3352,7 @@ rows:
   class: no-caller-found
 - name: sdk:complete_source
   method: complete_source
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3345,6 +3375,7 @@ rows:
   class: no-caller-found
 - name: sdk:compute_confidence
   method: compute_confidence
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3367,6 +3398,7 @@ rows:
   class: agent-reachable
 - name: sdk:compute_reputation
   method: compute_reputation
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3389,6 +3421,7 @@ rows:
   class: internal
 - name: sdk:create_derivation
   method: create_derivation
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3411,6 +3444,7 @@ rows:
   class: no-caller-found
 - name: sdk:create_direct_edge
   method: create_direct_edge
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3433,6 +3467,7 @@ rows:
   class: internal
 - name: sdk:create_document
   method: create_document
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3455,6 +3490,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_edge
   method: create_edge
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3477,6 +3513,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_entity
   method: create_entity
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -3499,6 +3536,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_event
   method: create_event
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3521,6 +3559,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_object
   method: create_object
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3543,6 +3582,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_operator
   method: create_operator
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3565,6 +3605,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_or_update_point
   method: create_or_update_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3587,6 +3628,7 @@ rows:
   class: no-caller-found
 - name: sdk:create_point
   method: create_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3609,6 +3651,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_source
   method: create_source
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3631,6 +3674,7 @@ rows:
   class: agent-reachable
 - name: sdk:create_subject
   method: create_subject
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3653,6 +3697,7 @@ rows:
   class: agent-reachable
 - name: sdk:delete
   method: delete
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3675,6 +3720,7 @@ rows:
   class: agent-reachable
 - name: sdk:delete_entity
   method: delete_entity
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3697,6 +3743,7 @@ rows:
   class: agent-reachable
 - name: sdk:delete_point
   method: delete_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3719,6 +3766,7 @@ rows:
   class: internal
 - name: sdk:delete_point_wrapped
   method: delete_point_wrapped
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3741,6 +3789,7 @@ rows:
   class: agent-reachable
 - name: sdk:diary_read
   method: diary_read
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3763,6 +3812,7 @@ rows:
   class: agent-reachable
 - name: sdk:diary_write
   method: diary_write
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3785,6 +3835,7 @@ rows:
   class: agent-reachable
 - name: sdk:dream
   method: dream
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3807,6 +3858,7 @@ rows:
   class: agent-reachable
 - name: sdk:dream_health_check
   method: dream_health_check
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3829,6 +3881,7 @@ rows:
   class: agent-reachable
 - name: sdk:dream_health_state
   method: dream_health_state
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3851,6 +3904,7 @@ rows:
   class: internal
 - name: sdk:expand_relationships
   method: expand_relationships
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3873,6 +3927,7 @@ rows:
   class: agent-reachable
 - name: sdk:file_decision
   method: file_decision
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3895,6 +3950,7 @@ rows:
   class: agent-reachable
 - name: sdk:file_human_approval
   method: file_human_approval
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3917,6 +3973,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_confidence
   method: get_confidence
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3939,6 +3996,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_cross_lens_candidates
   method: get_cross_lens_candidates
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -3961,6 +4019,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_entity
   method: get_entity
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -3983,6 +4042,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_events
   method: get_events
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4005,6 +4065,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_historical_knowledge
   method: get_historical_knowledge
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -4027,6 +4088,7 @@ rows:
   class: no-caller-found
 - name: sdk:get_org_structure
   method: get_org_structure
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4049,6 +4111,7 @@ rows:
   class: no-caller-found
 - name: sdk:get_owned_entities
   method: get_owned_entities
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4071,6 +4134,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_point
   method: get_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4094,6 +4158,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_provenance_chain
   method: get_provenance_chain
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4116,6 +4181,7 @@ rows:
   class: no-caller-found
 - name: sdk:get_session
   method: get_session
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4138,6 +4204,7 @@ rows:
   class: agent-reachable
 - name: sdk:get_source_reliability
   method: get_source_reliability
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4160,6 +4227,7 @@ rows:
   class: agent-reachable
 - name: sdk:graph_active_key_count
   method: graph_active_key_count
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4182,6 +4250,7 @@ rows:
   class: no-caller-found
 - name: sdk:graph_count
   method: graph_count
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4204,6 +4273,7 @@ rows:
   class: no-caller-found
 - name: sdk:graph_delete
   method: graph_delete
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4226,6 +4296,7 @@ rows:
   class: control-plane
 - name: sdk:graph_key_ids
   method: graph_key_ids
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4248,6 +4319,7 @@ rows:
   class: no-caller-found
 - name: sdk:index_directory
   method: index_directory
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4270,6 +4342,7 @@ rows:
   class: agent-reachable
 - name: sdk:index_file
   method: index_file
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4292,6 +4365,7 @@ rows:
   class: no-caller-found
 - name: sdk:index_sessions
   method: index_sessions
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4314,6 +4388,7 @@ rows:
   class: agent-reachable
 - name: sdk:ingest
   method: ingest
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4336,6 +4411,7 @@ rows:
   class: agent-reachable
 - name: sdk:ingest_corpus
   method: ingest_corpus
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4358,6 +4434,7 @@ rows:
   class: agent-reachable
 - name: sdk:invalidate_point
   method: invalidate_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4380,6 +4457,7 @@ rows:
   class: agent-reachable
 - name: sdk:invitation_accept
   method: invitation_accept
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4402,6 +4480,7 @@ rows:
   class: no-caller-found
 - name: sdk:invitation_create
   method: invitation_create
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4424,6 +4503,7 @@ rows:
   class: no-caller-found
 - name: sdk:invitation_get_by_id
   method: invitation_get_by_id
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4446,6 +4526,7 @@ rows:
   class: internal
 - name: sdk:invitation_get_by_token
   method: invitation_get_by_token
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4468,6 +4549,7 @@ rows:
   class: no-caller-found
 - name: sdk:invitation_list
   method: invitation_list
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4490,6 +4572,7 @@ rows:
   class: no-caller-found
 - name: sdk:invitation_revoke
   method: invitation_revoke
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4512,6 +4595,7 @@ rows:
   class: no-caller-found
 - name: sdk:issue_insight
   method: issue_insight
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4534,6 +4618,7 @@ rows:
   class: agent-reachable
 - name: sdk:link_source_to_entity
   method: link_source_to_entity
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4556,6 +4641,7 @@ rows:
   class: internal
 - name: sdk:list_batch
   method: list_batch
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4578,6 +4664,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_batches
   method: list_batches
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4600,6 +4687,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_dedup_candidates
   method: list_dedup_candidates
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4622,6 +4710,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_drafts
   method: list_drafts
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4644,6 +4733,7 @@ rows:
   class: no-caller-found
 - name: sdk:list_graphs
   method: list_graphs
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4666,6 +4756,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_memory_graphs
   method: list_memory_graphs
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -4688,6 +4779,7 @@ rows:
   class: internal
 - name: sdk:list_namespaces
   method: list_namespaces
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4710,6 +4802,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_pointkinds
   method: list_pointkinds
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4732,6 +4825,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_relations
   method: list_relations
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4754,6 +4848,7 @@ rows:
   class: internal
 - name: sdk:list_sources
   method: list_sources
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4776,6 +4871,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_tags
   method: list_tags
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4798,6 +4894,7 @@ rows:
   class: agent-reachable
 - name: sdk:list_topics
   method: list_topics
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4820,6 +4917,7 @@ rows:
   class: agent-reachable
 - name: sdk:membership_create
   method: membership_create
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4842,6 +4940,7 @@ rows:
   class: internal
 - name: sdk:membership_delete
   method: membership_delete
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4864,6 +4963,7 @@ rows:
   class: no-caller-found
 - name: sdk:membership_get
   method: membership_get
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4886,6 +4986,7 @@ rows:
   class: internal
 - name: sdk:membership_list
   method: membership_list
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4908,6 +5009,7 @@ rows:
   class: no-caller-found
 - name: sdk:membership_update_role
   method: membership_update_role
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4930,6 +5032,7 @@ rows:
   class: no-caller-found
 - name: sdk:migrate_orgs_to_registry
   method: migrate_orgs_to_registry
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4952,6 +5055,7 @@ rows:
   class: no-caller-found
 - name: sdk:mine_corpus
   method: mine_corpus
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4974,6 +5078,7 @@ rows:
   class: agent-reachable
 - name: sdk:mitigate_operator
   method: mitigate_operator
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -4996,6 +5101,7 @@ rows:
   class: agent-reachable
 - name: sdk:operator_action
   method: operator_action
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5018,6 +5124,7 @@ rows:
   class: no-caller-found
 - name: sdk:org_create
   method: org_create
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5040,6 +5147,7 @@ rows:
   class: agent-reachable
 - name: sdk:org_delete
   method: org_delete
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5062,6 +5170,7 @@ rows:
   class: no-caller-found
 - name: sdk:org_get
   method: org_get
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5084,6 +5193,7 @@ rows:
   class: internal
 - name: sdk:org_list
   method: org_list
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5106,6 +5216,7 @@ rows:
   class: no-caller-found
 - name: sdk:org_update
   method: org_update
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5128,6 +5239,7 @@ rows:
   class: no-caller-found
 - name: sdk:paginated_query
   method: paginated_query
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5150,6 +5262,7 @@ rows:
   class: agent-reachable
 - name: sdk:poll_events
   method: poll_events
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -5172,6 +5285,7 @@ rows:
   class: agent-reachable
 - name: sdk:promote_point
   method: promote_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5194,6 +5308,7 @@ rows:
   class: agent-reachable
 - name: sdk:provenance
   method: provenance
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5216,6 +5331,7 @@ rows:
   class: agent-reachable
 - name: sdk:quarantine_batch
   method: quarantine_batch
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5238,6 +5354,7 @@ rows:
   class: internal
 - name: sdk:query
   method: query
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5260,6 +5377,7 @@ rows:
   class: agent-reachable
 - name: sdk:query_points_by_tag
   method: query_points_by_tag
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5282,6 +5400,7 @@ rows:
   class: agent-reachable
 - name: sdk:recall_gaps
   method: recall_gaps
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5304,6 +5423,7 @@ rows:
   class: agent-reachable
 - name: sdk:recall_state
   method: recall_state
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5326,6 +5446,7 @@ rows:
   class: agent-reachable
 - name: sdk:recall_subgraph
   method: recall_subgraph
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5348,6 +5469,7 @@ rows:
   class: agent-reachable
 - name: sdk:reconcile_sessions
   method: reconcile_sessions
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5370,6 +5492,7 @@ rows:
   class: agent-reachable
 - name: sdk:record_calibration
   method: record_calibration
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5392,6 +5515,7 @@ rows:
   class: no-caller-found
 - name: sdk:resolve_id
   method: resolve_id
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5414,6 +5538,7 @@ rows:
   class: internal
 - name: sdk:restore_memory_graph
   method: restore_memory_graph
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -5436,6 +5561,7 @@ rows:
   class: no-caller-found
 - name: sdk:retract_point
   method: retract_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5458,6 +5584,7 @@ rows:
   class: agent-reachable
 - name: sdk:retrieval_legs
   method: retrieval_legs
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5480,6 +5607,7 @@ rows:
   class: no-caller-found
 - name: sdk:review_connections
   method: review_connections
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5502,6 +5630,7 @@ rows:
   class: agent-reachable
 - name: sdk:search_sessions
   method: search_sessions
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5524,6 +5653,7 @@ rows:
   class: agent-reachable
 - name: sdk:session_context
   method: session_context
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5546,6 +5676,7 @@ rows:
   class: agent-reachable
 - name: sdk:session_index_health
   method: session_index_health
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5568,6 +5699,7 @@ rows:
   class: agent-reachable
 - name: sdk:set_point_baseline
   method: set_point_baseline
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5590,6 +5722,7 @@ rows:
   class: agent-reachable
 - name: sdk:set_source_tier
   method: set_source_tier
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5612,6 +5745,7 @@ rows:
   class: agent-reachable
 - name: sdk:signup_token_lookup
   method: signup_token_lookup
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5634,6 +5768,7 @@ rows:
   class: internal
 - name: sdk:signup_token_recover
   method: signup_token_recover
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5656,6 +5791,7 @@ rows:
   class: no-caller-found
 - name: sdk:signup_token_revoke
   method: signup_token_revoke
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5678,6 +5814,7 @@ rows:
   class: no-caller-found
 - name: sdk:stale_points
   method: stale_points
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5700,6 +5837,7 @@ rows:
   class: agent-reachable
 - name: sdk:status
   method: status
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5722,6 +5860,7 @@ rows:
   class: agent-reachable
 - name: sdk:suggest_entry_points
   method: suggest_entry_points
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5744,6 +5883,7 @@ rows:
   class: agent-reachable
 - name: sdk:summarize_structure
   method: summarize_structure
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5766,6 +5906,7 @@ rows:
   class: agent-reachable
 - name: sdk:supersede
   method: supersede
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5788,6 +5929,7 @@ rows:
   class: agent-reachable
 - name: sdk:supersede_point
   method: supersede_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5810,6 +5952,7 @@ rows:
   class: internal
 - name: sdk:sweep_invite_ghost_memberships
   method: sweep_invite_ghost_memberships
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5832,6 +5975,7 @@ rows:
   class: internal
 - name: sdk:taxonomy
   method: taxonomy
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5854,6 +5998,7 @@ rows:
   class: agent-reachable
 - name: sdk:test_guard
   method: test_guard
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5876,6 +6021,7 @@ rows:
   class: no-caller-found
 - name: sdk:topic_summarize
   method: topic_summarize
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5898,6 +6044,7 @@ rows:
   class: internal
 - name: sdk:tortoise_fts_query
   method: tortoise_fts_query
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5920,6 +6067,7 @@ rows:
   class: agent-reachable
 - name: sdk:trash_graphs
   method: trash_graphs
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5942,6 +6090,7 @@ rows:
   class: no-caller-found
 - name: sdk:traverse
   method: traverse
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5964,6 +6113,7 @@ rows:
   class: no-caller-found
 - name: sdk:ulid
   method: ulid
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -5986,6 +6136,7 @@ rows:
   class: internal
 - name: sdk:update
   method: update
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -6008,6 +6159,7 @@ rows:
   class: agent-reachable
 - name: sdk:update_entity
   method: update_entity
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -6030,6 +6182,7 @@ rows:
   class: agent-reachable
 - name: sdk:update_memory_graph
   method: update_memory_graph
+  approved: true
   family: null
   family_rank: null
   served: sdk
@@ -6052,6 +6205,7 @@ rows:
   class: no-caller-found
 - name: sdk:update_point
   method: update_point
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -6074,6 +6228,7 @@ rows:
   class: agent-reachable
 - name: sdk:validate_domain
   method: validate_domain
+  approved: false
   family: null
   family_rank: null
   served: sdk
@@ -6096,6 +6251,7 @@ rows:
   class: agent-reachable
 - name: sdk:volunteer_context
   method: volunteer_context
+  approved: false
   family: null
   family_rank: null
   served: sdk
