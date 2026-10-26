@@ -2387,7 +2387,10 @@ def test_the_approved_flag_is_DERIVED_so_a_recut_cannot_refuse():
     writes `build_doc()` verbatim, and property 12 then compares two identical derived
     values — green by construction. What refuses is the `high_water_counts` growth pin,
     enforced independently by the BASE-REF-pinned `tools/surface-guard.py`. This pins the
-    premise the corrected header states, so the comment cannot quietly become false again.
+    premise the corrected header states AND the corrected text itself (the two constants
+    are byte-identical on the pre-fix tree, so a premise-only pin was green before the
+    rewrite and stayed green when the header was reverted), so the comment cannot quietly
+    become false again.
     """
     sm = _load_manifest_tool()
     assert "approved" not in sm.NON_DERIVABLE_ROW_KEYS, (
@@ -2399,7 +2402,33 @@ def test_the_approved_flag_is_DERIVED_so_a_recut_cannot_refuse():
         "statement that `high_water_counts` is the mechanism that reds an unapproved "
         "addition no longer holds"
     )
-
+    # The two constants above are the PREMISE, and they are identical on the pre-fix tree
+    # — on their own this test was GREEN before the header was corrected and stays green
+    # if it is reverted (a comment cannot keep itself true). These three assertions pin
+    # the CORRECTED TEXT, which is what F3 changed: restore the old sentence (… the
+    # `approved` flag on a re-cut row) and the middle arm reds.
+    # MANIFEST_HEADER is the artifact's comment BLOCK, so each of its lines carries a
+    # `# ` prefix that would otherwise land between two words of the sentence pinned —
+    # strip it per line, then flatten.
+    header = " ".join(
+        " ".join(line.lstrip("#").split())
+        for line in sm.MANIFEST_HEADER.splitlines()
+    )
+    assert "`approved` is a DERIVED row key" in header, (
+        "MANIFEST_HEADER no longer states that `approved` is DERIVED — the mechanism by "
+        "which a re-cut cannot refuse an unapproved addition is no longer recorded where "
+        "the artifact's reader sees it"
+    )
+    assert "flag on a re-cut row" not in header, (
+        "MANIFEST_HEADER claims an unapproved addition reds 'the `approved` flag on a "
+        "re-cut row' — the false claim F3 corrected: `approved` is derived, so a re-cut "
+        "cannot refuse anything (property 12 compares two identical derived values)"
+    )
+    assert "high_water_counts" in header and "INDEPENDENTLY" in header, (
+        "MANIFEST_HEADER no longer names the `high_water_counts` growth pin, enforced "
+        "INDEPENDENTLY of the re-cut by the base-ref-pinned tools/surface-guard.py, as "
+        "the mechanism that actually reds an unapproved addition"
+    )
 
 def test_the_committed_manifest_carries_the_DERIVED_approval():
     """#8144: the flip has landed, so the committed copy carries the owner's approval.

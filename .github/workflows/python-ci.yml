@@ -606,8 +606,11 @@ jobs:
     # #6135: the OUTER cap is not the watchdog. The per-shard watchdog is the
     # `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m` in the pytest step,
     # sized to that shard's own packed estimate — a 6.6-minute shard is killed
-    # at 15m, not 55m, so a hung small shard cannot hold the required aggregate
-    # red for the old budget.
+    # at the floor (`WATCHDOG_FLOOR_MIN`, currently 19m), not 55m, so a hung small
+    # shard cannot hold the required aggregate red for the old budget. ⛔ The
+    # floor is DERIVED in `tools/ci_selection.py`: read it there rather than
+    # trusting this comment, because restating a fixed number as a fact is how
+    # the previous "15m" here went stale when the floor moved.
     #
     # #6142: the last-failed PRE-PHASE adds a second bounded pytest run before
     # the gating one, so this outer cap must cover
@@ -2599,7 +2602,9 @@ jobs:
     # #3239/W37: OUTER cap, strictly above the in-step per-shard watchdog
     # (#798: the in-step kill is the one that prints the counts). It was 45m
     # when ONE job carried the whole 16.02m step; now each shard carries
-    # `${{ matrix.watchdog_minutes }}`m (15m at 3 shards), so the cap only has
+    # `${{ matrix.watchdog_minutes }}`m (floor-clamped — 19m at 3 shards, since
+    # the 53 carve-out files sum to 1158.1s and `carve_shards: 3` puts ~6.43m on
+    # each, under `WATCHDOG_FLOOR_MIN`'s `est x 2`), so the cap only has
     # to back THAT — and lowering it 45m -> 30m TIGHTENS the stale-head
     # exposure #3239 is about rather than loosening it. Both directions are
     # derived, not chosen: `test_every_bounded_pytest_job_caps_above_its_
