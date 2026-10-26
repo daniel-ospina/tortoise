@@ -849,6 +849,7 @@ silently-empty cell.
 | `id` | `_rebuild_all_replay` |
 | `created_at` | `_write_session_and_turns`, `_execute_commit_writes`, `_commit_region`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `turn_count` | `_write_session_and_turns`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `turn_max_index` | `_write_session_and_turns`, `_rebuild_all_replay` |
 | `is_episodic` | `_write_session_and_turns`, `_link_session`, `_fold_session_recorded`, `_execute_commit_writes`, `_commit_region`, `BACKFILL_STATEMENTS`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
 | `harness` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `capture_lane` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
@@ -858,7 +859,7 @@ silently-empty cell.
 | `client_captured_at` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `client_captured_at_source` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `source` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
-| `capture_redactions` | `_TURN_WRITE_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `_rebuild_all_replay` |
+| `capture_redactions` | `_TURN_WRITE_CYPHER`, `_SESSION_REDACTIONS_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `_rebuild_all_replay` |
 | `capture_ok` | `_capture_session_impl`, `_stamp_capture_attempt_state`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `capture_extractor` | `_capture_session_impl`, `_stamp_capture_attempt_state`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `entity_links_attempted` | `_capture_session_impl`, `_stamp_entity_link_counters`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |

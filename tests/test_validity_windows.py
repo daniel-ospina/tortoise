@@ -845,10 +845,13 @@ def test_a_start_naming_no_instant_leaves_the_window_open(sdk):
     The open-END side is deliberately NOT touched here, and it is NOT flagged
     either: a present-but-unparseable ``validTo`` is not a bound at all
     (``_covers`` skips its arm, #9202 — it used to EXCLUDE an unparseable probe
-    by comparing the text) and it still reads ``end_state: "known"``
-    (``END_UNKNOWN`` needs an ABSENT end plus an ``"unknown"`` declaration) —
-    the flag half is still #9202's owner decision. See
-    ::``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``.
+    by comparing the text) and, since #9202's 2026-10-25 owner ruling, it reads
+    ``end_state: "unknown"`` and fires the ``end_state_unknown`` /
+    ``indeterminate_end_ids`` flags (`END_UNKNOWN` now has two spellings: the
+    declared ``validToPrecision="unknown"`` with no ``validTo``, and a stored
+    end that names no instant). See
+    ::``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``
+    and ::``test_an_un_datable_end_reads_unknown_and_fires_the_flags``.
     """
     empty = _make_point(sdk, content="start recorded as empty", validFrom="")
     assert _props(sdk, empty["id"])["validFrom"] == ""
@@ -915,11 +918,12 @@ def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_prob
     reading the END keeps: an unorderable ``validTo`` *"covers every later
     instant"*. This test pins the COVERAGE half only.
 
-    NOT touched here, on purpose: ``end_state`` still reads ``known`` for a
-    present-but-un-datable end. Whether it should read ``unknown`` / ``open`` is
-    #9202's OWNER decision (``docs/ONTOLOGY.md`` §4.7; the ``#2350`` pin in
-    ``tests/test_2350_validity_precision.py``), and this fix does not pre-empt
-    it — the assertions below never touch ``end_state``.
+    NOT touched here, on purpose: this test pins the COVERAGE half only, so it
+    never asserts ``end_state``. The reported state is the flag half and it moved
+    to ``unknown`` under #9202's 2026-10-25 owner ruling (option B) — pinned
+    separately by ::``test_an_un_datable_end_reads_unknown_and_fires_the_flags``,
+    which is deliberately a DIFFERENT test so that a coverage regression and a
+    semantics regression cannot mask one another.
 
     Discriminating: on the unfixed code the ``"zzz"`` probe reports
     ``status="absent"`` for both shapes.
@@ -956,6 +960,171 @@ def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_prob
     out = sdk.get_historical_knowledge(dated_end["id"], "2050-01-01")
     assert out["status"] == "absent"
     assert out["found"] is False
+
+
+#: Every spelling #9202's 2026-10-25 owner ruling names as an UN-DATABLE end.
+#: The list is the ruling's own enumeration, not a sample of it. Covering only
+#: ``"TBD"`` is the vacuous pin this issue already suffered from: the class
+#: reaches the graph through six spellings that disagree about truthiness
+#: (``""`` vs ``"TBD"``), about digits (``"   "``, ``"1719792000"``) and about
+#: shape (``"2026-02-30"`` looks exactly like the ISO date beside it), and each
+#: of those differences is a way for a future gate to pass this test by
+#: accident.
+_UN_DATABLE_END_SPELLINGS = ["TBD", "", "   ", "not-a-date", "2026-02-30",
+                             "1719792000"]
+
+
+@pytest.mark.parametrize(
+    "stored_end", _UN_DATABLE_END_SPELLINGS,
+    ids=["text-placeholder", "empty-value", "whitespace", "plain-nonsense",
+         "impossible-calendar-date", "epoch-as-string"],
+)
+def test_an_un_datable_end_reads_unknown_and_fires_the_flags(sdk, stored_end):
+    """#9202 (flag half) — an end that names no instant is an UN-DATABLE end.
+
+    Owner ruling 2026-10-25, option B: *"a stored end that names no instant
+    reports ``end_state: \"unknown\"``"* — the same state a deliberately
+    declared ``validToPrecision="unknown"`` already produces. Before the
+    ruling every spelling below reported ``end_state: "known"`` and **no reply
+    field** distinguished it from a dated window, so ``get_historical_knowledge``
+    answered *"this was true in 2050"* on the strength of a value that names
+    nothing (the defect in the issue's title).
+
+    What must hold for EVERY spelling:
+
+    * ``end_state == "unknown"`` — on the ONE read-projection home
+      (``window_read_fields``) and on the reply, so all three read surfaces
+      (``get_historical_knowledge``, ``assembly.window_rows``, search/recall
+      wire) move together through the same home (#2350 review P2);
+    * the flags callers key on — ``end_state_unknown`` and
+      ``indeterminate_end_ids`` — FIRE for this class, which they could not
+      while the end read ``known``;
+    * the stored value is returned **verbatim**, so ``valid_to: "TBD"`` stays
+      distinguishable from ``valid_to: None`` (why option C's extra marker was
+      not needed);
+    * coverage is UNCHANGED — the window still covers 2050, because a bound that
+      names no instant bounds no instant (#9408). The fix must not buy its
+      reading by hiding the point.
+
+    Discriminating: on the unfixed head every row of this test reports
+    ``end_state: "known"``, ``end_state_unknown`` absent and
+    ``indeterminate_end_ids`` absent — measured, not inferred.
+    """
+    from tortoise.validity import end_state, window_read_fields
+
+    # (0) the ONE home: the precision and the state sit behind the SAME
+    # orderability predicate, so the emitted triple cannot contradict itself.
+    assert window_read_fields("2024-01-01", stored_end, None, None) == {
+        "valid_from_precision": "day",
+        "valid_to_precision": None,
+        "end_state": "unknown",
+    }
+    assert end_state(stored_end, None) == "unknown"
+
+    p = _make_point(sdk, content=f"un-datable end {stored_end!r}",
+                    validFrom="2024-01-01", validTo=stored_end)
+    assert _props(sdk, p["id"])["validTo"] == stored_end, (
+        "the write path stores the bound VERBATIM — a reading fix must never "
+        "rewrite or drop the value"
+    )
+
+    out = sdk.get_historical_knowledge(p["id"], "2050-01-01")
+    assert out["status"] == "found", (
+        "coverage is settled and unchanged: an end that names no instant "
+        f"bounds no instant (#9408), it does not hide the window: {out}"
+    )
+    vp = out["valid_point"]
+    assert vp["end_state"] == "unknown", (
+        "a stored end that names no instant is an un-datable end (#9202 owner "
+        f"ruling 2026-10-25, option B): {vp}"
+    )
+    assert vp["valid_to"] == stored_end, (
+        f"the stored end must come back VERBATIM, not normalised: {vp}"
+    )
+    assert vp["valid_to_precision"] is None
+
+    # (2) the two reply flags — the warning the ``known`` reading never gave.
+    assert out["end_state_unknown"] is True, (
+        f"the flag must fire for a covering un-datable end: {out}"
+    )
+    assert out["indeterminate_end_ids"] == [p["id"]], (
+        f"the covering window must be named as indeterminate: {out}"
+    )
+
+    # (3) the chain entry resolves through the same home, so a caller walking
+    # the chain instead of ``valid_point`` sees the same state.
+    assert out["chain"][0]["end_state"] == "unknown"
+
+
+def test_the_two_un_datable_spellings_stay_distinguishable(sdk):
+    """#9202 — one state, two spellings, and the reply keeps them apart.
+
+    The ruling's reason for NOT taking option C (a separate named marker): the
+    distinction is already in the reply, because the stored value is echoed
+    verbatim. A stored ``validTo="TBD"`` and a declared
+    ``validToPrecision="unknown"`` with no bound now report the SAME
+    ``end_state`` (so both are treated as un-datable by a consumer), and remain
+    distinguishable by ``valid_to`` / ``valid_to_precision`` (so a consumer can
+    still tell "garbage arrived" from "the author said unknown").
+
+    Discriminating: on the unfixed head ``end_state`` differs between these two
+    points (``known`` vs ``unknown``), which is the whole defect.
+    """
+    stored = _make_point(sdk, content="stored junk end",
+                         validFrom="2024-01-01", validTo="TBD")
+    declared = sdk.create_point("statement", "declared un-datable end",
+                                validFrom="2024-01-01",
+                                validToPrecision="unknown")
+
+    a = sdk.get_historical_knowledge(stored["id"], "2050-01-01")
+    b = sdk.get_historical_knowledge(declared["id"], "2050-01-01")
+
+    assert a["valid_point"]["end_state"] == "unknown"
+    assert b["valid_point"]["end_state"] == "unknown"
+    assert a["end_state_unknown"] is True
+    assert b["end_state_unknown"] is True
+
+    # the distinction the ruling preserves: the value somebody WROTE is echoed;
+    # the declared spelling has no value at all
+    assert a["valid_point"]["valid_to"] == "TBD"
+    assert b["valid_point"]["valid_to"] is None
+    assert a["valid_point"]["valid_to_precision"] is None
+    assert b["valid_point"]["valid_to_precision"] == "unknown"
+
+
+def test_the_un_datability_gate_does_not_widen_end_state():
+    """#9202 — the gate is ORDERABILITY, so no other end changes its reading.
+
+    A control set, so the fix cannot buy its pin by relabelling ends nobody
+    asked about. ``END_KNOWN`` still means "dated": a calendar date, a
+    date-time with an offset, and a NUMERIC epoch (``0`` is
+    1970-01-01T00:00:00Z — an instant, #3985) all keep it. ``END_OPEN`` stays
+    reserved for an ABSENT bound — the distinction the ruling insists on,
+    because reading a present-but-un-datable end as ``open`` is the
+    fabricated-coverage hazard the vocabulary exists to prevent.
+    """
+    from tortoise.validity import end_state, window_read_fields
+
+    # NUMERIC epochs name an instant, so they keep END_KNOWN.
+    assert end_state("2024-03-01", None) == "known"
+    assert end_state("2024-03-01T12:00:00+02:00", None) == "known"
+    assert end_state(0, None) == "known"
+    assert end_state(1719792000, None) == "known"
+
+    # ABSENT stays OPEN — the value that names no instant is NOT read as
+    # "no end was recorded".
+    assert end_state(None, None) == "open"
+    assert end_state(None, "") == "open"
+    assert end_state(None, "unknown") == "unknown"
+
+    # The issue's opening measurement, re-measured: the triple for a window
+    # whose two bounds both name no instant. Before the ruling this read
+    # ``end_state: 'known'``; the start half was already ``None`` (#9201).
+    assert window_read_fields("TBD", "TBD", None, None) == {
+        "valid_from_precision": None,
+        "valid_to_precision": None,
+        "end_state": "unknown",
+    }
 
 
 def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
@@ -1078,12 +1247,13 @@ def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
 # The START half was ruled by the owner (#6140: "A and C (c should be a
 # warning)") — coverage reads an unorderable start as NO START RECORDED, and the
 # write door WARNS. The END's *coverage* rule is the same and is already landed
-# (#9408, ONTOLOGY §4.7: a bound that names no instant is not a bound), but the
-# END's *reported state* — `end_state: "known"` for such a bound — is
-# #9202's OWNER decision and is deliberately NOT touched here. What this test
-# covers is the one half that is nobody's decision: a caller can currently store
-# a garbage `validTo` with NO signal from any surface, while the identical
-# mistake on `validFrom` is announced. The warning below changes no read
+# (#9408, ONTOLOGY §4.7: a bound that names no instant is not a bound). The END's
+# *reported state* was #9202's OPEN owner question and was RULED on 2026-10-25:
+# option B, an end that names no instant reads `end_state: "unknown"` and the
+# reply's `end_state_unknown` / `indeterminate_end_ids` flags fire for it. What
+# the write-door test below covers is the other half: a caller can store a
+# garbage `validTo`, and the write door says so instead of staying silent while
+# the identical mistake on `validFrom` is announced. The warning changes no read
 # behaviour — it is the write door saying what the value means.
 
 #: The verdict matrix: the window start, the value, whether the write door must
@@ -1147,8 +1317,9 @@ def test_an_unorderable_valid_to_warns_at_the_write_boundary(
     * the value is still stored VERBATIM (a warning, never a refusal — the
       #6140 ruling's shape, and a refusal here would reject writes accepted
       today and leave every stored row unchanged anyway),
-    * the read behaviour is untouched, including the reserved
-      ``end_state: "known"``, which #9202's owner decision alone may change,
+    * the read still COVERS the instant (the bound names no instant, so it
+      bounds nothing — #9408), while its reported state is ``unknown`` under
+      #9202's 2026-10-25 owner ruling,
     * the message names ``validTo`` and says the window is UNBOUNDED ABOVE — a
       copy of the start's wording ("OPEN below") would misinform the operator,
       so it is asserted against explicitly.
@@ -1178,16 +1349,18 @@ def test_an_unorderable_valid_to_warns_at_the_write_boundary(
         f"start's 'OPEN below' text would misinform the operator: {hits[0]}"
     )
 
-    # A warning, NOT a refusal: the value is persisted exactly as given, and
-    # the read path's behaviour is unchanged (the reserved state included).
+    # A warning, NOT a refusal: the value is persisted exactly as given. The
+    # read covers the instant (the bound names no instant, so it bounds
+    # nothing) and reports the end as UNKNOWN — the 2026-10-25 ruling on #9202.
     assert _props(sdk, p["id"])["validTo"] == stored_end
     out = sdk.get_historical_knowledge(p["id"], "2050-01-01")
     assert out["status"] == "found"
-    assert out["valid_point"]["end_state"] == "known", (
-        "this write-door warning must NOT pre-empt #9202's owner decision — "
-        "whether an un-datable end reads 'known' or 'unknown' is the owner's, "
-        f"and this fix changes no read: {out['valid_point']}"
+    assert out["valid_point"]["end_state"] == "unknown", (
+        "an end that names no instant is an un-datable end (#9202, owner ruling "
+        f"2026-10-25): {out['valid_point']}"
     )
+    assert out["end_state_unknown"] is True
+    assert out["indeterminate_end_ids"] == [p["id"]]
 
 
 def test_the_end_warning_is_scoped_like_the_start_warning(sdk, caplog):

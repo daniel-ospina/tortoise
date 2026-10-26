@@ -98,7 +98,11 @@ CLI:
         --out tests/eval/ask/preregistration.json
 
     # 2. run the sealed corpus (fixtures only; no gold, no grading)
-    uv run python -m tools.longmem_eval.measure_ask_distilled run \\
+    #    -B is REQUIRED, not decorative: importing this module CACHES it under
+    #    the executed surface before any identity is taken, so `run` refuses an
+    #    interpreter that writes byte-caches (`_require_byte_code_free`), and
+    #    the tree must carry none from an earlier launch either.
+    uv run python -B -m tools.longmem_eval.measure_ask_distilled run \\
         --out docs/benchmarks/ask-distilled/run-observations.json
 
     # 3. score against the sealed key and evaluate the exit bar
@@ -155,6 +159,25 @@ from tools.ask_spotcheck import (  # noqa: E402
     _superseded_live_state,
     _to_iso_date,
 )
+
+# The noise-suffix policy is IMPORTED, not re-listed: the guard and this record
+# must excuse exactly the same set, and a second copy is a copy that drifts.
+#
+# ⛔ BOTH halves of the guard's split, not just the constant. The guard's
+# ``NOISE_SUFFIXES`` names the suffix-excused set, but ``.pyc``/``.pyo`` are
+# members of that tuple only so the ``--allow-bytecode`` opt-out has something
+# to name: ``_is_bytecode`` is what the guard uses to REFUSE them by default
+# (#3712), over every set (untracked, tracked, present at the rev). Importing
+# the tuple alone imported the excuse while the comment promised the policy —
+# and a byte-cache is executable code (PEP 552: a hash-based pyc whose
+# ``check_source`` flag is unset is loaded WITHOUT the source being hashed, and
+# a forged header matches its source by construction), so the excuse made a
+# forged byte-cache read as a clean tree in a record whose whole purpose is a
+# sound attestation.
+from tools.longmem_eval.guard_measured_revision import (  # noqa: E402
+    _is_bytecode,
+    _is_noise,
+)
 from tools.longmem_eval.judge import (  # noqa: E402
     DEFAULT_JUDGE_MODEL,
     MockJudge,
@@ -176,6 +199,31 @@ PREREG_SCHEMA = "ask-distilled-preregistration/v1"
 RUN_SCHEMA = "ask-distilled-observations/v1"
 SCORED_SCHEMA = "ask-distilled-scored/v1"
 COMMIT_BINDING_SCHEMA = "ask-distilled-commit-binding/v1"
+#: What the RUN records about the tree it executed from. The publish-time
+#: binding (:func:`verify_commit_binding`) makes the named sha vouch for the
+#: corpus and the protocol; this makes the run say WHICH tree produced the
+#: numbers, so publish can refuse a run from a different one.
+CODE_IDENTITY_SCHEMA = "ask-distilled-code-identity/v1"
+
+#: The surface a measurement run can EXECUTE: the SDK under measurement, the
+#: measurement tooling itself, and the corpus loader that tooling imports. It
+#: mirrors ``DEFAULT_PATHS`` in :mod:`tools.longmem_eval.guard_measured_revision`
+#: — that guard and this record ask different questions about the SAME surface,
+#: so a surface named in one and not the other would be a hole shaped like the
+#: difference.
+#:
+#: ⛔ ``tests/eval/ask/`` is IN it, and that entry is not decoration: the runner
+#: imports ``tests.eval.ask.corpus`` at module load (``from tests.eval.ask import
+#: corpus``, :148), so a patched corpus loader EXECUTES on every run while
+#: producing no corpus-hash difference — the hash digests the corpus FILES, not
+#: the code that reads them. Measured: with ``tortoise/`` + ``tools/`` only, an
+#: ``--assume-unchanged`` patch to ``tests/eval/ask/corpus.py`` left
+#: ``dirty_paths == []`` and publish ACCEPTED it. The list is therefore PINNED
+#: BY MEASUREMENT, not by hand —
+#: ``test_the_recorded_surface_COVERS_every_module_the_run_imports`` imports the
+#: runner in a fresh interpreter and fails, naming the module, if anything it
+#: loads sits outside these prefixes.
+EXECUTED_SURFACE: tuple[str, ...] = ("tortoise/", "tools/", "tests/eval/ask/")
 
 ISSUE = "9097"
 EPIC = "2281"
@@ -403,6 +451,15 @@ def protocol(*, reader_spec: str | None = None,
             "note": "the #9095 seeder's own defaults — the instrument is not "
                     "re-tuned here",
         },
+        # ⛔ This template's ``run`` spelling is deliberately UNCHANGED even
+        # though ``run`` now REFUSES to start without ``-B``
+        # (:func:`_require_byte_code_free`). The committed
+        # ``tests/eval/ask/preregistration.json`` is a hash-bound historical
+        # record — the report's binding re-hashes it — so amending it is the
+        # owner's call on #9097, not a side effect of this change. The
+        # refusal names the working invocation (fail-closed), and §6 of the
+        # rendered report — the copy a reader actually reproduces from — is a
+        # literal in :func:`render_report` and DOES carry ``-B``.
         "reproduce": {
             "preregister": "uv run python -m "
                            "tools.longmem_eval.measure_ask_distilled "
@@ -602,6 +659,421 @@ def _shallow_boundary(repo_root: Path) -> set[str] | None:
         return set()
     except OSError:
         return None
+
+
+#: git's C-style escapes, as `quote.c` emits them when a path needs quoting.
+#: Every KEY here is ONE character — the byte after the backslash — because that
+#: is what the decoder looks up. The backslash's own entry is therefore the
+#: single character `\\`, not the two-character `\\\\` a C-style rendering would
+#: suggest: keying it as two characters silently failed to match, so `"a\\\\b.py"`
+#: decoded back to the doubled spelling and the dedupe missed again.
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\v", "\\": "\\", '"': '"',
+}
+
+
+def _c_unquote(path: str) -> str:
+    """Decode ONE C-quoted path ``git status`` printed, or return it unchanged.
+
+    ``git status --porcelain`` quotes a path carrying non-ASCII or control
+    bytes (``core.quotePath`` defaults to true) and spells the bytes as OCTAL
+    escapes — ``"tortoise/\303\2512.py"`` for ``tortoise/é2.py``. Stripping
+    only the surrounding quotes leaves the escaped spelling, which never equals
+    the RAW path ``git ls-files -z`` emits (``-z`` disables quoting), so the
+    dedupe missed and ONE file was recorded twice — with the false reason "an
+    ignore rule hides it" — the inflation :func:`_status_covered` exists to
+    prevent, and the recorded path kept its quotes.
+
+    The octal escapes are BYTES (git writes the path's own bytes), so they are
+    accumulated as bytes and decoded as UTF-8 at the end; ``surrogateescape``
+    keeps a path that is not valid UTF-8 comparable, which is what git handed
+    us rather than a silent replacement character.
+    """
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        return path
+    body, out, i = path[1:-1], bytearray(), 0
+    while i < len(body):
+        char = body[i]
+        if char != "\\":
+            out.extend(char.encode("utf-8", "surrogateescape"))
+            i += 1
+            continue
+        escaped = body[i + 1] if i + 1 < len(body) else ""
+        if escaped in _C_ESCAPES:
+            out.extend(_C_ESCAPES[escaped].encode("utf-8"))
+            i += 2
+            continue
+        octal = body[i + 1:i + 4]
+        if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+            out.append(int(octal, 8))
+            i += 4
+            continue
+        # An escape git does not emit: keep the byte rather than drop it, so a
+        # path it never matches stays visible instead of vanishing.
+        out.extend(body[i:i + 2].encode("utf-8", "surrogateescape"))
+        i += 2
+    return out.decode("utf-8", "surrogateescape")
+
+
+def _status_paths(stdout: str) -> list[str]:
+    """The PATH(s) a ``git status --porcelain`` answer names, decoded.
+
+    ONE parse site, because there were two and they disagreed: ``_status_covered``
+    split a rename/copy row on ``" -> "`` BEFORE unquoting it, while
+    ``code_identity`` unquoted the WHOLE row — so ``R  "tortoise/\303\251.py"
+    -> "tortoise/\303\274.py"`` was recorded as ``tortoise/é.py" ->
+    "tortoise/ü.py``, a string no ``git`` resolves, and the dirty path echoed in
+    the publish refusal named no path in the tree. Both sides of a rename are
+    reported: the source is gone from the worktree, the destination is new, and
+    each is a path git answers for (``git show <sha>:<src>`` / on disk).
+
+    The rename marker is read from the TWO-CHARACTER status prefix, not inferred
+    from the presence of ``" -> "`` in the body: a path may legitimately
+    CONTAIN that substring (``?? tools/a -> b.py`` is one file), and splitting
+    it would invent a second path that exists nowhere.
+
+    A collapsed untracked directory keeps its trailing ``/``
+    (``?? tools/newdir/``), which is what lets :func:`_status_covered` match the
+    files ``--untracked-files=normal`` did not list.
+    """
+    paths: list[str] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        code, body = line[:2], line[3:]
+        parts = body.split(" -> ") if ("R" in code or "C" in code) else [body]
+        for part in parts:
+            decoded = _c_unquote(part.strip())
+            if decoded:
+                paths.append(decoded)
+    return paths
+
+
+def _status_covered(rel: str, status_paths: tuple[str, ...] | list[str]) -> bool:
+    """Whether ``git status`` ALREADY reported ``rel`` (so re-reporting it
+    would inflate the count and misname the reason).
+
+    ``git ls-files --others`` (no ``--exclude-standard``) returns EVERY
+    untracked file under the surface, ignored or not — so for an ordinary
+    untracked module the surface scan and the status scan both see it, and
+    reporting both made one file read as "2 uncommitted path(s)" whose reason
+    pointed the operator at an ignore rule that does not exist.
+
+    ``status_paths`` are the paths ``git status`` NAMED, already decoded by
+    :func:`_status_paths` — every side of a rename/copy row as its own entry.
+    This function therefore only MATCHES; it does not parse. Two shapes have to
+    match, or the dedupe would still double-report:
+
+    * the plain row (``?? tools/x.py``);
+    * a COLLAPSED untracked directory — ``--untracked-files=normal`` prints
+      ``?? tools/newdir/`` and not its contents, so a file inside it is
+      covered by that row.
+    """
+    for raw in status_paths:
+        path = raw.strip()
+        if not path:
+            continue
+        if path == rel or (path.endswith("/") and rel.startswith(path)):
+            return True
+    return False
+
+
+def _paths_hidden_from_status(
+        repo_root: Path,
+        surface: tuple[str, ...] = EXECUTED_SURFACE,
+        *,
+        status_paths: tuple[str, ...] | list[str] = ()) -> list[str] | None:
+    """Paths a ``git status`` answer cannot see, enumerated from git's records.
+
+    ``git status`` is an oracle that takes advice, and both of its advisers can
+    be told to say "clean":
+
+    * ``git update-index --assume-unchanged`` / ``--skip-worktree`` record that
+      git must not look at a file's working-tree content, so a MODIFIED,
+      executed module prints nothing while the file on disk is the patched one
+      (reproduced: status ``[]``, ``ls-files -v`` shows the ``h``/``S`` bit).
+    * an ignore rule (``.gitignore``, ``.git/info/exclude``, a global
+      ``core.excludesFile``) hides an untracked file — an importable module
+      that never even has to be committed to run.
+
+    Both are recorded defeats of a diff-and-status check in this package
+    (``guard_measured_revision``:22-32, ``:481``), which is why the question is
+    put to git here with no filter in it: the untracked set WITHOUT
+    ``--exclude-standard``, and the index TAG of every tracked file (``H``
+    ordinary; a lowercase letter is assume-unchanged, ``S`` skip-worktree,
+    anything else is not ordinary staging).
+
+    ``surface`` bounds the walk because this repo — unlike the throwaway repos
+    the tests build — carries ignored trees (``.venv/``) that are not execution
+    surface, so an unbounded no-ignore enumeration would refuse every real run.
+
+    ⛔ BYTE-CACHES ARE REFUSED, never excused — the guard's own default
+    (#3712, ``_is_bytecode``) over all the sets it checks: untracked here,
+    tracked here (a committed/staged ``.pyc`` is just as loadable), and by the
+    guard at the revision. ``_is_noise`` still carries ``.pyc``/``.pyo`` as
+    members, so the byte-cache test runs FIRST — otherwise the noise excuse
+    would swallow exactly the case the guard refuses. The refusal is one
+    aggregated row rather than one per file: a checkout easily carries a
+    hundred byte-caches, and a hundred rows would bury the reason.
+
+    ``status_paths`` are the paths ``git status`` already reported, used ONLY
+    to dedupe: a path status saw needs no second row — of ANY kind, byte-cache
+    included, or one untracked ``.pyc`` in a repository that does not ignore
+    caches would be "2 uncommitted path(s)". The ignore-rule wording is
+    reserved for a path status did NOT list.
+
+    Returns ``None`` when a git call FAILS: a failed ``ls-files`` has empty
+    stdout, and empty stdout must never read as "nothing hidden".
+    """
+    tagged = _git(repo_root, "ls-files", "-z", "-v", "--", *surface)
+    if tagged.returncode != 0:
+        return None
+    # NO --exclude-standard: an ignore rule must not hide a file from the check.
+    others = _git(repo_root, "ls-files", "-z", "--others", "--", *surface)
+    if others.returncode != 0:
+        return None
+    hidden: list[str] = []
+    byte_caches: list[str] = []
+    for entry in tagged.stdout.split("\0"):
+        if not entry:
+            continue
+        tag, _, rel = entry.partition(" ")
+        if _is_bytecode(rel):
+            # Tracked (committed/staged) byte-cache: git calls it clean, and
+            # the index tag says "ordinary", so neither oracle below nor the
+            # status answer can see that CPython may load it over the source.
+            # ... unless it is MODIFIED, in which case status did list it and
+            # one file must still be one row.
+            if not (status_paths and _status_covered(rel, status_paths)):
+                byte_caches.append(rel)
+        elif tag != "H":
+            hidden.append(
+                f"{rel} (index flag {tag!r} tells git not to look at this "
+                f"file's content, so the dirty state is suppressed)")
+    for rel in others.stdout.split("\0"):
+        if not rel:
+            continue
+        if _is_bytecode(rel):
+            # Same dedupe as the ordinary branch below: `ls-files --others`
+            # without `--exclude-standard` also returns caches `git status`
+            # already printed, and a second row inflates the count.
+            if not (status_paths and _status_covered(rel, status_paths)):
+                byte_caches.append(rel)
+            continue
+        # Excused by SUFFIX only (editor/VCS droppings) — the same suffix-only
+        # excusal ``guard_measured_revision`` applies, taken from its own
+        # predicate so the two cannot drift. Byte-caches are NOT in this set
+        # however ``NOISE_SUFFIXES`` lists them: they were taken above.
+        if _is_noise(rel):
+            continue
+        # Already reported by the status oracle: one file, one row.
+        if status_paths and _status_covered(rel, status_paths):
+            continue
+        hidden.append(
+            f"{rel} (untracked under the executed surface and NOT listed by "
+            f"`git status` — an ignore rule hides it)")
+    if byte_caches:
+        listed = sorted(byte_caches)
+        examples = ", ".join(listed[:3]) + (" …" if len(listed) > 3 else "")
+        hidden.append(
+            f"{len(listed)} byte-cache file(s) under the executed surface "
+            f"that `git status` does not list (e.g. {examples}) — a "
+            f"``.pyc``/``.pyo`` is executable code that "
+            f"this record does not verify, and a forged byte-cache's header "
+            f"matches its source by construction (PEP 552), so the recorded "
+            f"sha cannot vouch for what CPython loads. Re-run over a "
+            f"byte-code-free tree (remove them first: `{_BYTECODE_REMOVAL}`)")
+    return hidden
+
+
+#: The removal command every byte-cache refusal names. ONE spelling, so the
+#: refusal raised at run start and the row ``code_identity`` records cannot tell
+#: an operator two different things.
+_BYTECODE_REMOVAL = ("find tortoise tools tests/eval/ask -name __pycache__ "
+                     "-type d -prune -exec rm -rf {} +")
+
+#: The invocation that satisfies the byte-code-free requirement, named by the
+#: run-start refusal. ``uv run python -B`` is equivalent and named beside it.
+_BYTECODE_FREE_RUN = ("PYTHONDONTWRITEBYTECODE=1 uv run python -m "
+                      "tools.longmem_eval.measure_ask_distilled run --out "
+                      "<observations.json>")
+
+
+def _is_byte_cache_row(dirty: str) -> bool:
+    """Whether one ``dirty_paths`` row names a byte-cache (or their aggregate).
+
+    Three shapes reach here: a raw path ``git status`` printed (``?? x.pyc``,
+    or a collapsed ``?? tools/__pycache__/``), a ``_paths_hidden_from_status``
+    row (``<path> (reason)\u2026``), and that function's single aggregate row
+    (``\u201c12 byte-cache file(s) \u2026\u201d``). All three mean the same thing to the
+    run guard: this tree cannot be published.
+    """
+    if "byte-cache file(s)" in dirty:
+        return True
+    path = dirty.split(" (", 1)[0]
+    return _is_bytecode(path) or "__pycache__" in path
+
+
+def _refuse_byte_caches(why: str, examples: list[str]) -> SystemExit:
+    """The ONE run-start refusal, so both halves cannot drift apart."""
+    shown = ", ".join(examples[:3]) + (" \u2026" if len(examples) > 3 else "")
+    return SystemExit(
+        f"refusing to start the run: {why}\n"
+        "This module is NOT launched by `tools/longmem_eval/run_protocol.py` "
+        "(that launches `tools.longmem_eval.run` and `full_context` with "
+        "`-B` and `PYTHONDONTWRITEBYTECODE=1`); the byte-code-free "
+        "requirement is this command's own.\n"
+        f"  {len(examples)} byte-cache path(s) the record cannot vouch for: "
+        f"{shown}\n"
+        "Re-run byte-code-free over a tree with no byte-caches left in it:\n"
+        f"  {_BYTECODE_REMOVAL}\n"
+        f"  {_BYTECODE_FREE_RUN}\n"
+        "(equivalently `uv run python -B -m "
+        "tools.longmem_eval.measure_ask_distilled run --out "
+        "<observations.json>`)")
+
+
+def _require_byte_code_free(repo_root: str | Path) -> None:
+    """Refuse to START a measured run that could never be published.
+
+    Two independent halves, and BOTH are needed — either one alone lets the run
+    measure for minutes and then be refused at publish:
+
+    1. **The interpreter.** ⛔ ``tools/longmem_eval/run_protocol.py`` does NOT
+       launch this module. It launches ``tools.longmem_eval.run``
+       (:func:`run_protocol._run_cmd`) and ``tools.longmem_eval.full_context``
+       (:func:`run_protocol._cell_cmd`) with ``-B`` and
+       ``PYTHONDONTWRITEBYTECODE=1``, and this module's own header says it is a
+       sibling of that protocol, not an extension of it. If the interpreter
+       writes byte-caches it caches this module **and its imports** before this
+       function can run — before the first identity is taken — so
+       :func:`code_identity` (correctly, #3712) records them. Worse, the
+       refusal's own remedy — delete the caches — would be undone by the next
+       identical launch, so an operator following it loops with no exit
+       signposted.
+    2. **The tree.** ``-B``/``PYTHONDONTWRITEBYTECODE=1`` stop caches being
+       WRITTEN and remove none, so a byte-code-free launch over a tree that
+       already carries caches (any earlier launch or test run leaves them) is
+       still unpublishable. Checking the flag alone passed a tree it claimed to
+       protect.
+
+    Both checks are read-only and cost three git calls.
+    """
+    if not sys.dont_write_bytecode:
+        raise _refuse_byte_caches(
+            "this interpreter WRITES byte-caches "
+            "(`sys.dont_write_bytecode` is False), so importing the runner has "
+            "already put `.pyc` files under the executed surface — before the "
+            "first code identity was taken — and `code_identity` refuses a "
+            "tree carrying them (#3712: a byte-cache is executable code this "
+            "record does not verify)",
+            ["<the interpreter has already written them>"])
+    # `python -B` and `PYTHONDONTWRITEBYTECODE=1` both set the flag above; on
+    # its own that stops caches being written, so the tree is asked separately.
+    identity = code_identity(repo_root)
+    caches = [row for row in identity["dirty_paths"] or []
+              if _is_byte_cache_row(row)]
+    if caches:
+        raise _refuse_byte_caches(
+            f"the tree at {repo_root} ALREADY carries byte-caches in its "
+            "executed surface. `-B`/`PYTHONDONTWRITEBYTECODE=1` stop caches "
+            "being WRITTEN and remove none, so this run would measure for "
+            "minutes and then be refused at publish (#3712: a byte-cache is "
+            "executable code the record does not verify)",
+            caches)
+
+
+def code_identity(repo_root: str | Path | None,
+                  *, surface: tuple[str, ...] = EXECUTED_SURFACE) -> dict:
+    """The tree the RUN was made from, as the repository reports it.
+
+    The publish-time binding makes the named sha vouch for the corpus and the
+    protocol. That is only half of "reproducible from the recorded sha alone":
+    nothing tied the NUMBERS to that sha, so a publisher could run the corpus
+    at tree A, then name a commit B whose corpus and protocol are byte-identical
+    (any merge of ``main`` between the run and the publish produces exactly
+    that) and still emit a report telling a reader to ``git checkout B`` — where
+    a re-run would execute different code. The corpus the numbers came from is
+    not the only input to those numbers.
+
+    So the run records the commit it ran at **and** whether the tree was clean.
+    A dirty tree is the same defect in another form: the sha then reproduces
+    *sha plus an uncommitted patch*, which is not the recorded sha alone. Both
+    are recorded here and refused at publish (:func:`_validate_code_identity`),
+    never guessed.
+
+    "Clean" is answered by TWO oracles, because the first one can be silenced:
+    the pinned ``git status`` (every tracked modification and every untracked
+    file), plus git's own records over the EXECUTED SURFACE — untracked files
+    enumerated WITHOUT ``--exclude-standard`` and the index tag of every
+    tracked file — which is the only place an ``assume-unchanged`` /
+    ``skip-worktree`` modification and an ignored, importable file are visible
+    (:func:`_paths_hidden_from_status`).
+
+    Byte-caches are REFUSED, not excused, which is the same default the sibling
+    guard enforces (#3712) over the same surface: a ``.pyc``/``.pyo`` is
+    executable code, this record does not verify its contents, and a forged
+    one's header matches its source by construction — so a tree carrying one is
+    not a tree the recorded sha reproduces, even though ``git status`` calls it
+    clean. Because a byte-cache is what an ordinary interpreter launch
+    CREATES, the refusal is only reachable if the run is launched
+    byte-code-free — and that requirement is **this command's own**, not an
+    inherited property: ``run_protocol`` does not launch this module
+    (:func:`_require_byte_code_free`), so the CLI ``run`` REFUSES to start
+    rather than measuring for minutes and then refusing at publish, and it
+    names the working invocation.
+
+    The remaining suffix exemptions are the editor/VCS droppings
+    (``.orig``/``.rej``/``.swp``/``.swo``/``.DS_Store``) — taken from
+    ``guard_measured_revision._is_noise`` so the two cannot drift.
+    """
+    if repo_root is None:
+        return {
+            "schema": CODE_IDENTITY_SCHEMA,
+            "commit": None,
+            "dirty_paths": [],
+            "repo": None,
+            "reason": "no repository was supplied to the run — a run that does "
+                      "not record the tree it executed from cannot be "
+                      "reproduced from a sha, so publish refuses it",
+        }
+    repo_root = Path(repo_root)
+    commit = _resolve_commit(repo_root, "HEAD")
+    # ⛔ ``--untracked-files=normal`` is PINNED, not inherited: the question is
+    # "was the tree clean?", and without the flag the answer comes from the
+    # reader's git config. ``status.showUntrackedFiles=no`` is a common setting
+    # on a repository this size, and under it an untracked, importable file is
+    # invisible — so ``dirty_paths`` is ``[]`` and the report publishes "clean at
+    # run time" over a tree that includes code nobody recorded.
+    status = _git(repo_root, "status", "--porcelain",
+                  "--untracked-files=normal")
+    # A status that FAILS is not a clean tree: a non-zero exit (not a
+    # repository, unreadable index) leaves stdout empty, which would otherwise
+    # read as "nothing modified" — a fail-open on the one question this asks.
+    if status.returncode != 0:
+        dirty_paths = ["<git status failed: the tree is not provably clean>"]
+    else:
+        dirty_paths = _status_paths(status.stdout)
+    # ⛔ The status answer is NOT the whole of "was the tree clean?": an index
+    # flag or an ignore rule makes a modified/untracked executed file print
+    # nothing at all. Both are asked of git's records directly, and a git
+    # failure here is recorded as not-provably-clean for the same reason a
+    # failed status is — empty stdout is not a clean tree.
+    hidden = _paths_hidden_from_status(repo_root, surface,
+                                       status_paths=dirty_paths)
+    if hidden is None:
+        dirty_paths.append(
+            "<git ls-files failed: the tree is not provably clean>")
+    else:
+        dirty_paths.extend(hidden)
+    return {
+        "schema": CODE_IDENTITY_SCHEMA,
+        "commit": commit,
+        "dirty_paths": dirty_paths,
+        "repo": str(repo_root),
+        "reason": None if commit else f"{repo_root} is not a git repository",
+    }
 
 
 def verify_commit_binding(*, commit: str, repo_root: str | Path,
@@ -828,7 +1300,8 @@ def _run_arm(*, fixture: dict, arm: str, sdk_factory, reader_factory,
 def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
                arms: tuple[str, ...] = ARMS,
                reader_factory=None, sdk_factory=None, mutate=None,
-               mutate_label: str | None = None) -> dict:
+               mutate_label: str | None = None,
+               repo_root: str | Path | None = None) -> dict:
     """Run the sealed corpus: both arms per case, fixtures ONLY.
 
     ⛔ The inputs are ``corpus.load_fixtures`` — ``fixtures/*.json``. The gold
@@ -839,10 +1312,22 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
     ``mutate`` is the falsification hook (applied to the distilled arm after
     seeding): drop the supersession and the D8 gate must go RED, which is what
     proves the gate can say no.
+
+    The tree is recorded **before** the first case runs, and re-read after the
+    last one: a run whose ``HEAD`` or cleanliness changed while it was running
+    straddled two trees, and no single sha reproduces it (see
+    :func:`code_identity`).
     """
     fixtures = corpus.load_fixtures(corpus_root)
     if not fixtures:
         raise ValueError(f"sealed corpus at {corpus_root} has no fixtures")
+    # ⛔ BEFORE the case loop, not after it. The measurement takes minutes and a
+    # real reader call takes seconds-to-minutes; a checkout that moves while the
+    # run is in flight would otherwise be recorded as the tree the NUMBERS came
+    # from, which is the false PASS this record exists to prevent. The library
+    # accepts a repository because the tests exercise real git repos in tmp
+    # directories; the CLI always passes this module's own tree.
+    identity = code_identity(repo_root)
     sdk_factory = sdk_factory or _default_sdk_factory
     records: list[dict] = []
     for fixture in fixtures:
@@ -853,6 +1338,15 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
                 fixture=fixture, arm=arm, sdk_factory=sdk_factory,
                 reader_factory=reader_factory, mutate=mutate)
         records.append(case)
+    # The same questions again, AFTER the run: a commit that landed mid-run (or a
+    # path dirtied by the run itself) means these numbers came from no single
+    # tree, and that is a refusal rather than a footnote — recorded here because
+    # only the run knows when it started.
+    identity["at_end"] = code_identity(repo_root)
+    # No separate "drifted" flag is recorded: :func:`_validate_code_identity`
+    # and :func:`render_report` both decide from the two records, so a third,
+    # inert field would be a second verdict nothing reads — the shape this
+    # repo has been burned by before.
     report = {
         "schema": RUN_SCHEMA,
         # FIXTURES ONLY — deliberately NOT the full corpus hash, which digests
@@ -869,6 +1363,11 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
         "arms": list(arms),
         "seed": {"turns_embedded": SEED_TURNS_EMBEDDED_BY_DEFAULT,
                  "search_keys": SEED_SEARCH_KEYS_BY_DEFAULT},
+        # WHICH TREE produced these observations, recorded by the step that ran
+        # before it ran, rather than supplied later by whoever writes the
+        # report: a publisher that could NAME the commit would be back to
+        # asserting it.
+        "code_identity": identity,
         "cases": records,
     }
     if mutate is not None:
@@ -1017,6 +1516,11 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
     }
     if run_report.get("mutated"):
         scored["mutated"] = run_report["mutated"]
+    # Carried through the score step so PUBLISH can compare it with the commit
+    # it is about to name. ``copy.deepcopy``: the scored artifact must not alias
+    # the run's record, or an audit that edits one silently rewrites the other.
+    if "code_identity" in run_report:
+        scored["code_identity"] = copy.deepcopy(run_report["code_identity"])
     return scored
 
 
@@ -1313,6 +1817,11 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
     why :func:`validate_ask_receipt` treats a receipt without one as invalid:
     the published claim's reproducibility has to come from the repository, and
     a receipt that merely *states* a sha is the defect this replaces.
+
+    The run's own ``code_identity`` (:func:`code_identity`) travels with the
+    scored artifact and is recorded here too: the binding proves the sha carries
+    this corpus and this protocol, the identity proves the numbers were produced
+    by that tree.
     """
     bar = scored["bar"]
     note_list = [
@@ -1369,7 +1878,84 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
     # produced by the repository, and a receipt must not alias it either.
     if commit_binding is not None:
         receipt["commit_binding"] = copy.deepcopy(commit_binding)
+    if scored.get("code_identity") is not None:
+        receipt["code_identity"] = copy.deepcopy(scored["code_identity"])
     return receipt
+
+
+def _validate_code_identity(receipt: dict) -> list[str]:
+    """The receipt must carry the tree the RUN recorded, and that tree must be
+    the receipt's own commit, clean.
+
+    ``commit_binding`` (publish time) answers *"does this sha carry the corpus
+    and the protocol these numbers came from?"*. This answers the question it
+    leaves open: *"were these numbers produced by that tree?"* Without it a    publisher can run the corpus at tree A and name a commit B whose corpus and
+    protocol are byte-identical — any ``main`` merge between the run and the
+    publish produces exactly that shape — and the report's §6 would tell a
+    reader to `git checkout B`, where a re-run executes different code.
+    """
+    issues: list[str] = []
+    identity = receipt.get("code_identity")
+    if not isinstance(identity, dict) or not identity:
+        return ["receipt.code_identity: missing — a published run must record "
+                "the tree it executed from (the commit, and whether that tree "
+                "was clean). Without it the recorded sha says where the CORPUS "
+                "came from, never where the numbers did"]
+    if identity.get("schema") != CODE_IDENTITY_SCHEMA:
+        issues.append(
+            f"receipt.code_identity.schema: unexpected "
+            f"{identity.get('schema')!r} (expected {CODE_IDENTITY_SCHEMA!r})")
+    run_tree = str(identity.get("commit") or "")
+    if len(run_tree) != 40 or not all(c in "0123456789abcdef"
+                                      for c in run_tree):
+        issues.append(
+            f"receipt.code_identity.commit: {run_tree!r} is not a full 40-hex "
+            f"sha — the run did not record the tree it executed from, so no "
+            f"sha can be said to reproduce these numbers")
+    elif run_tree != str(receipt.get("commit") or ""):
+        issues.append(
+            f"receipt.code_identity.commit: {run_tree!r} is not the receipt's "
+            f"own commit ({receipt.get('commit')!r}) — the run executed a "
+            f"DIFFERENT tree than the one this report names, so `git checkout "
+            f"<sha>` would re-run code these numbers did not come from")
+    dirty = identity.get("dirty_paths")
+    if not isinstance(dirty, list):
+        issues.append(
+            f"receipt.code_identity.dirty_paths: expected a list, got "
+            f"{dirty!r}")
+    elif dirty:
+        issues.append(
+            f"receipt.code_identity.dirty_paths: the run executed from a tree "
+            f"with {len(dirty)} uncommitted path(s) {dirty[:5]}" +
+            (" …" if len(dirty) > 5 else "") +
+            " — 'reproducible from the recorded sha alone' is false over an "
+            "uncommitted patch: commit the tree and re-run")
+    # The run records the tree at BOTH ends. A commit that landed mid-run (or a
+    # path the run itself dirtied) means these numbers came from no single tree,
+    # so no sha reproduces them — and the run is the only witness that it
+    # started before the change. A missing ``at_end`` is not "unchanged": a run
+    # from an older record cannot show it stayed put, so it is refused too.
+    at_end = identity.get("at_end")
+    if not isinstance(at_end, dict) or not at_end:
+        issues.append(
+            "receipt.code_identity.at_end: missing — the run did not record the "
+            "tree AFTER it finished, so nothing shows the measurement stayed on "
+            "one tree; a sha cannot reproduce a run that may have straddled two")
+    elif not isinstance(at_end.get("dirty_paths"), list):
+        issues.append(
+            f"receipt.code_identity.at_end.dirty_paths: expected a list, got "
+            f"{at_end.get('dirty_paths')!r} — a record that cannot say whether "
+            f"the END tree was clean is not evidence it was")
+    elif (at_end.get("commit") != run_tree
+            or at_end["dirty_paths"] != (dirty if isinstance(dirty, list)
+                                         else [])):
+        issues.append(
+            f"receipt.code_identity.at_end: the tree CHANGED while the run was "
+            f"in progress ({run_tree!r}/{dirty!r} at start → "
+            f"{at_end.get('commit')!r}/{at_end.get('dirty_paths')!r} at end) — "
+            f"these numbers came from no single tree, so `git checkout <sha>` "
+            f"reproduces neither half: commit first, then re-run")
+    return issues
 
 
 def _validate_commit_binding(receipt: dict) -> list[str]:
@@ -1526,6 +2112,7 @@ def validate_ask_receipt(receipt: dict) -> list[str]:
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
     issues.extend(_validate_commit_binding(receipt))
+    issues.extend(_validate_code_identity(receipt))
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(
             receipt.get("cost_usd"), (int, float)):
         issues.append("receipt.cost_usd: expected a number")
@@ -1640,6 +2227,38 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
     # reader audits is what the publisher verified.
     binding = receipt.get("commit_binding") or {}
     run_commit = binding.get("run_commit") or receipt["commit"]
+    identity = receipt.get("code_identity") or {}
+    run_tree = identity.get("commit") or "—"
+    dirty_paths = identity.get("dirty_paths")
+    # ⛔ "clean" is claimed only on a RECORDED clean tree. `(identity or {}).get(
+    # 'dirty_paths') or []` made an absent record render identically to a
+    # verified clean one — a fail-open default in the function the README calls
+    # the audit surface, which is the one place it must not be.
+    if not isinstance(dirty_paths, list) or not identity.get("commit"):
+        # ⛔ BOTH halves are required to say "clean": a record whose
+        # `dirty_paths` is an empty list but whose COMMIT is null (the shape
+        # `code_identity(None)` produces) rendered as "clean at run time"
+        # beside a commit column of "—", which asserts a tree that was never
+        # named. Publish refuses such a receipt first, but this is the audit
+        # surface — the one place a tidy sentence must not outrun its record.
+        tree_state = ("NOT RECORDED — the run did not say which tree it "
+                      "executed from")
+    elif dirty_paths:
+        tree_state = (f"DIRTY at run time: {len(dirty_paths)} uncommitted "
+                      f"path(s) {dirty_paths[:5]}")
+    else:
+        tree_state = "clean at run time (no uncommitted paths)"
+    # A run that straddled two trees renders the fact rather than a tidy
+    # sentence: publish refuses it, and a receipt rendered by anything else
+    # still has to say so.
+    at_end = identity.get("at_end")
+    if isinstance(at_end, dict) and at_end.get("commit"):
+        end_dirty = at_end.get("dirty_paths")
+        if (at_end.get("commit") != identity.get("commit")
+                or end_dirty != dirty_paths):
+            tree_state += (f" — ⛔ the tree CHANGED during the run (at end: "
+                           f"{at_end.get('commit')!r}, uncommitted "
+                           f"{end_dirty!r})")
     prereg_commit = binding.get("prereg_commit") or "—"
     committed_corpus_hash = binding.get("corpus_hash") or "—"
     committed_prereg_sha = binding.get("prereg_sha256") or "—"
@@ -1679,6 +2298,7 @@ extends: tools/longmem_eval/measure_ask_distilled.py, tests/eval/ask/README.md
 | Reader | `{receipt["reader_model_spec"]}` (temperature {prereg["reader"]["temperature"]}, max_tokens {prereg["reader"]["max_tokens"]}, pinned: {receipt["reader_pinned"]}) |
 | Judge | `{receipt["judge_model"]}` — pin `{receipt["judge_pin"]}`, rubric id `{prereg["judge"]["rubric_id"]}` (hash `{receipt["judge_rubric_id_hash"]}`) |
 | Commit (exact) | `{run_commit}` — **commit binding verified at publish time** (§6) |
+| Tree the run executed from | `{run_tree}` — {tree_state} |
 | Corpus hash | `{receipt["corpus_hash"]}` (re-hashed from the tree AT that commit: `{committed_corpus_hash}`) |
 | Pre-registration | `{prereg_rel}` — sha256 `{prereg_sha256}` (re-hashed from the tree AT that commit: `{committed_prereg_sha}`) |
 | Verdict | **{receipt["verdict"].upper()}** (run_status `{receipt["run_status"]}`, failure_origin `{receipt["failure_origin"]}`) |
@@ -1739,9 +2359,16 @@ pre-registration **at that sha** hash to the ones published above (so
 pre-registration's own commit is a **proper ancestor** of the run commit
 (ordering `{ordering}`).
 
+A fourth fact comes from the RUN step, not from this publishing pass: the run
+recorded that it executed from tree `{run_tree}` and that the tree was
+{tree_state}. That is what makes the re-run below reproduce *these numbers*
+rather than merely the same corpus — a report whose numbers came from one tree
+and whose sha names another would pass every corpus check and still be false.
+
 | Binding | Value |
 |---|---|
 | Run commit (resolved) | `{run_commit}` |
+| Tree the run executed from | `{run_tree}` — {tree_state} |
 | Corpus at that commit (`{corpus_rel}`) | `{committed_corpus_hash}` |
 | Pre-registration at that commit (`{prereg_rel}`) | `{committed_prereg_sha}` |
 | Pre-registration commit | `{prereg_commit}` |
@@ -1755,7 +2382,9 @@ git checkout {run_commit}
 git merge-base --is-ancestor {prereg_commit} {run_commit} && echo "ordering: proven"
 
 # 2. re-run the sealed corpus from the recorded commit
-uv run python -m tools.longmem_eval.measure_ask_distilled run \\
+#    -B: the run REFUSES an interpreter that writes byte-caches, and it refuses
+#    a tree that already carries one (#3712) — see `_require_byte_code_free`
+uv run python -B -m tools.longmem_eval.measure_ask_distilled run \\
     --out /tmp/ask-observations.json
 uv run python -m tools.longmem_eval.measure_ask_distilled score \\
     --run /tmp/ask-observations.json --out /tmp/ask-scored.json
@@ -1851,16 +2480,30 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "run":
+        # ⛔ BEFORE the measurement, not after it: a run that cannot be
+        # published is refused at the start rather than after minutes of work,
+        # and the refusal names the invocation that works
+        # (:func:`_require_byte_code_free`).
+        _require_byte_code_free(_REPO_ROOT)
         report = run_sealed(
             corpus_root=Path(args.corpus_root),
             mutate=(_drop_supersession if args.mutate else None),
-            mutate_label="planted supersessions dropped on the gate arm")
+            mutate_label="planted supersessions dropped on the gate arm",
+            # ⛔ NOT a flag. The numbers come from THIS module's tree, so the
+            # run records THIS module's tree — a `--repo` flag could only ever
+            # name a different one, which is the false PASS the record exists
+            # to close (`run --repo <main checkout>` would be the one-flag way
+            # around the refusal it is supposed to trip).
+            repo_root=_REPO_ROOT)
         _dump(args.out, report)
         measured = sum(1 for c in report["cases"]
                        for arm in report["arms"] if c["arms"][arm]["ok"])
         total = len(report["cases"]) * len(report["arms"])
+        identity = report["code_identity"]
         print(f"ran {measured}/{total} case-arms over {len(report['cases'])} "
-              f"cases → {args.out}")
+              f"cases from {(identity.get('commit') or 'NO COMMIT')[:12]} "
+              f"({len(identity.get('dirty_paths') or [])} uncommitted path(s)) "
+              f"→ {args.out}")
         return 0
 
     if args.cmd == "score":
@@ -1895,6 +2538,13 @@ def _main(argv: list[str] | None = None) -> int:
             for reason in binding_reasons:
                 print(f"  - {reason}", file=sys.stderr)
             return 2
+        # (0b) THE OTHER HALF — "the run is reproducible from the recorded sha
+        # alone" — is enforced by `_validate_code_identity` inside the receipt
+        # validation below, not by a second check here: the run's own
+        # `code_identity` record either agrees with the commit this receipt
+        # names and is clean, or the receipt is invalid. ONE implementation, so
+        # the two cannot drift; the binding above is separate because it asks
+        # the repository a question the receipt cannot answer.
         # Re-bind the verdict to the CURRENT corpus: a report published over a
         # drifted corpus, or against a pre-registration that no longer
         # describes it, is refuse-to-publish, not a footnote.

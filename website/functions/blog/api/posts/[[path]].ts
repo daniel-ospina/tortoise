@@ -28,12 +28,15 @@
 //   - slug immutable; archived posts reject all PATCHes AND DELETEs (409/400 terminal).
 //   - Rate limit: 120 req/min + 2,000 req/day per key (in-memory counter —
 //     per-isolate; unit-tested at lowered thresholds).
-//   - IndexNow (#9680): the PATCH that moves a post to published submits its
-//     canonical URL at most once per post ROW per 24 h (read-then-write, so not
-//     atomic — see _shared/indexnow.ts), in the background, fail-soft. Nothing
-//     is submitted when the stamp cannot be read, and the POST (create) path
-//     never notifies. It reaches Bing / Yandex / Seznam / Naver / Amazon / Yep —
-//     NOT Google, which does not consume IndexNow.
+//   - IndexNow (#9680 + #9803): every write here that makes a post publicly
+//     readable submits its canonical URL at most once per post ROW per 24 h
+//     (read-then-write, so not atomic — see _shared/indexnow.ts), in the
+//     background, fail-soft. That is two writes: the PATCH whose result is a
+//     published row that was not live before (a status transition, or a hold
+//     clear on an already-published row), and the CREATE that is born published.
+//     Nothing is submitted when the stamp cannot be read, and nothing is
+//     submitted for a draft or a held row. It reaches Bing / Yandex / Seznam /
+//     Naver / Amazon / Yep — NOT Google, which does not consume IndexNow.
 //
 // Author identity (#1383 — part of the same v1 contract, additive):
 //   - `author?: string` (≤100 chars) is the byline NAME. Omitted →
@@ -336,7 +339,7 @@ function serviceHeaders(env: Env): Record<string, string> {
   };
 }
 
-export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+export const onRequestPost: PagesFunction<Env> = async ({ request, env, waitUntil }) => {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return err(503, "not_configured", "agent API not configured");
   }
@@ -419,6 +422,28 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const created = (await res.json()) as Array<{ id: string; slug: string }>;
   const post = created[0];
+
+  // A create born `published` is a publish transition: the row is publicly
+  // readable the moment it lands. #9680 put the trigger on the PATCH only, which
+  // left exactly one way to put a page live and submit nothing — the owner's
+  // ruling on #9803 is that "became live" is the trigger, whichever write did it.
+  // `hold_for_review` cannot be combined with `status: published` (validation
+  // refuses it), so a created-published row is always live. The status tested is
+  // `isDirect` — the VALIDATED request value, which is the same value written to
+  // `row.status` a few lines up, so the predicate and the insert cannot disagree;
+  // the STORE supplies the row's identity (`id`, `slug`), which is what the
+  // notification needs.
+  if (isDirect && post?.id && post.slug) {
+    waitUntil(
+      notifyPublished({
+        env,
+        id: post.id,
+        url: `${SITE_URL}/blog/${post.slug}`,
+        nowMs: Date.parse(now),
+      }),
+    );
+  }
+
   return json(
     { id: post?.id, slug: post?.slug, url: post ? `${SITE_URL}/blog/${post.slug}` : null },
     201,

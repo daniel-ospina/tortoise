@@ -279,6 +279,11 @@ export default function PostEditor() {
         id,
         // #1865: draft-save on a published post = unpublish → purge edge cache
         wasPublished: existingPost?.status === 'published',
+        // #9680 item 3: the stored hold, so the save can tell a HOLD CLEAR on a
+        // published post (a real transition — the URL stops answering 404) from
+        // an ordinary "Save & Republish" of an already-live article (not one).
+        // `!== false` mirrors `api/notify-publish.ts`: NULL counts as held.
+        wasHeld: existingPost ? existingPost.hold_for_review !== false : false,
       }))(mode);
     },
     onSuccess: (savedId) => {

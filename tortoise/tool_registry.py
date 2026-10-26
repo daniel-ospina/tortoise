@@ -1291,10 +1291,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_delete",
         id="surface.delete",
-        description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
-                    "confirmation. Cannot be undone. dry_run=True previews the blast "
-                    "radius (which node resolves, and every edge that would go) and "
-                    "changes nothing.",
+        # #9660 (owner ruling 2026-10-25): ONE delete for every kind, behind a
+        # preview-then-confirm protocol — not a family of per-kind delete tools,
+        # because every agent that connects re-reads the tool list every session,
+        # so each extra tool is a cost every customer pays forever.
+        description="Delete one item by id — a Point, a relation (operators are "
+                    "Points), a Source, an Object, a Subject, or an Event. "
+                    "DESTRUCTIVE and PERMANENT: cannot be undone. The FIRST call "
+                    "changes nothing: it previews which node resolves and every "
+                    "edge that would go with it, and returns a confirmation token. "
+                    "Call again with confirmation=<token> to delete. When the item "
+                    "is wrong rather than unwanted, supersede it or retract it "
+                    "instead.",
         risk="destructive",
         http_policy=True,
         sdk_method="delete",

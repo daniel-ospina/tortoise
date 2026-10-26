@@ -198,10 +198,13 @@ def test_window_read_fields_denies_precision_to_an_unorderable_bound():
         "valid_to_precision": "day",
         "end_state": "known",
     }
+    # #9202 (owner ruling 2026-10-25, option B): the END bound here names no
+    # instant, so beside ``valid_to_precision: None`` the state must NOT claim
+    # the end is dated. Before the ruling this read ``known``.
     assert window_read_fields("2024-01-01", "TBD", None, None) == {
         "valid_from_precision": "day",
         "valid_to_precision": None,
-        "end_state": "known",
+        "end_state": "unknown",
     }
 
 
@@ -213,6 +216,13 @@ def test_end_state_is_three_valued():
     assert end_state("2024-01-01", None) == END_KNOWN
     assert end_state("2024-01-01", "month") == END_KNOWN
     assert end_state(None, "unknown") == END_UNKNOWN
+    # #9202 (owner ruling 2026-10-25): the SECOND spelling of END_UNKNOWN — a
+    # stored end that names no instant. Absent still reads OPEN and an
+    # orderable end still reads KNOWN, so the gate is datability, not presence.
+    assert end_state("TBD", None) == END_UNKNOWN
+    assert end_state("", None) == END_UNKNOWN
+    assert end_state("2026-02-30", None) == END_UNKNOWN
+    assert end_state(0, None) == END_KNOWN  # a numeric epoch IS an instant
 
 
 def test_validate_refuses_unknown_start():
@@ -389,14 +399,14 @@ def test_supersede_does_not_inherit_a_declaration_onto_a_fabricated_end(lane):
     # successor's unorderable start.
     assert props["validTo"] not in (None, "TBD")
     # …so no declaration may be attached to it: the property stays ABSENT (the
-    # legacy read default derives `day` from the bare timestamp, #9202's axis).
+    # legacy read default derives `day` from the bare timestamp — the
+    # #9201/#9244 axis, which is about bounds that name NO instant).
     assert props["validToPrecision"] is None
     assert "validToPrecision" not in _props(sdk, old["id"])
     # the read surface must not resurrect it either. The stored property is
     # ABSENT, so the read derives the legacy `day` default from the bare
-    # timestamp — the pre-#2350 reading every undeclared END gets (whether an
-    # undeclared END should read `null` instead is #9202's owner decision, not
-    # this write fix). What it must NOT read is the inherited `year`.
+    # timestamp — the pre-#2350 reading every undeclared, ORDERABLE end gets.
+    # What it must NOT read is the inherited `year`.
     assert sdk.get_historical_knowledge(
         old["id"], "2025-01-01")["chain"][0]["valid_to_precision"] == "day"
     # …and it agrees with what the SAME declaration reads on the successor's own
@@ -923,9 +933,10 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     ABSENT end) also resolves to no precision. Measured through the public write
     so a future edit to either end's plumbing reddens this.
 
-    ``end_state`` stays ``known``: whether a stored-but-un-datable END should
-    report ``END_UNKNOWN`` is #9202's owner ruling, and a precision gate must
-    not pre-empt it — that assertion is the pin.
+    ``end_state`` stays ``known`` for a DATED bound (the control below).
+    Whether a stored-but-un-datable END should report ``END_UNKNOWN`` was
+    #9202's owner decision; it was ruled on 2026-10-25 (option B) — it does,
+    pinned by ``test_unorderable_end_is_emitted_as_null_on_every_read_surface``.
     """
     sdk, _events = lane
     p = sdk.create_point("statement", "declared end on no instant",
@@ -937,12 +948,12 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
 
     gk = sdk.get_historical_knowledge(p["id"], A_DATE)["chain"][0]
     assert gk["valid_to_precision"] is None
-    assert gk["end_state"] == "known"
+    assert gk["end_state"] == "unknown"
 
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     assert "valid_to_precision" in hit, hit
     assert hit["valid_to_precision"] is None, hit
-    assert hit["end_state"] == "known"
+    assert hit["end_state"] == "unknown", hit
 
     # CONTROL — the same declaration on an ORDERABLE end still reads ``year``
     q = sdk.create_point("statement", "declared end on an instant",
@@ -1075,9 +1086,10 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
     emit ``null`` — a brand-new cross-surface divergence introduced by the
     start-side fix. All four surfaces must agree on ``None``.
 
-    ``end_state`` stays ``known``: whether a stored-but-un-datable END should
-    report ``END_UNKNOWN`` is #9202's owner decision, and this read fix does
-    not pre-empt it. That assertion is the pin — #9202 changes it on purpose.
+    ``end_state`` stays ``known`` for a DATED bound: whether a stored-but-
+    un-datable END should report ``END_UNKNOWN`` was #9202's owner decision and
+    it was ruled on 2026-10-25 (option B) — ``unknown``, pinned in
+    ``test_unorderable_end_is_emitted_as_null_on_every_read_surface`` below.
     """
     sdk, _events = lane
     from tortoise.assembly import docker_walker_port
@@ -1089,25 +1101,30 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
     # 1. get_historical_knowledge (raw bound)
     gk = sdk.get_historical_knowledge(p["id"], A_DATE)
     assert gk["chain"][0]["valid_to_precision"] is None
-    assert gk["chain"][0]["end_state"] == "known"
+    assert gk["chain"][0]["end_state"] == "unknown", (
+        "#9202 owner ruling 2026-10-25: an end that names no instant is "
+        f"un-datable, not dated: {gk['chain'][0]}"
+    )
 
     # 2. assembly window rows
     port = docker_walker_port(sdk)
     today = _utc_today()
     row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
     assert row["valid_to_precision"] is None
+    assert row["end_state"] == "unknown", row
 
     # 3. search/recall wire
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     assert "valid_to_precision" in hit, hit
     assert hit["valid_to_precision"] is None
-    assert hit["end_state"] == "known"
+    assert hit["end_state"] == "unknown", hit
 
     # 4. the embedded fallback decoration
     from tortoise.sdk import _decorate_fallback_hits
     fb = _decorate_fallback_hits([{"id": p["id"]}], sdk._get_proj().g)
     assert "valid_to_precision" in fb[0], fb[0]
     assert fb[0]["valid_to_precision"] is None
+    assert fb[0]["end_state"] == "unknown", fb[0]
 
     # CONTROL — an OPEN end (no validTo at all) keeps its absent key on the
     # wire; emitting ``null`` there would erase the open/un-datable distinction.

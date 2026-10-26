@@ -56,14 +56,19 @@ _HOSTED_SID = "equiv-hosted"
 _SDK_SESSION_CYPHER = (
     "MERGE (s:Session {id:$sid}) SET "
     "s.created_at=coalesce(s.created_at, $now), s.turn_count=$tc, "
-    "s.is_episodic=true"
+    "s.is_episodic=true, "
+    "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
+    "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"
 )
 #: The pre-refactor W1 ``:Session`` MERGE text — the SAME base clauses plus the
 #: conditional harness/machine_id/model clauses this request supplied.
 _HOSTED_SESSION_CYPHER = (
     "MERGE (s:Session {id:$sid}) SET "
     "s.created_at=coalesce(s.created_at, $now), s.turn_count=$tc, "
-    "s.is_episodic=true, s.harness=$harness, "
+    "s.is_episodic=true, "
+    "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
+    "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END, "
+    "s.harness=$harness, "
     "s.machine_id=coalesce(s.machine_id, $mid), "
     "s.model=coalesce(s.model, $model)"
 )
@@ -416,7 +421,7 @@ def test_sdk_writer_is_behaviour_equivalent(tmp_path):
     turn_cypher, turn_params = seen["turn_writes"][-1]
     assert session_cypher == _SDK_SESSION_CYPHER
     assert session_params == {
-        "sid": _SDK_SID, "now": "<NOW>", "tc": 5}
+        "sid": _SDK_SID, "now": "<NOW>", "tc": 5, "tmi": 4}
     assert (hashlib.sha256(turn_cypher.encode()).hexdigest()
             == _TURN_CYPHER_SHA256)
     assert [r["id"] for r in turn_params["turns"]] == [
@@ -460,7 +465,7 @@ def test_hosted_writer_is_behaviour_equivalent_and_parity(client):
     turn_cypher, turn_params = seen["turn_writes"][-1]
     assert session_cypher == _HOSTED_SESSION_CYPHER
     assert session_params == {
-        "sid": _HOSTED_SID, "now": "<NOW>", "tc": 5, "harness": "claude",
+        "sid": _HOSTED_SID, "now": "<NOW>", "tc": 5, "tmi": 4, "harness": "claude",
         "mid": "machine-abc", "model": "claude-opus-4"}
     assert (hashlib.sha256(turn_cypher.encode()).hexdigest()
             == _TURN_CYPHER_SHA256)

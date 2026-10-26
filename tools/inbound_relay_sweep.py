@@ -565,7 +565,8 @@ def sweep(
             # A retry must RESUME, not restart: if our own footer is already on
             # the item, the comment landed and only the close (or the label)
             # failed, so a second identical comment on an external contributor's
-            # PR would be noise every 15 minutes for as long as the close fails.
+            # PR would be noise every 15 minutes for as long as the close fails —
+            # or until the item ages out of the `--since-hours` window.
             # ⛔ The RECORD is still posted. A marker proves we COMMENTED, never
             # that intake accepted the record — the event path posts intake LAST
             # (label → comment → close → POST), so its footer can exist with no
@@ -782,7 +783,9 @@ class GhClient:
         ascending triple with and without the parameters). The relay's comment
         is posted at close time, i.e. LAST, so the newest page has to be WALKED
         TO, or an item with more than `per_page` comments reports "not relayed"
-        and the retry re-posts the identical comment every 15 minutes.
+        and the retry re-posts the identical comment every 15 minutes — until
+        the close succeeds, or until the item ages out of the `--since-hours`
+        window.
 
         ⛔ THE MARKER MUST BE OURS, and it proves only that we COMMENTED. The
         footer is a fixed public string printed on every relayed item, so an
