@@ -1336,6 +1336,101 @@ def test_a_tenant_cannot_supply_the_folded_ref_set(prov):
         "a rejected Point was still written (orphan)"
 
 
+def test_a_re_creation_does_not_resurrect_the_folded_set(prov):
+    """#7704 review F1 — a re-creation is a FRESH node, so the DEAD
+    incarnation's folded set must not survive a rebuild.
+
+    ``extractedFromAll``'s writer is PRESENCE-gated (``_upsert_point_props``
+    emits ``SET n.extractedFromAll = $all`` only for a stated non-empty list)
+    and a re-creation's payload can NEVER state one (only
+    ``_fold_source_evidence`` writes it; ``create_point``'s ``_create_map`` has
+    no such key). Pass-1a HOISTS the creation and MERGEs onto the dead
+    incarnation's still-present node, whose ``tags``-sibling clauses preserve
+    what the payload omits — so without the #4042 wipe entry the rebuilt node
+    reports the dead set while LIVE reports none, i.e.
+    ``derived = replay(journal)`` false on a reported surface (``get_point``
+    returns ``properties(n)``), naming sources the new incarnation never
+    carried.
+
+    The re-creation RESTATES both refs on purpose: it keeps the ``extractedFrom``
+    EDGE half out of the comparison (a dead edge surviving pass 2 is a recorded
+    pre-existing residual, not this pin's subject), so the ONLY divergence the
+    assertion can see is the folded-set property the wipe owns.
+    """
+    sdk, events = prov
+    content = "a folded claim that is later deleted and reborn"
+    alpha, beta = "https://example.com/alpha", "https://example.com/beta"
+    first = sdk.create_point("statement", content, extractedFrom=alpha,
+                             dedup=True)
+    second = sdk.create_point("statement", content, extractedFrom=beta,
+                              dedup=True)
+    pid = first["id"]
+    assert second["id"] == pid, "guard: the second write must FOLD"
+
+    proj = sdk._get_proj()
+    assert sorted(_all_prop_refs(proj, pid)) == sorted([alpha, beta]), (
+        "guard: the fold must have accumulated the set, or this pin is "
+        f"vacuous (got {_all_prop_refs(proj, pid)!r})")
+
+    assert sdk.delete_point(pid) is True, "guard: the delete must land"
+    sdk.create_point("statement", "a different claim under the same id",
+                     id=pid, extractedFrom=[alpha, beta])
+    assert _all_prop_refs(proj, pid) is None, (
+        "guard: a re-creation states no folded set, so LIVE holds none "
+        f"(got {_all_prop_refs(proj, pid)!r})")
+
+    live = _render_row(proj, pid)
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "the re-created node inherited the DEAD incarnation's folded set "
+        "(extractedFromAll) on rebuild — live never had it, so "
+        f"derived != replay(journal): live={live!r} "
+        f"replayed={_render_row(proj, pid)!r}")
+    assert _render_row(proj, pid)["extractedFromAll"] is None, \
+        "the dead incarnation's folded set survived the recreate wipe"
+
+
+def test_eventapi_add_point_rejects_a_forged_folded_set(prov):
+    """#7704 review F2 — the one producer that bypasses ``_sanitize_props``.
+
+    ``EventAPI.add_point`` is the internal ingest/mining/CLI seam and the SDK
+    backstop never runs on it, so its own ``_forged`` set is the ONLY guard.
+    Without the entry a caller-supplied array rides the ``PointAdded`` payload,
+    and ``_upsert_point_edges``/``_point_all_source_refs`` derive the
+    ``extractedFrom`` edges from it on replay — edges the live write never
+    wired, so ``derived = replay(journal)`` goes false.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    sdk, events = prov
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=sdk._get_proj())
+    with pytest.raises(ValueError, match="server-managed"):
+        api.add_point("forged folded set", {},
+                      extractedFromAll=["https://example.com/x"])
+
+
+def test_the_mcp_boundary_refuses_the_folded_set(prov):
+    """#7704 review F2 — the key family is registered at EVERY home.
+
+    ``_SERVER_MANAGED_PROPS`` is the fail-closed boundary IN FRONT of
+    ``sdk._sanitize_props`` for every MCP entity tool (§5256's "Acceptance 2,
+    at every home"). Defence in depth: the SDK backstop would still refuse the
+    write, but the refusal would arrive AFTER the tool had begun work, and a
+    future seam that skips the sanitizer would inherit no guard at all.
+    """
+    from tortoise import mcp_server
+
+    assert "extractedFromAll" in mcp_server._SERVER_MANAGED_PROPS, (
+        "extractedFromAll left the MCP server-managed boundary — the sibling "
+        "`sourceVersion*` keys are registered here and the folded set is the "
+        "same class of server-minted provenance record")
+    assert mcp_server._reject_server_managed_props(
+        {"extractedFromAll": ["https://example.com/x"]}), (
+        "the MCP boundary accepted a caller-supplied folded set")
+
+
 def test_create_point_treats_blank_ref_as_absent(prov):
     """An empty/blank string is explicit "none", not an error — so session
     inference still applies and nothing is invented."""

@@ -14042,11 +14042,38 @@ class FalkorProjection(
                     # and the rebuilt node diverges from live AND from `fold()`.
                     # The wipe runs BEFORE `_upsert_point_props`, so a
                     # re-creation that DOES restate them still writes them.
+                    #
+                    # #7704: `extractedFromAll` — the fold's accumulated ref
+                    # SET — is the same class and is wiped HERE for the same
+                    # reason. Its writer (`_upsert_point_props`'s
+                    # `_ef_clauses`) emits `SET n.extractedFromAll = $all` only
+                    # when the payload states a non-empty list, and a
+                    # re-creation's payload can never state one (only
+                    # `_fold_source_evidence` writes that key; `create_point`
+                    # has no `extractedFromAll` in its `_create_map`). The key
+                    # is in `_POINT_HANDLED`, so the open-set passthrough never
+                    # writes it and never clears it either — so without this
+                    # entry an identical-id re-creation lets the DEAD
+                    # incarnation's folded set survive a rebuild while live has
+                    # none: `derived = replay(journal)` goes false on a
+                    # REPORTED surface (`get_point` returns `properties(n)`),
+                    # naming sources the new incarnation never carried. The
+                    # #4042 residual note below scopes itself to OPEN-SET props
+                    # and therefore does not cover this one: the key is
+                    # declared, handled, and written by its own clause — which
+                    # is exactly why it needs a wipe entry, as
+                    # `embedding_verbatim` (#5004 r4), `sourceVersionTransit`
+                    # (#5256), `tags` (#2897) and the four capture props
+                    # (#9350) each got one. `check_consistency` cannot see the
+                    # divergence (`_canonical_point_fields` skips every
+                    # `_POINT_HANDLED` key), so this is a silent parity break,
+                    # never a noisy one.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
                         "    n.embedding_verbatim = NULL, "
                         "    n.sourceVersionTransit = NULL, "
+                        "    n.extractedFromAll = NULL, "
                         "    n.tags = NULL, "
                         "    n.eventId = NULL, n.source_session = NULL, "
                         "    n.source_harness = NULL, n.ingested_at = NULL",

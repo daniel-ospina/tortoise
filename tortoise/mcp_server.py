@@ -2358,6 +2358,13 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # provenance and break live/replay parity. Rejected on ALL spellings, at
     # this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
     "sourceVersion", "sourceVersions", "sourceVersionTransit",
+    # #7704: the fold's accumulated ref SET is the same class of record —
+    # server-minted by `_fold_source_evidence`, journalled on the Point's
+    # snapshot, and re-derived into `extractedFrom` edges on replay. A tenant
+    # setting it would put the payload's edges ahead of its writes. Entered here
+    # as the fail-closed boundary IN FRONT of `sdk._sanitize_props` (its
+    # backstop), matching the sibling keys' registration at every home.
+    "extractedFromAll",
     # #3644 / PR #8016 code-review ISSUE 1: the version's TRANSITION facts are
     # server-minted/journalled and name a `:Source` transition — they can never
     # be a legitimate caller prop on ANY entity, so they belong in this
