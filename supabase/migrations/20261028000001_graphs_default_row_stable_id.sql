@@ -39,21 +39,26 @@
 
 -- ── 1. One `kind='default'` row per organization that lacks one ────────────
 -- Idempotent by the NOT EXISTS guard: re-running inserts nothing.
--- The existence guard tests `status <> 'deleted'`, matching BOTH the live-name
--- index's own predicate below and `default_graph_id_for`, which names a tenant
--- only from an ACTIVE row. A status-blind guard would count a tombstoned
--- default row as "present" and insert nothing, leaving that organization
--- permanently unnamed (`no_tenant` for ever) while this migration reported
--- success — the fail-closed reading that is indistinguishable from "nothing to
--- do". Since `soft_delete_graph` refuses `kind='default'`, such a row is not
--- produced by any supported path; the guard is written so that if one exists
--- anyway the org gets a real active row rather than silence.
+-- The existence guard tests `status = 'active'` — the SAME predicate
+-- `default_graph_id_for` uses to name a tenant. The two must be identical, not
+-- merely both status-aware: `graphs.status` is free text with NO check
+-- constraint (`20260901000001`: `status text NOT NULL DEFAULT 'active', --
+-- 'active' | 'deleted'` is a COMMENT, not a constraint), so a row carrying any
+-- other value would count as "present" to a `<> 'deleted'` guard while the
+-- reader rejects it — leaving that organization permanently unnamed
+-- (`no_tenant` for ever) while this migration reported success, the fail-closed
+-- reading that is indistinguishable from "nothing to do". `soft_delete_graph`
+-- refuses `kind='default'`, so such a row is not produced by any supported
+-- path; the guard is written so that if one exists anyway the org gets a real
+-- active row rather than silence.
 -- The second guard keeps the migration from fighting the live-name uniqueness
 -- index (`uq_graphs_org_name_active` on (org_id, name) WHERE status <>
 -- 'deleted'): an organization that already has a graph *named* 'default' keeps
 -- the row it has, and its default graph stays unnamed — fail-closed, and the
 -- record refuses for that org rather than this migration picking a name the
--- user already took.
+-- user already took. That is a REAL residual (see
+-- docs/ops/multi-graph-migration-runbook.md) — the operator remediates it by
+-- renaming the colliding graph.
 INSERT INTO public.graphs (id, org_id, name, kind, namespace, status, recording)
 SELECT 'g_' || substr(md5(random()::text || clock_timestamp()::text || o.id), 1, 16),
        o.id,
@@ -67,7 +72,7 @@ SELECT 'g_' || substr(md5(random()::text || clock_timestamp()::text || o.id), 1,
    AND NOT EXISTS (
         SELECT 1 FROM public.graphs g
          WHERE g.org_id = o.id AND g.kind = 'default'
-           AND g.status <> 'deleted')
+           AND g.status = 'active')
    AND NOT EXISTS (
         SELECT 1 FROM public.graphs g2
          WHERE g2.org_id = o.id AND g2.name = 'default'

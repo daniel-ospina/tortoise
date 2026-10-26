@@ -85,11 +85,14 @@ def _record_tenant_scope(org: dict, *, control_plane_ids: bool):
     no write door has to remember it.
 
     A credential that resolves NO named graph (session / legacy / OAuth: an
-    org-wide key opens the org's default graph) yields the no-op: the write is
-    then REFUSED and counted rather than attributed to a graph id this layer
-    does not know. Naming the default-graph tenant is #9188's (the record keys
-    on `public.graphs.id`; the default graph need not have a row), and a guess
-    here is the cross-tenant write this whole seam exists to prevent.
+    org-wide key opens the org's default graph) is named by
+    :func:`tortoise.record_writer.record_tenant_for` from the credential's
+    ``default_graph_id`` — the id of the org's active ``kind='default'``
+    ``public.graphs`` row, resolved by ``supabase_control.resolve_api_key``
+    (#10025; `20261028000001` mints that row per organization). When the control
+    plane cannot name it — no row, no field — the write is REFUSED and counted
+    (``no_tenant``) instead. Nothing is guessed here: a guess is the
+    cross-tenant write this whole seam exists to prevent.
 
     ⚠️ ``control_plane_ids`` IS NOT DECORATION — it is the id-space precondition,
     and the caller passes whether the resolution came from the control plane
@@ -580,8 +583,8 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     it lacks a row: `20261028000001` mints an active `kind='default'` row per
     organization, and the credential path (`resolve_api_key` →
     `default_graph_id`) now names that tenant. This seam has not been wired to
-    it yet — closing that is #9188's open question, which is a deferral of
-    THIS lane only.
+    it yet — closing that is #10047's scope (the hosted REST /background
+    lanes), which is a deferral of THIS lane only.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None
@@ -1372,20 +1375,22 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
         #
         # It is a SCOPE, not a bare set: a `with` cannot leak this request's
         # tenant into the next request served on the same connection, and it
-        # nests. It is installed ONLY when the resolution produced a
-        # CONTROL-PLANE graph id (`is_supabase_enabled()` — the same predicate
-        # that chose the resolver two blocks up, so a cache hit is covered too):
-        # the record's layer tables FK to `public.graphs`, and the self-host
-        # registry lane's `g_<hex>` Falkor ids have no row there, so installing
-        # one would displace a declared single-tenant pair with an id the FK
-        # cannot satisfy (`write_failed`, cause unattributable). And
-        # deliberately conditional on a NAMED graph: an
-        # org-wide credential (session / legacy / OAuth, `graph_id` None) has no
-        # record tenant, so the armed write is REFUSED and counted (`no_tenant`)
-        # rather than filed under the org's default graph, which the record
-        # cannot name (its layer tables key on `public.graphs.id`, and the
-        # default graph need not have a row). Renaming the default-graph tenant
-        # is #9188's; guessing it here is exactly the cross-tenant write #9192
+        # nests. It is installed for a CONTROL-PLANE resolution only
+        # (`is_supabase_enabled()` — the same predicate that chose the resolver
+        # two blocks up, so a cache hit is covered too): the record's layer
+        # tables FK to `public.graphs`, and the self-host registry lane's
+        # `g_<hex>` Falkor ids have no row there, so installing one would
+        # displace a declared single-tenant pair with an id the FK cannot
+        # satisfy (`write_failed`, cause unattributable).
+        #
+        # An ORG-WIDE credential (session / legacy / OAuth, `graph_id` None) IS
+        # named on this lane since #10025: `resolve_api_key` puts the org's
+        # active `kind='default'` row id on the credential as
+        # `default_graph_id`, and `record_tenant_for` files the write under it —
+        # the same answer the hosted REST lane gives. It stays REFUSED and
+        # counted (`no_tenant`) whenever the control plane could not name that
+        # row (unset, tombstoned, unreadable), which is the fail-closed
+        # direction. Guessing it here is exactly the cross-tenant write #9192
         # exists to stop.
         from tortoise.supabase_control import is_supabase_enabled
 

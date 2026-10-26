@@ -3076,6 +3076,15 @@ def provision_org(cp, *, prior_org_ids: list[str] | None = None,
     """
     cp.rpc("provision_team", params)
 
+    # #10025: the FORWARD half of the default-row materialization. Ahead of the
+    # best-effort hooks below on purpose — those are allowed to fail silently
+    # and self-heal, this one is not (a missing row is the permanent
+    # `no_tenant` refusal). Covers every provision_org caller, because they all
+    # come through here.
+    if params.get("p_org_id"):
+        ensure_default_graph_row(cp, str(params["p_org_id"]),
+                                 params.get("p_graph_name"))  # type: ignore[arg-type]
+
     # #318 (multi-tenant pack isolation): post-RPC starter-pack activation.
     # The RPC transaction is Supabase-only; pack install-state lives in the
     # tenant graph (a different store), so activation rides AFTER the RPC as
@@ -3131,6 +3140,13 @@ def provision_org_with_token(cp, **params: object) -> None:
     failure (fail-closed → 500).
     """
     cp.rpc("provision_team_with_token", params)
+
+    # #10025: the FORWARD half of the default-row materialization — the signup
+    # lane mints an organization like any other, so it must come out with the
+    # same `kind='default'` row (see ensure_default_graph_row).
+    if params.get("p_org_id"):
+        ensure_default_graph_row(cp, str(params["p_org_id"]),
+                                 params.get("p_graph_name"))  # type: ignore[arg-type]
 
     # #2001 (W5): NEW post-RPC hook (agent_signup lane) — the signup path
     # has no eager TeamMeta statement, so the node is initialized here via
@@ -3944,6 +3960,80 @@ def insert_graph(cp, row: dict) -> None:
     cp.query("graphs", method="POST", json_body=row)
 
 
+def ensure_default_graph_row(cp, org_id: str,
+                            graph_name: str | None = None) -> str | None:
+    """Idempotently ensure the org's ``kind='default'`` graphs row (#10025).
+
+    ``20261028000001`` BACKFILLS that row for the organizations that exist when
+    it runs. Nothing re-runs it, so the forward half of the job is HERE: every
+    organization minted afterwards must come out with the same row, or
+    :func:`default_graph_id_for` returns ``None`` for it and
+    :func:`tortoise.record_writer.record_tenant_for` refuses every record write
+    as ``no_tenant`` for ever — while ``/health`` still reads armed and green
+    (its counters are a DECLINE channel only). That is the measured production
+    incident #10025 exists to close, re-created at one per signup.
+
+    Called from :func:`provision_org` and :func:`provision_org_with_token` — the
+    two RPC wrappers EVERY provisioning path routes through (``/v1/register``,
+    ``POST /v1/organizations``, agent signup, the onboarding sub-org, the
+    checkout replay). One hook at each chokepoint rather than a call site per
+    lane, because a per-lane list is exactly how the NEXT provisioning path
+    ships without it. Returns the row's id, or ``None`` when the mint is
+    deliberately a no-op (below).
+
+    Idempotent by the SAME guards the migration uses, read the same way: an
+    ACTIVE ``kind='default'`` row short-circuits (its id is returned); a
+    non-deleted graph already *named* ``'default'`` makes the mint a no-op
+    instead of a ``uq_graphs_org_name_active`` violation (the residual the
+    migration also documents — the operator renames the colliding graph);
+    otherwise exactly one row is inserted, with the migration's shape
+    (``namespace`` = the org's storage key, ``recording`` NULL).
+
+    ⛔ RAISES on a failed insert, deliberately. :func:`insert_graph`'s contract
+    is "a mint must not claim success for an unpersisted graph", and a
+    swallowed failure here reproduces the silent state this closes: an org
+    whose record refuses every write with no signal anywhere. Provisioning's
+    RPC has already committed, so the surface is a 500 on create; re-running
+    ``20261028000001`` (idempotent) is the healing path — documented in
+    ``docs/ops/multi-graph-migration-runbook.md``.
+    """
+    rows = cp.query(
+        "graphs", select=["id", "status"],
+        filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
+    )
+    for row in rows or []:
+        # 'active' is the predicate `default_graph_id_for` names a tenant by,
+        # and `graphs.status` is NOT NULL DEFAULT 'active' — so an absent value
+        # IS an active row, while any OTHER value leaves the org unnamed, which
+        # is exactly how the migration's `status = 'active'` guard reads it.
+        if (row.get("status") or "active") == "active" and row.get("id"):
+            return row["id"]
+    if cp.query("graphs", select=["id"],
+                filters=[("org_id", "eq", org_id),
+                         ("name", "eq", "default"),
+                         ("status", "neq", "deleted")]):
+        return None  # a live graph is already NAMED 'default' — see docstring
+    if not isinstance(graph_name, str) or not graph_name:
+        tro = cp.query("organizations", select=["graph_name"],
+                       filters=[("id", "eq", org_id)])
+        graph_name = tro[0].get("graph_name") if tro else None
+    if not isinstance(graph_name, str) or not graph_name:
+        # The migration guards `o.graph_name IS NOT NULL` for the same reason:
+        # a default row with no namespace would point at no data plane.
+        return None
+    graph_id = f"g_{_uuid.uuid4().hex[:16]}"
+    insert_graph(cp, {
+        "id": graph_id,
+        "org_id": org_id,
+        "name": "default",
+        "kind": "default",
+        "namespace": graph_name,
+        "status": "active",
+        "recording": None,
+    })
+    return graph_id
+
+
 def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
     """Hard-delete a graphs row by (id, org) — the rollback path for a
     failed mint (D11: no orphan graph). Never touches the default graph.
@@ -4105,18 +4195,41 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
                 json_body={"name": name},
             )
             return True
-        # kind == 'default' → fall through: the default path resolves the row
-        # by (org_id, kind) and never writes `namespace`.
-    # Default graph: rename the existing kind='default' display row, else
-    # upsert one (namespace = the ORG graph name — never the display name).
-    rows = cp.query(
-        "graphs", select=["id", "namespace"],
-        filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
-    )
-    if rows:
+        # kind == 'default' → fall through: the default path renames THIS row and
+        # never writes `namespace`. The caller NAMED a row above (and it is
+        # known to be this org's ACTIVE default), so the PATCH targets THAT id —
+        # never a re-resolved `rows[0]`. Two `kind='default'` rows are legal
+        # (the partial unique index is on `(org_id, name)`, so a tombstoned one
+        # and an active one coexist after `20261028000001`'s guard mints a
+        # second, and a tombstone plus an ACTIVE row with an older name is
+        # equally reachable), and a fresh read returns them in unspecified
+        # order: a re-resolve could PATCH the row the caller did NOT name and
+        # still return True, so the API reports success and the visible rename
+        # never happens.
+        named_default_row_id: str | None = graph_id
+    else:
+        named_default_row_id = None
+        # The sentinel `'default'` is not an id, so this path is the one case
+        # that MUST resolve the row.
+    # Default graph: rename the existing ACTIVE kind='default' display row,
+    # else upsert one (namespace = the ORG graph name — never the display
+    # name). The `status` filter is load-bearing: `20261028000001` can leave an
+    # org with a tombstoned default row AND a minted active one (the unique
+    # index is partial on `status <> 'deleted'`, so both are legal), and
+    # `graph_metadata`/`default_graph_id_for` read ACTIVE only — PATCHing
+    # `rows[0]` blind would accept the rename (True, HTTP 200) and then never
+    # show it.
+    if named_default_row_id is None:
+        rows = cp.query(
+            "graphs", select=["id", "namespace"],
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
+        )
+        named_default_row_id = rows[0]["id"] if rows else None
+    if named_default_row_id:
         cp.query(
             "graphs", method="PATCH",
-            filters=[("id", "eq", rows[0]["id"]),
+            filters=[("id", "eq", named_default_row_id),
                      ("org_id", "eq", org_id)],
             json_body={"name": name},
         )
@@ -4161,16 +4274,17 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
                         value: bool | None) -> bool:
     """C6 #2115: set the session_recording override on a graphs row.
 
-    Custom rows PATCH directly. The DEFAULT graph has NO row (derived from
-    ``teams.graph_name``) — an override for graph 0 upserts a kind='default'
-    row (the partial unique index permits name='default' per org; the
-    kind='default' rows are invisible to every custom-only reader: graph_metadata
-    lists custom rows only + derives the default separately, graph_count counts
-    custom active only, soft_delete_graph kind-guards them). ``value`` None =
-    inherit org default — on a MISSING row that is a no-op (NULL IS inherit);
-    on an existing row it PATCHes recording to null. Returns True when the
-    override was written/cleared against a known graph (row PATCHed/upserted
-    OR None-on-missing-row), False when the custom graph is unknown."""
+    Custom rows PATCH directly. The DEFAULT graph is overridden on its
+    `kind='default'` row — `20261028000001` mints one per organization (#10025)
+    — or, when it is still absent, on a row this call upserts (the partial
+    unique index permits name='default' per org; the kind='default' rows are
+    invisible to every custom-only reader: graph_metadata lists custom rows
+    only + derives the default separately, graph_count counts custom active
+    only, soft_delete_graph kind-guards them). ``value`` None = inherit org
+    default — on a MISSING row that is a no-op (NULL IS inherit); on an
+    existing row it PATCHes recording to null. Returns True when the override
+    was written/cleared against a known graph (row PATCHed/upserted OR
+    None-on-missing-row), False when the custom graph is unknown."""
     if graph_id != "default":
         rows = cp.query(
             "graphs", select=["id"],
@@ -4184,10 +4298,15 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
             json_body={"recording": value},
         )
         return True
-    # Default graph: read any kind='default' row (upsert on set).
+    # Default graph: read an ACTIVE kind='default' row (upsert on set). ACTIVE
+    # for the same reason `set_graph_name` filters it: a tombstoned default row
+    # plus a minted active one is a legal pair, and every reader of the default
+    # graph reads active only — writing the override onto the tombstone would
+    # return True and change nothing anyone can see.
     rows = cp.query(
         "graphs", select=["id"],
-        filters=[("org_id", "eq", org_id), ("kind", "eq", "default")],
+        filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                 ("status", "eq", "active")],
     )
     if value is None and not rows:
         return True  # no override exists — inherit is already the state
