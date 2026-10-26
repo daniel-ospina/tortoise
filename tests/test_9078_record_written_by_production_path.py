@@ -259,6 +259,15 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # the constraints, `DROP COLUMN IF EXISTS` on the generated column).
     (REPO_ROOT / "supabase" / "migrations"
      / "20261027000001_record_semantic_id_key.sql", None),
+    # #10017 R2 — a COLUMN plus a re-declared refusal for `public.point`, which
+    # this tree's readers parse from the FILES: on a container that predates it,
+    # `table_columns()`/`refused_props_names()` report `cache_tier` and the cache
+    # projection emits a predicate on a column the container does not have
+    # (`42703`) — every record-sourced rebuild fails. Re-apply safe by
+    # construction: `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` +
+    # `ADD`, and `COMMENT ON` are all idempotent.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261029000001_record_point_cache_tier.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in

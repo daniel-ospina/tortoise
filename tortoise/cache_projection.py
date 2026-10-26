@@ -808,9 +808,23 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
                               "WHERE org_id = %s AND graph_id = %s" + tier,
                          (org_id, graph_id)):
             nodes.append(node_from_row(label, row))
+    # …and its EDGES go with it (#10017 R2 review): a CONTAINS edge to a
+    # `record_only` turn is planned against a node this view deliberately does
+    # not project, so `rebuild_from_record` records it in
+    # `relations_not_written` — which makes the operator-facing "declared
+    # partial" signal permanently non-empty for every tenant with tiered turns,
+    # and therefore worthless. The endpoint subquery is label-agnostic on
+    # purpose: `point` is the only tiered table, and a key that is not a point
+    # simply never matches it.
+    record_only = ("SELECT node_key FROM public.point "
+                   "WHERE org_id = %s AND graph_id = %s "
+                   "AND cache_tier <> 'graph'")
     for row in _rows(cur, f"SELECT * FROM public.{RELATION_TABLE} "
-                          "WHERE org_id = %s AND graph_id = %s",
-                     (org_id, graph_id)):
+                          "WHERE org_id = %s AND graph_id = %s "
+                          f"AND src_key NOT IN ({record_only}) "
+                          f"AND tgt_key NOT IN ({record_only})",
+                     (org_id, graph_id,
+                      org_id, graph_id, org_id, graph_id)):
         relations.append(relation_from_row(row))
     return RecordView(nodes=tuple(nodes), relations=tuple(relations))
 
