@@ -959,6 +959,22 @@ def test_the_session_lane_resolves_the_journal_the_write_wrote(
         "the org-wide key lane — `_make_sdk(namespace=org_id)` — resolves no "
         "journal, so its captures' turns are unreadable through the record")
 
+    # ⛔ AND IT ASKS THROUGH AN OPEN WRITE BREAKER (#10000 review P2). The breaker
+    # bounds the WRITE path's N connect timeouts; it is no evidence about where a
+    # transcript that is already stored lives. Inheriting it made this door decide
+    # "the record holds nothing" without asking, so a healthy armed session served
+    # `turns: []` for the breaker's 60 s with no WARNING and no counter. Pinned on
+    # the door itself, not on the flag's spelling: the assertion above is the same
+    # door, and the ONLY change is that the write breaker is now open.
+    rw._trip_live_breaker()
+    try:
+        assert ha._record_tenant_for_read(session_org) == ("org-1", "g-1"), (
+            "an open WRITE breaker was read as 'the record holds nothing': the "
+            "door abstained instead of asking, and the caller then serves the "
+            "graph, which holds no turn node — a silent empty transcript")
+    finally:
+        rw._close_live_breaker()
+
 
 def test_a_shrunk_session_is_not_reported_as_a_missing_tail(sdk, monkeypatch):
     """⛔ P2: the tail witness describes the LIVE id space, not its peak.
