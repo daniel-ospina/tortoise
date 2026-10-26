@@ -18158,27 +18158,6 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
-def _record_holds_turns(org: dict) -> bool:
-    """#10000: does the RECORD hold this request's captured turns?
-
-    THE SAME PREDICATE THE CAPTURE WRITER USES. The turns reach the record only
-    through the per-turn `PointAdded` records, which the writer emits only when a
-    journal is configured, and the record accepts them only when
-    `record_writer.live_write_refusal` names no reason to refuse — so this asks
-    that ONE declaration rather than forming its own opinion. The previous
-    version asked `_dsn() is not None` alone, and that is how the read side and
-    the write side came to disagree in exactly the lane where the graph kept the
-    turns: an armed-but-journal-less deployment writes turn NODES to the graph,
-    and this read went looking for them in the record.
-
-    ⛔ It is a CAPABILITY question, never a policy flag. Nothing here reads a
-    toggle that could send the turns back to the graph (§9.1/D1 is the ruling —
-    the graph is not an option); it asks whether Postgres CAN hold them right
-    now, because a refusal there is what leaves them in the graph.
-    """
-    return _record_tenant_for_read(org) is not None
-
-
 def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
     """The tenant this READ must scope, or ``None`` ⇒ the graph holds the turns.
 
@@ -18328,7 +18307,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
     # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
-    # capture writer asks (`_record_holds_turns`). With the record holding them,
+    # capture writer asks (`_record_tenant_for_read`, the ONE resolution). With
+    # the record holding them,
     # the graph has no turn nodes and this read must come from the record;
     # otherwise it reads the graph exactly as before, which is what keeps both
     # the pre-arming deployment AND the refused-write lane byte-identical.

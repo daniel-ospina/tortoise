@@ -2842,8 +2842,9 @@ def _write_capture_turns(
         # captured before the record was armed. A no-op `DETACH DELETE` on ids
         # the graph does not carry costs one statement; leaving residue instead
         # is #1920 itself, and it is reachable from the armed path precisely
-        # because arming is new (`_record_holds_turns` used to be the gate, and
-        # that left every pre-arming surplus turn served forever).
+        # because arming is new (the record-capability gate used to be asked
+        # with this process's journal, and that left every pre-arming surplus
+        # turn served forever).
         if stale:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(

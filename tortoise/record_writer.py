@@ -1066,7 +1066,7 @@ def live_write_refusal(*, durable: bool = True,
     The public half of :func:`_live_write_verdict`, for a caller that needs the
     answer BEFORE the write — ``sdk._write_capture_turns`` asks it to decide
     whether the record can hold this capture's turns, and
-    ``hosted_api._record_holds_turns`` asks it to decide whether it may serve
+    ``hosted_api._record_tenant_for_read`` asks it to decide whether it may serve
     the transcript from the record. Both use THIS function, so the read side and
     the write side cannot disagree about which store holds the turns (#10000
     review P0-2/P0-3).

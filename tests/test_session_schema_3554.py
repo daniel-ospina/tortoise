@@ -820,6 +820,47 @@ def test_undercount_counts_the_same_edge_universe_as_the_counter() -> None:
     assert report["entity_links_under_count"]["edges"] == 2
 
 
+def test_the_short_turn_class_is_not_measured_from_the_graph_when_armed(
+        monkeypatch) -> None:
+    """⛔ On an armed deployment the graph holds NO turn node — so it measures 0.
+
+    #10000 moved the turns into the record: once the writer takes the record
+    branch it writes no turn node at all, so `count(t)` is 0 for every session
+    captured since arming and this class — the diagnostic that exists to detect
+    a SHORT stored transcript — reports `stored_turns = 0 < turn_count = N` for
+    sessions whose transcript is stored perfectly. 100% false positive on
+    healthy data, which trains its reader to ignore it.
+
+    So the audit reports the class as NOT MEASURABLE (`retro_quantifiable:
+    False`, the report's own vocabulary) and issues no graph count for it. The
+    honest figure lives in the record (§9.1/D1) and is part of #10000's
+    measurement step. Non-vacuity: pre-fix the key does not exist and the class
+    reports the fake graph's two short sessions.
+    """
+    import tortoise.record_writer as rw
+
+    monkeypatch.setattr(rw, "record_tenant", lambda: ("org-1", "g-1"))
+    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: None)
+    report = session_schema.audit_session_retrofit(_FakeGraph())
+    short = report["short_turn_count"]
+    assert short["retro_quantifiable"] is False
+    assert short["all_short"] == 0 and short["candidates_measured"] == 0
+    assert "record" in (short["reason"] or ""), (
+        "the class is unmeasurable here and must SAY why, not print a number")
+
+
+def test_the_short_turn_class_is_still_measured_on_a_graph_only_deployment(
+        monkeypatch) -> None:
+    """The unarmed lane keeps the measurement it always had (no regression)."""
+    import tortoise.record_writer as rw
+
+    monkeypatch.setattr(rw, "record_tenant", lambda: None)
+    report = session_schema.audit_session_retrofit(_FakeGraph())
+    short = report["short_turn_count"]
+    assert short["retro_quantifiable"] is True
+    assert short["all_short"] == 2 and short["capture_ok_true"] == 1
+
+
 def test_undercount_query_aggregates_the_two_legs_separately() -> None:
     """The two ``OPTIONAL MATCH``es must not cross-product their counts.
 

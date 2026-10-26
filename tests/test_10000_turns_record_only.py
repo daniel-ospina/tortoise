@@ -82,9 +82,20 @@ class _RecordSeam:
 
     def __call__(self, record, **kwargs):
         self.records.append(record)
-        if self.outcome is None:
+        outcome = self.outcome
+        if isinstance(outcome, (list, tuple)):
+            # A LIST means "this outcome per TURN" — the MIXED state, where one
+            # turn's record write is applied and the next is refused. Nothing
+            # else in this writer produces a split store, and the read side has
+            # to serve it (#10000 review P0), so the fixture has to be able to
+            # produce it.
+            turn_index = sum(1 for r in self.records
+                             if r.get("type") == "PointAdded") - 1
+            outcome = (outcome[turn_index] if turn_index < len(outcome)
+                       else outcome[-1])
+        if outcome is None:
             return None
-        return self.outcome
+        return outcome
 
     def point_contents(self) -> list[str]:
         return [r["point"]["content"] for r in self.records
@@ -303,9 +314,11 @@ def test_a_recapture_without_an_embedder_journals_the_preserved_vector(
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     seam = _RecordSeam(_APPLIED)
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
-    monkeypatch.setattr(sdk_mod, "_record_prior_vectors",
-                        lambda *a, **k: {"kept_t0": ("[user] same text",
-                                                     [0.1, 0.2, 0.3])})
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established")})
     _bind_tenant(sdk)
     _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
              turn_embs=[None])
@@ -326,9 +339,11 @@ def test_a_changed_turn_with_no_embedder_clears_the_vector(sdk, monkeypatch):
     seam = _RecordSeam(_APPLIED)
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     # The record holds a vector for the OLD text; this capture stores new text.
-    monkeypatch.setattr(sdk_mod, "_record_prior_vectors",
-                        lambda *a, **k: {"kept_t0": ("[user] same text",
-                                                     [0.1, 0.2, 0.3])})
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established")})
     _bind_tenant(sdk)
     _capture(sdk, "kept", [{"role": "user", "content": "DIFFERENT text"}],
              turn_embs=[None])
@@ -338,18 +353,23 @@ def test_a_changed_turn_with_no_embedder_clears_the_vector(sdk, monkeypatch):
     assert snapshot[0].get("embedding_preserved") is None
 
 
-def test_a_scratch_journal_keeps_the_turns_in_the_graph_and_off_the_read_switch(
+def test_a_scratch_journal_keeps_the_turns_in_the_graph_and_the_read_backs_it(
         sdk, monkeypatch):
-    """A NON-DURABLE journal is the same capability answer as no journal.
+    """A NON-DURABLE journal is a WRITE answer; the READ must not infer from it.
 
     The seam declines a scratch buffer (`write_live_record(durable=False)`), so
-    the record cannot hold these turns and the graph must. The READ has to reach
-    that conclusion from the same declaration: a read that asked only "is a log
-    present" would consult the record, find no Session row there, call that an
-    empty transcript, and serve `turns: []` for a session whose turns are in the
-    graph — #10000 review P0-3's shape, reached through the durability arm
-    instead of the scope arm. The record here is REACHABLE and would answer
-    empty, which is what makes that failure mode visible instead of incidental.
+    the record cannot hold these turns and the graph must. The READ's question is
+    a different one — "is the record where THIS SESSION's turns are", which is a
+    fact about the process that CAPTURED it, not about this one — so the read asks
+    the record and lets its own answer (`session_turns.answered`) decide (#10000
+    review P2: a journal-less reader of a session the hosted lane captured WITH a
+    journal used to serve an empty graph copy, silently).
+
+    What must NOT happen is the failure the original leg guarded: the record here
+    is REACHABLE and answers empty, and that silence must not blank the
+    transcript. So the assertions are (a) the transcript is still the graph's and
+    (b) the record really was asked — a change that stops asking would re-open the
+    cross-process gap without reddening anything else.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     log = sdk._get_event_log()
@@ -370,11 +390,132 @@ def test_a_scratch_journal_keeps_the_turns_in_the_graph_and_off_the_read_switch(
 
     detail = sdk.get_session("scratch") or {}
     assert [t["id"] for t in detail.get("turn_points", [])] == ["scratch_t0"], (
-        "the SDK read consulted a record that cannot hold these turns and "
-        "served an empty transcript (#10000 P0-3)")
-    assert not any("set_config" in s for s in conn.statements), (
-        "the record was consulted for a scratch-journal SDK — the read and the "
-        "write disagree about the same capability")
+        "a record that answered EMPTY for a session whose turns are in the "
+        "graph blanked the transcript (#10000 P0-3)")
+    # The read DID ask the record (it is armed and tenanted), so a change that
+    # silently stops consulting it — the cross-process gap of review P2 — reddens
+    # here instead of passing as "the graph had it anyway".
+    assert any("set_config" in s for s in conn.statements), (
+        "the SDK read did not consult the record at all: the store is a "
+        "capability question about the record, not about this process's journal")
+
+
+def test_a_partially_refused_capture_is_served_from_both_stores(
+        sdk, monkeypatch):
+    """⛔ P0: ONE session, two outcomes — the served transcript is BOTH turns.
+
+    The writer's store decision is per TURN (a record write refused after an
+    earlier one landed sends only the refused turns to the graph), while the
+    read's used to be per SESSION: `session_turns` answered as soon as ANY row
+    existed, so the record's landed prefix was served ALONE and the turn the
+    fallback had just rescued was reachable from neither door.
+
+    The record's answer for this state is produced by `turn_read` itself (pinned
+    above), so this leg drives the DOOR: the SDK detail read must serve the union.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam([_APPLIED, None])
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    _bind_tenant(sdk)
+    proj = sdk._get_proj()
+    _capture(sdk, "split", [{"role": "user", "content": "a"},
+                            {"role": "assistant", "content": "b"}])
+    assert sdk_mod._capture_turn_ids(proj, "split") == ["split_t1"], (
+        "the fixture did not produce a split store: only the REFUSED turn "
+        "belongs in the graph")
+
+    landed_only = record_read.TurnAnswer(
+        answered=False,
+        turns=(record_read.Turn(turn_id="split_t0", index=0,
+                                 content="[user] a", speaker="user"),),
+        turn_count=2,
+        reason="the record states 2 turn(s) but holds only 1 — a partial "
+               "transcript")
+    monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
+                        lambda self, sid: landed_only)
+    detail = sdk.get_session("split") or {}
+    assert [t["id"] for t in detail.get("turn_points", [])] == [
+        "split_t0", "split_t1"], (
+        "the split transcript was served from ONE store: the record's landed "
+        "turn and the graph's rescued turn must both be readable")
+
+
+def test_a_recapture_journals_the_records_created_at_and_status(
+        sdk, monkeypatch):
+    """⛔ P1: the record's upsert is ABSOLUTE, so the journal must carry the prior.
+
+    `_TURN_WRITE_CYPHER` coalesces `status`/`createdAt`, so the graph path cannot
+    restamp or demote a stored turn — and it journals what the write LEFT because
+    the write hands it back. The record path has no read-back, and
+    `record_projection._upsert_statement` writes both columns from EXCLUDED, so a
+    journalled `now`/`draft` RE-STAMPS `created_at` and DEMOTES a promoted turn to
+    `draft` on the store of record. The prior row is what the journal carries.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established")})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[[0.1, 0.2, 0.3]])
+    snapshot = next(r["point"] for r in seam.records
+                    if r.get("type") == "PointAdded")
+    assert snapshot["createdAt"] == "2026-01-01T00:00:00+00:00", (
+        "a re-capture re-stamped the record's created_at")
+    assert snapshot["status"] == "established", (
+        "a re-capture demoted a promoted turn to draft on the store of record")
+
+
+def test_an_unreadable_prior_row_omits_the_field_rather_than_restamping(
+        sdk, monkeypatch):
+    """A field this capture cannot attest is OMITTED, never asserted as `now`.
+
+    An omitted column is one the record's upsert leaves untouched; a column
+    carrying this capture's `now`/`draft` is a claim that the stored turn is new.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(sdk_mod, "_record_prior_vectors", lambda *a, **k: None)
+    _bind_tenant(sdk)
+    _capture(sdk, "unknown", [{"role": "user", "content": "hi"}],
+             turn_embs=[[0.1, 0.2, 0.3]])
+    snapshot = next(r["point"] for r in seam.records
+                    if r.get("type") == "PointAdded")
+    assert "createdAt" not in snapshot and "status" not in snapshot, (
+        "a capture that could not read the prior row asserted its own "
+        "created_at/status over the record's")
+
+
+def test_the_write_op_meter_counts_the_sessions_turns_not_turn_nodes(sdk):
+    """⛔ P1: an armed capture writes NO turn node, so a node count meters replay.
+
+    `CONTAINS -> Point {is_episodic}` reads 0 for every session captured since
+    arming, which makes `len(windowed) > prior_turn_count` TRUE for an idempotent
+    re-POST — a phantom write-op charged for a replay (#1827/#3892), on the
+    billing/abuse leg and silent. The Session's own id-space mark survives the
+    store switch, so the meter reads IT.
+    """
+    import inspect
+
+    import tortoise.hosted_api as ha
+
+    proj = sdk._get_proj()
+    _capture(sdk, "metered", [{"role": "user", "content": "a"},
+                              {"role": "assistant", "content": "b"}])
+    # Model the armed store: the counters stay, the turn nodes do not exist.
+    proj.g.query("MATCH (s:Session {id:'metered'})-[:CONTAINS]->(t:Point) "
+                 "DETACH DELETE t")
+    assert ha._prior_stored_turn_count(proj, "metered") == 2, (
+        "the meter read 0 stored turns for a 2-turn session — every re-POST of "
+        "it would be billed as a write op")
+    src = inspect.getsource(ha._capture_session_impl)
+    assert "_prior_stored_turn_count(" in src, (
+        "the capture path no longer asks the shared meter read")
 
 
 # ── the read side ──────────────────────────────────────────────────────────
@@ -412,7 +553,7 @@ class _RlsCursor:
             self._rows = list(self._conn.narrative)
         elif "FROM public.point" in flat and "is_episodic IS TRUE" in flat:
             self._rows = list(self._conn.turn_rows)
-        elif "SELECT node_key, content, embedding FROM public.point" in flat:
+        elif "SELECT node_key, content, embedding, created_at, status" in flat:
             self._rows = list(self._conn.prior_rows)
         else:
             self._rows = []
@@ -499,6 +640,71 @@ def test_an_empty_record_is_only_an_answer_when_the_record_says_so():
         "a record that states 0 turns IS an authoritative empty transcript")
 
 
+def test_a_short_record_answer_is_not_an_answer():
+    """⛔ P0: "the record spoke" is not "the record spoke for the WHOLE session".
+
+    Three shapes are incomplete, and each must leave the caller free to reach the
+    other store — while still handing it the rows the record does hold, so the
+    merge can be a union rather than a choice:
+
+    * SHORT — the narrative row states 3 turns and `_turns` returns 2 (a per-turn
+      write refused after the first landed);
+    * FRONT GAP — rows `_t2`/`_t3` with `turn_count = 2`, the `turn_offset`
+      append shape, where the count is a WINDOW length and cannot see the gap;
+    * HOLE — `_t0` and `_t2`, one refused write between two that landed.
+    """
+    short = _RlsConn(narrative=[(None, None, 0, 3)],
+                     turn_rows=[_turn_row(0, "[user] a"),
+                                _turn_row(1, "[assistant] b")])
+    answer = record_read.session_turns(short, org_id="org-1", graph_id="g-1",
+                                       session_id="sess")
+    assert not answer.answered and answer.turn_count == 3
+    assert [t.turn_id for t in answer.turns] == ["sess_t0", "sess_t1"], (
+        "the partial rows were dropped instead of carried for the merge")
+    assert "partial" in answer.reason
+
+    front = _RlsConn(narrative=[(None, None, 0, 2)],
+                     turn_rows=[_turn_row(2, "[user] c"),
+                                _turn_row(3, "[assistant] d")])
+    answer = record_read.session_turns(front, org_id="org-1", graph_id="g-1",
+                                       session_id="sess")
+    assert not answer.answered, (
+        "a run that starts at index 2 was served as the whole transcript")
+
+    hole = _RlsConn(narrative=[(None, None, 0, 3)],
+                    turn_rows=[_turn_row(0, "[user] a"),
+                               _turn_row(2, "[user] c")])
+    answer = record_read.session_turns(hole, org_id="org-1", graph_id="g-1",
+                                       session_id="sess")
+    assert not answer.answered, "an interior hole was served as complete"
+
+    whole = _RlsConn(narrative=[(None, None, 0, 2)],
+                     turn_rows=[_turn_row(0, "[user] a"),
+                                _turn_row(1, "[assistant] b")])
+    answer = record_read.session_turns(whole, org_id="org-1", graph_id="g-1",
+                                       session_id="sess")
+    assert answer.answered and len(answer.turns) == 2, (
+        "a complete row set was refused")
+
+
+def test_the_merge_serves_the_union_in_turn_order():
+    """The union both doors serve: the record's rows, then the other store's."""
+    answer = record_read.TurnAnswer(
+        answered=False,
+        turns=(record_read.Turn(turn_id="s_t0", index=0, content="[user] a",
+                                speaker="user"),),
+        turn_count=3)
+    other = [
+        {"id": "s_t2", "role": "user", "content": "c", "created_at": None},
+        {"id": "s_t1", "role": "assistant", "content": "b", "created_at": None},
+        # A row the record already holds is the RECORD's (§9.1/D1).
+        {"id": "s_t0", "role": "user", "content": "STALE", "created_at": None},
+    ]
+    merged = record_read.merge_turn_payloads(answer, other)
+    assert [p["id"] for p in merged] == ["s_t0", "s_t1", "s_t2"]
+    assert merged[0]["content"] == "a", "the other store won over the record"
+
+
 def test_the_record_payload_is_the_same_shape_the_graph_served():
     """The record→payload map is shared by both serving doors, and framed text
     is un-framed exactly once (#4675 parity)."""
@@ -542,11 +748,14 @@ def test_the_prior_vector_read_is_scoped_and_returns_what_the_record_holds():
     the caller clears every vector in the window — so the scope is load-bearing
     here exactly as it is on the turn read, and this read installs it itself.
     """
-    rows = (("sess_t0", "[user] hi", [0.5, 0.5]),)
+    rows = (("sess_t0", "[user] hi", [0.5, 0.5], "2026-01-01T00:00:00+00:00",
+             "established"),)
     conn = _RlsConn(org_id="org-1", prior_rows=rows)
     got = record_read.turn_prior_vectors(
         conn, org_id="org-1", graph_id="g-1", session_id="sess",
         turn_ids=["sess_t0"])
-    assert got == {"sess_t0": ("[user] hi", [0.5, 0.5])}, got
+    assert got == {"sess_t0": record_read.PriorTurn(
+        content="[user] hi", embedding=[0.5, 0.5],
+        created_at="2026-01-01T00:00:00+00:00", status="established")}, got
     # The scope is what the read asked for, and it asked on ITS OWN connection.
     assert any("set_config" in s for s in conn.statements), conn.statements
