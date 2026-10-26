@@ -577,7 +577,9 @@ class KindClassifier:
         ``prompt`` (which prompt version answered), ``model`` (the pin that
         answered), ``unavailable`` (how many batches the capability never
         answered, so an armed-but-keyless run is distinguishable from "no item
-        reached the tail") and ``schema_rejects``.
+        reached the tail") and ``rejected`` (the failing question names — the
+        seam reports them as ``schema_rejects``, and they are re-keyed here to
+        the name the two gates' record uses).
         """
         seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
                                          "cost_usd": 0.0, "rejected": []})

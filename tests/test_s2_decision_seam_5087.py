@@ -1,15 +1,22 @@
-"""S2.2/S2.3 typed-decision seam (#5087) — two discriminating tests, and nothing else.
+"""S2.2/S2.3 typed-decision seam (#5087) — four discriminating tests.
 
-**Why only two.** This seam exists to prevent one defect class: *an answer that
-does not fit the schema is trusted anyway*. Every test here is either "a valid
-typed answer produces the expected verdict through the REAL consumers" (so the
-seam's shape is the gate's shape, not a private one) or "an out-of-schema answer
-fails closed" (the defect the seam prevents). Anything that merely pins the
-request's byte layout is a test that cannot fail for a reason we care about — the
-one request-shape assertion kept is the ``questions`` **map** (``#7866``): the
+**Why the first two.** This seam exists to prevent one defect class: *an answer
+that does not fit the schema is trusted anyway*. Both are either "a valid typed
+answer produces the expected verdict through the REAL consumers" (so the seam's
+shape is the gate's shape, not a private one) or "an out-of-schema answer fails
+closed" (the defect the seam prevents). Anything that merely pins the request's
+byte layout is a test that cannot fail for a reason we care about — the one
+request-shape assertion kept is the ``questions`` **map** (``#7866``): the
 documented array form 400s, so that line is the 400 trap, not decoration.
 
-**The fail-closed tests are mutation-checked**, and the mutant is named in each
+**Why the other two.** Being right and being *measurable* are different
+failures, and only one of them reddens a pure-logic test. Arming the seam puts a
+billable call on the write path, so the record of it is asserted where a cost
+gate reads (``vet_gate``'s ``stats["seam"]``), and an injected decider's
+unrepresentable spend is asserted not to abort a pass documented as
+never-raising. Neither was reachable from the first two tests.
+
+**Every test here is mutation-checked**, and the mutant is named in its
 docstring. A test that cannot be made red by breaking the guard it claims to
 test is not a test.
 """
