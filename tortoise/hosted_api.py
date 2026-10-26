@@ -18245,7 +18245,8 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
 
 
 def _record_unavailable() -> HTTPException:
-    """#8447: fail-CLOSED 503 when the RECORD holds the transcript and did not answer.
+    """#8447: fail-CLOSED 503 when the RECORD did not answer and nothing could be
+    served in its place.
 
     On an armed **journaling** deployment the turns are RECORD rows (the
     per-turn `PointAdded` records, #10000/#10011) and the graph keeps only the
@@ -18305,8 +18306,8 @@ def _record_unavailable() -> HTTPException:
         status_code=503,
         detail={
             "error_code": "record_unavailable",
-            "message": "The record holds this session's transcript and cannot "
-                       "answer right now — retry in a moment.",
+            "message": "The record could not answer for this session and there "
+                       "was no copy to fall back to — retry in a moment.",
         },
     )
 
@@ -18490,14 +18491,26 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 "created_at": created_at,
             })
 
-    # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. The
-    # record was the store holding these turns and it did not answer; the graph
-    # fallback above therefore carries EITHER the pre-arming copy (serve it,
-    # unchanged — #1591 keeps failing soft) OR nothing at all. Nothing is not an
-    # empty transcript: the two are indistinguishable to the caller, and on an
-    # armed deployment an empty graph copy is the NORMAL state (#10000 writes no
-    # turn nodes), so `turns: []` here would claim a captured session had no
-    # turns. Refuse visibly instead — see `_record_unavailable`.
+    # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. On an
+    # armed JOURNALING deployment the record was the store holding these turns
+    # and it did not answer; the graph fallback above therefore carries EITHER
+    # the pre-arming copy (serve it, unchanged — #1591 keeps failing soft) OR
+    # nothing at all. Nothing is not an empty transcript: the two are
+    # indistinguishable to the caller, and there an empty graph copy is the
+    # NORMAL state (#10000 writes no turn nodes), so `turns: []` here would claim
+    # a captured session had no turns. Refuse visibly instead — see
+    # `_record_unavailable`.
+    #
+    # ⚠️ KNOWN OVER-BLOCK, stated rather than papered over: `_record_holds_turns`
+    # tests only the DSN, so on an armed-but-NOT-journaling deployment (where the
+    # GRAPH is the store holding the turns — see `sdk.py`'s two-conjunct write
+    # predicate) a record outage plus a session that genuinely has no turns ALSO
+    # lands here, turning a truthful `200 {"turn_points": []}` into a 503. It is
+    # narrow — it needs the record read to FAIL, on that config, for an empty
+    # session — and the *message* is worded not to assert the record held the
+    # transcript, precisely because this arm cannot know that it did. Closing it
+    # is the shared-predicate fix recorded on #10021, not a read rewrite smuggled
+    # into this visibility diff.
     if _record_read_failed and not turns:
         raise _record_unavailable()
 

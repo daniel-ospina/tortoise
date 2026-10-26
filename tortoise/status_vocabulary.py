@@ -71,20 +71,29 @@ fifth term, renames none, and does not change the boundary's mapping.
 
 **One write-path dimension this vocabulary does not name.** ``record_writer``'s
 LIVE door reports an ARMED call that did not write as ``REFUSED`` (#8447), and
-its ``refusal`` token is one of five. Four of them are literally *configured,
-not reached* — ``malformed_dsn``, ``no_tenant``, ``circuit_open``,
-``write_failed`` — so ``degraded`` names them exactly. ``no_durable_journal``
-is NOT that: the M2 capture lane has no journal by design, so the write is
-declined before the store is ever asked and nothing a replay could restore is
-missing. The four terms have no name for *the store was never asked, by
-design*, so the write path carries that decline as ``degraded`` — the nearest
-recorded term, **not** a measured outage — and keeps the reason in
-``RecordWrite.refusal``, which is authoritative: a consumer must read
-``refusal`` before calling a decline an error. Recorded here for the same
-reason as the read-path dimension above — this module is the vocabulary's ONE
-home, and a mapping documented only at the call site is one that no reader of
-the published table will ever find. It adds no fifth term, renames none, and
-does not change the boundary's mapping.
+its ``refusal`` token is one of five. NONE of the five is exactly a term here:
+
+* ``circuit_open`` is the only LITERAL fit — a connect to the record failed, so
+  the store is configured and was not reached, which is ``degraded`` exactly;
+* ``write_failed`` covers two causes: the record was unreachable
+  (``degraded`` literally), OR the record was reached and refused the
+  projection — an impairment, not an outage;
+* ``malformed_dsn`` is a SET-UP defect, refused before any reach is attempted:
+  closer to a policy/set-up gap than to an outage, but ``unconfigured`` is
+  defined as *no value is configured*, and here a value IS set and is wrong;
+* ``no_tenant`` is a deployment/caller gap — nothing about the store is wrong;
+* ``no_durable_journal`` is a healthy DECLINE (the M2 capture lane has no
+  journal by design), counted on ``record_non_journal_skips`` rather than
+  ``record_write_failures``, so nothing a replay could restore is missing.
+
+So the write path carries all five as ``degraded`` — the NEAREST recorded term
+for "not available", and not a measured outage for four of them — and keeps the
+reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
+``refusal`` before calling a refusal an outage, a set-up gap, or an error.
+Recorded here for the same reason as the read-path dimension above — this
+module is the vocabulary's ONE home, and a mapping documented only at the call
+site is one that no reader of the published table will find. It adds no fifth
+term, renames none, and does not change the boundary's mapping.
 """
 
 from __future__ import annotations

@@ -435,11 +435,13 @@ class RecordWrite:
         supported state); a ``REFUSED`` call was armed and did not write, and
         :attr:`refusal` says WHY, but the five refusal tokens are not one
         severity: ``malformed_dsn`` / ``no_tenant`` / ``circuit_open`` /
-        ``write_failed`` are FAILURES (counted on ``record_write_failures``),
-        while ``no_durable_journal`` is a healthy-armed DECLINE counted on
-        ``record_non_journal_skips`` — that lane has no journal by design, so
-        nothing a replay could restore is missing (#9231 review P2, and the
-        vocabulary note in `monitoring.record_write_failure`). A consumer must
+        ``write_failed`` are FAILURES (counted on ``record_write_failures`` —
+        except the malformed CARRIED-pair ``no_tenant`` arm, which warns without
+        counting), while ``no_durable_journal`` is a healthy-armed DECLINE
+        counted on ``record_non_journal_skips`` — that lane has no journal by
+        design, so nothing a replay could restore is missing (#9231 review P2,
+        and the vocabulary note in
+        :func:`monitoring.record_record_write_failure`). A consumer must
         branch on :attr:`refusal`, not on ``applied is False``, before calling a
         decline an error. Either way a caller that needs the record to exist
         must not read ``False`` as success.
@@ -458,16 +460,22 @@ class RecordWrite:
         if self.outcome is RecordWriteOutcome.NOT_ARMED:
             return status_vocabulary.classify(configured=False, reached=False)
         if self.outcome is RecordWriteOutcome.REFUSED:
-            # ARMED and nothing written. For the four `record_write_failures`
-            # tokens this is literally "configured, not reached" ⇒ `degraded`.
-            # It is NOT literally that for `no_durable_journal`: that decline
-            # (the healthy M2 capture lane) never asks the store at all, so
-            # `degraded` — which `status_vocabulary` defines as "off by OUTAGE"
-            # — is the nearest of the four recorded terms, not a measured
-            # outage. There is deliberately no fifth term ("do not add a fifth
-            # term… a condition the four do not cover is a contract change"),
-            # so `.status` alone cannot tell a decline from an outage: a
-            # consumer MUST read :attr:`refusal` first (see :attr:`applied`).
+            # ARMED and nothing written. Only `circuit_open` is LITERALLY
+            # "configured, not reached" ⇒ `degraded`. The other four are near
+            # misses, and NOTHING here has its own term: `write_failed` covers an
+            # unreachable record AND a record that WAS reached and refused the
+            # projection; `malformed_dsn` is a SET-UP defect (a value IS set and
+            # is wrong, so not `unconfigured`, which is defined as no value at
+            # all); `no_tenant` is a deployment/caller gap; and
+            # `no_durable_journal` (the healthy M2 capture lane) never asks the
+            # store at all. So `degraded` — which `status_vocabulary` defines as
+            # "off by OUTAGE" — is the NEAREST of the four recorded terms for
+            # all five, not a measured outage for four of them. There is
+            # deliberately no fifth term ("do not add a fifth term… a condition
+            # the four do not cover is a contract change"), so `.status` alone
+            # cannot tell those apart: a consumer MUST read :attr:`refusal`
+            # first (see :attr:`applied`, and the write-path paragraph in
+            # `status_vocabulary`'s module docstring).
             # Never `available` either way — a refusal that reads as the healthy
             # term is exactly the #8447 shape (`APPLIED` is the only `available`).
             return status_vocabulary.classify(configured=True, reached=False)
