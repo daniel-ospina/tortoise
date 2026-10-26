@@ -316,6 +316,51 @@ def test_first_and_last_key_follow_the_index_not_the_sort_order() -> None:
     assert bucket["id_space_hole"] is False
 
 
+def test_a_window_that_starts_above_index_zero_is_not_an_id_space_hole() -> None:
+    """CONTIGUITY IS MEASURED OVER THE SESSION'S OWN WINDOW, not from index 0.
+
+    `turn_offset` makes the writer start a window anywhere: a 2-turn window at
+    offset 2 holds the ids `_t2`, `_t3` and declares `turn_max_index = 3`
+    (`tests/test_10000_turns_record_only.py:83-92`,
+    `tests/test_write_session_and_turns_3551.py:263`). The census used
+    `indexes_seen + 1 != turns`, which is a correct contiguity test only when the
+    window begins at 0 — so it reported a hole on an id space that has none (and
+    `max + 1 == count` can never hold for an offset window). The declared and the
+    measured high-water marks AGREE here, which is the evidence the ids are
+    intact; the derived flag must not contradict the two numbers beside it.
+    """
+    sessions = [("s1", 2, 3)]
+    turns = [("s1", "s1_t2", 1, 0, "event"), ("s1", "s1_t3", 1, 0, "event")]
+    report = census_mod.census(_FakeGraph(sessions, turns), "g")
+    bucket = report["per_session"]["s1"]
+
+    assert bucket["turns"] == 2
+    assert bucket["first_index"] == 2 and bucket["last_index"] == 3
+    assert bucket["declared_max_index"] == bucket["indexes_seen"] == 3
+    assert report["count_mismatch"] == {}     # window length agrees too
+    assert bucket["id_space_hole"] is False
+    assert report["sessions_with_id_space_holes"] == []
+    assert report["totals"]["sessions_with_id_space_holes"] == 0
+
+
+def test_a_hole_inside_an_offset_window_is_still_a_hole() -> None:
+    """The offset arm is not an exemption: a gap inside the window still bites.
+
+    Ids 2,3,6,7 declare 4 turns and carry 4, so the count agrees — but the ids
+    span 6 slots for 4 turns. Anchoring the test at the session's OWN first index
+    must not turn a real hole into a clean read.
+    """
+    sessions = [("s1", 4, 7)]
+    turns = [("s1", f"s1_t{i}", 1, 0, "event") for i in (2, 3, 6, 7)]
+    report = census_mod.census(_FakeGraph(sessions, turns), "g")
+    bucket = report["per_session"]["s1"]
+
+    assert bucket["first_index"] == 2 and bucket["last_index"] == 7
+    assert report["count_mismatch"] == {}     # the count still agrees …
+    assert bucket["id_space_hole"] is True    # … 7 - 2 + 1 = 6 slots, 4 turns
+    assert report["sessions_with_id_space_holes"] == ["s1"]
+
+
 def test_turns_not_carrying_point_kind_event_are_measured_not_filtered() -> None:
     """The product's readers disagree about `pointKind`; the census measures it.
 

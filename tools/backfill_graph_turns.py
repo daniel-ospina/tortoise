@@ -382,9 +382,21 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
         # `turn_count` is a WINDOW LENGTH; the indices are the ID SPACE. A
         # session whose ids run 0,1,5,6 has 4 turns and a hole, and only the
         # second number can show it.
+        #
+        # The test is over the session's OWN window (`last - first + 1`), never
+        # anchored at index 0. `max + 1 == count` is a contiguity test only when
+        # the window begins at 0, and the writer deliberately starts it anywhere:
+        # `_capture_turn_id(session_id, i, turn_offset)` keys `s_<i+offset>` and
+        # `turn_max_index = turn_offset + turn_count - 1` (`tortoise/sdk.py`), so
+        # a 2-turn window at offset 2 holds `_t2`,`_t3` with `turn_count = 2`
+        # (the shape `tests/test_10000_turns_record_only.py` writes) — for which
+        # `indexes_seen + 1 != turns` is arithmetically ALWAYS true. That flagged
+        # a phantom hole on a contiguous id space, in the derived judgement this
+        # pre-delete artifact exists to make trustworthy.
         bucket["id_space_hole"] = (
             bucket["turns"] > 0
-            and bucket["indexes_seen"] + 1 != bucket["turns"])
+            and bucket["last_index"] - bucket["first_index"] + 1
+            != bucket["turns"])
 
     # NO CAUSE IS NAMED HERE. A disagreement between the declared window length
     # and the attached turns is a MEASUREMENT; on a journal+record deployment
@@ -503,7 +515,8 @@ def main(argv: list[str] | None = None) -> int:
           f"declared turn_count != attached turns (cause NOT measured)   "
           f"[{t['sessions_declared_and_empty']} declare turns and hold none]")
     print(f"id-space holes: {t['sessions_with_id_space_holes']} session(s) "
-          f"whose max turn index + 1 != attached turns")
+          f"whose turn ids are not contiguous over their OWN window "
+          f"(last index - first index + 1 != attached turns)")
     print(f"non-'event'    : {t['turns_not_point_kind_event']} keyed turn(s) "
           f"whose pointKind is not 'event' (the product readers do not count those)")
     if t["sessions_in_count_mismatch"]:
