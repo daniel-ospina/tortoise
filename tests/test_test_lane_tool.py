@@ -1312,12 +1312,20 @@ def test_remove_and_describe_refuses_a_peer_lane_container(monkeypatch):
 # ── the eval contract ──────────────────────────────────────────────────────
 
 def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
+    """The stdout of `uri` is exactly the eval-able export block — all three
+    seam variables and nothing else (#5084 remainder: the port and password
+    seams are what let a probe aimed at THIS container authenticate and
+    address it, instead of falling back to the shared 6379)."""
     monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     rc = tl.main(["uri"])
     out, err = capsys.readouterr()
     assert rc == 0
-    assert out == "export TORTOISE_DB_URI='docker://:@127.0.0.1:16399/tortoise_test_matrix'\n"
+    assert out == (
+        "export TORTOISE_DB_URI='docker://:@127.0.0.1:16399/tortoise_test_matrix'\n"
+        "export TORTOISE_TEST_DOCKER_PORT='16399'\n"
+        "export TORTOISE_TEST_DOCKER_PASSWORD=''\n"
+    )
     assert "fdb-lane-x" in err, "the human-readable diagnostic belongs on stderr"
 
 
