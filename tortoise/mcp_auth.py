@@ -409,6 +409,15 @@ def resolve_graph_target(org_id: str, ref: str, *,
     the caller cannot detect — the failure class this feature is most likely
     to cause.
 
+    Both spellings of a row's id are accepted, because a caller may have read
+    either one off another surface: `graph_id` (the storage/registry id — and,
+    for the DEFAULT row, the `"default"` SENTINEL) and `stable_id` (#10025's
+    identity field). For the default graph `stable_id` is the ONLY real id, so
+    without it the value `graph_metadata`/`GET /v1/graphs` calls a graph's
+    identity was REFUSED here while the sentinel — explicitly not an id —
+    resolved: a dual-surface caller (list over REST, write over MCP, the shape
+    this repo's own agents take) could not use the id it had just been handed.
+
     Raises :class:`GraphTargetError` for anything that is not exactly one
     reachable graph: unknown id/name, a name matching several, a graph that is
     soft-deleted (absent from the reachable set), and a graph belonging to
@@ -436,6 +445,15 @@ def resolve_graph_target(org_id: str, ref: str, *,
     # 1. id — exact, and allowed to win over a name that happens to collide.
     for row in reachable:
         if ref == row.get("graph_id"):
+            return row
+    # 1b. the #10025 identity id, matched over the SAME `reachable` set — the
+    #     workspace + tombstone filters above are exactly what keeps this from
+    #     becoming an IDOR: a foreign or soft-deleted row's stable id is not in
+    #     the list, so it stays indistinguishable from unknown. The default
+    #     row carries the sentinel in `graph_id`, so `stable_id` is the only
+    #     field that can name it by id at all.
+    for row in reachable:
+        if row.get("stable_id") and ref == row["stable_id"]:
             return row
     # 2. namespace — the storage spelling `list_memory_graphs` returns, so a caller
     #    that read it from `tortoise_list_graphs` can pass it straight back.

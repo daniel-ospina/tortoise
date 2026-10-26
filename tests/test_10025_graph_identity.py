@@ -27,6 +27,7 @@ import time
 
 import pytest
 
+from tortoise import mcp_auth
 from tortoise.record_writer import record_tenant_for
 from tortoise.supabase_control import (
     default_graph_id_for,
@@ -231,6 +232,76 @@ def test_a_tombstoned_row_is_not_the_metadata_stable_id() -> None:
     assert rows[0]["stable_id"] is None
     assert rows[0]["name"] == "default"  # tombstoned display name not revived
     assert default_graph_id_for(cp, "org-1") is None  # one answer, not two
+
+
+# ── 3b. The id a listed graph carries is usable on the WRITE path ──────────
+
+
+def test_an_id_read_off_the_listing_drives_a_write_through_the_resolver() -> None:
+    """One surface's id must be another surface's input.
+
+    `graph_metadata` is what `GET /v1/graphs` and `list_memory_graphs` return;
+    `resolve_graph_target` is the resolver every MCP write passes through. A
+    dual-surface caller (list over REST, write over MCP — the shape this repo's
+    own agents take) was handed a graph's `stable_id` and REFUSED by the write
+    path, while the `"default"` SENTINEL — explicitly not an id — resolved. For
+    the default row the sentinel occupies `graph_id`, so `stable_id` is the only
+    field that can name it by id at all; that is the defect this pins.
+    """
+    cp = _FakeCP(tables={
+        "organizations": [{"id": "org-1", "graph_name": "team_org-1"}],
+        "graphs": [
+            {"id": DEFAULT_ROW_ID, "org_id": "org-1", "name": "default",
+             "kind": "default", "namespace": "team_org-1",
+             "status": "active", "recording": None},
+            {"id": "g_custom", "org_id": "org-1", "name": "research",
+             "kind": "custom", "namespace": "team_org-1_g_custom",
+             "status": "active", "recording": None},
+        ],
+    })
+    rows = graph_metadata(cp, "org-1")
+    for listed in rows:
+        resolved = mcp_auth.resolve_graph_target(
+            "org-1", listed["stable_id"], rows=rows)
+        assert resolved["stable_id"] == listed["stable_id"]
+        assert resolved["graph_id"] == listed["graph_id"]
+    # The sentinel and the default row's REAL id name the same row — and the
+    # default stays the untouched path, so passing the id is byte-identical to
+    # passing the sentinel (and to omitting the argument).
+    by_id = mcp_auth.resolve_graph_target("org-1", DEFAULT_ROW_ID, rows=rows)
+    assert by_id == mcp_auth.resolve_graph_target(
+        "org-1", "default", rows=rows) == rows[0]
+    assert by_id["kind"] == "default"
+    assert mcp_auth.use_graph_target(by_id) is by_id  # sets no ContextVar
+
+
+def test_an_unreachable_id_still_refuses_and_names_the_reachable_set() -> None:
+    """Accepting `stable_id` must not WIDEN reachability.
+
+    The new comparison runs over the SAME filtered `reachable` list, so a
+    foreign row's id (a leaky reader) and a soft-deleted row's id are both
+    absent from it: refused, with the reachable set named and nothing confirmed
+    about another tenant. This is the fail-closed property the resolver is
+    trusted for.
+    """
+    rows = [
+        {"graph_id": "default", "stable_id": DEFAULT_ROW_ID,
+         "org_id": "org-1", "name": "default", "kind": "default",
+         "namespace": "team_org-1", "status": "active"},
+        {"graph_id": "g_foreign", "stable_id": "g_foreign_stable",
+         "org_id": "org-2", "name": "Foreign", "kind": "custom",
+         "namespace": "team_org-2_x", "status": "active"},
+        {"graph_id": "g_gone", "stable_id": "g_gone", "org_id": "org-1",
+         "name": "Gone", "kind": "custom",
+         "namespace": "team_org-1_g_gone", "status": "deleted"},
+    ]
+    for unreachable in ("g_foreign_stable", "g_gone", "g_never_was"):
+        with pytest.raises(mcp_auth.GraphTargetError) as excinfo:
+            mcp_auth.resolve_graph_target("org-1", unreachable, rows=rows)
+        message = str(excinfo.value)
+        assert f"No graph {unreachable!r} is reachable" in message, message
+        assert "team_org-2_x" not in message, message  # not confirmed to exist
+        assert "default" in message, message            # the reachable set
 
 
 # ── 4. Rename is a label: identity and storage key never move ───────────────
