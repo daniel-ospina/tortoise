@@ -107,7 +107,13 @@ class TestTeamCRUD:
         assert result["tier"] == "free"
 
     def test_tenant_list_is_not_on_the_public_surface(self, sdk):
-        """No public "list every tenant" call — owner ruling 2026-10-25 (#4282).
+        """No public call RETURNS every tenant — owner ruling 2026-10-25 (#4282).
+
+        The qualifier is load-bearing: `migrate_orgs_to_registry` is still public and still
+        scans `MATCH (t:Team)` unscoped, but it returns only `{migrated, skipped}` — no
+        tenant data reaches the caller. So the disclosure claim this file guards is true,
+        while the unscoped scan is #4282 Phase 2's to widen, not this pin's to imply it is
+        already gone.
 
         The method that replaced this test listed every `Team` node with
         `MATCH (t:Team)` and no tenant filter, so a customer-facing SDK could
