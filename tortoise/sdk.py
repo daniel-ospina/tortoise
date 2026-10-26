@@ -92,8 +92,8 @@ from .live import direction_flows  # #7852 (source→target, target→source) fl
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
-    ADDRESSING_SOURCE, UnaddressableEntityName, resolve_document_target_id,
-    resolve_entity_id)
+    ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
+    resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -3667,6 +3667,392 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     out["status"] = "live"
     out.update(props)
     return out
+
+
+# ── #9964: the kind decides the layer ──────────────────────────────────────
+#
+# ONE authority answers "which layer does this kind belong to?"
+# (``kind_layers``, derived from the classifier's CATALOG-UNION section partition
+# — a superset of any graph-gated one, see ``kind_layers.section_of`` — plus the
+# §5 vocabularies). Before this, the SDK doors labelled a node from their own
+# ``type`` ARGUMENT and never looked at the kind, while the classifier's
+# ``entity`` partition and the two write lanes that route by kind
+# (``is_subject_kind``) said something else — MEASURED at ``4c797596d``:
+# ``create_object("T3 Acme Holdings", objectKind="core:organization")`` minted a
+# ``:Object`` the ``(s:Subject {subjectKind:'core:organization'})`` read cannot
+# see (0 rows), permanently (#2489: ``rebuild_all`` does not repair an existing
+# graph).
+#
+# Two outcomes, and NEITHER refuses the write (warn-not-block is #1934's
+# recorded decision; a refusal would be a reopen for the owner):
+#
+#   * SAME-AXIS (object ↔ subject) — the kind ROUTES the label. Both are
+#     ``:entity`` nodes in the classifier's partition and the two vocabularies
+#     are disjoint, so nothing is lost by writing the layer the kind names
+#     instead of the one the caller typed. Advisory: ``kind_layer_routed``.
+#   * CROSS-AXIS (a kind declared only on another axis: an Event kind at the
+#     Point door, an entity kind at the Event door) — NOT routable (a Point and
+#     an Event are different records, and the kinds overlap by ruling: `goal`
+#     etc. are Point AND Object, `decision`/`humanApproval` Point AND Event
+#     (#7813)). The write lands as asked and the caller is TOLD: advisory
+#     ``kind_other_layer`` naming the declaring layer(s) and the door that
+#     writes them. That is also the fix for the point door's old behaviour —
+#     the only notice was ``_logger.warning`` inside ``_validate_kind``, which
+#     the caller never sees.
+#
+# A kind declared on the door's OWN layer (including every §5 overlap kind) and
+# an UNDECLARED kind both stay silent: the vocabulary is deliberately open, and
+# the overlap is the model, not residue.
+
+#: The four layer-specific kind properties a door can name, camel form. The
+#: snake spellings the fold also reads come from ``pack_state``'s ONE
+#: declaration (``_KIND_PROP_SPELLINGS``), never re-spelled here.
+_LAYER_KIND_PROPS: tuple[str, ...] = (
+    "subjectKind", "objectKind", "eventKind", "pointKind")
+
+
+def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
+    """``[(layer, prop-spelling, kind)]`` for every layer kind the write names.
+
+    Both spellings are read (the fold persists ``object_kind`` and
+    ``objectKind`` onto the same property — the #5475 lesson at this exact
+    seam), so a kind cannot escape the layer check by arriving snake-cased.
+    ``sourceKind``/``documentKind``/``actionKind``/``kind`` are NOT layer
+    properties (a document is a ``:Source``; genre and action are other axes)
+    and are deliberately out of scope.
+
+    ⛔ A NIL kind (``other``/``core:other``) is NOT a layer kind and is never
+    returned (#9964 review P2). ``kind_layers.NIL_KINDS`` says it asserts
+    NOTHING about the layer — it is the fold's ON CREATE default on EVERY
+    entity label — so letting it into ``named`` made the agreement test below
+    read a disagreement between a value that names no layer and the one that
+    does, and the write kept a §5 Subject kind on an ``:Object``. Dropping it
+    here also leaves a write that names ONLY ``other`` with ``named == []``,
+    i.e. silent, which is that constant's published contract.
+    """
+    from tortoise.kind_layers import NIL_KINDS, PROP_LAYER
+    from tortoise.pack_state import _KIND_PROP_SPELLINGS
+
+    named: list[tuple[str, str, str]] = []
+    for spelling, canonical in _KIND_PROP_SPELLINGS.items():
+        if canonical not in _LAYER_KIND_PROPS or spelling not in props:
+            continue
+        value = props.get(spelling)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if value.strip() in NIL_KINDS:
+            continue
+        named.append((PROP_LAYER[canonical], spelling, value))
+    return named
+
+
+#: entity layer → the node label its door mints. Entity identity is
+#: LABEL-SCOPED (``ids.entity_name_id`` hashes ``f"{label}:{name}"``), so the
+#: same name under the two entity labels is TWO nodes, never one entity seen
+#: twice — which is why a re-route can SPLIT an entity (#9964 review).
+_ENTITY_LAYER_LABEL: dict[str, str] = {"subject": "Subject", "object": "Object"}
+
+
+def _door_relayed_props(etype: str, item: dict) -> dict:
+    """The props the ENTITY door RELAYS to ``create_entity``, from a raw item.
+
+    ⛔ The door does not hand ``create_entity`` the item it was given (#9964
+    review P2, second round). ``create_subject``/``create_object``
+
+    1. **bind** their OWN camel kind param out of the item, so it is not part
+       of the ``**props`` they relay,
+    2. ``_coerce_props`` the rest (the alias's fold),
+    3. put the param back **through ``named_kind``** — a padded
+       ``objectKind=" core:team "`` becomes ``core:team`` before the routing
+       authority ever sees it,
+
+    and only then does ``create_entity`` fold a second time. The strip is
+    POSITIONAL and NARROW — only the alias's OWN top-level kind param is
+    normalised: the sibling camel key (``subjectKind`` at the object door), the
+    snake spellings (``object_kind``) and a kind one or two ``props:`` levels
+    down all reach ``_kind_layer_note`` RAW, because the alias normalises only
+    its own param, after its own fold and before the relay.
+
+    MEASURED (embedded lane, pre-fix) — the two shapes whose predicted label
+    disagreed with the label the write LANDED on, each re-reporting ``created``
+    on every re-ingest forever because the probe queried the other entity
+    label:
+
+        {"type": "object",  "objectKind": " core:team "}   -> :Subject
+        {"type": "subject", "subjectKind": " core:skill "} -> :Object
+
+    and, in the other direction, the shapes a blanket "normalise every kind
+    prop" repair would BREAK — they do NOT re-file on this head, so a probe
+    that stripped them would query a label the write never lands on:
+
+        {"type": "object", "object_kind": " core:team "}           -> :Object
+        {"type": "object", "props": {"objectKind": " core:team "}} -> :Object
+
+    That is why this mirrors the door's PIPELINE instead of normalising the
+    fold's output: the probe must predict the door, not an idealised door.
+    """
+    from tortoise.kind_layers import KIND_PROP
+
+    depth = _ENTITY_ITEM_FLATTEN_DEPTH.get(etype, 2)
+    # Only the two ENTITY doors this probe predicts have a bind-and-normalise
+    # alias; anything else is faithfully just the fold(s).
+    kind_key = KIND_PROP.get(etype) if etype in _ENTITY_LAYER_LABEL else None
+    if kind_key is None or depth < 1:
+        relayed = dict(item)
+        for _ in range(depth):
+            relayed = _coerce_props(relayed)
+        return relayed
+    relayed = {k: v for k, v in item.items() if k != kind_key}  # 1. the bind
+    relayed = _coerce_props(relayed)                           # 2. alias fold
+    normalized = named_kind(item.get(kind_key))
+    if normalized is not None:
+        relayed[kind_key] = normalized                         # 3. the re-add
+    for _ in range(depth - 1):
+        relayed = _coerce_props(relayed)                       # create_entity
+    return relayed
+
+
+def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
+    """The ids of the entity nodes this write will actually MERGE onto.
+
+    ``etype`` is what the ITEM declared; the entity door re-labels the write by
+    the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
+    ``:Subject``), and identity is label-scoped (``ids.py``:
+    ``sha256(f"{label}:{name}")``) — so probing ``etype``'s label can measure a
+    DIFFERENT node than the write touches. Measured at the review head:
+    re-ingesting ``{"type": "object", "objectKind": "core:team"}`` reported
+    ``created`` while the write MERGED, forever, because the ``:Object`` probe
+    never matched the ``:Subject`` the door had minted.
+
+    Asks the door's OWN authority (``_kind_layer_note``) instead of re-deriving
+    type→label here, on a COPY (that function MUTATES ``props`` on the routed
+    case), and fails open to ``etype`` (#1934: a probe must never refuse a
+    write).
+
+    Folded to the DOOR's depth first — the SAME rule ``_item_prop_at_depth``
+    states for every other ingest reader (#7925 review P2). The entity doors
+    flatten the item TWICE (``create_subject``/``create_object`` apply
+    ``_coerce_props``, then relay ``**props`` to ``create_entity``, which folds
+    again — ``_ENTITY_ITEM_FLATTEN_DEPTH``), so probing the RAW item was blind
+    to BOTH supported nested spellings (``props: {kind: …}`` and
+    ``props: {props: {kind: …}}``) while the write still re-labelled by the
+    kind: ``created`` was reported on every re-ingest of a nested bundle,
+    exactly as the FLAT shape was before this probe existed (#9964 review P2).
+    A shallower fold leaves the depth-2 spelling wrong; a deeper one would read
+    a kind the door never applies.
+
+    ⛔ Folding is not enough, because the door NORMALISES its own kind param
+    between its fold and the relay (#9964 review P2, second round):
+    ``objectKind=" core:team "`` is ``core:team`` by the time routing sees it,
+    so the write re-files to ``:Subject`` while a fold-only probe answered
+    ``object`` and queried ``:Object`` — ``created`` on every re-ingest, forever
+    (and the mirror on the subject door: ``subjectKind=" core:skill "`` writes
+    an ``:Object`` the probe never looked for). ``_door_relayed_props`` replays
+    the door's pipeline, at the door's positions, so the prediction cannot drift
+    from the write.
+    """
+    if not isinstance(name, str) or not name:
+        return []
+    try:
+        probe_props = _door_relayed_props(etype, props)
+        probe = _kind_layer_note(etype, probe_props)[0]
+    except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
+        probe = etype
+    label = _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
+    return all_name_holder_ids(g, label, name) if label else []
+
+
+def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
+    """Route/annotate an ENTITY write by the kind it names (#9964).
+
+    Returns ``(entity_type, note)``. ``note`` is ``None`` when the write is
+    consistent (or names no kind — the doors stay open, unchanged), else
+    ``{"code", "kind", "layer" (requested), "actual" (declaring layers)}``
+    for the caller to materialize as an advisory once the node id exists.
+
+    ⚠️ It reads the CATALOG-UNION partition, not this graph's: the graph gate
+    is not threaded through (see ``kind_layers.section_of``), so a pack that
+    ``packs/`` carries but this graph has not installed can still decide a
+    label. Anything that states this answer IS the classifier's own partition
+    is stating more than the code does.
+
+    MUTATES ``props`` on the ONE routable case: every layer spelling the write
+    named is removed and the kind is re-declared under the routed layer's
+    canonical prop, so the fold writes the routed property and no stale
+    ``object_kind`` rides along. Nothing else in the write is touched — the
+    caller's name, props and door call are otherwise honoured.
+    """
+    from tortoise.kind_layers import ENTITY_LAYERS, KIND_PROP, entity_route
+
+    t = (t or "").strip().lower()
+    named = _named_layer_kinds(props)
+    if not named:
+        return t, None
+    if t not in ENTITY_LAYERS:
+        # Event door (the document door's kind is a Source genre, not a layer).
+        return t, _first_layer_mismatch(named, t)
+    # 1. Kinds that belong EXCLUSIVELY to one entity layer ROUTE the label — the
+    #    kind is the decision, the door's `type` was only a hint. The authority is
+    #    `kind_layers.routing_layers` (the classifier's CATALOG-UNION section —
+    #    no graph gate, so a SUPERSET of this graph's; see
+    #    `kind_layers.section_of` — plus the §5 Subject
+    #    vocabulary), NOT the write-gate vocabularies — see that function for the
+    #    P1 that ruled the latter out. Every named
+    #    kind must be THE SAME kind, so a write that names two different layers
+    #    is never routed on a coin flip. A NIL kind never reaches this test: a
+    #    value that declares no layer cannot veto the one that does (it is
+    #    dropped in `_named_layer_kinds`, #9964 review P2). Nor is a write that
+    #    names ONE property under two spellings whose values disagree
+    #    (`objectKind="core:organization",
+    #    object_kind="core:team"`): routing would have to pick one of two values
+    #    the caller gave for the same property — a silent rewrite of a prop to
+    #    fit, and `named` is ordered by ``_KIND_PROP_SPELLINGS``'s dict iteration,
+    #    so the survivor was an accident of declaration order. Such a write is
+    #    REPORTED instead: nothing is dropped, nothing is rewritten.
+    routes = [entity_route(kind) for _layer, _spelling, kind in named]
+    named_kinds = {kind for _layer, _spelling, kind in named}
+    target = (routes[0]
+              if routes and all(r == routes[0] for r in routes)
+              and len(named_kinds) == 1 else None)
+    moved = named[0][2]
+    if target is not None and target != t:
+        # ⛔ ROUTING MUST NEVER TURN A LEGAL WRITE INTO A REFUSAL (#1934). The
+        # Subject door validates `status` against ONTOLOGY §4.2; the Object door
+        # validates nothing. So routing object→subject with an Object-only status
+        # (`status='active'`) would RAISE where the caller's write previously
+        # succeeded — a refusal invented by this fix. When that would happen the
+        # write keeps the layer the caller asked for and is REPORTED instead: no
+        # write is ever refused, and no prop is ever rewritten to fit.
+        # ⚠️ `isinstance` FIRST, exactly as the Subject door's own validation does
+        # (`_subj_status` below): `_SUBJECT_STATUS_VALUES` is a frozenset, so
+        # membership HASHES the operand and an unhashable `status` (a list/dict)
+        # raised `TypeError: unhashable type` HERE — a crash invented by a guard.
+        # A non-str status is not routable (the Subject door would refuse it), and
+        # it is not a crash either.
+        _status = props.get("status", "live")
+        blocked = (target == "subject"
+                   and not (isinstance(_status, str)
+                            and _status in _SUBJECT_STATUS_VALUES))
+        if not blocked:
+            for _layer, spelling, _kind in named:
+                props.pop(spelling, None)
+            props[KIND_PROP[target]] = moved
+            return target, {"code": "kind_layer_routed", "kind": moved,
+                            "layer": t, "actual": (target,)}
+        return t, {"code": "kind_other_layer", "kind": moved,
+                   "layer": t, "actual": (target,),
+                   "why": (f"the write's status {props.get('status')!r} is not one "
+                           f"of the {target.capitalize()} lifecycle's "
+                           f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))} values, "
+                           f"and re-routing would refuse a write that is legal "
+                           f"at this door")}
+    # 2. A kind declared only on other layer(s) cannot be re-routed here: report
+    #    it (warn-not-block) and let the write land as asked.
+    return t, _first_layer_mismatch(named, t)
+
+
+def _first_layer_mismatch(named: list[tuple[str, str, str]],
+                          layer: str) -> dict | None:
+    """The first named kind that ``layer`` does not declare, as a note.
+
+    ``None`` when the layer declares every named kind (including the §5
+    point↔object / point↔event overlaps — #7813) or when nothing declares the
+    kind at all (the vocabulary is deliberately open).
+    """
+    from tortoise.kind_layers import LAYERS, undeclared_on
+
+    if layer not in LAYERS:
+        return None
+    for _named_layer, _spelling, kind in named:
+        others = undeclared_on(kind, layer)
+        if others:
+            return {"code": "kind_other_layer", "kind": kind,
+                    "layer": layer, "actual": others}
+    return None
+
+
+def _kind_layer_advisory(note: dict | None, node_id: str | None,
+                         name: str | None = None) -> dict:
+    """The ADVISORY payload for ``_kind_layer_note``'s note (#8171 channel).
+
+    ADVISORY ONLY: the write has already landed, nothing here raises or changes
+    what was stored, and a caller that ignores it loses nothing but the notice
+    (#1934 warn-not-block).
+
+    ``name`` is the entity name, needed only when the re-route SPLIT an existing
+    entity (``note['split_peer_id']``) — the message then names both ids.
+    """
+    if not note:
+        return {}
+    from tortoise.kind_layers import DOOR
+
+    kind, layer, actual = note["kind"], note["layer"], note["actual"]
+    declared = "/".join(a.capitalize() for a in actual)
+    _article = "an" if declared[:1] in "AEIOU" else "a"
+    if note["code"] == "kind_layer_routed":
+        # ⛔ "no data was lost" is only true when the OTHER entity label holds no
+        # node of this name. Identity is label-scoped, so on a graph that already
+        # holds the OLD label (#2489 records no repair path) the re-route mints a
+        # SECOND node and leaves the stale one answering every old-label read —
+        # the caller is the only one who can reconcile that, so the advisory
+        # names both ids instead of claiming losslessness (#9964 review).
+        _peer = note.get("split_peer_id")
+        _peer_article = "an" if layer[:1].lower() in "aeiou" else "a"
+        _door = DOOR[actual[0]]
+        message = (
+            f"{kind!r} is {_article} {declared}-layer kind, so this write landed "
+            f"as a :{declared} (with the kind on {actual[0]}Kind) instead of "
+            f"the {layer.capitalize()} the door requested. The kind decides the "
+            f"layer (ONTOLOGY §1); "
+            # ⛔ The claim is about the GRAPH, never about THIS call. The routed
+            # id is DETERMINISTIC (`_entity_name_id(<label>, name)`), so a re-run
+            # of the very call that first split the entity MERGES onto the node
+            # it already minted — the peer probe below only asks whether the
+            # OTHER label holds the name, never whether the routed node is new,
+            # so "this write created a SECOND node" was FALSE on every retry
+            # (the common case: ingest and capture re-issue writes), while the
+            # graph fact it is trying to convey stayed true (#9964 review).
+            + (f"⚠️ {_peer_article} :{layer.capitalize()} named {name!r} ALREADY "
+               f"exists ({_peer}), and entity ids are LABEL-scoped "
+               f"(`sha256('<label>:<name>')`), so the graph now holds a SECOND "
+               f"node ({node_id}) beside it rather than replacing it — {name!r} "
+               f"has a node under EACH entity label, nothing reconciles them "
+               f"for you "
+               f"(#2489: no repair path), and the older one keeps answering "
+               f"the {layer.capitalize()}-keyed reads. Retire the stale node "
+               f"explicitly, or read this entity across both labels."
+               if _peer else
+               f"no data was lost, and the door that writes {_article} "
+               f"{declared} explicitly is ``{_door}``.")
+        )
+    else:
+        doors = ", ".join(f"{DOOR[a]} (e.g. {DOOR[a]}(name, "
+                          f"{a}Kind={kind!r}))" for a in actual)
+        message = (
+            f"{kind!r} is declared on the {declared} layer, not on the "
+            f"{layer.capitalize()} layer this write used. The write landed as "
+            f"requested with that kind (#1934 warn-not-block); a "
+            f"{declared} write is ``{doors}``."
+        )
+        if note.get("why"):
+            message += f" It was not re-routed because {note['why']}."
+    return {"advisories": [{
+        "code": note["code"],
+        "node_id": node_id,
+        "message": message,
+        "advisory": True,
+    }]}
+
+
+def _merge_advisories(*payloads: dict) -> dict:
+    """Merge ``{"advisories": [...]}`` payloads (order preserved, no dupes)."""
+    merged: list[dict] = []
+    for payload in payloads:
+        for note in (payload or {}).get("advisories") or []:
+            if note not in merged:
+                merged.append(note)
+    return {"advisories": merged} if merged else {}
+
 
 def _payload_entity_kind(e: dict) -> str | None:
     """The payload entity's kind to write, or ``None`` when it must NOT be.
@@ -8911,6 +9297,22 @@ class TortoiseSDK:
         # kind at all hears that, not an approval complaint about it.
         _refuse_invisible_kind("pointKind", kind, door="create_point")
         self._validate_kind(kind)
+        # ── #9964: the kind's LAYER, reported to the caller ─────────────────
+        # `_validate_kind` above warns `_logger` about an unrecognised spelling;
+        # it never asks which LAYER declares the kind, and it never reaches the
+        # caller or the result. So `create_point(kind='core:deployment')` — an
+        # EVENT kind — minted a `:Point` (a claim EP prices) in silence, and the
+        # Event/state fold never saw the occurrence (#9675's step-1 table).
+        # This door cannot re-route losslessly (a Point and an Event are
+        # different records, and §5 declares `decision`/`humanApproval` on BOTH
+        # axes — the #7813 owner ruling), so the disagreement is REPORTED and
+        # the write lands as asked (warn-not-block, #1934).
+        # ⚠️ Computed AFTER `_coerce_props` and the props kind gates (further
+        # down): the effective kind is the one the fold will STORE, and the
+        # MCP-style nested `props={"pointKind": …}` shape only exists after the
+        # coercion (read here, it missed the primary caller and reported nothing
+        # — measured on `create_point("statement", "x", props={"pointKind":
+        # "core:deployment"})`).
         # #5475: `pointKind` is one of the properties
         # `pack_state.graph_kind_namespaces` mines the approval set from, so the
         # point door widened it exactly as the entity doors did — measured at
@@ -8933,6 +9335,23 @@ class TortoiseSDK:
         # widened a `dev`-only graph. Gate the whole mined key set, exactly as
         # the entity funnel does.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9964: NOW the effective kind is final — the positional `kind`, then
+        # the props passthrough (which WINS over it, #5475/#9287), then the
+        # nested MCP `props={…}` flatten. Report the layer disagreement from
+        # THAT value. Fail-open (#1934): an advisory that raised would refuse a
+        # write that landed before it existed — and the pack-manifest compile is
+        # a real source of such a raise (see `kind_layers.section_of`).
+        try:
+            _layer_note = _first_layer_mismatch(
+                [("point", "pointKind", str(props.get("pointKind") or kind))],
+                "point")
+        except Exception as _layer_exc:  # noqa: BLE001, RUF100 — advisory must never raise
+            _logger.warning(
+                "create_point: the kind<->layer advisory could not be computed "
+                "(%s: %s) — the write proceeds without the notice (#1934: an "
+                "advisory never refuses a write).",
+                type(_layer_exc).__name__, _layer_exc)
+            _layer_note = None
         # #9167: `content` is a REQUIRED str and nothing said so. A ``None`` or
         # any non-str reached ``_content_hash(content)`` below — i.e.
         # ``text.encode("utf-8")`` one frame inside a private helper — so the
@@ -9245,8 +9664,18 @@ class TortoiseSDK:
                         # or to an SDK caller reading the return value. The
                         # advisory is transient (#8171) — it rides a COPY, so
                         # neither `get_point` nor the journal ever holds it.
-                        return {**self.get_point(pid),
-                                **self._temporal_not_applied_advisory(pid)}
+                        # ⚠️ BOTH advisories ride the one `advisories` key, so the
+                        # merge is `_merge_advisories` (a second `**` splat would
+                        # REPLACE the list and drop the kind↔layer note — the
+                        # defect measured at the #9964 review: the re-run of this
+                        # very call returned `temporal_not_applied` ONLY, while
+                        # its first run reported `kind_other_layer` too).
+                        return {
+                            **self.get_point(pid),
+                            **_merge_advisories(
+                                self._temporal_not_applied_advisory(pid),
+                                _kind_layer_advisory(_layer_note, pid)),
+                        }
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -9491,7 +9920,8 @@ class TortoiseSDK:
                         self.update_point(pid, **props)
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
-                return self.get_point(pid)
+                return {**self.get_point(pid),
+                        **_kind_layer_advisory(_layer_note, pid)}
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         if explicit_id is not None:
@@ -9980,12 +10410,13 @@ class TortoiseSDK:
             )
             _provenance_notes = self._no_source_advisory(
                 pid, hint=_point_sid_hint)
-        if _source_change_notices or _provenance_notes:
-            # #5516 / #8171: both are TRANSIENT — they ride the write result the
-            # writer sees, on a COPY, so the journaled snapshot above and every
-            # later `get_point` stay free of them. A write that carries neither
-            # notice returns byte-identical to before these features.
-            _extra = dict(_provenance_notes)
+        _layer_advice = _kind_layer_advisory(_layer_note, pid)
+        if _source_change_notices or _provenance_notes or _layer_advice:
+            # #5516 / #8171 / #9964: all three are TRANSIENT — they ride the
+            # write result the writer sees, on a COPY, so the journaled snapshot
+            # above and every later `get_point` stay free of them. A write that
+            # carries none returns byte-identical to before these features.
+            _extra = dict(_merge_advisories(_provenance_notes, _layer_advice))
             if _source_change_notices:
                 _extra["source_change_notices"] = _source_change_notices
             return {**_snapshot, **_extra}
@@ -21076,17 +21507,14 @@ class TortoiseSDK:
                 if isinstance(item.get(key), str) and item[key] in refs:
                     item[key] = refs[item[key]]
             if etype == "subject":
-                existed = proj.g.query(
-                    "MATCH (n:Subject {name:$name}) RETURN n.id",
-                    params={"name": name},
-                ).result_set
+                # ── #9964 review: probe the label the WRITE lands on, not the one
+                # the item declared (the door re-labels by the kind). See
+                # `_existing_entity_ids`.
+                existed = _existing_entity_ids(proj.g, etype, item, name)
                 node = self.create_subject(name, **item)
                 canonical = node.get("id") or name
             elif etype == "object":
-                existed = proj.g.query(
-                    "MATCH (n:Object {name:$name}) RETURN n.id",
-                    params={"name": name},
-                ).result_set
+                existed = _existing_entity_ids(proj.g, etype, item, name)
                 node = self.create_object(name, **item)
                 canonical = node.get("id") or name
             elif etype == "event":
@@ -35778,6 +36206,16 @@ class TortoiseSDK:
         (``no_source`` only for documents, where its remedy is real;
         ``extracted_from_inert`` on any type that declares an unwired ref).
         Advisory only: never a block, and it never changes what is stored.
+
+        #9964 — THE KIND DECIDES THE LAYER. The classifier's entity partition
+        merges objects and subjects, so a kind it returns can belong to the
+        other entity layer than ``type`` names. A kind declared EXCLUSIVELY on
+        one entity layer therefore ROUTES the write to that layer
+        (``core:organization`` at ``type='object'`` becomes a ``:Subject``), and
+        the result carries a ``kind_layer_routed`` advisory; a kind declared
+        only on another AXIS (an Event kind at an entity door) is reported as
+        ``kind_other_layer`` and the write lands as asked (warn-not-block,
+        #1934). ``kind_layers`` is the one authority for both answers.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
@@ -35795,6 +36233,24 @@ class TortoiseSDK:
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
         t = (type or "").strip().lower()
+        # ── #9964: the KIND decides the layer, then REPORT the disagreement ───
+        # One authority answers which layer a kind is declared on; a kind that
+        # belongs exclusively to the other entity layer ROUTES this write there
+        # and a cross-axis kind is reported instead (warn-not-block, #1934).
+        # Fail-open (#1934): an advisory that raised would refuse a write that
+        # landed before it existed (see `kind_layers.section_of`, whose spec
+        # compile is a real source of such a raise).
+        try:
+            t, _layer_note = _kind_layer_note(t, props)
+        except Exception as _layer_exc:  # noqa: BLE001, RUF100 — advisory must never raise
+            _logger.warning(
+                "create_entity: the kind<->layer advisory could not be "
+                "computed (%s: %s) — the write proceeds without the notice, AND "
+                "the kind<->layer ROUTING was skipped too, so the write kept the "
+                "door's label "
+                "(#1934: an advisory never refuses a write).",
+                type(_layer_exc).__name__, _layer_exc)
+            _layer_note = None
         if t == "subject":
             # #1423 (review P1): `status` arrives through `**props` below and
             # OVERRIDES the `"status": "live"` default, so this surface is a
@@ -36037,11 +36493,41 @@ class TortoiseSDK:
                         _prov_id, _prov_ref, label=_prov_label),
                     what="create_entity extractedFrom edges",
                 )
+        # ── #9964 review: a re-route mints a LABEL-scoped id, so on a graph
+        # that already holds this entity under the OTHER entity label it mints a
+        # SECOND node beside the stale one (#2489 records no repair path). The
+        # advisory used to claim "no data was lost" in exactly that case; probe
+        # for the twin so it can name both ids instead. READ-ONLY and fail-open
+        # (#1934): a probe that failed must never refuse a write that landed.
+        if _layer_note and _layer_note.get("code") == "kind_layer_routed":
+            _written_id = node.get("id") or node.get("eventId")
+            # `all_name_holder_ids` takes a LABEL and refuses anything else, so
+            # map the note's LAYER through the one map instead of re-spelling.
+            _peer_label = _ENTITY_LAYER_LABEL.get(_layer_note["layer"])
+            try:
+                _split_peer = next(
+                    (i for i in all_name_holder_ids(
+                        self._get_proj().g, _peer_label, name)
+                     if i and i != _written_id), None) if _peer_label else None
+            except Exception as _split_exc:  # noqa: BLE001, RUF100 — advisory only
+                # ⚠️ `type` is this method's PARAMETER (the entity type), so
+                # `type(exc)` would be the string here — use `__class__`.
+                _logger.warning(
+                    "create_entity: the split probe failed (%s: %s) — the "
+                    "re-route advisory is reported without it.",
+                    _split_exc.__class__.__name__, _split_exc)
+                _split_peer = None
+            if _split_peer:
+                _layer_note = {**_layer_note, "split_peer_id": _split_peer}
         return {
             "node": node,
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
-            **self._provenance_advisory(node, props, entity_type=t),
+            **_merge_advisories(
+                self._provenance_advisory(node, props, entity_type=t),
+                _kind_layer_advisory(
+                    _layer_note, node.get("id") or node.get("eventId"),
+                    name=name)),
         }
 
     # ── #8171: the write-time provenance advisory ────────────────────
@@ -36313,6 +36799,12 @@ class TortoiseSDK:
                        **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2.
 
+        #9964: the KIND decides the layer. An ``objectKind``-declared kind
+        (``core:product``, or ``core:organization``'s mirror) routes the write
+        to a ``:Object`` and the result carries a ``kind_layer_routed``
+        advisory; a kind declared on another axis is reported as
+        ``kind_other_layer`` and lands as asked (warn-not-block, #1934).
+
         ``subjectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
         #9572: the alias used to fabricate ``"other"``, so a bare re-create
         shipped ``subject_kind="other"`` on the record and the fold's ON MATCH
@@ -36337,6 +36829,13 @@ class TortoiseSDK:
     def create_object(self, name: str, objectKind: str | None = None,
                       **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2.
+
+        #9964: the KIND decides the layer. ``create_object(name,
+        objectKind='core:organization')`` writes a ``:Subject`` (a §5 Subject
+        kind cannot be stored as an ``:Object`` — the Subject read would never
+        see it) and returns a ``kind_layer_routed`` advisory; a kind declared
+        on another axis is reported as ``kind_other_layer`` and lands as asked
+        (warn-not-block, #1934).
 
         ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
         #9572 — the Object twin of ``create_subject``'s fabricated default.

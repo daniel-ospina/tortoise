@@ -61,6 +61,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = REPO_ROOT / "tools" / "inbound_relay_sweep.py"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay.yml"
 SWEEP_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "inbound-relay-sweep.yml"
+SCOPING_DOC = REPO_ROOT / "docs" / "scoping" / "2026-09-06-2409-inbound-channel-scoping.md"
 
 OWNER = "daniel-ospina"
 LABEL = "queued-for-triage"
@@ -571,7 +572,8 @@ def test_the_detail_budget_bounds_the_reads_that_decide_the_actions(sweep: Any) 
     A detail fetch is one `gh api` call, and the page budget alone admits up to
     1,000 candidates. Unbounded, a dense window spends the whole REST budget on
     reads and then 403s on the mutations — and a mutation that fails after its
-    intake POST re-relays the item every 15 minutes without ever closing it.
+    intake POST re-relays the item every 15 minutes, until the close succeeds or
+    the item ages out of the `--since-hours` window.
     """
     client = FakeClient(pulls=[pull(n, author="someone") for n in range(1, 21)])
     report = run(sweep, client, max_actions=20, detail_budget=3)
@@ -688,8 +690,9 @@ def test_a_retry_resumes_instead_of_re_posting(sweep: Any) -> None:
     The sequence is relay → comment → close → label, so an item whose close
     failed is selected again 15 minutes later. Without a resume it would re-post
     the same boilerplate comment on an external contributor's PR every 15
-    minutes for as long as the close keeps failing. The relay's own footer is
-    the marker that says "we already spoke".
+    minutes for as long as the close keeps failing — or until the item ages out
+    of the `--since-hours` window. The relay's own footer is the marker that
+    says "we already spoke".
 
     ⛔ The RECORD is still posted on a resume. The marker proves we commented,
     never that intake accepted the record — the event path posts intake LAST
@@ -792,6 +795,10 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
     to the sweep's marker, and the predicate must actually consume it plus the
     same author rule `already_relayed()` applies — a bot-typed comment or the
     owner's login, never the bare string an author could paste.
+
+    ⛔ And binding its TOKENS is not enough (#9946 review, measured): see the
+    normalised-literal assertion below — three inversions of this predicate
+    passed a substring pin, so what is pinned now is the exact expression.
     """
     import re
 
@@ -822,13 +829,34 @@ def test_every_relay_comment_step_checks_for_an_existing_comment_first(sweep: An
         # whose body carries its own semicolons, so a `;`-terminated match stops
         # at `const user = …;` and tests nothing.
         body = script[start:gate]
-        assert "includes(FOOTER)" in body, (
-            "the predicate does not test for the footer, so it cannot tell a "
-            f"relayed item from a fresh one: {body}"
-        )
-        assert "user.type" in body and "user.login === owner" in body, (
-            "the predicate does not apply `already_relayed()`'s author rule "
-            f"(a bot comment, or the owner's own login): {body}"
+        # ⛔ THE WHOLE EXPRESSION, NOT ITS VOCABULARY. Measured 2026-10-25
+        # (#9946 review, on this file's own previous form): substring asserts on
+        # `includes(FOOTER)` / `user.type` / `user.login === owner` stayed GREEN
+        # under all three inversions that matter — `!String(...).includes(FOOTER)`
+        # (a fresh item is never commented, an already-relayed one is commented
+        # AGAIN: the double comment this rail exists to prevent), `!== 'bot'`
+        # (any comment carrying the footer counts as bot-typed, so an author who
+        # pastes the footer suppresses the relay's comment), and a
+        # `false && comments.some(...)` short-circuit (the rail silently becomes
+        # "never skip"). A substring constrains the words; POLARITY is the
+        # behaviour, so the normalised slice is compared to one literal body.
+        squashed = " ".join(body.split())
+        # The slice runs to the gate, so it also carries the line comment that
+        # introduces the gate. Drop it — the predicate is what is pinned.
+        predicate = squashed.split(" //", 1)[0]
+        assert predicate == (
+            "const alreadyCommented = comments.some((c) => { "
+            "const user = c.user || {}; "
+            "return String(c.body || '').includes(FOOTER) && "
+            "(String(user.type || '').toLowerCase() === 'bot' || "
+            "user.login === owner); });"
+        ), (
+            "the duplicate-comment predicate changed meaning. Whitespace is "
+            "normalised, so re-wrapping is fine — but a different expression "
+            "is not: an inverted `includes(FOOTER)`, an inverted bot test or a "
+            "short-circuit all leave the rail doing something other than "
+            "`already_relayed()`. If the change is intended, pin the new "
+            f"literal deliberately: {predicate!r}"
         )
 
 
@@ -1028,6 +1056,10 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
         "\"a later run selects it again\" is the same over-claim one step "
         "earlier in the sequence"
     )
+    assert "every 15 minutes without ever closing them" not in rail_text, (
+        "the rails text still calls the re-relay UNBOUNDED — it stops at the "
+        "close or at the age-out, whichever comes first"
+    )
 
     # `EXIT CODES` exit 2 is the operator's list of "could not act" causes, and
     # this change added a fourth one (`--repo` not `owner/name`). A list that
@@ -1049,6 +1081,114 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
         "re-selectable, including the label step that runs after the close"
     )
     assert "BEFORE THE CLOSE" in block_text, block_text
+
+    # ⛔ AND THE OTHER COPIES OF THE SAME SENTENCE. `41c3452f0` scoped the
+    # docstring, `EXIT CODES` and the code's own note, and stopped there — the
+    # sweep workflow's rails (the file an operator opens to read what the control
+    # does) and the scoping doc (what a human triaging a red run reads before
+    # deciding whether to act by hand) still promised an unconditional re-select.
+    # Prose, so it cannot be executed: what is pinned is that the claim is
+    # SCOPED in EACH copy, and that the unscoped form is gone FROM THAT COPY.
+    #
+    # ⛔ EACH COPY IS SLICED TO ITS OWN BLOCK, AND THE COMMENT PREFIX IS STRIPPED
+    # PER LINE. A whole-file `" ".join(text.split())` fails twice: it cannot tell
+    # one copy from another (any copy can revert to the unscoped wording while a
+    # sibling keeps the assertion green), and it cannot match the WRAPPED form at
+    # all — a YAML comment run needs a new `#` on every continuation line, so a
+    # whitespace-only collapse leaves that `#` sitting BETWEEN the words
+    # (`… again and # reds this workflow`), i.e. the pre-fix text the negative
+    # half names reads as already absent. Measured on the pre-fix text at
+    # `3d851d2f6` (the base this pin was written against) and pinned here so it
+    # cannot silently go inert again (#9990 review).
+    #
+    # ⛔ AND THE PREFIX IS TWO CHARACTERS WHERE `tools/` USES IT. `#:` (the Sphinx
+    # prefix those two copies carry) leaves `":"` behind after a bare `#` strip,
+    # so every wrap becomes `… every 15 minutes : without ever closing it …` and
+    # the negative half is inert there — the same defect one character further
+    # along, and wrapping is the normal shape of a `#:` comment (#9990 review).
+    # The end marker is ASSERTED because `split(end, 1)[0]` returns the whole
+    # remainder of the file when `end` is missing, which silently widens one
+    # copy's pin to every later copy instead of failing.
+    def _block(text: str, start: str, end: str) -> str:
+        tail = text.split(start, 1)[1]
+        assert end in tail, f"slice end marker {end!r} not found after {start!r}"
+        return " ".join(
+            line.lstrip(" #").lstrip(":").strip()
+            for line in tail.split(end, 1)[0].splitlines()
+        )
+
+    sweep_workflow = SWEEP_WORKFLOW.read_text(encoding="utf-8")
+    module_text = MODULE_PATH.read_text(encoding="utf-8")
+
+    copies = {
+        "the sweep workflow's rails bullet": (
+            _block(
+                sweep_workflow,
+                "# * `relay-then-close-then-label`",
+                "# * An INCOMPLETE listing",
+            ),
+            "so the next run selects it again and reds this workflow",
+            ("STILL INSIDE", "ages out"),
+        ),
+        "the sweep workflow's cancel note": (
+            _block(sweep_workflow, "# ⛔ NOT the repair story", "concurrency:"),
+            "so the next run selects it again and `already_relayed()` resumes it",
+            ("still inside the `--since-hours` window", "`already_relayed()` resumes it"),
+        ),
+        "RELAY_MARKER's own comment": (
+            _block(module_text, "#: The footer both comment templates", "RELAY_MARKER ="),
+            "a failed close leaves an item that the next run selects again",
+            ("STILL INSIDE", "ages out"),
+        ),
+        "the detail-budget comment": (
+            _block(
+                module_text,
+                "#: How many per-PR detail fetches",
+                "DEFAULT_DETAIL_BUDGET =",
+            ),
+            "every 15 minutes without ever closing it",
+            ("ages out",),
+        ),
+        # The suite's own docstring is a copy of the claim too — it is what the
+        # next reader of this test learns the budget is for.
+        "this suite's detail-budget docstring": (
+            " ".join(
+                (
+                    test_the_detail_budget_bounds_the_reads_that_decide_the_actions.__doc__
+                    or ""
+                ).split()
+            ),
+            "every 15 minutes without ever closing it",
+            ("ages out",),
+        ),
+    }
+    for where, (copy_text, over_claim, scoped) in copies.items():
+        assert over_claim not in copy_text, (
+            f"{where} still makes the UNSCOPED claim ({over_claim!r}) — the copy "
+            "an operator reads promises a retry that the label step, which runs "
+            f"AFTER the close, cannot get (or one the window does not reach): {copy_text}"
+        )
+        for phrase in scoped:
+            assert phrase in copy_text, (
+                f"{where} must scope the claim to the `--since-hours` window and "
+                f"name the age-out ({phrase!r} missing): {copy_text}"
+            )
+
+    def _prose(path: Any) -> str:
+        return " ".join(
+            line.lstrip(" #")
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+
+    scoping_doc = _prose(SCOPING_DOC)
+    assert "therefore retryable rather than open-and-marked" not in scoping_doc, (
+        "the scoping doc still calls a pre-close failure 'therefore retryable' "
+        "with no window, which is the over-claim this change removed elsewhere"
+    )
+    assert "ages out" in scoping_doc and "still inside" in scoping_doc, (
+        "the scoping doc must scope the re-select to the `--since-hours` window "
+        "and name the age-out, like the docstring does"
+    )
 
 
 def test_run_is_capped_and_reports_the_remainder(sweep: Any) -> None:
@@ -2070,8 +2210,9 @@ def test_the_resume_read_walks_to_the_newest_comments(sweep: Any, monkeypatch: A
     asks for "newest first" and stops therefore reads the oldest page — so the
     relay's own footer, posted at close time (i.e. LAST), is invisible on any
     item with more than `per_page` comments. The retry then re-posts the
-    identical comment every 15 minutes for as long as the close keeps failing,
-    which is the exact failure this marker exists to prevent.
+    identical comment every 15 minutes for as long as the close keeps failing —
+    or until the item ages out of the `--since-hours` window. That re-post is
+    the exact failure this marker exists to prevent.
 
     Three shapes, because the terminal page is not enough on its own: the marker
     sits mid-thread once a contributor replies after it, and an EXACT multiple of
