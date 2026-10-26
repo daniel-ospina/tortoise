@@ -199,6 +199,22 @@ def _prop_refs(proj, pid: str):
     return got[0][0] if got else None
 
 
+def _seed_hashed_source(sdk, url: str, content_hash: str) -> None:
+    """A ``:Source`` carrying a RECORDED read-version (the document/ingest shape).
+
+    ``sourceVersionTransit`` (#5256) carries a pair only for a Source whose
+    ``contentHash`` is non-blank, so a pin built on bare stubs never constructs
+    the carrier at all: the fold pops the key and the property the live write is
+    supposed to carry does not exist to be missed (#7704 review P1).
+
+    Seeded through the PRODUCT door (``create_source``, journaled and replayed),
+    not a raw write: §17.1's handle is armed for a journal-backed SDK, so a raw
+    fixture statement would need a lane and would not survive the rebuilds these
+    pins run.
+    """
+    sdk.create_source(url, "document", contentHash=content_hash)
+
+
 def test_dedup_hit_accumulates_the_second_source(prov):
     """#7704: two sources, one claim — the fold keeps BOTH.
 
@@ -281,20 +297,29 @@ def test_the_fold_journals_a_state_the_checker_agrees_with(prov):
 
     ``check_consistency`` ADOPTS a pre-existing graph on its first run, so the
     baseline is taken after the create and the verdict is read after the fold.
+
+    Both Sources carry a RECORDED ``contentHash``: the carrier branch is only
+    constructed for a Source that has one (a stub contributes no pair), and a
+    pin built on stubs passed while the fold journalled a ``sourceVersionTransit``
+    the live node never received (#7704 review P1).
     """
     from tortoise.consistency import check_consistency
 
     sdk, events = prov
     log_path = os.path.join(str(events), "events.jsonl")
+    proj = sdk._get_proj()
+    first_ref, second_ref = ("https://example.com/first",
+                             "https://example.com/second")
+    _seed_hashed_source(sdk, first_ref, "hash-first")
+    _seed_hashed_source(sdk, second_ref, "hash-second")
     content = "the expansion is funded through next spring"
     first = sdk.create_point("statement", content,
-                             extractedFrom="https://example.com/first",
+                             extractedFrom=first_ref,
                              dedup=True)
-    proj = sdk._get_proj()
     check_consistency(log_path, proj)          # adopt the existing graph
 
     sdk.create_point("statement", content,
-                     extractedFrom="https://example.com/second", dedup=True)
+                     extractedFrom=second_ref, dedup=True)
 
     result = check_consistency(log_path, proj)
     assert result["ok"], (
@@ -302,8 +327,155 @@ def test_the_fold_journals_a_state_the_checker_agrees_with(prov):
         f"replay would diverge from live: {result.get('divergent_points')}")
     assert result["hash_match"], result
     assert not result.get("divergent_points"), result["divergent_points"]
-    assert _sources_of(proj, first["id"]) == {
-        "https://example.com/first", "https://example.com/second"}
+    assert _sources_of(proj, first["id"]) == {first_ref, second_ref}
+
+
+def test_the_fold_replays_field_by_field(prov):
+    """``derived = replay(journal)`` for the fold — field by field.
+
+    The decisive comparison, and the one a "a rebuild produced some edges" pin
+    cannot make: both a LOSSY fold and a DIVERGENT one satisfy the edge count.
+    The replayed row must equal the live row on every field the fold wrote — the
+    ``extractedFrom`` property, the ``sourceVersionTransit`` carrier (#5256), and
+    each edge's recorded read-version.
+
+    Frozen before (#7704 review P1): the fold journalled the merged carrier but
+    the live write only set ``extractedFrom``, so the replay re-stamped
+    ``[[one, hash-one], [two, hash-two]]`` on a node live held as
+    ``[[one, hash-one]]`` — the provenance the change exists to keep was kept in
+    the journal ALONE.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    one, two = "https://example.com/one", "https://example.com/two"
+    _seed_hashed_source(sdk, one, "hash-one")
+    _seed_hashed_source(sdk, two, "hash-two")
+
+    content = "the fold must be replayable field by field"
+    pid = sdk.create_point("statement", content, extractedFrom=one,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=two, dedup=True)
+    assert _sources_of(proj, pid) == {one, two}, \
+        "guard: the second write must be a fold, not a second Point"
+
+    def _row(projection) -> dict:
+        props = projection.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.extractedFrom, "
+            "p.sourceVersionTransit", params={"id": pid}).result_set[0]
+        return {
+            "extractedFrom": props[0],
+            "sourceVersionTransit": props[1],
+            "edges(url, sourceVersion)": sorted(
+                (r[0], r[1]) for r in projection.g.query(
+                    "MATCH (p:Point {id:$id})-[r:extractedFrom]->(s:Source) "
+                    "RETURN s.url, r.sourceVersion",
+                    params={"id": pid}).result_set),
+        }
+
+    live = _row(proj)
+    assert live["sourceVersionTransit"] == [[one, "hash-one"],
+                                            [two, "hash-two"]], live
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _row(proj) == live, (
+        "the journal does not reproduce the row live wrote — replay(journal) "
+        f"!= live: live={live!r} replayed={_row(proj)!r}")
+
+
+def test_a_url_variant_of_a_held_ref_is_not_refolded(prov):
+    """A held ref supplied under a URL VARIANT is PRESENT — no fold, no record.
+
+    ``_present`` is the edges' RESOLVED ``s.url`` set, while the caller supplies
+    a RAW spelling; ``resolve_source_key`` (S0b, #5012) is the one resolver every
+    source writer uses to map one onto the other and ``_link_source`` routes
+    through it. A comparison that skipped it read a ref the Point already holds
+    as permanently absent, so a re-ingested variant (the normal connector shape)
+    re-journalled a full ``PointAdded`` on every retry and widened the property
+    with a spelling that has no Source and no edge — a prop-only lie a rebuild
+    makes permanent instead of healing (#7704 review P1).
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    journal = os.path.join(str(events), "events.jsonl")
+    held = "https://example.com/a"
+
+    def _point_added() -> int:
+        import json
+        n = 0
+        with open(journal) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if (rec.get("type") == "PointAdded"
+                        and (rec.get("point") or {}).get("id") == pid):
+                    n += 1
+        return n
+
+    content = "a url variant is the same source"
+    pid = sdk.create_point("statement", content, extractedFrom=held,
+                           dedup=True)["id"]
+    before = _point_added()
+    for _ in range(3):
+        assert sdk.create_point(
+            "statement", content,
+            extractedFrom=held + "?utm_source=x", dedup=True)["id"] == pid
+    assert _point_added() == before, (
+        "an idempotent retry journalled a full snapshot — the fold is not "
+        f"idempotent ({before} -> {_point_added()})")
+    assert _sources_of(proj, pid) == {held}
+    assert _prop_refs(proj, pid) == held, (
+        "the property states a spelling the graph has no Source for — a "
+        f"prop-only lie: {_prop_refs(proj, pid)!r}")
+    assert proj.g.query(
+        "MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1, \
+        "a URL variant minted a second :Source"
+
+
+def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
+                                                               monkeypatch):
+    """§17.1 — NO record ⇒ NO fold.
+
+    The fold's ``PointAdded`` append is its commit point. If it fails, the edges
+    must not be wired and the property must not move: a cache written without a
+    record is AHEAD of truth, where a replay silently loses the evidence and no
+    repair can recover it — the exact loss the fold exists to stop.
+
+    MUTATION (the review's arm — ``if _committed is False:`` → ``if False:``):
+    the fold then lands with no record, and this pin fails because
+    ``WriteNotLandedError`` is never raised.
+    """
+    from tortoise.exceptions import WriteNotLandedError
+
+    sdk, _events = prov
+    proj = sdk._get_proj()
+    content = "a claim whose fold cannot be recorded"
+    held, incoming = "https://example.com/held", "https://example.com/incoming"
+    pid = sdk.create_point("statement", content, extractedFrom=held,
+                           dedup=True)["id"]
+
+    log = sdk._get_event_log()
+    assert log is not None, "the fixture must wire a journal for this arm"
+
+    def _boom(_event):
+        raise OSError("simulated journal append failure")
+
+    monkeypatch.setattr(log, "append", _boom)
+    with pytest.raises(WriteNotLandedError) as ei:
+        sdk.create_point("statement", content, extractedFrom=incoming,
+                         dedup=True)
+    assert ei.value.record_committed is False, (
+        "the append FAILED, so the record is not committed and the fold must "
+        "not be applied — re-issuing is the correct caller response")
+
+    assert _sources_of(proj, pid) == {held}, (
+        "the fold wired an edge although its record was never committed — the "
+        "derived store leads the truth (§17.1)")
+    assert _prop_refs(proj, pid) == held, (
+        "the fold moved the property although its record was never committed")
+    assert proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.url",
+        params={"u": incoming}).result_set == [], \
+        "a refused fold minted the incoming Source"
 
 
 def test_repeated_dedup_hit_neither_duplicates_nor_rejournals(prov):

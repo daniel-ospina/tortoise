@@ -9765,8 +9765,36 @@ class TortoiseSDK:
                                 "(s:Source) RETURN DISTINCT s.url ORDER BY s.url",
                                 params={"id": pid}).result_set
                         ]
-                        _missing = [r for r in _supplied
-                                    if r not in _present]
+                        # `_present` holds the RESOLVED `s.url` of each
+                        # `:Source` the edges address, while `_supplied` is the
+                        # caller's RAW spelling. Comparing them directly makes a
+                        # URL VARIANT of a ref the Point already holds look
+                        # permanently absent — so the fold re-journals on every
+                        # idempotent retry and writes a prop ref that has no
+                        # Source and no edge (S0b/#5012: `resolve_source_key` is
+                        # the ONE resolver every source writer uses to map a raw
+                        # spelling onto the node the write will address, and
+                        # `_mint_source_stub` — i.e. `_link_source` — routes
+                        # through it). Resolve here so "present" is decided on
+                        # the identity the edge will address. It does not MINT
+                        # (an unregistered ref resolves to itself) and its only
+                        # write is the declared derived-recompute adopt-on-touch
+                        # — the same pre-append control-plane write the CREATE
+                        # path already makes via `resolve_source_versions`. The
+                        # RAW spelling is what stays in the ref lists: it is the
+                        # journal-stable key `sourceVersionTransit` is keyed by
+                        # (`resolve_source_versions`), never a live-time
+                        # resolution.
+                        from .source_identity import resolve_source_key
+                        _present_set = set(_present)
+                        _missing: list[str] = []
+                        _missing_keys: set[str] = set()
+                        for _ref in _supplied:
+                            _key = resolve_source_key(proj.g, _ref)
+                            if _key in _present_set or _key in _missing_keys:
+                                continue
+                            _missing_keys.add(_key)
+                            _missing.append(_ref)
                         if _missing:
                             self._fold_source_evidence(
                                 pid, _present, _missing)
@@ -27965,10 +27993,23 @@ class TortoiseSDK:
                                           source_versions=versions),
                 what="create_point dedup provenance edges",
             )
+            # The `sourceVersionTransit` carrier (#5256) rides the SAME
+            # statement as the prop. The record above JOURNALS the merged pairs,
+            # so a live node left holding only its pre-fold pairs is a record
+            # `check_consistency` reports DIVERGENT on (a one-sided presence of
+            # this prop is a divergence — `consistency.py`, #5256) and a
+            # `derived = replay(journal)` break on the ordinary document path
+            # (any new Source with a recorded `contentHash`). `None` ⇒
+            # `SET … = NULL`, which REMOVES the property — exactly what a
+            # replayed `PointAdded` whose payload omits the carrier leaves
+            # behind, so live and replay agree in both directions.
             self._graph_write_with_retry(
                 lambda: proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref",
-                    params={"id": pid, "ref": accumulated}),
+                    "MATCH (n:Point {id:$id}) "
+                    "SET n.extractedFrom = $ref, "
+                    "    n.sourceVersionTransit = $sv",
+                    params={"id": pid, "ref": accumulated,
+                            "sv": pairs or None}),
                 what="create_point dedup provenance prop",
             )
         _logger.info(
