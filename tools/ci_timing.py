@@ -1989,6 +1989,115 @@ def _strip_stale_basis_claim(tail: str) -> str:
     return f"{prefix}{kept}" if kept else ""
 
 
+# ── the UNMEASURED-STATE note, and the adoption that falsifies it ───────────
+#
+# Two guards in the suite read ONE rule off this map, and the writer did not
+# implement it: a row that carries a MEASUREMENT may not also carry the note of a
+# row no sweep has collected.
+#
+#   tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
+#   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
+#
+# The map's own rule for it is stated above `durations:` — "a row's comment is kept
+# only while the value AND its stated basis are unchanged" — and the 2026-10-26
+# refresh (#10026) broke it on every row it re-based from an unmeasured state: the
+# value moved, the note asserting the OLD basis stayed, and the row ended up
+# asserting that a file with a CI reading has no CI reading (`test_hermetic_egress_guard.py`
+# 2.0 -> 0.1 kept `it takes the #3400 flat 2.0s default`; `test_tool_risk_tiers.py`
+# 2.0 -> 7.8 kept `LOCAL reading … NOT adopted`). 77 of that refresh's 711 re-based
+# rows carry a claim of this shape, which is why the repair is here and not a
+# hand-edit of the three rows a guard happens to name today.
+#
+# The claim is recognised by its VERB (`takes`/`carries`/`holds` … flat … default),
+# never by the bare phrase, because the COUNTERFACTUAL forms are legitimate and must
+# survive: "without this row the file packs at the flat 2.0s default", "its absence
+# packs it at the flat 2.0s default", "a real weight, not the flat 2.0 default".
+_STALE_FLAT_DEFAULT_CLAIM_RE = re.compile(
+    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\b"
+    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+(?:2\.0s?\s+)?default",
+    re.IGNORECASE)
+
+# …and the second shape the guard suite forbids on a measured row: a note that
+# states the row has NO reading, or cites a LOCAL one as its basis.
+_STALE_UNMEASURED_PROVENANCE_RE = re.compile(
+    r"\bLOCAL reading\b|\blocal reading\b|\blocally measured\b"
+    r"|\bADDED BY (?:A|THIS) PR\b|\badded by (?:a|this) PR\b"
+    r"|\bno CI\b[^.;]{0,40}?(?:measurement|sample|duration|junit)"
+    r"|\bno junit measurement\b|\bno sweep has (?:ever )?collected\b"
+    r"|\bno source leg sampled\b|\bdev-box\b|\ba file that never ran\b"
+    r"|\brefresh from the first post-merge run\b|\bNOT adopted\b|\bnot adopted\b"
+    r"|\bnot a full-file CI measurement\b",
+    re.IGNORECASE)
+
+# The clause separators, and the note's leading `#<issue>` anchor (`#4387: `,
+# `#7818/#5362: `, `#4122 `) — kept when the clauses around it are cut, because
+# that anchor is what makes the surviving instruction findable.
+# A COMMA is deliberately NOT a clause boundary here: cutting one side of
+# "it takes the flat default, which this map forbids as a SHARD-LAYOUT input"
+# leaves the subordinate half stranded — the claim and its justification are
+# one clause and go together.
+_CLAUSE_TOKEN_RE = re.compile(r" — |; |\. ")
+# `_note_body` strips the note's leading `#`, so the anchor is matched WITHOUT one
+# and re-emitted WITH it (`#4387: `, `#7818/#5362: `).
+_LEADING_NOTE_REF_RE = re.compile(r"^\d+(?:/#?\d+)*(?::|\s)\s*")
+
+
+def _is_stale_unmeasured_claim(text: str) -> bool:
+    """Does this clause assert an UNMEASURED basis for the row's weight?"""
+    return bool(_STALE_FLAT_DEFAULT_CLAIM_RE.search(text)
+                or _STALE_UNMEASURED_PROVENANCE_RE.search(text))
+
+
+def _repair_adopted_note(tail: str) -> str:
+    """Cut the clauses an ADOPTED reading falsified; keep everything else.
+
+    Called only when this render MOVED the row's value, because that is the event
+    that falsifies "no sweep has collected this file": the note described the
+    basis the row no longer has. Clause-by-clause, following
+    :func:`_strip_stale_basis_claim`, so the row keeps its record — the
+    `#4348` `do NOT drop the row` instruction, the issue anchor, the reasoning that
+    is still true — instead of losing the whole note (the record loss the #9134
+    review fixed on two other paths).
+
+    A dropped clause takes its separator with it and the neighbours are joined by
+    `; `, so nothing is left reading `… ; — …`. Returns "" when nothing survives,
+    which the caller already renders as an absent tail.
+    """
+    body = _note_body(tail)
+    if not _is_stale_unmeasured_claim(body):
+        return tail
+    ref = _LEADING_NOTE_REF_RE.match(body)
+    ref_text = ""
+    if ref:
+        ref_text = f"#{ref.group(0).strip()}"
+        body = body[ref.end():]
+    parts = _CLAUSE_TOKEN_RE.split(body)
+    seps = [m.group(0) for m in _CLAUSE_TOKEN_RE.finditer(body)]
+    kept: list[tuple[str, str]] = []   # (separator before this clause, clause)
+    dropped = False
+    for i, clause in enumerate(parts):
+        text = clause.strip().strip(" —;,.").strip()
+        if not text:
+            dropped = dropped or bool(kept)
+            continue
+        if _is_stale_unmeasured_claim(text):
+            dropped = dropped or bool(kept)
+            continue
+        sep = "" if not kept else ("; " if dropped else (seps[i - 1] if i else "; "))
+        kept.append((sep, text))
+        dropped = False
+    if not kept:
+        return ""
+    if ref_text:
+        anchor = ref_text if ref_text.endswith(":") else f"{ref_text}:"
+        rendered = f"{anchor} {kept[0][1]}"
+    else:
+        rendered = kept[0][1]
+    for sep, text in kept[1:]:
+        rendered = f"{rendered}{sep or '; '}{text}"
+    return f"  # {rendered}"
+
+
 def _restate_unmeasured_marker(tail: str) -> str:
     """Restate a HELD row's `# unmeasured` marker instead of deleting it.
 
@@ -2040,6 +2149,27 @@ def _strip_unmeasured_marker(tail: str) -> str:
         return tail
     rest = tail[match.end():].strip()
     return f"  # {rest}" if rest else ""
+
+
+def _held_equal_pins(manifest_text: str) -> dict[str, str]:
+    """`durations_held_equal` — rows that BORROW a sibling's reading (#3400).
+
+    A machine-readable declaration, because it is a fact about this artifact and
+    the writer is its only automatic re-writer: each row is otherwise re-based from
+    its own reading, and two rows the suite requires to agree drift apart the first
+    time a sweep measures them separately. Absent or unreadable → no pins, so every
+    caller and fixture that carries no such key keeps its output.
+    """
+    import yaml
+    try:
+        data = yaml.safe_load(manifest_text) or {}
+    except yaml.YAMLError:
+        return {}
+    pins = data.get("durations_held_equal") if isinstance(data, dict) else None
+    if not isinstance(pins, dict):
+        return {}
+    return {str(row): str(sibling) for row, sibling in pins.items()
+            if isinstance(row, str) and isinstance(sibling, str)}
 
 
 def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
@@ -2122,6 +2252,16 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # file with no duration yet is added below instead of refusing the whole
     # refresh (#4364).
     resolved = _resolve_to_manifest_keys(weights, classified_keys)
+    # A HELD-EQUAL pin (#3400): the map declares the rows that borrow a sibling's
+    # reading because the suite requires them to agree — today
+    # `test_mcp_rename_table.py` = `test_bridge_table.py`, asserted by
+    # tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite.
+    # The writer used to re-base each row from its OWN reading, which is how the
+    # 2026-10-26 refresh wrote 21.2 and 2.2 for a pinned pair whose note says they
+    # carry one weight; the pair takes the LARGER reading, per the pin's own note.
+    for pinned, sibling in _held_equal_pins(manifest_text).items():
+        if pinned in resolved and sibling in resolved:
+            resolved[pinned] = max(resolved[pinned], resolved[sibling])
     # The coverage witness is keyed by MEASURED path (that is what the collector
     # supplies), and the rows are keyed by MANIFEST key — so it is put through the
     # SAME resolution, which is what makes it impossible for a witness to describe
@@ -2259,6 +2399,14 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                 # `test_2350_validity_precision.py`'s `#4348 trap — do not drop
                 # the row` instruction (#9134 review, P2).
                 tail = "" if _is_pure_provenance(tail) else _strip_stale_basis_claim(tail)
+            # …and the UNMEASURED-state claim goes with it (#10026). AFTER the
+            # dated-claim cut, never before: that cut finds its clause by scanning
+            # back for a separator, and a repair that has already joined the
+            # survivors can leave the claim with no separator on its left — the
+            # anchor then looked empty and `test_2350_validity_precision.py` lost
+            # its `#2350` ref (caught by
+            # tests/test_ci_timing.py::test_a_dated_refresh_claim_inside_a_rationale_loses_only_that_clause).
+            tail = _repair_adopted_note(tail)
             basis = f"{sample_label}; was {previous:.1f}"
             # A surviving DESIGN note is kept and the new basis is appended to it,
             # never substituted for it: notes like "Do NOT substitute a local
@@ -2266,6 +2414,10 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # not silently overwrite one (the reason the 82 non-citing tails in
             # this map exist).
             tail = f"{tail} — {basis}" if tail.strip() else f"  # {basis}"
+        elif not kept and new_value != previous and tail.strip():
+            # No `sample_label` means no basis is appended, but the note must still
+            # not assert a basis the value it was written for contradicts.
+            tail = _repair_adopted_note(tail)
         # Reuse the row's RAW key text (`match.group('key')`), not `key`: a
         # quoted key (`'test_a.py'`) must stay quoted when its value is
         # rewritten, or a key character that needs quoting would become an
