@@ -2078,6 +2078,15 @@ def test_a_guessably_short_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
     assert consent_token_secret() == _TEST_SECRET
     assert consent_token_secret_problem() is None
 
+    # The floor is measured in UTF-8 BYTES, so a multi-byte key with FEWER than 32 characters and
+    # 32+ bytes must stay ACCEPTED — the only direction the byte measure loosens, and a revert to
+    # `len(secret)` re-introduces a false refusal. This is 20 characters and 40 bytes.
+    multibyte = "\u00e9" * 20
+    assert len(multibyte) < 32 and len(multibyte.encode()) >= 32
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", multibyte)
+    assert consent_token_secret_problem() is None, (
+        "a 40-byte key was refused for being 20 characters — the floor is a byte measure")
+
 
 def test_a_short_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
                                                     monkeypatch) -> None:
@@ -2465,12 +2474,19 @@ def test_no_module_in_the_package_mints_a_consent_token() -> None:
     session cookie is). That rule was prose in a docstring — and a docstring cannot fail — so it is
     executed here. An AST scan, not a grep: a comment or a log line naming the function is not a
     false positive, and an alias or attribute call is not a false negative.
+
+    Its LIMIT, stated because a guard that overstates its reach is worse than none: it sees STATIC
+    references — `from ... import`, `import ... as`, `module.attr`, a bare name — and not a name
+    assembled at runtime (`getattr(mod, "mint_" + "consent_token")` escapes it, measured in review).
+    That is the right scope for the purpose: catching an innocent route addition. A deliberate
+    obfuscation is a code-review matter, not a scan's.
     """
     import ast
 
     offenders: list[str] = []
     for path in sorted((REPO / "tortoise").rglob("*.py")):
-        if path.name == "consent_token.py":
+        # By PATH, not basename: a module that merely SHARES the name must not be exempt.
+        if path == REPO / "tortoise" / "consent_token.py":
             continue                      # the reference implementation itself
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):

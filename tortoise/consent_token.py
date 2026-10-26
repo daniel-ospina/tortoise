@@ -56,8 +56,9 @@ REFUSALS (all typed, all fail-closed)
     the bearer path (which would answer "missing session token" to a request that never had one).
 
 OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on the hosted API:
-  * ``CONSENT_TOKEN_SECRET`` — a dedicated secret, HMAC-SHA256 signing key, **at least 32
-    characters** (a shorter value is treated as unprovisioned: a guessable key is the same forgery
+  * ``CONSENT_TOKEN_SECRET`` — a dedicated secret, HMAC-SHA256 signing key, **at least 32 UTF-8
+    bytes** (≈32 characters for an ASCII key; a shorter value is treated as unprovisioned: a
+    guessable key is the same forgery
     oracle as a reused one — the floor is a length heuristic, not a strength guarantee, so pick a
     generated value). Must NOT be the service-role key (key reuse across purposes) or the anon key
     (§2.3: the consent page embeds the anon key in HTML). Unset ⇒ the arm is unavailable and the

@@ -272,7 +272,8 @@ oversight.**
       provider sign-in no longer leaves the app origin (§6). Record the answer on #3524.
 - [ ] `CONSENT_TOKEN_SECRET` exists on **both** the `tortoise-dashboard` Pages project and the hosted API,
       and `config/required-bindings.yml` declares it (the deploy preflight then fails closed until it does).
-- [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value of **at least 32 characters** — NOT the
+- [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value of **at least 32 UTF-8 bytes** (≈32
+      characters for an ASCII key) — NOT the
       service-role key and NOT the anon key (§2.3). The length is an implementation floor, not a
       §2.3 requirement: HMAC-SHA256 with a guessable key is the same forgery oracle as a reused one
       (measured with a 1-character secret), so the hosted API refuses a short one with a typed 503
@@ -308,7 +309,7 @@ bearer path untouched); step 4 is where the flow changes.
 `tests/test_oauth_consent_bridge.py`. Two conditions an operator must know, both recorded there:
 
 - the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API **and is a dedicated
-  value of at least 32 characters** (§2.3; a value equal to a service-role key or to
+  value of at least 32 UTF-8 bytes** (§2.3; a value equal to a service-role key or to
   `SUPABASE_ANON_KEY` — both are in this process's environment, and the anon key is the one the
   consent page publishes — is treated as unprovisioned, and so is a key too short to be one). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
   and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
