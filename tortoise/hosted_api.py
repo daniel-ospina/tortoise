@@ -18247,13 +18247,25 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
 def _record_unavailable() -> HTTPException:
     """#8447: fail-CLOSED 503 when the RECORD holds the transcript and did not answer.
 
-    On an armed deployment the turns are RECORD rows (the per-turn `PointAdded`
-    records, #10000/#10011) and the graph keeps only the Session's counters — so
-    when the record read FAILS, the fail-soft fallback below has nothing to fall
-    back to: it answers zero turn nodes, which is byte-identical to a session
-    that has no turns. Serving that as ``200 {"turn_points": []}`` is the shape
-    #8447 forbids — a refusal rendered as a legitimate empty answer, with the
-    only signal in a WARNING the caller never reads.
+    On an armed **journaling** deployment the turns are RECORD rows (the
+    per-turn `PointAdded` records, #10000/#10011) and the graph keeps only the
+    Session's counters — so when the record read FAILS, the fail-soft fallback
+    below answers zero turn nodes, which is byte-identical to a session that has
+    no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
+    forbids — a refusal rendered as a legitimate empty answer, with the only
+    signal in a WARNING the caller never reads.
+
+    ⚠️ "JOURNALING" is load-bearing, and `_record_holds_turns` does NOT test it:
+    that predicate asks only whether the DSN is set (``return _dsn() is not
+    None``), while the WRITE side asks the same capability question with both
+    conjuncts — ``sdk._get_event_log() is not None and _record_dsn() is not
+    None`` (`tortoise/sdk.py:2652`), because a per-turn `PointAdded` record is
+    gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
+    write door declines `no_durable_journal` and the GRAPH keeps the turns, so
+    "the graph keeps only the counters" is a property of armed+journaling, not
+    of arming alone. This refusal's own behaviour is unaffected either way: it
+    also requires ``not turns``, so a graph copy carrying real turns is still
+    served 200.
 
     The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
     repealed: a graph copy that exists is still served byte-identically, because
@@ -18440,8 +18452,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             _record_turns = None
             _record_read_failed = True
             _logger.warning(
-                "session %s turns read from the record failed — serving the graph "
-                "copy for this request", session_id, exc_info=True)
+                "session %s turns read from the record failed — falling back to "
+                "the graph copy for this request", session_id, exc_info=True)
     if _record_turns is not None:
         for _t in _record_turns:
             turns.append({

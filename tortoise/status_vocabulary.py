@@ -68,6 +68,23 @@ as ``degraded`` — the recorded term for an impaired memory — and keeps the
 leg-by-leg detail in its ``leg_trace``. That is a read-path-local extension,
 recorded here because this module is the vocabulary's ONE home: it adds no
 fifth term, renames none, and does not change the boundary's mapping.
+
+**One write-path dimension this vocabulary does not name.** ``record_writer``'s
+LIVE door reports an ARMED call that did not write as ``REFUSED`` (#8447), and
+its ``refusal`` token is one of five. Four of them are literally *configured,
+not reached* — ``malformed_dsn``, ``no_tenant``, ``circuit_open``,
+``write_failed`` — so ``degraded`` names them exactly. ``no_durable_journal``
+is NOT that: the M2 capture lane has no journal by design, so the write is
+declined before the store is ever asked and nothing a replay could restore is
+missing. The four terms have no name for *the store was never asked, by
+design*, so the write path carries that decline as ``degraded`` — the nearest
+recorded term, **not** a measured outage — and keeps the reason in
+``RecordWrite.refusal``, which is authoritative: a consumer must read
+``refusal`` before calling a decline an error. Recorded here for the same
+reason as the read-path dimension above — this module is the vocabulary's ONE
+home, and a mapping documented only at the call site is one that no reader of
+the published table will ever find. It adds no fifth term, renames none, and
+does not change the boundary's mapping.
 """
 
 from __future__ import annotations
