@@ -32,24 +32,78 @@ _spec.loader.exec_module(census_mod)
 
 
 class _FakeGraph:
-    """Returns the queued result sets in call order (sessions, turns, orphans).
+    """A PAGING-AWARE fake: it honours `id()`/`$cursor`/`$batch`, and answers
+    every aggregate leg with a real count of its own rows.
+
+    A fake that merely hands back a queued result set per call (as this one did
+    before the cap finding) cannot express truncation OR paging at all: a
+    silently-clipped 10,000-of-37,571 read and a complete read look identical to
+    it, which is how that fail-open went unseen. Rows are given synthetic
+    internal ids in list order; ``cap`` simulates the server-global
+    RESULTSET_SIZE, which TRUNCATES a non-aggregate read without an error.
 
     Sessions rows are ``(id, turn_count, turn_max_index)``; turn rows are
     ``(session_id, point_id, chars, is_embedded, point_kind)``.
     """
 
-    def __init__(self, sessions, turns, orphan_ids=()) -> None:
-        self._sets = [sessions, turns, [(i,) for i in orphan_ids]]
+    def __init__(self, sessions, turns, orphan_ids=(), *, cap=None) -> None:
+        self._sessions = list(sessions)
+        self._turns = list(turns)
+        self._orphans = list(orphan_ids)
+        self.cap = cap
         self.queries: list[str] = []
+        self.params: list[dict] = []
 
-    def query(self, cypher: str):
+    def _page(self, rows, params):
+        cursor = int(params["cursor"])
+        batch = int(params["batch"])
+        out = [(i, row) for i, row in enumerate(rows) if i >= cursor][:batch]
+        if self.cap is not None:
+            # the engine truncates the RESULT SET, silently, at the cap
+            out = out[: self.cap]
+        return out
+
+    def _point_rows(self):
+        """One row per POINT, with its session memberships — what the census's
+        ``WITH p, collect(s.id)`` really returns (a multi-wired point is ONE
+        row, and paging over raw (session, point) pairs would repeat its id)."""
+        order: list[str] = []
+        by_pid: dict[str, dict] = {}
+        for sid, pid, chars, emb, kind in self._turns:
+            if pid not in by_pid:
+                by_pid[pid] = {"row": (pid, chars, emb, kind), "sids": []}
+                order.append(pid)
+            by_pid[pid]["sids"].append(sid)
+        return [(*by_pid[pid]["row"], by_pid[pid]["sids"]) for pid in order]
+
+    def query(self, cypher: str, params=None):
         self.queries.append(cypher)
+        p = dict(params or {})
+        self.params.append(p)
+        text = " ".join(cypher.split()).upper()
 
         class _R:
             def __init__(self, rows):
                 self.result_set = rows
 
-        return _R(self._sets.pop(0))
+        if "COUNT(DISTINCT" in text:
+            # one row, two aggregates: (session, point) pairs and distinct points
+            return _R([(len(self._turns), len(self._point_rows()))])
+        if "COUNT(" in text:
+            if "IS_EPISODIC" not in text:
+                return _R([(len(self._sessions),)])
+            if "NOT (" in text:
+                return _R([(len(self._orphans),)])
+            raise AssertionError(f"unexpected aggregate: {cypher}")
+        if "COLLECT(S.ID)" in text:
+            return _R([(i, *row)
+                       for i, row in self._page(self._point_rows(), p)])
+        if "NOT (:SESSION)" in text:
+            return _R([(i, row)
+                       for i, row in self._page(self._orphans, p)])
+        if "TURN_MAX_INDEX" in text:
+            return _R([(i, *row) for i, row in self._page(self._sessions, p)])
+        raise AssertionError(f"unexpected statement in the census: {cypher}")
 
 
 class _FakeDB:
@@ -192,6 +246,43 @@ def test_a_point_that_is_not_this_sessions_turn_is_not_counted_as_one() -> None:
     assert report["totals"]["turn_ids_of_another_session"] == 1
 
 
+def test_a_multi_wired_point_is_one_turn_and_survives_a_page_boundary(
+        monkeypatch) -> None:
+    """A point wired into two sessions is ONE turn, not one per session.
+
+    The turn leg therefore returns one row per POINT (its sessions collected on
+    the row). Paging the raw (session, point) pairs would repeat a point's
+    internal id, and ``last + 1`` — the keyset advance — would step over the
+    second membership at a page boundary. Both arms are pinned here at a page
+    size of 1, which is the boundary that exposed the difference on a live
+    FalkorDB (a fake that hands back queued rows cannot express either).
+    """
+    monkeypatch.setattr(census_mod, "_PAGE_SIZE", 1)
+    sessions = [("s1", 2, 1), ("s2", 0, None)]
+    turns = [
+        ("s1", "s1_t0", 3, 0, "event"),
+        ("s1", "s1_t1", 4, 0, "event"),
+        ("s2", "s1_t0", 3, 0, "event"),   # the SAME point, wired into s2 too
+    ]
+    graph = _FakeGraph(sessions, turns)
+    report = census_mod.census(graph, "g")
+
+    assert report["totals"]["turns"] == 2, "a multi-wired point counted twice"
+    assert report["per_session"]["s1"]["turns"] == 2
+    assert report["per_session"]["s1"]["chars"] == 7
+    # attached, on-shape, but not s2's turn — reported, never folded in
+    assert report["per_session"]["s2"]["turns"] == 0
+    assert report["per_session"]["s2"]["non_turn_members"] == 1
+    # page size 1: two point rows are TWO pages, plus the empty page that ends
+    # the loop. A pair-per-row read would have needed three rows to say the same
+    # thing — and would have lost the third to the keyset advance.
+    point_pages = [q for q in graph.queries if "collect(s.id)" in q]
+    cursors = [p["cursor"] for q, p in zip(graph.queries, graph.params)
+               if "collect(s.id)" in q]
+    assert len(point_pages) == 3, graph.queries
+    assert cursors == [0, 1, 2], cursors
+
+
 def test_an_id_space_hole_is_reported_even_when_the_count_agrees() -> None:
     """`turn_count` is a WINDOW LENGTH; the indices are the ID SPACE (#10000).
 
@@ -265,7 +356,8 @@ def test_census_is_read_only() -> None:
     """The census phase must contain no mutation: it runs on production."""
     graph = _FakeGraph([("s1", 1, 0)], [("s1", "s1_t0", 1, 0, "event")])
     census_mod.census(graph, "g")
-    assert len(graph.queries) == 3
+    # three PAGED reads + the three aggregates that cross-check them
+    assert len(graph.queries) == 6
     for cypher in graph.queries:
         # Stronger than a keyword scan: EVERY statement is a MATCH-shaped read,
         # and none carries a CALL (which is how a write hides without a word
@@ -274,6 +366,78 @@ def test_census_is_read_only() -> None:
         assert not re.search(r"\bCALL\b", cypher.upper()), cypher
         assert not re.search(r"\b(CREATE|MERGE|DELETE|SET|REMOVE|DROP)\b",
                              cypher.upper()), cypher
+
+
+def test_every_row_bearing_read_is_keyset_paged_and_count_cross_checked() -> None:
+    """A single unpaged ``RETURN`` is clipped SILENTLY at RESULTSET_SIZE.
+
+    Measured on the target population: ~37,571 episodic points against a
+    server-global cap of 10,000, so an unpaged read here would hand `verify`
+    the first 10,000 turns as if that were the graph, while the delete sweep is
+    broader than any count in the census.
+    """
+    graph = _FakeGraph([("s1", 1, 0)], [("s1", "s1_t0", 1, 0, "event")])
+    census_mod.census(graph, "g")
+    paged = [q for q in graph.queries if "$cursor" in q]
+    assert len(paged) == 3, graph.queries
+    for cypher in paged:
+        assert "id(" in cypher and ">= $cursor" in cypher, cypher
+        assert "ORDER BY id(" in cypher and "LIMIT $batch" in cypher, cypher
+    aggregates = [q for q in graph.queries if "COUNT(" in q.upper()]
+    assert len(aggregates) == 3, graph.queries
+    for cypher in aggregates:
+        assert "$cursor" not in cypher, "an aggregate must never be paged"
+
+
+def test_the_paged_reads_cover_every_row_across_pages(monkeypatch) -> None:
+    """The keyset loop, exercised: >1 page must produce the WHOLE population.
+
+    Pins the cursor advance itself (the pre-fix read had none). Retunes the
+    module constant rather than the call, because that is how a live retune
+    takes effect — a def-time default would ignore it.
+    """
+    monkeypatch.setattr(census_mod, "_PAGE_SIZE", 2)
+    sessions = [("s1", 5, 4), ("s2", 0, None)]
+    turns = [("s1", f"s1_t{i}", 1, 0, "event") for i in range(5)]
+    graph = _FakeGraph(sessions, turns, orphan_ids=["o1", "o2", "o3"])
+    report = census_mod.census(graph, "g")
+
+    assert report["totals"]["turns"] == 5, "a page boundary dropped turns"
+    assert report["per_session"]["s1"]["turns"] == 5
+    assert report["per_session"]["s1"]["indexes_seen"] == 4
+    assert report["totals"]["sessions_declared"] == 2
+    assert report["orphan_turn_ids"] == ["o1", "o2", "o3"]
+    # more than one page per row-bearing leg == the cursor actually advanced
+    turn_pages = [q for q in graph.queries if "p.pointKind" in q]
+    assert len(turn_pages) >= 2, graph.queries
+    cursors = [p["cursor"] for q, p in zip(graph.queries, graph.params)
+               if "p.pointKind" in q]
+    assert cursors == sorted(cursors) and len(set(cursors)) > 1, cursors
+
+
+def test_a_truncated_read_is_refused_and_never_written(monkeypatch,
+                                                      tmp_path) -> None:
+    """A clipped read must fail CLOSED — a partial baseline authorises a delete.
+
+    ``cap`` is the server-global RESULTSET_SIZE: it truncates without an error,
+    so nothing in the row data says the census is short. Only the aggregate
+    cross-check can say so.
+    """
+    sessions = [("s1", 3, 2)]
+    turns = [("s1", f"s1_t{i}", 1, 0, "event") for i in range(3)]
+    graph = _FakeGraph(sessions, turns, cap=2)
+    with pytest.raises(census_mod.CensusError) as exc:
+        census_mod.census(graph, "g")
+    assert "TRUNCATED" in str(exc.value)
+    assert "2 row(s)" in str(exc.value) and "counts 3" in str(exc.value)
+
+    out = tmp_path / "census.json"
+    with pytest.raises(SystemExit) as refusal:
+        _run_main(monkeypatch, _FakeDB(_FakeGraph(sessions, turns, cap=2)),
+                  ["census", "--graph", "g", "--uri-env", "CENSUS_TEST_URI",
+                   "--out", str(out)])
+    assert "TRUNCATED" in str(refusal.value)
+    assert not out.exists(), "a refused census must not leave an artifact"
 
 
 def test_the_statements_measure_what_the_report_claims() -> None:
@@ -285,7 +449,10 @@ def test_the_statements_measure_what_the_report_claims() -> None:
     """
     graph = _FakeGraph([("s1", 1, 0)], [("s1", "s1_t0", 1, 0, "event")])
     census_mod.census(graph, "g")
-    sessions_q, turns_q, orphan_q = graph.queries
+    sessions_q = next(q for q in graph.queries if "s.turn_max_index" in q)
+    turns_q = next(q for q in graph.queries
+                   if "p.pointKind" in q and "NOT (" not in q)
+    orphan_q = next(q for q in graph.queries if "NOT (:Session)" in q)
     assert "s.turn_count" in sessions_q and "s.turn_max_index" in sessions_q
     assert "is_episodic" in turns_q and ":CONTAINS]" in turns_q
     assert "p.pointKind" in turns_q, "the pointKind divergence would be invisible"
@@ -305,7 +472,7 @@ def test_main_checks_existence_before_it_selects_or_queries(monkeypatch) -> None
     assert db.calls == ["list_graphs", "select_graph:g"], (
         "GRAPH.LIST must run before the graph is selected: a read against a "
         "missing graph CREATES its keyspace")
-    assert len(graph.queries) == 3
+    assert len(graph.queries) == 6
 
 
 def test_main_refuses_a_missing_graph_without_issuing_one_query(monkeypatch) -> None:
@@ -364,6 +531,27 @@ def test_main_never_echoes_a_uri_pasted_into_uri_env(monkeypatch) -> None:
         census_mod.main(["census", "--graph", "g", "--uri-env", secret])
     assert "SUPERSECRETPW" not in str(exc.value)
     assert "not the URI" in str(exc.value)
+
+
+def test_main_never_echoes_a_SCHEMELESS_credential_passed_to_uri_env(
+        monkeypatch) -> None:
+    """The SCHEMELESS pasted-credential spelling is the leak the guard missed.
+
+    Deciding from a `"://"` substring let `--uri-env
+    ':SUPERSECRETPW@db.example.com:6379'` through: the env lookup returned None,
+    and the "not set" message interpolated the ARGUMENT verbatim — printing the
+    password the module docstring promises never to print, into the terminal and
+    (in a dispatched lane) the CI log. The decision must be on the SHAPE.
+    """
+    secret = ":SUPERSECRETPW@db.example.com:6379"
+    monkeypatch.setattr(census_mod, "_connect",
+                        lambda uri: pytest.fail("must not connect"))
+    with pytest.raises(SystemExit) as exc:
+        census_mod.main(["census", "--graph", "g", "--uri-env", secret])
+    message = str(exc.value)
+    assert "SUPERSECRETPW" not in message, message
+    assert "db.example.com" not in message, message
+    assert "NAME of an environment variable" in message
 
 
 def test_main_names_an_unset_variable_but_never_its_value(monkeypatch) -> None:

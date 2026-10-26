@@ -27,6 +27,12 @@ holds no `:Session` at all, because an all-zero census is indistinguishable
 from a wrong graph or a label/property shape that no longer matches, and a
 zero that cannot be told apart from "nothing to migrate" is not evidence.
 
+Every row-bearing read is keyset-PAGED and cross-checked against the server's
+own aggregate for the same predicate, and a disagreement is a REFUSAL: FalkorDB
+truncates a non-aggregate result at `RESULTSET_SIZE` (default 10,000) without an
+error, and the population this exists for is larger than that, so a clipped read
+would otherwise hand `verify` a prefix of the graph as the whole of it.
+
 Why `node_key` is not read: the legacy turn points on the production graphs have
 `node_key = NULL`. Their identity is carried in `id` (``<session_id>_t<index>``),
 which is what the record's `(org_id, graph_id, node_key)` key will be rebuilt
@@ -38,11 +44,25 @@ how a session that lost turns reads as complete.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import would fail first, and an UNATTRIBUTED failure is the harm
+# #5128 was filed for. Same shape as the sibling census (tools/edge_census.py);
+# the guard must be the first statement after the docstring and `import sys`,
+# which `tests/test_entry_point_python_guard.py` pins for every tools/ entry
+# point.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/backfill_graph_turns.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/backfill_graph_turns.py`"
+    )
+
 import argparse
 import json
 import os
 import re
-import sys
 import urllib.parse as up
 
 #: A turn id in the shape the SDK mints: ``<session_id>_t<index>``.
@@ -58,6 +78,9 @@ import urllib.parse as up
 #: ``sess_t3`` index 7, not as session ``sess`` — otherwise one session's turns
 #: prefix-match another's, which is the trap `sdk._capture_turn_ids` documents.
 _TURN_ID_RE = re.compile(r"^(?P<session>.+)_t(?P<index>[0-9]+)$")
+
+#: What ``--uri-env`` accepts: an environment VARIABLE NAME, nothing else.
+_URI_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _assert_graph_exists(db, graph_name: str,
@@ -82,6 +105,106 @@ def _assert_graph_exists(db, graph_name: str,
         "so this tool will not be the thing that creates it. Check the name, "
         "or pass --create-if-missing to accept that.")
 
+
+
+#: Rows per keyset page. Deliberately BELOW FalkorDB's server-global
+#: ``RESULTSET_SIZE`` (default 10,000), which truncates a non-aggregate read
+#: SILENTLY — no error, no marker (#4515/#4233, ``tortoise/hosted_backup.py``).
+#: The population this census exists for is ~37,571 episodic points, so a single
+#: unpaged ``RETURN`` would measure the first 10,000 of them and report that as
+#: the whole graph: a partial baseline for `verify`, on the phase that gates an
+#: irreversible delete.
+_PAGE_SIZE = 5000
+
+_SESSIONS_PAGE_QUERY = (
+    "MATCH (s:Session) WHERE id(s) >= $cursor "
+    "RETURN id(s), s.id, s.turn_count, s.turn_max_index "
+    "ORDER BY id(s) LIMIT $batch"
+)
+_SESSIONS_COUNT_QUERY = "MATCH (s:Session) RETURN count(s)"
+_TURNS_PAGE_QUERY = (
+    "MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE p.is_episodic = true "
+    "AND id(p) >= $cursor "
+    "WITH p, collect(s.id) AS sids "
+    "RETURN id(p), p.id, size(coalesce(p.content,'')), "
+    "       (p.embedding IS NOT NULL), p.pointKind, sids "
+    "ORDER BY id(p) LIMIT $batch"
+)
+#: One row, two aggregates: ``count(p)`` counts the (session, point) PAIRS the
+#: census must account for, ``count(DISTINCT p)`` the POINTS the paged read
+#: returns one row for. Both are needed — the paged leg groups sessions per
+#: point, so a point is one row and N session memberships.
+_TURNS_COUNT_QUERY = (
+    "MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE p.is_episodic = true "
+    "RETURN count(p), count(DISTINCT p)"
+)
+_ORPHANS_PAGE_QUERY = (
+    "MATCH (p:Point) WHERE p.is_episodic = true "
+    "AND NOT (:Session)-[:CONTAINS]->(p) AND id(p) >= $cursor "
+    "RETURN id(p), p.id ORDER BY id(p) LIMIT $batch"
+)
+_ORPHANS_COUNT_QUERY = (
+    "MATCH (p:Point) WHERE p.is_episodic = true "
+    "AND NOT (:Session)-[:CONTAINS]->(p) RETURN count(p)"
+)
+
+
+class CensusError(RuntimeError):
+    """A census that cannot be trusted — refused, never written.
+
+    Raised instead of returning a report whose numbers are a prefix of the
+    graph's: the artifact is what `verify` compares the record against before a
+    delete, and a silently-clipped read is indistinguishable from a small graph.
+    """
+
+
+def _paged_rows(graph, query: str, batch: int):
+    """Every row of ``query``, keyset-paged on its ``id()`` column.
+
+    The cursor advances to ``last_id + 1``, which requires the query to return
+    ONE ROW PER NODE: a ``RETURN`` that emits one row per (session, point) PAIR
+    repeats a point's internal id, and ``last + 1`` would then step over that
+    point's remaining rows at a page boundary — a silent drop of exactly the
+    turns this census exists to count. That is why the turn leg groups its
+    sessions per point (``WITH p, collect(s.id)``) rather than paging raw pairs;
+    a live FalkorDB measurement of both shapes is what settled it.
+
+    The lower bound is ``id(n) >= 0``, never negative: a negative comparison
+    against a NODE id answers 0 rows on the v6 Rust FalkorDB core (#9226,
+    ``tortoise/hosted_backup.py::_paged_rows``).
+    """
+    cursor = 0
+    while True:
+        rows = graph.query(query, params={"cursor": cursor,
+                                          "batch": batch}).result_set
+        if not rows:
+            return
+        yield from rows
+        if len(rows) < batch:
+            return
+        cursor = int(rows[-1][0]) + 1
+
+
+def _count(graph, query: str) -> tuple[int, ...]:
+    """A server-side aggregate — ONE row, so RESULTSET_SIZE cannot clip it."""
+    rows = graph.query(query).result_set
+    return tuple(int(v) for v in rows[0]) if rows else ()
+
+
+def _cross_check(leg: str, measured: int, aggregate: int) -> None:
+    """Refuse a census whose paged read disagrees with the server's own count.
+
+    A clipped read is silent by construction (the engine truncates, it does not
+    error), so the artifact would state a PREFIX of the graph as the graph — and
+    `verify` would then compare the record against a partial baseline while the
+    delete sweep is broader than any count in it. Fail closed.
+    """
+    if measured != aggregate:
+        raise CensusError(
+            f"census: the {leg} read returned {measured} row(s) but the server "
+            f"counts {aggregate} — the read was TRUNCATED (RESULTSET_SIZE) or "
+            "the graph changed under the census. A partial read would become a "
+            "partial parity baseline, so this census is refused, not written.")
 
 
 def _connect(uri: str):
@@ -134,22 +257,30 @@ def _empty_bucket() -> dict:
             "non_turn_members": 0, "turns_not_point_kind_event": 0}
 
 
-def census(graph, graph_name: str) -> dict:
+def census(graph, graph_name: str, page_size: int | None = None) -> dict:
     """Per-session turn census for ONE graph. Reads only.
 
     A "turn" here is a ``:Point`` wired ``[:CONTAINS]`` to a ``:Session`` whose
     id keys as THAT session's turn (``<session_id>_t<ascii digits>``) — the same
     identity the record rebuilds from. Everything else attached to the session
     is reported apart, never folded into ``turns``.
+
+    Every row-bearing read is keyset-PAGED and cross-checked against the
+    server's own aggregate for the same predicate; a disagreement raises
+    ``CensusError`` rather than returning a truncated census.
     """
+    if page_size is None:
+        # Read at CALL time, never bound as a def-time default: the module
+        # constant is what a test retunes to make the census take >1 page.
+        page_size = _PAGE_SIZE
     # `turn_max_index` is the ID-SPACE high-water mark the writer records beside
     # the window length (`sdk.py`, post-#10000: "`turn_count` is a WINDOW LENGTH,
     # not a max id index"), so the census can report the two declared numbers
     # separately from the two measured ones. `created_at` is deliberately not
     # read: nothing here consumes it.
-    sessions = graph.query(
-        "MATCH (s:Session) RETURN s.id, s.turn_count, s.turn_max_index"
-    ).result_set
+    sessions = list(_paged_rows(graph, _SESSIONS_PAGE_QUERY, page_size))
+    _cross_check(":Session", len(sessions),
+                 _count(graph, _SESSIONS_COUNT_QUERY)[0])
 
     # One pass over the turns: their id IS the key (`<session>_t<index>`), and
     # the `CONTAINS` edge is the session linkage the record copy will carry.
@@ -158,64 +289,75 @@ def census(graph, graph_name: str) -> dict:
     # require `pointKind = 'event'`; the record's own turn read does not): this
     # census keeps the id-shape definition — which is what the record keys on —
     # and MEASURES the divergence instead of silently picking one.
-    rows = graph.query(
-        "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-        "WHERE p.is_episodic = true "
-        "RETURN s.id, p.id, size(coalesce(p.content,'')), "
-        "       (p.embedding IS NOT NULL), p.pointKind "
-        "ORDER BY s.id, p.id"
-    ).result_set
+    rows = list(_paged_rows(graph, _TURNS_PAGE_QUERY, page_size))
+    pairs_expected, points_expected = _count(graph, _TURNS_COUNT_QUERY)
+    _cross_check("turn", len(rows), points_expected)
+    _cross_check("turn-to-session edge",
+                 sum(len(r[5] or ()) for r in rows), pairs_expected)
 
     per_session: dict[str, dict] = {}
     off_shape: list[str] = []
     other_session: list[str] = []
-    for sid, pid, chars, has_emb, kind in rows:
-        sid = str(sid)
+    for _internal_id, pid, chars, has_emb, kind, sids in rows:
         pid = "" if pid is None else str(pid)
+        sids = [str(s) for s in (sids or ())]
         parsed = _TURN_ID_RE.match(pid)
         index = _int_or_none(parsed.group("index")) if parsed is not None else None
-        bucket = per_session.setdefault(sid, _empty_bucket())
         if parsed is None or index is None:
             # An off-shape id (or an index CPython cannot convert) cannot be
             # keyed into the record at all — a copy-blocking finding, distinct
-            # from the one below.
-            bucket["non_turn_members"] += 1
+            # from the one below. Named ONCE per point, counted per membership.
+            for sid in sids or [""]:
+                per_session.setdefault(sid, _empty_bucket())[
+                    "non_turn_members"] += 1
             off_shape.append(pid)
             continue
-        if parsed.group("session") != sid:
+        owner = parsed.group("session")
+        if owner not in sids:
             # A well-formed turn id belonging to a DIFFERENT session, wired
-            # here. It IS on the shape; it simply is not this session's turn,
+            # here. It IS on the shape; it simply is not these sessions' turn,
             # and the copy would rebuild it under its own session.
-            bucket["non_turn_members"] += 1
+            for sid in sids:
+                per_session.setdefault(sid, _empty_bucket())[
+                    "non_turn_members"] += 1
             other_session.append(pid)
             continue
-        bucket["turns"] += 1
-        bucket["chars"] += _int_or_none(chars) or 0
-        bucket["embedded"] += 1 if has_emb else 0
-        if kind != "event":
-            bucket["turns_not_point_kind_event"] += 1
-        bucket["indexes_seen"] = max(bucket["indexes_seen"], index)
-        # `first_key`/`last_key` are the ids at the LOWEST/HIGHEST INDEX, not the
-        # lexicographically-first/last id (`s1_t9` sorts after `s1_t10`, so the
-        # ordering the query returns is not the id order).
-        if bucket["first_index"] is None or index < bucket["first_index"]:
-            bucket["first_index"] = index
-            bucket["first_key"] = pid
-        if bucket["last_index"] is None or index > bucket["last_index"]:
-            bucket["last_index"] = index
-            bucket["last_key"] = pid
+        for sid in sids:
+            bucket = per_session.setdefault(sid, _empty_bucket())
+            if sid != owner:
+                # ATTACHED, on-shape, but not this session's: a multi-wired
+                # point is one turn, not one per session.
+                bucket["non_turn_members"] += 1
+                continue
+            bucket["turns"] += 1
+            bucket["chars"] += _int_or_none(chars) or 0
+            bucket["embedded"] += 1 if has_emb else 0
+            if kind != "event":
+                bucket["turns_not_point_kind_event"] += 1
+            bucket["indexes_seen"] = max(bucket["indexes_seen"], index)
+            # `first_key`/`last_key` are the ids at the LOWEST/HIGHEST INDEX, not
+            # the lexicographically-first/last id (`s1_t9` sorts after `s1_t10`,
+            # so the ordering the query returns is not the id order).
+            if bucket["first_index"] is None or index < bucket["first_index"]:
+                bucket["first_index"] = index
+                bucket["first_key"] = pid
+            if bucket["last_index"] is None or index > bucket["last_index"]:
+                bucket["last_index"] = index
+                bucket["last_key"] = pid
 
     # Turns with NO session edge would be copied under no session — that is a
     # silent orphan line in the parity check, so the ids are MEASURED, not
     # merely counted. A hard-coded empty list beside a non-zero count would read
     # as "no orphan ids", which is the opposite of the finding.
-    orphan_ids = [r[0] for r in graph.query(
-        "MATCH (p:Point) WHERE p.is_episodic = true "
-        "AND NOT (:Session)-[:CONTAINS]->(p) RETURN p.id ORDER BY p.id"
-    ).result_set]
+    orphan_ids = [str(r[1]) for r in
+                  _paged_rows(graph, _ORPHANS_PAGE_QUERY, page_size)]
+    _cross_check("orphan", len(orphan_ids),
+                 _count(graph, _ORPHANS_COUNT_QUERY)[0])
 
-    declared = {str(sid): _int_or_none(tc) for sid, tc, _ in sessions}
-    declared_max = {str(sid): _int_or_none(tmi) for sid, _, tmi in sessions}
+    declared = {str(sid): _int_or_none(tc)
+                for _nid, sid, tc, _tmi in sessions}
+    declared_max = {str(sid): _int_or_none(tmi)
+                    for _nid, sid, _tc, tmi in sessions}
 
     # Counted BEFORE declared-only sessions are folded in, so a declared session
     # with no turns cannot inflate "sessions with turns" — and by the TURN count,
@@ -312,16 +454,19 @@ def main(argv: list[str] | None = None) -> int:
                          "its keyspace (refused by default)")
     args = ap.parse_args(argv)
 
-    uri = os.environ.get(args.uri_env)
-    if "://" in args.uri_env:
-        # ⛔ The VALUE is never interpolated: `--uri-env` is the natural place to
-        # paste a URI by mistake, and echoing it would print the password this
-        # file promises never to print. Name the mistake, not the value.
+    # ⛔ Decided from the argument's SHAPE, never from a substring: the VALUE is
+    # never interpolated, because `--uri-env` is the natural place to paste a URI
+    # by mistake and echoing it would print the password this file promises never
+    # to print. A substring test for "://" missed the SCHEMELESS spelling
+    # (`:SUPERSECRETPW@db.example.com:6379`), which then reached the "not set"
+    # message verbatim — a real leak through the guard that exists to prevent it.
+    if not _URI_ENV_NAME_RE.fullmatch(args.uri_env):
         raise SystemExit(
-            "census: --uri-env takes the NAME of an environment variable, not "
-            "the URI itself. Refusing to echo what was passed (a URI carries a "
-            "credential) — export it and pass the variable name, e.g. "
-            "FALKORDB_CLOUD_URI.")
+            "census: --uri-env takes the NAME of an environment variable "
+            "([A-Za-z_][A-Za-z0-9_]*), not the URI itself. Refusing to echo "
+            "what was passed (a pasted URI carries a credential) — export it "
+            "and pass the variable name, e.g. FALKORDB_CLOUD_URI.")
+    uri = os.environ.get(args.uri_env)
     if not uri:
         raise SystemExit(
             f"census: ${args.uri_env} is not set — export the graph URI in that "
@@ -329,7 +474,10 @@ def main(argv: list[str] | None = None) -> int:
     db, shown = _connect(uri)
     _assert_graph_exists(db, args.graph, args.create_if_missing)
     graph = db.select_graph(args.graph)
-    report = census(graph, args.graph)
+    try:
+        report = census(graph, args.graph)
+    except CensusError as exc:
+        raise SystemExit(str(exc)) from None
 
     t = report["totals"]
     if t["sessions_declared"] == 0:
