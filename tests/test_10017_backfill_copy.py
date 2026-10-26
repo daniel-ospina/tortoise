@@ -570,13 +570,13 @@ def _main_harness(monkeypatch, graph):
                         lambda db, name: None)
 
 
-def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch) -> None:
+def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch, capsys) -> None:
     """`off_shape: 3` beside exit 0 reads as "the backfill completed".
 
     The two sibling gates refuse on the same classes (the census exits 2 and
-    writes no artifact; the parity census exits 2 on its anomaly partition), so
-    the copy carries the verdict in its exit code too — after writing the
-    artifact, which still reports what DID land.
+    writes no artifact; the parity census exits 3 for a short read), so the copy
+    carries the verdict in its exit code too — and names the class on stderr,
+    after writing the artifact, which still reports what DID land.
     """
     _main_harness(monkeypatch, _FakeGraph(
         sessions=[(1, "s1", {})],
@@ -585,7 +585,8 @@ def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch) -> None:
     with pytest.raises(SystemExit) as excinfo:
         copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
                        "--dry-run"])
-    assert "off_shape" in str(excinfo.value)
+    assert excinfo.value.code == 2
+    assert "off_shape=1" in capsys.readouterr().err
 
 
 def test_a_dry_run_measures_no_position_and_says_so(monkeypatch, capsys) -> None:

@@ -40,12 +40,17 @@ left nodes the record can never hold:
 
 * ``0``  accepted nodes copied; every anomaly class is either zero or
   copied-and-reported.
-* ``2``  refused. Either a BLOCKING anomaly class is nonzero (``off_shape``,
+* ``1``  the tool cannot start: an environment variable it was pointed at is not
+  set, a flag received a pasted URI/DSN, or `--journal` is missing on a run that
+  would write.
+* ``2``  REFUSED. Either a BLOCKING anomaly class is nonzero (``off_shape``,
   ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
   store), or the copy stopped on a write it could not prove: a truncated read, an
   unproven journal position, a non-contiguous segment, a record that was not
-  armed, or a record that executed statements nobody committed. The summary JSON
-  is still written, so the artifact reports what DID land.
+  armed, or a record that executed statements nobody committed. A blocking class
+  is reported IN the artifact (the copy ran, so the JSON says what did land); a
+  refusal raised before the loop (a duplicate turn key, a truncated read) writes
+  no artifact, because nothing was copied.
 
 Honest bounds, stated rather than implied:
 
@@ -493,13 +498,12 @@ def main(argv: list[str] | None = None) -> int:
         args.journal, dsn, args.org_id, args.graph_id)
     try:
         stats = copy_phase(graph, emit, event_id=ulid)
-    except census.CensusError as exc:
-        # A truncated read is a REFUSAL, not a crash: exit with the reason the
-        # census already states, so an operator (or a CI step) reads a verdict
-        # rather than a traceback.
-        raise SystemExit(str(exc)) from None
-    except CopyRefused as exc:
-        raise SystemExit(f"copy: {exc}") from None
+    except (census.CensusError, CopyRefused) as exc:
+        # A refusal is a VERDICT, not a crash: exit 2 with the reason, so the
+        # operator (or a CI chain) reads what happened instead of a traceback —
+        # the code the census uses for the same class (exit 2, no artifact).
+        print(f"copy: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     if args.dry_run:
         # Not measured, and said so — never 0, which reads as "measured: none".
         stats["positions_measured"] = None
@@ -521,10 +525,12 @@ def main(argv: list[str] | None = None) -> int:
         # carries the verdict — the same contract both sibling gates keep, so an
         # operator chaining `copy && parity-gate` is not told "the backfill
         # completed" by a run that left nodes the record can never hold.
-        raise SystemExit(
+        print(
             f"copy: {sum(blocking.values())} node(s) the record can never hold "
             f"({', '.join(f'{k}={n}' for k, n in sorted(blocking.items()))}) — the "
-            "artifact was written; resolve them before the delete")
+            "artifact was written; resolve them before the delete",
+            file=sys.stderr)
+        raise SystemExit(2)
     return 0
 
 
