@@ -3288,6 +3288,12 @@ class TestValueVerbSpan2684:
         addressed = turn[pt["span_start"]:pt["span_end"]]
         assert addressed == "cut latency by 20%", pt
         assert pt["span_start"] > 0      # not a degenerate offset-0 stamp
+        # NB: the offset-0 case is NOT degenerate — `search_engine.py:1002-1003`
+        # says "``span_start == 0`` is a REAL address and must survive, so the
+        # gate is presence (``is not None``), never truthiness". The line above
+        # only holds because this fixture prepends "we "; it pins that the
+        # resolver found the value at its true offset, NOT that 0 is invalid.
+        assert 0 <= pt["span_start"] < pt["span_end"] <= len(turn)
         assert v2._carries_value(addressed)
 
         # (b) band-resolved (not verbatim) -> no address, and the absence is
@@ -3299,7 +3305,9 @@ class TestValueVerbSpan2684:
                    for w in r["warnings"]), r["warnings"]
 
         # (c) the value-free majority keeps its pre-change shape: a non
-        #     value-bearing endpoint mints no span and gains no warning
+        #     value-bearing endpoint mints no span and gains no *span-absence*
+        #     warning (its pre-change no-anchor warning stays — this endpoint
+        #     resolves to no turn, so it never reaches the report at all)
         r, pt = mint("the retro cadence")
         assert "span_start" not in pt and "span_end" not in pt
         assert not any("minted endpoint" in w and "no source span" in w

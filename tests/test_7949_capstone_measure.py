@@ -734,20 +734,20 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8454` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8458`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8474`); the
+    `extractor_v2.py:8504` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return at `:8508`, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8524`); the
     VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8542`, `if vet_enabled and complete_list:` `:8664`). So the flag-ON +
+    `:8592`, `if vet_enabled and complete_list:` `:8714`). So the flag-ON +
     empty-list session emits `enabled: True` with empty counters and no pass ran —
     and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8340-8343`).
+    its fail-open path, `:8390-8393`).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8423`, its gates are
-    `if classify_later and embed_list:` (`:8554`) around `if items:` (`:8557`) and
-    `if classify_later and complete_list:` (`:8679`) around `if items:` (`:8689`),
-    and its fail-open `except` sits at `:8570` / `:8700`. A cause templated for the
+    `classify_later` is computed at `:8473`, its gates are
+    `if classify_later and embed_list:` (`:8604`) around `if items:` (`:8607`) and
+    `if classify_later and complete_list:` (`:8729`) around `if items:` (`:8739`),
+    and its fail-open `except` sits at `:8620` / `:8750`. A cause templated for the
     surface NAME while citing the VET lines told a reader of the classify block
     that the VET pass's gate idled it — false: an idle classify block comes from no
     embed list or no classify ITEMS, and `embed_list` is only its first gate
