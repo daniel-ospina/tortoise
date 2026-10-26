@@ -304,6 +304,34 @@ def test_an_unreachable_id_still_refuses_and_names_the_reachable_set() -> None:
         assert "default" in message, message            # the reachable set
 
 
+def test_a_refusal_names_the_id_the_caller_could_actually_pass() -> None:
+    """The hint is the only thing that tells a caller what to pass instead.
+
+    Every refusal routes its reachable set through `_describe_graph`, so for the
+    DEFAULT row that hint has to name the `stable_id` — the only real id the row
+    has — and not just the `"default"` SENTINEL occupying `graph_id`. The row is
+    renamed here so its own name carries no id hint either. Fails pre-fix, where
+    the hint read `'Team HQ' ('default')`: the sentinel in the id slot, and the
+    id the caller was holding nowhere in the message.
+    """
+    rows = [
+        {"graph_id": "default", "stable_id": DEFAULT_ROW_ID,
+         "org_id": "org-1", "name": "Team HQ", "kind": "default",
+         "namespace": "team_org-1", "status": "active"},
+        {"graph_id": "g_custom", "stable_id": "g_custom",
+         "org_id": "org-1", "name": "research", "kind": "custom",
+         "namespace": "team_org-1_g_custom", "status": "active"},
+    ]
+    with pytest.raises(mcp_auth.GraphTargetError) as excinfo:
+        mcp_auth.resolve_graph_target("org-1", "g_typo", rows=rows)
+    message = str(excinfo.value)
+    assert "Team HQ" in message, message            # reachable, by its label
+    assert DEFAULT_ROW_ID in message, message       # and by its real id
+    assert f"id {DEFAULT_ROW_ID}" in message, message
+    # A custom row's two ids are the SAME string, so it keeps the short form.
+    assert "'research' (g_custom)" in message, message
+
+
 # ── 4. Rename is a label: identity and storage key never move ───────────────
 
 def test_renaming_the_default_by_its_real_id_never_touches_the_namespace() -> None:

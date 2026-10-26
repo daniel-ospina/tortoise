@@ -350,9 +350,23 @@ def _retarget_refusal(requested: str) -> GraphTargetError:
 
 
 def _describe_graph(row: dict) -> str:
-    """One graph as a caller can act on it: `name (graph_id)`."""
+    """One graph as a caller can act on it: `name (graph_id)`.
+
+    Every refusal the resolver raises routes its reachable set through here, so
+    this is the ONE place that tells a caller what to pass instead. When the
+    #10025 `stable_id` differs from `graph_id` it is therefore part of the hint:
+    the default row carries the `"default"` SENTINEL in `graph_id` — explicitly
+    not an id — and its `stable_id` is the only real id it has, so a hint shaped
+    `name (graph_id)` named nothing that identifies that row while the id it
+    omitted is exactly the value `graph_metadata` / `GET /v1/graphs` hand out
+    (and now a value this resolver accepts). A custom row's two ids are the same
+    string, so its hint stays the single short form.
+    """
     gid = row.get("graph_id")
     name = row.get("name") or gid
+    stable_id = row.get("stable_id")
+    if stable_id and stable_id != gid:
+        return f"{name!r} (id {stable_id}, graph_id {gid!r})"
     return f"{name!r} ({gid})"
 
 
