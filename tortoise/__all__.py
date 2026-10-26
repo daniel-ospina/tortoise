@@ -40,6 +40,12 @@ THE GATE
     cannot make it approved.
 """
 
+# ruff: noqa: F822, RUF022  (#10056 — both are this module's DESIGN, not debt: do not "fix" them)
+#   F822 `undefined name in __all__` — the 40 names are CLASS MEMBERS of `TortoiseSDK`, never
+#        module-level bindings (see WHY A MODULE AND NOT THE PACKAGE `__all__` above). No import
+#        can satisfy F822 here without destroying the module's reason to exist.
+#   RUF022 `__all__ is not sorted` — the order IS the contract: `docs/product/beta-sdk-surface.md`
+#        rows 1-40, in that order. Sorting is exactly the reordering this declaration must not make.
 #: The approved SDK surface — `docs/product/beta-sdk-surface.md` rows 1-40, in that order.
 #: 40 names. The gate refuses any disagreement with that document, in either direction.
 __all__ = (
