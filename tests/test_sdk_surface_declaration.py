@@ -193,16 +193,33 @@ def test_an_unchanged_surface_passes():
     assert _problems() == []
 
 
-def test_a_removal_from_the_backlog_passes_once_the_ledger_is_decremented():
-    """The migration direction: a method leaves the class AND the backlog, and that is green."""
+def test_a_removal_from_the_backlog_passes_WITHOUT_touching_the_declaration():
+    """The migration direction: a method leaves the class and the record needs no edit.
+
+    #10034's complaint about the old workflow was that every removal was a hand edit. The
+    frozen record removes that: the record says what WAS there, and the gate accounts for
+    the live class as `record & live`.
+    """
     declaration = _declaration()
     dropped = declaration["OFF_SURFACE"][0]
 
-    assert _problems(live=_live() - {dropped})  # the ledger still names it -> red
-    assert not _problems(  # ledger decremented -> green
-        live=_live() - {dropped},
-        off_surface=[n for n in declaration["OFF_SURFACE"] if n != dropped],
-    )
+    assert not _problems(live=_live() - {dropped})
+
+
+def test_a_RENAME_or_swap_is_caught():
+    """The defect a `record == live − approved` rule CANNOT see (found in review).
+
+    One method leaves the class and one unapproved method takes its place: the set lengths
+    are unchanged, so a cardinality rule and an equality rule both stay green. With a frozen
+    record the new name is in neither declared set and is NAMED.
+    """
+    declaration = _declaration()
+    gone = declaration["OFF_SURFACE"][0]
+    renamed_in = "probe_renamed_method"
+
+    problems = _problems(live=(_live() - {gone}) | {renamed_in})
+
+    assert any(renamed_in in p and "rename" in p for p in problems), problems
 
 
 # ── the CLI, on the real evidence ────────────────────────────────────────────────
@@ -258,12 +275,29 @@ def test_the_cli_refuses_when_the_document_no_longer_yields_the_table(tmp_path):
 # ── and the other surface tools read the same declaration (the single-source claim) ──
 
 
+def test_build_doc_REFUSES_when_the_class_disagrees_with_the_declaration(monkeypatch):
+    """The refusal that guards every future re-cut (`cut` cannot run while they disagree).
+
+    Review finding: the committed manifest comparison below passes even if the refusal is
+    deleted, so the behaviour change that can break `cut` had no test. This adds one, by
+    attaching a public method in-process and asserting `build_doc` refuses and NAMES it.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    from tools import surface_manifest
+
+    monkeypatch.setattr(TortoiseSDK, "probe_undeclared_review_method", lambda self: None, raising=False)
+
+    with pytest.raises(surface_manifest.SurfaceEvidenceUnreadable, match="probe_undeclared_review_method"):
+        surface_manifest.build_doc()
+
+
 def test_the_manifest_is_cut_from_the_declaration():
-    """`surface_manifest.build_doc` refuses when the declaration and the class disagree.
+    """The committed manifest's `sdk:` rows are exactly the declared live set.
 
     Asserted by reading the declaration the manifest was cut from, not by trusting the
-    comment beside the code: the manifest's `sdk:` rows must be exactly the declared live
-    set, and its count pin must be derived from the same number.
+    comment beside the code. (The REFUSAL half is
+    `test_build_doc_REFUSES_when_the_class_disagrees_with_the_declaration`.)
     """
     import yaml
 
@@ -294,7 +328,82 @@ def test_the_target_check_reads_the_sdk_target_from_the_declaration():
     assert Path(targets["sources"]["sdk"]) == DECLARATION
 
 
-@pytest.mark.parametrize("name", ["Tortoise"])
-def test_the_constructor_row_resolves_to_the_class(name):
-    """Row 1 of the approved table is the constructor, not a method on the class."""
-    assert surface.resolves(name, _live()) is True
+def test_the_constructor_row_resolves_to_the_class_by_evidence():
+    """Row 1 is written `Tortoise(...)` — the constructor, not a method on the class.
+
+    The earlier version asserted `resolves("Tortoise", live) is True`, which is tautological:
+    it passes on any tree, including one with no constructor at all (review finding). This
+    asserts the OBJECT the row resolves to, so a tree without the class fails the row.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    assert surface.resolve("Tortoise", _live()) is surface.CONSTRUCTOR
+    assert surface.resolve("Tortoise", _live()) != ""
+    assert callable(TortoiseSDK)
+    # A name in neither the declaration nor the class resolves to nothing.
+    assert surface.resolve("no_such_method_at_all", _live()) == ""
+
+
+# ── the re-cut must not re-assert an OBSERVATION it cannot make (#10034 review P1) ──
+
+
+def test_a_recut_carries_usage_observations_forward(tmp_path, monkeypatch):
+    """`used_by` / `reason` are OBSERVATIONS (telemetry + corpora), not derivations.
+
+    Measured on the review host: `skills/` did not resolve and the telemetry log differed,
+    so a re-cut rewrote 103 rows — 58 flipping `agents, …` to `never called, …` — while no
+    tool, registration or caller had moved. `check` cannot see it (`NON_DERIVABLE_ROW_KEYS`),
+    so the carry is the only thing standing between a re-cut on a bare host and a frozen
+    baseline that misreports what the owner's customers use.
+    """
+    import yaml
+
+    from tools import surface_manifest
+
+    previous = tmp_path / "surface-manifest.yml"
+    previous.write_text(
+        yaml.safe_dump(
+            {
+                "manifest_version": 1,
+                "issue": 3863,
+                "cut_at_commit": "deadbeef",
+                "allowed_transforms": [],
+                "response_fields": [],
+                "approval_status": "approved",
+                "approval_principal": "daniel-ospina",
+                "approval_pr": "4120",
+                "approval_date": "2026-09-18",
+                "counts": {"tools": 1, "sdk_public_methods": 0, "retired": 0},
+                "high_water_counts": {"tools": 1, "sdk_public_methods": 0},
+                "retired": [],
+                "rows": [
+                    {
+                        "name": "tortoise_query",
+                        "used_by": "agents, tooling, skill-docs, docs",
+                        "reason": "called by agents",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(surface_manifest, "MANIFEST_FILE", previous)
+    rows = [
+        {"name": "tortoise_query", "used_by": "never called, tooling, docs", "reason": "not called over MCP"},
+        {"name": "tortoise_brand_new", "used_by": "never called", "reason": "new row, nothing to carry"},
+    ]
+
+    carried = surface_manifest._carried_observations(rows, carry=True)
+
+    assert carried == ["tortoise_query"]
+    assert rows[0]["used_by"] == "agents, tooling, skill-docs, docs"
+    assert rows[0]["reason"] == "called by agents"
+    # A name with no previous row keeps what was derived: carrying is not a blanket freeze.
+    assert rows[1]["used_by"] == "never called"
+
+    rewritten = [
+        {"name": "tortoise_query", "used_by": "never called, tooling, docs", "reason": "not called over MCP"}
+    ]
+    assert surface_manifest._carried_observations(rewritten, carry=False) == []
+    assert rewritten[0]["used_by"] == "never called, tooling, docs"
