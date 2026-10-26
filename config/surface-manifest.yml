@@ -22,7 +22,6 @@
 manifest_version: 1
 issue: 3863
 cut_at_commit: d426db97cc2766b5f35a70f2cc81bfdac2e6bdb9
-cut_at_commit: 2cb7f0cc40a58648947e81f086310f16f18d6525
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
