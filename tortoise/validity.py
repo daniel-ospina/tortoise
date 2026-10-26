@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import MINYEAR, date
 
 _logger = logging.getLogger(__name__)
 
@@ -110,8 +110,18 @@ END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
 #: silently rather than refused (ONTOLOGY §4.7, #9202). A day/month-first form
 #: (``03/04/2024``) deliberately does NOT match: it parses both ways, so it is
 #: "legible but ambiguous" and belongs in the refuse column (§0).
+#:
+#: The DATE part, not the whole string: un-padded fields beside a TIME
+#: (``2024-3-1T12:00:00``) are the SAME human sloppiness and name the SAME
+#: instant, so they are normalised by the same rule rather than refused. Only
+#: the date is re-spelled — ``rest`` (the time-of-day, if any) is the caller's
+#: and is kept verbatim — and the result is accepted only when the read measure
+#: can order it, so this tolerance cannot smuggle a value past
+#: ``_names_an_instant``. (Review P3: a padded date normalised while the padded
+#: date-TIME beside it was refused — one sloppiness, two verdicts.)
 _DATE_VARIANT_RE = re.compile(
-    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)(?P<day>\d{1,2})$"
+    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)(?P<day>\d{1,2})"
+    r"(?P<rest>[T ]\S*)?$"
 )
 
 #: An epoch supplied as a STRING. ``_created_sort_key`` reads an epoch from a
@@ -121,12 +131,21 @@ _EPOCH_AS_STRING_RE = re.compile(r"^-?\d{9,}$")
 
 #: The forms the field accepts, quoted into EVERY refusal: a refusal that does
 #: not name the repair manufactures a retry loop (§7 trap 2).
+#:
+#: The open-end repair is spelled PER DOOR and never as "None/omitted" (#9202
+#: review P2): ``omitted`` is an OPEN end on ``create_point`` only — on
+#: ``update_point`` a partial write that omits ``validTo`` leaves the STORED end
+#: exactly as it was, so a caller who followed the old instruction was refused
+#: again with the junk end still in place. Naming the door costs one sentence and
+#: is the difference between a repair and a second failure.
 _END_ACCEPTED_FORMS = (
     "an ISO-8601 instant ('2026-02-28', '2026-02-28T12:00:00+00:00'), a "
     "year-first date ('2024-3-1', '2024/03/01'), the NUMBER for a Unix epoch "
     "(1719792000), an uncertainty marker ("
     + ", ".join(END_UNKNOWN_MARKERS)
-    + ") or blank to say 'ended, un-datable', or None/omitted for an OPEN end"
+    + ") or blank to say 'ended, un-datable', or validTo=None to CLEAR the end "
+    "(an OPEN window). OMITTING validTo clears the end on create_point, but on "
+    "update_point it leaves the STORED end untouched — pass None there"
 )
 
 
@@ -306,8 +325,11 @@ def read_caller_end(value: object, declared_precision: object = None,
     * ``shaped_token is None`` — write ``stored_value`` as the end. Either the
       caller's value is a real orderable instant (returned UNTOUCHED: a stored
       instant is never re-spelled), or it is representational variance the read
-      measure could not order (``2024-3-1``, ``2024/03/01``), normalised to the
+      measure could not order (``2024-3-1``, ``2024/03/01``, and the same
+      un-padded date beside a time: ``2024-3-1T12:00:00``), normalised to the
       ISO form **silently** — same instant, same meaning, nothing to report.
+      Only the DATE is re-spelled; a time-of-day is kept as the caller wrote it,
+      and the pair is accepted only when the read measure can order it.
     * ``shaped_token is not None`` — the value DECLARES NO DATE (blank, or one of
       ``END_UNKNOWN_MARKERS``). The caller must store the canonical un-datable
       form instead: no end value plus ``validToPrecision = "unknown"``, which
@@ -362,6 +384,18 @@ def read_caller_end(value: object, declared_precision: object = None,
         if match:
             year, month, day = (int(match["year"]), int(match["month"]),
                                 int(match["day"]))
+            # The YEAR is checked FIRST so the refusal names the component that is
+            # actually out of range (review P3): ``date()`` raises one bare
+            # ValueError for every bad component, and the day arm below would
+            # otherwise blame the day for ``0000-01-01`` — a year the proleptic
+            # calendar has no year 0 for. 1-4 digits reach here, so MINYEAR is
+            # the only bound that can be crossed.
+            if year < MINYEAR:
+                raise _end_refusal(
+                    value,
+                    f"year {year:04d} is not a calendar year (the earliest is "
+                    f"{MINYEAR:04d})",
+                ) from None
             if not 1 <= month <= 12:
                 raise _end_refusal(
                     value,
@@ -369,13 +403,27 @@ def read_caller_end(value: object, declared_precision: object = None,
                     "01-12)",
                 ) from None
             try:
-                return date(year, month, day).isoformat(), None
+                canonical = date(year, month, day).isoformat()
             except ValueError:
                 raise _end_refusal(
                     value,
                     f"{year}-{month:02d} has no day {day}, so this is not a "
                     "calendar day",
                 ) from None
+            rest = match["rest"] or ""
+            if not rest:
+                return canonical, None
+            # Un-padded DATE fields beside a TIME: the padding is the whole
+            # tolerance, so the date is finished and the caller's time is kept
+            # verbatim — then the read measure decides whether the pair names an
+            # instant at all (it does NOT re-implement "is that a time").
+            if _names_an_instant(canonical + rest):
+                return canonical + rest, None
+            raise _end_refusal(
+                value,
+                f"the date part reads as {canonical} but {rest!r} is not an "
+                "ISO-8601 time-of-day, so the whole value names no instant",
+            ) from None
         if _EPOCH_AS_STRING_RE.match(token):
             raise _end_refusal(
                 value,

@@ -1400,6 +1400,9 @@ _END_REFUSALS = [
      "datum is not a day"),
     ("2026-13-01", "month 13 is not a calendar month",
      "month 13 — an attempted instant whose component is out of range"),
+    ("0000-01-01", "is not a calendar year",
+     "year 0 — the YEAR is the component out of range, so the refusal must name "
+     "the year and not blame the day (review P3)"),
     ("1719792000", "Unix epoch supplied as a STRING",
      "an epoch as a string: _created_sort_key reads an epoch from a NUMBER, so "
      "this string names no instant while the intent is unmistakable"),
@@ -1454,6 +1457,49 @@ def test_a_caller_end_that_attempts_an_instant_and_fails_is_refused(
     )
 
 
+def test_the_refusal_repair_is_true_on_the_door_that_raises_it(sdk):
+    """#9202 (review P2) — the repair must be followable ON THE DOOR THAT SAID IT.
+
+    The message used to end "... or None/omitted for an OPEN end". That is true
+    on `create_point` and FALSE on `update_point`, where a partial write that
+    omits `validTo` leaves the STORED end exactly as it was — so a caller who
+    followed the repair came back with the same value and the same refusal. A
+    refusal that misdescribes its own repair is worse than a vague one.
+
+    Two halves, because they are one claim: the message states the door-specific
+    truth, and the STORE behaves the way the message now says it does. The second
+    half is what made the old sentence untrue; the first is what reds if the
+    sentence is restored.
+    """
+    target = _make_point(sdk, content="a dated end to be repaired",
+                         validFrom="2024-01-01", validTo="2024-06-01")
+
+    with pytest.raises(ValueError) as refused:
+        sdk.update_point(target["id"], validTo="2026-02-30")
+    message = str(refused.value)
+
+    assert "update_point" in message and "OMITTING validTo" in message, (
+        "the repair must say that omitting the field is NOT an open end on "
+        f"update_point — that is the door that just refused: {message}"
+    )
+    assert "omitted for an OPEN end" not in message, (
+        "the create-door sentence must not be quoted at the update door — it "
+        f"is the instruction that fails again: {message}"
+    )
+    assert "validTo=None" in message, (
+        f"the repair must name the form that DOES work here: {message}"
+    )
+
+    # …and the store keeps the end when the field is omitted, clears it on None.
+    sdk.update_point(target["id"], content="an unrelated edit")
+    assert _props(sdk, target["id"])["validTo"] == "2024-06-01", (
+        "omitting validTo on update_point leaves the STORED end — the sentence "
+        "the refusal used to carry promised the opposite"
+    )
+    sdk.update_point(target["id"], validTo=None)
+    assert _props(sdk, target["id"]).get("validTo") is None
+
+
 def test_a_declared_granularity_beside_a_no_date_value_is_refused(sdk):
     """#9202 — a concrete precision beside a marker is a CONTRADICTION, refused.
 
@@ -1484,10 +1530,21 @@ def test_a_real_instant_and_a_readable_variant_are_accepted_silently(sdk):
 
     before = dict(END_WRITE_OUTCOMES)
 
-    # A real instant is untouched — byte-identical, INCLUDING its spelling.
-    for sent in ("2024-06-01", "2024-06-01T12:00:00+02:00",
-                 "2024-06-01T12:00:00Z", 1719792000):
-        p = _make_point(sdk, content=f"real end {sent!r}", validFrom="2024-01-01",
+    # A real instant is untouched — byte-identical, INCLUDING its spelling. The
+    # triples carry the window START and an in-window probe because two rows are
+    # the pre-2026-10-26 pin's own boundaries: a ZONE-LESS date-time (read
+    # locally, #3982) and numeric epoch 0 — the 1970-01-01T00:00:00Z instant
+    # (#3985) — which needs a 1970 start to stay a legal window. Both were rows of
+    # that 11-row pin and are restored here rather than dropped by the re-cut.
+    for valid_from, sent, probe in (
+        ("2024-01-01", "2024-06-01", "2024-05-01"),
+        ("2024-01-01", "2024-06-01T12:00:00+02:00", "2024-05-01"),
+        ("2024-01-01", "2024-06-01T12:00:00", "2024-05-01"),
+        ("2024-01-01", "2024-06-01T12:00:00Z", "2024-05-01"),
+        ("2024-01-01", 1719792000, "2024-05-01"),
+        ("1970-01-01", 0, "1970-01-01"),
+    ):
+        p = _make_point(sdk, content=f"real end {sent!r}", validFrom=valid_from,
                         validTo=sent)
         assert "valid_to_shaped" not in p, (
             f"an orderable end {sent!r} must be SILENT: {p.get('valid_to_shaped')}"
@@ -1496,12 +1553,17 @@ def test_a_real_instant_and_a_readable_variant_are_accepted_silently(sdk):
             f"{sent!r} names an instant, so it is stored exactly as sent"
         )
         assert sdk.get_historical_knowledge(
-            p["id"], "2024-05-01")["valid_point"]["end_state"] == "known"
+            p["id"], probe)["valid_point"]["end_state"] == "known"
 
-    # …and representational variance is normalised WITHOUT comment.
+    # …and representational variance is normalised WITHOUT comment: an un-padded
+    # date, and the SAME un-padded date beside a time-of-day. The pair is one
+    # rule (#9202 review P3) — a padded date was finished silently while the
+    # padded date-TIME beside it was refused, two verdicts for one sloppiness.
     for sent, canonical in (("2024-3-1", "2024-03-01"),
                             ("2024/03/01", "2024-03-01"),
-                            ("2024/3/1", "2024-03-01")):
+                            ("2024/3/1", "2024-03-01"),
+                            ("2024-3-1T12:00:00", "2024-03-01T12:00:00"),
+                            ("2024/3/1T12:00:00", "2024-03-01T12:00:00")):
         p = _make_point(sdk, content=f"variant end {sent!r}",
                         validFrom="2024-01-01", validTo=sent)
         assert "valid_to_shaped" not in p, (
