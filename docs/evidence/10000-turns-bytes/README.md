@@ -45,7 +45,7 @@ and the committed `expected_rows` is `sessions × turns` = `1,000`.
   within **0.3%** of the parent commit (888 B/session, 0.28%) — so the delta is the change and not the
   instrument. It also means
   a deployment that never arms the record pays exactly what it paid before.
-- **Only 37.8% of what is removed is payload.** The text (1,509.5 B/turn) plus its `float32` vector
+- **Only 37.8% of what the removed turn node costs is payload.** The text (1,509.5 B/turn) plus its `float32` vector
   (1,536 B/turn) is 3,045.5 of the 8,052 B/turn the change takes out; the rest is graph structure — the
   node block, the attribute block, the label matrices, the `CONTAINS` edge and the HNSW entry. **That
   subtraction is the argument for placement over compression:** shrinking or truncating the stored text
@@ -106,8 +106,9 @@ The nodes already in live graphs are untouched by any of this and are #10017's d
 
   ⚠️ **The armed arm is the noisy one** — 4.7% run-to-run at ~32 KB, where a fixed ~1,500 B of allocator
   bookkeeping is a large fraction. That is why its figure is quoted as measured and never dressed as a
-  precision bound, and why the comparison that carries the claim is the **90.0% delta**, which is three
-  orders of magnitude larger than the noise on either side of it.
+  precision bound, and why the comparison that carries the claim is the **90.0% delta** — 290,031 B per
+  session against a worst per-run spread of **1,510 B**, ≈**192×** in absolute bytes (≈19× as a ratio of
+  the two quoted percentages). That is ~2 orders of magnitude, and two is the number to quote.
 - **One run per arm is committed, and here is which one.** `measurement-before.json` is `before` run
   **2**, `measurement-after-unarmed.json` is run **3**, `measurement-after-armed.json` is run **2**
   (`…_r2` / `…_r3` in each `namespace`). The quoted per-arm figure in the table above **is** that

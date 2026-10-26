@@ -1583,7 +1583,8 @@ the `✅ … IMPLEMENTED AND MEASURED (#10000, 2026-10-26)` stamp, the before/af
 note that the record is not armed on any deployment today. Issue state and the narrative of what
 changed belong in this file (#8542); §9.1 states the rule they settled on.
 
-What the design document now says in that place, and nothing more: the turn write has **one home**,
+What the design document now says in that place — the rule, plus the measured per-turn graph cost and the
+pointer to the evidence bundle: the turn write has **one home**,
 and the **capability** decides which — turns go to the record whenever the record can hold them (and
 then no turn node is written at all; the graph keeps the `:Session` and its counters, and
 `get_session_detail` serves the transcript from the record), and the graph write runs unchanged where
@@ -1592,10 +1593,12 @@ put the transcript in no store at all.
 
 Delivery state as of this entry, for the record: the turn half is in `main` and **measured** —
 `docs/evidence/10000-turns-bytes/README.md`, three arms on one fixed corpus, 322,063 → 32,032 bytes
-per captured session, −90.0%, 0 turn nodes. The record is **not armed in hosting yet** (`#9989`), so
-live deployments still take the graph path by design — the documented capability fallback, measured
-byte-identical to the pre-change writer (within 0.28%). The nodes those deployments already hold are
-`#10017`'s separate, gated, destructive removal.
+per captured session, −90.0%, 0 turn nodes. The record is **not armed in hosting yet** (`#9548`, the
+open arming act; its state is readable from `GET /health`'s `record.armed` block, which is `#9989`,
+merged), so live deployments still take the graph path by design — the documented capability fallback,
+measured **within 0.28%** of the pre-change writer (888 B/session, `measurement-after-unarmed.json` vs
+`measurement-before.json`; **not** byte-identical — run-to-run variance, not a re-implementation). The
+nodes those deployments already hold are `#10017`'s separate, gated, destructive removal.
 
 Why it left: the class guard
 (`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
