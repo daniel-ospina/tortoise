@@ -959,6 +959,11 @@ surfaces:
   # tests/test_ci_selection.py::test_write_op_reachability_guard_runs_on_every_surface_it_pins.
   - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py
+  # #10000: which store holds the captured turns (record vs graph), the
+  # `turn_max_index` id-space sweep, and the record-served transcript. DUAL
+  # (`api` + `core`), same convention: it drives `tortoise/sdk.py` (api) AND
+  # `tortoise/session_schema.py`-declared writers (core fallback).
+  - test_10000_turns_record_only.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -3147,6 +3152,7 @@ surfaces:
   # tests/test_ci_selection.py::test_write_op_reachability_guard_runs_on_every_surface_it_pins.
   - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
+  - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
   - test_session_schema_3554.py
@@ -7337,6 +7343,7 @@ durations:
   test_7846_restore_is_not_silent.py: 14.0  # unmeasured — #7846 criterion 5: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so the >=90% coverage floor (#2876) would fail by construction for this test-adding PR. Measured on this host 2026-10-17: `uv run pytest tests/test_7846_restore_is_not_silent.py -q` → "10 passed in 4.32s"; re-measured after the #8827 review added eight guards and two hermetic probe arms → "20 passed in 7.15s"; re-measured again after the #8827 cycle-9 review added three behavioural guards (a refused port outranking the caller-stall inference, an answered-but-slow overrun, and the caller-held-time tail) → "23 passed in 10.50s", then re-measured again after the #8827 cycle-10 review added two guards (the completed-vs-overrun account arm and the module's caller-held ceiling) → "25 passed in 13.94s", URI-less as well (`TORTOISE_TEST_CARVE_OUT=1`). The file needs no server and takes no skip, and its cost is dominated by deliberate sub-second windows (a 0.3 s simulated block, a 0.1 s caller bound, a sample the witness never records, an abandoned worker), which is why the row is 14.0 rather than 5.0, so the reading is a function of the assertions rather than of host load. WHAT THE NUMBER IS: pytest's session total, NOT what the refresher computes — `--refresh-durations` reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
   test_capture_session.py: 90.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 43.7
   test_write_session_and_turns_3551.py: 2.1  # #3551 (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — NOW CI-MEASURED from run 39040632415 (was 70.8 locally measured; the local figure counted container lifecycle, not the pytest session)
+  test_10000_turns_record_only.py: 11.9  # #10000 (3 tests) — locally measured 2026-10-25 on the private test lane (11.92s pytest session, 19.0s wall incl. startup); re-measure from the CI junit artifact once this lands
   test_session_schema_3554.py: 3.9  # #3554 (42 hermetic tests, no graph lane) — NOW CI-MEASURED from run 39040632415 (was 6.6 locally measured) — ci-timing top-15 2026-10-21 (run 39467226356): top-15 saw 1 of 44 testcases = 3.4s in the largest single job (not summed across legs), a LOWER bound; kept 3.9
   test_battery_setup.py: 177.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 106.8 — ci-timing top-15 2026-10-21 (run 39467226356): top-15 saw 3 of 11 testcases = 150.1s in the largest single job (not summed across legs), a LOWER bound; kept 177.7
   test_graph_write_loop_responsiveness.py: 9.0  # ci-timing top-15 2026-10-20 (run 39467226356); was 4.4
