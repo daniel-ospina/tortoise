@@ -790,14 +790,20 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch, capsys):
     A MOCK-graded run is wiring, never a measurement: publish refuses it even
     though its bar verdict is PASS. Asserting `rc == 2` alone would NOT prove
     that: a refusal from any other clause satisfies it, and there is now more
-    than one (the CLI `run` records THIS checkout's tree, so a publish naming a
-    tmp repository's commit also fails the code-identity check). The assertion
-    therefore names the clause this test exists for.
+    than one. The assertion therefore names the clause this test exists for.
+
+    `_REPO_ROOT` is pinned to the repository this test builds: `run` records
+    THIS module's tree by design (it is not a `--repo` flag), so driving the
+    CLI against the real checkout would record the checkout's identity —
+    including whatever `__pycache__` the test session just wrote — and refuse
+    the run at its own byte-cache guard rather than exercising the publish
+    path.
     """
     monkeypatch.chdir(tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_init(repo)
+    monkeypatch.setattr(m, "_REPO_ROOT", repo)
     corpus_dir = repo / "tests" / "eval" / "ask"
     generate_corpus.write_corpus(corpus_dir, _small_cases())
     prereg_path = corpus_dir / "preregistration.json"
@@ -2036,6 +2042,63 @@ def test_an_UNTRACKED_byte_cache_is_reported_ONCE(tmp_path):
     assert dirty == ["tools/probe_step.pyc"], dirty
 
 
+def test_a_C_QUOTED_untracked_path_is_reported_ONCE(tmp_path):
+    """FAIL-BEFORE: ONE non-ASCII untracked file became ``2 uncommitted
+    path(s)``, and the second row said "an ignore rule hides it" about a path
+    ``git status`` had just listed.
+
+    ``git status --porcelain`` C-QUOTES a path carrying non-ASCII bytes and
+    spells them as octal escapes (``"tortoise/\303\2512.py"``) unless
+    ``core.quotePath=false``; ``git ls-files -z`` prints the raw bytes. The
+    dedupe stripped the surrounding quotes but did not UNESCAPE, so
+    ``"tortoise/\303\2512.py"`` never matched ``tortoise/é2.py``: the hidden
+    scan re-reported the file it had just been told about, with the wrong
+    reason, and the recorded path kept its quotes.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / "tortoise" / "é2.py").write_text("VALUE = 2\n", encoding="utf-8")
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    # Non-vacuity: the premise is that git really did quote this path, so the
+    # test cannot pass because quoting happened to be off in the reader's
+    # config (the same trap `--untracked-files=normal` is pinned for).
+    assert "\\303\\251" in status, (
+        f"the fixture did not reproduce a C-quoted status row: {status!r}")
+    dirty = m.code_identity(repo)["dirty_paths"]
+    assert dirty == ["tortoise/é2.py"], dirty
+    assert not any("ignore rule" in path for path in dirty), dirty
+
+
+def test_the_reproduce_instructions_carry_the_byte_code_free_spelling(
+        shared_run, tmp_path):
+    """FAIL-BEFORE: §6 and the pre-registration template printed a ``run``
+    command that the run-start guard REFUSES.
+
+    The report's §6 is the audit surface a reader reproduces the numbers from,
+    so handing them a command that exits 1 — on any tree, cache-free or not —
+    defeats the artifact this change exists to make honest.
+
+    §6 is the surface pinned here, and ONLY §6. The committed
+    ``tests/eval/ask/preregistration.json``'s ``reproduce.run`` is a hash-bound
+    historical record that the report's binding re-hashes, so amending it is
+    the owner's call on #9097 — ``test_preregistration_pins_the_corpus_and_the_
+    protocol`` (``committed == fresh``) is the guard that keeps this change
+    from drifting the protocol as a side effect.
+    """
+    prereg, _ = _prereg(tmp_path)
+    scored = copy.deepcopy(shared_run["scored"])
+    receipt = m.build_receipt(
+        scored=scored, commit="a" * 40, cost_usd=0.0,
+        commit_binding=_binding("a" * 40, scored["corpus_hash"]))
+    text = m.render_report(receipt=receipt, scored=scored, prereg=prereg,
+                           prereg_sha256="sha256:" + "0" * 64)
+    reproduction = text.split("## 6.", 1)[1]
+    run_lines = [line for line in reproduction.splitlines()
+                 if "measure_ask_distilled run" in line]
+    assert run_lines, reproduction
+    assert all("python -B -m" in line for line in run_lines), run_lines
+
+
 def test_the_run_REFUSES_to_start_when_the_interpreter_would_write_byte_caches(
         tmp_path, monkeypatch):
     """FAIL-BEFORE: the documented ``run`` command measured for minutes and
@@ -2078,16 +2141,60 @@ def test_the_run_PROCEEDS_when_the_interpreter_is_byte_code_free(
         tmp_path, monkeypatch):
     """The other half of the refusal: ``-B`` / ``PYTHONDONTWRITEBYTECODE=1`` is
     ACCEPTED, so the guard refuses the launch that loses the record — not the
-    one that keeps it."""
+    one that keeps it.
+
+    ``_REPO_ROOT`` is the tree ``run`` records (it is deliberately NOT a flag),
+    so a tmp repository is pinned here: the real checkout normally carries
+    ``__pycache__`` from its own test session, and this test is about the
+    INTERPRETER half, not about a tree that would be refused for the other
+    reason (:func:`test_the_run_REFUSES_to_start_over_a_tree_that_already_
+    carries_byte_caches` covers that one).
+    """
+    repo = _make_surface_repo(tmp_path)
     calls: list[dict] = []
     report = {"schema": m.RUN_SCHEMA, "cases": [], "arms": [],
               "code_identity": {"commit": None, "dirty_paths": []}}
+    monkeypatch.setattr(m, "_REPO_ROOT", repo)
     monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or report)
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
     out = tmp_path / "obs.json"
     assert m._main(["run", "--out", str(out)]) == 0
     assert len(calls) == 1, "a byte-code-free launch must reach the measurement"
+    assert calls[0]["repo_root"] == repo, calls[0]["repo_root"]
     assert json.loads(out.read_text(encoding="utf-8"))["schema"] == m.RUN_SCHEMA
+
+
+def test_the_run_REFUSES_to_start_over_a_tree_that_already_carries_byte_caches(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE: the flag check passed a tree it claimed to protect.
+
+    ``-B``/``PYTHONDONTWRITEBYTECODE=1`` stop caches being WRITTEN and remove
+    none, so an operator who follows the README's summary — set the env var —
+    over a tree an earlier launch already cached measures for minutes and is
+    then refused at publish. That is the outcome this guard exists to prevent,
+    and it validated the interpreter's flag instead of the tree.
+
+    ``run_sealed`` is stubbed, so the assertion is the ORDERING: the refusal
+    lands before the measurement.
+    """
+    repo = _make_surface_repo(tmp_path)
+    cache = repo / "tools" / "__pycache__" / "probe_step.cpython-312.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"\x00forged byte-cache: already on disk\n")
+    calls: list[dict] = []
+    monkeypatch.setattr(m, "_REPO_ROOT", repo)
+    monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or {})
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    out = tmp_path / "obs.json"
+    with pytest.raises(SystemExit) as exc:
+        m._main(["run", "--out", str(out)])
+    assert calls == [], "the refusal must land BEFORE the measurement"
+    assert not out.exists(), "a refused run writes no observations"
+    message = str(exc.value)
+    # Both halves of the remedy: remove the caches AND launch byte-code-free.
+    assert "already carries byte-caches" in message.lower(), message
+    assert "-name __pycache__" in message, message
+    assert "PYTHONDONTWRITEBYTECODE=1" in message, message
 
 
 def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,

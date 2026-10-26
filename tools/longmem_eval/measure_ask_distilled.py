@@ -98,7 +98,11 @@ CLI:
         --out tests/eval/ask/preregistration.json
 
     # 2. run the sealed corpus (fixtures only; no gold, no grading)
-    uv run python -m tools.longmem_eval.measure_ask_distilled run \\
+    #    -B is REQUIRED, not decorative: importing this module CACHES it under
+    #    the executed surface before any identity is taken, so `run` refuses an
+    #    interpreter that writes byte-caches (`_require_byte_code_free`), and
+    #    the tree must carry none from an earlier launch either.
+    uv run python -B -m tools.longmem_eval.measure_ask_distilled run \\
         --out docs/benchmarks/ask-distilled/run-observations.json
 
     # 3. score against the sealed key and evaluate the exit bar
@@ -447,6 +451,15 @@ def protocol(*, reader_spec: str | None = None,
             "note": "the #9095 seeder's own defaults — the instrument is not "
                     "re-tuned here",
         },
+        # ⛔ This template's ``run`` spelling is deliberately UNCHANGED even
+        # though ``run`` now REFUSES to start without ``-B``
+        # (:func:`_require_byte_code_free`). The committed
+        # ``tests/eval/ask/preregistration.json`` is a hash-bound historical
+        # record — the report's binding re-hashes it — so amending it is the
+        # owner's call on #9097, not a side effect of this change. The
+        # refusal names the working invocation (fail-closed), and §6 of the
+        # rendered report — the copy a reader actually reproduces from — is a
+        # literal in :func:`render_report` and DOES carry ``-B``.
         "reproduce": {
             "preregister": "uv run python -m "
                            "tools.longmem_eval.measure_ask_distilled "
@@ -648,6 +661,61 @@ def _shallow_boundary(repo_root: Path) -> set[str] | None:
         return None
 
 
+#: git's C-style escapes, as `quote.c` emits them when a path needs quoting.
+#: Every KEY here is ONE character — the byte after the backslash — because that
+#: is what the decoder looks up. The backslash's own entry is therefore the
+#: single character `\\`, not the two-character `\\\\` a C-style rendering would
+#: suggest: keying it as two characters silently failed to match, so `"a\\\\b.py"`
+#: decoded back to the doubled spelling and the dedupe missed again.
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\v", "\\": "\\", '"': '"',
+}
+
+
+def _c_unquote(path: str) -> str:
+    """Decode ONE C-quoted path ``git status`` printed, or return it unchanged.
+
+    ``git status --porcelain`` quotes a path carrying non-ASCII or control
+    bytes (``core.quotePath`` defaults to true) and spells the bytes as OCTAL
+    escapes — ``"tortoise/\303\2512.py"`` for ``tortoise/é2.py``. Stripping
+    only the surrounding quotes leaves the escaped spelling, which never equals
+    the RAW path ``git ls-files -z`` emits (``-z`` disables quoting), so the
+    dedupe missed and ONE file was recorded twice — with the false reason "an
+    ignore rule hides it" — the inflation :func:`_status_covered` exists to
+    prevent, and the recorded path kept its quotes.
+
+    The octal escapes are BYTES (git writes the path's own bytes), so they are
+    accumulated as bytes and decoded as UTF-8 at the end; ``surrogateescape``
+    keeps a path that is not valid UTF-8 comparable, which is what git handed
+    us rather than a silent replacement character.
+    """
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        return path
+    body, out, i = path[1:-1], bytearray(), 0
+    while i < len(body):
+        char = body[i]
+        if char != "\\":
+            out.extend(char.encode("utf-8", "surrogateescape"))
+            i += 1
+            continue
+        escaped = body[i + 1] if i + 1 < len(body) else ""
+        if escaped in _C_ESCAPES:
+            out.extend(_C_ESCAPES[escaped].encode("utf-8"))
+            i += 2
+            continue
+        octal = body[i + 1:i + 4]
+        if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+            out.append(int(octal, 8))
+            i += 4
+            continue
+        # An escape git does not emit: keep the byte rather than drop it, so a
+        # path it never matches stays visible instead of vanishing.
+        out.extend(body[i:i + 2].encode("utf-8", "surrogateescape"))
+        i += 2
+    return out.decode("utf-8", "surrogateescape")
+
+
 def _status_covered(rel: str, status_paths: tuple[str, ...] | list[str]) -> bool:
     """Whether ``git status`` ALREADY reported ``rel`` (so re-reporting it
     would inflate the count and misname the reason).
@@ -676,8 +744,7 @@ def _status_covered(rel: str, status_paths: tuple[str, ...] | list[str]) -> bool
         _, sep, destination = path.partition(" -> ")
         if sep:
             path = destination.strip()
-        if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
-            path = path[1:-1]
+        path = _c_unquote(path)
         if path == rel or (path.endswith("/") and rel.startswith(path)):
             return True
     return False
@@ -804,51 +871,88 @@ _BYTECODE_FREE_RUN = ("PYTHONDONTWRITEBYTECODE=1 uv run python -m "
                       "<observations.json>")
 
 
-def _require_byte_code_free() -> None:
-    """Refuse to START a measured run that could never be published.
+def _is_byte_cache_row(dirty: str) -> bool:
+    """Whether one ``dirty_paths`` row names a byte-cache (or their aggregate).
 
-    ⛔ ``tools/longmem_eval/run_protocol.py`` does NOT launch this module. It
-    launches ``tools.longmem_eval.run`` (:func:`run_protocol._run_cmd`) and
-    ``tools.longmem_eval.full_context`` (:func:`run_protocol._cell_cmd`) with
-    ``-B`` and ``PYTHONDONTWRITEBYTECODE=1``, and this module's own header says
-    it is a sibling of that protocol, not an extension of it. The
-    byte-code-free requirement those launchers satisfy for THEIR steps is
-    therefore **this command's own obligation** — an earlier revision of the
-    docstrings and of ``tests/eval/ask/README.md`` claimed it was inherited,
-    which was false.
-
-    Without it the interpreter compiles and caches this module **and its
-    imports** before this function can run, so ``.pyc`` files appear under the
-    executed surface and :func:`code_identity` (correctly, #3712) records them:
-    the run measures for minutes, and ``publish`` then refuses it. Worse, the
-    refusal's own remedy — delete the caches — is undone by the next identical
-    launch, so an operator following it loops with no exit signposted. Refusing
-    HERE puts the refusal before the measurement, where it costs nothing, and
-    names the invocation that works.
+    Three shapes reach here: a raw path ``git status`` printed (``?? x.pyc``,
+    or a collapsed ``?? tools/__pycache__/``), a ``_paths_hidden_from_status``
+    row (``<path> (reason)\u2026``), and that function's single aggregate row
+    (``\u201c12 byte-cache file(s) \u2026\u201d``). All three mean the same thing to the
+    run guard: this tree cannot be published.
     """
-    if sys.dont_write_bytecode:
-        # `python -B` and `PYTHONDONTWRITEBYTECODE=1` both set this, and under
-        # it importing this module writes no cache at all.
-        return
-    raise SystemExit(
-        "refusing to start the run: this interpreter WRITES byte-caches "
-        "(`sys.dont_write_bytecode` is False), so importing the runner has "
-        "already put `.pyc` files under the executed surface — before the "
-        "first code identity was taken — and `code_identity` refuses a tree "
-        "carrying them (#3712: a byte-cache is executable code this record "
-        "does not verify). The run would measure for minutes and then be "
-        "refused at publish, and deleting the caches would be undone by the "
-        "next identical launch.\n"
+    if "byte-cache file(s)" in dirty:
+        return True
+    path = dirty.split(" (", 1)[0]
+    return _is_bytecode(path) or "__pycache__" in path
+
+
+def _refuse_byte_caches(why: str, examples: list[str]) -> SystemExit:
+    """The ONE run-start refusal, so both halves cannot drift apart."""
+    shown = ", ".join(examples[:3]) + (" \u2026" if len(examples) > 3 else "")
+    return SystemExit(
+        f"refusing to start the run: {why}\n"
         "This module is NOT launched by `tools/longmem_eval/run_protocol.py` "
         "(that launches `tools.longmem_eval.run` and `full_context` with "
         "`-B` and `PYTHONDONTWRITEBYTECODE=1`); the byte-code-free "
         "requirement is this command's own.\n"
+        f"  {len(examples)} byte-cache path(s) the record cannot vouch for: "
+        f"{shown}\n"
         "Re-run byte-code-free over a tree with no byte-caches left in it:\n"
         f"  {_BYTECODE_REMOVAL}\n"
         f"  {_BYTECODE_FREE_RUN}\n"
         "(equivalently `uv run python -B -m "
         "tools.longmem_eval.measure_ask_distilled run --out "
         "<observations.json>`)")
+
+
+def _require_byte_code_free(repo_root: str | Path) -> None:
+    """Refuse to START a measured run that could never be published.
+
+    Two independent halves, and BOTH are needed — either one alone lets the run
+    measure for minutes and then be refused at publish:
+
+    1. **The interpreter.** ⛔ ``tools/longmem_eval/run_protocol.py`` does NOT
+       launch this module. It launches ``tools.longmem_eval.run``
+       (:func:`run_protocol._run_cmd`) and ``tools.longmem_eval.full_context``
+       (:func:`run_protocol._cell_cmd`) with ``-B`` and
+       ``PYTHONDONTWRITEBYTECODE=1``, and this module's own header says it is a
+       sibling of that protocol, not an extension of it. If the interpreter
+       writes byte-caches it caches this module **and its imports** before this
+       function can run — before the first identity is taken — so
+       :func:`code_identity` (correctly, #3712) records them. Worse, the
+       refusal's own remedy — delete the caches — would be undone by the next
+       identical launch, so an operator following it loops with no exit
+       signposted.
+    2. **The tree.** ``-B``/``PYTHONDONTWRITEBYTECODE=1`` stop caches being
+       WRITTEN and remove none, so a byte-code-free launch over a tree that
+       already carries caches (any earlier launch or test run leaves them) is
+       still unpublishable. Checking the flag alone passed a tree it claimed to
+       protect.
+
+    Both checks are read-only and cost three git calls.
+    """
+    if not sys.dont_write_bytecode:
+        raise _refuse_byte_caches(
+            "this interpreter WRITES byte-caches "
+            "(`sys.dont_write_bytecode` is False), so importing the runner has "
+            "already put `.pyc` files under the executed surface — before the "
+            "first code identity was taken — and `code_identity` refuses a "
+            "tree carrying them (#3712: a byte-cache is executable code this "
+            "record does not verify)",
+            ["<the interpreter has already written them>"])
+    # `python -B` and `PYTHONDONTWRITEBYTECODE=1` both set the flag above; on
+    # its own that stops caches being written, so the tree is asked separately.
+    identity = code_identity(repo_root)
+    caches = [row for row in identity["dirty_paths"] or []
+              if _is_byte_cache_row(row)]
+    if caches:
+        raise _refuse_byte_caches(
+            f"the tree at {repo_root} ALREADY carries byte-caches in its "
+            "executed surface. `-B`/`PYTHONDONTWRITEBYTECODE=1` stop caches "
+            "being WRITTEN and remove none, so this run would measure for "
+            "minutes and then be refused at publish (#3712: a byte-cache is "
+            "executable code the record does not verify)",
+            caches)
 
 
 def code_identity(repo_root: str | Path | None,
@@ -921,8 +1025,8 @@ def code_identity(repo_root: str | Path | None,
     if status.returncode != 0:
         dirty_paths = ["<git status failed: the tree is not provably clean>"]
     else:
-        dirty_paths = [line[3:] for line in status.stdout.splitlines()
-                       if line.strip()]
+        dirty_paths = [_c_unquote(line[3:]) for line in
+                       status.stdout.splitlines() if line.strip()]
     # ⛔ The status answer is NOT the whole of "was the tree clean?": an index
     # flag or an ignore rule makes a modified/untracked executed file print
     # nothing at all. Both are asked of git's records directly, and a git
@@ -2250,7 +2354,9 @@ git checkout {run_commit}
 git merge-base --is-ancestor {prereg_commit} {run_commit} && echo "ordering: proven"
 
 # 2. re-run the sealed corpus from the recorded commit
-uv run python -m tools.longmem_eval.measure_ask_distilled run \\
+#    -B: the run REFUSES an interpreter that writes byte-caches, and it refuses
+#    a tree that already carries one (#3712) — see `_require_byte_code_free`
+uv run python -B -m tools.longmem_eval.measure_ask_distilled run \\
     --out /tmp/ask-observations.json
 uv run python -m tools.longmem_eval.measure_ask_distilled score \\
     --run /tmp/ask-observations.json --out /tmp/ask-scored.json
@@ -2350,7 +2456,7 @@ def _main(argv: list[str] | None = None) -> int:
         # published is refused at the start rather than after minutes of work,
         # and the refusal names the invocation that works
         # (:func:`_require_byte_code_free`).
-        _require_byte_code_free()
+        _require_byte_code_free(_REPO_ROOT)
         report = run_sealed(
             corpus_root=Path(args.corpus_root),
             mutate=(_drop_supersession if args.mutate else None),

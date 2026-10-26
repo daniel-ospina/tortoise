@@ -187,9 +187,12 @@ publishable is **this command's own**, not an inherited property:
 not this module. A bare interpreter launch writes `.pyc` files under the
 surface on import — before any identity is taken — so `run` **refuses to
 start** when `sys.dont_write_bytecode` is False, naming the removal command
-and the invocation that works. That refusal is not advisory: `-B` stops caches
-being written but not one being read, so a run is publishable only once the
-surface carries no byte-caches.
+and the invocation that works. Two halves, both checked: the interpreter
+flag, and the tree itself — a byte-code-free launch over a tree that already
+carries caches removes none, so it would measure and then be refused at
+publish. The refusal is not advisory: `-B` stops caches being written but not
+one being read, so a run is publishable only once the surface carries no
+byte-caches.
 
 ## Why this is a separate tree from `tests/eval/write_path/`
 
