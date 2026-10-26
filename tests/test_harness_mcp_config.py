@@ -1295,9 +1295,17 @@ class TestDocsPageAndSkillConfig:
         # paragraph in this same row already carries that phrase, so an
         # assertion on it would pass with this caveat deleted (vacuity).
         assert "naming a graph on a write does not work" in row_norm, (
-            "the row must carry the #10084 caveat: on this client the `graph` "
-            "argument is refused on a WRITE, with the keyed-harness fallback "
-            "named — otherwise the row promises an affordance the client blocks")
+            "the row must carry the #10084 caveat — on this client the `graph` "
+            "argument is refused on a WRITE — otherwise the row promises an "
+            "affordance the client blocks")
+        # The caveat without the remedy sends a user to a wall with no way past
+        # it, and "connect a keyed harness" alone is vacuous here (the row
+        # already says it twice for deletions and for the read-only-grant case),
+        # so the clause asserted is the one that names WHICH graph to write from.
+        assert "to write to a graph other than the default" in row_norm, (
+            "the #10084 caveat must name the keyed-harness fallback for writing "
+            "to a non-default graph — a refusal with no route past it is a dead "
+            "end, not a documented limit")
 
         # ── which packs ────────────────────────────────────────────────────
         # The hazard is INVISIBLE, not absent — but WHICH default applies depends
