@@ -188,7 +188,7 @@ def test_retrieval_only_still_gates_the_extractor_lane(monkeypatch):
     capped extractor key went from a fast pre-flight failure to a per-question
     failure after the dataset load and the embedder gate — the precise failure
     mode D2 exists to prevent."""
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     extractor = _RecordingExtractor()
     result = run_preflight(reader=None, judge=None,
                            extractor_model=extractor, retrieval_only=True)
@@ -207,7 +207,7 @@ def test_retrieval_only_with_a_failing_extractor_fails_the_gate(monkeypatch):
 
     Same 402 shape as ``test_billing_probe_402_is_fatal``: a capped billing key
     is the ordinary way this lane goes dark."""
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
     class _FatalExtractor(_RecordingExtractor):
         def complete(self, **kw):

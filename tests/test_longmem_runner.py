@@ -6917,6 +6917,29 @@ def test_seed_payload_sums_every_qid_on_the_same_lane():
         spend_guard.reset()
 
 
+def test_resume_seed_counts_calls_once():
+    """#8486 F1 (review round 2, P2). A seeded envelope's ``calls`` must be
+    counted ONCE, and ``status()["calls"]`` must be a real paid-call count.
+
+    RED before the fix: ``seed`` passed ``calls`` inside ``tokens`` while
+    ``observe`` ALSO did ``calls += 1``, so a lane bucket over-reported by one
+    per envelope; and ``_calls`` advanced once per ENVELOPE rather than by the
+    envelope's own count. README advertises ``calls`` as a recorded field, so a
+    reader reconciling ``spend_usd`` against it got a number wrong in both
+    directions. It cannot move money — the ceiling prices tokens, never calls.
+    """
+    spend_guard.reset()
+    try:
+        payload = _overhead_lane("q1")
+        payload.update(_overhead_lane("q2"))
+        spend_guard.seed_payload(payload)   # two qids, one paid call each
+        assert spend_guard.status()["calls"] == 2
+        _, _, breakdown = spend_guard.spend()
+        assert breakdown["lanes"][0]["calls"] == 2
+    finally:
+        spend_guard.reset()
+
+
 def test_unpriced_lane_refuses_under_a_ceiling_never_meters_zero():
     """#8486 F1, the residual: a model with no ``PRICING_MAP`` entry is
     UNKNOWN spend, not free. Under an armed ceiling it must refuse.
@@ -7060,11 +7083,15 @@ def test_hard_stop_abort_keeps_the_in_flight_questions_spend(
     assert bucket["prompt_tokens"] == 400_000
     assert bucket["completion_tokens"] == 2_000
 
-    # and it is genuinely ADDITIVE on resume: the resumed run's ceiling sees
-    # question 1's outcome spend AND the crossing question's overhead rows
+    # and it is genuinely ADDITIVE on resume: the resumed total is the
+    # abandoned process's spend (question 1's outcome + the swept crossing
+    # rows) PLUS question 2's re-run, so it must exceed the abort marker's own
+    # spend by another question's burn (~$0.057 measured). Pre-fix the swept
+    # rows were missing, leaving the resumed total level with the marker.
+    abort_spend = saved["spend_hard_stop"]["spend_usd"]
     out2 = tmp_path / "report2.json"
     report = run_mod.run_main(["--data", str(MINI), "--limit", "2",
                                "--split", "s", "--skip-preflight",
                                "--checkpoint", str(cp), "--output", str(out2),
                                "--hard-stop-usd", "5"])
-    assert report["hard_stop"]["spend_usd"] > 0.10
+    assert report["hard_stop"]["spend_usd"] > abort_spend + 0.03

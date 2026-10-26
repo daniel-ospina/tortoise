@@ -209,13 +209,22 @@ def _bucket_for(key: tuple[str, str, str]) -> dict:
 
 
 def observe(*, stage: str, provider: str | None, model_id: str,
-            tokens: dict | None, usage_present: bool) -> None:
-    """Record one completed call's tokens (called from ``UsageCollector``)."""
+            tokens: dict | None, usage_present: bool,
+            calls: int = 1) -> None:
+    """Record completed calls' tokens (called from ``UsageCollector``).
+
+    ``calls`` is how many PAID calls the row stands for: 1 for a live sink row
+    (the default, and what ``UsageCollector.record`` relies on), or the
+    envelope's OWN count when ``seed`` folds a persisted bucket that may
+    already stand for many calls. Passing the count explicitly is what keeps
+    ``status()["calls"]`` a real call count instead of a count of envelopes.
+    """
     global _calls
+    n = calls if isinstance(calls, int) and not isinstance(calls, bool) else 1
     with _lock:
-        _calls += 1
+        _calls += n
         bucket = _bucket_for((stage, provider or "unknown", model_id))
-        bucket["calls"] += 1
+        bucket["calls"] += n
         bucket["usage_present"] = bucket["usage_present"] and usage_present
         for k, v in (tokens or {}).items():
             if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -241,10 +250,16 @@ def seed(envelope: dict | None) -> None:
             for model, bucket in models.items():
                 if not isinstance(bucket, dict):
                     continue
+                # ``calls`` is NOT a token: it travels as its own argument so
+                # ``observe`` adds it exactly once. Leaving it inside
+                # ``tokens`` double-counted it (the +1 below AND the bucket's
+                # own count), which is a reporting defect only — the ceiling
+                # prices tokens, never calls.
                 observe(stage=stage, provider=provider, model_id=model,
                         tokens={k: bucket[k] for k in _BUCKET_KEYS
-                                if k in bucket},
-                        usage_present=bucket.get("usage_present", True))
+                                if k in bucket and k != "calls"},
+                        usage_present=bucket.get("usage_present", True),
+                        calls=bucket.get("calls", 1))
 
 
 def seed_payload(payload: dict | None) -> None:
