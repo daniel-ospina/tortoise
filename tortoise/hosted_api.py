@@ -18178,18 +18178,44 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
-def _record_holds_turns() -> bool:
-    """#10000: does the RECORD hold captured turns (rather than the graph)?
+def _record_holds_turns(org: dict) -> bool:
+    """#10000: does the RECORD hold this request's captured turns?
 
-    The same capability question the capture writer asks, asked from the read
-    side: turns reach the record only through the per-turn `PointAdded` records,
-    which require a configured journal, and the record must be ARMED
-    (`TORTOISE_RECORD_DSN`). When either is absent the graph is what holds them
-    and every read stays exactly as it was before #10000.
+    THE SAME PREDICATE THE CAPTURE WRITER USES. The turns reach the record only
+    through the per-turn `PointAdded` records, which the writer emits only when a
+    journal is configured, and the record accepts them only when
+    `record_writer.live_write_refusal` names no reason to refuse — so this asks
+    that ONE declaration rather than forming its own opinion. The previous
+    version asked `_dsn() is not None` alone, and that is how the read side and
+    the write side came to disagree in exactly the lane where the graph kept the
+    turns: an armed-but-journal-less deployment writes turn NODES to the graph,
+    and this read went looking for them in the record.
+
+    ⛔ It is a CAPABILITY question, never a policy flag. Nothing here reads a
+    toggle that could send the turns back to the graph (§9.1/D1 is the ruling —
+    the graph is not an option); it asks whether Postgres CAN hold them right
+    now, because a refusal there is what leaves them in the graph.
     """
-    from tortoise.record_writer import record_dsn as _dsn
+    if not org.get("graph_id"):
+        # An org-wide credential names no graph, so no record tenant can be
+        # scoped for this read (the record's key is (org_id, graph_id)) — and the
+        # SAME credential's capture is refused `no_tenant`, which keeps its turns
+        # in the graph. Reading the graph is then the correct answer rather than
+        # a degradation. (Before this, `org["graph_id"]` raised here and the
+        # whole record leg was skipped by the enclosing `except`, mutely.)
+        return False
+    from tortoise.config import _resolve_event_log_path
+    from tortoise.record_writer import record_holds_turns
 
-    return _dsn() is not None
+    # The journal path is resolved EXACTLY as `_make_sdk(graph_name=…)` resolves
+    # it for this branch: an explicit graph name, no namespace (the derivation
+    # uses the name verbatim, and `namespace="registry"` would divert it).
+    # No journal ⇒ the per-turn records are never emitted ⇒ the record is not
+    # where the turns are, armed DSN or not.
+    return record_holds_turns(
+        journal_configured=_resolve_event_log_path(
+            namespace=None, graph_name=org["graph_namespace"]) is not None,
+        tenant=(org["org_id"], org["graph_id"]))
 
 
 def _open_record():
@@ -18294,44 +18320,55 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
     # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
-    # capture writer asks. With the record armed, the turns are RECORD rows (the
-    # per-turn `PointAdded` records) and the graph holds none, so this read must
-    # come from the record; unarmed, it reads the graph exactly as before, which
-    # makes the pre-arming deployment byte-identical.
+    # capture writer asks (`_record_holds_turns`). With the record holding them,
+    # the graph has no turn nodes and this read must come from the record;
+    # otherwise it reads the graph exactly as before, which is what keeps both
+    # the pre-arming deployment AND the refused-write lane byte-identical.
+    #
+    # ⛔ AN EMPTY RECORD ANSWER IS NOT AN EMPTY TRANSCRIPT (review P0-3). The
+    # record's `()` is what an unscoped connection, the wrong tenant, a
+    # pre-arming capture and a genuinely empty session all look like, so
+    # `record_read.session_turns` also reports whether the record SPOKE — and
+    # when it did not, this read goes to the graph and says so at WARNING. A
+    # migration that silently empties transcripts is worse than one that reddens.
     turns = []
-    _record_turns = None
-    if _record_holds_turns():
+    _record_answer = None
+    if _record_holds_turns(org):
         try:
             def _read_record_turns():
                 conn = _open_record()
                 try:
-                    return list(_record_read._turns(
-                        conn, org["org_id"], org["graph_id"], session_id))
+                    return _record_read.session_turns(
+                        conn, org_id=org["org_id"], graph_id=org["graph_id"],
+                        session_id=session_id)
                 finally:
                     conn.close()
 
-            _record_turns = await asyncio.to_thread(_read_record_turns)
+            _record_answer = await asyncio.to_thread(_read_record_turns)
         except Exception:
             # Fail SOFT to the graph: a record that cannot answer must not blank a
             # transcript the cache still holds. This fallback is the transitional
             # half of #10000 and disappears with the graph-side purge step.
-            _record_turns = None
+            _record_answer = None
             _logger.warning(
                 "session %s turns read from the record failed — serving the graph "
                 "copy for this request", session_id, exc_info=True)
-    if _record_turns is not None:
-        for _t in _record_turns:
-            turns.append({
-                "id": _t.turn_id,
-                # The record stores the framed text and the speaker separately, so
-                # the SAME inverse gives the same role/body this endpoint served
-                # from the graph (#4675 parity).
-                "role": (_t.speaker
-                         or _capture_turn_role_text(_t.content)[0]),
-                "content": _t.body,
-                "created_at": _t.created_at,
-            })
+    if _record_answer is not None and _record_answer.answered:
+        # ONE record→payload map, shared with `TortoiseSDK.get_session_detail`
+        # (#3557 parity, #4675: the record stores the framed text and the speaker
+        # separately, so the writer's own inverse gives the same role/body this
+        # endpoint served from the graph).
+        turns.extend(_record_read.turn_payloads(_record_answer.turns))
     else:
+        if _record_answer is not None:
+            # The record was REACHABLE and did not answer for these turns. The
+            # session says it has a transcript (`s.turn_count` above) while the
+            # record holds none, which is a divergence between the two stores —
+            # never a reason to serve an empty transcript, and never silent.
+            _logger.warning(
+                "session %s: the record did not answer for its turns (%s) — "
+                "serving the graph copy for this request",
+                session_id, _record_answer.reason)
         # Turn points (events) — ordered by turn index embedded in the id
         turn_rows = await asyncio.to_thread(
             lambda: proj.g.query(

@@ -73,6 +73,7 @@ being armed, it filters on the same pair explicitly.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,9 +81,13 @@ __all__ = [
     "RecordReadError",
     "SessionText",
     "Turn",
+    "TurnAnswer",
     "session_text",
+    "session_turns",
     "source_narrative",
     "source_session",
+    "turn_payloads",
+    "turn_prior_vectors",
 ]
 
 #: The narrative home (#9555).
@@ -186,6 +191,159 @@ class SessionText:
     def verbatim_available(self) -> bool:
         """Is there any §9.4-usable text at all?"""
         return bool(self.narrative or self.summary or self.turns)
+
+
+@dataclass(frozen=True)
+class TurnAnswer:
+    """This record's answer about ONE session's transcript — and whether it SPOKE.
+
+    ⛔ THE DISTINCTION THIS TYPE EXISTS FOR (#10000 review P0-3): an EMPTY answer
+    is only authoritative when the record also holds the capture's own account of
+    that session. `_turns` returning `()` is not provenance — it is what an
+    unscoped connection, the wrong tenant, a session captured before the record
+    was armed, a capture whose record write was refused, and a genuinely empty
+    session ALL look like, and a reader that cannot tell them apart serves an
+    empty transcript over a store that still holds the text.
+
+    So "the record says there are no turns" and "the record did not answer" are
+    different answers, and the second one is not a value: it is the caller's cue
+    to read the store that DOES hold them (the graph, until the purge step of
+    #10000 removes it). ``answered`` carries that, and ``reason`` names WHICH
+    silence it was for the log an operator reads.
+
+    ``turns`` is only meaningful when ``answered`` is True; when it is False the
+    tuple is empty and says nothing about the session.
+    """
+
+    answered: bool
+    turns: tuple[Turn, ...] = field(default=())
+    turn_count: int | None = None
+    reason: str = ""
+
+
+def session_turns(conn: Any, *, org_id: str, graph_id: str,
+                  session_id: str) -> TurnAnswer:
+    """THE turn read for a serving door: scope, read, and say whether it answered.
+
+    ⛔ THE TENANT SCOPE IS INSTALLED HERE, by this function, because a turn read
+    on an UNSCOPED connection is a ZERO-ROW read under the record's row-level
+    security (`point_read_org` filters on `app.current_org_id`, and a policy
+    treats a missing GUC as "no rows", never as an error). That is the #10000
+    review P0-1: `record_serve.open_record()` opens and bounds a connection but
+    deliberately does not scope it — scoping is per-TENANT, and the opener knows
+    no tenant — so a caller that opens one and reads directly gets `()` and
+    cannot tell it from an absence. Two serving doors read turns (the hosted
+    `GET /v1/sessions/{id}` and `TortoiseSDK.get_session_detail`), so the scope
+    lives in the door they share instead of in each of them: a reader cannot
+    forget what it does not call.
+
+    ⚠️ The connection must be in a TRANSACTION (the GUC is transaction-local);
+    `scope_connection` refuses a connection where the value did not stick rather
+    than reading on unscoped (see its docstring).
+
+    ``answered`` is decided by the record's OWN account of the session:
+    :func:`_turns` returning rows is an answer by itself; with no rows, the
+    answer is only the record's when `public.session_narrative` holds this
+    session's `turn_count` — the column the capture's `SessionRecorded` writes
+    (`record_projection._narrative_statements`). A count of 0 says "this session
+    has no turns"; a positive count with no rows, or no count row at all, says
+    "this record did not answer for these turns" and leaves the decision to the
+    caller.
+    """
+    from tortoise.record_projection import scope_connection
+
+    if not session_id:
+        raise RecordReadError("session_turns needs a session id")
+    scope_connection(conn, org_id)
+    row = _narrative_row(conn, org_id, graph_id, session_id)
+    turns = _turns(conn, org_id, graph_id, session_id)
+    turn_count = row[3] if row is not None and isinstance(row[3], int) else None
+    if turns:
+        return TurnAnswer(answered=True, turns=turns, turn_count=turn_count,
+                          reason="turn rows")
+    if turn_count == 0:
+        return TurnAnswer(answered=True, turns=(), turn_count=0,
+                          reason="the record states 0 turns")
+    if turn_count is not None:
+        return TurnAnswer(
+            answered=False, turn_count=turn_count,
+            reason=(f"the record states {turn_count} turn(s) but holds no turn "
+                    "rows — not an empty transcript"))
+    return TurnAnswer(
+        answered=False, turn_count=None,
+        reason=("the record holds no narrative row and no turn rows for this "
+                "session — it did not answer"))
+
+
+def turn_payloads(turns: Sequence[Turn]) -> list[dict]:
+    """The ``turn_points`` payload both serving doors return — ONE definition.
+
+    The hosted ``GET /v1/sessions/{id}`` and ``TortoiseSDK.get_session_detail``
+    serve the same key set for the same session (#3557's parity contract), and a
+    second copy of the record→payload field map is how the two come to disagree
+    the moment one of them grows a field. So the map lives here, next to the
+    reader that produces the values, and both doors call it.
+
+    ``role`` prefers the record's own ``speaker`` and falls back to the writer's
+    frame inverse (`sdk._capture_turn_role_text`) — the same pair the graph read
+    uses, which is what makes the two stores serve identical payloads for the
+    same turn (#4675: a client comparing a stored turn against a served detail
+    depends on the two agreeing).
+    """
+    out: list[dict] = []
+    for turn in turns:
+        out.append({
+            "id": turn.turn_id,
+            "role": turn.speaker or _role_and_body(turn.content)[0],
+            "content": turn.body,
+            "created_at": turn.created_at,
+        })
+    return out
+
+
+def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
+                       session_id: str,
+                       turn_ids: Sequence[str]) -> dict[str, tuple[str, Any]]:
+    """``{turn_id: (stored content, stored embedding)}`` for the ids it holds.
+
+    The record's half of #5004 round-3's PRESERVE rule (#10000 review P1). The
+    graph path learns what a write LEFT on the node from the write's own
+    read-back (`_TURN_WRITE_CYPHER`'s `RETURN ... t.embedding`), because a
+    re-capture with the embedder unavailable must journal the vector the write
+    PRESERVED, not the `None` this capture encoded — journalling `None` tells the
+    replay the vector is genuinely gone and CLEARS it. With the turns in the
+    record there is no node to read back, so the prior value is read from the
+    record instead, through the same three rules the Cypher applies: the vector
+    survives only when the stored CONTENT is unchanged (a preserved vector for
+    changed text ranks the turn by text no longer stored).
+
+    ``embedding`` is the record's jsonb column, returned as PostgreSQL hands it
+    back (a list of floats, or ``None``). A read that fails must not be mistaken
+    for "no prior vector": the caller decides, and the graph path's answer for
+    that case is a CLEARED vector — see `sdk._write_capture_turns`.
+
+    SCOPED, like :func:`session_turns`: an unscoped read here would silently
+    report "no prior vector" for every turn and clear the whole window's vectors.
+    """
+    from tortoise.record_projection import scope_connection
+
+    ids = tuple(t for t in turn_ids if isinstance(t, str) and t)
+    if not ids:
+        return {}
+    scope_connection(conn, org_id)
+    cursor = _cursor(conn)
+    cursor.execute(
+        f"SELECT node_key, content, embedding FROM public.{POINT_TABLE} "
+        f"WHERE org_id = %s AND graph_id = %s AND node_key IN %s",
+        (org_id, graph_id, ids),
+    )
+    out: dict[str, tuple[str, Any]] = {}
+    for row in _rows(cursor):
+        node_key, content, embedding = row[0], row[1], row[2]
+        if isinstance(node_key, str):
+            out[node_key] = (content if isinstance(content, str) else "",
+                             embedding)
+    return out
 
 
 def _cursor(conn: Any):

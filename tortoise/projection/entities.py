@@ -2789,6 +2789,27 @@ class _EntityHandlers:
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
                 params[f"v_{prop}"] = val
+        # #10000: the turn ID-SPACE high-water mark. It is NOT `turn_count`'s
+        # sibling (`turn_count` is a WINDOW LENGTH: an APPEND at
+        # `turn_offset=2` writes `_t2`/`_t3` while the count reads 2), and the
+        # stale-turn sweep is bounded by it — so a journal-only rebuild that
+        # dropped it left `_rebuild_all_replay`'s
+        # `coalesce(s.turn_max_index, s.turn_count, 0)` fallback substituting a
+        # WINDOW LENGTH for the mark, i.e. re-opening the #1920 residue this
+        # property exists to close (#10000 review P1).
+        #
+        # The fold MIRRORS the live clause exactly, and that is the point of the
+        # CASE rather than a plain assignment: the live write only ever moves the
+        # mark UP (`sdk._write_session_and_turns`), so a replay in journal order
+        # must not let a later, shorter re-capture LOWER it — a lowered mark makes
+        # the sweep miss the surplus turns the earlier capture owns.
+        _tmi = ev.get("turn_max_index")
+        if _tmi is not None and _annotator_value_ok(_tmi):
+            sets.append(
+                "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
+                "OR s.turn_max_index < $v_turn_max_index "
+                "THEN $v_turn_max_index ELSE s.turn_max_index END")
+            params["v_turn_max_index"] = _tmi
         # #9206 (review P1): the two ATTRIBUTION props the same session MERGE
         # writes. Set-if-absent on BOTH sides (the live clause is a `coalesce`),
         # so a later producer cannot relabel the machine/model that captured the

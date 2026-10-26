@@ -267,6 +267,28 @@ VALUE_CONFIRMED_REFUSAL = (
 # longer the one executed — a confident claim with no coupling.
 STAGE3_PREDICATE = "p.pointKind IS NULL OR p.pointKind <> 'event'"
 
+#: ⛔ THE TURN COLUMN HAS TWO SOURCES BECAUSE THE STORED TRANSCRIPT HAS TWO HOMES
+#: (#10000). §9.1/D1 moved captured turns OUT of the graph and into the Postgres
+#: record, and the graph keeps the Session's COUNTERS (`turn_count`,
+#: `turn_max_index`) — so `count(DISTINCT t)` alone reads 0 for every session on
+#: an armed deployment and this scorecard publishes `stored_sessions = 0` and
+#: `turn_points_total = 0` for sessions whose transcript was captured perfectly.
+#: A counter that used to be derived from the turn rows is now silently zero —
+#: falsifier (c) at the aggregate level.
+#:
+#: So the query returns BOTH facts and `stage_counts` takes the LARGER: a turn
+#: node is a turn, and `s.turn_count` is the session's own statement of how many
+#: turns it holds. In the graph-only world the node count is the larger (it is,
+#: by construction: `turn_count` is the WINDOW LENGTH, never more than the ids
+#: written), so the reported numbers do not move for a deployment that has not
+#: armed the record; in the record world the counter is all there is.
+#:
+#: ⚠️ NOT written as a `CASE WHEN count(DISTINCT t) > ...` in Cypher: MEASURED
+#: on the embedded engine, that form parses, runs, returns NO error, and reports
+#: `turn_points = 0` for a session carrying `turn_count = 2` — a silently wrong
+#: number, which is the one thing this lane may not publish. Two plain columns
+#: and one comparison in Python are checkable; an aggregate inside a conditional
+#: is not.
 FUNNEL_QUERY = (
     "MATCH (s:Session) "
     "WHERE s.created_at >= $since AND s.created_at < $until "
@@ -274,7 +296,9 @@ FUNNEL_QUERY = (
     "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
     f"WHERE {STAGE3_PREDICATE} "
     "RETURN s.id, s.created_at, "
-    "count(DISTINCT t) AS turn_points, count(DISTINCT p) AS extracted "
+    "count(DISTINCT t) AS turn_nodes, "
+    "coalesce(s.turn_count, 0) AS turn_count, "
+    "count(DISTINCT p) AS extracted "
     "ORDER BY s.id"
 )
 
@@ -448,7 +472,15 @@ def stage_counts(rows: Sequence[Sequence[Any]], since: str,
                  until: str) -> tuple[dict, dict]:
     """Fold the funnel rows into the three graph stages.
 
-    ``rows`` are ``(session_id, created_at, turn_points, extracted)``.
+    ``rows`` come in two shapes, and both are accepted because ``FUNNEL_QUERY``
+    changed shape in #10000 while callers and fixtures still build the old one:
+    ``(session_id, created_at, turn_nodes, turn_count, extracted)`` — the live
+    shape, where the turn count is the LARGER of the graph's turn nodes and the
+    Session's own `turn_count` counter (see ``FUNNEL_QUERY``: the turns live in
+    the record once the record is armed, and the graph keeps only the counter) —
+    and ``(session_id, created_at, turn_points, extracted)``, where position 2
+    is already the turn count. A 4-tuple is read as the second shape; nothing
+    else is guessed.
 
     Side effect worth naming: EVERY returned ``created_at`` is re-checked
     against the window IN PYTHON. If Cypher's window predicate were ever
@@ -465,8 +497,13 @@ def stage_counts(rows: Sequence[Sequence[Any]], since: str,
     integrity: list[str] = []
     kept: list[tuple[int, int]] = []
     for row in rows:
-        sid, created_at, turn_points, extracted = (
-            row[0], row[1], int(row[2] or 0), int(row[3] or 0))
+        sid, created_at = row[0], row[1]
+        if len(row) >= 5:
+            # the live shape: (sid, created_at, turn_nodes, turn_count, extracted)
+            turn_points = max(int(row[2] or 0), int(row[3] or 0))
+            extracted = int(row[4] or 0)
+        else:
+            turn_points, extracted = int(row[2] or 0), int(row[3] or 0)
         parsed = _coerce_created_at(created_at)
         if parsed is None:
             integrity.append("unparseable_created_at")

@@ -1115,8 +1115,12 @@ def test_the_sdk_forwarding_hop_requires_the_ordinal(wiring):
         "`_write_record_projection(seq=...)` regained a default — a caller that "
         "omits it then writes no position row, silently (#9190)")
     source = (REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    with_default = source.replace("seq: int | None) -> None:",
-                                 "seq: int | None = None) -> None:", 1)
+    # #10000: the annotation is the RETURN value now (`-> Any`: the seam's
+    # outcome travels back to the capture writer so it can decide a store from
+    # what the write did), so the mutation follows the spelling. The assertion
+    # it makes is unchanged — a DEFAULT on `seq` is the defect.
+    with_default = source.replace("seq: int | None) -> Any:",
+                                 "seq: int | None = None) -> Any:", 1)
     assert with_default != source, "the signature spelling changed — re-point this leg"
     fired = module.ordinal_argument_problems(
         ast.parse(with_default, filename="tortoise/sdk.py"), "tortoise/sdk.py")

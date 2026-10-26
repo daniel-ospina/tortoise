@@ -991,6 +991,186 @@ def _note_unproven_position(record: Mapping[str, Any]) -> None:
     )
 
 
+#: The reasons :func:`live_write_refusal` / :func:`_live_write_verdict` can
+#: return. Named in ONE place because a caller branches on them: "unarmed" is
+#: not a failure (nothing was attempted, §2.0 byte-identical), every other
+#: token is a DECLINE this write cannot survive. "no_tenant_carried" is
+#: separate from "no_tenant" only so the WARNING can tell an operator whose
+#: carried pair was malformed from one who carried none — both are counted on
+#: the same `no_tenant` counter, so the metric did not gain a term.
+LIVE_WRITE_REFUSALS: tuple[str, ...] = (
+    "unarmed", "malformed_dsn", "no_durable_journal", "no_tenant",
+    "no_tenant_carried", "circuit_open",
+)
+
+
+def _live_write_verdict(
+    *, durable: bool = True, tenant: tuple[str, str] | None = None,
+) -> tuple[str | None, tuple[str, str] | None, Any]:
+    """``(why an armed live write is refused before any socket, its tenant, detail)``.
+
+    THE ONE DECLARATION of :func:`write_live_record`'s preconditions (#10000
+    review P0). It is a separate function because the door is no longer the only
+    caller: a producer that must decide WHICH STORE holds a write before making
+    it (``sdk._write_capture_turns``) has to ask the same question the door will
+    ask, and a second copy of these rules is how the decision and the write come
+    to disagree — which is exactly how a turn lands in neither store (§17.1: a
+    decision made before the write must be the write's own predicate, and
+    anything the predicate cannot name is decided AFTER the write).
+
+    ``None`` means the write will be ATTEMPTED. Everything the seam can decide
+    without a socket is decided here — the arming surface, the journal's
+    durability, the tenant, and the connect breaker. Reachability is
+    deliberately NOT here: it can only be learned by connecting, which is the
+    write.
+
+    ``detail`` is what the WARNING needs and nothing else: the refusal's own
+    exception for ``malformed_dsn``, the offending carrier for
+    ``no_tenant_carried``, ``None`` otherwise. It is returned rather than
+    re-derived by the reporter, because a second derivation is a second chance
+    to report a value the verdict never saw.
+    """
+    try:
+        armed = record_dsn() is not None
+    except RecordWriteError as exc:
+        return "malformed_dsn", None, exc
+    if not armed:
+        return "unarmed", None, None
+    if not durable:
+        return "no_durable_journal", None, None
+    resolved = tenant if tenant is not None else record_tenant()
+    if resolved is not None and not (
+            isinstance(resolved, tuple) and len(resolved) == 2
+            and all(isinstance(part, str) and part for part in resolved)):
+        # The seam's ONLY injection point must not be its weakest carrier: an
+        # empty/half pair would be unpacked straight into `write_records` and
+        # file the row under a tenant nobody named (#9188 review F4).
+        return "no_tenant_carried", None, resolved
+    if resolved is None:
+        return "no_tenant", None, None
+    if _breaker_is_open():
+        # A recent connect FAILED. Refuse locally: the journal already holds the
+        # record, a replay heals it, and paying the connect timeout once per
+        # record is what turns a degraded record into a wedged capture.
+        return "circuit_open", None, None
+    return None, resolved, None
+
+
+def live_write_refusal(*, durable: bool = True,
+                       tenant: tuple[str, str] | None = None) -> str | None:
+    """Why an armed live write would be REFUSED (``None`` ⇒ it will be tried).
+
+    The public half of :func:`_live_write_verdict`, for a caller that needs the
+    answer BEFORE the write — ``sdk._write_capture_turns`` asks it to decide
+    whether the record can hold this capture's turns, and
+    ``hosted_api._record_holds_turns`` asks it to decide whether it may serve
+    the transcript from the record. Both use THIS function, so the read side and
+    the write side cannot disagree about which store holds the turns (#10000
+    review P0-2/P0-3).
+
+    ⛔ ``None`` is not a promise: it says no *precondition* refuses the write.
+    A connect can still fail, the breaker can trip mid-capture, and the fold can
+    still refuse the record — so a caller deciding a store from this answer
+    ALONE is deciding before the write. Read the write's own outcome
+    (:func:`write_live_record`'s return) for the rest, and keep an alternative
+    store for what it reports it did not do.
+    """
+    return _live_write_verdict(durable=durable, tenant=tenant)[0]
+
+
+def record_holds_turns(*, journal_configured: bool, durable: bool = True,
+                       tenant: tuple[str, str] | None = None) -> bool:
+    """Can the RECORD hold a capture's TURNS for this tenant, right now?
+
+    ⛔ ONE declaration, THREE callers — the capture writer that DECIDES where a
+    capture's turns go (`sdk._write_capture_turns`), the hosted detail read, and
+    the SDK's own `get_session_detail`. They ask it so that the store a write
+    chooses and the store a read consults cannot disagree, which is the failure
+    the #10000 review measured from both ends (a read that went to the record
+    while the write had gone to the graph, and a write that went nowhere while
+    the capture reported success).
+
+    Two facts, both capability, neither a policy flag (#10000's ruling: §9.1/D1
+    puts the transcript in Postgres, so nothing here may be a toggle that sends
+    it back):
+
+    * ``journal_configured`` — the turns reach the record ONLY through the
+      per-turn `PointAdded` records (`_write_capture_turns` emits them when the
+      SDK has a journal), so without one the record cannot be where they are,
+      whatever its DSN says. ``durable`` is the same fact one step in: a scratch
+      buffer is not a journal and the seam declines it.
+    * :func:`live_write_refusal` — the write door's own preconditions (armed
+      DSN, a tenant, a closed connect breaker). A reason it names is a write this
+      record will refuse, so its turns stay in the graph.
+
+    ⛔ ``True`` is a PREFLIGHT, not a promise: a connect can still fail. The
+    writer therefore re-reads what each write actually reported; a reader has
+    the stronger evidence instead (`record_read.session_turns` says whether the
+    record ANSWERED), so a ``True`` here plus a silent record still falls back.
+    """
+    if not journal_configured:
+        return False
+    return live_write_refusal(durable=durable, tenant=tenant) is None
+
+
+def _report_live_write_refusal(reason: str, record_type: Any,
+                              detail: Any = None) -> None:
+    """Count and log ONE pre-write refusal — the door's whole observable half.
+
+    Extracted from :func:`write_live_record` so :func:`_live_write_verdict` can
+    decide WITHOUT counting: a caller that only asked the question did not
+    attempt a write, so it must not move the metrics. The door in turn must
+    report exactly what it reported before this refactor — same counters, same
+    sentences, same counters' names.
+    """
+    if reason == "malformed_dsn":
+        _count_write_failure("malformed_dsn")
+        _logger.warning("the record write did not happen (malformed_dsn): %s", detail)
+        return
+    if reason == "no_durable_journal":
+        # A DECLINE, not a loss: this lane has no journal by design, so no row is
+        # missing that a replay could restore (#9231 review P2). Counted on the
+        # skip counter and logged at DEBUG — a warning per extracted record on
+        # the healthy M2 capture path is the same noise the counter was.
+        _count_non_journal_skip("no_durable_journal")
+        _logger.debug(
+            "the record write was declined (no_durable_journal) — the record "
+            "is armed but this log is a scratch buffer, not a journal, so no "
+            "replay could reproduce the row: %s", record_type,
+        )
+        return
+    if reason == "no_tenant_carried":
+        _count_write_failure("no_tenant")
+        _logger.warning(
+            "the record write did not happen (no_tenant) — a CARRIED tenant "
+            "was not a (org_id, graph_id) pair of non-empty strings: %r",
+            detail,
+        )
+        return
+    if reason == "no_tenant":
+        _count_write_failure("no_tenant")
+        _logger.warning(
+            "the record write did not happen (no_tenant) — the record is armed "
+            "but no tenant could be named for this write.%s",
+            _refused_tenant_env_note(),
+        )
+        return
+    if reason == "circuit_open":
+        _count_write_failure("circuit_open")
+        _logger.warning(
+            "the record write did not happen (circuit_open) — a connect to the "
+            "record failed within the last %.0fs, so this write is refused "
+            "without a socket: %s", LIVE_WRITE_BREAKER_SECONDS, record_type,
+        )
+        return
+    # Unreachable by construction: the verdict returns only tokens from
+    # LIVE_WRITE_REFUSALS. Assert rather than ignore — a reason nobody counted
+    # would make a refusal SILENT, the one failure mode this door may not have.
+    raise AssertionError(
+        f"unreported live-write refusal {reason!r} (known: "
+        f"{', '.join(LIVE_WRITE_REFUSALS)})")
+
+
 def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None,
@@ -1129,61 +1309,16 @@ def write_live_record(record: Mapping[str, Any], *,
     exception, on the ``monitoring.record_write_failures`` surface. #9187 owns
     decision 3; the reversal is recorded there.
     """
-    try:
-        armed = record_dsn() is not None
-    except RecordWriteError as exc:
-        _count_write_failure("malformed_dsn")
-        _logger.warning("the record write did not happen (malformed_dsn): %s", exc)
+    refusal, tenant, detail = _live_write_verdict(
+        durable=durable, tenant=tenant)
+    if refusal == "unarmed":
+        # §2.0: the unarmed deployment is byte-identical — no counter, no log.
         return None
-    if not armed:
+    if refusal is not None:
+        _report_live_write_refusal(refusal, record.get("type"), detail)
         return None
-    if not durable:
-        # A DECLINE, not a loss: this lane has no journal by design, so no row is
-        # missing that a replay could restore (#9231 review P2). Counted on the
-        # skip counter and logged at DEBUG — a warning per extracted record on
-        # the healthy M2 capture path is the same noise the counter was.
-        _count_non_journal_skip("no_durable_journal")
-        _logger.debug(
-            "the record write was declined (no_durable_journal) — the record "
-            "is armed but this log is a scratch buffer, not a journal, so no "
-            "replay could reproduce the row: %s", record.get("type"),
-        )
-        return None
-    tenant = tenant if tenant is not None else record_tenant()
-    if tenant is not None and not (
-            isinstance(tenant, tuple) and len(tenant) == 2
-            and all(isinstance(part, str) and part for part in tenant)):
-        # The seam's ONLY injection point must not be its weakest carrier: an
-        # empty/half pair would be unpacked straight into `write_records` and
-        # file the row under a tenant nobody named (#9188 review F4).
-        _count_write_failure("no_tenant")
-        _logger.warning(
-            "the record write did not happen (no_tenant) — a CARRIED tenant "
-            "was not a (org_id, graph_id) pair of non-empty strings: %r",
-            tenant,
-        )
-        return None
-    if tenant is None:
-        _count_write_failure("no_tenant")
-        _logger.warning(
-            "the record write did not happen (no_tenant) — the record is armed "
-            "but no tenant could be named for this write.%s",
-            _refused_tenant_env_note(),
-        )
-        return None
+    assert tenant is not None  # the verdict only clears with a resolved pair
     org_id, graph_id = tenant
-    if _breaker_is_open():
-        # A recent connect FAILED. Refuse locally: the journal already holds the
-        # record, a replay heals it, and paying the connect timeout once per
-        # record is what turns a degraded record into a wedged capture.
-        _count_write_failure("circuit_open")
-        _logger.warning(
-            "the record write did not happen (circuit_open) — a connect to the "
-            "record failed within the last %.0fs, so this write is refused "
-            "without a socket: %s", LIVE_WRITE_BREAKER_SECONDS,
-            record.get("type"),
-        )
-        return None
     connection: Any | None = None
     if seq is None:
         # A DURABLE journal whose append could not prove the record's position
