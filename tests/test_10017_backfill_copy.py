@@ -674,9 +674,20 @@ class _PagedGraph(_FakeGraph):
     server's ceiling. A bare ``RETURN`` is exactly the clippable shape, so an
     un-paged non-aggregate read here is an ASSERTION FAILURE, not a fake result.
 
-    ⛔ This replaced a `clip` parameter that sliced the unpaged branch. That
-    branch was DEAD — every paged call passes params and every param-less call is
-    an aggregate — so `clip=0` and `clip=99` produced identical runs, and the test
+    ⛔ It is ALSO driven by the CYPHER'S RETURN LIST, and that is what makes the
+    claims in the test using it true rather than decorative. It used to build its
+    own 3-tuples out of the fixture regardless of the query — measured: with
+    `properties(s)` deleted from `_COPY_SESSIONS_PAGE_QUERY` the suite still
+    reported 54 passed, so "every session keeps its provenance" was pinned by
+    nothing. A session page now REFUSES to answer a read that does not ask for
+    `properties(s)` (the copy unpacks three columns; a two-column answer would
+    fail as an opaque ValueError much further from the cause), and it records the
+    `$batch` of every page it serves so the caller can assert the read really was
+    paged.
+
+    ⛔ This replaced a `clip` parameter that sliced an UNPAGED branch. That branch
+    was DEAD — every paged call passes params and every param-less call is an
+    aggregate — so `clip=0` and `clip=99` produced identical runs, and the test
     advertised a ceiling case it never exercised. A fake that cannot fail the way
     its docstring says is the same fabrication class as the `RecordWriter.connect`
     double this file's `test_the_record_floor_reads_both_homes_for_the_tenant`
@@ -686,6 +697,10 @@ class _PagedGraph(_FakeGraph):
 
     def __init__(self, sessions, turns) -> None:
         super().__init__(sessions, turns)
+        #: The `$batch` of every SESSION page served, in order — the page-count pin.
+        self.session_pages: list[int] = []
+        #: ...and of every TURN page, so both legs are pinned as PAGED.
+        self.turn_pages: list[int] = []
 
     def query(self, cypher: str, params: dict | None = None):
         if "count(" in cypher:
@@ -695,6 +710,20 @@ class _PagedGraph(_FakeGraph):
                 "copy_phase issued a NON-AGGREGATE read with no params — that is "
                 "the shape FalkorDB clips silently at RESULTSET_SIZE (#4515), so "
                 "it must be paged, not faked: " + cypher.strip()[:120])
+        if "CONTAINS" not in cypher and "properties(s)" not in cypher:
+            raise AssertionError(
+                "the session page does not RETURN properties(s), so every session "
+                "would be filed with EMPTY provenance — no harness, no "
+                "capture_lane, a created_at the graph never had — while its turns "
+                "still counted as copied. That is the one loss this phase exists "
+                "to prevent: " + cypher.strip()[:120])
+        if "CONTAINS" in cypher and "properties(p)" not in cypher:
+            raise AssertionError(
+                "the TURN page does not RETURN properties(p), so every turn would "
+                "be filed with an empty payload (its pointKind, ts and turn_index "
+                "gone) after the graph is pruned: " + cypher.strip()[:120])
+        (self.turn_pages if "CONTAINS" in cypher else self.session_pages).append(
+            int(params.get("batch", 1000)))
         # Keyset semantics, NOT a positional slice: the cursor is the last node's
         # INTERNAL id, not an index into this list.
         rows = self._turns if "CONTAINS" in cypher else self._sessions
@@ -719,10 +748,13 @@ def test_a_paged_session_read_carries_every_sessions_provenance() -> None:
     loss this phase exists to prevent, reported as success.
 
     What pins it: the read is KEYSET-PAGED (`page_size=2` over 3 sessions, so `s3`
-    can only arrive on page 2) and `_PagedGraph` FAILS the test if any
-    non-aggregate read is issued unpaged — the clippable shape. Deleting
-    `properties(s)` from `_COPY_SESSIONS_PAGE_QUERY` makes this fail at
-    `recorded["s3"]["harness"]`.
+    can only arrive on page 2 — `_PagedGraph` counts the pages it serves and the
+    assertion below requires at least two) and the fake FAILS the test if any
+    non-aggregate read is issued unpaged (the clippable shape). Deleting
+    `properties(s)` from `_COPY_SESSIONS_PAGE_QUERY` makes this fail at the
+    fake's own refusal (`the session page does not RETURN properties(s)`), and
+    hard-coding a page size the copy ignores fails the page-count assertion —
+    both measured, and both were GREEN before this fake honoured the cypher.
     """
     turns = [(10, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
              (11, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"]),
@@ -736,6 +768,12 @@ def test_a_paged_session_read_carries_every_sessions_provenance() -> None:
 
     stats = copy_mod.copy_phase(graph, emit, page_size=2, event_id=lambda: "E")
     assert stats["sessions"] == 3 and stats["turns"] == 3
+    # ⛔ PAGED, not one unbounded read: 3 sessions at batch=2 is TWO pages, and `s3`
+    # (the fixture row carrying `created_at`) can only arrive on the second. A
+    # `page_size` the copy ignored would still pass every assertion below without
+    # this one.
+    assert graph.session_pages == [2, 2], graph.session_pages
+    assert graph.turn_pages == [2, 2], graph.turn_pages
     assert recorded["s3"]["harness"] == "codex"
     assert recorded["s3"]["created_at"] == "2026-10-01T00:00:00Z"
     assert recorded["s2"]["harness"] == "claude"
@@ -955,25 +993,44 @@ def test_an_unreadable_record_floor_is_a_refusal_not_a_blind_copy(monkeypatch) -
     """
     from tortoise import record_projection, record_serve
     from tortoise.record_projection import RecordProjectionError
+    from tortoise.record_serve import RecordServeError
 
-    # A DRIVER failure — any class outside the record's own seam. It refuses, and
-    # its message is NOT echoed: a driver's text can carry the host, and this
-    # module never prints a DSN.
-    def _boom(dsn):
-        raise RuntimeError("connection to postgresql://u:s3cret@db/r refused")
+    # A SEAM failure (the door's own class): refused, and its TEXT is quoted —
+    # the operator needs "install the 'postgres' extra".
+    missing_extra = ("the record is armed but no Postgres driver is installed — "
+                     "install the 'postgres' extra")
 
-    monkeypatch.setattr(record_serve, "open_record", _boom)
-    with pytest.raises(copy_mod.CopyRefused, match="could not be read") as driver:
+    def _unarmed(dsn):
+        raise RecordServeError(missing_extra)
+
+    monkeypatch.setattr(record_serve, "open_record", _unarmed)
+    with pytest.raises(copy_mod.CopyRefused, match="could not be read") as seam_err:
         copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
-    assert "s3cret" not in str(driver.value)
-    assert "(RuntimeError)" in str(driver.value)
+    assert missing_extra in str(seam_err.value)
 
-    # A scope that cannot be VERIFIED is the same refusal, not a zero-row floor:
-    # the policies treat an unset GUC as "no rows", so reading on past a failed
-    # scope is how the lowering write comes back.
+    # ⛔ A DRIVER failure, raised where one can REALLY surface: `open_record`
+    # wraps every failure it can have into `RecordServeError`/`RecordUnavailable`
+    # (`record_serve.py:554-598`), so no raw driver class escapes it — the one
+    # place a `psycopg2.Error` reaches this handler unquoted is the cursor work
+    # inside `scope_connection`. It refuses, names the CLASS only, and never
+    # echoes the message: a driver's text can carry the host, and this module
+    # never prints a DSN.
     class _Conn:
         def close(self):
             pass
+
+    class _DriverError(Exception):
+        """Stands in for `psycopg2.OperationalError` — deliberately NOT a seam class."""
+
+    def _driver(conn, org_id):
+        raise _DriverError("connection to postgresql://u:s3cret@db/r refused")
+
+    monkeypatch.setattr(record_serve, "open_record", lambda dsn: _Conn())
+    monkeypatch.setattr(record_projection, "scope_connection", _driver)
+    with pytest.raises(copy_mod.CopyRefused, match="could not be read") as driver:
+        copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+    assert "s3cret" not in str(driver.value)
+    assert "(_DriverError)" in str(driver.value)
 
     repair = ("the record's connection runs as a role that BYPASSES RLS — arm "
               "the DSN with the tenant role")

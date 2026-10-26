@@ -90,6 +90,22 @@ MB at the largest production graph (6,432 turns), not a constant.
   measures neither journal positions nor the floor (it opens no record
   connection at all), so its counts are the graph-side numbers the copy WOULD
   write, not the clamped ones.
+  ⛔ THE FLOOR IS A SNAPSHOT, and its staleness window is STATED here because
+  it cannot be closed from this side. It is read once, before the first journal
+  append, and then threaded into every session's write; the upsert that could
+  lower a value is the projection's own (``DO UPDATE SET turn_count =
+  EXCLUDED.turn_count``), so closing the window would require the floor read to
+  share the write's transaction — a seam change, not a knob here. What bounds
+  it in practice is the precondition this tool already ENFORCES: a live writer
+  appending to the journal during the run makes the copy's next append
+  non-contiguous, which is refused (see the refusal list above), and a capture
+  write reaches the record only after its own journal append. So the exposure
+  is a capture write already IN FLIGHT when the run starts — its journal append
+  behind the copy's first, its record commit ahead of the copy's write for that
+  session — and no state the copy can read distinguishes it. The remedy shape is
+  recorded on #10017: run the copy with the capture stopped and re-run it after
+  any capture burst, because a re-run re-reads the floor and can only raise a
+  count.
 * The graph's own journal is the graph's REPLAY source. Appending ``PointAdded``
   to it means a later ``rebuild()`` re-creates the turns this migration deletes
   from the graph. That is a design consequence recorded on #10017, not a
@@ -293,6 +309,17 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
     A read that cannot be MADE refuses. An unmeasured floor is exactly the state
     this function exists to remove, so falling back to `{}` would silently
     restore the lowering write — the fail-open shape this whole phase is about.
+
+    ⛔ WHAT THIS SNAPSHOT DOES NOT COVER. It is read ONCE, before the copy's
+    first journal append, and a live capture that commits a `SessionRecorded`
+    between this read and the copy reaching that session would leave the max()
+    comparing against a stale floor. That window is stated, not implied, in the
+    module docstring's "Honest bounds" — it cannot be closed here because the
+    lowering upsert is the projection's own (`DO UPDATE SET turn_count =
+    EXCLUDED.turn_count`), so closing it means reading inside the write's
+    transaction. The practical precondition — run with the capture stopped — is
+    the same one the journal-contiguity refusal already enforces for the rest of
+    the run, and a re-run re-reads this floor and can only RAISE a count.
     """
     from tortoise import record_projection, record_serve
     from tortoise.record_projection import RecordProjectionError
