@@ -27945,19 +27945,84 @@ class TortoiseSDK:
             # idempotent retry — refused by construction, not by the caller's
             # memory.
             return existing
-        accumulated = list(present) + [r for r in missing if r not in present]
+        from .source_identity import resolve_source_key
+        # ── ONE identity pass over the THREE spellings this function juggles.
+        # `present` holds the edges' RESOLVED ``s.url``; `missing` holds the
+        # caller's RAW refs; a carrier pair is keyed by the RAW ref by contract
+        # (journal-stable — `resolve_source_versions`, which is also why the
+        # resolution is never a carrier key: it is a live-time fact). Every
+        # question below is "does the Point still hold this ref", so each is
+        # answered on the identity the edges ADDRESS, through the ONE resolver
+        # every source writer uses (#5012) — the same call the caller's presence
+        # test already makes, which is why `missing` is identity-disjoint from
+        # `present` on entry. The adopt-on-touch it may perform is the declared
+        # derived-recompute lane `resolve_source_versions` below already takes.
+        #
+        # #7704 review P1, and the CLASS it belongs to: a raw key compared with
+        # a resolved collection retains a held pair only when the two spellings
+        # are byte-identical, so a ref registered canonically and carried under
+        # a variant (`…?utm_source=x`) silently loses its recorded read-version
+        # — and when the new refs record no hash at all, `pairs` empties and the
+        # live write REMOVES a carrier the journal record OMITS while the replay
+        # KEEPS it (`_upsert_point_props` only sets the keys its payload
+        # carries): live ≠ replay(journal).
+        #
+        # The ref LISTS must therefore keep the spelling the NODE carries, never
+        # the resolver's: THREE replay-side selectors match a pair's key
+        # BYTE-WISE against the payload's own ``extractedFrom`` refs
+        # (`_point_source_transit`, `_point_source_versions`), so writing the
+        # resolved url here would rewrite the caller's provenance spelling AND
+        # strand the pair that spelling was the key of.
+        _prop_refs = existing.get("extractedFrom")
+        if isinstance(_prop_refs, str):
+            _prop_refs = [_prop_refs]
+        # RESOLVED s.url → the spelling the node already uses for it. Only a
+        # spelling that RESOLVES to the same identity is adopted, so this
+        # cannot merge two identities or invent one.
+        _carried: dict[str, str] = {}
+        for _ref in _prop_refs or []:
+            if isinstance(_ref, str) and _ref:
+                _carried.setdefault(resolve_source_key(proj.g, _ref), _ref)
+        # RESOLVED s.url → the spelling the ref list uses. The EDGES stay
+        # authoritative (#3263): every ref they hold is in the list, in the
+        # edges' own (``ORDER BY s.url``) order, so it is byte-stable.
+        _spelling: dict[str, str] = {}
+        for _url in present:
+            _spelling.setdefault(_url, _carried.get(_url, _url))
+        accumulated = list(_spelling.values())
+        for _ref in missing:
+            _key = resolve_source_key(proj.g, _ref)
+            if _key in _spelling:
+                continue
+            _spelling[_key] = _ref
+            accumulated.append(_ref)
         versions = resolve_source_versions(proj.g, missing)
-        # Keep the pairs the Point already carries for refs it still holds; add
-        # one per new ref whose Source has a recorded (non-blank) version.
+        # Keep the pairs the Point already carries for refs it still holds —
+        # decided on the EDGE identity, which is the only authoritative
+        # statement that the ref is still held (#3263) — and re-key each to the
+        # spelling this payload's ref list actually uses, so the pair keys stay
+        # a SUBSET of its own ``extractedFrom`` refs (the byte-wise selector
+        # above drops any pair that is not). In the ordinary case the two
+        # spellings are the same string and this is a no-op. Add one pair per
+        # new ref whose Source has a recorded (non-blank) version.
         prior = existing.get("sourceVersionTransit")
+        _edge_urls = set(present)
         pairs: list[list[str]] = []
         if isinstance(prior, list):
             for pair in prior:
                 if (isinstance(pair, (list, tuple)) and len(pair) == 2
                         and isinstance(pair[0], str)
-                        and isinstance(pair[1], str) and pair[1].strip()
-                        and pair[0] in accumulated):
-                    pairs.append([pair[0], pair[1]])
+                        and isinstance(pair[1], str) and pair[1].strip()):
+                    _key = resolve_source_key(proj.g, pair[0])
+                    if _key in _edge_urls:
+                        pairs.append([_spelling[_key], pair[1]])
+        # Raw-vs-raw, and correctly so: `_seen` and `new_pairs` are both keyed
+        # by the journal-stable RAW ref (`_source_version_transit` over
+        # `resolve_source_versions`), and a retained pair is now keyed by the
+        # ref list's own spelling — the same surface. A new ref cannot collide
+        # with a retained pair on a DIFFERENT spelling either: `missing` is
+        # identity-disjoint from the edges, and the caller already collapsed
+        # identity-duplicates inside it.
         _seen = {pair[0] for pair in pairs}
         new_pairs = _source_version_transit(versions) or []
         pairs.extend([ref, h] for ref, h in new_pairs if ref not in _seen)

@@ -62,6 +62,28 @@ def _sources_of(proj, pid: str) -> set[str]:
     }
 
 
+def _render_row(proj, pid: str) -> dict:
+    """The row the fold writes, as the replay comparison must see it.
+
+    ``extractedFrom`` (the property), ``sourceVersionTransit`` (the carrier,
+    #5256) and every edge's recorded read-version — the three surfaces
+    ``_fold_source_evidence`` touches. Shared so the parity pins cannot drift
+    apart from each other.
+    """
+    props = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.extractedFrom, "
+        "p.sourceVersionTransit", params={"id": pid}).result_set[0]
+    return {
+        "extractedFrom": props[0],
+        "sourceVersionTransit": props[1],
+        "edges(url, sourceVersion)": sorted(
+            (r[0], r[1]) for r in proj.g.query(
+                "MATCH (p:Point {id:$id})-[r:extractedFrom]->(s:Source) "
+                "RETURN s.url, r.sourceVersion",
+                params={"id": pid}).result_set),
+    }
+
+
 # ── control: the explicit path (unchanged) ────────────────────────────────
 
 
@@ -358,27 +380,13 @@ def test_the_fold_replays_field_by_field(prov):
     assert _sources_of(proj, pid) == {one, two}, \
         "guard: the second write must be a fold, not a second Point"
 
-    def _row(projection) -> dict:
-        props = projection.g.query(
-            "MATCH (p:Point {id:$id}) RETURN p.extractedFrom, "
-            "p.sourceVersionTransit", params={"id": pid}).result_set[0]
-        return {
-            "extractedFrom": props[0],
-            "sourceVersionTransit": props[1],
-            "edges(url, sourceVersion)": sorted(
-                (r[0], r[1]) for r in projection.g.query(
-                    "MATCH (p:Point {id:$id})-[r:extractedFrom]->(s:Source) "
-                    "RETURN s.url, r.sourceVersion",
-                    params={"id": pid}).result_set),
-        }
-
-    live = _row(proj)
+    live = _render_row(proj, pid)
     assert live["sourceVersionTransit"] == [[one, "hash-one"],
                                             [two, "hash-two"]], live
     proj.rebuild_all(str(events), confirm_destructive=True)
-    assert _row(proj) == live, (
+    assert _render_row(proj, pid) == live, (
         "the journal does not reproduce the row live wrote — replay(journal) "
-        f"!= live: live={live!r} replayed={_row(proj)!r}")
+        f"!= live: live={live!r} replayed={_render_row(proj, pid)!r}")
 
 
 def test_a_url_variant_of_a_held_ref_is_not_refolded(prov):
@@ -429,6 +437,137 @@ def test_a_url_variant_of_a_held_ref_is_not_refolded(prov):
     assert proj.g.query(
         "MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1, \
         "a URL variant minted a second :Source"
+
+
+def test_a_fold_keeps_the_carrier_of_a_variant_spelled_held_ref(prov):
+    """A held ref carried under a VARIANT spelling keeps its recorded read-version.
+
+    The carrier is keyed by the RAW ``extractedFrom`` spelling (journal-stable —
+    ``resolve_source_versions``) while ``present`` holds the edges' RESOLVED
+    ``s.url``; the caller supplies a variant and the ``:Source`` is registered
+    under the clean spelling, which is the ordinary connector shape. Deciding
+    "the Point still holds this ref" on the RAW key therefore retains the pair
+    only when the two spellings are byte-IDENTICAL, and every other variant
+    silently drops a read-version the docstring of ``_fold_source_evidence``
+    promises is "merged, never rebuilt".
+
+    Frozen before (#7704 review P1, one line below its own fix): the fold's
+    carrier came back ``[[two, hash-two]]`` — ``hash-one`` gone from both the
+    live row and the replayed one, so the two agreed and no gate reported it.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    clean = "https://example.com/one"
+    raw = clean + "?utm_source=x"          # the connector's spelling
+    second = "https://example.com/two"
+    _seed_hashed_source(sdk, clean, "hash-one")
+    _seed_hashed_source(sdk, second, "hash-two")
+
+    content = "a variant-spelled held ref keeps its read-version"
+    pid = sdk.create_point("statement", content, extractedFrom=raw,
+                           dedup=True)["id"]
+    assert _render_row(proj, pid)["sourceVersionTransit"] == [
+        [raw, "hash-one"]], "guard: the create must record the held pair"
+
+    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    assert _sources_of(proj, pid) == {clean, second}, \
+        "guard: the second write must be a fold, not a second Point"
+
+    assert _prop_refs(proj, pid) == [raw, second], (
+        "the fold REWROTE the caller's provenance spelling into the "
+        f"resolver's — the node owns that spelling: {_prop_refs(proj, pid)!r}")
+    live = _render_row(proj, pid)
+    assert live["sourceVersionTransit"] == [[raw, "hash-one"],
+                                            [second, "hash-two"]], (
+        "the fold DROPPED the recorded read-version of a ref the Point still "
+        f"holds — merged, never rebuilt: {live['sourceVersionTransit']!r}")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "the journal does not reproduce the row live wrote — replay(journal) "
+        f"!= live: live={live!r} replayed={_render_row(proj, pid)!r}")
+
+
+def test_a_fold_keeps_the_carrier_when_the_nodes_spelling_was_changed(prov):
+    """Held-ness is decided on the EDGE identity, not on the spelling.
+
+    The shape that separates the two: the node's ``extractedFrom`` spelling is
+    moved to another variant of the SAME Source before the fold (an
+    ``update_point`` writes the prop; the edges still address the one
+    ``:Source``). A retention test written against the spelling drops the held
+    pair here — swallowing a recorded read-version for a ref the Point still
+    holds — while an identity test keeps it, and the pair is re-keyed to the
+    spelling this payload's ref list uses so the replay-side byte-wise selector
+    (`_point_source_transit`) still matches it.
+
+    Frozen before (#7704 review P1): the pair was dropped and only the new
+    ref's read-version survived.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    clean = "https://example.com/one"
+    raw = clean + "?utm_source=x"
+    moved = "https://EXAMPLE.com/one/"      # same identity, other spelling
+    second = "https://example.com/two"
+    _seed_hashed_source(sdk, clean, "hash-one")
+    _seed_hashed_source(sdk, second, "hash-two")
+
+    content = "a held ref survives a moved spelling"
+    pid = sdk.create_point("statement", content, extractedFrom=raw,
+                           dedup=True)["id"]
+    sdk.update_point(pid, extractedFrom=moved)
+    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    assert _sources_of(proj, pid) == {clean, second}, \
+        "guard: the second write must be a fold, not a second Point"
+
+    live = _render_row(proj, pid)
+    assert live["sourceVersionTransit"] == [[moved, "hash-one"],
+                                            [second, "hash-two"]], (
+        "the fold dropped the read-version of a ref the Point still holds, "
+        "because the two spellings differ — held-ness is an IDENTITY:"
+        f" {live['sourceVersionTransit']!r}")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "a carrier key no longer named by the payload's own refs is dropped "
+        "on replay — replay(journal) != live: "
+        f"live={live!r} replayed={_render_row(proj, pid)!r}")
+
+
+def test_a_fold_with_an_unhashed_ref_does_not_remove_the_carrier(prov):
+    """Live == replay when the NEW ref records no hash at all — the loud arm.
+
+    ``_source_version_transit`` omits a ref with no recorded hash (honest-absent),
+    so if the held pairs were dropped too, ``pairs`` is empty and the live write
+    ``SET … = NULL`` REMOVES ``sourceVersionTransit`` — while the journal record
+    omits the key (an omitted property is RETAINED on replay: the pass-1 writer
+    only sets the keys its payload carries) and the rebuild KEEPS the pair the
+    create record installed. Live ≠ ``replay(journal)`` on the one prop this fold
+    exists to journal, and ``check_consistency`` cannot see it.
+
+    Frozen before (#7704 review P1): live ``None``, replayed
+    ``[[raw, hash-one]]``.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    clean = "https://example.com/one"
+    raw = clean + "?utm_source=x"
+    _seed_hashed_source(sdk, clean, "hash-one")
+
+    content = "an unhashed new ref must not remove the carrier"
+    pid = sdk.create_point("statement", content, extractedFrom=raw,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, session_id="sess-nohash",
+                     dedup=True)
+    assert _sources_of(proj, pid) == {clean, "session:sess-nohash"}, \
+        "guard: the session ref must fold onto the same Point"
+
+    live = _render_row(proj, pid)
+    assert live["sourceVersionTransit"] == [[raw, "hash-one"]], (
+        "the fold REMOVED the carrier of a Point that still holds the ref — "
+        f"the journal record omits the key, so replay keeps it: {live!r}")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "derived = replay(journal) is FALSE on the fold's own carrier — "
+        f"live={live!r} replayed={_render_row(proj, pid)!r}")
 
 
 def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
