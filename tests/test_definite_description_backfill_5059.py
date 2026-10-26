@@ -940,8 +940,13 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
     one clause (most plausibly the never-delete one, which reads as
     inconvenient next to a "clean up the graph" ask) merging green because
     the module-level guards never re-read the passage (#4309 silent-drop
-    class). Non-vacuous by construction: every assertion names the exact
-    phrase the decision paragraph carries.
+    class). Non-vacuous by construction: **every assertion reads the DECISION
+    PARAGRAPH itself**, never the enclosing subsection, because two of the four
+    clauses ("reversal is a journaled status write back", "it authorises
+    nothing") already exist in the prose ABOVE it — a section-wide assertion
+    stays green after the clause is deleted from the decision, which is the
+    false-PASS this test exists to forbid (measured: the softened paragraph
+    kept the section-wide form green).
     """
     section = _g5_destructive_half()
     assert "The design decision" in section, (
@@ -949,24 +954,73 @@ def test_the_design_decision_is_recorded_add_only_never_delete():
         "subsection — G5's destructive half again reads as an open question "
         "(#5333)."
     )
-    lowered = section.lower()
-    assert "no pass may remove" in lowered, (
-        "the add-only clause is gone: after COMMIT no pass may remove, "
-        "archive or withdraw a committed row (#5333)."
+    # THE SCOPE: the decision paragraph and nothing else. It is one blank-line
+    # separated paragraph, so it ends at the next newline.
+    start = section.index("**The design decision")
+    end = section.find("\n", start)
+    decision = (section[start:] if end == -1 else section[start:end]).lower()
+    assert "no pass may remove" in decision, (
+        "the add-only clause is gone: after COMMIT no pass may remove a "
+        "committed row from the graph, archive it as a storage action, or "
+        "withdraw it from recall except through the journaled fold (#5333)."
     )
-    assert "only deletion trigger is gdpr / retention" in lowered, (
+    assert "only deletion trigger is gdpr / retention" in decision, (
         "the never-delete rule is gone or softened — nothing is ever deleted "
         "on supersession; the only deletion trigger is GDPR / retention "
         "(§2.4 row 3, #5333)."
     )
-    assert "reconstruction source" in lowered and "reversal is a journaled status write back" in lowered, (
+    assert "reconstruction source" in decision, (
         "the reconstruction invariant is gone — the fold's event stream is "
-        "the reconstruction source, and reversal must stay a journaled "
-        "status write back (#5333)."
+        "the reconstruction source (#5333)."
     )
-    assert "authorises nothing" in lowered and "task 1" in lowered, (
+    assert "reversal is a journaled status write back" in decision, (
+        "the reconstruction invariant is gone — reversal must stay a "
+        "journaled status write back (#5333)."
+    )
+    assert "authorises nothing" in decision and "task 1" in decision, (
         "the decision paragraph must keep stating that it AUTHORISES "
         "NOTHING and that the authorisation (task 1) remains the owner's — "
         "a recorded design answer is not a licence to build the pass "
         "(#5333)."
+    )
+    assert "only permitted form of removal-from-recall" in decision, (
+        "the permitted form must be named in the SAME paragraph as the "
+        "prohibition — 'no pass may remove, archive or withdraw' without it "
+        "reads as forbidding the journaled `restatus`→`archived` fold that "
+        "the paragraph itself records as the target (a lane implementing the "
+        "guard cannot tell prohibition from permitted form) (#5333)."
+    )
+    # The two capstone figures may not stand uncited: they have no committed
+    # artifact behind them, so the paragraph must name their record.
+    assert "#7949" in decision and "#9889" in decision, (
+        "the two capstone figures (0 of 34 bare-definite drops; share 0.54) "
+        "lost their provenance — they are auditable only in the #7949 "
+        "capstone pass recorded on #5333, whose probe #9889 has yet to land, "
+        "so a reader cannot re-derive them from the tree (#5333)."
+    )
+    # The gaps table is the section's index of what is still open; it may not
+    # report the design question open after the decision answered it. (The
+    # table sits ABOVE the `#### G5's destructive half` heading, so it is read
+    # from the document — a subsection-scoped assertion could not see it.)
+    doc_text = (
+        ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
+    ).read_text(encoding="utf-8")
+    g5_rows = [
+        line for line in doc_text.splitlines()
+        if line.startswith("| **G5** → `#5333`")
+    ]
+    assert len(g5_rows) == 1, (
+        "§4.3's gaps table no longer carries exactly one G5 row "
+        f"({len(g5_rows)} found) — the reader's index of what is still open "
+        "in G5 is gone (#5333)."
+    )
+    g5_row = g5_rows[0].lower()
+    assert "no decision on the ~4,900" not in g5_row, (
+        "the §4.3 gaps table still reports 'no decision on the ~4,900 "
+        "`the <X>` Objects' — the decision is recorded below it, so the row "
+        "must narrow the open item to the AUTHORISATION (task 1) (#5333)."
+    )
+    assert "no decision authorising a relocation pass" in g5_row, (
+        "the §4.3 gaps table no longer states what IS still open — a "
+        "relocation pass has no authorising decision (task 1, #5333)."
     )
