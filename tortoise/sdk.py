@@ -4575,6 +4575,35 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #10017 R2 (review P1-2): `cache_tier` is the record's PLACEMENT
+    # declaration — the row's own statement of which store it is for — and a
+    # tenant write must never carry PLACEMENT AUTHORITY. Measured on this
+    # branch's head BEFORE this guard, through the public SDK:
+    #
+    #     create_point("statement", "...", cache_tier="record_only")
+    #       -> node property `cache_tier='record_only'` AND the record plan
+    #          writes `public.point.cache_tier` from the same snapshot;
+    #     update_point(pid, cache_tier="graph")   -> node flips back to `graph`.
+    #
+    # i.e. a public write could hide a real claim from `read_record_view` and
+    # so from every `rebuild_from_record` — a graph point made silently
+    # disappear from a restore, which is the exact class #10017 exists to
+    # close. The record's own strip set (`record_projection._RECORD_ONLY_KEYS`)
+    # closes the payload half and the fold's skip set
+    # (`projection/entities.py::_META_KEYS`) closes the graph half; this is the
+    # INTAKE half, so the caller is TOLD no rather than silently having the key
+    # dropped (a strip would let a caller believe the placement took).
+    #
+    # Hard-reject, not strip-and-ignore: there is no legitimate caller intent —
+    # the tier is written by the record's own producers (`TurnRecorded` via
+    # `_declared_mutations`, the R1 delete demote via
+    # `record_projection._tier_demote_statement`), never by a props bag.
+    if "cache_tier" in props:
+        raise ValueError(
+            "'cache_tier' is the record's placement declaration, not a "
+            "writable property: a caller prop cannot move a row between the "
+            "graph and the record (#10017 R2)."
+        )
     # #3947 review (security): `contains_session` is an ENVELOPE-level capture
     # directive (it drives the `(:Session)-[:CONTAINS]->(:Point)` rebuild fold),
     # never a Point property. Reject it here as the fail-closed boundary: a

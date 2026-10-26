@@ -1374,19 +1374,23 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # cache is the projection). `test_record_projection`'s storable-primary leg
     # is what keeps that distinction honest.
     "agent_id",
-    # ⛔ `cache_tier` is DELIBERATELY NOT here (#10017 R2), and the entry that
-    # once listed it was removed for a measured reason. This set is stripped
-    # BEFORE `_split_properties` sees a key, so listing the tier dropped it
-    # ahead of the COLUMN split: `public.point.cache_tier` then kept its
-    # `DEFAULT 'graph'` on every replayed turn row, `read_record_view` kept
-    # selecting it, and `rebuild_from_record` re-created the very turn nodes the
-    # tier exists to keep out of the graph — the resurrection, restored by the
-    # guard meant to prevent it. The tier must reach its COLUMN.
-    #
-    # The intent behind that entry is served where it belongs, by the schema:
-    # the migration refuses `cache_tier` as a `props` key
-    # (`chk_point_props_no_derived`), so `cache_projection._props_from_row` drops
-    # it by name and a node can never carry it as a property.
+    # #10017 R2: a PLACEMENT declaration, not a derived value.
+    # ⛔ This is the RECORD's strip set, and deleting it as "redundant now that
+    # the column exists and the schema refuses it" would be a silent data
+    # disaster: `_split_properties` checks `column in cols` BEFORE `refused`, so
+    # a payload `cache_tier` is written to the COLUMN — the refusal cannot catch
+    # it. Without this entry any `PointAdded` could set
+    # `cache_tier='record_only'` and hide a real graph point from the cache.
+    # The GRAPH half is `projection/entities.py::_META_KEYS` (the `agent_id`
+    # precedent — the record strip alone was never sufficient for that key).
+    # ⛔ And because this strips it, the tier can NOT be set through an event
+    # payload: it is dropped before the insert, so the row lands the DEFAULT
+    # `graph` and the turn would be materialised again. Step 7 must write it as
+    # its own column statement — `_node_snapshot_statements` below writes
+    # `TURN_RECORD_TYPE`'s tier straight to the COLUMN for exactly this
+    # reason (`_declared_mutations`), and REFUSES a carrier that does not
+    # declare it.
+    "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -2314,7 +2318,13 @@ def _op_dispatch_statements(
         col_values, tail = _split_properties(
             table, dict(state),
             columns=columns, refused=refused,
-            drop=dispatch.never_store.get(table, frozenset()),
+            # #10017 R2: `cache_tier` is a placement declaration, so the
+            # `EntityMutated` path must drop it too. Without it a `state` map
+            # carrying the tier writes `object.props`/`subject.props`, and a
+            # record-sourced rebuild sets it on the node while the journal
+            # replay strips it (`_META_KEYS`) — the two rebuild routes diverging
+            # on a property, which is the class this change exists to close.
+            drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]
@@ -3511,6 +3521,36 @@ def _declared_mutations(
         if (node.table == "source"
                 and "canonical_url" in columns.get("source", frozenset())):
             col_values.setdefault("canonical_url", _normalize_source_url(key))
+        # #10017 R2 — THE TIER IS A COLUMN WRITE, AND ONLY THE CARRIER MAKES IT.
+        #
+        # `_RECORD_ONLY_KEYS` strips `cache_tier` from every payload BEFORE
+        # `_split_properties` sees it — that strip is what stops a `PointAdded`
+        # carrying the key from flipping a REAL graph point to record-only and
+        # hiding it from every `rebuild_from_record` — so the carrier's tier
+        # never arrives through the generic path above. It is applied here, from
+        # the record's own declaration, and it is REQUIRED: a `TurnRecorded`
+        # that omitted it would land `public.point.cache_tier`'s DEFAULT
+        # `'graph'`, the cache projection would keep projecting the row, and the
+        # record route would re-create exactly the turn node the carrier exists
+        # to keep out of the graph (#10067). Refusing beats a silent default —
+        # the two rebuild routes must agree, and this is the statement that
+        # makes them.
+        if record_type == TURN_RECORD_TYPE:
+            if node.table != "point":
+                raise RecordProjectionError(
+                    f"{TURN_RECORD_TYPE!r} declares the tier column, which "
+                    f"exists only on `public.point`; this mutation targets "
+                    f"{node.table!r}")
+            tier = (snapshot.get("cache_tier")
+                    if isinstance(snapshot, Mapping) else None)
+            if tier != RECORD_ONLY_TIER:
+                raise RecordProjectionError(
+                    f"{TURN_RECORD_TYPE!r} must declare the row's tier: the "
+                    f"snapshot carries cache_tier={tier!r}, expected "
+                    f"{RECORD_ONLY_TIER!r}. Without it the row lands the "
+                    "'graph' DEFAULT and a record-sourced rebuild re-creates "
+                    "the turn node this carrier is the record of (#10067)")
+            col_values["cache_tier"] = RECORD_ONLY_TIER
         return [
             _identity_statement(org_id, graph_id, node, resolved_key),
             _upsert_statement(org_id, graph_id, node, resolved_key, col_values,

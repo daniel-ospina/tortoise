@@ -1636,6 +1636,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # no guard running on the edit. The #1349/#3332/#3616 silent-drop
              # class. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             # ⚠️ It is ALSO the one file that can silently SHRINK `point`'s
+             # refusal set (the SQL DROP+ADD REPLACES while
+             # `refused_props_names()` UNIONS), so this entry must run
+             # `test_record_projection.py` / `test_cache_projection.py` /
+             # `test_10017_cache_tier.py`, not merely a `core` registration
+             # (#1349/#3332/#3616).
              "supabase/migrations/20261029000001_record_point_cache_tier.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The

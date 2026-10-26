@@ -2651,6 +2651,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # Measured on the pre-fix head: `_sel([<this path>])` -> surfaces=[],
         # full=False, so editing the very file the pin parses ran no guard.
         "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
+        # #10017 R2: the FORWARD migration that re-declares
+        # `chk_point_props_no_derived` to refuse `cache_tier` — and the one file
+        # that can silently SHRINK `point`'s refusal set, because the SQL CHECK
+        # REPLACES while `refused_props_names()` UNIONS (so the parser keeps
+        # reporting every name refused after the database stopped refusing it).
+        "supabase/migrations/20261029000001_record_point_cache_tier.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:

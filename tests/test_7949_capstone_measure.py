@@ -855,7 +855,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8843-8847) and `result["classify_later"]` (:8833-8839). The
-    drop is the meta fold at `tortoise/sdk.py:13247` — **re-derived from the tree at
+    drop is the meta fold at `tortoise/sdk.py:13276` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
@@ -1197,7 +1197,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13247`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
+# `tortoise/sdk.py:13276`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8843-8847``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1427,7 +1427,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `00_index.md`'s fold cite back to `12401` reds it). The RED COUNT is a
     property of the base, not of the rule set, so it is stamped with the commit it
     was measured at rather than asserted about `main`: 17 of the 44 cites red
-    across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
+    across three rules at `0c7062af1` (`sdk.py:12708` for the meta fold, `12960`
     for the call that writes the references edge, `11851` for the entry point — a
     supersession comment, an ORDER comment and a counters line instead of the
     symbols), and 26 of the 44 red at `f86ae965b` (`52e2be157^`), the base #9850
@@ -1443,7 +1443,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     round quoted an older read of `7913`, which the extractor's own growth had
     since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13247` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:13276` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
