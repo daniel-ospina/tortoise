@@ -3469,11 +3469,19 @@ def _record_run_abort(path: str | None, *, marker: str, detail: dict,
                       outcomes: list[dict], failures: list[dict],
                       fingerprint: dict | None = None, run_key: str | None = None,
                       surface: str | None = None, retriever: str | None = None,
-                      model: str | None = None, prompt: str | None = None) -> None:
+                      model: str | None = None, prompt: str | None = None,
+                      usage_overhead: dict | None = None) -> None:
     """Best-effort persist of a run-level abort marker (``degraded_aborted``
     or ``checkpoint_abort``) onto the checkpoint so a resume refuses it —
     atomic WITH the final checkpoint write (plan P1-7: no persist-race
-    window where gate-green outcomes resume into a 'clean' continuation)."""
+    window where gate-green outcomes resume into a 'clean' continuation).
+
+    ``usage_overhead`` (#8486 F1) carries spend the aborted process already
+    PAID that never reached an outcome — the in-flight question's rows. The
+    ``sweep_to_overhead()``/``drain_overhead()`` pair at the end of
+    ``run_evaluation`` is UNREACHABLE on this path (the handler re-raises), so
+    without it the crossing question's burn dies with the process and the
+    resumed ceiling under-counts it."""
     if not path:
         return
     p = Path(path)
@@ -3489,6 +3497,10 @@ def _record_run_abort(path: str | None, *, marker: str, detail: dict,
             data[marker] = {**detail, "utc": _utc_now().isoformat()}
             data["outcomes"] = outcomes
             data["failures"] = failures
+            # #8486 F1: only when there is something to carry — an empty sweep
+            # never clobbers the payload a previous per-question save wrote.
+            if usage_overhead:
+                data["usage_overhead"] = usage_overhead
             if fingerprint is not None:
                 data["fingerprint"] = fingerprint
             _write_json_atomic(p, data)
@@ -5512,11 +5524,38 @@ def run_evaluation(
                   f"ceiling (--hard-stop-usd N) and re-run the SAME command "
                   f"to resume, or disarm with --hard-stop-usd 0.",
                   file=sys.stderr)
+        # #8486 F1 (review finding 2): the question that CROSSED the ceiling
+        # has already spent. The guard is a PRE-call check, so the ordinary
+        # crossing sequence is "reader returns and its rows are recorded, then
+        # the JUDGE's pre-call check trips" — leaving that question's rows in
+        # the collector's per-qid ``_rows``. The ``sweep_to_overhead()`` /
+        # ``drain_overhead()`` pair at the end of ``run_evaluation`` is
+        # UNREACHABLE here (this handler re-raises), so without this sweep the
+        # burn dies with the process and the resumed run's ceiling under-counts
+        # it — on a $10 ceiling over a ~40 h 500-Q run, repeated on every
+        # resume. Swept for EVERY abort marker, not just the spend stop: the
+        # same rows are lost on a watchdog / provider-fatal abort, and the
+        # module's guarantee ("a resumed run cannot reset its own ceiling by
+        # restarting the process") must not depend on WHICH abort fired.
+        _abort_overhead: dict | None = None
+        try:
+            _collector = lme_usage.get_collector()
+            _collector.sweep_to_overhead()
+            # ``overhead_payload`` (per-qid), NOT ``drain_overhead`` (the
+            # merged ``by_stage`` envelope the REPORT consumes): the checkpoint
+            # field is re-read on resume by ``merge_overhead_payload`` and
+            # ``spend_guard.seed_payload``, both of which take the per-qid
+            # shape. ``checkpoint_form`` spells the keyless sentinel the way
+            # the loader expects.
+            _abort_overhead = _collector.overhead_payload(checkpoint_form=True)
+        except Exception:  # noqa: BLE001, RUF100
+            _abort_overhead = None
         _record_run_abort(
             checkpoint, marker=_marker, detail=_detail,
             outcomes=list(done.values()), failures=failures,
             fingerprint=fingerprint, run_key=run_key, surface=surface,
-            retriever=retriever, model=model, prompt=query_prompt)
+            retriever=retriever, model=model, prompt=query_prompt,
+            usage_overhead=_abort_overhead)
         raise
     finally:
         if _load_workers is not None:

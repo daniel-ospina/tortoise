@@ -112,8 +112,11 @@ continues — one transient error never aborts the 500-Q run),
 (R1/R1C knobs — env-first, CLI overrides, all validated ≥ 1; the C2 boost
 is OFF by default in code, ON only for the re-validation run),
 `--retrieval-only` (retrieval WITHOUT reader/judge: `accuracy: n/a
-(retrieval-only)`, the official `recall_all@5` surface; needs **no provider
-key** since #8486 F3 — it makes no LLM call),
+(retrieval-only)`, the official `recall_all@5` surface; needs **no
+reader/judge provider key** since #8486 F3 — those calls are not made. It is
+NOT a blanket "no credential" flag: with `--ingest-mode v2` the run still pays
+for extraction, so the extractor key IS still required and IS still
+pre-flighted),
 `--hard-stop-usd USD` (#8486 F1 — see the section below),
 `--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
 #1747 census-class-aware: override the `integrity.valid` RATE criterion —

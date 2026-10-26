@@ -6874,6 +6874,49 @@ def test_hard_stop_reads_actual_spend_not_the_meter():
     spend_guard.reset()
 
 
+def _overhead_lane(qid: str) -> dict:
+    """One failed/aborted question's rows, in the checkpoint's
+    ``usage_overhead`` per-qid shape (``overhead_payload``)."""
+    return {qid: {"reader": {"deepseek": {"deepseek-flash": {
+        "prompt_tokens": 437_253, "completion_tokens": 2_330,
+        "prompt_cache_hit_tokens": 60_928,
+        "prompt_cache_miss_tokens": 376_325,
+        "total_tokens": 439_583, "calls": 1, "usage_present": True}}}}}
+
+
+def test_seed_payload_sums_every_qid_on_the_same_lane():
+    """#8486 F1 (review finding 1). Every failed or aborted question's rows go
+    to the SAME ``(stage, provider, model)`` lane, so the resume seed must SUM
+    across qids.
+
+    RED before the fix: ``seed_payload`` ASSIGNED into the merged envelope
+    (``[model] = bucket``), so a two-qid payload kept only the last qid's
+    bucket. The resumed ceiling then started below the money the abandoned
+    process had already spent, and the run could overspend the pre-registered
+    ceiling by exactly that shortfall — the ceiling reset that the resume
+    accounting exists to prevent."""
+    spend_guard.reset()
+    try:
+        spend_guard.seed_payload(_overhead_lane("q1"))
+        one_qid, priced, _ = spend_guard.spend()
+        assert priced is True
+        assert one_qid > 0
+
+        spend_guard.reset()
+        two = _overhead_lane("q1")
+        two.update(_overhead_lane("q2"))
+        spend_guard.seed_payload(two)
+        two_qids, priced, _ = spend_guard.spend()
+        assert priced is True
+
+        # two questions on one lane cost twice one question — the assertion
+        # that fails when the seed keeps only the last bucket. Tolerance covers
+        # the pricing reader's 6-dp rounding (0.0535085 × 2 → 0.107017).
+        assert two_qids == pytest.approx(one_qid * 2, abs=1e-5)
+    finally:
+        spend_guard.reset()
+
+
 def test_unpriced_lane_refuses_under_a_ceiling_never_meters_zero():
     """#8486 F1, the residual: a model with no ``PRICING_MAP`` entry is
     UNKNOWN spend, not free. Under an armed ceiling it must refuse.
@@ -6970,3 +7013,58 @@ def test_hard_stop_aborts_before_the_call_and_leaves_a_resumable_artifact(
     assert report["hard_stop"]["ceiling_usd"] == 5.0
     assert report["hard_stop"]["spend_usd"] > 0.10
     assert "spend_hard_stop" not in json.loads(cp.read_text(encoding="utf-8"))
+
+
+def test_hard_stop_abort_keeps_the_in_flight_questions_spend(
+        monkeypatch, tmp_path):
+    """#8486 F1 (review finding 2). The guard is a PRE-call check, so the
+    ordinary crossing sequence is "the reader returns and its rows are
+    recorded, THEN the judge's pre-call check trips". That question never
+    completes, so its burn reaches no outcome — and the abort handler re-raises
+    past the ``sweep_to_overhead()``/``drain_overhead()`` pair at the end of
+    ``run_evaluation``.
+
+    RED before the fix: the crossing question's rows stayed in the collector's
+    per-qid ``_rows`` and died with the process, so the resume seeded a ceiling
+    that under-counted the single largest item — on the pre-registered $10
+    ceiling over a ~40 h 500-Q run, repeated on every resume."""
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None:
+                                     _FakeEmbedder384()))
+    monkeypatch.setattr(run_mod, "build_reader",
+                        lambda *a, **kw: _SpendingReader())
+    monkeypatch.setattr(run_mod, "build_judge", lambda *a, **kw: MockJudge())
+    cp = tmp_path / "state.json"
+    out = tmp_path / "report.json"
+
+    with pytest.raises(SystemExit) as ei:
+        run_mod.run_main(["--data", str(MINI), "--limit", "2", "--split", "s",
+                          "--skip-preflight", "--checkpoint", str(cp),
+                          "--output", str(out), "--hard-stop-usd", "0.06"])
+    assert ei.value.code == run_mod.HARD_STOP_EXIT
+
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    # question 1 completed and its spend lives on its outcome ...
+    assert [o["question_id"] for o in saved["outcomes"]] == ["mini_ie_user_001"]
+    # ... while the crossing question did NOT complete, so the reader burn it
+    # already paid must ride ``usage_overhead`` or it is lost outright.
+    payload = saved.get("usage_overhead") or {}
+    assert "mini_msr_002" in payload, sorted(payload)
+    bucket = payload["mini_msr_002"]["reader"]["deepseek"][
+        "deepseek-flash"]
+    # the exact burn _SpendingReader recorded before the judge check tripped
+    assert bucket["prompt_tokens"] == 400_000
+    assert bucket["completion_tokens"] == 2_000
+
+    # and it is genuinely ADDITIVE on resume: the resumed run's ceiling sees
+    # question 1's outcome spend AND the crossing question's overhead rows
+    out2 = tmp_path / "report2.json"
+    report = run_mod.run_main(["--data", str(MINI), "--limit", "2",
+                               "--split", "s", "--skip-preflight",
+                               "--checkpoint", str(cp), "--output", str(out2),
+                               "--hard-stop-usd", "5"])
+    assert report["hard_stop"]["spend_usd"] > 0.10

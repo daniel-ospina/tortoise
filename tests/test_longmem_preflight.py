@@ -177,6 +177,60 @@ def test_preflight_mock_mode_skips():
     assert result["checks"] == []
 
 
+def test_retrieval_only_still_gates_the_extractor_lane(monkeypatch):
+    """#8486 F3 (review finding 3). ``--retrieval-only`` skips the READER and
+    JUDGE checks because neither is called — but extraction is a THIRD, paid
+    lane, gated on ``ingest_mode == "v2"`` alone (never on ``retrieval_only``),
+    and this probe is that lane's only presence/billing gate.
+
+    RED before the fix: ``run_preflight`` returned ``skipped`` BEFORE building
+    any check, so ``--retrieval-only --ingest-mode v2`` with a missing or
+    capped extractor key went from a fast pre-flight failure to a per-question
+    failure after the dataset load and the embedder gate — the precise failure
+    mode D2 exists to prevent."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    extractor = _RecordingExtractor()
+    result = run_preflight(reader=None, judge=None,
+                           extractor_model=extractor, retrieval_only=True)
+    assert result["status"] == "ok"
+    assert result["retrieval_only"] is True
+    assert [c["what"] for c in result["checks"]] == [
+        "extractor-billing-probe"]
+    # the lane really WAS probed — one S1-sized completion through it
+    assert len(extractor.calls) == 1
+    assert extractor.calls[0] == (PROBE_SYSTEM, PROBE_USER)
+
+
+def test_retrieval_only_with_a_failing_extractor_fails_the_gate(monkeypatch):
+    """The gate must still FAIL CLOSED when the extractor lane is unavailable —
+    a probe that runs but cannot fail is not a gate (#8486 F3 review finding 3).
+
+    Same 402 shape as ``test_billing_probe_402_is_fatal``: a capped billing key
+    is the ordinary way this lane goes dark."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class _FatalExtractor(_RecordingExtractor):
+        def complete(self, **kw):
+            raise _http_err(402)
+
+    with pytest.raises(PreflightError) as ei:
+        run_preflight(reader=None, judge=None,
+                      extractor_model=_FatalExtractor(), retrieval_only=True)
+    assert len(ei.value.failures) == 1
+    assert ei.value.failures[0]["status"] == "fatal"
+    assert "extractor-billing-probe" in str(ei.value)
+
+
+def test_retrieval_only_without_an_extractor_is_still_a_noop():
+    """The F3 win is preserved: with deterministic ingest a retrieval-only run
+    makes NO LLM call at all, so there is genuinely nothing to gate and no
+    credential to demand."""
+    result = run_preflight(reader=None, judge=None, retrieval_only=True)
+    assert result["status"] == "skipped"
+    assert result["retrieval_only"] is True
+    assert result["checks"] == []
+
+
 def test_run_main_records_preflight_block(tmp_path, capsys):
     """The pre-flight result rides report['preflight'] (additive kwarg) and
     the summary prints the gate line."""

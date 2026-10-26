@@ -251,8 +251,18 @@ def seed_payload(payload: dict | None) -> None:
     """Seed from a checkpoint's ``usage_overhead`` payload.
 
     Shape: ``{qid_or_marker: {stage: {provider: {model: bucket}}}}`` (the
-    collector's ``overhead_payload`` form) — collapsed into one envelope."""
-    by_stage: dict = {}
+    collector's ``overhead_payload`` form) — folded into one envelope
+    ADDITIVELY, the same semantics as
+    ``UsageCollector.merge_overhead_payload``.
+
+    Summing is not a formatting detail. Every qid that failed or aborted
+    contributes its own rows to the SAME ``(stage, provider, model)`` lane, so
+    collapsing by replacement keeps only the LAST qid's bucket and hands the
+    resumed ceiling a total SHORTER than the money already spent. The run then
+    overspends the ceiling by exactly that shortfall — the ceiling reset the
+    resume accounting exists to prevent.
+    """
+    merged: dict = {}
     for lanes in (payload or {}).values():
         if not isinstance(lanes, dict):
             continue
@@ -263,10 +273,20 @@ def seed_payload(payload: dict | None) -> None:
                 if not isinstance(models, dict):
                     continue
                 for model, bucket in models.items():
-                    if isinstance(bucket, dict):
-                        by_stage.setdefault(stage, {}).setdefault(
-                            provider, {})[model] = bucket
-    seed({"by_stage": by_stage})
+                    if not isinstance(bucket, dict):
+                        continue
+                    tgt = merged.setdefault(stage, {}).setdefault(
+                        provider, {}).setdefault(
+                            model, {k: 0 for k in _BUCKET_KEYS})
+                    for k in _BUCKET_KEYS:
+                        v = bucket.get(k)
+                        if isinstance(v, bool) or not isinstance(v, (int, float)):
+                            continue
+                        tgt[k] = tgt.get(k, 0) + v
+                    tgt["usage_present"] = (
+                        tgt.get("usage_present", True)
+                        and bucket.get("usage_present", True))
+    seed({"by_stage": merged})
 
 
 def _envelope() -> dict:

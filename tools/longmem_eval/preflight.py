@@ -226,19 +226,41 @@ def run_preflight(*, reader: Any, judge: Any, extractor_model: Any = None,
     listing every failure. ``mock=True`` → no-op (the ``--mock`` run has no
     keys and no network).
 
-    #8486 F3: ``retrieval_only=True`` → no-op as well, for the same reason
-    and a sharper one — a retrieval-only run never invokes the reader or the
-    judge, so there is no call to gate and no credential to demand. Gating it
-    on an LLM key made the official ``recall_all@5`` unmeasurable without
-    paying for a call the run does not make.
+    #8486 F3: ``retrieval_only=True`` skips the READER and JUDGE checks — a
+    retrieval-only run invokes neither, so there is no call to gate and no
+    credential to demand. Gating it on a reader/judge key made the official
+    ``recall_all@5`` unmeasurable without paying for a call the run does not
+    make.
+
+    It does NOT skip the EXTRACTOR check. Extraction is a third, separately
+    billed lane and it is gated on ``ingest_mode == "v2"`` ALONE (never on
+    ``retrieval_only``), so ``--retrieval-only --ingest-mode v2`` still pays
+    for it — and this probe is that lane's only presence/billing gate
+    (``_build_cli_extractor_model`` checks no key). Returning early here would
+    move a missing or capped extractor key from a fast pre-flight failure to a
+    per-question failure after the dataset load and the embedder gate, which
+    is the exact failure mode D2 exists to prevent. When the run has no
+    extractor model (deterministic ingest) nothing paid happens at all, and
+    the gate is genuinely a no-op.
     """
     if mock:
         return {"status": "skipped", "mock": True,
                 "checks": [], "detail": "mock mode — no API gate"}
     if retrieval_only:
-        return {"status": "skipped", "mock": False, "retrieval_only": True,
-                "checks": [],
-                "detail": "retrieval-only — no reader/judge call to gate"}
+        if extractor_model is None:
+            return {"status": "skipped", "mock": False,
+                    "retrieval_only": True, "checks": [],
+                    "detail": "retrieval-only — no reader/judge call to gate "
+                              "and no extractor (deterministic ingest)"}
+        checks_ro: list[dict[str, Any]] = [
+            ping_model(extractor_model, what="extractor-billing-probe")]
+        fatal_ro = [c for c in checks_ro if c.get("status") == "fatal"]
+        if fatal_ro:
+            raise PreflightError(checks_ro)
+        return {"status": "ok", "mock": False, "retrieval_only": True,
+                "checks": checks_ro,
+                "detail": "retrieval-only — extractor lane gated; the "
+                          "reader/judge make no call"}
     checks: list[dict[str, Any]] = [check_judge_key(judge)]
     if extractor_model is None:
         checks.append({
