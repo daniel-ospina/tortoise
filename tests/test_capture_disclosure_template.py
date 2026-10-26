@@ -25,8 +25,11 @@ Each test names the mutation that turns it RED.
 from __future__ import annotations
 
 import json
+import os
+import site
 import subprocess
 import sys
+import sysconfig
 import tomllib
 from pathlib import Path
 
@@ -39,6 +42,93 @@ SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
 MIRROR = (REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "skills"
           / "tortoise-onboarding" / "SKILL.md")
 MAIN_JSX = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
+
+
+_STDLIB_TOP_LEVEL = frozenset(sys.stdlib_module_names)
+
+
+def _stdlib_roots() -> frozenset[str]:
+    """The interpreter's OWN stdlib directories — which contain `types.py` by definition.
+
+    Without this the check below would classify the standard library as a shadow of
+    itself and drop it from the child's PYTHONPATH (it did, on the first cut: the only
+    entry filtered on a normal run was `/usr/lib/python3.12`).
+    """
+    roots = set()
+    for key in ("stdlib", "platstdlib"):
+        path = sysconfig.get_path(key)
+        if path:
+            roots.add(os.path.realpath(path))
+    return frozenset(roots)
+
+
+def _shadows_the_stdlib(directory: str) -> bool:
+    """True when `directory` carries a top-level name that SHADOWS a stdlib module.
+
+    A verbatim `sys.path` pass-through is not safe, because at test time `sys.path` also
+    carries roots pytest inserted for COLLECTION rather than for import: a directory that
+    holds test modules but no `__init__.py` (here `tests/eval`, which carries `types.py`)
+    is put on `sys.path` verbatim. THIS process cannot see the damage — `types` is already
+    in `sys.modules`, so nothing re-resolves it — but a fresh interpreter can, and it
+    resolves the shadow *during `site` init* (`site` -> `importlib.util` -> `types`). The
+    child then dies with `ImportError: cannot import name 'MappingProxyType' from
+    partially initialized module 'types'` before running a line of its own code, which is
+    why the failure looks total rather than import-specific.
+
+    Measured 2026-10-26, CI `test (g)`: both `TestCliRender` pins went red on that line,
+    while a single-file run of this module passes — collection of `tests/eval` is what puts
+    the shadow on the path, so the harness was breaking its own children only in the full
+    suite. Such a root is a collection artifact, not a dependency, so it is not exported.
+
+    Only the top level is inspected (a shadow is only reachable at the top level), so this
+    stays one `scandir` per root and never walks a tree. The interpreter's own stdlib dir is
+    exempt: it holds `types.py` because that IS `types`, so exporting it is correct.
+    """
+    if os.path.realpath(directory) in _stdlib_roots():
+        return False
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.endswith(".py"):
+                    name = name[:-3]
+                if name in _STDLIB_TOP_LEVEL:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _exportable_roots() -> list[str]:
+    """This process's import roots, minus any a child interpreter could not survive."""
+    return [p for p in sys.path if p and not _shadows_the_stdlib(p)]
+
+
+def _child_env(**overrides: str) -> dict[str, str]:
+    """A child env that still imports what THIS process imports (#10012).
+
+    `env={"HOME": tmp, "PATH": …}` reads as hermetic and is not: Python resolves its
+    *user* site from HOME, and the `.pth` hooks `pip install -e .` writes into that site
+    are what make `import tortoise` resolve. So on a runner whose install landed in the
+    user site (a shared self-hosted runner whose tool dir the job user cannot write),
+    redirecting HOME uninstalls every package for the child while the same interpreter
+    imports them fine in the parent — the pin then reds on the harness instead of on the
+    behaviour it is about. Measured 2026-10-26: `python -m tortoise` in the child →
+    "No module named 'tortoise'", and the same mechanism cost 12 pins in
+    `tests/test_ci_selection_changed_files_9109.py` (`No module named 'yaml'`).
+
+    The fix is to hand the child the import roots the PARENT already resolved — its
+    `sys.path`, minus any root that would kill a fresh interpreter. That covers
+    site-packages, the user site and every editable install regardless of which of them the
+    install used, so the pin no longer depends on where the runner put the packages. The
+    product's own config isolation is untouched: it reads HOME (`Path.home()`), which still
+    points at the tmp dir. `_shadows_the_stdlib` is the one exclusion, and it is there
+    because the raw list is not a list of *dependencies* — see its docstring for the CI red
+    it caused.
+    """
+    env = dict(overrides)
+    env.setdefault("PYTHONPATH", os.pathsep.join(_exportable_roots()))
+    return env
 
 
 def _static_runs(template: str) -> list[str]:
@@ -422,7 +512,7 @@ class TestCliRender:
         Mutation: gate the subcommand behind the api_key check (the pattern the
         other `session` verbs use) — the CLI then exits 1 instead of printing.
         """
-        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(tmp_path)}
+        env = _child_env(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(tmp_path))
         r = subprocess.run(
             [sys.executable, "-m", "tortoise", "session", "disclosure",
              "--harness", "pi"],
@@ -431,6 +521,84 @@ class TestCliRender:
         assert r.returncode == 0, (r.stdout, r.stderr)
         assert "What is recorded" in r.stdout
         assert "your own Tortoise store" in r.stdout, r.stdout
+
+    def test_the_redirected_home_still_keeps_the_interpreter_s_packages(self, tmp_path):
+        """Instrument check for `_child_env` — the failure that fix removed (#10012).
+
+        Two arms. The FIRST pins the premise: a redirected HOME really does move the
+        user site, so the hazard is real wherever the install landed there. The SECOND
+        pins the remedy through the pin that actually broke: a child with a tmp HOME
+        must still import a dependency of this package (`yaml` is the one CI measured).
+        Delete the pass-through in `_child_env` and the second arm reds on exactly the
+        runner that produced the failure.
+        """
+        home = tmp_path / "empty-home"
+        home.mkdir()
+        moved = subprocess.run(
+            [sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True)
+        assert moved.returncode == 0, moved.stderr
+        assert moved.stdout.strip() != site.getusersitepackages(), (
+            "a redirected HOME no longer moves the interpreter's user site — the hazard "
+            "`_child_env` exists for is gone, so this pin is stale rather than green"
+        )
+
+        env = _child_env(HOME=str(home), PATH="/usr/bin:/bin")
+        assert env["PYTHONPATH"].split(os.pathsep) == _exportable_roots(), (
+            "the child is no longer handed this process's import roots, so any package a "
+            "redirected HOME hides (the user site) is unreachable for it"
+        )
+        r = subprocess.run([sys.executable, "-c", "import yaml"], env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, (
+            f"the child lost a dependency this process imports: {r.stderr}")
+
+    def test_a_root_that_shadows_the_stdlib_is_never_exported(self, tmp_path, monkeypatch):
+        """The other half of `_child_env`: the roots it must NOT hand over (#10012).
+
+        Mutation this pins: export `sys.path` verbatim (the pre-fix `_child_env`). A child
+        given a root carrying `types.py` dies during `site` init — `site` imports
+        `importlib.util`, which imports `types`, and the shadow wins — so it fails before
+        running any of its own code. That is exactly what CI `test (g)` measured: pytest
+        puts `tests/eval` on `sys.path` for collection, `tests/eval/types.py` shadows the
+        stdlib, and both `TestCliRender` pins red only in a full-suite run.
+
+        The second assertion is the one that keeps the remedy honest: a harmless sibling
+        root must STILL be exported, so this is a filter and not a silent emptying of
+        PYTHONPATH (which would re-break the user-site hazard the pass-through exists for).
+        """
+        shadowing = tmp_path / "shadowing"
+        shadowing.mkdir()
+        (shadowing / "types.py").write_text("THIS_SHADOWS_THE_STDLIB = True\n")
+        harmless = tmp_path / "harmless"
+        harmless.mkdir()
+        (harmless / "not_a_stdlib_name.py").write_text("VALUE = 1\n")
+        monkeypatch.setattr(sys, "path", [*sys.path, str(shadowing), str(harmless)])
+
+        env = _child_env(HOME=str(tmp_path))
+        exported = env["PYTHONPATH"].split(os.pathsep)
+        assert str(shadowing) not in exported, (
+            "a stdlib-shadowing root reached the child: it dies in `site` init before "
+            "running a line of its own code, which reads as a product failure"
+        )
+        assert str(harmless) in exported, (
+            "only roots a child cannot survive may be dropped — this one is importable"
+        )
+        # The interpreter's OWN stdlib dir contains `types.py` because it IS `types`. The
+        # first cut of this filter dropped it — the only entry filtered on a normal run was
+        # `/usr/lib/python3.12` — so this arm pins the exemption, not just the filter.
+        stdlib = os.path.realpath(sysconfig.get_path("stdlib"))
+        if stdlib in {os.path.realpath(p) for p in sys.path if p}:
+            assert any(os.path.realpath(p) == stdlib for p in exported), (
+                "the interpreter's own stdlib directory was filtered out — it is not a "
+                "shadow of itself, and a child that loses it is the same total failure"
+            )
+        r = subprocess.run([sys.executable, "-c", "import yaml"], env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, (
+            f"the child cannot start at all with the filtered roots: {r.stderr}")
+
 
     @pytest.mark.parametrize("kind", ["disclosure", "confirmation", "declined"])
     def test_every_branch_kind_renders(self, keyless, capsys, kind):

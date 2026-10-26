@@ -193,7 +193,7 @@ class TestTeamCreateTierLimits:
         assert graphs[0]["kind"] == "default"
         assert graphs[0]["name"] == "default"
         assert graphs[0]["namespace"] == result["graph_name"]
-        assert sdk.graph_count(result["id"]) == 1
+        assert sdk._graph_count(result["id"]) == 1
 
     def test_custom_graph_node(self):
         sdk = sdk_fixture()
@@ -201,7 +201,7 @@ class TestTeamCreateTierLimits:
         g = sdk._graph_create(result["id"], "project-b")
         assert g["kind"] == "custom"
         assert g["namespace"] == f"org_{result['id']}_{g['graph_id']}"
-        assert sdk.graph_count(result["id"]) == 2  # default + custom
+        assert sdk._graph_count(result["id"]) == 2  # default + custom
         # Default graph sorts first
         graphs = sdk.list_memory_graphs(result["id"])
         assert graphs[0]["kind"] == "default"

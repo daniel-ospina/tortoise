@@ -213,7 +213,14 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 # other explanatory line above the first key). The marker's durable homes are the tool
 # docstrings; this is the copy a reader of the ARTIFACT sees, kept across re-cuts.
 MANIFEST_HEADER = (
-    "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).\n"
+    "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.\n"
+    "#\n"
+    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today\n"
+    "# because the required `surface-guard` job compares the live class against them and is run\n"
+    "# from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The\n"
+    "# APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row\n"
+    "# with `approved: false` is migration backlog, not consent. An unapproved addition reds\n"
+    "# `tools/sdk_surface_declaration.py check` and the `approved` flag on a re-cut row.\n"
     "#\n"
     "# The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by\n"
     "# `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.\n"
@@ -1118,6 +1125,26 @@ def build_doc(commit: str | None = None) -> dict:
     public = sorted(
         name for name in dir(TortoiseSDK) if not name.startswith("_") and callable(getattr(TortoiseSDK, name))
     )
+    # #10044: the `sdk:` ROW SET is the frozen baseline of what EXISTS (the `dir()` walk
+    # above), and each row records whether that method is on the owner's approved surface
+    # (`approved`, cut from `tortoise/__all__.py`).
+    #
+    # The row set cannot be the approved 40 yet, and pretending otherwise would be worse
+    # than the gap: `tools/surface-guard.py` — the required gate that compares the live
+    # class against these rows — is restored from the BASE REF in CI
+    # (`.github/workflows/python-ci.yml` → `surface-guard`), so a baseline cut down to the
+    # 40 would red the required job on the 140 live methods that still exist until Phase 2
+    # removes them. So the baseline keeps describing reality, the `approved` flag makes the
+    # gap visible per row, and the honest red lives in `tools/sdk_surface_declaration.py
+    # check` + `tools/surface-target-check.py`. An unreadable declaration is still a REFUSAL:
+    # a baseline cut beside a declaration nobody could read is the "snapshot is not the
+    # target" defect (#4185) one level down.
+    from tools.sdk_surface_declaration import DeclarationUnreadable, load_declaration
+
+    try:
+        approved = set(load_declaration()["__all__"])
+    except DeclarationUnreadable as exc:
+        raise SurfaceEvidenceUnreadable(str(exc)) from exc
     # Retired names are STILL HANDLERS (they are served through the #3883 shim), so
     # they count for the caller scan: a call inside `tortoise_get_point` is a call
     # inside a tool handler, not free-floating code.
@@ -1306,6 +1333,10 @@ def build_doc(commit: str | None = None) -> dict:
             {
                 "name": f"sdk:{name}",
                 "method": name,
+                # ON THE OWNER'S APPROVED SURFACE? Cut from `tortoise/__all__.py`, both
+                # directions checked by `tools/sdk_surface_declaration.py`. `False` is the
+                # migration backlog: it exists today, it is not approved, Phase 2 removes it.
+                "approved": name in approved,
                 "family": None,
                 "family_rank": None,
                 "served": "sdk",
@@ -2174,7 +2205,8 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eleven structural properties, plus a twelfth derived from the code."""
+    """AC13's lint: eleven structural properties, a twelfth derived from the code, and a
+    thirteenth: the DECLARED surface is the approved one (#10034)."""
     try:
         order = load_order()
         doc = _read_manifest()
@@ -2360,6 +2392,49 @@ def cmd_check(args: argparse.Namespace) -> int:
         return _refuse(exc)
     problems.extend(_derivation_problems(doc, derived))
 
+    # 13. the DECLARED surface is the APPROVED one (#10034) ----------------------
+    # `build_doc` above proves the baseline was cut from a declaration that agrees with the
+    # class. It does not prove the declaration is the OWNER'S list: a re-cut over a grown
+    # or re-derived declaration would reproduce it faithfully. That check lives in
+    # `tools/sdk_surface_declaration.py`, and it is run HERE — from the required
+    # `python-ci.yml::surface-guard` step that already runs this lint — rather than from a
+    # new workflow step, so the gate is enforced by the existing required job. (A separate
+    # step was the first draft; it needs the `workflow` scope on the pushing credential,
+    # and the enforcement does not.)
+    #
+    # ⚠️ THE RESIDUAL BYPASS, STATED: this half runs from the PR's OWN copy of this file. Only
+    # `tools/surface-guard.py` is restored from the base ref by CI (pinning this file too was a
+    # deadlock — see the workflow comment), so a PR that edits `tools/surface_manifest.py` can
+    # drop or neuter this call in the same commit. The pinned expansion gate still catches a new
+    # public SDK method; it cannot see a re-cut approved LIST. That gap is why the declaration
+    # half is also asserted by tests on every code change (#10044).
+
+    # The CONTRACT half runs here, in the required `surface-guard` job: the declaration must
+    # still be the owner's exact 40, in both directions. The GAP half (140 live methods off
+    # the surface + 30 approved but unimplemented, today) is deliberately NOT a required-CI
+    # failure — a permanently red required job is a permanently ignored one, and the gap is
+    # already red in `tools/sdk_surface_declaration.py check` and in
+    # `tools/surface-target-check.py`. It is PRINTED here so a green job cannot be read as
+    # "on target" (#10044).
+    from tools import sdk_surface_declaration as declaration_gate
+
+    try:
+        problems.extend(declaration_gate.check(contract_only=True))
+        # The gap document is a TRACKING artifact, so staleness IS a required-CI failure: a
+        # surface change that does not re-render it would leave the gap understated.
+        problems.extend(declaration_gate.baseline_problem())
+        _declared = declaration_gate.load_declaration()["__all__"]
+        _live = declaration_gate.measure_live()
+    except declaration_gate.DeclarationUnreadable as exc:
+        return _refuse(SurfaceEvidenceUnreadable(str(exc)))
+    print(
+        f"GAP (expected until #4282 Phase 2) — {len(_live - set(_declared))} live method(s) "
+        f"off the approved surface, "
+        f"{len([n for n in _declared if not declaration_gate.resolves(n, _live)])} approved "
+        f"method(s) not implemented; target {len(_declared)}. Full red: "
+        "`uv run python tools/sdk_surface_declaration.py check`."
+    )
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
@@ -2367,7 +2442,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
-        "twelve properties hold (eleven structural, one derived-from-code)"
+        "thirteen properties hold (eleven structural, one derived-from-code, one declared-vs-approved)"
     )
     return 0
 

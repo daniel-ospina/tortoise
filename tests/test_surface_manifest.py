@@ -475,7 +475,7 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
     claim it: `dependency` is a DERIVED column, so that edit reds
     `tools/surface_manifest.py check` — measured, exit 1, "row `sdk:supersede_point` was
     hand-edited" — which `test_the_order_lint_passes` runs. The floor therefore carries no
-    allowance for a row leaving the comparison (41, the measured count, not 40).
+    allowance for a row leaving the comparison (40, the measured count, not 39).
     """
     compared, mismatched, one_sided = _caller_lists(_manifest())
     assert not one_sided, (
@@ -483,11 +483,12 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         "was deleted (which would exempt the row from this comparison instead of reding it) "
         f"or the two were reworded apart: {one_sided}"
     )
-    assert compared >= 41, (
-        f"only {compared} rows carry a comparable caller list (41 today) — this check "
+    assert compared >= 40, (
+        f"only {compared} rows carry a comparable caller list (40 today) — this check "
         "has stopped reading the manifest's rows and would pass vacuously. The bound is "
-        "the measured count, not one below it: the old 40 let a single row leave the "
-        "comparison unnoticed, which is the hole the one-sided arm above closes"
+        "the measured count, not one below it: a floor set one row short lets a single "
+        "row leave the comparison unnoticed, which is the hole the one-sided arm above "
+        "closes"
     )
     assert not mismatched, (
         "these rows state one caller set in `dependency` and another in `reason`: "
@@ -507,7 +508,7 @@ def test_the_reason_dependency_cross_check_can_fail():
     row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
     row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
     compared, mismatched, one_sided = _caller_lists(doc)
-    assert compared >= 41, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
     assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
     assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
@@ -2624,7 +2625,7 @@ def test_the_guard_refuses_an_sdk_row_whose_name_is_not_its_method(tmp_path):
     a fabricated `name: sdk:totally_new_and_unapproved` carrying an existing `method` and
     `exemption: true` → `OK … 151 public SDK methods (1 exempt)`, exit 0. The derivation
     emits `sdk:<method>` for every `sdk:` row, so that identity is the check (the
-    count is whatever the surface is — 149 today, 150 when this was measured).
+    count is whatever the surface is — 147 today, 150 when this was measured).
     """
     doc = _manifest()
     real = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
@@ -3441,6 +3442,22 @@ def _write_beta_fixture(path: Path, *, mcp: int = 7, sdk: int = 9) -> None:
     )
 
 
+def _write_declaration_fixture(path: Path, *, count: int) -> Path:
+    """A stand-in `tortoise/__all__.py` carrying `count` approved names (#10034).
+
+    The SDK leg of the target is read from the DECLARATION, so a test that moves the target
+    has to move it where the target now lives. The module is the real shape: `__all__` and
+    nothing else (#10044 — a second ledger is refused by `load_declaration`).
+    """
+    names = tuple(f"approved_method_{i}" for i in range(count))
+    path.write_text(
+        "from __future__ import annotations\n"
+        f"__all__ = {names!r}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_the_live_surface_is_the_baseline_the_guard_froze():
     """The live counts are the same numbers the manifest's `counts:` records.
 
@@ -3453,7 +3470,7 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
     assert live["mcp"] == manifest["counts"]["tools"] == 81
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 149
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 147
 
 
 def test_the_compliance_check_is_RED_on_todays_gap(capsys):
@@ -3528,11 +3545,30 @@ def test_the_target_is_read_from_the_docs_not_a_constant(tmp_path):
     beta = tmp_path / "beta-sdk-surface.md"
     _write_canonical_fixture(canonical, mcp=11)
     _write_beta_fixture(beta, mcp=11, sdk=13)
-    targets = tc.read_targets(canonical, beta)
+    declaration = _write_declaration_fixture(tmp_path / "__all__.py", count=13)
+    targets = tc.read_targets(canonical, beta, declaration)
     assert targets["mcp"] == 11
     assert targets["sdk"] == 13
     assert targets["approval"]["principal"] == "someone-else"
     assert targets["approval"]["pr"] == "9999"
+
+
+def test_a_declaration_that_disagrees_with_the_approved_doc_is_a_refusal(tmp_path):
+    """#10034: the SDK target is the declaration AND the document — never one over the other.
+
+    Reading it from prose alone made it a number nobody maintained; reading it from the
+    declaration alone would let a typed list overrule the owner's ruling. A disagreement is
+    refused, so neither half can silently win.
+    """
+    tc = _load_target_check()
+    canonical = tmp_path / "canonical-mcp-tools.md"
+    beta = tmp_path / "beta-sdk-surface.md"
+    _write_canonical_fixture(canonical, mcp=7)
+    _write_beta_fixture(beta, mcp=7, sdk=9)
+    declaration = _write_declaration_fixture(tmp_path / "__all__.py", count=11)
+
+    with pytest.raises(tc.TargetUnreadable, match="disagree on the SDK target"):
+        tc.read_targets(canonical, beta, declaration)
 
 
 def test_the_canonical_docs_beta_target_number_is_not_read_as_the_mcp_target(tmp_path):
@@ -3560,7 +3596,8 @@ def test_the_canonical_docs_beta_target_number_is_not_read_as_the_mcp_target(tmp
         encoding="utf-8",
     )
     _write_beta_fixture(beta, mcp=26, sdk=40)
-    targets = tc.read_targets(canonical, beta)
+    declaration = _write_declaration_fixture(tmp_path / "__all__.py", count=40)
+    targets = tc.read_targets(canonical, beta, declaration)
     assert targets["mcp"] == 26, "the canonical doc's `beta target` number leaked into the MCP target"
     assert targets["sdk"] == 40
 
@@ -3668,3 +3705,39 @@ def test_the_target_tool_refuses_rather_than_pass_when_evidence_is_unreadable(
     assert rc == 1
     assert "::error::" in out and "REFUSED" in out, out
     assert "Traceback" not in out
+
+
+# --- #10044: the required lint IS the declaration's gate (property 13's own proof) -----
+# `cmd_check` is the ONLY required-CI reader of `tortoise/__all__.py` — `surface-guard.py`
+# never reads it, and `surface-target-check.py` runs with `continue-on-error`. Before this,
+# nothing tested that the call is still there: deleting it (or passing the wrong flag) left
+# every test green while the required job stopped enforcing the approved list at all.
+
+def test_the_required_lint_reds_on_a_declaration_that_is_not_the_owners_list(
+    tmp_path, monkeypatch, capsys
+):
+    from tools import sdk_surface_declaration as gate
+
+    sm = _load_manifest_tool()
+    real = gate.load_declaration()
+    padded = {**real, "__all__": [*real["__all__"], "probe_padded_method"]}
+
+    # NON-VACUITY FIRST: the real declaration passes this lint.
+    monkeypatch.setattr(gate, "load_declaration", lambda *a, **k: real)
+    assert sm.cmd_check(argparse.Namespace()) == 0, capsys.readouterr().out
+
+    monkeypatch.setattr(gate, "load_declaration", lambda *a, **k: padded)
+    rc = sm.cmd_check(argparse.Namespace())
+
+    out = capsys.readouterr().out
+    assert rc == 1, "the required lint passed a declaration padded with an unapproved method"
+    assert "probe_padded_method" in out, out
+
+    # And the mirror direction: dropping an approved binding reds too.
+    monkeypatch.setattr(
+        gate, "load_declaration", lambda *a, **k: {**real, "__all__": real["__all__"][1:]}
+    )
+    rc = sm.cmd_check(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert rc == 1, "the required lint passed a declaration missing an approved method"
+    assert "MISSING from __all__" in out, out
