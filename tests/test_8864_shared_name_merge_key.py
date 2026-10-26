@@ -30,7 +30,6 @@ sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
 
-from _node_ids import node_id  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
@@ -67,7 +66,12 @@ class TestSharedNameDoesNotCollapseIds:
 
             created = sdk.create_object("Acme", "company")
             created_id = created["id"]
-            assert created_id == node_id(proj, "Object", "Acme")
+            # #3590: the create MINTS an opaque id — it is not a function of
+            # the name (the retired `obj-<sha26(name)>` spelling is not what a
+            # create produces, which is the whole point of the change).
+            assert not created_id.startswith("obj-"), (
+                "the created id must not be the retired name-derived "
+                f"spelling: {created_id!r}")
 
             rows = _nodes(proj, "Object", "name")
             ids = _ids(rows)
@@ -199,10 +203,9 @@ class TestFoldSeam:
             proj = sdk._get_proj()
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
-            # The id this registration carries is the fixture's own choice:
-            # #3590 retired the name-derived id, and the test's point is that
-            # the fold writes the record's OWN id, never a carrier it guesses.
-            canonical = "obj-applied-acme"
+            # An opaque id — any id a registration carries is legal now;
+            # the point of the case is that it does not collide.
+            canonical = "obj-minted-third-carrier"
             proj.apply(
                 {
                     "type": "ObjectRegistered",
@@ -245,7 +248,7 @@ class TestReplayModelsSeeTheMentionStubs:
         )
 
         name = "Acme"
-        stub = "obj-stub-acme"      # a journal fixture states its own id
+        stub = "obj-stub-carrier"
         events = [
             # Mints `(stub, name)` — a carrier with NO registration record.
             {"type": "EventRecorded", "eventId": "ev-1",
@@ -291,7 +294,7 @@ class TestReplayModelsSeeTheMentionStubs:
         )
 
         name = "Bob"
-        stub = "sub-stub-bob"       # a journal fixture states its own id
+        stub = "sub-stub-carrier"
         events = [
             {"type": "EventRecorded", "eventId": "ev-1",
              "event": {"eventId": "ev-1", "eventKind": "mentioned",
@@ -350,7 +353,8 @@ class TestReplayModelsSeeTheMentionStubs:
             refused_events,
         )
 
-        stub = f"fixture-stub-{label.lower()}"   # a fixture-owned id
+        stub = "obj-stub-carrier" if label == "Object" \
+            else "sub-stub-carrier"
         other = "obj-x" if label == "Object" else "sub-x"
         creation = ("ObjectRegistered" if label == "Object" else "SubjectAdded")
         events = [

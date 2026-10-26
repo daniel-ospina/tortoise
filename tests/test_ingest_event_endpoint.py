@@ -2030,11 +2030,13 @@ def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
 
 
 def _canonical(label: str, name: str) -> str:
-    """A fixture-owned carrier id (#3590 retired the name-derived one).
+    """A fixed opaque id for the carrier these fixtures call "canonical".
 
-    Nothing in `tortoise/` derives an id from a name any more, so the fixture
-    states the id it wants its carrier to hold; it only has to be stable and
-    distinct from the decoy's.
+    #3590 retired the name-derived id (`ids.entity_name_id`), so there is no
+    spelling to reproduce: an id is opaque, and what these fixtures need is
+    simply ONE carrier whose id the case can address by name. The name
+    "canonical" survives only as this cluster's own shorthand for "the carrier
+    the test annotates", not as a derivation.
     """
     return f"carrier-{label.lower()}-{name.lower()}"
 

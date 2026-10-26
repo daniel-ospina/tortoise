@@ -958,12 +958,14 @@ def _m_point(nid: str = _MATRIX_ID, content: str = "matrix point") -> dict:
 
 
 def _m_mention(name: str, *, subject: bool = False) -> dict:
-    """An ``EventRecorded`` that MINTS a name-stub with NO registration record.
+    """An ``EventRecorded`` that MENTIONS a name and registers NOTHING.
 
-    ``_event_plain_merge`` MERGEs an ``Object``/``Subject`` stub by NAME under
-    the deterministic #7936 id (``entity_name_id``) and writes that id
-    ``ON CREATE`` only — a real graph carrier that no registration-based model
-    of the carrier table would otherwise see.
+    #3590: the fold no longer mints an ``Object``/``Subject`` stub for a bare
+    name — a fold-time mint is not replay-deterministic, so a mention resolves
+    against LIVE holders only and an unresolved one records the exempt
+    ``unfolded-mention`` shape (D9 leaves the minting duty on the producer).
+    So this record contributes NO carrier to the model, which is exactly what
+    the rows below exercise.
     """
     inner = {"eventId": "matrix-mention", "eventKind": "mentioned"}
     inner["subject" if subject else "object"] = name
@@ -1013,21 +1015,27 @@ _BOUNDARY_MATRIX = [
     # the P2-2 shape: the write PRECEDES its own materialization.
     ("belief-forward-references-its-materialization",
      [_m_belief(), _m_object()], False),
-    # #7936 round-5 P1: the graph MERGEs Object/Subject by NAME, so a second
-    # registration of ONE name under a FRESH id RE-IDS the single node and the
-    # earlier id stops existing with NO journaled delete. The boundary must
-    # model that collapse (the disposition `journal_object_surviving_keys`
-    # already takes for supersedes) or it answers EXISTS for the collapsed
-    # id and exempts a belief `rebuild_all` refuses — the fail-open class.
-    ("name-reuse-buries-the-earlier-id",
-     [_m_object(), _m_object("n-7936-matrix-2"), _m_belief()], True),
-    # CONTROL: the same collapse AFTER the write — at the write the earlier id
-    # is still the carrier, so the belief folds and every engine accepts.
+    # #7936 round-5 P1 → FLIPPED by #3590. The row used to pin the
+    # NAME-KEYED collapse: the graph MERGE'd Object/Subject by NAME, so a second
+    # registration of ONE name under a FRESH id RE-ID'd the single node and the
+    # earlier id stopped existing with NO journaled delete — the boundary had to
+    # model that burial or it exempted a belief `rebuild_all` refuses.
+    # `#3590` retired the name key for EVERY name (`_upsert_object` /
+    # `_upsert_subject` key on the record's own `id`), so a second registration
+    # MINTS a second carrier and the earlier id SURVIVES — legal same-name
+    # coexistence (#8864 / D2). Both classifiers therefore accept, which is what
+    # this row now pins; the neighbouring `name-reuse-after-the-write-is-…` row
+    # is its control (the same journal, the write ordered after the reuse).
+    ("name-reuse-no-longer-buries-the-earlier-id",
+     [_m_object(), _m_object("n-7936-matrix-2"), _m_belief()], False),
+    # CONTROL: the same two registrations AFTER the write — at the write the
+    # earlier id is the carrier, and the second registration adds a carrier
+    # rather than re-iding it, so the belief folds and every engine accepts.
     ("name-reuse-after-the-write-is-accepted",
      [_m_object(), _m_belief(), _m_object("n-7936-matrix-2")], False),
-    # the :Subject twin of the same collapse (`_upsert_subject` MERGEs by name).
-    ("subject-name-reuse-buries-the-earlier-id",
-     [_m_subject(), _m_subject("n-7936-matrix-2"), _m_belief()], True),
+    # the :Subject twin (`_upsert_subject` keys on `id` for the same reason).
+    ("subject-name-reuse-no-longer-buries-the-earlier-id",
+     [_m_subject(), _m_subject("n-7936-matrix-2"), _m_belief()], False),
     # an UNWRITABLE merge key materializes no node, so the record must not open
     # an incarnation the graph fold never created.
     ("unwritable-name-materializes-nothing",
@@ -1039,12 +1047,15 @@ _BOUNDARY_MATRIX = [
     ("rename-away-then-reuse-old-name-is-accepted",
      [_m_object(), _m_rename(), _m_object("n-7936-matrix-2"), _m_belief()],
      False),
-    # The mirror: a registration of the RENAMED-TO name re-ids the node, so the
-    # original id stops existing and the belief refuses — same collapse, reached
-    # through the rename rather than a second registration of the original name.
-    ("rename-into-a-reused-name-buries-the-earlier-id",
+    # The mirror, reached through the rename rather than a second registration
+    # of the original name: it used to re-id the node by the RENAMED-TO name, so
+    # the original id stopped existing. #3590 retires that too — the rename MOVES
+    # the carrier's `name` on its own `id`, and the later registration of the
+    # same name mints a separate carrier, so the original id survives and the
+    # belief folds.
+    ("rename-into-a-reused-name-no-longer-buries-the-earlier-id",
      [_m_object(), _m_rename(new_name="matrix-renamed"),
-      _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], True),
+      _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], False),
     # #7936 round-5 P1 → FLIPPED by #8864. When MORE THAN ONE node already
     # carries the name-MERGE key, `_upsert_object` USED to match EVERY one of
     # them and `ON MATCH SET o.id=$id` re-id'd them ALL, so a 1:1
@@ -1057,7 +1068,9 @@ _BOUNDARY_MATRIX = [
     # `_MATRIX_ID` therefore SURVIVES and the belief folds — on the graph and
     # on both reference folds, which is why this row is now ACCEPTED. The node
     # table still leaves duplicated nodes as SEPARATE records; that half is
-    # unchanged and still pinned by `name-reuse-buries-the-earlier-id`, whose
+    # unchanged and still pinned by `name-reuse-no-longer-buries-the-earlier-id`
+    # (flipped by #3590 together with this row: there is no collapse left to
+    # disagree about), whose
     # name has exactly ONE carrier at the registration.
     ("rename-collision-buries-every-dup-named-id",
      [_m_object(_MATRIX_ID, "matrix-collide"),
@@ -1197,7 +1210,7 @@ _BOUNDARY_MATRIX = [
      [_m_mention("matrix-mention"),
       _m_object(_MATRIX_ID, "matrix-other-name"),
       _m_rename(_MATRIX_ID, new_name="matrix-mention"),
-      _m_object("matrix-mention-stub","matrix-mention"),
+      _m_object("n-second-mention-carrier", "matrix-mention"),
       _m_restatus(_MATRIX_ID),
       _m_belief(_MATRIX_ID)], False),
     # The :Subject twin (`_upsert_subject` follows the same #8864 rule, and the
@@ -1206,8 +1219,7 @@ _BOUNDARY_MATRIX = [
      [_m_mention("matrix-sub-mention", subject=True),
       _m_subject(_MATRIX_ID, "matrix-sub-other-name"),
       _m_rename(_MATRIX_ID, new_name="matrix-sub-mention", label="Subject"),
-      _m_subject("matrix-sub-mention-stub",
-                 "matrix-sub-mention"),
+      _m_subject("n-second-sub-mention", "matrix-sub-mention"),
       _m_restatus(_MATRIX_ID, label="Subject"),
       _m_belief(_MATRIX_ID)], False),
 ]

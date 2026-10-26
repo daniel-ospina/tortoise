@@ -1701,13 +1701,31 @@ class _EdgeHandlers:
                 f"wire_about_link: {rel!r} is not an about* rel "
                 f"({sorted(_ABOUT_REPLAY_RELS)})")
         if target_internal is None:
-            _mint_subject_stub(self.g, link["resolve_key"])
-            rows = self.g.query(
-                "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1",
-                params={"name": link["resolve_key"]}).result_set
-            if not rows:
+            # ⛔ NOT a name-keyed write, and NOT an arbitrary pick (#3590 review
+            # P2). This branch used to be ``_mint_subject_stub(...)`` followed by
+            # ``MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1`` — the
+            # resolver no longer mints (a fold-time mint is not replay-
+            # deterministic), so what remained was a bare-name probe that took
+            # the FIRST of however many carriers held the name, with no refusal
+            # and no record. D2/R8 legalise two live carriers and route-then-
+            # refuse forbids guessing which one a name means: the same file
+            # refuses exactly this shape twelve lines away
+            # (``_refuse_ambiguous_target``).
+            #
+            # So the fallback goes through the ONE resolver the REPLAY arm of
+            # ``replay_about_links`` uses for the same journaled link
+            # (``resolve_structural_target(..., mint=link["mint_if_absent"])``):
+            # one carrier is wired, two or more are RECORDED and refused, zero
+            # records the exempt ``unfolded-mention`` miss (via
+            # ``_mint_subject_stub`` → ``resolve_fold_name``) and wires nothing.
+            # Live and replay therefore reach the same answer through the same
+            # code — the property this method's docstring claims.
+            target = resolve_structural_target(
+                self.g, "Subject", link["resolve_key"], rel,
+                mint=bool(link.get("mint_if_absent")))
+            if not target:
                 return False
-            internals: list[int] = [rows[0][0]]
+            internals: list[int] = [target["internal"]]
         elif isinstance(target_internal, int):
             internals = [target_internal]
         else:

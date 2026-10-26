@@ -69,8 +69,8 @@ SHAPE_UNREGISTERED_REFERENCE = "unregistered-reference"
 #: a guess, and the graph then folds an arbitrary carrier.
 SHAPE_AMBIGUOUS_ENTITY_NAME = "ambiguous-entity-name"
 #: #3590 D9: a fold record MENTIONED an Object/Subject by name and it resolved
-#: to no single live holder — an Event's ``subject``/``object``/``uses[]``, an
-#: ``about_entities`` status-fold target, or an about-edge name. Distinct from
+#: to no single live holder — an Event's ``subject``/``object``/``uses[]``, or
+#: an about-edge name. Distinct from
 #: :data:`SHAPE_UNREGISTERED_REFERENCE` because a mention is loose
 #: ATTRIBUTION, not the identity of the record being folded: the fold drops one
 #: link and moves no entity's state. See the exemption's bounded guarantee
@@ -215,8 +215,8 @@ EXEMPT_SHAPES: dict[str, str] = {
         "reconcile the producer before relying on the rebuilt edge state"
     ),
     SHAPE_UNFOLDED_MENTION: (
-        "a MENTION — an Event's subject/object/uses[], an about_entities "
-        "status-fold target, an about-edge name — resolved to no single live "
+        "a MENTION — an Event's subject/object/uses[], an about-edge name — "
+        "resolved to no single live "
         "holder, so the fold wired NO link: on the live pass and on replay "
         "alike, since both run this same resolver. Pre-#3590 journals, and the "
         "producers that still do not register (`EventAPI.add_event`), reference "
@@ -230,7 +230,22 @@ EXEMPT_SHAPES: dict[str, str] = {
         "take this exemption; (b) live and replay drop the SAME link (one "
         "resolver), so this is a producer omission, not a live/replay "
         "divergence — what a legacy journal loses is the stub nodes the "
-        "retired fold minted, which no replay can recreate; (c) every "
+        "retired fold minted, which no replay can recreate. ⛔ (b) is BOUNDED "
+        "TO A GRAPH REPLAYED FROM SCRATCH, which is the population the pins "
+        "exercise: the resolver answers from the graph IN FRONT OF IT, so a "
+        "replay into a graph that was WRITTEN before this change can answer "
+        "differently from the live pass on the same journal — pre-#3590, the "
+        "fold minted name stubs with no journal record (the old "
+        "`MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name`, and "
+        "`_event_plain_merge`'s Object twin), so the LIVE pass finds that "
+        "surviving stub and wires the edge, while the REPLAY pass wipes the "
+        "graph and has no record that recreates it (this change deleted both "
+        "minters) and therefore wires nothing. `rebuild == live` is NOT "
+        "claimed for that population; the only thing holding it up is the "
+        "decision's own premise that there is no migration and no backfill "
+        "('the live graphs are empty', #3590) — the same bound "
+        "`identity-decision.md` states beside this row. Judge a divergence "
+        "there by the premise, not by this exemption; (c) every "
         "occurrence is still recorded here and NAMED by the run boundary's "
         "report (and by `_log_identity_skip`'s census for the empty/absent "
         "form), never silently swallowed"

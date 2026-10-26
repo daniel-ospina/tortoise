@@ -176,7 +176,7 @@ def test_the_record_journals_the_precise_link_form(wired) -> None:
     the rel-IGNORING cascade, so the record must pin what the cascade actually
     produced — here a ``:Subject`` stub under ``aboutSubject``, NOT the
     ``aboutDocument`` the caller asked for (#8398 review P1-2). """
-    sdk, _proj, _events, journal = wired
+    sdk, proj, _events, journal = wired
     obj = _nid(sdk.create_object("TheObject"))
     sdk.create_event("marked", "event", aboutObject=obj,
                      aboutDocument="https://example.test/doc")
@@ -192,12 +192,17 @@ def test_the_record_journals_the_precise_link_form(wired) -> None:
         "an unresolved aboutDocument value takes the rel-IGNORING cascade, which "
         f"mints a Subject stub under aboutSubject: {record['aboutLinks']!r}")
     pinned = links["aboutSubject"]
-    assert (pinned["how"] == "id" and pinned["target_label"] == "Subject"
-            and pinned["resolve_key"] == "https://example.test/doc"
-            and pinned["mint_if_absent"] is True), (
-        "the cascade's answer must be PINNED (rel, label, resolve key, and the "
-        f"mint claim) for replay to repeat it: {pinned!r}")
-    assert pinned["targets"] == ["https://example.test/doc"], pinned
+    registered = proj.g.query(
+        "MATCH (s:Subject {name:'https://example.test/doc'}) RETURN s.id"
+    ).result_set
+    assert registered and pinned["targets"] == [registered[0][0]], (
+        "#3590: the cascade's answer is still PINNED (rel, label, resolve "
+        "key) for replay to repeat — but the endpoint is now the Subject the "
+        "DOOR registered (D9) under its own minted id, not a fold-time stub "
+        f"whose id WAS the name: {pinned!r} vs {registered!r}")
+    assert pinned["mint_if_absent"] is False, (
+        "nothing mints any more — the projection is not the minter, so the "
+        f"claim must be False: {pinned!r}")
 
 
 def test_about_links_never_become_node_properties(wired) -> None:
@@ -385,17 +390,16 @@ def test_a_document_target_survives_a_rotated_journal(wired) -> None:
 def test_a_name_link_replays_the_REL_and_NODE_live_produced(wired) -> None:
     """P1-2: journaled name links must not re-run the cascade at replay.
 
-    ``_create_about_edges`` is the rel-IGNORING Subject→Object→Event→Source→Point
-    cascade, so ``aboutObject="Acme"`` with no ``Acme`` node wired
-    ``aboutSubject`` to a fresh Subject stub — not ``aboutObject``. Journaling
-    that as ``how:"name"`` made replay re-ask a LATER graph: once the caller
-    registers the Object, the cascade answers ``aboutObject``. Different rel,
-    different node, and silent — ``_count_about_out`` only asks "is the source
-    joined to anything", so the wrong-rel landing counted as success.
-
-    MEASURED on the shipped code (a38d6e775):
-      LIVE  : [['aboutSubject', ['Subject'], 'Acme']]
-      REPLAY: [['aboutObject',  ['Object'],  'Acme']]
+    ⛔ WHAT CHANGED UNDER #3590, and why this is still the discriminating pin:
+    live used to reach the rel-IGNORING cascade, so ``aboutObject="Acme"`` with
+    no ``Acme`` node wired ``aboutSubject`` to a fold-minted Subject stub. The
+    door now REGISTERS the mentioned name under the DECLARED label before
+    resolving (D9), so live wires ``aboutObject`` to a real Object. The trap
+    this test exists for is unchanged and is now set up EXPLICITLY: a Subject
+    named ``Acme`` is registered AFTER the event, so the cascade's FIRST arm
+    would answer ``aboutSubject`` — replay must still repeat the pinned
+    ``aboutObject`` endpoint, because it was pinned to an id, never re-derived
+    by rel.
     """
     sdk, proj, events, journal = wired
 
@@ -405,20 +409,24 @@ def test_a_name_link_replays_the_REL_and_NODE_live_produced(wired) -> None:
             "RETURN type(r), labels(t), t.name").result_set
 
     sdk.create_event("m", "event", aboutObject="Acme")   # no Acme node yet
-    sdk.create_object("Acme")                            # registered LATER
+    registered = proj.g.query(
+        "MATCH (o:Object {name:'Acme'}) RETURN o.id").result_set
+    assert registered, "the door must REGISTER a mentioned name (D9)"
+    sdk.create_object("Acme")                            # idempotent re-mention
+    sdk.create_entity("subject", "Acme")                 # cascade's FIRST arm
     live = edges()
-    assert live == [["aboutSubject", ["Subject"], "Acme"]], (
-        f"the live cascade did not mint the Subject stub: {live}")
+    assert live == [["aboutObject", ["Object"], "Acme"]], (
+        f"live must wire the DECLARED label, not the cascade's first arm: {live}")
 
     record = _event_records(journal, "m")[0]
-    assert [link["rel"] for link in record["aboutLinks"]] == ["aboutSubject"], (
+    assert [link["rel"] for link in record["aboutLinks"]] == ["aboutObject"], (
         "the record must pin the rel the LIVE cascade produced, not the rel the "
         f"caller asked for: {record['aboutLinks']!r}")
 
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert edges() == live, (
         "replay re-ran the name cascade against the END-OF-JOURNAL graph and "
-        f"landed on a different rel/node: live={live} replay={edges()}")
+        f"landed on a different rel/node: live={live}, replay={edges()}")
 
 
 def test_a_name_link_to_an_EXISTING_node_replays_onto_that_node(wired) -> None:
@@ -588,17 +596,27 @@ def test_a_LEGACY_name_link_record_still_replays(wired) -> None:
     the resolved endpoint). The branch therefore defends a form only this branch
     ever produced — it is forward-compatible handling, not a migration path.
 
-    It is kept rather than deleted because dropping it would turn such a record
-    into a counted loss instead of the pre-fix behaviour it had, and this pins
-    that behaviour AND documents the drift it keeps: the edge lands on whatever
-    the rel-ignoring cascade finds, not on the record's ``rel``.
+    ⛔ #3590 SPLITS THE OUTCOME, and BOTH halves are pinned here: the fold can
+    no longer MINT (the projection is not the minter), so a legacy name link
+    resolves (a) THROUGH the rel-ignoring cascade when the name is registered,
+    and (b) as a COUNTED LOSS when it is not — never a silent skip, and never a
+    fold-time mint that would fabricate a node the live graph never had.
     """
     sdk, proj, _events, _journal = wired
     ev = _nid(sdk.create_event("legacy", "event"))
     payload = {"id": ev,
                "aboutLinks": [{"rel": "aboutObject", "value": "Legacy",
                                "how": "name"}]}
-    assert proj.replay_about_links(payload) == (1, 0)
+    # (b) nothing registered under that name: the link is a LOSS, counted.
+    assert proj.replay_about_links(dict(payload)) == (0, 1), (
+        "an unresolvable legacy name link must be COUNTED, never minted")
+    assert proj.g.query(
+        "MATCH (e:Event {id:$id})-[r]->(t) RETURN type(r)",
+        params={"id": ev}).result_set == [], (
+        "replay fabricated a node for an unregistered legacy name")
+    # (a) registered -> the rel-ignoring cascade still finds it, as it always did.
+    sdk.create_entity("subject", "Legacy")
+    assert proj.replay_about_links(dict(payload)) == (1, 0)
     assert proj.g.query(
         "MATCH (e:Event {id:$id})-[r]->(t) RETURN type(r), labels(t), t.name",
         params={"id": ev}).result_set == [["aboutSubject", ["Subject"], "Legacy"]], (
@@ -794,15 +812,22 @@ def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None
     cannot see that defect at all.
     """
     sdk, proj, events, journal = wired
-    carriers = {_nid(sdk.create_event("Shared", "event")) for _ in range(3)}
-    assert len(carriers) == 3, f"the carriers collapsed: {carriers}"
+    # #3590: the carriers are the DECLARED label's, because the door registers a
+    # mentioned name under its declared rel before resolving (D9) — so
+    # `aboutObject` addresses Objects. Two live carriers of one name is legal
+    # (D2/#8864), and the create door refuses to mint a third, so the fixture
+    # supplies explicit ids.
+    carriers = {f"id-shared-{i}" for i in range(3)}
+    for cid in sorted(carriers):
+        sdk.create_entity("object", "Shared", _server_id=cid,
+                          is_episodic=False)
 
     sdk.create_event("dup", "event", aboutObject="Shared")
 
     def edges() -> set:
         return {
             row[0] for row in proj.g.query(
-                "MATCH (e:Event {name:'dup'})-[:aboutEvent]->(t) "
+                "MATCH (e:Event {name:'dup'})-[:aboutObject]->(t) "
                 "RETURN t.id").result_set
         }
 
@@ -812,12 +837,12 @@ def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None
 
     record = _event_records(journal, "dup")[0]
     link = record["aboutLinks"][0]
-    assert link["rel"] == "aboutEvent", f"wrong rel: {link!r}"
+    assert link["rel"] == "aboutObject", f"wrong rel: {link!r}"
     assert sorted(link["targets"]) == sorted(carriers), (
         "the record pinned a subset of the carriers live addressed: "
         f"{link!r}")
     assert link["mint_if_absent"] is False, (
-        f"an :Event was never mintable live: {link!r}")
+        f"an :Object was never mintable live: {link!r}")
 
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert edges() == carriers, (
@@ -825,7 +850,7 @@ def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None
 
     # And the SINGLE-carrier case still journals one endpoint, not two: the
     # probe must not turn every name into a list.
-    sdk.create_event("only", "event")
+    sdk.create_object("only")
     sdk.create_event("solo", "event", aboutObject="only")
     solo = _event_records(journal, "solo")[0]["aboutLinks"][0]
     assert len(solo["targets"]) == 1, (
@@ -976,14 +1001,16 @@ def test_a_PARTIAL_multi_carrier_loss_is_COUNTED_per_endpoint(wired) -> None:
     failure, not a silent skip").
     """
     sdk, proj, _events, journal = wired
-    carriers = {_nid(sdk.create_event("Shared", "event")) for _ in range(3)}
-    assert len(carriers) == 3, f"the carriers collapsed: {carriers}"
+    carriers = {f"id-shared-{i}" for i in range(3)}
+    for cid in sorted(carriers):
+        sdk.create_entity("object", "Shared", _server_id=cid,
+                          is_episodic=False)
     sdk.create_event("dup", "event", aboutObject="Shared")
 
     def edges() -> set:
         return {
             row[0] for row in proj.g.query(
-                "MATCH (e:Event {name:'dup'})-[:aboutEvent]->(t) "
+                "MATCH (e:Event {name:'dup'})-[:aboutObject]->(t) "
                 "RETURN t.id").result_set
         }
 
@@ -995,7 +1022,7 @@ def test_a_PARTIAL_multi_carrier_loss_is_COUNTED_per_endpoint(wired) -> None:
         f"the fixture needs a multi-carrier pinned link: {link!r}")
 
     gone = sorted(carriers)[0]
-    proj.g.query("MATCH (e:Event {id:$id}) DETACH DELETE e",
+    proj.g.query("MATCH (o:Object {id:$id}) DETACH DELETE o",
                  params={"id": gone})
     assert edges() == carriers - {gone}, (
         "deleting the carrier did not take its edge with it — the fixture "
@@ -1014,16 +1041,19 @@ def test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED(wired, caplog) -> None:
     """A link whose TARGET the journal hard-deletes later is stale, not lost.
 
     The sweep applied the #8398 staleness rule to the record's EVENT only, so a
-    hard-deleted target was still re-wired — and, because the Subject-stub
-    fallback journals ``mint_if_absent``, RE-MINTED. Measured at 208f96eb8:
-    ``create_event(aboutObject="Acme")`` with no ``Acme`` node mints
-    ``(:Subject {name:"Acme", id:"Acme"})`` and wires ``aboutSubject``;
-    ``delete("Acme")`` (the SDK door, so the journal carries
-    ``EntityMutated op=delete label=Subject``) empties the live graph again; then
-    ``rebuild_all`` reported ``wired=1, failed=0`` — SUCCESS — while FABRICATING
-    the Subject and its edge back. ``derived != replay(journal)`` in the
-    fabrication direction, and the counters this PR advertises as its honest
-    signal said nothing.
+    hard-deleted target was still re-wired — and, because the name fallback
+    journaled ``mint_if_absent``, RE-MINTED. Measured at 208f96eb8:
+    ``create_event(aboutObject="Acme")`` with no ``Acme`` node minted
+    ``(:Subject {name:"Acme", id:"Acme"})`` and wired ``aboutSubject``;
+    ``delete("Acme")`` emptied the live graph again; then ``rebuild_all``
+    reported ``wired=1, failed=0`` — SUCCESS — while FABRICATING the node and its
+    edge back. ``derived != replay(journal)`` in the fabrication direction, and
+    the counters this PR advertises as its honest signal said nothing.
+
+    ⛔ #3590 moves the mint to the PRODUCER and makes it journaled (D9), so the
+    fixture's target is a real, registered ``:Object`` under a minted id and
+    ``mint_if_absent`` is False; the falsification this pins — a replay that
+    recreates a hard-deleted endpoint — is unchanged.
 
     Asserted on NODES and EDGES, not on a bare count: a count can agree with a
     fabricated graph.
@@ -1032,37 +1062,41 @@ def test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED(wired, caplog) -> None:
 
     sdk, proj, events, journal = wired
 
-    def subjects() -> set:
+    def targets() -> set:
         return {row[0] for row in proj.g.query(
-            "MATCH (s:Subject) RETURN s.id").result_set}
+            "MATCH (o:Object) RETURN o.id").result_set}
 
     def edges() -> set:
         return {(row[0], row[1]) for row in proj.g.query(
-            "MATCH (e:Event)-[:aboutSubject]->(t:Subject) "
+            "MATCH (e:Event)-[:aboutObject]->(t:Object) "
             "RETURN e.id, t.id").result_set}
 
     ev = _nid(sdk.create_event("e", "event", aboutObject="Acme"))
     link = _event_records(journal, "e")[0]["aboutLinks"][0]
-    assert link.get("resolve_key") == "Acme" and link.get("mint_if_absent") is True, (
-        "the fixture needs the Subject-stub path (the one that MINTS on replay): "
+    assert link.get("resolve_key") == "Acme" and link.get("mint_if_absent") is False, (
+        "the fixture needs the registered-name path (mint claim retired, #3590): "
         f"{link!r}")
-    assert subjects() == {"Acme"}, f"live did not mint the stub: {subjects()}"
-    assert edges() == {(ev, "Acme")}, f"live did not wire the edge: {edges()}"
+    assert targets() == set(link["targets"]), (
+        f"live did not register/address the named Object: {targets()} vs {link!r}")
+    assert edges() == {(ev, link["targets"][0])}, (
+        f"live did not wire the edge: {edges()}")
 
     # The TARGET, through the SDK door — the only door that journals the delete.
-    assert sdk.delete("Acme") is True, "the Subject was not deleted"
-    assert subjects() == set(), (
-        "live kept the hard-deleted Subject — the fixture is not measuring a "
-        f"delete: {subjects()}")
-    assert edges() == set(), f"live kept the deleted Subject's edge: {edges()}"
+    # By its MINTED id: `delete` resolves ids/urls, never names (#3590 retired
+    # the id-is-the-name stub this fixture used to lean on).
+    assert sdk.delete(link["targets"][0]) is True, "the Object was not deleted"
+    assert targets() == set(), (
+        "live kept the hard-deleted Object — the fixture is not measuring a "
+        f"delete: {targets()}")
+    assert edges() == set(), f"live kept the deleted Object's edge: {edges()}"
 
     with caplog.at_level(logging.WARNING):
         proj.rebuild_all(str(events), confirm_destructive=True)
-    assert subjects() == set(), (
-        "rebuild_all RESURRECTED the hard-deleted link target — the stub was "
-        f"re-minted from an append-only record: {subjects()}")
+    assert targets() == set(), (
+        "rebuild_all RESURRECTED the hard-deleted link target — a node was "
+        f"re-created from an append-only record: {targets()}")
     assert edges() == set(), (
-        f"rebuild_all re-wired the stale aboutSubject edge: {edges()}")
+        f"rebuild_all re-wired the stale aboutObject edge: {edges()}")
     assert "could NOT be re-wired" not in caplog.text, (
         "the sweep reported a loss for a link the journal legitimately deleted "
         f"— live never had it: {caplog.text[-2000:]}")
@@ -1071,8 +1105,8 @@ def test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED(wired, caplog) -> None:
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         proj.rebuild(_DirLog(journal.parent), confirm_destructive=True)
-    assert subjects() == set(), (
-        f"rebuild resurrected the hard-deleted link target: {subjects()}")
+    assert targets() == set(), (
+        f"rebuild resurrected the hard-deleted link target: {targets()}")
     assert edges() == set(), f"rebuild re-wired the stale edge: {edges()}"
     assert "could NOT be re-wired" not in caplog.text, (
         f"the EventLog sweep reported a phantom loss: {caplog.text[-2000:]}")
@@ -1237,6 +1271,52 @@ def test_wire_about_link_reports_FALSE_when_the_target_is_gone(wired) -> None:
         params={"id": obj}).result_set[0][0]
     assert proj.wire_about_link(ev, {"rel": "aboutObject"}, internal) is True, (
         "wire_about_link reported failure for an edge it DID create")
+    assert _edges() == 1, f"the control edge was not written: {_edges()}"
+
+
+def test_the_stub_fallback_refuses_a_doubly_held_name(wired) -> None:
+    """#3590 review P2: ``target_internal is None`` must not pick a carrier.
+
+    The fallback arm ("no cascade label matched — resolve the Subject by name")
+    used to run ``_mint_subject_stub`` and then
+    ``MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1``. The resolver no
+    longer mints, so what was left was a bare-name probe that took the FIRST of
+    however many carriers held the name — no refusal, no record — while the
+    same file refuses exactly that shape twelve lines away
+    (``_refuse_ambiguous_target``) and D2/R8 legalise two live carriers. This
+    pins the contract of the branch itself (a unit pin, like the ``999999``
+    case above: the live cascade currently resolves every carrier before it can
+    reach ``None``, so the guess is latent — which is the reason a pin is
+    needed before some future caller makes it live).
+
+    RED before the fix: ``LIMIT 1`` found a carrier and wired ONE edge, so the
+    call returned True over a name that does not identify one entity.
+    """
+    sdk, proj, _events, _journal = wired
+    for server_id in ("id-twin-a", "id-twin-b"):
+        sdk.create_entity("subject", "Twin", _server_id=server_id,
+                          is_episodic=False)
+    held = sorted(r[0] for r in proj.g.query(
+        "MATCH (s:Subject {name:'Twin'}) RETURN s.id").result_set)
+    assert held == ["id-twin-a", "id-twin-b"], held
+    ev = _nid(sdk.create_event("noop", "event"))
+
+    def _edges() -> int:
+        return proj.g.query(
+            "MATCH ()-[r:aboutSubject]->() RETURN count(r)").result_set[0][0]
+
+    link = {"rel": "aboutSubject", "how": "id", "targets": ["Twin"],
+            "target_label": "Subject", "resolve_key": "Twin",
+            "mint_if_absent": True}
+    assert proj.wire_about_link(ev, link, None) is False, (
+        "the stub fallback wired an edge off a name two live Subjects hold")
+    assert _edges() == 0, f"an arbitrary carrier was picked: {_edges()} edge(s)"
+
+    # Control: the SAME call resolves and wires when the name has ONE carrier,
+    # so the fix is "refuse a guess", not "never wire the fallback".
+    proj.g.query("MATCH (s:Subject {id:'id-twin-b'}) DETACH DELETE s")
+    assert proj.wire_about_link(ev, link, None) is True, (
+        "the fallback stopped resolving a name with exactly one carrier")
     assert _edges() == 1, f"the control edge was not written: {_edges()}"
 
 
@@ -1410,8 +1490,9 @@ def test_a_name_equal_to_the_Events_OWN_name_resolves_to_the_SUBJECT_arm(
 
     * ``origin/main`` — live ``(Event)-[:aboutEvent]->(itself)``, which a rebuild
       then LOSES (the #8398 defect: the self-edge was never journaled).
-    * this branch — live ``(Event)-[:aboutSubject]->(:Subject{id:"SelfName"})``,
-      which SURVIVES rebuild.
+    * this branch — live ``(Event)-[:aboutSubject]->(:Subject{id:"SelfName"})``
+      under the id the door MINTS for that name (#3590; the fold no longer makes
+      a stub whose id IS the name), which SURVIVES rebuild.
 
     That is an undisclosed change of live wiring in the direction of
     replay-safety, so it is pinned here (and stated in the resolver's
@@ -1428,9 +1509,14 @@ def test_a_name_equal_to_the_Events_OWN_name_resolves_to_the_SUBJECT_arm(
         "MATCH (e:Event {id:$id})-[r]->(t) "
         "RETURN type(r), labels(t), t.id, t.name",
         params={"id": ev}).result_set
-    assert rows == [["aboutSubject", ["Subject"], "SelfName", "SelfName"]], (
+    assert len(rows) == 1, rows
+    rel, labels, target_id, target_name = rows[0]
+    assert (rel, labels, target_name) == ("aboutSubject", ["Subject"], "SelfName"), (
         "a name equal to the Event's own name must resolve to the :Subject arm "
         f"(measured), got {rows}")
+    assert target_id != "SelfName", (
+        "#3590: the endpoint is a MINTED id — a Subject whose id IS its name is "
+        f"the retired fold-time stub: {rows}")
     assert proj.g.query(
         "MATCH (e:Event {id:$id})-[:aboutEvent]->(x:Event) RETURN count(x)",
         params={"id": ev}).result_set[0][0] == 0, (

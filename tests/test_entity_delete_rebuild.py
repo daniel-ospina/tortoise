@@ -100,7 +100,7 @@ class TestDeleteSurvivesRebuild:
         name = "delete-me-subject"
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
-        oid = node_id(sdk, "Subject", name)
+        oid = node_id(proj, "Subject", name)
         assert _subject(proj, name), "seed Subject must exist live"
 
         assert sdk._delete_entity(oid) is True, "node must be deleted"
@@ -123,7 +123,7 @@ class TestDeleteSurvivesRebuild:
         name = "delete-me-object"
         sdk.create_entity("object", name, objectKind="core:other",
                           is_episodic=False)
-        oid = node_id(sdk, "Object", name)
+        oid = node_id(proj, "Object", name)
 
         assert sdk._delete_entity(oid) is True
         assert not _object(proj, name)
@@ -231,7 +231,7 @@ class TestRebuildFidelity:
                           objectKind="core:other", is_episodic=False)
         sdk.create_entity("subject", "drop-subject",
                           subjectKind="core:other", is_episodic=False)
-        drop_id = node_id(sdk, "Subject", "drop-subject")
+        drop_id = node_id(proj, "Subject", "drop-subject")
         assert sdk._delete_entity(drop_id) is True
 
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -251,7 +251,7 @@ class TestRebuildFidelity:
         name = "recreate-me"
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
-        oid = node_id(sdk, "Subject", name)
+        oid = node_id(proj, "Subject", name)
         assert sdk._delete_entity(oid) is True
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
@@ -365,7 +365,7 @@ def test_deleted_entity_absent_after_rebuild_dispatch(env):
     proj = sdk._get_proj()
     sdk.create_entity("object", "dispatch-delete", objectKind="core:other",
                       is_episodic=False)
-    oid = node_id(sdk, "Object", "dispatch-delete")
+    oid = node_id(proj, "Object", "dispatch-delete")
     assert sdk._delete_entity(oid) is True
 
     proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
@@ -435,7 +435,7 @@ class TestIdentityIsKindPlusId:
         name = "collide-subject-3860"
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
-        sid = node_id(sdk, "Subject", name)
+        sid = node_id(proj, "Subject", name)
         assert _subject(proj, name), "seed Subject must exist live"
 
         assert sdk._delete_entity(sid) is True

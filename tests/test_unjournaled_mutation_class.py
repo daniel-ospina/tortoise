@@ -524,20 +524,23 @@ class TestPropertyMutationRoundTrip:
         assert _props(sdk2, "Object", oid2, "status")["status"] == "archived", (
             "control: without the delete the post-supersede op IS restored")
 
-    def test_a_name_change_is_not_journaled_and_says_so(self, env, caplog):
-        """#3377 is DEFERRED (#4769) — and the deferral must be LOUD.
+    def test_a_name_change_is_journaled_on_the_stable_id(self, env, caplog):
+        """#3377/#4769 is CLOSED BY #3590: a rename IS journaled, on the id.
 
-        Journalling a `name` change renames the node in pass 1b, before the
-        deferred `ObjectSuperseded` sweep matches on that name, so a legacy
-        id-less supersede is dropped (`rebuild_all` returns the object
-        status='live' while live and `apply()` keep 'superseded'). Rather than
-        ship that regression, the producer withholds the record — and warns on
-        every matching occurrence, so the withhold is a declared deferral and not
-        the silent loss this lane exists to fix.
+        The deferral existed for ONE reason, stated here before it was lifted:
+        journalling a `name` change renames the node in pass 1b, BEFORE the
+        `ObjectSuperseded` sweep matched on that name, so a legacy id-less
+        supersede was dropped (`rebuild_all` returned status='live' while live
+        and ``apply()`` kept 'superseded'). #3590 removes the premise — the
+        supersede fold is ID-keyed, so a rename cannot reorder anything in front
+        of it — and the acceptance list makes the opposite requirement explicit:
+        *"Renaming an entity is journaled and survives replay; the old name does
+        not come back."* Withholding the record is now the DEFECT: a live rename
+        that replay reverts.
 
-        This row is the pin for that contract: it asserts the write still
-        applies to the graph, that NO `EntityMutated` record is written for it,
-        and that a warning naming #4769 is emitted.
+        So this row pins the new contract: the write applies live, ONE
+        ``EntityMutated op=rename`` record is written FOR THAT ID, the rename
+        survives ``rebuild_all``, and the old name is gone from the graph.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
@@ -545,36 +548,41 @@ class TestPropertyMutationRoundTrip:
         before = len(_mutations(events))
         caplog.clear()
         with caplog.at_level("WARNING"):
-            # NAME-ONLY: a write carrying other keys journals THOSE (see
-            # `test_a_name_bearing_write_still_journals_its_other_keys`).
             sdk.update_entity(oid, name="B")
 
         assert _props(sdk, "Object", oid, "name")["name"] == "B", \
-            "the live write must still apply — only the JOURNAL is withheld"
-        assert len(_mutations(events)) == before, \
-            "a `name` change must not be journalled while #3377 is deferred"
-        msgs = " ".join(r.getMessage() for r in caplog.records)
-        assert "#4769" in msgs and "NOT journaled" in msgs, (
-            "the deferral must be loud and name its tracking issue: " f"{msgs}")
+            "the live write must apply"
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert len(recs) == 1, recs   # exactly one record, for this id
+        assert recs[-1]["op"] == "rename", recs[-1]
+        assert recs[-1]["state"].get("name") == "B", recs[-1]
 
-        # ...and it warns on EVERY occurrence, not once per process: a one-shot
-        # net would leave the second and later reverts silent, which is the
-        # failure mode this whole lane exists to remove.
+        proj = sdk._get_proj()
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        assert _props(sdk, "Object", oid, "name")["name"] == "B", (
+            "the rename must survive replay (acceptance item 3)")
+        assert proj.g.query(
+            "MATCH (o:Object {name:'A'}) RETURN count(o)"
+        ).result_set[0][0] == 0, "the old name came back after replay"
+
+        # ...and a SECOND rename journals too, on the same stable id.
         caplog.clear()
         with caplog.at_level("WARNING"):
             sdk.update_entity(oid, name="C")
-        assert any("#4769" in r.getMessage() for r in caplog.records), \
-            "a repeat `name` change must warn again, not go silent"
+        recs = [r for r in _mutations(events) if r.get("id") == oid]
+        assert recs[-1]["state"].get("name") == "C", recs[-1]
 
     def test_a_name_bearing_write_still_journals_its_other_keys(self, env,
                                                                 caplog):
-        """The withhold must be exactly `name` wide — #3312 for the rest.
+        """#3312 still holds now that the rename rides the same record (#3590).
 
-        Withholding the WHOLE map (the first cut of this fix) reopened #3312 for
-        the ordinary call `update_entity(id, name=..., status=...)`: the status
-        rode along with the withheld record and was silently reverted by
-        `rebuild_all`. Only `name` moves the node in front of the deferred
-        name-keyed supersede sweep, so only `name` needs withholding.
+        The deferral's rule was "withhold `name` and journal the rest" because
+        the two key families rode ONE record. With the rename journaled again,
+        the requirement flips to the opposite direction and is strictly
+        stronger: ONE record must carry BOTH, and replay must restore BOTH — a
+        record that journals the status while dropping `name` reverts the
+        rename, and one that journals the name only reverts the status. Both
+        halves are asserted below, plus the rebuild.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
@@ -587,12 +595,13 @@ class TestPropertyMutationRoundTrip:
                       "name")["name"] == "B", "live write still applies"
 
         recs = [r for r in _mutations(events) if r.get("id") == oid]
-        assert recs, "the non-`name` keys must still journal"
+        assert recs, "the write must journal"
         state = recs[-1]["state"]
-        assert "name" not in state, (
-            "`name` must NOT be journalled while #3377 is deferred: " f"{state}")
-        assert state == {"status": "archived", "confidence": 0.9}, state
-        assert recs[-1]["op"] == "restatus", recs[-1]["op"]
+        assert state.get("name") == "B", (
+            "#3377 is closed by #3590 — a rename IS journaled now: " f"{state}")
+        assert {k: v for k, v in state.items() if k != "name"} == {
+            "status": "archived", "confidence": 0.9}, state
+        assert recs[-1]["op"] == "rename", recs[-1]["op"]
 
         # The payload of this test: the status SURVIVES a rebuild.
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -968,48 +977,51 @@ class TestJournalWriteFailure:
 class TestLegacyJournalShapes:
     """Rows whose input can only come from a raw journal line.
 
-    These are the `rebuild_all`-deferral guard's own regression rows. They were
-    briefly dropped as "untested defensive code" — which was the wrong call and
-    for the wrong reason. The guard was never untestable: the FIRST attempt
-    failed only because a name-only `ObjectSuperseded` cannot be written by
-    `_emit_event` (no `point=`/`id=` → no JSONL line at all), so the probe was
-    exercising a `:GraphEvent`-only record that `rebuild_all` never reads.
-    Constructing the line directly — the way the other legacy rows in this file
-    do — tests exactly the path the name fallback exists for.
+    ⛔ #3590 REPLACES WHAT THIS CLASS MEASURED. It pinned the name-keyed
+    supersede FALLBACK (#2164 ISSUE B) and its ordering against an inline
+    `EntityMutated` state fold: the supersede journalled LAST had to win, and a
+    later state op had to win in the other direction. That fallback is RETIRED —
+    an identity fold is ID-keyed, because under same-name coexistence a
+    name-keyed supersede can bury a DIFFERENT incarnation (#3573) — so an
+    id-less `ObjectSuperseded` is now unaddressable and both ordering cases are
+    unreachable: there is no fold to order.
 
-    The defect these pin: the deferred `ObjectSuperseded` sweep applies AFTER an
-    inline `EntityMutated` state fold, so without consulting journal order the
-    sweep wins over a later state op (and a blanket re-fold would invert the
-    other direction). Both directions are asserted.
+    What the branch does instead is fail-loud, and THAT is what is pinned here:
+    the record is refused as `unregistered-reference` (a NON-exempt identity
+    shape, so `rebuild_all` does not silently return a partial graph) and the
+    object keeps the status the journal's other records give it.
+
+    ⚠️ CONSEQUENCE, stated rather than buried: a journal written by a producer
+    that emitted id-less supersedes cannot be rebuilt by this branch — it
+    refuses, naming the record, instead of folding a guess. The acceptance
+    premise that bounds this is the decision's own (*"no migration / no
+    backfill … the live graphs are empty"*, #3590); a real legacy graph would
+    need a re-keying step before replay, which is a separate issue.
     """
 
-    def test_legacy_name_keyed_supersede_beats_an_earlier_state_op(
-            self, env):
-        """Supersede journalled LAST must win — the guard must NOT re-fold."""
-        sdk, events = env
-        oid = sdk.create_entity("object", name="Legacy",
-                                objectKind="k")["node"]["id"]
-        sdk.update_entity(oid, status="archived")
-        _append_raw(events, type="ObjectSuperseded", name="Legacy",
-                    supersedes_by="other", session_id="s", evidence="e")
+    def test_an_id_less_supersede_is_REFUSED_not_name_folded(self, env):
+        """#3590: unaddressable is not the same as absent — it refuses."""
+        import pytest as _pytest
 
-        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-        assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
-            "the state fold overwrote a LATER name-keyed supersede")
+        from tortoise.projection.nonfolded import NonFoldedEventsError
 
-    def test_state_op_after_a_legacy_name_keyed_supersede_wins(self, env):
-        """The converse: the state op journalled LAST must win, so the guard
-        must re-fold it rather than being disabled entirely."""
         sdk, events = env
         oid = sdk.create_entity("object", name="Legacy",
                                 objectKind="k")["node"]["id"]
         _append_raw(events, type="ObjectSuperseded", name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_entity(oid, status="archived")
 
-        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-        assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
-            "the deferred supersede sweep clobbered a LATER state op")
+        with _pytest.raises(NonFoldedEventsError) as exc:
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        msg = str(exc.value)
+        assert "unregistered-reference" in msg, msg
+        assert "ObjectSuperseded without an id" in msg, msg
+        assert "name='Legacy'" in msg, msg
+        # The object is NOT parked in the retired name-keyed fold's state, and
+        # it was not silently dropped either.
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Legacy'}) RETURN o.status").result_set
+        assert rows and rows[0][0] != "superseded", rows
 
 
 # ══ Green-on-arrival guards ════════════════════════════════════════════

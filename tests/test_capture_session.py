@@ -2890,59 +2890,67 @@ def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
          f"successor would be dangling: {rows!r}")
 
 
-def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
-    """#2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
-    WITHOUT the canonical obj-<sha26(name)> id — every supported write path
-    mints it, raw writes can skip it) superseded by a payload record must
-    (a) flip status to 'superseded' AND (b) journal the ObjectSuperseded
-    event carrying the SYNTHESIZED canonical id + name + supersedes_by.
+def test_apply_supersessions_legacy_idless_object_is_refused(sdk):
+    """#3590: an ID-LESS legacy Object is UNADDRESSABLE — refused, not folded.
 
-    Pre-fix the probe row had o.id=None → _emit_event received id=None →
-    the JSONL branch early-returned and the GraphEvent payload became {}
-    — the event journaled NOWHERE (silent drop, the M2 provenance gap)
-    and the live status never flipped."""
+    #2164 fixed the silent drop by SYNTHESIZING `obj-<sha26(name)>` for an
+    id-less target so the journal carried "a real, auditable id". #3590 retires
+    that: the synthesized id was a function of the NAME, which is exactly what
+    made a rename mint a second entity, and no node carries it any more — so
+    folding onto it would move nothing live while minting a phantom identity in
+    the journal.
+
+    The pinned contract is therefore the OPPOSITE of #2164's: `applied == 0`,
+    NO `ObjectSuperseded` reaches either store, the id-less row keeps its
+    status, and the refusal is RECORDED (`unregistered-reference`) rather than
+    silent — the half of #2164 that still holds.
+    """
     from tortoise.commit_ops import apply_supersessions
-    from _node_ids import node_id
+    from tortoise.entity_identity import (
+        clear_non_folded_entries,
+        non_folded_entries,
+    )
 
     proj = sdk._get_proj()
     # successor must be visible (the payload-entities equivalent)
     sdk.create_entity("object", "successor-B", objectKind="core:strategy")
     # raw legacy Object — NO id property at all
     proj.g.query("CREATE (o:Object {name:'legacy-X', status:'live'})")
+    clear_non_folded_entries()
+    warnings: list[str] = []
     applied = apply_supersessions(
         proj, sdk,
         [{"superseded": "legacy-X", "supersedes_by": "successor-B",
           "evidence": "legacy lifecycle"}],
-        session_id="sess_legacy")
-    assert applied == 1, "legacy no-id supersession must apply"
+        session_id="sess_legacy", warn=warnings.append)
+    assert applied == 0, "an id-less target must be REFUSED, never folded"
+    assert any("id-less" in w for w in warnings), warnings
+    assert [(e.label, e.shape) for e in non_folded_entries()] == [
+        ("Object", "unregistered-reference")], non_folded_entries()
     rows = proj.g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
         params={"n": "legacy-X"}).result_set
-    assert rows and rows[0][0] == "superseded", \
-        f"status never flipped: {rows!r}"
-    assert rows[0][1] == "successor-B", rows
-    # journaled with the synthesized canonical id (create_entity parity)
-    events = proj.g.query(
-        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) "
-        "RETURN e.payload ORDER BY e.seq",
-    ).result_set
-    assert events, "ObjectSuperseded must reach the :GraphEvent store"
-    payload = json.loads(events[-1][0])
-    assert payload["id"] == node_id(proj, "Object", "legacy-X"), payload
-    assert payload["name"] == "legacy-X", payload
-    assert payload["supersedes_by"] == "successor-B", payload
-    assert payload["session_id"] == "sess_legacy", payload
+    assert rows and rows[0][0] == "live", (
+        f"an unaddressable target must not be folded: {rows!r}")
+    assert proj.g.query(
+        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) RETURN count(e)"
+    ).result_set[0][0] == 0, (
+        "no ObjectSuperseded may be journaled for an unaddressable target — "
+        "the synthesized id that used to make it auditable is retired (#3590)")
 
 
-def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
-    """#2164 review (P2-1, JSONL half): the synthesized-id emission must reach
-    the JSONL rebuild log (#548) — the store the reviewer's M2 provenance gap
-    is about. Pre-fix the emit passed id=None → the JSONL branch of
-    sdk._emit_event early-returned (``if point is None and id is None``) and
-    the legacy Object's supersession left NO journal line — a wipe+rebuild
-    could never restore (or even show) the fold."""
+def test_apply_supersessions_legacy_idless_object_journals_nothing(tmp_path):
+    """#2164 review (P2-1, JSONL half) under #3590: NOTHING is journaled.
+
+    #2164 required the synthesized-id emission to reach the JSONL rebuild log.
+    With the synthesized id retired there is nothing to emit: an id-less target
+    is refused BEFORE the emit, so the JSONL log carries no `ObjectSuperseded`
+    line for it at all — the "silent drop" of #2164 becomes a DECLARED refusal
+    (warning + recorded non-folded entry + `applied == 0`), which is the
+    property that must hold now. A journal line with a fabricated id would be
+    worse: a wipe+rebuild would restore a node that never existed.
+    """
     from tortoise.commit_ops import apply_supersessions
-    from _node_ids import node_id
 
     events = tmp_path / "events"
     events.mkdir()
@@ -2953,21 +2961,21 @@ def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
         sdk.create_entity("object", "successor-C", objectKind="core:strategy")
         # raw legacy Object — NO id property at all
         proj.g.query("CREATE (o:Object {name:'legacy-Y', status:'live'})")
+        warnings: list[str] = []
         applied = apply_supersessions(
             proj, sdk,
             [{"superseded": "legacy-Y", "supersedes_by": "successor-C",
               "evidence": "legacy lifecycle"}],
-            session_id="sess_legacy2")
-        assert applied == 1
+            session_id="sess_legacy2", warn=warnings.append)
+        assert applied == 0
+        assert any("id-less" in w for w in warnings), warnings
         log = (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        superseded_lines = [ln for ln in log
-                            if '"type": "ObjectSuperseded"' in ln]
-        assert superseded_lines, ("ObjectSuperseded must be journaled to the "
-                                  "JSONL log for a legacy no-id Object")
-        ev = json.loads(superseded_lines[-1])
-        assert ev["id"] == node_id(proj, "Object", "legacy-Y"), ev
-        assert ev["name"] == "legacy-Y", ev
-        assert ev["supersedes_by"] == "successor-C", ev
+        assert not [ln for ln in log if '"type": "ObjectSuperseded"' in ln], (
+            "an unaddressable target must journal nothing — a fabricated id "
+            f"would be restored by rebuild: {log}")
+        rows = proj.g.query(
+            "MATCH (o:Object {name:'legacy-Y'}) RETURN o.status").result_set
+        assert rows and rows[0][0] == "live", rows
     finally:
         sdk.close()
 
@@ -3336,8 +3344,9 @@ def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     superseded side as the graph ID when the object pre-exists
     (extractor_v2.py:5836) while supersedes_by is always the NAME
     (commit_schema.py:776). So the chain records are X.supersedes_by = name
-    'mx-B' (id-form-free) and Y.superseded = B's canonical id
-    obj-<sha26('mx-B')>. Reverse emission must STILL converge. This test
+    'mx-B' (id-form-free) and Y.superseded = B's OWN id — an opaque minted id
+    since #3590, read from the create rather than derived from the name.
+    Reverse emission must STILL converge. This test
     forces the fold-order pre-pass to resolve BOTH sides against the graph
     (id-form ref + name-form successor) — raw string comparison would miss
     the edge (name != id string)."""

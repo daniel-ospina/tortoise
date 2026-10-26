@@ -576,13 +576,46 @@ class EventAPI:
         ``coalesce($sk, s.subjectKind)`` as a real value, so a bare re-mention
         reset a user-authored kind. The ``'other'`` default is the fold's ON
         CREATE arm.
+
+        ⛔ The id is RESOLVED against the live graph, not minted blind (#3590).
+        This door used to emit ``ulid()`` unconditionally, which under the
+        minted-identity model means a MENTION of a name that already has a live
+        carrier registers a SECOND carrier of that name: measured on this head
+        (``tests/test_subjectadded_journal.py::
+        TestStubAdoption::test_eventapi_mention_adopts_created_at_on_stub``) the
+        live graph ended with TWO ``:Subject`` nodes named ``mention-person`` —
+        the raw stub (no ``createdAt``) and the newly minted one — so the
+        recorded registration never reached the node that held the name, and
+        the name read back ambiguous for every later by-name door.
+
+        So the door does what the SDK's entity door does (D9: the producer
+        registers what it references): ``resolve_or_mint`` on the attached
+        projection's graph. A subject this door CREATES mints a fresh opaque id;
+        a re-mention of a live name returns the carrier's own id (its
+        ``SubjectAdded`` line is then replay-idempotent — the same MERGE target
+        on both passes). With no projection attached (journal-only lanes,
+        in-memory doubles: ``m0.py``, the ``__main__`` demo) there is no graph
+        to resolve against and the historical mint stands — the record is still
+        written, exactly as ``add_document``'s #5140 guard states its own bound.
         """
         sid = ulid()
         ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
         subject_kind = named_kind(subject_kind)
         if subject_kind is not None:
             ev["subject_kind"] = subject_kind
-        self._emit("SubjectAdded", **ev)
+        _g = getattr(self.projection, "g", None)
+        if _g is None or not name:
+            self._emit("SubjectAdded", **ev)
+            return sid
+        from .entity_identity import mint_lock, resolve_or_mint
+        # The mint lock spans the resolve AND the fold this record drives (the
+        # ``_emit`` inside this block applies it), so two producers cannot each
+        # see zero live holders and each register a fresh id for one name — the
+        # `_holder_lock`-only shape ``resolve_or_mint`` exposes is not enough.
+        with mint_lock("Subject", name):
+            sid, _created = resolve_or_mint(_g, "Subject", name)
+            ev["id"] = sid
+            self._emit("SubjectAdded", **ev)
         return sid
 
     def add_object(self, name: str, object_kind: str | None = None, *,

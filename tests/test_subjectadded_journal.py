@@ -36,10 +36,10 @@ import sys  # noqa: E402
 sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
+from _node_ids import node_id  # noqa: E402
 
 from tortoise.ids import ulid  # noqa: E402
 from tortoise.log import EventLog  # noqa: E402
-from _node_ids import node_id  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
@@ -120,7 +120,7 @@ class TestRoundTrip:
             assert len(sas) == 1, (
                 f"exactly one SubjectAdded expected: {sas}")
             line = sas[0]
-            assert line["id"] == node_id(proj, "Subject", name), line
+            assert line["id"] == live_props["id"], line
             assert line["name"] == name
             assert line["subject_kind"] == "core:team", line
             assert line["subjectKind"] == "core:team", line
@@ -147,21 +147,27 @@ class TestRoundTrip:
 # ── Test 2 (RED): only-on-create semantics ─────────────────────────────────
 
 class TestOnlyOnCreate:
-    def test_remenion_journals_every_registration_and_subjectkind_churns_live_only(
+    def test_remenion_journals_every_create_and_subjectkind_churn_live_only(
             self, tmp_path):
-        """A canonical re-mention journals a SECOND registration (#3590 retired
-        the #2194/#2295 first-registration probe: journal growth is the stated
-        cost of dropping a fail-open read), but both lines carry the SAME minted
-        id, so replay stays idempotent. Casing pins: live node `subjectKind` ==
-        the SECOND value; the FIRST journal line's `subject_kind` (snake) == the
-        FIRST value; rebuilt node `subjectKind` == the SECOND value — replay now
-        reproduces live, where `origin/main` diverged (a re-mention was not
-        journaled at all, so its kind churned live-only).
+        """#3590: EVERY create journals its registration, and a re-mention is
+        replay-idempotent on the SAME carrier id. Casing pins: live node
+        `subjectKind` == the SECOND value (the ON MATCH coalesce); the rebuilt
+        node's `subjectKind` == the FIRST value (ON CREATE wins, the ON MATCH
+        coalesce keeps what is stored) — the accepted only-on-create divergence.
 
-        Was `test_remenion_does_not_double_journal_…`; the single-line count it
-        asserted is the mechanism #3590 deliberately reverses, so the count is
-        restated and the guarantee it protected (one node, first-wins kind) is
-        asserted instead."""
+        ⛔ THIS TEST USED TO ASSERT THE OPPOSITE ("re-mention must NOT
+        double-journal": 1 line), which was #2194's PROBE-GATED registration:
+        the door asked the graph "does a node already hold this name?" and
+        skipped the journal when it hit. With a MINTED id that probe hits on a
+        node that carries NO registration line — a raw/foreign-written stub, or
+        a node whose registration never landed — so the record was never
+        journaled and ``rebuild_all`` DESTROYED a live node. The probe is
+        retired (#3590 review P2-4); the duplicate line this now allows is
+        replay-idempotent (same id, ``ON CREATE`` first-wins), pinned by
+        ``TestDuplicateReplay``. The two lines carry DIFFERENT
+        ``subject_kind`` values: that is the churn this test measures, and the
+        reason the rebuilt value is the FIRST one rather than the live one.
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t2.db"),
@@ -178,22 +184,22 @@ class TestOnlyOnCreate:
             journal = _journaled(sdk, events)
             sas = _name_sas(journal, "strategy-owner")
             assert len(sas) == 2, (
-                "every canonical create journals its registration "
-                f"(#3590): {len(sas)} lines")
-            assert len({line["id"] for line in sas}) == 1, (
-                "both registrations must carry ONE minted id — a re-mention "
-                f"that mints a second identity is the #3590 defect: {sas}")
+                "every create journals its registration (the #2194 probe is "
+                f"retired): {len(sas)} lines")
+            assert sas[0]["id"] == sas[1]["id"], (
+                "both lines name the SAME carrier — a re-mention resolves to "
+                f"the live holder, it does not mint: {[s['id'] for s in sas]}")
             assert sas[0]["subject_kind"] == "core:org", (
                 "journal must hold FIRST-registration subject_kind, not the "
                 "churned live value")
+            assert sas[1]["subject_kind"] == "core:team", sas[1]
             proj.rebuild_all(str(events), confirm_destructive=True)
             rebuilt = _subject_row(proj, "strategy-owner", "subjectKind")
             assert rebuilt and rebuilt[0][0] == "core:team", (
-                "rebuild must reproduce the LIVE subjectKind: the second "
-                "registration is journaled (every create journals, #3590) and "
-                "`_upsert_subject` writes it ON MATCH with "
-                "`coalesce($sk, s.subjectKind)`, so the pre-#3590 "
-                "only-on-create divergence is gone — rebuild == live")
+                "rebuild reproduces the LIVE value: the second line's ON MATCH "
+                "coalesce($sk, s.subjectKind) carries the churned kind, so "
+                "live == replay for subjectKind once every create journals "
+                f"(the old first-wins was single-line only): {rebuilt}")
         finally:
             sdk.close()
 
@@ -242,13 +248,15 @@ class TestStubAdoption:
                 "stub adoption must journal the canonical registration "
                 f"(probe by canonical id+name found no canonical row): {sas}")
             line = sas[0]
-            assert line["id"] == node_id(proj, "Subject",
-                                        "connector-person")
+            assert line["id"] == stub_id, (
+                "the re-mention RESOLVES to the carrier that holds the name "
+                f"(#3590: identity is the carrier's own id, {stub_id})")
             # live adopted node carries the journaled createdAt (ON MATCH
             # coalesce(s.createdAt, $ca)) — delta-1 discriminator
             rows = _subject_row(proj, "connector-person", "id", "createdAt")
             assert rows and rows[0][0] == line["id"], (
-                "the canonical registration must land on the adopted stub node")
+                "the live node keeps the id it was created under — nothing "
+                "re-addresses it to a name-derived spelling (#3590)")
             assert rows[0][1] == line["createdAt"], (
                 "live adopted createdAt must equal the journaled value "
                 "(delta 1 ON MATCH adoption)")
@@ -318,9 +326,7 @@ class TestDuplicateReplay:
                           event_log_path=str(events / "events.jsonl"))
         try:
             proj = sdk._get_proj()
-            # A journal fixture carries explicit ids; after #3590 no id is
-            # derived from the name, so the fixture states its own.
-            oid = "race-person-incarnation-1"
+            oid = ulid()  # an arbitrary id: the record IS the identity
             first_ts = "2026-01-01T00:00:00+00:00"
             second_ts = "2026-06-01T00:00:00+00:00"
             sdk._emit_event("SubjectAdded", id=oid, name="race-person",
@@ -410,21 +416,28 @@ class TestReservedProps:
 # ── Tests 7-8 (RED): failure injection ─────────────────────────────────────
 
 class TestFailureInjection:
-    def test_a_create_journals_without_a_holder_probe(self, tmp_path,
-                                                     monkeypatch):
-        """The #2194/#2295 first-registration probe is GONE (#3590): the create
-        path must not read a holder row to decide whether to journal, because a
-        node can exist under a minted id with NO registration line and the probe
-        then HITS — the registration is never journaled and `rebuild_all`
-        destroys a live node. The guard is now structural: every canonical
-        create emits its registration.
+    def test_no_probe_gates_the_registration(self, tmp_path, monkeypatch,
+                                             caplog):
+        """#3590: NO probe query gates the registration, so nothing can fail
+        open OR fail closed on it.
 
-        Was `test_probe_failure_fails_open_to_journal`, which injected a raise
-        into the probe literal `s:Subject {id:$cid, name:$name}`. That literal
-        no longer exists, so the injection could never fire and the test went
-        green on any tree — the retired mechanism it named is asserted absent
-        here instead, and the property it protected (the registration always
-        lands, so replay cannot lose the node) is asserted directly."""
+        This test used to inject a raise on the #2194 probe literal
+        (``s:Subject {id:$cid, name:$name}``) and assert a "probe failed"
+        WARNING plus an optimistic journal — the probe's own fail-open arm. That
+        probe is RETIRED (with a MINTED id it hits on a node that carries no
+        registration line, so the record was never journaled and
+        ``rebuild_all`` destroyed a live node), and a test for an arm that no
+        longer exists cannot tell a regression from an absence.
+
+        So it is INVERTED and it stays a real detector: the injection is kept
+        (a raise on that literal, should the door ever issue it again), and the
+        assertions are now (i) the create journals EXACTLY ONE registration
+        line, (ii) NO "probe failed" warning fires — i.e. the probe never ran,
+        (iii) the live node exists and ``rebuild_all`` restores it. Re-introduce
+        the probe and (ii) reds; drop the journaling and (i)/(iii) red.
+        """
+        import logging
+
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t7.db"),
@@ -440,17 +453,20 @@ class TestFailureInjection:
                 return orig_query(self, cypher, params=params,
                                   timeout=timeout)
 
-            monkeypatch.setattr(guarded_type, "query", _record_query)
-            sdk.create_entity("subject", "fail-open-person",
-                              subjectKind="core:other",
-                              is_episodic=False)
-            assert not any("id:$cid" in q for q in seen), (
-                "the retired first-registration probe is back on the create "
-                f"path — a probe that HITS suppresses the registration: {seen}")
+            monkeypatch.setattr(guarded_type, "query", _raise_on_probe)
+            with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+                sdk.create_entity("subject", "fail-open-person",
+                                  subjectKind="core:other",
+                                  is_episodic=False)
+            assert not any("probe failed" in r.getMessage()
+                           for r in caplog.records), (
+                "the #2194 registration probe is RETIRED — a 'probe failed' "
+                "warning means one was re-introduced (and with it the "
+                f"node-loss it caused): {[r.getMessage() for r in caplog.records]}")
             journal = _journaled(sdk, events)
             sas = _name_sas(journal, "fail-open-person")
             assert len(sas) == 1, (
-                "probe failure must fail OPEN to journaling (durable bias): "
+                "every create journals its registration, unconditionally: "
                 f"{sas}")
             assert _subject_row(proj, "fail-open-person"), "create must succeed"
             proj.rebuild_all(str(events), confirm_destructive=True)
@@ -614,7 +630,7 @@ class TestFalsyName:
                           event_log_path=str(events / "events.jsonl"))
         try:
             proj = sdk._get_proj()
-            sdk._create_entity("Subject", "empty-name-id",
+            sdk._create_entity("Subject", ulid(),
                                {"name": "", "subjectKind": "other",
                                 "status": "live"}, "SubjectAdded")
             journal = _journaled(sdk, events)
@@ -630,16 +646,26 @@ class TestFalsyName:
 class TestEventAPICoexistence:
     def test_random_ulid_mention_between_sdk_creates_is_by_design(
             self, tmp_path):
-        """By-design double-registration pin (delta 4): EventAPI add_subject
-        mints a random ulid with NO canonical override → a mention between
-        two SDK creates re-ids the live node (#1918 accepted), so the second
-        SDK create probe-misses and journals a second canonical line.
+        """#3590: an ``EventAPI`` mention between two SDK creates lands on the
+        SAME carrier, and both SDK creates still journal their own line.
+
+        ⛔ WHAT THIS PINNED BEFORE, and why it moved: pre-#3590
+        ``EventAPI.add_subject`` minted a blind ``ulid()`` with no canonical
+        override, so a mention between two SDK creates RE-IDED the live node
+        (#1918's accepted behaviour) and the second SDK create probe-missed.
+        The door now RESOLVES against the live graph (``resolve_or_mint``, the
+        same rule as the SDK's entity door — D9), so B keeps A's carrier id and
+        the two SDK lines hold the SAME id. What the pins still measure is the
+        durable half: every create journals its registration, and a rebuild
+        reproduces the live node's id and createdAt.
 
         Layout pin: rebuild_all replays *.jsonl SORTED — B must NOT be
         replayed (replayed FIRST it first-wins B's createdAt ≠ live; replayed
-        LAST it re-ids the node to the ulid). Rebuild the SDK log ONLY (A + C
-        reproduce live — C already re-converged B's transient re-id live).
-        Cross-file replay reorder is an accepted divergence (#330 class)."""
+        LAST it first-wins the later line). Rebuild the SDK log ONLY (A + C
+        reproduce live). Cross-file replay reorder is the accepted divergence
+        pinned by ``test_cross_file_reversed_sort_replay_is_accepted`` (#330
+        class).
+        """
         sdk_events = tmp_path / "sdk_events"
         api_events = tmp_path / "api_events"
         sdk_events.mkdir()
@@ -663,21 +689,23 @@ class TestEventAPICoexistence:
             assert len(sas) == 2, (
                 "SDK log must hold exactly two canonical SubjectAdded lines "
                 f"(A + C; B lives on the API's own log): {sas}")
-            assert sas[0]["id"] == sas[1]["id"] == node_id(proj, "Subject", name), sas
+            assert sas[0]["id"] == sas[1]["id"], (
+                "both SDK registration lines name the SAME carrier id — "
+                f"#3590 identity is the carrier's own id, never a spelling "
+                f"derived from the name: {sas}")
             api_journal = EventLog(str(api_events / "api.jsonl")).read_all()
             assert len(_name_sas(api_journal, name)) == 1, api_journal
             # live: re-canonicalized by C, createdAt first-won A's value
             live_rows = _subject_row(proj, name, "id", "createdAt")
-            assert live_rows and live_rows[0][0] == node_id(
-                proj, "Subject", name), live_rows
+            assert live_rows and live_rows[0][0] == sas[0]["id"], live_rows
             assert live_rows[0][1] == sas[0]["createdAt"], (
                 "live createdAt must be A's (first registration)")
             # rebuild against the SDK log ONLY
             proj.rebuild_all(str(sdk_events), confirm_destructive=True)
             rows = _subject_row(proj, name, "id", "createdAt")
-            assert rows and rows[0][0] == node_id(
-                proj, "Subject", name), (
-                "rebuilt node must be canonical (B's ulid must not stick)")
+            assert rows and rows[0][0] == sas[0]["id"], (
+                "rebuilt node keeps the registration's own id (B's ulid "
+                "must not stick)")
             assert rows[0][1] == sas[0]["createdAt"], (
                 "rebuilt createdAt must equal the SDK A-line value (== live)")
         finally:

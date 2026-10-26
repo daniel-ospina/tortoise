@@ -467,13 +467,13 @@ class TestFoldBehaviour:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "T3", objectKind="venture:tranche")
-            # #3590: the fold is ID-keyed, so the SETUP must address the created
-            # id — an id-less supersede is unaddressable now (it folds nothing
-            # and records `unregistered-reference`), which left the Object
-            # 'live' and made this guard assert against its own broken setup.
+            # #3590: identity folds are ID-keyed — an id-less record is
+            # refused rather than name-folded (route-then-refuse).
+            _tid = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'T3'}) RETURN o.id"
+            ).result_set[0][0]
             sdk._get_proj()._fold_object_superseded(
-                {"id": node_id(sdk, "Object", "T3"), "name": "T3",
-                 "supersedes_by": "T3-v2"})
+                {"id": _tid, "name": "T3", "supersedes_by": "T3-v2"})
             sdk.create_event("released", "venture:disbursement", object="T3")
             assert _object_status(sdk, "T3") == "superseded"
         finally:

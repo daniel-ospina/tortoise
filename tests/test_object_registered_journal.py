@@ -209,9 +209,25 @@ class TestReMentionJournalsEveryRegistration:
 
     def test_remention_after_fold_keeps_the_fold_and_does_not_resurrect(
             self, tmp_path):
-        """A superseded name re-mentioned: no status reset live, and no
-        resurrect on rebuild (the re-mention's registration line MERGEs onto the
-        existing node instead of creating a second one)."""
+        """A superseded name re-created: the SUPERSEDED carrier keeps its fold
+        (no status reset, no resurrect on rebuild), and the re-create is a NEW
+        incarnation under its own minted id (#3590: an id is never derived from
+        a name, so a create after a terminal state cannot resurrect the old
+        node by coincidence of spelling — acceptance item 4's
+        delete/re-create shape, here for the `superseded` terminal status).
+
+        ⛔ WHAT THIS TEST USED TO ASSERT, and why it changed: pre-#3590 the
+        id WAS ``obj-<sha26(name)>``, so a re-create resolved back to the SAME
+        node and the whole test could read one row (``rows[0][0] ==
+        "superseded"``). `resolve_or_mint` excludes terminal holders
+        (``_terminal_excluded``), so the re-create now MINTS, the rebuilt graph
+        holds TWO carriers of the name, and a single-row assert reports the new
+        live incarnation as a "resurrect". The #1350 clobber guard this test
+        exists for is about the FOLDED node: it must still read
+        ``superseded``/``supersededBy=strategy-B``, and no live twin may inherit
+        its fold. Two carriers is the legal D2 state, and only the new one is
+        live, so the name still resolves.
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t4.db"),
@@ -222,29 +238,37 @@ class TestReMentionJournalsEveryRegistration:
                               objectKind="core:strategy", is_episodic=False)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
+            folded_id = node_id(proj, "Object", "strategy-A")
             from tortoise.commit_ops import apply_supersessions
             assert apply_supersessions(
                 proj, sdk,
                 [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
                   "evidence": "fold"}],
                 session_id="s1") == 1
-            # re-mention the SUPERSEDED name (post-#3590: resolves to the SAME
-            # id, so it appends a registration line that MERGEs onto the
-            # existing node — it must not clear the fold)
+            # re-create the SUPERSEDED name — a terminal holder is not live, so
+            # this mints a NEW incarnation rather than resurrecting the folded
+            # one, and it must not clear the fold on either node
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
-            rows = _object_row(proj, "strategy-A", "status")
-            assert rows and rows[0][0] == "superseded", (
-                "re-mention must not reset superseded (#1350 clobber guard)")
             journal = _journaled(sdk, events)
             assert len(_name_ors(journal, "strategy-A")) == 2, (
-                "re-mention of a superseded Object journals a duplicate "
-                "registration, but must not add a fold or a reset")
+                "re-create of a superseded Object journals its own "
+                "registration (every create journals), and must not add a "
+                "fold or a reset")
             proj.rebuild_all(str(events), confirm_destructive=True)
-            rows = _object_row(proj, "strategy-A", "status", "supersededBy")
-            assert rows and rows[0][0] == "superseded", (
-                "no resurrect on rebuild")
-            assert rows[0][1] == "strategy-B", rows[0]
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id, o.status, "
+                "o.supersededBy", params={"n": "strategy-A"}).result_set
+            by_id = {r[0]: (r[1], r[2]) for r in rows}
+            assert folded_id in by_id, by_id
+            assert by_id[folded_id] == ("superseded", "strategy-B"), (
+                "no resurrect and no clobber: the FOLDED carrier keeps its "
+                f"status + successor after replay: {by_id}")
+            live = {i: v for i, v in by_id.items() if v[0] != "superseded"}
+            assert len(live) == 1, (
+                "the re-create is exactly ONE new live incarnation under a "
+                f"different minted id: {by_id}")
+            assert next(iter(live)) != folded_id, by_id
         finally:
             sdk.close()
 
@@ -522,11 +546,17 @@ class TestDuplicateReplay:
 # ── Tests 10-13 (post-implementation pins) ─────────────────────────────────
 
 class TestFailureInjection:
-    def test_probe_failure_fails_open_to_journal(self, tmp_path, monkeypatch,
-                                                  caplog):
-        """A probe-query raise must NOT fail the create: warning + optimistic
-        journal (durable bias) — a regression to fail-closed (silent skip)
-        would re-open the node-loss bug."""
+    def test_no_probe_gates_the_registration(self, tmp_path, monkeypatch,
+                                             caplog):
+        """#3590: the #2194 registration probe is RETIRED, so a raise on its
+        literal cannot be reached and the create journals unconditionally.
+
+        The injection is kept as a detector, inverted: if the probe ever comes
+        back, the "probe failed" warning reappears and this reds. (The Subject
+        twin in `test_subjectadded_journal.py` carries the same pin; its
+        docstring records why the probe was removed — it hit on a node that
+        carried no registration line, so the record was never journaled and
+        `rebuild_all` destroyed a live node.)"""
         import logging
 
         events = tmp_path / "events"
@@ -549,15 +579,19 @@ class TestFailureInjection:
             with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
                 sdk.create_entity("object", "fail-open-name",
                                   objectKind="core:other", is_episodic=False)
+            assert not any("probe failed" in r.getMessage()
+                           for r in caplog.records), (
+                "the registration probe is retired — a 'probe failed' warning "
+                f"means one was re-introduced: {[r.getMessage() for r in caplog.records]}")
             journal = _journaled(sdk, events)
             ors = _name_ors(journal, "fail-open-name")
             assert len(ors) == 1, (
-                "probe failure must fail OPEN to journaling (durable bias): "
+                "every create journals its registration, unconditionally: "
                 f"{ors}")
             assert _object_row(proj, "fail-open-name"), "create must succeed"
             proj.rebuild_all(str(events), confirm_destructive=True)
             assert _object_row(proj, "fail-open-name"), (
-                "fail-open journal must let rebuild restore the node")
+                "the registration line must let rebuild restore the node")
         finally:
             sdk.close()
 
@@ -704,12 +738,26 @@ class TestCasReplayParity:
 
     def test_fold_reg_fold_recreate_last_wins_unchanged(self, tmp_path,
                                                         caplog):
-        """delete→recreate→re-supersede: [Reg(fr-B), OS(fr-B→B), <delete,
-        journaled as EntityMutated op=delete>, Reg(fr-B), OS(fr-B→C)] replays
-        with the SAME last-wins outcome as pre-CAS on both surfaces →
-        supersededBy == fr-succ-C (live truth — the CURRENT incarnation was
-        superseded by C). A cas leak into replay would CAS-miss the second
-        line → B (first-wins)."""
+        """delete→recreate→re-supersede **naming the DELETED incarnation**:
+        [Reg(fr-B@oid), OS(oid→B), <delete oid, journaled as EntityMutated
+        op=delete>, Reg(fr-B@oid2), OS(oid→C)] leaves the CURRENT incarnation
+        (oid2) LIVE on BOTH replay surfaces — identically, which is the #2242
+        invariant this test exists for (the live-path CAS must not leak into
+        replay, and both replay surfaces must agree).
+
+        ⛔ WHAT CHANGED, and why this is not a weakening: pre-#3590 the id was
+        ``obj-<sha26(name)>``, so the re-create RESOLVED to the same id ("one
+        incarnation reuse") and the second fold applied to the current node,
+        making ``supersededBy == fr-succ-C`` the expected outcome. Under minted
+        identity the re-create mints ``oid2`` (a delete is terminal, so
+        ``resolve_or_mint`` does not resurrect), and the journaled fold still
+        names ``oid`` — the DELETED incarnation. The fold therefore matches no
+        Object, which the run REPORTS ("matched no Object") instead of applying
+        the fold to a same-named newer node: a name-keyed guess there is exactly
+        the harm #1350/the identity decision remove. So both the warning and the
+        live current incarnation are now CORRECT, and a regression that made the
+        fold fall back to the name would supersede ``oid2`` and RED this test.
+        """
         import logging
         events = tmp_path / "events"
         events.mkdir()
@@ -718,33 +766,47 @@ class TestCasReplayParity:
         try:
             proj = sdk._get_proj()
             name = "fr-B"
-            oid = node_id(proj, "Object", name)
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)                  # Reg 1
+            # #3590 review P1: the id is read AFTER the create that mints it.
+            # `node_id` is a GRAPH read that asserts exactly one holder, not the
+            # retired pure `_entity_name_id`, so called before the create it
+            # finds zero ("expected exactly one Object carrying name='fr-B'")
+            # — it was left on the pre-#3590 side of the write by the mechanical
+            # migration.
+            oid = node_id(proj, "Object", name)
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
                             supersedes_by="fr-succ-B",
                             evidence="first fold")
             assert sdk._delete_entity(oid) is True               # journaled
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)                 # Reg 2
+            oid2 = node_id(proj, "Object", name)
+            assert oid2 != oid, (
+                "a create after a terminal state mints a NEW incarnation "
+                f"(#3590 acceptance item 4): {oid2!r} vs {oid!r}")
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
                             supersedes_by="fr-succ-C",
                             evidence="second fold")
             with caplog.at_level(logging.WARNING,
                                  logger="tortoise.projection"):
                 proj.rebuild_all(str(events), confirm_destructive=True)
-            rows = _object_row(proj, name, "status", "supersededBy")
-            assert rows and rows[0] == ["superseded", "fr-succ-C"], (
-                "rebuild_all must resolve fold-Reg-fold LAST-wins "
-                "(pre-CAS parity): the CAS must not leak into the sweep")
-            assert not any("matched no Object" in r.message
-                           for r in caplog.records), caplog.records
+            rows = _object_row(proj, name, "id", "status")
+            assert rows == [[oid2, "live"]], (
+                "rebuild_all: the fold names the DELETED incarnation, so the "
+                "current one stays live — a name-keyed fallback would have "
+                f"superseded it (CAS must not leak into the sweep): {rows}")
+            assert any("matched no Object" in r.message
+                       for r in caplog.records), (
+                "a fold naming a deleted incarnation must be REPORTED, never "
+                "silently applied to a same-named node: "
+                f"{[r.message for r in caplog.records]}")
             # dispatch arm — chronological rebuild (the backup-restore path)
             proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
-            rows = _object_row(proj, name, "status", "supersededBy")
-            assert rows and rows[0] == ["superseded", "fr-succ-C"], (
-                "rebuild() dispatch must resolve fold-Reg-fold LAST-wins — "
-                "mutually consistent with rebuild_all")
+            rows = _object_row(proj, name, "id", "status")
+            assert rows == [[oid2, "live"]], (
+                "rebuild() dispatch must reach the SAME outcome — mutually "
+                f"consistent with rebuild_all: {rows}")
         finally:
             sdk.close()
 
@@ -769,9 +831,12 @@ class TestCasReplayParity:
         try:
             proj = sdk._get_proj()
             name = "dup-B"
-            oid = node_id(proj, "Object", name)
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)
+            # #3590 review P1: read the id AFTER the create — `node_id` is a
+            # graph read (exactly-one-holder assertion), not the retired pure
+            # name derivation, so before the create it finds zero holders.
+            oid = node_id(proj, "Object", name)
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
                             supersedes_by="dup-succ", evidence="fold 1",
                             ts="2026-09-07T10:00:00Z")

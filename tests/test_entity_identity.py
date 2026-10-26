@@ -931,13 +931,15 @@ _ALLOWED_KEYED = {
         # with `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
         # remaining read is the holder probe itself, not a silent pick.
         'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": key}).result_set': 1,
-        # E: the cascade's Subject-stub FALLBACK anchor (#8398 P1-2). Reached
-        # only when no label matched by name — including no `:Subject` — so the
-        # mint above it creates the node this read then addresses. A write key,
-        # migration-gated (owner: S3 identity/resolver). Its predecessor, the
-        # rel-ignoring `MERGE (n)-[:aboutSubject]->(s)` by name, is REMOVED with
-        # `_try_about_edge`'s inline write, not left stale below.
-        'rows = self.g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1", params={"name": link["resolve_key"]}).result_set': 1,
+        # E was the cascade's Subject-stub FALLBACK anchor (#8398 P1-2):
+        # `_mint_subject_stub(...)` + `MATCH (s:Subject {name:$name}) LIMIT 1`.
+        # #3590 review P2 DELETED it — the resolver no longer mints, so what
+        # remained was a bare-name probe that took the FIRST of however many
+        # carriers held the name with no refusal and no record. The fallback now
+        # goes through `resolve_structural_target` (`LIMIT 2` +
+        # `_refuse_ambiguous_target`), the same resolver replay uses, so the site
+        # this row excused is gone and the row goes with it (the sweep reds on a
+        # stale entry by design).
     },
     'tortoise/projection/entities.py': {
         # §B "Route" — lifecycle folds / participants fallback / edge anchors;
@@ -983,7 +985,18 @@ _ALLOWED_KEYED = {
         # `live` uses for Points (`TERMINAL_EXCLUDED_STATUSES` also carries
         # `outdated`), so it does not make this predicate drift-free against
         # the resolver. Do not restate it as "the same constant".
-        'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
+        #
+        # ⛔ REMOVED, not replaced (#3590 review P2): the `participatesIn`
+        # FALLBACK used to be name-keyed —
+        # ``MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) MERGE
+        # (s)-[:participatesIn]->(e)`` — and was allowlisted here as a
+        # dispositioned READ. It was a WRITE that MERGEs an edge, so under D2
+        # same-name coexistence it wired EVERY carrier of the name, exactly the
+        # harm class `_fold_object_status` names in this same module. It now
+        # reuses the subject id resolved once in the `performs` arm and MATCHes
+        # `{id:$sid}`, so there is nothing left to excuse — an entry left here
+        # would be a stale one (the sweep fails on those), and "declared as a
+        # read" is not a disposition for a write.
     },
     'tortoise/near_dup_merge.py': {
         # Twin of sdk.py's local `about_entities` claim loop (entry "E" below),

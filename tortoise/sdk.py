@@ -20062,9 +20062,10 @@ class TortoiseSDK:
                 (_existing, _hit, _op, _bad, _carriers, _merges,
                  _target) = _name_holders(_elabel, _name)
                 _key = (_elabel, _name)
-                # MERGES (a carrier holds the canonical id) or not the first
-                # naming item (the first one creates it) ⇒ this write does not
-                # store the status.
+                # MERGES (exactly one LIVE carrier holds the name — #3590
+                # retired the derived "canonical id" this used to name) or not
+                # the first naming item (the first one creates it) ⇒ this write
+                # does not store the status.
                 if _merges or _key in _minted_names:
                     continue
                 _minted_names.add(_key)
@@ -34872,9 +34873,13 @@ class TortoiseSDK:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
-        ``ObjectRegistered`` on first canonical registration (probe-gated,
-        #2194 — a canonical re-mention never double-journals); SDK-created
-        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295);
+        ``ObjectRegistered`` on EVERY create (#2194's probe is RETIRED — #3590
+        review P2-4: with a MINTED id the "does a node already hold this?"
+        probe HITS on a node that has no registration line, so the record was
+        never journaled and ``rebuild_all`` destroyed a live node; duplicate
+        registration lines are replay-idempotent, pinned by
+        ``test_object_registered_journal.py``'s duplicate-replay class);
+        SDK-created Subjects journal ``SubjectAdded`` the same way;
         Documents journal ``DocumentCreated`` on EVERY create (#2296 —
         emit-on-every-write, since each create mints a fresh ulid and
         ``_upsert_document`` MERGEs by that id). Source journals via
@@ -35505,6 +35510,17 @@ class TortoiseSDK:
           what the fold means by it. A name held by TWO OR MORE live entities is
           the legal same-name coexistence (#8864 / D2) — nothing to register,
           and the reference cascade addresses the whole list.
+
+          ⚠️ RESIDUAL, stated rather than claimed closed (#3590 review P2,
+          round 2 at this head): the predicate is "does a node HOLD this name
+          live", not "is this name JOURNALED". Those two questions came apart
+          when the create door's first-registration probe was removed, so a
+          node a FOREIGN writer created (a raw `MERGE`, no registration line)
+          is skipped here and `rebuild_all` still drops it. Every door THIS repo
+          owns that writes an Object by an explicit id now journals a
+          registration on its first write (`_connect_issue_objects`'s
+          metadata-`oid` branch), which is what the graph-only probe cannot
+          see; a durable predicate would need the journal itself, not the node.
         * **`AmbiguousEntityName` is not an error here.** It is a CREATE-door
           refusal (a create may not pick one carrier); a REFERENCE is not a
           create, and the consumer (`resolve_about_link`, `resolve_fold_name`)
@@ -36254,19 +36270,31 @@ class TortoiseSDK:
                     f"Must be one of: "
                     f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                 )
-            node = self._create_entity(
-                "Subject",
-                self._entity_identity_for("Subject", name,
-                                          explicit_id=_server_id),
-                _entity_door_props("subjectKind", name, props),
-                "SubjectAdded", is_episodic=is_episodic)
+            # #3590 review P2-1: held across the WRITE, not just the resolve
+            # (`entity_identity.mint_lock`) — a plain `resolve_or_mint` releases
+            # before the MERGE, so two concurrent creates of one name both mint.
+            from .entity_identity import mint_lock as _mint_lock
+            with _mint_lock("Subject", name):
+                node = self._create_entity(
+                    "Subject",
+                    self._entity_identity_for("Subject", name,
+                                              explicit_id=_server_id),
+                    _entity_door_props("subjectKind", name, props),
+                    "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
-            node = self._create_entity(
-                "Object",
-                self._entity_identity_for("Object", name,
-                                          explicit_id=_server_id),
-                _entity_door_props("objectKind", name, props),
-                "ObjectRegistered", is_episodic=is_episodic)
+            # #3590 review P2-1: the per-name mint lock must span the WRITE, not
+            # just the resolve — see `entity_identity.mint_lock`. Without it two
+            # threads creating one name each see zero live holders, each mint,
+            # and each MERGE by id -> two live carriers and a create-poisoned
+            # name (`AmbiguousEntityName` on every later by-name door).
+            from .entity_identity import mint_lock as _mint_lock
+            with _mint_lock("Object", name):
+                node = self._create_entity(
+                    "Object",
+                    self._entity_identity_for("Object", name,
+                                              explicit_id=_server_id),
+                    _entity_door_props("objectKind", name, props),
+                    "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
             # stripped HERE, at the Event door, because ``event`` is the
@@ -36354,6 +36382,21 @@ class TortoiseSDK:
             # cascade is resolved ONCE here (read-only, `resolve_about_link`)
             # and the RESOLVED rel/label/key are journaled; the write below
             # reuses that same resolution.
+            # ⛔ #5475 GATE BEFORE the registration below, not only at the
+            # append. `_apply_and_journal` gates this door's record before it
+            # journals (so a refusal leaves the JOURNAL and the cache
+            # untouched), but by then this branch has already REGISTERED the
+            # names the record mentions (D9 below) and every about* target —
+            # i.e. a refused event left its mentions in the graph. Measured at
+            # this head: `create_event("ev with uses", ..., uses=[{"name":
+            # "campaignX", "kind": "marketing:campaign"}])` raised the
+            # unapproved-kind ValueError and still left `(:Object
+            # {name:'campaignX'})` behind
+            # (`tests/test_vocab_gating_by_graph.py::test_event_uses_stub_is_gated`
+            # asserts the graph is unchanged, which is the contract the gate
+            # states: "a refusal leaves neither store touched").
+            self._refuse_unapproved_kinds_in_record(
+                {"eventKind": eventKind, **props}, getattr(proj, "g", None))
             from .projection.edges import STRUCTURAL_REL_LABELS as _REL_LABELS
             about_links: list[dict] = []
             #: (rel-or-pinned-link, value-or-internal-id) for the post-fold write.
@@ -36415,6 +36458,25 @@ class TortoiseSDK:
                     if _tlabel in ("Subject", "Object"):
                         self._register_referenced_entity(_tlabel, _val)
                     _link, _internal = proj.resolve_about_link(_val)
+                    if _link is not None and _internal is None:
+                        # The cascade matched NOTHING and fell back to its
+                        # label-agnostic Subject stub — the one construction the
+                        # fold used to MINT (`MERGE (s:Subject {name:$name})
+                        # ON CREATE SET s.id=$name`). The projection never mints
+                        # (a fold-time mint is not replay-deterministic), so
+                        # without this the pinned link names an endpoint nothing
+                        # in the journal creates: live wires nothing and replay
+                        # counts a LOSS on every rebuild (measured at this head:
+                        # `create_event(aboutDocument="https://…/named")` →
+                        # `replay_about_links` → wired=0, failed=1).
+                        # So the producer performs the retired mint, as a MINTED
+                        # Subject it JOURNALS (D9: register what you reference) —
+                        # the same node the old fold produced, replayable — and
+                        # re-resolves so the record and the write address that
+                        # carrier instead of a guessed name.
+                        self._register_referenced_entity(
+                            "Subject", _link["resolve_key"])
+                        _link, _internal = proj.resolve_about_link(_val)
                     if _link is not None:
                         about_links.append(_link)
                         _about_writes.append((_link, _internal))
@@ -39291,35 +39353,56 @@ class TortoiseSDK:
                     # it through the SDK create door, so the registration is
                     # JOURNALED and `rebuild_all` reproduces the node (the raw
                     # MERGE below journals nothing).
-                    #
-                    # #3590 review P1: `AmbiguousEntityName` is NOT an error
-                    # here, for the same reason `_register_referenced_entity`
-                    # catches it — a name held by two or more LIVE entities is
-                    # the legal same-name coexistence (D2/#8864), and this is a
-                    # REFERENCE-wiring loop, not a create. Letting the create
-                    # door's refusal escape aborted the whole write
-                    # (`ingest_corpus`/`_index_sessions` mark the file complete
-                    # and then raise, and `_session_event_write` raises between
-                    # the live Event MERGE and its journal record — a live node
-                    # with no durable record). The documented contract of this
-                    # method is "a resolution failure is logged at debug";
-                    # skipping the item is that contract.
                     from .entity_identity import (
                         AmbiguousEntityName,
+                        live_name_holder_ids,
+                        mint_lock,
                         resolve_or_mint,
                     )
-                    try:
-                        oid, _created = resolve_or_mint(proj.g, "Object", name)
-                    except AmbiguousEntityName as exc:
-                        _logger.debug(
-                            "_connect_issue_objects: skipping reference %r — "
-                            "%s", name, exc)
-                        continue
-                    self._create_entity(
-                        "Object", oid,
-                        {"name": name, "objectKind": okind, "repo": repo,
-                         "issue_number": issue_number, "url": url},
-                        "ObjectRegistered")
+                    # #3590 review P2-1: the mint lock spans the resolve AND
+                    # the `_create_entity` write below — releasing it at the end
+                    # of the resolve lets two concurrent re-indexes of one name
+                    # each mint and each MERGE, leaving two live carriers of
+                    # that name (a create-poisoned name: every later by-name
+                    # door refuses it).
+                    with mint_lock("Object", name):
+                        try:
+                            oid, _created = resolve_or_mint(proj.g, "Object",
+                                                            name)
+                        except AmbiguousEntityName:
+                            # ⛔ ``AmbiguousEntityName`` must not fail this write
+                            # (#3590 review P2). It is a CREATE-door refusal —
+                            # "a create may not pick one of two live carriers" —
+                            # and a re-INDEX is not a create: two live entities
+                            # of one name is the legal D2/#8864 state, and this
+                            # door is reached from every connector/session-index
+                            # write (sdk:27879, :27951, :37398,
+                            # session_indexer:852), so raising here aborts the
+                            # whole event AFTER earlier writes committed. The
+                            # event door one layer up already decided this
+                            # refusal must not fail a write
+                            # (``_register_referenced_entity``: "a REFERENCE is
+                            # not a create"); this connector door agrees.
+                            #
+                            # What it does instead is what an ATTRIBUTION means:
+                            # the about-edge is wired to EVERY live carrier of
+                            # the name (``resolve_about_link``'s own rule — "A
+                            # LIST because a name may legally have several
+                            # carriers, and EVERY one of them is"), and no third
+                            # incarnation is created or annotated.
+                            for _holder in live_name_holder_ids(
+                                    proj.g, "Object", name):
+                                if not _holder:
+                                    continue
+                                if proj.create_about_edge(
+                                        event_id, str(_holder), "aboutObject"):
+                                    connected += 1
+                            continue
+                        self._create_entity(
+                            "Object", oid,
+                            {"name": name, "objectKind": okind, "repo": repo,
+                             "issue_number": issue_number, "url": url},
+                            "ObjectRegistered")
                 # #3574: store the name VERBATIM — never `name[:200]`.
                 #
                 # `name` is the Object's natural key and the value every
@@ -39345,27 +39428,55 @@ class TortoiseSDK:
                 # MERGE bypasses _sanitize_props, so guard before the write.
                 _reject_unrepresentable_number("oid", oid)
                 _reject_unrepresentable_number("issue_number", issue_number)
-                proj.g.query(
-                    # #9572: the kind is this door's OWN synthesis (`"pr"` /
-                    # `"issue"` from the frontmatter key) — the caller named
-                    # none. Writing it on MATCH re-typed a stored Object
-                    # (`pm:issue` → `issue`, `capability` → `issue`) from a
-                    # session file's frontmatter, the same fabrication class as
-                    # the doors above, one layer out. The kind belongs to the
-                    # fold's ON CREATE arm; a re-index refreshes the fields it
-                    # legitimately owns and touches nothing else.
-                    # #3590: `o.name` is ON CREATE only. A name is a mutable
-                    # natural key, so moving it is a JOURNALED rename
-                    # (`EntityMutated op=rename`) — a connector re-index must not
-                    # rewrite it live-only, which would replay differently.
-                    "MERGE (o:Object {id:$oid}) "
-                    "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
-                    "o.issue_number=$issue_number, o.url=$url "
-                    "ON MATCH SET o.repo=$repo, "
-                    "o.issue_number=$issue_number, o.url=$url",
-                    params={"oid": oid, "name": name, "okind": okind,
-                            "repo": repo, "issue_number": issue_number, "url": url},
-                )
+                # #3590 review P2 (round 2 at this head): a metadata-supplied
+                # `oid` used to be written by a RAW MERGE that journaled
+                # NOTHING, so `rebuild_all` destroyed a live `:Event`'s Object
+                # and its `aboutObject` edge — live-without-durable, the class
+                # this epic exists to remove. It also defeated the *other* half:
+                # a later event that mentions that name then finds a LIVE holder,
+                # so `_register_referenced_entity`'s "already registered" probe
+                # skips the registration and the node is still never journaled.
+                #
+                # So a FIRST write registers through the SDK door (which
+                # journals `ObjectRegistered`); a RE-index only refreshes the
+                # fields this door owns, so the journal does not grow one line
+                # per re-index. RESIDUAL, stated rather than papered over: a
+                # node that a FOREIGN writer created (no registration, and this
+                # door only sees it as existing) is still live-without-durable,
+                # and `_register_referenced_entity` still skips it — the durable
+                # predicate that would fix that is "is this name journaled",
+                # which this graph-only probe cannot answer.
+                _exists = proj.g.query(
+                    "MATCH (o:Object {id:$oid}) RETURN count(o)",
+                    params={"oid": oid}).result_set
+                if not (_exists and _exists[0][0]):
+                    self._create_entity(
+                        "Object", oid,
+                        {"name": name, "objectKind": okind, "repo": repo,
+                         "issue_number": issue_number, "url": url},
+                        "ObjectRegistered")
+                else:
+                    proj.g.query(
+                        # #9572: the kind is this door's OWN synthesis (`"pr"` /
+                        # `"issue"` from the frontmatter key) — the caller named
+                        # none. Writing it on MATCH re-typed a stored Object
+                        # (`pm:issue` → `issue`, `capability` → `issue`) from a
+                        # session file's frontmatter, the same fabrication class as
+                        # the doors above, one layer out. The kind belongs to the
+                        # fold's ON CREATE arm; a re-index refreshes the fields it
+                        # legitimately owns and touches nothing else.
+                        # #3590: `o.name` is ON CREATE only. A name is a mutable
+                        # natural key, so moving it is a JOURNALED rename
+                        # (`EntityMutated op=rename`) — a connector re-index must not
+                        # rewrite it live-only, which would replay differently.
+                        "MERGE (o:Object {id:$oid}) "
+                        "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
+                        "o.issue_number=$issue_number, o.url=$url "
+                        "ON MATCH SET o.repo=$repo, "
+                        "o.issue_number=$issue_number, o.url=$url",
+                        params={"oid": oid, "name": name, "okind": okind,
+                                "repo": repo, "issue_number": issue_number, "url": url},
+                    )
                 if proj.create_about_edge(event_id, oid, "aboutObject"):
                     connected += 1
                 else:

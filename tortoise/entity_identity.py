@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
 from typing import NamedTuple
 
 from tortoise.live import _terminal_excluded
@@ -217,23 +218,58 @@ def live_name_holder_ids(g, label: str, name: str, *,
                             name_props=name_props)
 
 
-#: One lock per ``(label, name)`` for the CREATE-side resolve-or-mint
-#: (:func:`resolve_or_mint`). The resolve is check-then-act and D2 legalises
-#: same-name coexistence, so no unique index can close the race — the lock
-#: closes it WITHIN A PROCESS. The registry is module-level (mirroring
-#: ``sdk._source_merge_locks``), so two processes can still each see zero live
-#: holders and each mint; that residual is named in the issue and is bounded by
-#: the pre-beta premise (no production Object/Subject graph).
-_holder_locks: dict[tuple, threading.Lock] = {}
+#: One RE-ENTRANT lock per ``(label, name)`` for the CREATE-side resolve-or-mint
+#: (:func:`resolve_or_mint`) AND the write that follows it (:func:`mint_lock`).
+#: The resolve is check-then-act and D2 legalises same-name coexistence, so no
+#: unique index can close the race — the lock closes it WITHIN A PROCESS. The
+#: registry is module-level (mirroring ``sdk._source_merge_locks``), so two
+#: processes can still each see zero live holders and each mint; that residual is
+#: named in the issue and is bounded by the pre-beta premise (no production
+#: Object/Subject graph).
+#:
+#: ⛔ RE-ENTRANT on purpose: a create door holds this lock ACROSS its write
+#: (``mint_lock``) and :func:`resolve_or_mint` — called inside that region —
+#: acquires the SAME lock. A plain ``Lock`` self-deadlocks there.
+_holder_locks: dict[tuple, threading.RLock] = {}
 _holder_locks_guard = threading.Lock()
 
 
-def _holder_lock(label: str, name: str) -> threading.Lock:
+def _holder_lock(label: str, name: str) -> threading.RLock:
     with _holder_locks_guard:
         lock = _holder_locks.get((label, name))
         if lock is None:
-            lock = _holder_locks[(label, name)] = threading.Lock()
+            lock = _holder_locks[(label, name)] = threading.RLock()
         return lock
+
+
+@contextmanager
+def mint_lock(label: str, name: str):
+    """Hold the per-``(label, name)`` create lock ACROSS a resolve AND its write.
+
+    #3590 review P2-1: :func:`resolve_or_mint` alone closes only the RESOLVE —
+    the module docstring promised "the lock closes it WITHIN A PROCESS", but the
+    ``with`` block ENDED when the resolver returned, and the caller writes the
+    node afterwards. Two threads creating one name then interleave:
+
+    1. T1 takes the lock, sees ZERO live holders, mints ``id-a``, releases;
+    2. T2 takes the lock before T1 has written, still sees ZERO, mints
+       ``id-b``, releases;
+    3. both MERGE by their own id -> **two live carriers of one name**.
+
+    That is precisely the create-poisoned state the lock exists to prevent:
+    from then on every by-name create and every ``resolve_entity_id`` refuses
+    with ``AmbiguousEntityName`` and there is no by-name repair path.
+
+    So a create door wraps ``resolve_or_mint`` **and** its write in this:
+    ``with mint_lock(label, name): oid = resolve_or_mint(...); write(oid)``.
+    Cross-PROCESS races are still open (two processes, one graph) — the residual
+    the lock registry docstring names, closed only by a write-time uniqueness
+    constraint on the engine side (the vendor's own answer for "only one node
+    may hold this key"), which this model deliberately does not add because D2
+    legalises two live holders of a name.
+    """
+    with _holder_lock(label, name):
+        yield
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -296,9 +332,9 @@ def resolve_fold_name(g, label: str, name: str, *,
       reference`` recorded, nothing folded.
 
     ``mention=True`` classifies the caller's reference as loose ATTRIBUTION (an
-    Event's ``subject``/``object``/``uses[]``, an about-edge name) rather than
-    the identity of the record being folded, and records the EXEMPT
-    :data:`SHAPE_UNFOLDED_MENTION` instead. The
+    Event's ``subject``/``object``/``uses[]``, an about-edge name, the hosted
+    step-6a ``aboutObject`` link) rather than the identity of the record being
+    folded, and records the EXEMPT :data:`SHAPE_UNFOLDED_MENTION` instead. The
     distinction is load-bearing: a mention that cannot resolve drops ONE link
     and moves no entity's state, and the live pass and the replay pass drop the
     same one (they run this same resolver) — so it is a producer omission, not a
@@ -319,31 +355,77 @@ def resolve_fold_name(g, label: str, name: str, *,
     The remedy for NEW journals is on the producer: register what you reference
     before referencing it (D9) — the SDK's entity doors do exactly that.
     """
+    ids = resolve_fold_name_ids(g, label, name, context=context,
+                                mention=mention)
+    if len(ids) == 1:
+        return ids[0]
+    if len(ids) > 1:
+        # TWO OR MORE live holders: the PLURAL form wires an attribution to all
+        # of them (that is not a miss), but THIS form is asked for the identity
+        # of the record being folded and picking one would be a guess. Record it
+        # — a silent ``None`` here is a fold that neither moves the entity nor
+        # fails the run, i.e. the fail-open the shapes exist to prevent.
+        from tortoise.projection.nonfolded import (
+            SHAPE_AMBIGUOUS_ENTITY_NAME,
+            record_non_folded,
+        )
+        record_non_folded(
+            SHAPE_AMBIGUOUS_ENTITY_NAME, label=label, candidates=tuple(ids),
+            detail=f"name={name!r} cause=ambiguous-holders" + (
+                f" context={context}" if context else ""))
+    # 0 holders: the plural resolver already recorded the miss (`unfolded-
+    # mention` for an attribution, `unregistered-reference` for an identity).
+    return None
+
+
+def resolve_fold_name_ids(g, label: str, name: str, *,
+                          context: str = "", mention: bool = False) -> list[str]:
+    """EVERY live id a NAME reference addresses — the plural fold resolver.
+
+    A mention is loose ATTRIBUTION, and this repo legalises **two live entities
+    holding one name** (D2 / #8864). So a mention site must wire the link to
+    every live carrier — one edge per carrier — exactly as the `:Point` /
+    Event about-edge cascade does (`edges.resolve_about_link`: *"target_internal_ids
+    … A LIST because a name may legally have several carriers, and EVERY one of
+    them is"*). Answering only for the single-holder shape is how the hosted
+    session-commit door (``hosted_api`` step 6a) silently dropped the edge for a
+    name two live entities hold, where ``origin/main``'s
+    ``MERGE (o:Object {name:$name})`` bound to both (#3590 review P1-1).
+
+    Returns EVERY live id, recording nothing, when one or more live id-carrying
+    holders exist: two carriers is what an ATTRIBUTION addresses, not a miss.
+    It returns ``[]`` — and records the shape
+    :func:`resolve_fold_name` would for a lookup that resolves to NOTHING —
+    when no live holder exists. The classification is the caller's ``mention``
+    flag, not a guess: an attribution miss is the exempt ``unfolded-mention``;
+    anything that must be an identity stays non-exempt.
+
+    ``resolve_fold_name`` is the SINGULAR form (one live holder or nothing),
+    for a fold that needs *the* identity of the record it is applying. Callers
+    that only link an attribution must use THIS one.
+    """
     holders = live_name_holder_ids(g, label, name)
     ids = [str(h) for h in holders if h]
-    if len(holders) == 1 and ids:
-        return ids[0]
+    if ids:
+        # ONE OR MANY live holders: the link is wired on every one of them and
+        # no miss is recorded (a name may legally have several carriers).
+        return ids
     from tortoise.projection.nonfolded import (
-        SHAPE_AMBIGUOUS_ENTITY_NAME,
         SHAPE_UNFOLDED_MENTION,
         SHAPE_UNREGISTERED_REFERENCE,
         record_non_folded,
     )
-    if mention:
-        shape = SHAPE_UNFOLDED_MENTION
-    else:
-        shape = (SHAPE_AMBIGUOUS_ENTITY_NAME if len(holders) > 1
-                 else SHAPE_UNREGISTERED_REFERENCE)
+    shape = (SHAPE_UNFOLDED_MENTION if mention
+             else SHAPE_UNREGISTERED_REFERENCE)
     # ``nonfolded.record_non_folded(shape, **fields)`` takes the R8 vocabulary
     # (label / candidates / detail) — NOT the identity module's positional
     # ``(label, name, candidate_ids, shape=)``. Passing ``name=``/``ids=``/
     # ``context=`` raised a TypeError INSIDE the fold (after a rebuild has
     # already wiped the graph), i.e. the fail-closed path crashed instead of
     # recording. Verified against ``nonfolded.NonFoldedEvent``'s fields.
-    record_non_folded(shape, label=label, candidates=tuple(ids),
+    record_non_folded(shape, label=label, candidates=(),
                       detail=f"name={name!r}" + (
-                          f" cause={'ambiguous-holders' if len(holders) > 1 else 'no-live-holder'}"
-                          if mention else "") + (
+                          " cause=no-live-holder" if mention else "") + (
                           f" context={context}" if context else ""))
     logger.warning(
         "entity-identity: a journal record references %s %r by NAME and it "
@@ -352,7 +434,10 @@ def resolve_fold_name(g, label: str, name: str, *,
         "deterministic); the producer must register what it references "
         "(#3590 D9).%s", label, name, len(ids), ids,
         f" context={context}" if context else "")
-    return None
+    # EVERY live holder (empty only on the miss recorded above): a mention is
+    # ATTRIBUTION, so the caller wires one edge per carrier rather than dropping
+    # the ones a single-holder answer would miss.
+    return ids
 
 
 def _require_name_properties(name_props: tuple) -> tuple:

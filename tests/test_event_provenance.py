@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
-from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -40,6 +39,13 @@ class TestUsesProducesEdges:
     def test_performs_edge_created(self, sdk):
         """_upsert_event with subject creates performs edge."""
         proj = sdk._get_proj()
+        # #3590: the fold does not MINT a mention (``the projection is not the
+        # minter``) — a name it cannot resolve is recorded as an exempt
+        # ``unfolded-mention`` and wires nothing. ``EventAPI.add_event``, the
+        # journal writer this fixture stands in for, registers nothing; the SDK
+        # door does (D9). This test drives ``apply()`` directly, so it registers
+        # first, which is exactly the producer duty.
+        sdk.create_entity("subject", "alice", is_episodic=False)
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-001",
@@ -63,6 +69,11 @@ class TestUsesProducesEdges:
     def test_produces_edge_created(self, sdk):
         """_upsert_event with object creates produces edge."""
         proj = sdk._get_proj()
+        # #3590 (D9): the fold does not MINT a mention, so the producer
+        # registers the names this record references before applying it — the
+        # duty `EventAPI.add_event` leaves undone and the SDK door performs.
+        sdk.create_entity("subject", "ci-bot", is_episodic=False)
+        sdk.create_entity("object", "release-v1.0", is_episodic=False)
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-002",
@@ -87,6 +98,12 @@ class TestUsesProducesEdges:
     def test_uses_edge_created(self, sdk):
         """_upsert_event with uses list creates uses edges."""
         proj = sdk._get_proj()
+        # #3590 (D9): the fold does not MINT a mention, so the producer
+        # registers the names this record references before applying it — the
+        # duty `EventAPI.add_event` leaves undone and the SDK door performs.
+        sdk.create_entity("subject", "bob", is_episodic=False)
+        sdk.create_entity("object", "dataset-a", is_episodic=False)
+        sdk.create_entity("object", "dataset-b", is_episodic=False)
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-003",
@@ -108,6 +125,11 @@ class TestUsesProducesEdges:
     def test_uses_single_string(self, sdk):
         """_upsert_event with uses as a single string works."""
         proj = sdk._get_proj()
+        # #3590 (D9): the fold does not MINT a mention, so the producer
+        # registers the names this record references before applying it — the
+        # duty `EventAPI.add_event` leaves undone and the SDK door performs.
+        sdk.create_entity("subject", "carol", is_episodic=False)
+        sdk.create_entity("object", "paper-xyz", is_episodic=False)
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-004",
@@ -127,6 +149,12 @@ class TestUsesProducesEdges:
         """_upsert_event with uses containing duplicates must not create
         duplicate edges — MERGE is idempotent on the pattern level (#146)."""
         proj = sdk._get_proj()
+        # #3590 (D9): the fold does not MINT a mention, so the producer
+        # registers the names this record references before applying it — the
+        # duty `EventAPI.add_event` leaves undone and the SDK door performs.
+        sdk.create_entity("subject", "dedup-tester", is_episodic=False)
+        sdk.create_entity("object", "a", is_episodic=False)
+        sdk.create_entity("object", "b", is_episodic=False)
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-005",
@@ -1036,120 +1064,109 @@ class TestNegativePaths:
         assert r2[0][0] == 0
 
 
-# ── #151: Stub Subject/Object ids are proper ids, NOT the entity name ────
+# ── #151/#3590: a fold-time mention mints NOTHING; the producer registers ──
 #
-# #7936: the stub id `_event_plain_merge` mints is now the CANONICAL entity id
-# for the name (`tortoise.ids.entity_name_id` → `sub-<sha256[:26]>` /
-# `obj-<sha256[:26]>`): deterministic, so replaying one journal cannot move it
-# — which is the hazard that blocked the `(label, id)` re-key of the
-# consistency digest. Before #7936 it was a RANDOM ulid. Its exact SHAPE was
-# never the contract #151 protects: the load-bearing half is `id != name`
-# below (the stub must not take the entity NAME as its id).
+# #151's load-bearing half was always `id != name`: a mention must never take
+# the entity NAME as its id, because the name is a mutable natural key.
+#
+# #7936 then made the fold's stub id the name-DERIVED canonical id, so a
+# replay could not move it. #3590 retires that whole mechanism: a fold-time
+# mint is not replay-deterministic for an OPAQUE id (and the derived spelling
+# is what made a rename mint a second entity), so the fold mints NO carrier for
+# a bare mention at all — D9 puts the registration duty on the PRODUCER
+# (`sdk._register_referenced_entity`, "a reference is not a create"). A mention
+# that resolves to nothing is recorded as the EXEMPT `unfolded-mention` shape
+# and leaves the link unwired.
+#
+# So the pairs below assert the two halves the change actually makes: the FOLD
+# alone produces no carrier, and the SDK DOOR produces one whose id is an
+# opaque minted id — never the name, and never a spelling derived from it.
 
 
-class TestStubEntityIdIsNotTheName:
-    """#151: `_upsert_event` auto-created Subject/Object stubs carry a real id
-    for the name — never the entity name itself (#7936: the canonical
-    `entity_name_id`, formerly a random ulid)."""
+class TestAMentionMintsNoCarrier:
+    """#151/#3590: `id != name` holds by NOT MINTING at fold time at all."""
 
-    def test_performs_stub_subject_has_entity_name_id(self, sdk):
-        """Stub Subject created via performs edge gets the canonical id, not
-        the entity name."""
+    @staticmethod
+    def _carriers(proj, label: str, name: str) -> list:
+        return proj.g.query(
+            f"MATCH (n:{label} {{name:$name}}) RETURN n.id",
+            params={"name": name}).result_set
+
+    def test_a_performs_mention_mints_no_subject(self, sdk):
+        """`EventRecorded.subject` alone: the fold writes the Event and no
+        `:Subject` — a fold-time mint is not replay-deterministic (#3590 D9)."""
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
-            "id": "ev-ulid-1",
-            "eventId": "ev-ulid-1",
+            "id": "ev-3590-1",
+            "eventId": "ev-3590-1",
             "eventKind": "test",
             "subject": "stub-agent-1",
             "startedAt": "2024-01-01T00:00:00Z",
         })
-        r = proj.g.query(
-            "MATCH (s:Subject {name:'stub-agent-1'}) RETURN s.id, s.name"
-        ).result_set
-        assert len(r) == 1
-        sid, name = r[0][0], r[0][1]
-        assert name == "stub-agent-1"
-        assert sid == node_id(proj, "Subject", "stub-agent-1"), sid
-        assert sid != name, f"id must not be the entity name ({sid!r} == {name!r})"
+        assert self._carriers(proj, "Subject", "stub-agent-1") == [], (
+            "the fold minted a Subject carrier for a bare mention — #3590 D9 "
+            "moved that duty to the producer")
+        assert proj.g.query(
+            "MATCH (e:Event {eventId:'ev-3590-1'}) RETURN count(e)"
+        ).result_set[0][0] == 1, "the Event itself must still be written"
 
-    def test_produces_stub_object_has_entity_name_id(self, sdk):
-        """Stub Object created via produces edge gets the canonical id, not
-        the entity name."""
+    def test_a_produces_mention_mints_no_object(self, sdk):
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
-            "id": "ev-ulid-2",
-            "eventId": "ev-ulid-2",
+            "id": "ev-3590-2",
+            "eventId": "ev-3590-2",
             "eventKind": "build",
             "subject": "ci-bot",
             "object": "artifact-stub-1",
             "startedAt": "2024-01-01T00:00:00Z",
         })
-        r = proj.g.query(
-            "MATCH (o:Object {name:'artifact-stub-1'}) RETURN o.id, o.name"
-        ).result_set
-        assert len(r) == 1
-        oid, name = r[0][0], r[0][1]
-        assert name == "artifact-stub-1"
-        assert oid == node_id(proj, "Object", "artifact-stub-1"), oid
-        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
+        assert self._carriers(proj, "Object", "artifact-stub-1") == []
 
-    def test_uses_stub_object_has_entity_name_id(self, sdk):
-        """Stub Object created via uses edge gets the canonical id, not the
-        entity name."""
+    def test_a_uses_mention_mints_no_object(self, sdk):
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
-            "id": "ev-ulid-3",
-            "eventId": "ev-ulid-3",
+            "id": "ev-3590-3",
+            "eventId": "ev-3590-3",
             "eventKind": "analysis",
             "subject": "analyst",
             "uses": ["input-stub-1"],
             "startedAt": "2024-01-01T00:00:00Z",
         })
-        r = proj.g.query(
-            "MATCH (o:Object {name:'input-stub-1'}) RETURN o.id, o.name"
-        ).result_set
-        assert len(r) == 1
-        oid, name = r[0][0], r[0][1]
-        assert name == "input-stub-1"
-        assert oid == node_id(proj, "Object", "input-stub-1"), oid
-        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
+        assert self._carriers(proj, "Object", "input-stub-1") == []
 
-    def test_stub_preserves_existing_id_on_merge(self, sdk):
-        """When the Subject already exists via `_upsert_subject` (with its own
-        canonical `sub-<sha256>` id), the `_upsert_event` MERGE matches by name
-        and ON CREATE does NOT fire, so the existing id is preserved.
+    def test_the_sdk_door_registers_the_mention_with_an_opaque_id(self, sdk):
+        """The producer half: the event door REGISTERS what it references, and
+        the id it registers is opaque — not the name, not derived from it."""
+        sdk.create_event("producer-registered", "test",
+                         subject="performs-agent", is_episodic=False)
+        rows = self._carriers(sdk._get_proj(), "Subject", "performs-agent")
+        assert len(rows) == 1, rows
+        sid = rows[0][0]
+        assert sid != "performs-agent", (
+            f"a mention must never take the entity NAME as its id ({sid!r})")
+        assert not sid.startswith("sub-"), (
+            "the name-derived `sub-<sha26>` spelling is retired as an "
+            f"identity (#3590): {sid!r}")
 
-        #7936: this shape no longer DISTINGUISHES the clause — the stub now
-        mints the same canonical id, so an unconditional `SET` would also pass
-        here. The guard that does distinguish it (a FOREIGN id registered
-        before the event) is
-        `tests/test_7936_stable_stub_ids.py::test_a_late_stub_does_not_clobber_a_canonical_id`
-        for Object and `::test_a_late_subject_stub_does_not_clobber_a_foreign_id`
-        for Subject.
-        """
-        # Create a proper Subject with the canonical id via SDK
+    def test_a_mention_of_a_registered_name_resolves_to_its_id(self, sdk):
+        """And with the registration present, the fold's mention resolves to
+        that carrier — the link is wired, and no second carrier appears."""
         subj = sdk.create_subject("existing-agent", "tester")
         proj = sdk._get_proj()
-        # Now create an event referencing the same subject name
         proj.apply({
             "type": "EventRecorded",
-            "id": "ev-ulid-4",
-            "eventId": "ev-ulid-4",
+            "id": "ev-3590-4",
+            "eventId": "ev-3590-4",
             "eventKind": "test",
             "subject": "existing-agent",
             "startedAt": "2024-01-01T00:00:00Z",
         })
-        # The Subject should still have its original canonical id, not overwritten
-        r = proj.g.query(
-            "MATCH (s:Subject {name:'existing-agent'}) RETURN s.id"
-        ).result_set
-        assert len(r) == 1
-        assert r[0][0] == subj["id"], (
-            f"existing id should be preserved: {r[0][0]!r} != {subj['id']!r}"
-        )
+        rows = self._carriers(proj, "Subject", "existing-agent")
+        assert [r[0] for r in rows] == [subj["id"]], (
+            f"the mention must resolve to the registered carrier: {rows}")
 
 
 # ── #212: participatesIn edges ────────────────────────────────────────

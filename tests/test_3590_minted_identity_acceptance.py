@@ -18,10 +18,19 @@ exactly the shapes a by-eye check misses:
 4. **Delete then re-create the same name yields two distinct entities** —
    acceptance: *"no resurrection, no burial"*.
 
-Every assertion here is RED on the pre-#3590 tree: the id was the name's hash,
-a rename was withheld rather than journaled, and a re-create resurrected the
-buried id. That is the point of the pins — each one names the behaviour that
-regresses if the MERGE key ever moves back to `{name}`.
+Every assertion in items 1, 3 and 4 is RED on the pre-#3590 tree: the id was
+the name's hash, a rename was withheld rather than journaled, and a re-create
+resurrected the buried id. That is the point of those pins — each one names the
+behaviour that regresses if the MERGE key ever moves back to `{name}`.
+
+⚠️ **Item 2 is NOT a pre-fix regression pin, and must not be sold as one.**
+`test_two_creates_of_one_live_name_are_one_entity` PASSES on the pre-#3590 tree,
+because the derived id made both creates land on the same id by construction;
+it is the #452 idempotency contract — a property the change must PRESERVE, so
+it is a load-bearing anti-regression pin, just of the other kind (and it is the
+one test the base run reports as passing: "4 failed, 1 passed"). The measured
+base result for this file is exactly that split, and the earlier blanket claim
+("every assertion here is RED") was wrong about this one (#3590 review P3).
 """
 
 from __future__ import annotations
@@ -280,97 +289,124 @@ def test_a_mention_no_door_registered_does_not_make_the_journal_unrebuildable(
 
 
 def test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not(sdk):
-    """The exemption's BOUND — exercised against the fold, not asserted about a
-    constant table (#3590 review: the constant-only form passed on any tree
-    that merely DEFINES the two shapes, including one where no fold ever
-    records them).
+    """The exemption's BOUND — asserted by RUNNING the fold, not by reading a flag.
 
-    The degraded guarantee recorded in ``EXEMPT_SHAPES`` is worth nothing unless
-    the neighbouring shape still fails the run. An id-less ``ObjectSuperseded``
-    addresses an ENTITY (it must move its status), so it keeps the non-exempt
-    ``unregistered-reference`` shape — a mention exemption that leaked into that
-    class would let a supersede be silently not applied.
+    ``identity-decision.md`` cites this test BY NAME as the proof that the
+    ``unfolded-mention`` exemption cannot leak into the identity class, so it
+    must fail if the leak happens. An earlier version asserted two membership
+    tests on module CONSTANTS (``SHAPE_UNFOLDED_MENTION in EXEMPT_SHAPES`` and
+    its negation) — which stays GREEN if ``_fold_object_superseded``'s id-less
+    branch is changed to record ``unfolded-mention``, i.e. under exactly the
+    mutation it claims to guard (#3590 review P1-2).
 
-    Mutation that must red this: changing ``_fold_object_superseded``'s id-less
-    ``record_non_folded(SHAPE_UNREGISTERED_REFERENCE, …)`` to
-    ``SHAPE_UNFOLDED_MENTION`` — the leak the test names — leaves the constants
-    unchanged and is caught only by the fold-level assertions below.
+    So the bound is now asserted against a real replay of a real journal, in
+    ONE run so the two sides cannot drift apart:
+
+    * a mention of a name nobody registered is EXEMPT — the run completes (the
+      live and replay passes drop the same link);
+    * an id-less ``ObjectSuperseded`` over that same journal is REFUSED — the
+      run raises ``NonFoldedEventsError`` carrying ``unregistered-reference``,
+      because a supersede must MOVE an entity's state and cannot resolve its
+      target.
+
+    Non-vacuous by construction: re-point the fold site's shape at
+    ``SHAPE_UNFOLDED_MENTION`` and the ``pytest.raises`` below does not fire.
     """
     from tortoise.projection import _replay_write_scope
     from tortoise.projection.nonfolded import (
-        EXEMPT_SHAPES,
         SHAPE_UNFOLDED_MENTION,
         SHAPE_UNREGISTERED_REFERENCE,
-        collect_non_folded,
+        NonFoldedEventsError,
     )
 
-    client, _events = sdk
+    client, events = sdk
     proj = client._get_proj()
+    journal = events / "events.jsonl"
 
-    # 1. A mention that resolves to nothing: the EXEMPT attribution shape.
-    with _replay_write_scope(), collect_non_folded() as entries:
-        proj.apply({"type": "EventRecorded", "eventId": "ev-bound",
-                    "event": {"eventId": "ev-bound",
-                              "eventKind": "meeting",
-                              "subject": "Nobody At All"}})
-    mention_shapes = [e.shape for e in entries]
-    assert SHAPE_UNFOLDED_MENTION in mention_shapes, mention_shapes
+    # ── the MENTION half: unregistered names only, and the run completes ──
+    journal.write_text(json.dumps({
+        "type": "EventRecorded", "id": "ev-bound-1",
+        "eventId": "ev-bound-1", "name": "bound matrix event",
+        "eventKind": "meeting", "subject": "Nobody Registered",
+        "object": "Nothing Registered",
+        "startedAt": "2026-01-01T00:00:00Z",
+    }) + "\n")
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert proj.g.query(
+        "MATCH (o:Object {name:'Nothing Registered'}) RETURN count(o)"
+    ).result_set[0][0] == 0, "the fold minted a mention carrier"
 
-    # 2. An id-less ObjectSuperseded: an ENTITY the fold must move, so the
-    #    NON-exempt shape — recorded by the fold, observed at the run boundary.
-    with _replay_write_scope(), collect_non_folded() as entries:
-        proj.apply({"type": "ObjectSuperseded", "name": "Nobody Two",
-                    "supersededBy": "someone-else"})
-    identity_shapes = [e.shape for e in entries]
-    assert SHAPE_UNREGISTERED_REFERENCE in identity_shapes, identity_shapes
-    assert SHAPE_UNFOLDED_MENTION not in identity_shapes, (
-        "the identity miss took the mention exemption — a fold that must "
-        "move an entity's state is now skippable with a green run")
+    # ── the IDENTITY half: the same journal plus an id-less supersede ──
+    with journal.open("a") as fh:
+        fh.write(json.dumps({
+            "type": "ObjectSuperseded", "name": "Nobody Registered",
+            "supersedes_by": "Successor",
+            "ts": "2026-01-01T00:00:01+00:00",
+        }) + "\n")
+    with pytest.raises(NonFoldedEventsError) as refused:
+        proj.rebuild_all(str(events), confirm_destructive=True)
 
-    # …and the classification the fold just demonstrated is the table's own:
-    assert SHAPE_UNFOLDED_MENTION in EXEMPT_SHAPES
-    assert SHAPE_UNREGISTERED_REFERENCE not in EXEMPT_SHAPES, (
-        "the identity shape became exempt — a fold that must move an entity's "
-        "state can be skipped with a green run")
-
-
-def test_an_unresolvable_status_fold_target_may_not_take_the_mention_exemption(sdk):
-    """#3590 review P1: a fold that MOVES entity state is not a mention.
-
-    ``_fold_object_status`` resolves an ``about_entities`` target and then
-    ``SET o.status`` on it — entity state. ``nonfolded.EXEMPT_SHAPES`` records
-    the exemption's bound as *"a fold that must MOVE an entity's state can
-    never take this exemption"*, so this site may not resolve with
-    ``mention=True``: doing so made an unresolvable target a silent no-op
-    behind a GREEN run (nothing written, nothing reported, nothing refused)
-    where the pre-#3590 name-keyed read at least applied it.
-
-    Mutation that must red this: adding ``mention=True`` back to the
-    ``resolve_fold_name`` call in ``_fold_object_status._targets`` — the record
-    becomes the EXEMPT ``unfolded-mention`` and the run stops failing.
-    """
-    from tortoise.projection import _replay_write_scope
-    from tortoise.projection.nonfolded import (
-        SHAPE_UNFOLDED_MENTION,
-        collect_non_folded,
-    )
-
-    client, _events = sdk
-    proj = client._get_proj()
-    with _replay_write_scope(), collect_non_folded() as entries:
-        proj.apply({"type": "EventRecorded", "eventId": "ev-status-fold",
-                    "event": {"eventId": "ev-status-fold",
-                              "eventKind": "venture:disbursement",
-                              # a DECLARED lifecycle kind whose target is named
-                              # only here, and is registered nowhere
-                              "aboutEntities": ["Nothing Registered"]}})
-    shapes = [e.shape for e in entries]
-    assert shapes, (
-        "the declared fold resolved an unregistered target and recorded "
-        "NOTHING — a state-moving miss must be recorded")
+    shapes = [e.shape for e in refused.value.refused]
+    assert SHAPE_UNREGISTERED_REFERENCE in shapes, (
+        "an id-less ObjectSuperseded must keep the NON-exempt identity shape — "
+        f"the run refused {shapes} instead")
     assert SHAPE_UNFOLDED_MENTION not in shapes, (
-        "a state-moving status fold took the ATTRIBUTION exemption — an "
-        f"unresolvable target is now a silent no-op behind a green run: {shapes}")
+        "the mention exemption LEAKED into the identity class: the supersede "
+        f"was refused under the exempt shape too ({shapes})")
+    assert not any(e.exempt for e in refused.value.refused), (
+        f"an identity miss was marked exempt: {shapes}")
+    # …and the mention in the SAME journal was still classified as the exempt
+    # shape rather than silently dropped: the two dispositions coexist in one
+    # fold, which is what "a classification, not a blanket" means.
+    assert SHAPE_UNFOLDED_MENTION in [e.shape for e in refused.value.events]
+
+
+def test_a_fold_that_moves_state_cannot_ride_the_mention_exemption(sdk):
+    """#3590 review P1 (round 5): the explicit-``object`` status fold is NOT attribution.
+
+    ``_event_plain_merge`` resolves the event's explicit ``object`` through the
+    MENTION resolver (``mention=True``), which records the EXEMPT
+    ``unfolded-mention`` when no single live holder carries the name. The
+    ``#1350`` work-item fold then took that same ``None`` as its target:
+    ``_targets()`` appends a target only when it has an id, and the built-in
+    half is guarded on the id too — so an unresolvable ``object`` applied NO
+    status write, reported NO ``status_fold_unapplied``, and the run PASSED with
+    an exempt warning. That is the exemption's own written bound crossed:
+    ``identity-decision.md`` and ``nonfolded.EXEMPT_SHAPES`` both say a fold that
+    must MOVE an entity's state can never take it — an unrested entity silently
+    keeps its old status behind a green rebuild.
+
+    Non-vacuous by construction: the journal below is the SAME shape the
+    exemption test above replays green (an unregistered name mentioned by an
+    event). Only the fold's classification separates them, so restoring
+    ``mention=True`` for the fold's own resolution reds the ``pytest.raises``.
+    """
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNREGISTERED_REFERENCE,
+        NonFoldedEventsError,
+    )
+
+    client, events = sdk
+    proj = client._get_proj()
+    journal = events / "events.jsonl"
+    journal.write_text(json.dumps({
+        "type": "EventRecorded", "id": "ev-fold-miss",
+        "eventId": "ev-fold-miss", "name": "unregistered lifecycle target",
+        # a #1350 lifecycle kind: this event's ONLY projection is Entity state
+        "eventKind": "github.issue.closed",
+        "object": "Never Registered",
+        "startedAt": "2026-01-01T00:00:00Z",
+    }) + "\n")
+
+    with pytest.raises(NonFoldedEventsError) as refused:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+    shapes = [e.shape for e in refused.value.refused]
+    assert SHAPE_UNREGISTERED_REFERENCE in shapes, (
+        "a lifecycle event whose `object` resolved to nothing applied no status "
+        f"write and passed the run; refused {shapes} instead")
+    assert not any(e.exempt for e in refused.value.refused), (
+        f"the state-moving fold's miss was marked EXEMPT: {shapes}")
 
 
 def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
@@ -489,3 +525,63 @@ def test_the_event_door_registers_every_name_its_record_mentions(sdk):
     assert _edges() == live, (
         "the mention edges did not survive replay — the door referenced names "
         "its journal never registered (#3590 D9)")
+
+
+def test_a_create_holds_the_per_name_mint_lock_across_its_write(sdk, monkeypatch):
+    """#3590 review P2-1: the lock's SCOPE is the write, not just the resolve.
+
+    `entity_identity`'s contract says the per-name lock closes the create race
+    *within a process*. It did not: `resolve_or_mint`'s ``with`` block ENDED when
+    the resolver returned, and the caller writes the node afterwards, so two
+    threads creating one name interleave as
+
+    1. T1 sees ZERO live holders, mints ``id-a``, releases the lock;
+    2. T2 — before T1 has written — sees ZERO, mints ``id-b``, releases;
+    3. both MERGE by their own id ⇒ **two live carriers of one name**.
+
+    That state is create-poisoning: every later by-name create and every
+    `resolve_entity_id` refuses with `AmbiguousEntityName`, and there is no
+    by-name repair path. The fix is that a create door holds
+    `entity_identity.mint_lock` across the resolve AND the write.
+
+    The pin is taken AT the write: a probe thread tries to acquire the very
+    lock the door must be holding, and must FAIL. Non-vacuous by construction —
+    drop the ``with mint_lock(...)`` from `create_entity` (or from
+    `_connect_issue_objects`) and the probe acquires it, so this reds.
+    """
+    import threading
+
+    from tortoise.entity_identity import _holder_lock
+
+    client, _ = sdk
+    proj = client._get_proj()
+    observed: dict = {}
+    real = TortoiseSDK._create_entity
+
+    def _spy(self, label, id_val, props, event_type, **kw):
+        if label == "Object" and props.get("name") == "Serialised":
+            lock = _holder_lock("Object", "Serialised")
+            probe: dict = {}
+
+            def _try_acquire():
+                got = lock.acquire(blocking=False)
+                probe["free"] = got
+                if got:
+                    lock.release()
+
+            t = threading.Thread(target=_try_acquire, daemon=True)
+            t.start()
+            t.join(10)
+            observed["free"] = probe.get("free")
+        return real(self, label, id_val, props, event_type, **kw)
+
+    monkeypatch.setattr(TortoiseSDK, "_create_entity", _spy)
+    client.create_entity("object", "Serialised", is_episodic=False)
+
+    assert observed.get("free") is False, (
+        "the per-name mint lock was FREE at the moment of the write "
+        f"(observed={observed}) — it is released when `resolve_or_mint` "
+        "returns, so two concurrent creates of one name both mint and the "
+        "name is create-poisoned (#3590 review P2-1)")
+    assert len(_name_ids(proj, "Object", "Serialised")) == 1, (
+        "one name, one carrier")

@@ -4,8 +4,12 @@ Pins the two halves of interface E so a regression fails CI rather than a
 rebuild (``docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md``
 §1):
 
-* the canonical id FORMAT (``ulid()``, the accepted Crockford form, the
-  ``label[:3]-<sha256[:26]>`` entity handle) and its determinism;
+* the canonical id FORMAT (``ulid()`` — the ONLY minted shape since #3590 —
+  the accepted Crockford form, and the RETIRED ``label[:3]-<sha256[:26]>``
+  entity handle, which stays RECOGNISED (a pre-change graph's ids must keep
+  being treated as ids) but is nothing's identity any more: no name-derived
+  minter exists, because ``obj-<sha26(name)>`` made a rename mint a second
+  entity and a delete+re-create resurrect the first one;
 * the stable-name replay keys (``stub_key`` + ``STRUCTURAL_REL_LABELS``) — a
   rebuilt edge MUST resolve its sibling by ``name`` / ``url`` and **never**
   ``target.id``, and ``aboutDocument`` keys on ``url`` (NOT the pre-D10
@@ -18,6 +22,7 @@ unit/format half that every downstream unit is written against.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
@@ -69,33 +74,38 @@ def test_ulid_and_crockford_accepted_junk_rejected():
         assert not _is_ulid(junk), junk
 
 
-def test_the_legacy_entity_handle_is_recognised_but_never_minted():
-    """The handle spelling survives ONLY as a legacy id (#3590 retired it).
+def test_the_retired_entity_handle_is_recognised_but_never_minted():
+    """#3590: the derived handle stays accepted AS AN ID, and nothing mints it.
 
-    #3590 item 6 retired `obj-<sha26(name)>` as an ENTITY id: identity is an
-    opaque ULID minted at creation, so nothing in `tortoise/` derives an id from
-    a name (the only survivor is `legacy_ids._derived_legacy_handle`, reachable
-    from no write path). The RECOGNISERS must still accept the handle, because
-    an existing journal and a `legacy_ids` plan both carry it — so this pins the
-    two identity spaces rather than the retired derivation: the handle is a
-    recognised `_is_canonical_entity_id` value and is NOT the minted shape.
+    Pre-change every entity id was ``label[:3]-<sha256(label:name)[:26]>``, so
+    a graph written by that tree is full of them. Retiring the MINT while
+    dropping the RECOGNITION would make every pre-change node unaddressable —
+    ``_check_refs`` would stop treating its id as an id — so the shape stays in
+    the accepted set. What must NOT come back is the derivation: it made a
+    rename mint a second entity (the id moved with the name) and a
+    delete+re-create resurrect the first one (the id was the same again).
 
-    The derivation itself is frozen as a literal in
-    `tests/test_8607_legacy_id_normaliser.py::test_the_target_is_the_existing_
-    canonical_minter`; a test cannot recompute it without re-implementing it.
+    The pins, in order: the spelling is still a valid entity id; the module
+    that used to mint it can no longer; and two creates of one name space are
+    two DIFFERENT minted ids (identity is minted once, not recomputed).
     """
-    handle = "obj-c64daa148b39390702266ea93d"     # a legacy (retired) handle
-    assert ENTITY_HANDLE_RE.match(handle), handle
-    assert handle.startswith("obj-")
-    assert _CANONICAL_ENTITY_ID_RE.match(handle)
-    assert _ENTITY_ID_RE.match(handle)
-    assert _is_canonical_entity_id(handle)
-    assert _is_entity_id(handle)
-    # … and it is a DIFFERENT identity space from the minted one: a create
-    # produces this shape, never the handle above.
-    assert not _is_ulid(handle), handle
-    assert _is_ulid(ulid())
-    assert not ENTITY_HANDLE_RE.match(ulid())
+    retired = "obj-" + hashlib.sha256(b"Object:acme").hexdigest()[:26]
+    assert ENTITY_HANDLE_RE.match(retired), retired
+    assert _CANONICAL_ENTITY_ID_RE.match(retired)
+    assert _ENTITY_ID_RE.match(retired)
+    assert _is_canonical_entity_id(retired)
+    assert _is_entity_id(retired)
+
+    import tortoise.ids as ids_module
+
+    assert not hasattr(ids_module, "entity_name_id"), (
+        "tortoise.ids must not carry a name-derived entity minter: #3590 "
+        "retired it, and a re-introduction silently restores the "
+        "rename-mints-a-second-entity class")
+    assert not hasattr(ids_module, "_derived_legacy_handle")
+
+    first, second = ulid(), ulid()
+    assert first != second, "each mint is a FRESH id, never a recomputation"
 
 
 # ── the stable-name replay keys ─────────────────────────────────────────────

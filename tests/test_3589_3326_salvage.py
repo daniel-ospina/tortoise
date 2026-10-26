@@ -52,6 +52,7 @@ fix lands this XPASSES and FAILS, so the pin cannot outlive its bug.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -80,11 +81,11 @@ def test_derived_id_reference_does_not_mint_a_second_carrier(tmp_path):
                       event_log_path=str(events / "events.jsonl"))
     try:
         proj = sdk._get_proj()
-        # The RETIRED derivation's value for `Object:"SHARED"`, frozen as a
-        # literal (#3590 item 6 removed the minter; a test must not recompute a
-        # derivation the product no longer has). The point of this pin is that a
-        # derived-LOOKING id proves nothing about identity (#3389).
-        derived = "obj-2c8f61dbe32e30a50debc0b61b"
+        # A SPELLING of the retired derived handle, built here rather than
+        # imported: #3590 removed `ids.entity_name_id`, and this case is about
+        # what a legacy journal CONTAINS, so the test must be able to write the
+        # old spelling without any module still minting it.
+        derived = "obj-" + hashlib.sha256(b"Object:SHARED").hexdigest()[:26]
         assert derived.startswith("obj-"), derived
 
         # 1) a journaled live carrier of SHARED under an ARBITRARY id
