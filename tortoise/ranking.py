@@ -194,13 +194,19 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 #     documented [0, 1] graph_boost invariant raised, which is a
 #     retrieval-semantics decision and not a tuning value.
 #
-# Every listed remedy is a PRODUCT decision, which is why this is reported
-# rather than enacted: (1) boost inside fusion = score-based fusion, the open
-# owner ruling on #4210; (2) raise the boost = a magnitude choice that repairs
-# the default page and an invariant change that repairs the small ones (above);
-# (3) tie on the contested signal = reverses #3019's id tie-break, which
-# ``temporal_leg.py`` consumes positionally; (4) restate the promise = the
-# recorded #2102 E2E-1 indicator, also the owner's.  Pinned by
+# Every listed remedy was PUT to the owner and the answer is recorded: the
+# #7704 ruling (2026-10-25, comment 6402104535) CLOSES options A / B / C / D as
+# answers to that issue, so none of them is a pending decision here.
+# (1) boost inside fusion = score-based fusion, which is #4210's own open
+# ruling and not a #7704 choice; (2) raise the boost = a magnitude tuning value,
+# whose only product-shaped part is raising the documented [0, 1] graph_boost
+# invariant (above) — that needs its own decision, not this issue's; (3) tie on
+# the contested signal = reverses #3019's id tie-break, which ``temporal_leg.py``
+# consumes positionally (#2976); (4) restate the promise = CLOSED for #7704, and
+# the ruling does not re-specify the #2102 E2E-1 indicator's wording at all —
+# "No hard rule is to be written in its place". What actually closes the
+# measured defect is dedup identity + provenance accumulation (#9998, #9437,
+# #9879).  Pinned by
 # ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this

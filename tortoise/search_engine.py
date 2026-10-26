@@ -2841,7 +2841,6 @@ def rrf_fusion(
     # directly on two DISTINCT ids with equal scores, so the marker comes off
     # deliberately: in the change that lands dedup, where the pin is replaced by
     # one asserting the intended state); the measured magnitudes live on #7704.
-    # Do not read this comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.

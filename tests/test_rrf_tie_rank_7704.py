@@ -72,8 +72,9 @@ The pin stays ARMED, and it reds on the WRONG follow-through first:
   the #2102 E2E-1 indicator's wording is restated alongside it is **not**
   decided by the ruling — its point 5 reads "The #2102 E2E-1 indicator's wording
   is NOT re-specified by this ruling. No hard rule is to be written in its
-  place" — so a restatement needs its own decision elsewhere and is not
-  authorised here. Never a silent green.
+  place, and none is to be enforced as an absolute ordering guarantee" — so a
+  restatement needs its own decision elsewhere and is not authorised here.
+  Never a silent green.
 
 The three green guards below hold ANY change here to its invariants (a
 generator leg is not swallowed, a leg that DID rank the rows apart is still
