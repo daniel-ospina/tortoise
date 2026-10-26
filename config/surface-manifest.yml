@@ -540,11 +540,12 @@ response_fields:
   field: valid_to_shaped
   emitted_when: 'same field, same condition, on the UPDATE door (#9202): the caller''s validTo declared no date
     and was shaped into the canonical un-datable end. Emitted on every reply path of the door that WROTE the shaped
-    end, including the status-only and promote no-ops. ⛔ ONE exception, and it is the rule rather than a hole: a
-    reply for an id that does not exist returns {} and carries NO receipt, because nothing was stored — the receipt
-    reports an end that reached the record, and that path writes nothing (it is also the documented absent-id
-    contract). A downstream lane may therefore index reply["valid_to_shaped"] only after confirming the reply is
-    non-empty.'
+    end; a `status` that was already applied does not suppress it, because the props write still applies the shaping.
+    The status-only and promote NO-OP replies write nothing and carry none. ⛔ ONE further exception, and it is the
+    rule rather than a hole: a reply for an id that does not exist returns {} and carries NO receipt, because nothing
+    was stored — the receipt reports an end that reached the record, and that path writes nothing (it is also the
+    documented absent-id contract). A downstream lane may therefore index reply["valid_to_shaped"] only after
+    confirming the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
   unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
     returns byte-identical to before this field existed
 approval_status: approved
