@@ -261,7 +261,7 @@ def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
     """
     clf = _classifier(lambda _rows: ({"i0": "core:workflow"}, {
         "calls": 1, "cost_usd": 10 ** 400, "prompt": seam.CLASSIFY_PROMPT,
-        "unavailable": 1, "schema_rejects": ["kind_c0"],
+        "model": seam.MODEL, "unavailable": 1, "schema_rejects": ["kind_c0"],
     }))
     classified = clf.classify_items(
         [{"id": "i0", "type": "entity", "text": "the plan workflow"}])
@@ -270,6 +270,9 @@ def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
     assert seam_stats["cost_usd"] == 0.0, "an unrepresentable spend is not counted"
     assert seam_stats["prompt"] == seam.CLASSIFY_PROMPT, (
         "the armed-but-unavailable state has to be readable from the artifact")
+    assert seam_stats["model"] == seam.MODEL, (
+        "the pin that answered belongs in the record — it is the provenance the "
+        "seam enforces but the classify artifact used to drop")
     assert seam_stats["unavailable"] == 1
     assert "kind_c0" in seam_stats["rejected"]
 

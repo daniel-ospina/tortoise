@@ -574,9 +574,10 @@ class KindClassifier:
         (``assigned_llm`` means "assigned by the model tail", of either kind),
         and the seam's own spend/refusals ride in ``stats["seam"]`` — additive
         keys only, the classify-later payload's convention. That record includes
-        ``prompt`` (which prompt version answered), ``unavailable`` (how many
-        batches the capability never answered, so an armed-but-keyless run is
-        distinguishable from "no item reached the tail") and ``schema_rejects``.
+        ``prompt`` (which prompt version answered), ``model`` (the pin that
+        answered), ``unavailable`` (how many batches the capability never
+        answered, so an armed-but-keyless run is distinguishable from "no item
+        reached the tail") and ``schema_rejects``.
         """
         seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
                                          "cost_usd": 0.0, "rejected": []})
@@ -601,6 +602,13 @@ class KindClassifier:
             prompt = seam_stats.get("prompt")
             if isinstance(prompt, str) and prompt:
                 seam["prompt"] = prompt
+            model = seam_stats.get("model")
+            if isinstance(model, str) and model:
+                # The pin that answered — the same provenance `_decide` enforces
+                # (a mismatched envelope is Unavailable, so an unverified model's
+                # answer never becomes a kind). Dropped here it would leave the
+                # classify artifact unable to say WHICH model produced the kinds.
+                seam["model"] = model
             unavailable = seam_stats.get("unavailable")
             if isinstance(unavailable, int) and not isinstance(unavailable, bool):
                 seam["unavailable"] = seam.get("unavailable", 0) + unavailable

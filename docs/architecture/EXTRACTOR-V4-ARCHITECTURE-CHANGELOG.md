@@ -1007,11 +1007,14 @@ per token is the vendor's documented example (`$0.000026 / 62 tokens`, ⇒ `4.19
 cross-checked against a 100-row usage ledger from this machine, whose fit is `4.20e-7 × input_tokens`
 with a maximum absolute error of `$0.000001`. ⚠️ **No live call was made** (no `JEV_API_KEY` on the
 box that wrote this), so the token counts are a `cl100k` proxy (read them ±15%) and the first armed
-call is what produces a receipt — the seam records it in `stats["cost_usd"]`.
+call is what produces a receipt — the seam records it in `stats["seam"]["cost_usd"]` (the VET gate's
+`stats` and the classify `stats` both nest the seam's own record under that key).
 
-**Tests:** two, and both are mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
+**Tests:** four, and each is mutation-checked (`tests/test_s2_decision_seam_5087.py`): a valid typed
 answer decides through the REAL `vet_gate` and the REAL `KindClassifier`; an out-of-schema answer
 (wrong primitive / `9.0` on a 0–3 scale / a choice outside the offered set) produces no verdict and
-names its question. Four mutants each redden at least one of them and restore byte-identically — including
+names its question; the seam's own record (`prompt`/`model`/`bands`/`cost_usd`) reaches the gate's
+stats; and an injected decider's unrepresentable spend cannot abort the fail-open classify pass. Six
+mutants each redden at least one of them and restore byte-identically — including
 `_noul`'s coercion of a missing probability to `0.0`, which turns a `choice` answer into a
 confident **DISCARD**.
