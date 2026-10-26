@@ -13795,7 +13795,12 @@ class TortoiseSDK:
         storage, so ``operator=False`` is REFUSED there rather than overruled —
         the caller does not choose (``beta-sdk-surface.md`` row 19, ONTOLOGY §8).
         ``True`` is accepted and changes nothing: the meaning already requires
-        the carrying operator.
+        the carrying operator. On the two arms that build **no** operator at all
+        (``wasDerivedFrom`` → ``create_derivation``, ``references`` with an
+        ``entity_label`` → ``link_source_to_entity``) ``True`` is REFUSED, not
+        dropped: there is no carrying operator on those writers for it to
+        select, so honouring it is not possible and ignoring it would return
+        success for a write that stored a subset of the call (the rule below).
 
         ⛔ **A parameter an arm cannot RECORD is refused, never dropped.** The
         five writers take different parameter sets, so a keyword this signature
@@ -13807,7 +13812,9 @@ class TortoiseSDK:
         ``create_direct_edge`` arm, ``label``/``direction``/``promote_source`` by
         the ``create_operator`` arm, and NONE of them by the derivation,
         provenance or plain-edge arms; asking for one there raises a
-        ``ValueError`` that names the arm and the writer. ``entity_label`` and
+        ``ValueError`` that names the arm and the writer. ``operator=True`` is
+        honoured by the ``create_operator`` arm alone — the arm that IS that
+        writer — and refused on the derivation and provenance arms. ``entity_label`` and
         ``source_kind`` belong to the PROVENANCE arm alone — naming either on
         another relation is refused rather than ignored. ``source_kind``
         defaults to ``None`` (= not asked) and is resolved to ``"document"``
@@ -13840,7 +13847,12 @@ class TortoiseSDK:
             "create_direct_edge": frozenset({
                 "direction", "confidence", "weight", "label", "batch_id",
                 "promote_source"}),
-            "create_operator": frozenset({"label", "direction", "promote_source"}),
+            # `operator` is honoured HERE and only here (#10053 review, P3): this
+            # is the arm whose writer BUILDS the carrying operator, so an
+            # explicit `True` is exactly what it does. Every other door records
+            # no carrying operator, so `True` there is refused by `_dispatch`.
+            "create_operator": frozenset({
+                "label", "direction", "promote_source", "operator"}),
             "create_derivation": frozenset(),
             "link_source_to_entity": frozenset({"entity_label", "source_kind"}),
             "create_edge": frozenset(),
@@ -13855,6 +13867,17 @@ class TortoiseSDK:
         }
         if promote_source is False:
             requested["promote_source"] = False
+        # #10053 review (P3): `operator` was the one parameter outside
+        # `requested`, so `_dispatch` could never refuse it — and the provenance
+        # and derivation arms return BEFORE it is read, so `operator=True` there
+        # was accepted and forwarded nowhere. Only `True` is added: on those two
+        # arms `False` is already the true statement (they build no carrying
+        # operator, so "no operator" is exactly what they do), while `True` is a
+        # request they have no home for. The IMPL/NAND plain-edge arm is
+        # unreachable with `True` (`operator is not True`), so `create_direct_edge`
+        # never needs it in its honoured set.
+        if operator is True:
+            requested["operator"] = True
 
         def _dispatch(door: str, call):
             """Run the arm, or REFUSE what its writer cannot record (#4282).
@@ -13866,12 +13889,24 @@ class TortoiseSDK:
             """
             dropped = sorted(set(requested) - _honours[door])
             if dropped:
+                # `operator` gets its own counsel: "call the writer directly" is
+                # false advice for it — `create_derivation` takes no `operator`
+                # either, so there is no call to make. What the caller wants is
+                # a DIFFERENT relation, and naming it is the only fix there is.
+                advice = (
+                    " There is no carrying operator on this arm at all — if you "
+                    "need one, name an epistemic relation ('supports', "
+                    "'refutes', 'mutuallySupportive', 'mutuallyExclusive'), "
+                    "which builds it."
+                    if "operator" in dropped else
+                    f" Call `TortoiseSDK.{door}` directly if you need that "
+                    f"parameter."
+                )
                 raise ValueError(
                     f"link_entities: the {rel!r} arm writes through `{door}`, which "
                     f"records no {', '.join(dropped)} — refusing rather than "
                     f"returning success for a write that dropped "
-                    f"{'them' if len(dropped) > 1 else 'it'}. Call "
-                    f"`TortoiseSDK.{door}` directly if you need that parameter."
+                    f"{'them' if len(dropped) > 1 else 'it'}.{advice}"
                 )
             return call()
 

@@ -539,12 +539,33 @@ def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
     ("wasDerivedFrom", {"entity_label": "Event"}, "create_derivation"),
     ("supports", {"source_kind": "document"}, "create_operator"),
     ("IMPL", {"entity_label": "Event"}, "create_direct_edge"),
+    # #10053 review (P3): `operator` was OUTSIDE `requested`, so no arm could ever
+    # refuse it — and the two arms that return BEFORE it is read anywhere swallowed
+    # `operator=True`, the mirror of the `operator=False` refusal tested above, on
+    # the two writers that record no carrying operator at all. Asking for one there
+    # is not "already true", it is a request the writer has no home for.
+    ("wasDerivedFrom", {"operator": True}, "create_derivation"),
+    ("references", {"entity_label": "Event", "operator": True}, "link_source_to_entity"),
 ])
 def test_link_entities_refuses_a_parameter_the_chosen_arm_cannot_record(
         sdk, relation, kwargs, door):
     """Accept-and-drop is the fail-silent class: success returned, nothing stored."""
     with pytest.raises(ValueError, match=f"`{door}`, which records no"):
         sdk.link_entities(relation, "src", "dst", **kwargs)
+    assert sdk.calls == [], "a refusal must not fall through to a write"
+
+
+def test_the_operator_refusal_advises_the_relations_that_can_carry_it(sdk):
+    """A refusal is only actionable if its advice can be FOLLOWED.
+
+    The generic counsel is "call the writer directly" — false for `operator`:
+    `create_derivation` and `link_source_to_entity` take no such parameter, so
+    there is no call to make. The request is satisfiable only by a different
+    relation, so the message names one. (The `_honours` matrix above pins the
+    refusal; this pins the sentence a caller has to act on.)
+    """
+    with pytest.raises(ValueError, match="name an epistemic relation"):
+        sdk.link_entities("wasDerivedFrom", "src", "dst", operator=True)
     assert sdk.calls == [], "a refusal must not fall through to a write"
 
 
@@ -557,6 +578,23 @@ def test_the_direct_edge_arm_still_records_every_attribute_it_can(sdk):
     assert kwargs["confidence"] == 0.8 and kwargs["weight"] == 0.5
     assert kwargs["label"] == "bearson" and kwargs["batch_id"] == "b1"
     assert kwargs["direction"] == "->"
+
+
+def test_operator_true_still_reaches_the_arms_that_do_build_the_operator(sdk):
+    """The CONTRAST for the two refusals above: `operator=True` is not refused everywhere.
+
+    Without this, "add `operator` to `requested`" could be implemented by the blunt
+    route — `("operator", operator)` unconditionally, or not adding `operator` to the
+    `create_operator` arm's honoured set — and the whole override would become
+    unusable on the very relations it exists for: IMPL/NAND (the two legitimate
+    storages) and the meaning-bearing family (where `True` is documented as
+    change-nothing, because the meaning already requires the carrying operator).
+    """
+    for relation in ("IMPL", "NAND", "supports", "refutes"):
+        sdk.link_entities(relation, "p1", "p2", operator=True)
+        door, _args, _kwargs = sdk.calls[-1]
+        assert door == "create_operator", (
+            f"{relation} + operator=True must build the carrying operator, got {door}")
 
 
 def test_the_operator_arm_still_records_the_attributes_it_can(sdk):
