@@ -117,8 +117,10 @@ class FalkorProbe(StrEnum):
 
     ``ABSENT`` — the server ANSWERED and has no graph module (bare redis):
     nothing to protect, a boundary. ``UNREACHABLE`` — the probe could not
-    complete (down, timeout, connection reset): a TRANSIENT FAULT, and calling
-    it "absent" would certify an outage as a deployment fact. ``DENIED`` — the
+    complete (down, timeout, connection reset): a TRANSIENT FAULT. Reporting it
+    as "absent" *without a distinguishing reason* would certify an outage as a
+    deployment fact — which is why this state exists (the caller still carries
+    it as ``ABSENT`` + ``layer_down``). ``DENIED`` — the
     server ANSWERED and refused the probe: the credential lacks
     ``+MODULE|LIST``, which is a fact about the CREDENTIAL, not about the
     server. Conflating these was the silent-degradation class #8617 paid for.

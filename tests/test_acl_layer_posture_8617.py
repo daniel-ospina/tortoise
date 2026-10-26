@@ -244,6 +244,20 @@ def test_a_connection_failure_during_setuser_is_a_layer_down_not_a_boundary(
     assert r.reason == acl.REASON_LAYER_DOWN, r.reason
 
 
+def test_the_reason_vocabulary_is_distinct():
+    """Round-5 note: nothing pinned that the seven reasons are DISTINCT, so a
+    future edit could collapse two of them into one token — merging two
+    different operator actions inside `absent_reasons` with the suite green.
+
+    The whole point of the vocabulary is that each value implies a different
+    action; two equal tokens destroy that silently."""
+    values = [acl.REASON_DECLARED_OFF, acl.REASON_NO_URI,
+              acl.REASON_NO_GRAPH_MODULE, acl.REASON_PROBE_DENIED,
+              acl.REASON_SETUSER_DENIED, acl.REASON_LAYER_DOWN,
+              acl.REASON_PROBE_UNREADABLE]
+    assert len(set(values)) == len(values) == 7, values
+
+
 def test_the_hook_forwards_the_reason_it_was_given(monkeypatch, caplog):
     """Round-1 review, proven by mutation: the announcement test drives
     `_announce_acl_absence_once` DIRECTLY, so replacing `result.reason` with

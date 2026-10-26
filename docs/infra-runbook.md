@@ -263,8 +263,9 @@ downtime so far.
    **So the credential in `FALKORDB_CLOUD_URI` must cover the app's DATA path —
    and one measurement: `GRAPH.MEMORY USAGE`.** The console's **`Write`** preset
    covers the data path — `+GRAPH.QUERY +GRAPH.RO_QUERY +GRAPH.EXPLAIN
-   +GRAPH.PROFILE +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING` (plus the key
-   verbs `DEL` / `RESTORE` / `RENAME` need). It does **not** cover the per-org
+   +GRAPH.PROFILE +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING`, plus the key
+   verbs (`DEL` / `RESTORE` / `RENAME`) and `EXISTS` (the SDK's retry presence
+   probe). It does **not** cover the per-org
    storage meter (`tortoise/graph_storage.py`, driven by the backup sweep): the
    vendor makes `GRAPH.MEMORY` **Admin-only**, so on the `Write` preset every
    org's `graph_storage_mb` reads `0.0` — permanently and silently, because a
@@ -307,18 +308,26 @@ downtime so far.
    (the default, `strict`) still creates the per-graph user on every graph
    mint, and *there* the **app** credential genuinely needs:
 
-   - the whole data-plane command set (the same one the Cloud bullet lists,
-     including `+GRAPH.COPY`) **plus `+GRAPH.MEMORY`** for the storage meter —
-     **not** `_GRAPH_COMMANDS`, which is the allowlist granted to each
-     per-graph **tenant** user (`+GRAPH.QUERY +GRAPH.RO_QUERY +PING`). Reading
-     that constant as the app's requirement is how a self-hosted credential ends
-     up unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
+   - **the vendor's `Write` preset string, VERBATIM** (copy it from the console
+     or from the vendor's ACL page — it already carries `GRAPH.QUERY`,
+     `GRAPH.RO_QUERY`, `GRAPH.LIST`, `GRAPH.DELETE`, `GRAPH.COPY`, `EXISTS`,
+     `INFO` and the key verbs), **plus `+GRAPH.MEMORY`** for the storage meter.
+     ⛔ Do **not** hand-write the set from a prose list, including the one in the
+     Cloud bullet: an enumeration can silently omit a verb the app does issue
+     and the omission fails LATE and QUIET — `EXISTS` is the SDK's retry
+     presence probe, and a refusal there makes the retry gate refuse to retry a
+     graph-abort and report the graph state as UNKNOWN (`sdk.py`, #7685/#7357).
+     And do **not** read `_GRAPH_COMMANDS` as this requirement: it is the
+     allowlist granted to each per-graph **tenant** user (`+GRAPH.QUERY
+     +GRAPH.RO_QUERY +PING`), which is how a self-hosted app credential ends up
+     unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
    - **`+ACL`** — to create and rotate per-graph users at all;
    - **`+MODULE|LIST` — REQUIRED to have the layer here.** It gates
      `_falkordb_present`, and a refusal makes `create_acl_user` return `denied`
      **before any `ACL SETUSER`** — so not one per-graph user is created for any
-     graph, while every mint stays green and the log says only "credential
-     refused". MEASURED on this head: a `NOPERM` on `MODULE LIST` leaves the
+     graph, while every mint stays green (the probe DOES log
+     `MODULE LIST refused … — the ACL credential lacks +MODULE|LIST`, so a grep
+     for it is the tell). MEASURED on this head: a `NOPERM` on `MODULE LIST` leaves the
      server having seen `MODULE LIST` and nothing else (`status=denied`,
      `reason=probe_denied`). That is the silent-degradation shape this whole
      change exists to end, so it is in the list of grants the APP credential
