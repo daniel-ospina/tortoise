@@ -90,15 +90,25 @@ Points carry a vector; content is **1,121.4 B over the 49.0% of Points that carr
 the footprint needs the second**: `avg()` skips NULLs, so applying the carrying mean to every node
 would overstate the row by its dominant column.
 
-> ⚠️ **BASIS (2026-10-26, #10017):** these figures were cut on a schema WITHOUT
-> `public.point.cache_tier` and its partial index `idx_point_graph_tier`. The
-> probe's migration list is pinned EQUAL to `record_projection.RECORD_MIGRATIONS`,
-> so a re-run today INCLUDES both: the column adds ~6 B/row, and the partial index
-> is inside `pg_total_relation_size`, which is what the per-tenant footprint is
-> summed from. Measured direction ≈ **+3-4%**, i.e. ≈2,200 B/node rather than
-> 2,136 - not re-measured here. The figures below are a correct measurement of the
-> schema that existed on the date they were cut, not of the schema today; re-run
-> the probe before quoting them as current.
+⚠️ **BASIS (2026-10-26, #10017):** these figures were cut on a schema WITHOUT
+`public.point.cache_tier` and its partial index `idx_point_graph_tier`. The probe's
+migration list is pinned EQUAL to `record_projection.RECORD_MIGRATIONS`, so a
+re-run includes both — and would land OUTSIDE the band below. Measured on
+postgres:16 by re-running this probe's own plant with and without the migration:
+`pg_total_relation_size(public.point)` 347,193,344 → **364,634,112 B**, i.e.
+**+4.55%**, and **2,136 → ≈2,234 B/node** on disk.
+
+⛔ The delta is the INDEX, not the column: `idx_point_graph_tier` is 17,448,960 B
+= **97.2 B/row** — the exact size `point_pkey` takes on the same rows, and the
+whole +17,440,768 B. The column's `NOT NULL DEFAULT 'graph'` costs 6 B/row in ROW
+WIDTH (`pg_column_size` 1,487 → 1,493) and is absorbed by page slack in the
+footprint; the heap even measures 90,112 B SMALLER. A note that blamed the column
+and called it "+3-4%" would send a reader to the wrong scalar AND a re-run outside
+its own stated band.
+
+The figures below remain a correct measurement of the schema that existed on the
+date they were cut. They are not the schema today: re-run the probe before
+quoting them as current.
 
 | measured | value | base |
 |---|---|---|
