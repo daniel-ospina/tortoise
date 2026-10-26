@@ -107,24 +107,61 @@ def stub_key(rel: str, target: dict):
 
 
 def _mint_subject_stub(g, name: str) -> None:
-    """RESOLVE (never mint) the Subject an about-edge names. #3590.
+    """MERGE the Subject stub the about-edge Name-CASCADE falls back to.
 
-    This helper used to write ``MERGE (s:Subject {name:$name}) ON CREATE SET
-    s.id=$name`` — a node whose id WAS its name. That is the third spelling of
-    one (label, name) identity the change retires: the projection never mints an
-    id (a fold-time mint is not replay-deterministic, so ``rebuild != live`` by
-    construction), and an id may not be derived from a name.
+    ⚠️ **#3590 retired this construction and the retirement was WITHDRAWN —
+    this mint stays, and both halves of why are recorded here (#8398).** The
+    branch briefly made this helper ``resolve_fold_name(..., mention=True)``,
+    i.e. resolve-only, on the argument that "the projection never mints an id"
+    (D9). That argument is true for the mint D9 forbids — an OPAQUE id minted
+    during a fold, which replay re-mints differently, so ``rebuild != live`` by
+    construction. It is FALSE for THIS construction, and applying it here broke
+    a shipped contract:
 
-    So a bare-name reference now resolves to the single LIVE holder and otherwise
-    stays unwired, with a structured non-folded record (``unfolded-mention`` —
-    exempt: an about-edge name is loose attribution, and the live and replay
-    passes drop the same link). The remedy lives on the producer — register what
-    you reference before referencing it (D9); the SDK's entity doors do exactly
-    that.
+    * ``MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name`` is
+      NAME-DETERMINISTIC: the id is a pure function of the MERGE key, so live
+      and replay produce the byte-identical node. It is the construction
+      ``#8398``'s replay contract is written against.
+    * It is the ONLY construction that gives a name no producer registered a
+      node at all, and the journal is append-only, so a resolve-only helper
+      makes every ``how:"name"`` record already in a journal
+      UN-REPLAYABLE (measured: ``replay_about_links`` → ``(0, 1)``, no node;
+      ``tests/test_8398_aboutobject_replay.py
+      ::test_a_LEGACY_name_link_record_still_replays``). It also contradicts
+      ``_count_about_out``'s own documented premise ("``_create_about_edges``
+      MINTS a Subject stub when nothing in the graph matches, so for any
+      writable value a name link leaves an outgoing edge") and the shipped pins
+      that read the stub: ``tests/test_projection.py
+      ::test_falkor_subject_stub_resolves_canonical_id`` and
+      ``::test_5026_b1_live_aboutdocument_ignores_non_document_source``,
+      ``tests/test_pointsuperseded_rebuild.py
+      ::test_resolver_stub_mint_equivalence_for_absent_entities``,
+      ``tests/test_9079_edge_lane_declared.py`` (this helper IS a declared
+      writer) and ``tests/test_cache_projection.py`` (the ``subjectKind`
+      literal below).
+
+    What D9 actually asks of the LIVE path is kept, and it is upstream of this
+    helper: the SDK's Event door now REGISTERS the Subject it references through
+    the ordinary create door (``TortoiseSDK._register_referenced_entity``,
+    called from the ``create_entity(type='event')`` about* loop), so the stub a
+    NEW journal needs is a journaled ``SubjectAdded`` rather than a fold-side
+    invention — live writes it, replay folds it. This helper is then the shared
+    fallback for the records a producer never registered (an older journal, a
+    non-SDK writer) and the single create path live + replay still need to
+    agree on.
+
+    #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
+    after the wipe. Skip rather than raise.
     """
-    from tortoise.entity_identity import resolve_fold_name
-    resolve_fold_name(g, "Subject", name, context="about-edge Subject",
-                      mention=True)
+    from tortoise.projection import _log_identity_skip, _writable_id
+    if not _writable_id(name):
+        _log_identity_skip("Subject stub", name, "name (MERGE key)")
+        return
+    g.query(
+        "MERGE (s:Subject {name:$name}) "
+        "ON CREATE SET s.id=$name, s.subjectKind='other'",
+        params={"name": name},
+    )
 
 
 def _mint_source_stub(
@@ -202,16 +239,15 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
     really has, and a Source's identity IS its ``url`` (ONTOLOGY §3.2 — nothing
     is derived from a name). Every other arm resolves only:
 
-    * **``aboutSubject`` (Subject) is RESOLVE-ONLY at this head (#3590).**
-      ``_mint_subject_stub`` keeps its historical name but no longer mints — it
-      calls ``resolve_fold_name(..., mention=True)``. The stub it used to MERGE
-      was a fold-time create keyed on a NAME whose id WAS the name; #3590
-      retires both halves (a fold-time mint is not replay-deterministic — two
-      holders of one name resolve arbitrarily, so ``rebuild != live`` by
-      construction — and an id may not be derived from a name). A bare about-name
-      that resolves to no single LIVE holder is RECORDED as an exempt
-      ``unfolded-mention`` and left unwired; the remedy is the producer's (D9:
-      register what you reference before referencing it).
+    * **``aboutSubject`` (Subject) mints its NAME-KEYED stub** when the bare
+      name has no holder — ``_mint_subject_stub``'s ``ON CREATE SET s.id=$name``
+      construction, which is name-DETERMINISTIC (so replay reproduces the same
+      node) and is what ``#8398``'s replay contract and the shipped pins are
+      written against. ⚠️ #3590 briefly made this arm resolve-only; that was
+      withdrawn — see ``_mint_subject_stub``'s docstring, which records why the
+      D9 rule against fold-time mints does not apply to a name-keyed stub, and
+      what the LIVE half of D9 actually requires (the SDK door registers the
+      Subject it references, so a NEW journal carries a ``SubjectAdded``).
     * **``aboutDocument`` (Source) is RESOLVE-ONLY**, and for a sharper reason: a
       miss is logged and skipped, never minted, because a phantom Source would
       silently mis-point the resurrected edge (adversarial class B1). D10 §4.4
@@ -225,11 +261,10 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
       None too; those entities are journaled by their own creation events, and an
       absent one is an unjournaled-producer edge that dies at rebuild).
 
-    ``mint=False`` (#8398 review P1-2) forbids the remaining stub mint — the
-    ``extractedFrom`` Source one — and leaves pure resolution (``resolve_source_key``
-    instead, which only canonicalises the key). On the Subject arm the flag is
-    now inert: #3590 already made that arm resolve-only, so ``mint=False`` there is
-    the belt to its braces rather than a per-call policy. A #8398 link whose live
+    ``mint=False`` (#8398 review P1-2) forbids the stub mint — the
+    ``extractedFrom`` Source one and the ``aboutSubject`` one — and leaves pure
+    resolution (``resolve_source_key`` instead, which only canonicalises the
+    key). A #8398 link whose live
     cascade RESOLVED an existing node must not mint a replacement when that node
     is missing at replay: live created nothing, so a minted stub would be a node
     the live graph never had. The missing endpoint is then reported as a failed
@@ -1496,16 +1531,17 @@ class _EdgeHandlers:
           every other label is resolve-only live, so minting one at replay would
           fabricate a node live never had.
 
-          ⚠️ **#3590 retires the construction this flag describes, so on the
-          Subject arm it no longer buys a CREATE.** ``_mint_subject_stub`` is
-          resolve-only at this head, so a journaled ``mint_if_absent: true``
-          now replays as a resolve (and an absent holder leaves the descriptor
-          unwired — recorded as an exempt ``unfolded-mention``) rather than as a
-          stub. The flag is kept, and still journaled as ``true`` on the
-          Subject-stub fallback below, because it is part of the RECORD shape
-          (``tests/test_8398_aboutobject_replay.py`` pins it) and because the
-          ``extractedFrom`` Source arm still honours it; read it as "the
-          construction was allowed to mint", not as "a mint will happen".
+          ⚠️ **#3590 briefly retired the construction this flag describes, and
+          that retirement was WITHDRAWN (#8398).** ``_mint_subject_stub`` was
+          made resolve-only at that head, which made this flag inert on the
+          Subject arm and left a journaled ``mint_if_absent: true`` replaying as
+          a bare resolve — so a name no producer registered lost its link on
+          every replay, including the ``how:"name"`` records an append-only
+          journal cannot repair. The helper mints again, so the flag means what
+          it says on BOTH arms (its own docstring records the reasoning and the
+          shipped pins that depend on it). It is journaled ``true`` on the
+          Subject-stub fallback below because that is the RECORD shape
+          (``tests/test_8398_aboutobject_replay.py`` pins it).
 
         ``target_internal_ids`` — the FalkorDB internal ids the LIVE write must
         address, so the journal and the write come from ONE resolution rather
@@ -1543,17 +1579,18 @@ class _EdgeHandlers:
         # Nothing matched — live defaults to a Subject stub (label-agnostic
         # source). #2489 routed that mint through the SHARED helper
         # (_mint_subject_stub) so live wiring and rebuild replay produced
-        # byte-identical stubs (one create path). ⚠️ #3590: the helper is
-        # RESOLVE-ONLY now, so this fallback no longer creates the stub — the
-        # name is still journaled as the `targets` value and the live write
-        # resolves it, which means a name with no live holder wires nothing
-        # (rather than a node whose id was its name). The D9 remedy is the
-        # producer's: register what you reference.
+        # byte-identical stubs (one create path). ⚠️ #3590 made the helper
+        # resolve-only for a while and that is WITHDRAWN: the stub is
+        # name-KEYED, so its id is a pure function of the MERGE key and replay
+        # reproduces it exactly — the mint D9 forbids is the OPAQUE one, not
+        # this one (see the helper's docstring). The live half of D9 is kept
+        # upstream, on the producer: the SDK's Event door registers the Subject
+        # it references, so a NEW journal carries a ``SubjectAdded`` for it and
+        # does not depend on a replay-time stub.
         #
-        # `mint_if_absent` stays True: it is the record's claim about the
-        # CONSTRUCTION this branch used to use, and the Source arm still honours
-        # it (`resolve_structural_target(mint=…)`); on the Subject arm the flag
-        # is now inert.
+        # `mint_if_absent` is True on purpose: it is the record's claim about
+        # the construction this fallback names, and BOTH arms now honour it
+        # (``resolve_structural_target(mint=…)``).
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(entity_name):
             _log_identity_skip("Subject stub", entity_name, "name (MERGE key)")
@@ -1722,10 +1759,10 @@ class _EdgeHandlers:
 
         ``target_internal`` is the id (or, for a name with several legal
         carriers, the ids) ``resolve_about_link`` resolved; ``None`` means the
-        live path must RESOLVE the ``:Subject`` stub the cascade's fallback
-        named — #3590 made that helper resolve-only, so a name with no live
-        holder wires nothing and this method reports ``False`` (it used to mint
-        the stub first). Writing by the RESOLVED internal id — rather than
+        live path must RESOLVE-OR-MINT the ``:Subject`` stub the cascade's
+        fallback named (``_mint_subject_stub`` — the name-keyed construction
+        live and replay share; the SDK door has normally already registered it,
+        in which case this resolves that node). Writing by the RESOLVED internal id — rather than
         re-matching the name inside the MERGE — is what makes the journaled link
         and the edge the same decision, with no second read that could answer
         differently. Every resolved id is written, so the live edge set is
