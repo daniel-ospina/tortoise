@@ -72,7 +72,23 @@ exactly the CI/lane asymmetry this module exists to remove. `collection_violatio
 applies that SAME guard function to pytest's `CollectReport`, from the same two
 halves the junit matcher reads (`_pytest/junitxml.py` writes the constant message
 "collection skipped" plus `str(report.longrepr)` as the detail), so the two
-enforcement points still cannot disagree.
+enforcement points apply ONE verdict to the same two halves.
+
+ONE LANE ARM IS DELIBERATELY WIDER HERE, AND IT IS NAMED RATHER THAN CLAIMED
+CLOSED. `lane_declaration()` folds `TORTOISE_TEST_CARVE_OUT` into `False`
+(a URI-less declaration — the same opt-in `_p4_uri_required` demands), while
+the guard's own `lane_expects_live_uri()` reads only `TORTOISE_TEST_EXPECT_URI`.
+So on CI's `test-carve-out` leg (`python-ci.yml:2611` sets the carve-out flag
+and NOT the expectation, and its matcher at `:2818` runs WITHOUT
+`--manifest-only`) the log matcher sees lane `None` and would hold an
+availability skip against the run, where this gate exempts it. That asymmetry
+is PRE-EXISTING and deliberate on this side: epic #1647 P4 records the
+carve-out lane's live skips as its shape, so the in-process verdict is the
+correct one and re-pointing the guard's lane derivation is a change to the
+#1436/#3592 calibration this module must not make on its own initiative. It is
+latent — that shard's selection produces no FalkorDB-availability skip today —
+but it is a real difference, so it is recorded here instead of being covered by
+a blanket "the two points cannot disagree".
 
 THE ARM'S SCOPE IS NOT ITS VERDICT, and three exemptions keep it inside the
 class it exists for. Each mirrors a decision recorded OUTSIDE this module — a
@@ -96,11 +112,15 @@ skips this gate is about, not about whether a skip is a violation:
   * pytest's own `pytest.importorskip(...)` abort is the optional-extra class,
     which "must remain a skip in a lane" (the same recorded reason the guard's
     third class, `is_embedder_reason_violation`, is deliberately CI-only).
-    pytest builds that reason as `f"could not import {modname!r}: {exc}"`
-    (`_pytest/outcomes.py` in the pinned 9.1.1), so this arm — which sees the
-    detail the skip was raised with — can tell it from a live-storage abort,
+    pytest builds BOTH of its whole-module reasons in `_pytest/outcomes.py` at
+    the pinned 9.1.1 — `f"could not import {modname!r}: {exc}"` for an absent
+    module, and `f"module {modname!r} has __version__ {verattr!r}, required is:
+    {minversion!r}"` for an `importorskip(..., minversion=...)` shortfall, the
+    second also with `allow_module_level=True`. This arm — which sees the detail
+    the skip was raised with — can tell either shape from a live-storage abort,
     where the junit matcher cannot. Applying the matcher's verdict here would
-    manufacture a false red the repository promises not to produce.
+    manufacture a false red the repository promises not to produce (and a
+    wrong one: the remedy printed would send a reader looking for a database).
 
 DECLARED RESIDUALS of the collection arm, neither silently covered:
   * the exemption above matches pytest's SHAPE for an absent optional extra,
@@ -218,22 +238,55 @@ _COLLECTION_SKIP_MESSAGE = "collection skipped"
 #: Subtrees whose whole-module aborts are NOT this gate's class: they are not
 #: selectable, so no CI skip matcher is ever run against them (#1349 in
 #: `tests/test_uri_requiring_selection.py`; `python-ci.yml:3047-3052` names the
-#: 24 opt-in e2e gates the matchers would false-red).
+#: 24 opt-in e2e gates the matchers would false-red). The PREFIX is only the
+#: fallback spelling: `CollectReport.nodeid` is ROOTDIR-relative, so a run that
+#: moves the rootdir (`--rootdir`, `-c` from another tree, an installed layout)
+#: spells the same module without the `tests/` prefix — `_out_of_scope` decides
+#: from the FILE whenever the report carries one, so the exemption is a property
+#: of the tree rather than of one invocation.
 _NON_SELECTABLE_PREFIXES = ("tests/e2e/",)
+_E2E_ROOT = (_ROOT / "tests" / "e2e").resolve()
 
-#: pytest's own `pytest.importorskip(...)` reason — `could not import '<mod>':
-#: <exc>` (`_pytest/outcomes.py`, pinned 9.1.1). The quoted module name and the
-#: `: ` that introduces the exception keep this anchored to pytest's shape: a
-#: hand-written reason that merely MENTIONS an import is not exempt.
-_IMPORTORSKIP_DETAIL_RE = re.compile(
-    r"could not import (?P<q>['\"])[^'\"]+(?P=q): ")
+#: pytest's own `pytest.importorskip(...)` whole-module skips — BOTH shapes, and
+#: both are the optional-extra class that "must remain a skip in a lane":
+#:   * an absent module — `could not import '<mod>': <exc>`;
+#:   * a version shortfall — `module '<mod>' has __version__ <v>, required is:
+#:     <min>` (`_pytest/outcomes.py:281-285` in the pinned 9.1.1 raises it with
+#:     `allow_module_level=True`, so it is decided at COLLECTION like the first).
+#: The quoted module name plus the `: ` / ` has __version__ ` that carries the
+#: reason keep this anchored to pytest's shape: a hand-written reason that merely
+#: MENTIONS an import is not exempt.
+_IMPORTORSKIP_DETAIL_RES = (
+    re.compile(r"could not import (?P<q>['\"])[^'\"]+(?P=q): "),
+    re.compile(r"module (?P<q>['\"])[^'\"]+(?P=q) has __version__ "),
+)
 
 
-def _out_of_scope(nodeid: str) -> bool:
+def _is_importorskip_abort(detail: str) -> bool:
+    """True when `detail` is pytest's own `importorskip` abort — either shape."""
+    return any(rx.search(detail) for rx in _IMPORTORSKIP_DETAIL_RES)
+
+
+def _out_of_scope(report: pytest.CollectReport) -> bool:
     """True when this module is not part of the gate's class — see the module
-    docstring's scope paragraph."""
-    normalised = nodeid.replace("\\", "/")
-    return normalised.startswith(_NON_SELECTABLE_PREFIXES)
+    docstring's scope paragraph.
+
+    The NODEID is checked first because that is what every CI leg and the
+    documented `pytest tests/` run produce. It is rootdir-relative, though, so
+    the FILE is the authority when the report carries one — otherwise a run that
+    relocated the rootdir would lose the `tests/e2e/**` exemption and turn a
+    documented opt-in gate into a collection error naming a FalkorDB remedy.
+    """
+    nodeid = str(getattr(report, "nodeid", "") or "")
+    if nodeid.replace("\\", "/").startswith(_NON_SELECTABLE_PREFIXES):
+        return True
+    fspath = getattr(report, "fspath", None)
+    if fspath is None:  # pragma: no cover - pytest always sets it on a module
+        return False
+    try:
+        return Path(str(fspath)).resolve().is_relative_to(_E2E_ROOT)
+    except (OSError, ValueError):  # pragma: no cover - unreadable/odd path
+        return False
 
 
 def violation(item: pytest.Item) -> str | None:
@@ -276,7 +329,7 @@ def collection_violation(report: pytest.CollectReport) -> str | None:
     if getattr(report, "outcome", None) != "skipped":
         return None
     nodeid = str(getattr(report, "nodeid", "") or "")
-    if _out_of_scope(nodeid):
+    if _out_of_scope(report):
         return None
     lane = lane_declaration()
     if lane is False:
@@ -285,8 +338,9 @@ def collection_violation(report: pytest.CollectReport) -> str | None:
         # mirrors — a false red on every module-level opt-in gate.
         return None
     detail = str(getattr(report, "longrepr", "") or "")
-    if _IMPORTORSKIP_DETAIL_RE.search(detail):
-        # An absent optional extra: a legitimate skip in every lane.
+    if _is_importorskip_abort(detail):
+        # An absent (or too old) optional extra: a legitimate skip in every
+        # lane, in BOTH of pytest's `importorskip` abort shapes.
         return None
     if not _GUARD.is_collection_skip_violation(
             _COLLECTION_SKIP_MESSAGE, detail, lane=lane):

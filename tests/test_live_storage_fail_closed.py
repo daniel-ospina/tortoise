@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 
 from tests import _live_gate
+from tests import _live_utils
 
 ROOT = Path(__file__).resolve().parents[1]
 #: 14 tests, every one of them mark-skipped by the module-level availability
@@ -246,6 +247,16 @@ def _abort(reason: str, nodeid: str = "tests/test_x.py") -> _FakeCollectReport:
          {}, False),
         (_abort("could not import 'psycopg2': no module named 'psycopg2'"),
          {"TORTOISE_TEST_EXPECT_URI": "1"}, False),
+        # …and the SECOND shape pytest builds for the same class: an
+        # `importorskip(..., minversion=…)` shortfall
+        # (`_pytest/outcomes.py:281-285`, also `allow_module_level=True`). A
+        # rule keyed on `could not import` alone reds it with a FalkorDB
+        # remedy for a missing optional extra — the wrong remediation, on a
+        # lane that never asked for a database.
+        (_abort("module 'redislite' has __version__ None, required is: '99.0'"),
+         {}, False),
+        (_abort("module 'redislite' has __version__ None, required is: '99.0'"),
+         {"TORTOISE_TEST_EXPECT_URI": "1"}, False),
         # …and the exemption is pytest's SHAPE, not the phrase: a hand-written
         # reason that merely MENTIONS an import is still a vacancy on a lane that
         # promised the URI. Without this row a blanket "mentions import" test
@@ -277,12 +288,25 @@ def _run_pytest(*, carve_out: bool, expect_uri: bool = False,
     In-process would prove nothing here: the defect is about WHERE in pytest's
     runtest phases the enforcement happens (a session fixture is too late), and
     only a real collection+run exercises that ordering.
+
+    The popped names are the repo's `_CHILD_LANE_VARS` convention
+    (`tests/test_tripwire.py` pops the same set — a parent lane's values must not
+    reach a child whose verdict is about the URI IT was handed):
+    `TORTOISE_TEST_JOURNAL_FILE` is set by THIS conftest on a db-URI lane
+    (`tests/conftest.py`, the journal block), and the child's probe mints against
+    it at call time, so an inherited value appends the child's graphs to the
+    PARENT's journal and inflates the parent's census.
     """
     env = {k: v for k, v in os.environ.items()
            if k not in ("TORTOISE_DB_URI", "TORTOISE_TEST_EXPECT_URI",
                         "EXPECT_URI", "TORTOISE_TEST_CARVE_OUT",
                         "TORTOISE_TEST_ALLOW_CANONICAL",
-                        "TORTOISE_TEST_DOCKER_HOST")}
+                        "TORTOISE_TEST_DOCKER_HOST",
+                        "TORTOISE_TEST_JOURNAL_FILE",
+                        "TORTOISE_TEST_NO_REDIRECT",
+                        "TORTOISE_DB_PATH",
+                        "TORTOISE_EMBEDDED_AOF",
+                        "TORTOISE_ALLOW_NONSTANDARD_PATH")}
     # A CLOSED port makes "no database" deterministic on every host.
     env["TORTOISE_TEST_DOCKER_PORT"] = "1"
     if carve_out:
@@ -397,3 +421,60 @@ def test_a_missing_optional_extra_is_not_a_live_storage_abort(tmp_path):
     assert "live storage is REQUIRED by this MODULE" not in proc.stdout, \
         proc.stdout[-3000:]
     assert "could not import 'redislite'" in proc.stdout, proc.stdout[-3000:]
+
+
+def test_the_e2e_exemption_is_a_property_of_the_tree_not_of_the_nodeid():
+    """SCOPE: the `tests/e2e/**` exemption must survive a moved rootdir.
+
+    `CollectReport.nodeid` is ROOTDIR-relative, so a run that relocates the
+    rootdir (`--rootdir`, `-c` from another tree, an installed layout) spells the
+    same module WITHOUT the `tests/` prefix — and a prefix-only test would then
+    lose the exemption and turn a documented opt-in gate into a collection error
+    naming a FalkorDB remedy. The FILE is the authority when the report has one;
+    the nodeid form stays as the fallback every CI leg produces.
+    """
+    e2e_file = ROOT / "tests" / "e2e" / "test_dashboard_billing.py"
+
+    class _Relocated(_FakeCollectReport):
+        fspath = e2e_file
+
+    relocated = _Relocated("skipped", "Skipped: RUN_DASHBOARD_E2E=1",
+                           nodeid="e2e/test_dashboard_billing.py")
+    assert _live_gate._out_of_scope(relocated) is True
+
+    class _NotE2e(_FakeCollectReport):
+        fspath = ROOT / "tests" / "test_guard.py"
+
+    sibling = _NotE2e("skipped", "Skipped: whatever",
+                      nodeid="test_guard.py")
+    assert _live_gate._out_of_scope(sibling) is False
+
+
+def test_the_docker_password_seam_reads_at_call_time(monkeypatch):
+    """#5084's password axis: the private lane is ADDRESSABLE only through it.
+
+    `""` is a REAL value (the private container runs without `requirepass`), so
+    the one-character regression this pins is `os.environ.get(...) or
+    "falkordb"` — which would re-break the empty case and restore the
+    `AuthenticationError` → “not available” → silent SKIP path the seam exists to
+    close.
+    """
+    monkeypatch.delenv("TORTOISE_TEST_DOCKER_PASSWORD", raising=False)
+    # The historical literal, so every existing URI string is unchanged.
+    assert _live_utils.docker_password() == "falkordb"
+    assert _live_utils.docker_base_uri() == \
+        _live_utils.docker_base_uri(password="falkordb")
+    # …and unset does not collapse into the empty value.
+    monkeypatch.setenv("TORTOISE_TEST_DOCKER_PASSWORD", "")
+    assert _live_utils.docker_password() == ""
+    assert _live_utils.docker_base_uri().split("://", 1)[1].startswith(":@")
+    monkeypatch.setenv("TORTOISE_TEST_DOCKER_PASSWORD", "s3cret")
+    assert _live_utils.docker_password() == "s3cret"
+    assert _live_utils.docker_base_uri().split("://", 1)[1].startswith(":s3cret@")
+    # An EXPLICIT password still wins over the seam, and `None` still means
+    # "no userinfo at all": the sentinel is what keeps the three apart.
+    assert _live_utils.docker_uri("g", password=None) == \
+        _live_utils.docker_base_uri(password=None) + "/g"
+    monkeypatch.setenv("TORTOISE_TEST_DOCKER_PASSWORD", "")
+    assert _live_utils.docker_uri("g", password=_live_utils.ENV_DEFAULT) == \
+        _live_utils.docker_base_uri(password="") + "/g"
