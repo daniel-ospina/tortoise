@@ -969,6 +969,21 @@ surfaces:
   # (`api` + `core`), same convention: it drives `tortoise/sdk.py` (api) AND
   # `tortoise/session_schema.py`-declared writers (core fallback).
   - test_10000_turns_record_only.py
+  # #10025: a graph's identity is a fixed id, its name a user-editable label.
+  # DUAL (`api` + `core`), same convention: it pins
+  # `supabase_control`'s default-graph resolution + `set_graph_name` (`api` —
+  # `tortoise/supabase_control.py` IS a SOURCE_PATTERNS entry) AND
+  # `record_writer.record_tenant_for`, the record write path (which matches no
+  # SOURCE_PATTERNS row and falls through to `core`). A core-only entry would
+  # never run it on a hosted-auth change, which is the lane that produced the
+  # measured `no_tenant` refusals.
+  # ⚠️ The two clauses above were SWAPPED when this row landed (review round 13,
+  # F3-class doc drift): the entry is unchanged, only the rationale is corrected.
+  # A lane `tidying` registrations must not read this as "the api half is
+  # redundant" — dropping it would stop this file running on a
+  # `hosted_api.py`/`supabase_control.py`-only change, the #2938 silent-drop
+  # class this comment exists to prevent.
+  - test_10025_graph_identity.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -3170,6 +3185,7 @@ surfaces:
   - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
+  - test_10025_graph_identity.py  # #10025: graph id vs user-editable name; default-graph record tenant; dual: api
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
@@ -7377,6 +7393,7 @@ durations:
   test_10017_backfill_census.py: 2.8  # #10017 (33 tests, pure — a fake graph + a fake client; the tool itself reads production read-only). Locally measured 2026-10-26 on this host: `uv run pytest tests/test_10017_backfill_census.py -q` -> "33 passed in 3.14s" (31 tests / 2.77 s before this review added the two id-space arms for the offset window, so the arms cost ~0); the whole cost is interpreter/pytest startup and every test body is sub-millisecond, so the reading is a property of the file rather than of host load. The 27.2 this row carried was not a measurement of this file. Refresh from the first post-merge push run that includes it.
   test_10000_turns_record_only.py: 0.1  # #10000: (3 tests); startup; re-measure from the CI junit artifact once this lands — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 11.9
   test_session_schema_3554.py: 5.2  # #3554: (42 hermetic tests, no graph lane) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.9
+  test_10025_graph_identity.py: 3.0  # unmeasured by CI — #10025: graph id vs user-editable name, default-graph record tenant (46 collected at THIS head: 39 `def test_` functions + 7 parametrised instances, re-derived with `--collect-only`, NOT the 18/21/25/29/32/45 counts this note carried while the review rounds added pins — every review cycle changes the count, so RE-DERIVE rather than trust this number; pure, a fake control plane, no graph writes, no server). Needed here rather than left to the sweep because `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Measured on this host 2026-10-26: `TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_10025_graph_identity.py -q` → "46 passed in 5.44s" (re-measured at THIS head, after the refusal-hint arm for `_describe_graph` landed; the 18/25/29/30/32/45-test readings in this note are superseded. The COUNT is the load-independent datum — a re-run on a busier host measured 4.38s at 45 tests — so trust the collected total and re-time before tightening the row) — and the original reading was "18 passed in 2.75s", "2.61s", "2.67s" (three consecutive runs). The row carried 18.5 before review: that reading was taken on a private `tools/test_lane.py` container and counted container lifecycle, not the pytest session — the same artefact the `test_7846_index_safe_restore_guard.py` and `test_8474_ontology_record.py` rows below call out, and the case for citing the session total rather than the wall clock. Refresh from the first post-merge push run that includes it.
   test_battery_setup.py: 99.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 177.7
   test_graph_write_loop_responsiveness.py: 20.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 9.0
   test_read_routes_loop_responsiveness.py: 21.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
