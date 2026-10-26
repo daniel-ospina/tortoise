@@ -19642,14 +19642,35 @@ class TortoiseSDK:
         made the CREATE a resolve-or-mint (``entity_identity.resolve_or_mint``),
         so there are exactly three shapes:
 
-          * **no carrier** — the item MINTS a fresh opaque id, inherits NO
+          * **no LIVE carrier** — the item MINTS a fresh opaque id, inherits NO
             holder axis, and its declared status is what gets stored;
-          * **one carrier** — the item RESOLVES to that holder (idempotent
+          * **one LIVE carrier** — the item RESOLVES to that holder (idempotent
             re-mention), so THAT node's axes decide; a declared status is
             dropped by the ``ON CREATE``-only status write;
-          * **2+ carriers** — the create REFUSES
+          * **2+ LIVE carriers** — the create REFUSES
             (``AmbiguousEntityName``); no carrier is the target and no holder
             axis applies.
+
+        ⛔ **LIVE-ONLY, mirroring the create (#3590 review P1).** The landing
+        node is the one `resolve_or_mint` picks, and that resolver probes
+        ``live_name_holder_ids``: a TERMINAL holder does not block a create
+        (it is a different incarnation, and re-using its id would be id reuse —
+        R5). Reading the axes off an any-status probe made the two disagree for
+        a name whose only carrier is terminal (the ordinary output of
+        ``apply_supersessions``) or id-less:
+
+          * the guard reported ``merges=True`` + that terminal id while the
+            writer MINTED, so the two ``#7925`` Phase-1 arms skipped an item
+            whose declared status IS then stored — the mid-write ``Phase2Error``
+            class they exist to prevent, reopened; and
+          * a new direct edge to the minted (live) node was refused as
+            "resolves to terminal … (by name)", which is not the endpoint the
+            write produces.
+
+        So ``carrier_count`` stays the TOTAL carrier count (the born-terminal
+        arm reads it as "something holds this name"), while
+        ``merges``/``target_id``/the three axes come from the LIVE carriers
+        alone — exactly the predicate the create uses.
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -19695,13 +19716,25 @@ class TortoiseSDK:
         ).result_set
         if not rows:
             return False, None, None, None, 0, False, None
-        # #3590: the node the item lands on. A shared name has NO target — the
-        # create refuses rather than picking one, so no holder axis applies (the
-        # previous "the carrier holding the derived canonical id" answer existed
-        # only because the id was a function of the name).
-        if len(rows) > 1:
+        # #3590 review P1: the LANDING NODE is what `resolve_or_mint` resolves,
+        # and that resolver probes LIVE holders only — a terminal or id-less
+        # carrier is not a candidate (a create mints past it; re-using its id
+        # would be id reuse, R5). Mirroring the probe is what keeps this guard
+        # and the writer from disagreeing about where the item lands.
+        live = [r for r in rows if r[0] and not r[1]]
+        # #3590: the node the item lands on. 2+ LIVE carriers is a shared name
+        # with NO target — the create refuses rather than picking one, so no
+        # holder axis applies (the previous "the carrier holding the derived
+        # canonical id" answer existed only because the id was a function of
+        # the name).
+        if len(live) > 1:
             return True, None, None, None, len(rows), False, None
-        target = rows[0]
+        if not live:
+            # ZERO live carriers: the item MINTS a fresh live node. Its declared
+            # status is the one stored, so no HOLDER axis applies (a terminal
+            # carrier's stored status is not the endpoint the edge addresses).
+            return True, None, None, None, len(rows), False, None
+        target = live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
@@ -19711,7 +19744,11 @@ class TortoiseSDK:
         _holder_id, _term, _op, _status = target
         return (
             True,
-            _holder_id if _term else None,
+            # A LIVE target is by definition not terminal, so the terminal axis
+            # is empty — the terminal refusal that applies under #3590 is the
+            # MINT case above (`merges=False`): the edge lands on the fresh live
+            # node, not on the terminal carrier the old any-status probe named.
+            None,
             _holder_id if _op else None,
             _holder_id if _status_is_stored_unhashable(_status) else None,
             len(rows),
@@ -35471,19 +35508,32 @@ class TortoiseSDK:
         from .entity_identity import live_name_holder_ids
         from .exceptions import NameAlreadyHeld
         g = self._get_proj().g
-        rows = g.query(
-            "MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) "
-            "RETURN DISTINCT labels(n)",
-            params={"id": id_val}).result_set
-        for row in rows:
-            labels = row[0] if isinstance(row[0], list) else [row[0]]
-            for label in labels:
-                if label not in ("Object", "Subject"):
-                    continue
-                holders = [h for h in live_name_holder_ids(g, label, new_name)
-                           if h and str(h) != str(id_val)]
-                if holders:
-                    raise NameAlreadyHeld(label, new_name, holders, id_val)
+        # ⛔ LABEL-SCOPED, deliberately (#3590 review P2). This probe used to be
+        # `MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) RETURN
+        # DISTINCT labels(n)`: the pattern carries no label, and FalkorDB's
+        # indexes are per-label (`docs.falkordb.com/cypher/indexing.html` —
+        # "single-property indexes for node labels"), so no label-scoped `id`
+        # index can serve it and the plan degrades to an all-node scan followed
+        # by a filter. It runs BEFORE any label is written, i.e. on EVERY
+        # name-bearing `update_entity` — and `name` is a `:Point` property, so
+        # the common case is an update of a node that is in neither label and
+        # the scan is provably empty. Two index-served probes ask the same
+        # question (`which IDENTITY labels does the target carry?`) and a
+        # Point/Event/Source matches neither.
+        #
+        # `Object`/`Subject` carry a single-property `id` range index
+        # (`_RANGE_INDEX_LABEL_PROPS`), so each probe is an index seek.
+        carried = [
+            label for label in ("Object", "Subject")
+            if g.query(
+                f"MATCH (n:{label} {{id:$id}}) RETURN n.id LIMIT 1",
+                params={"id": id_val}).result_set
+        ]
+        for label in carried:
+            holders = [h for h in live_name_holder_ids(g, label, new_name)
+                       if h and str(h) != str(id_val)]
+            if holders:
+                raise NameAlreadyHeld(label, new_name, holders, id_val)
 
     def _register_referenced_entity(self, label: str, name) -> None:
         """D9: REGISTER an entity a JOURNALED write references by name.
@@ -36124,8 +36174,10 @@ class TortoiseSDK:
                 if not keys or not res.result_set:
                     continue
                 if isinstance(props.get(match_prop), str):
-                    # Same re-key case as the `name` branch above: the matched
-                    # key is one this write rewrote.
+                    # The matched identity key is one THIS write rewrote (the
+                    # OR-SET re-key case, #4649): the node that now carries the
+                    # prop is addressed by the value just written, so the read
+                    # back below must use it.
                     post_write_id = props[match_prop]
                 vals = list(res.result_set[0][0])
                 if len(vals) != len(keys):

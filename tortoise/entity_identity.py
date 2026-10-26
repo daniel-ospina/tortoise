@@ -230,11 +230,30 @@ def live_name_holder_ids(g, label: str, name: str, *,
 #: ⛔ RE-ENTRANT on purpose: a create door holds this lock ACROSS its write
 #: (``mint_lock``) and :func:`resolve_or_mint` — called inside that region —
 #: acquires the SAME lock. A plain ``Lock`` self-deadlocks there.
+#:
+#: ⛔ PRUNED, not grown (#3590 review P1, secondary). Both maps are keyed by
+#: ``(label, name)`` and the key space is every entity name the process ever
+#: creates, so an entry left behind for the life of a hosted server is a leak
+#: that only ever grows. `mint_lock` therefore REFCOUNTS: the count rises before
+#: the acquire (so it includes WAITERS, not just the holder) and the entry is
+#: dropped when the last of them leaves. A lock with no holder and no waiter is
+#: unreachable, which is what makes dropping it safe — a peer that arrives after
+#: the drop gets a fresh lock and there is nothing left to exclude.
 _holder_locks: dict[tuple, threading.RLock] = {}
+_holder_refs: dict[tuple, int] = {}
 _holder_locks_guard = threading.Lock()
 
 
 def _holder_lock(label: str, name: str) -> threading.RLock:
+    """The registry's lock object for ``(label, name)`` — CREATING it if absent.
+
+    ⛔ Internal/observability use only: entry lifetime is owned by
+    :func:`mint_lock`, so calling this does not pin the entry. A caller that
+    needs the exclusion must go through ``mint_lock``; a caller that wants to
+    OBSERVE it (a test probing whether the door holds it) is fine here, and a
+    probe taken while the door holds the lock reads the very object the door
+    took, because the registry keeps it for as long as the refcount is positive.
+    """
     with _holder_locks_guard:
         lock = _holder_locks.get((label, name))
         if lock is None:
@@ -268,8 +287,27 @@ def mint_lock(label: str, name: str):
     may hold this key"), which this model deliberately does not add because D2
     legalises two live holders of a name.
     """
-    with _holder_lock(label, name):
-        yield
+    key = (label, name)
+    # Refcount BEFORE the acquire: a thread blocked in `lock.acquire()` is a
+    # waiter that must keep the entry alive, or it would wake on a lock object
+    # the registry has already forgotten and a third caller would mint a second
+    # one for the same name.
+    with _holder_locks_guard:
+        lock = _holder_locks.get(key)
+        if lock is None:
+            lock = _holder_locks[key] = threading.RLock()
+        _holder_refs[key] = _holder_refs.get(key, 0) + 1
+    try:
+        with lock:
+            yield
+    finally:
+        with _holder_locks_guard:
+            remaining = _holder_refs.get(key, 1) - 1
+            if remaining > 0:
+                _holder_refs[key] = remaining
+            else:
+                _holder_refs.pop(key, None)
+                _holder_locks.pop(key, None)
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -302,7 +340,9 @@ def resolve_or_mint(g, label: str, name: str, *,
     _require_identity_label(label)
     if explicit_id:
         return str(explicit_id), True
-    with _holder_lock(label, name):
+    # `mint_lock` (not the raw registry getter): the same exclusion, and the
+    # registry's entry lifetime/refcount lives there.
+    with mint_lock(label, name):
         holders = live_name_holder_ids(g, label, name)
         if len(holders) > 1:
             raise AmbiguousEntityName(label, name,

@@ -501,19 +501,28 @@ def test_the_event_door_registers_every_name_its_record_mentions(sdk):
         return {
             "performs": {r[0] for r in proj.g.query(
                 "MATCH (s:Subject)-[:performs]->(e:Event {eventId:'ev-mentions'}) "
-                "RETURN s.name").result_set},
+                "RETURN s.id").result_set},
             "produces": {r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventId:'ev-mentions'})-[:produces]->(o:Object) "
-                "RETURN o.name").result_set},
+                "RETURN o.id").result_set},
             "uses": {r[0] for r in proj.g.query(
                 "MATCH (e:Event {eventId:'ev-mentions'})-[:uses]->(o:Object) "
-                "RETURN o.name").result_set},
+                "RETURN o.id").result_set},
         }
 
     live = _edges()
-    assert live == {"performs": {"Agent Pi"},
-                    "produces": {"Docs Thing"},
-                    "uses": {"Tool X"}}, live
+    # ⛔ IDS, not names (#3590 review P2). A name-keyed set satisfies the replay
+    # comparison even when a rebuild re-mints a DIFFERENT id for the same name,
+    # which is exactly the drift this pin exists to catch.
+    ids_by_name = {(label, name): _name_ids(proj, label, name)
+                   for label, name in (("Subject", "Agent Pi"),
+                                       ("Object", "Docs Thing"),
+                                       ("Object", "Tool X"))}
+    for key, ids in ids_by_name.items():
+        assert len(ids) == 1, (key, ids)
+    assert live == {"performs": set(ids_by_name[("Subject", "Agent Pi")]),
+                    "produces": set(ids_by_name[("Object", "Docs Thing")]),
+                    "uses": set(ids_by_name[("Object", "Tool X")])}, live
 
     # An id-shaped name would be the pre-#3590 derivation sneaking back in; the
     # registration must MINT (and the mention must resolve to that minted id).
@@ -521,10 +530,114 @@ def test_the_event_door_registers_every_name_its_record_mentions(sdk):
         ids = _name_ids(proj, "Object", name)
         assert len(ids) == 1 and ids[0] != name, (name, ids)
 
+    # ⛔ MUTATE LIVE STATE THAT EXISTS NOWHERE IN THE JOURNAL before replaying
+    # (#3590 review P2). Without it, a `rebuild_all` stubbed to a no-op leaves
+    # the live graph untouched and `_edges() == live` still holds, so the pin
+    # would pass without ever exercising replay — the round-2 degeneration this
+    # file's tests 3 and 4 already guard against with the same mutation.
+    proj.g.query("MATCH (o:Object {name:'Docs Thing'}) SET o.name='live-drift'")
+    drifted = {r[0] for r in proj.g.query(
+        "MATCH (o:Object) WHERE o.name = 'live-drift' RETURN o.id").result_set}
+    assert drifted, (
+        "fixture: the live-drift mutation did not land, so replay would prove "
+        "nothing")
+
     proj.rebuild_all(str(events), confirm_destructive=True)
-    assert _edges() == live, (
+    replayed = _edges()
+    assert replayed == live, (
         "the mention edges did not survive replay — the door referenced names "
-        "its journal never registered (#3590 D9)")
+        f"its journal never registered (#3590 D9): live={live}, "
+        f"replayed={replayed}")
+    still_drifted = {r[0] for r in proj.g.query(
+        "MATCH (o:Object) WHERE o.name = 'live-drift' RETURN o.id").result_set}
+    assert not still_drifted, (
+        "replay did not clear a live-only mutation — rebuild is not authoritative "
+        f"over the live graph: {still_drifted}")
+
+
+def test_a_rename_onto_a_live_name_is_refused_before_any_write(sdk):
+    """#3590 R2/D3 at the public door: `NameAlreadyHeld` is RAISED and pinned.
+
+    The guard exists so a rename cannot create the state the rest of the model
+    refuses to resolve — two live entities of one name — and it is the only
+    refusal `update_entity` gained from this change. Nothing pinned it (the
+    acceptance file's rename pin covers only the rename-onto-a-FREE-name case),
+    which is how a guard can be deleted without a red (#3590 review P2).
+
+    Refusal is BEFORE the write, so the loser keeps its own name AND the journal
+    grows by nothing: a half-applied rename would be `rebuild != live`.
+    """
+    from tortoise.exceptions import NameAlreadyHeld
+
+    client, events = sdk
+    proj = client._get_proj()
+    holder = client.create_entity("object", "Taken", is_episodic=False)
+    mover = client.create_entity("object", "Mover", is_episodic=False)
+    holder_id = holder["node"]["id"]
+    mover_id = mover["node"]["id"]
+    before = len(_journal(events))
+
+    with pytest.raises(NameAlreadyHeld) as excinfo:
+        client.update_entity(mover_id, name="Taken")
+    assert holder_id in str(excinfo.value), (
+        "the refusal must NAME the holder it collided with, or a caller cannot "
+        f"act on it: {excinfo.value}")
+
+    # Nothing moved: the target still carries its own name, the holder still
+    # owns the contested one, and no record was written.
+    assert _name_ids(proj, "Object", "Mover") == [mover_id], (
+        "the refused rename moved the entity anyway")
+    assert _name_ids(proj, "Object", "Taken") == [holder_id]
+    assert len(_journal(events)) == before, (
+        "a refused rename journaled a record — replay would apply a rename the "
+        "live pass never made")
+
+
+def test_a_point_update_never_pays_an_unlabelled_id_scan(sdk, monkeypatch):
+    """#3590 review P2: the rename guard is label-scoped, on the hot door.
+
+    `Point`/`Event`/`Source` carry `name` but do not key identity on it, so the
+    guard must neither refuse them nor scan for them: the pre-fix probe was an
+    UNLABELLED `MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject)` — no
+    label, so no label-scoped `id` index can serve it (FalkorDB indexes are
+    per-label) — and it ran for EVERY name-bearing `update_entity`, including the
+    common case of a `:Point`, which matches neither label so the scan was
+    provably empty after touching every node.
+
+    The probe is now two label-scoped `id` seeks. This pin asserts that property
+    directly (the door issues no unlabelled id-anchored statement).
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    pt = client.create_point("observation", "a point sharing a name",
+                             is_episodic=False)
+    live = client.create_entity("object", "Shared", is_episodic=False)
+    live_id = live["node"]["id"]
+
+    seen: list[str] = []
+    graph_cls = type(proj.g)
+    real = graph_cls.query
+
+    def _spy(self, statement, *a, **kw):
+        seen.append(statement)
+        return real(self, statement, *a, **kw)
+
+    # `proj.g` is a `_GuardedGraph` whose `query` resists instance patching, so
+    # the spy goes on the CLASS (monkeypatch undoes it).
+    monkeypatch.setattr(graph_cls, "query", _spy)
+    client.update_entity(pt["id"], name="Shared")
+
+    unlabelled = [
+        s for s in seen
+        if s.lstrip().upper().startswith("MATCH (N)")
+        and "{ID:" in s.upper().replace(" ", "")
+        and ":OBJECT" not in s.upper() and ":SUBJECT" not in s.upper()
+    ]
+    assert not unlabelled, (
+        "the rename guard ran an UNLABELLED id probe — a whole-node scan with no "
+        f"label to select an index from: {unlabelled}")
+    assert _name_ids(proj, "Object", "Shared") == [live_id], (
+        "a Point update must not touch the Object that happens to share the name"))
 
 
 def test_a_create_holds_the_per_name_mint_lock_across_its_write(sdk, monkeypatch):

@@ -2290,15 +2290,26 @@ def _graph_entities(projection) -> tuple[dict, dict]:
     return _entities_from_view(_graph_view(projection))
 
 
-def _entities_from_view(graph_view: dict) -> tuple[dict, dict]:
+def _entities_from_view(graph_view: dict) -> dict:
     """The entity half of a :func:`_graph_view` index — see :func:`_graph_entities`.
 
     Keys are ``(label, id)`` resolved against the SAME graph MATCH key the
     writers use (``_ENTITY_PARITY``), so a key here is one the entity leg's
     journal side also produces.
+
+    ⛔ ID-KEYED ONLY (#3590 review P2). This used to ALSO return a
+    ``{(label, name): view}`` index, and `_compare_entities` consulted it when a
+    journal id was absent from the graph — justified by *"the graph MERGEs these
+    labels by NAME, so a second registration of the same name under a fresh id is
+    ONE node carrying the LAST id"*. **That premise is what #3590 retires**: the
+    entity writers now MERGE on ``id`` (`merge_key = "id"`), so a second
+    registration of one name under a fresh id is TWO nodes, and the name index
+    resolved a BURIED journal id onto a different incarnation of the same name
+    and reported the burial CLEAN — a false PASS on exactly the shape this file
+    exists to catch (the `:Event` `id`-only leg documented below was hardened on
+    this same reasoning).
     """
     out: dict = {}
-    by_name: dict = {}
     id_prop = dict(_ENTITY_PARITY)
     for (label, eid), props in graph_view.items():
         if label not in id_prop or not eid:
@@ -2321,15 +2332,11 @@ def _entities_from_view(graph_view: dict) -> tuple[dict, dict]:
         # journal counterpart correctly reports `absent-from-graph`.
         if props.get(id_prop[label]) != eid:
             continue
-        rec = _entity_node_view(props)
-        out[(label, eid)] = rec
-        name = props.get("name")
-        if isinstance(name, str) and name:
-            by_name[(label, name)] = rec
-    return out, by_name
+        out[(label, eid)] = _entity_node_view(props)
+    return out
 
 
-def _compare_entities(journal_entities, graph_entities, graph_names,
+def _compare_entities(journal_entities, graph_entities,
                       deleted, ambiguous) -> tuple[list, int, list]:
     """Field-aware non-Point comparison.
 
@@ -2352,22 +2359,14 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         if ambiguous_status:
             excluded_ambiguous.append((label, eid, rec.get("name")))
         g = graph_entities.get(key)
-        if g is None and label in _NAME_MERGE_LABELS:
-            # The graph MERGEs these labels by NAME, so a second registration
-            # of the same name under a fresh id is ONE node carrying the LAST
-            # id — resolve by name before declaring a burial (#3585 review).
-            #
-            # This is the PRESENCE leg's name resolution, not the STATUS leg, so it
-            # reads `_NAME_MERGE_LABELS` — the home whose declared meaning is exactly
-            # the sentence above. Round 2 hoisted the status pair and pointed BOTH
-            # `_compare_entities` sites at it; the two constants coincide in value
-            # today, which is why the mis-wiring was invisible. When a reference-fold
-            # label becomes name-MERGE'd (forced into `_NAME_MERGE_LABELS` by
-            # `test_the_name_merge_label_sets_have_one_home`) while the status set
-            # stays Object/Subject, this site would miss the name resolution and
-            # report `absent-from-graph` on a FAITHFUL graph — measured. There is no
-            # live verdict change today (#8859 follow-up review round 3, P2).
-            g = graph_names.get((label, rec.get("name")))
+        # ⛔ NO NAME FALLBACK (#3590 review P2). The presence leg used to resolve
+        # an id absent from the graph BY NAME on the premise that the graph
+        # merges Object/Subject by name. That premise is retired: the writers key
+        # the MERGE on `id`, so a same-name node under ANOTHER id is a DIFFERENT
+        # incarnation — resolving onto it compared the status of the wrong node
+        # and reported the burial CLEAN. An id the graph does not carry is
+        # ABSENT, the same rule the `:Event` leg above states ("a false GREEN,
+        # which is the one failure mode this file must never produce").
         if g is None:
             count += 1
             if len(mismatches) < _MAX_DIVERGENT_POINTS:
@@ -2589,11 +2588,10 @@ def check_consistency(log_path: str, projection, *,
     # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
     # Point-only, so an Object/Subject burial would be invisible; this compares
     # the journal's entity reference against the graph's entity nodes.
-    graph_entities, graph_entity_names = _entities_from_view(graph_view)
+    graph_entities = _entities_from_view(graph_view)
     entity_mismatches, entity_divergent_count, entity_ambiguous_excluded = (
         _compare_entities(journal_entities, graph_entities,
-                          graph_entity_names, entity_deleted,
-                          entity_ambiguous))
+                          entity_deleted, entity_ambiguous))
     entities_ok = not entity_mismatches
     # `db_hash` is a pure function of the GRAPH — the fields the verdict covers
     # PLUS the embedding, so a vector-only rewrite of an otherwise-identical
