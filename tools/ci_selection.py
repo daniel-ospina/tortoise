@@ -326,6 +326,19 @@ SHARED_MODULES = (
     # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
     # cannot see it and this registration has to be made by hand.
     "tests/_change_feed_isolation.py",
+    # this PR (#1436 / #5084 remainder): the in-process live-skip gate
+    # (`tests/_live_gate.py`) is imported at conftest MODULE level and is applied
+    # from `pytest_runtest_setup` — i.e. it runs before EVERY test on EVERY
+    # surface (api, ep, sdk, onboarding, eval, battery), not just `core`. Same
+    # class as `_verdict.py` / `_signal_hygiene.py` / `_canonical_store_guard.py` /
+    # `_change_feed_isolation.py` above, and enforced by the same AST ratchet
+    # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`):
+    # it is not a `test_*.py` file, so the manifest never classifies it — without
+    # this entry a change to the gate would select `core` only and an api/eval/ep
+    # break it induced would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class). The gate's own blast radius is
+    # the whole suite: it can RED any test that skips on a live-storage reason.
+    "tests/_live_gate.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -2070,6 +2083,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # surface that can actually run it. Pinned by
              # tests/test_ci_selection.py::test_ci_queue_health_tool_change_selects_core_not_tier1.
              "tools/ci_queue_health.py",
+             # #10017 review P1 (the second time this class was measured on a
+             # CENSUS): tools/backfill_graph_turns.py owns
+             # tests/test_10017_backfill_census.py, registered `core`. `tools/`
+             # is a flat NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS
+             # row, so a tool-only diff came back with `changed == []`, took the
+             # docs-only early return and selected NO surface — the census that
+             # gates an irreversible turn delete would never run its own suite
+             # (nor `tests/test_bounded_raw_clients_3065.py`, which pins its
+             # read bound, nor `tests/test_entry_point_python_guard.py`, which
+             # pins its #5128 guard) on the PR that edits it. Measured before
+             # this entry: `--changed-files tools/backfill_graph_turns.py` ->
+             # surfaces=[], full=False, test_10017_backfill_census.py ABSENT.
+             # `CORE_ALSO` (not `TOOL_CARVEOUTS`) is the documented seam, for the
+             # same reason as `tools/graph_census.py` above: the suite is
+             # hermetic (a fake graph + a fake client, no DB), so `core` is the
+             # surface that can actually run it — fail-closed FULL would add the
+             # whole matrix for a DB-free instrument. Pinned by
+             # tests/test_ci_selection.py::test_backfill_graph_turns_tool_change_selects_core_not_tier1.
+             "tools/backfill_graph_turns.py",
              # #9085 review P1: `tests/test_runner_ports_6673.py` (registered
              # `core`) carries the two #8124 guards that pin the ENGINE, and both
              # read a file the selector did not keep:
