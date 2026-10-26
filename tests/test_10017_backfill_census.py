@@ -487,6 +487,14 @@ def test_a_truncated_read_is_refused_and_never_written(monkeypatch,
     assert not out.exists(), "a refused census must not leave an artifact"
 
 
+#: A `pointKind` EQUALITY in a WHERE clause, which would narrow the census to a
+#: strict SUBSET of the delete set. Matching is on the operator, never on the
+#: name: `p.pointKind` is legitimately present in the turns query's RETURN list
+#: (that is how the divergence is MEASURED), so a presence check cannot tell
+#: "measured" from "filtered on" (#10017 decision relay, 2026-10-26T08:44:26Z).
+_KIND_FILTER_RE = re.compile(r"pointKind\s*=")
+
+
 def test_the_statements_measure_what_the_report_claims() -> None:
     """The fake graph cannot catch a query that stops measuring the right thing.
 
@@ -504,6 +512,24 @@ def test_the_statements_measure_what_the_report_claims() -> None:
     assert "is_episodic" in turns_q and ":CONTAINS]" in turns_q
     assert "p.pointKind" in turns_q, "the pointKind divergence would be invisible"
     assert "is_episodic" in orphan_q and "NOT (:Session)-[:CONTAINS]->(p)" in orphan_q
+
+    # #10017 decision relay: the graph leg READS the delete set — `is_episodic =
+    # true` and NO kind filter — and the turn SHAPE decides the PURGE set. A
+    # narrowing `AND p.pointKind = 'event'` is a strict SUBSET of what the delete
+    # sweep removes, so a census that carried it would report a subset CLEAN and
+    # authorise an irreversible delete over nodes nothing had compared.
+    #
+    # The assertion above cannot see that narrowing: `p.pointKind` rides the
+    # turns query's RETURN list, so it is present whether selected or filtered
+    # on. Narrowing the paged read ALONE trips the per-leg cross-check, but
+    # narrowing BOTH legs (read + aggregate — what a careful author does) agrees
+    # with itself, so the shape is pinned over EVERY statement the census issues.
+    assert graph.queries, "the census must issue statements to be pinned"
+    for stmt in graph.queries:
+        assert not _KIND_FILTER_RE.search(stmt), (
+            "a pointKind filter narrows the census to a subset of the delete "
+            f"set, so CLEAN would no longer mean parity: {stmt}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
