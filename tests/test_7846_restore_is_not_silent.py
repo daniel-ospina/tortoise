@@ -945,15 +945,31 @@ def test_the_caller_held_time_reports_the_whole_call_including_the_TAIL() -> Non
     Pre-fix the ``elapsed_s`` assertion below fails (it reads ~0.2s against a ~0.9s
     call); the docstring's promise of "never past its own bound" is corrected alongside
     it, to the additive term asserted here.
+
+    #10022: the tail is asserted against MEASURED terms, not against the test's own wall
+    clock. ``elapsed_s`` is captured INSIDE the driver, so a comparison with ``held``
+    also counts the driver's post-measurement work — building the observation, its
+    ``sentence()``/``diagnosis()`` notes, the ERROR log, the raise — which is time the
+    caller does wait for but the driver cannot include, because it has not happened yet.
+    A FIXED 0.2s slack for that is a deterministic-looking bound on an unbounded
+    quantity: on the loaded CI runner the overhead was 0.26s and this test reddened a
+    CORRECT measurement (caller held 1.16s, ``elapsed_s`` 0.90s = the 0.2s bound + 0.5s
+    join + 0.2s probe, exactly). The contract is asserted against the measured tail; the
+    wall-clock checks keep a slack that is a FRACTION of the call, so load alone cannot
+    turn them into a false red while a real pre-fix drift (the whole ~0.7s tail) still
+    reddens them.
     """
     instance = _FakeInstance()
+    probe_costs: list[float] = []
 
     def ping_that_never_lands() -> None:
         time.sleep(1.5)  # still in flight when the witness is joined and abandoned
         instance.pings += 1  # ... and only then does the sample land, past the window
 
     def slow_probe() -> bool:
+        probe_started = time.perf_counter()
         time.sleep(0.2)  # a real tcp probe carries a timeout; this models its cost
+        probe_costs.append(time.perf_counter() - probe_started)
         return True
 
     bound_s, join_s, probe_s = 0.2, 0.5, 0.2
@@ -989,18 +1005,30 @@ def test_the_caller_held_time_reports_the_whole_call_including_the_TAIL() -> Non
         f"the RESTORE step is reported as {observation.restore_s:.2f}s on a {bound_s}s "
         f"bound: the overrun vanished from the split"
     )
-    assert observation.elapsed_s >= observation.restore_s + join_s * 0.8, (
+    # The tail the caller also waited for, MEASURED: the witness join plus the liveness
+    # probe's own cost (the probe runs after the join, so both are inside `elapsed_s`).
+    assert probe_costs, "the liveness probe was never called — the scenario is not the one asserted"
+    measured_tail = join_s + probe_costs[-1]
+    assert observation.elapsed_s >= observation.restore_s + measured_tail * 0.8, (
         f"elapsed_s ({observation.elapsed_s:.2f}s) does not carry the tail the caller "
         f"also waited for (RESTORE step {observation.restore_s:.2f}s + a {join_s}s "
-        f"witness join)"
+        f"witness join + a {probe_costs[-1]:.2f}s liveness probe)"
     )
-    assert observation.elapsed_s >= held - 0.2, (
+    # Post-measurement overhead is the only term a wall-clock comparison adds, and the
+    # driver cannot include it (it is the cost of PUBLISHING the observation). Budget it
+    # as a fraction of the call, with the original 0.2s floor for short calls: a
+    # pre-fix capture at the bound is short by the whole tail (>0.5s here), so this
+    # still reddens it while leaving room for a loaded runner to be slow at the tail end.
+    overhead_budget = max(0.2, held * 0.4)
+    assert observation.elapsed_s >= held - overhead_budget, (
         f"the caller waited {held:.2f}s but elapsed_s reports {observation.elapsed_s:.2f}s — "
-        f"the published caller-held time excludes the tail the operation needed"
+        f"the published caller-held time excludes the tail the operation needed "
+        f"(budget for post-measurement overhead: {overhead_budget:.2f}s)"
     )
-    assert abs(held - observation.elapsed_s) < 0.35, (
+    assert abs(held - observation.elapsed_s) < overhead_budget, (
         f"elapsed_s ({observation.elapsed_s:.2f}s) and the wall time the caller actually "
-        f"waited ({held:.2f}s) do not describe the same call"
+        f"waited ({held:.2f}s) do not describe the same call "
+        f"(budget for post-measurement overhead: {overhead_budget:.2f}s)"
     )
     assert observation.elapsed_s >= observation.restore_s
 
