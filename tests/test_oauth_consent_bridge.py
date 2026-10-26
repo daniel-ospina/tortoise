@@ -1800,6 +1800,11 @@ def test_a_token_bound_to_a_state_the_request_drops_is_refused(bridge_client, mi
     ({"jti": "x" * 300}, "jti"),
     # §2.1 `email` — optional, but if present it must be a string; the check had no test.
     ({"email": 12345}, "email"),
+    # §2.2 `exp` — a JSON integer literal too large to be a float. `json.loads` yields a Python int
+    # with no float involved, and both `math.isfinite` and `float()` then raise `OverflowError`,
+    # which answered a bare 500 (measured, convergence review). Not a privilege path (only a
+    # signature holder gets here), but this module's every-refusal-is-typed claim has to be true.
+    ({"exp": 10**400}, "exp"),
 ])
 def test_a_claim_that_breaks_the_contract_is_refused(bridge_client, mint_spy, bearer_refuses,
                                                      overrides: dict, needle: str) -> None:

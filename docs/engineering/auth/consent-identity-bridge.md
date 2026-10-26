@@ -272,8 +272,11 @@ oversight.**
       provider sign-in no longer leaves the app origin (§6). Record the answer on #3524.
 - [ ] `CONSENT_TOKEN_SECRET` exists on **both** the `tortoise-dashboard` Pages project and the hosted API,
       and `config/required-bindings.yml` declares it (the deploy preflight then fails closed until it does).
-- [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value — NOT the service-role key and NOT the anon key
-      (§2.3). The hosted API refuses a value equal to any of them that it can see (typed 503 whose
+- [ ] `CONSENT_TOKEN_SECRET` is a **dedicated** value of **at least 32 characters** — NOT the
+      service-role key and NOT the anon key (§2.3). The length is an implementation floor, not a
+      §2.3 requirement: HMAC-SHA256 with a guessable key is the same forgery oracle as a reused one
+      (measured with a 1-character secret), so the hosted API refuses a short one with a typed 503
+      that names the reason. The hosted API refuses a value equal to any of them that it can see (typed 503 whose
       description names the collision; it reads `SUPABASE_ANON_KEY` itself, for the consent page).
       This box is still the operator's for the case the API cannot see — a Pages project whose env
       carries a value the API's env does not. Skipping it turns the verifier into a forgery oracle

@@ -273,9 +273,20 @@ def _number(claims: dict, name: str) -> float:
     # in the `jti` register with an expiry that never arrives (the entry is never pruned). That
     # defeats exactly the bound §2.2 requires. ±Infinity is already refused by the TTL check, but
     # finiteness is the property, so it is stated as the property.
-    if not math.isfinite(value):
-        raise _refuse(f"{name} is not a finite number")
-    return float(value)
+    #
+    # ⛔ THE CONVERSION IS GUARDED TOO: an integer too large to be a float (`10**400`, which
+    # `json.loads` produces from a JSON integer literal with no float involved) makes BOTH
+    # `math.isfinite` and `float()` raise `OverflowError` — which escaped as a 500 `server_error`
+    # and put an exception in this module's "every refusal is a typed OAuthError" claim. Measured
+    # end-to-end by the convergence review: a correctly signed token with `exp = 10**400` answered
+    # 500. A caller who can sign one can also just mint a valid token, so this was never a
+    # privilege path — it was a claim that was not true of its own code.
+    try:
+        if not math.isfinite(value):
+            raise _refuse(f"{name} is not a finite number")
+        return float(value)
+    except (OverflowError, ValueError) as exc:
+        raise _refuse(f"{name} is not a finite number") from exc
 
 
 def _text(claims: dict, name: str, *, max_chars: int | None = None) -> str:
