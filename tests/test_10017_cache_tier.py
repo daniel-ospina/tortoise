@@ -150,6 +150,14 @@ def test_the_forward_re_definition_cannot_shrink_the_refusal_set() -> None:
                   r"\s*ARRAY\[(.*?)\]\s*::text\[\]", sql, re.S)
               if table == "point"]
     assert alters, "no forward re-declaration found for point — the pin is blind"
-    lost = create - alters[-1]
-    assert not lost, f"the forward re-declaration dropped {sorted(lost)}"
+    # ⚠️ Compare against EVERYTHING that could have introduced a name, not just
+    # the CREATE: `refused_props_names()` unions all forward ALTERs while the SQL
+    # DROP+ADD REPLACES, so a name an INTERMEDIATE re-declaration added and the
+    # newest one omits shrinks the live constraint with the parser still
+    # reporting it. Latent today (one ALTER) and silent the day it is not.
+    superset = set(create)
+    for earlier in alters[:-1]:
+        superset |= earlier
+    lost = superset - alters[-1]
+    assert not lost, f"the newest forward re-declaration dropped {sorted(lost)}"
     assert "cache_tier" in alters[-1]

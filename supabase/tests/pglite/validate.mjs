@@ -192,6 +192,28 @@ for (const f of files) {
     if (f === '20260813000002_metering_nodes_written.sql') {
       await db.exec('DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);');
     }
+    if (f === '20261029000001_record_point_cache_tier.sql') {
+      // #10017 R2 — seed the POISONED row this migration has to clean before its
+      // constraint can validate existing rows. Before this file `cache_tier` was
+      // not a column, not in `_META_KEYS` and not refused, so a caller-supplied
+      // prop of that name went into the props tail. Without this seed the file is
+      // applied to empty tables and its data path is exercised by nothing — while
+      // on a real tenant ONE such row aborts the whole migration
+      // (`check constraint … is violated by some row`), taking the column and the
+      // index with it and leaving step 7 unable to deploy.
+      await db.exec(`
+        INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+          VALUES ('9881-mig-org','9881-mig-graph','Point','cache-tier-poison')
+          ON CONFLICT DO NOTHING;
+        -- chk_point_node_key_is_contract_key requires node_key = id, and id is a
+        -- COLUMN: the props tail cannot satisfy it.
+        INSERT INTO public.point (org_id, graph_id, node_key, node_label, id, props)
+          VALUES ('9881-mig-org','9881-mig-graph','cache-tier-poison','Point',
+                  'cache-tier-poison',
+                  '{"cache_tier": "record_only", "kept": "yes"}'::jsonb)
+          ON CONFLICT DO NOTHING;
+      `);
+    }
     if (f === '20261027000001_record_semantic_id_key.sql') {
       // #9881 — seed the PRE-MOVE shape so this migration's RE-KEY runs on real
       // rows. Without it the file is applied to empty tables, and its whole data

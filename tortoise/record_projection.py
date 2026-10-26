@@ -1310,11 +1310,14 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # is what keeps that distinction honest.
     "agent_id",
     # #10017 R2: a PLACEMENT declaration, not a derived value.
-    # ⛔ This is the RECORD's strip set, and that is ALL it is: it stops the
-    # record storing the tier as a `props` key. The GRAPH half is
-    # `projection/entities.py::_META_KEYS` (the `agent_id` precedent — the record
-    # strip alone was never sufficient for that key either), which is what stops
-    # a `PointAdded` carrying the tier from setting it on a node.
+    # ⛔ This is the RECORD's strip set, and deleting it as "redundant now that
+    # the column exists and the schema refuses it" would be a silent data
+    # disaster: `_split_properties` checks `column in cols` BEFORE `refused`, so
+    # a payload `cache_tier` is written to the COLUMN — the refusal cannot catch
+    # it. Without this entry any `PointAdded` could set
+    # `cache_tier='record_only'` and hide a real graph point from the cache.
+    # The GRAPH half is `projection/entities.py::_META_KEYS` (the `agent_id`
+    # precedent — the record strip alone was never sufficient for that key).
     # ⛔ And because this strips it, the tier can NOT be set through an event
     # payload: it is dropped before the insert, so the row lands the DEFAULT
     # `graph` and the turn would be materialised again. Step 7 must write it as
@@ -2187,7 +2190,13 @@ def _op_dispatch_statements(
         col_values, tail = _split_properties(
             table, dict(state),
             columns=columns, refused=refused,
-            drop=dispatch.never_store.get(table, frozenset()),
+            # #10017 R2: `cache_tier` is a placement declaration, so the
+            # `EntityMutated` path must drop it too. Without it a `state` map
+            # carrying the tier writes `object.props`/`subject.props`, and a
+            # record-sourced rebuild sets it on the node while the journal
+            # replay strips it (`_META_KEYS`) — the two rebuild routes diverging
+            # on a property, which is the class this change exists to close.
+            drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]
