@@ -271,6 +271,35 @@ select = ["E", "F", "B", "UP", "I", "SIM", "RUF"]
 #            comment/string surface (Latin-1 quotes); low signal.
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
+[tool.ruff.lint.per-file-ignores]
+# `tortoise/__all__.py` is a DECLARATION, not an export list (#4282 phase 1.1).
+# Its `__all__` names the owner's 40 approved TortoiseSDK CLASS METHODS, not
+# module-level bindings of `tortoise.__all__`, so every one of them is undefined
+# *in that module* and F822 (undefined-export) fires on all of them — measured on
+# `origin/main` at 16e65862d: 68 errors repo-wide, which red with F822 in this
+# file, so the required `agent-infra-ci / lint` job is red on the MERGE REF of
+# every open PR, not on any one PR's diff.
+#
+# Ruff's own rule documentation names `lint.per-file-ignores` as the mechanism for
+# a module whose `__all__` deliberately refers to names it does not define
+# (https://docs.astral.sh/ruff/rules/undefined-export/); keeping the suppression
+# here rather than inert per-line `# noqa` comments keeps it in the pinned rule
+# surface, where it can be reviewed.
+#
+# It is scoped to TWO rules and ONE file. It is not free: `from tortoise.__all__
+# import *` really would raise NameError, which is why nothing imports it that
+# way — `tools/sdk_surface_declaration.py` loads the file BY PATH and reads
+# `__all__` as data, and the package does not re-export it. An undefined name in
+# any OTHER module's `__all__` still fails the gate.
+#
+# RUF022 (`__all__` is not sorted) goes with it for the OPPOSITE reason: the list
+# is a transcription of the owner's approved-surface document in THAT document's
+# row order, which is the file's stated contract — sorting it would break the
+# row-by-row correspondence a reviewer checks the declaration against, and would
+# rewrite an owner's list to satisfy a style rule. The declaration tool compares
+# the two as SETS, so the order carries no behaviour; it carries the PROVENANCE.
+"tortoise/__all__.py" = ["F822", "RUF022"]
+
 [tool.mypy]
 python_version = "3.12"
 # Agent-infra python-ci convention (templates/.github/workflows/python-ci.yml):
