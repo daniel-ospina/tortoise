@@ -47,6 +47,17 @@ COMMENT ON COLUMN public.point.cache_tier IS
 --    the full set, since this REPLACES the table's refusal rather than adding to
 --    it at the SQL level. The set is read from the live parser
 --    (`refused_props_names()`) so it cannot drift from what the code believes.
+-- The ADD below VALIDATES existing rows. Before this migration `cache_tier` was
+-- not a column, not in `_META_KEYS` and not refused, so a caller-supplied prop
+-- of that name went into the props tail — and a single such row aborts the whole
+-- migration (`check constraint … is violated by some row`), taking the column
+-- and the index with it. The sibling `20261014000001` (the `subject` refusal)
+-- established the remedy: remove the name from the tail first. Idempotent, so
+-- re-applying it (this file is in RECORD_REAPPLY_STEPS) is a no-op.
+UPDATE public.point
+   SET props = props - 'cache_tier'
+ WHERE props ? 'cache_tier';
+
 ALTER TABLE public.point
   DROP CONSTRAINT IF EXISTS chk_point_props_no_derived;
 
