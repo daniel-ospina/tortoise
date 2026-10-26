@@ -64,12 +64,11 @@ The fusion BOUND (why :func:`resolve_lexical_weight` exists)
 ------------------------------------------------------------
 ``#1657`` measured that equal-weight RRF dilutes a strong leg, and its recorded
 production default is ``{"vector": 1.5}`` — the bge-small dense leg leads.
-``#7704`` records the sibling defect: an UNBOUNDED boost does not survive
-fusion at all — the rank difference a fused list carries outweighs it, so the
-outcome falls to an arbitrary id tie-break. Both lessons point the same way:
-a leg's fusion weight has to be bounded BELOW the strongest leg's, or it
-decides the order by itself. :data:`LEXICAL_WEIGHT_MAX` is that bound (the
-lexical leg may never outweigh the dense leg), and
+``#7704`` (FIXED: ``rrf_fusion`` now averages a leg's tied ranks, so a fused
+list no longer carries a relevance difference between documents its legs scored
+identically) leaves the other half of the same lesson standing: an unbounded
+leg weight decides the order by itself, so :data:`LEXICAL_WEIGHT_MAX` bounds it
+(the lexical leg may never outweigh the dense leg), and
 :func:`resolve_lexical_weight` is the ONE place it is applied — including to a
 ``TORTOISE_FUSION_WEIGHTS`` env override, which is ``json.loads``-ed and could
 otherwise carry any number:

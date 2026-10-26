@@ -81,122 +81,35 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # W4-b (issue #2102): the bounded contested-relevance boost, in graph-boost
 # space (weighted by graph_boost_weight in the final score).  Small by
 # design — it tips relevance-matched contested claims ABOVE their
-# uncontested twins (E2E-1) while the twins' FUSED relevance difference stays
-# BELOW the boost's final-score contribution
-# (W4_CONTESTED_BOOST × graph_boost_weight = 0.0175); it does not reorder the
-# tail.  Strictly > 0 so a boost never lowers a score.
+# uncontested twins (E2E-1).  Strictly > 0 so a boost never lowers a score,
+# and clamped with the graph term into [0, 1] below, so it can never make the
+# graph signal dominate the scored relevance.
 #
-# THAT CONDITION IS NOT GUARANTEED ON A FUSED READ (#7704).  Content-identical
-# twins tie on EVERY leg, and each leg's own ``ORDER BY score DESC,
-# node.<id> ASC`` tie-break (#3019) hands the lower-ULID twin rank 0.  RRF is
-# rank-based (``1/(k + rank + 1)``), so the post-fusion min-max normalization
-# converts that ONE-rank difference into a relevance gap that grows as the
-# pool shrinks — measured on the shipped hybrid path, as the RELEVANCE gap the
-# boost must clear (so the comparison with the 0.0175 boost effect is
-# like-for-like): 0.0189 of final score on the 4-row E2E-1 fixture (just above
-# the 0.0175 boost, so the contested twin ranks BELOW its twin), 0.5 on a
-# 3-row pool (there the twins occupy both ends of the normalization span; the
-# final-score residual once the shipped boost is applied is 0.5 - 0.0175 =
-# 0.4825, which is the delta a reader sees in the payload).  The guarantee
-# therefore holds
-# on a SINGLE-LEG read (where both twins score identically and the boost is
-# the sole differentiator), and on a fused read only while the fused relevance
-# delta stays under the boost effect.  Sizing the boost, changing the fusion
-# tie semantics, or restating the promise is a product decision — tracked on
-# #7704, not decided here.
+# IT IS APPLIED AFTER FUSION, AND IT SURVIVES FUSION BECAUSE FUSION NO LONGER
+# INVENTS A GAP (#7704, FIXED 2026-10-25).  ``rrf_fusion`` used to consume a
+# row's POSITION, so a leg's own tie order — ``ORDER BY score DESC, node.<id>
+# ASC`` (#3019), i.e. the ULID — became a fused RELEVANCE difference between
+# two content-identical twins that tied on every leg, and that difference is
+# worth more than this boost's 0.0175 of final score.  ``rrf_fusion`` now
+# averages the ranks of a leg's score-tied group, so identical evidence yields
+# identical fused relevance and this boost is the sole differentiator.  The
+# fused read measured (E2E-1 twin fixture, dense leg live): the contested twin
+# ranks first at ``limit`` 3, 4, 10 and 40 with a twin delta of exactly
+# ``-W4_CONTESTED_BOOST * graph_boost_weight`` (-0.0175); before the fix it
+# ranked second at every one of those pages, and the outcome was a property of
+# the caller's ``limit``.  Pinned end-to-end by
+# ``tests/test_ranking_w4b.py::test_integration_equal_evidence_twins_need_no_boost_magnitude``
+# and at the fusion level by ``tests/test_rrf_tie_rank_7704.py``.
 #
-# AND THE RANKER'S POOL IS THE PAGE, NOT THE CORPUS (#7704, re-measured
-# 2026-10-15).  ``tortoise_fts_query`` truncates the fused candidate list to
-# ``limit`` (``result_ids[:limit]``, before ``rerank`` normalizes it), so the
-# fused relevance delta the boost must clear is a function of the caller's
-# ``limit`` — the promise's truth is a property of the READ SHAPE.  Same
-# graph, same query, 404 points, dense leg live: the contested twin ranks
-# BELOW its twin at limit=4 (delta 0.0157) and at the shipped default limit=10
-# (delta 0.0013), and ABOVE it at limit>=40 (delta -0.0041), the gap shrinking
-# as the page grows.  On the fixture with 40 filler rows (a 44-point graph) it
-# ranks below at every limit 2..40 (+0.0056 at limit=40).  The exact page delta is
-# a property of the page's own similarity span, so filler composition moves it (a
-# 404-point variant with different filler rows measures a SMALLER requirement at
-# limit=10, small enough that the contested twin is already first there); the
-# MECHANISM is what is stable, not any one fixture's number.
-#
-# WHAT A LARGER BOOST WOULD AND WOULD NOT BUY (#7704, corrected 2026-10-18).
-# The required increment is BOUNDED, not unbounded: ``_min_max_normalize`` maps
-# a page into [0, 1], so every term of the level condition between the twins
-#
-#   cb_req = (similarity_weight * d_sim + graph_boost_weight * d_gb
-#             + recency_weight * d_rec) / graph_boost_weight    (d = calm - hot)
-#
-# is bounded by its own weight, and ``cb_req`` SATURATES at
-# ``(similarity_weight + graph_boost_weight * |d_gb| + recency_weight)
-# / graph_boost_weight`` — 2.857 in the worst case, where the twins' baseline
-# ``graph_boost`` differs maximally (each row's is in [0, 1]).  The 1.857 the
-# page-bound band pins is that saturation at ``d_gb == 0`` — the ceiling is
-# monotone in ``|d_gb|``, so a NEGATIVE ``d_gb`` gives a LARGER one, not that
-# one — and 1.4286 is the equal-recency case with ``d_gb == 0``: the case the
-# measured pages here exhibit, because the E2E-1 twins share a baseline
-# ``graph_boost`` (identical operator connectivity).  That premise is what
-# makes the flat 1.4286 figures below legitimate, so the test pins it by name
-# rather than assuming it.
-# A wider CONFIDENCE gap moves ``d_gb``, and the requirement moves WITH it.  On
-# the 2-row page (``d_sim`` = 1, equal recency) the formula above is
-# ``cb_req = 1.4286 + d_gb``, so ``d_gb`` >= 0 puts the requirement at or above
-# 1.4286 — NOT 1.857, which it only passes once ``d_gb`` >= 0.4286 (a 0.857
-# confidence gap at equal connectivity).  Measured end-to-end: a maximal gap,
-# calm 1.0 / contested 0.0, gives ``d_gb`` = 0.5 and puts the 2-row requirement
-# at 1.4286 + 0.5 = 1.9286.  Nor is the sign guaranteed: the contested twin is
-# the one carrying the counter-claim edge, i.e. the one with the HIGHER
-# connectivity, which pushes ``d_gb`` the other way — the fixture has to mint a
-# parity NAND onto the calm twin to zero it, and without that calm falls to
-# degree 0, ``d_gb`` = -0.25, and the 2-row requirement drops to 1.1786.  So
-# 1.857 is the CEILING at ``d_gb == 0`` and 1.4286 is the requirement at that
-# parity; 1.857 is never a floor (at ``d_gb == 0`` the requirement is 1.4286,
-# and it passes 1.857 only once ``d_gb`` >= 0.4286), while 1.4286 is one only
-# while ``d_gb`` >= 0 — ``1.4286 + d_gb`` exceeds it for every positive
-# ``d_gb`` — and only 2.857 bounds every page.  The conclusion below is
-# unaffected: a larger ``d_gb`` only moves the requirement UP, never down.
-# A 2-row page is the worst PAGE because a page cannot hold fewer than the two
-# rows being ordered: it is a maximum, not the first term of a series.  Measured
-# on the bare 4-row E2E-1 fixture (dense leg live, re-measured 2026-10-18):
-# required total ``cb`` 1.4286 on a 2-row page (built from the fused rows — the
-# SDK's own ``limit=2`` read does not hold both twins), still 1.4286 at
-# ``limit=3`` (the twins occupy both ends of the span, so a third row buys
-# nothing), and 0.0540 at ``limit>=4`` on that 4-row fixture (where every page
-# size at or above 4 is its whole page) — the shipped default 10 included.  The
-# requirement FALLS as the page grows and the largest value it ever takes is
-# the 2-row one.
-#   * A modest raise therefore DOES repair the shipped default read: on that
-#     fixture the limit=10 ordering flips at ``cb`` >= 0.05415 — on the 1e-4
-#     grid the shipped boost uses that is ``cb`` >= 0.0542 (0.0541 still ties).
-#     The requirement itself is 0.0540153, so the flip sits TWO ``graph_boost``
-#     grid steps above it, not one: ``graph_boost`` is rounded to 4 dp BEFORE it
-#     is weighted (``round(min(1.0, graph_boost + cb), 4)``), so the requirement
-#     lands on cell 0.7540, the next cell 0.7541 still ties once ``final_score``
-#     is rounded again, and the flip starts at cell 0.7542.  Remedy (2) is a real
-#     magnitude choice with a page-dependent, partial effect — not an
-#     impossibility.  Measured: ``cb`` = 0.06 (> 0.0542) ranks the contested twin
-#     FIRST on the shipped default page, where the shipped 0.05 leaves it
-#     second.  Clearing #2102's own E2E-1 pre-assertion
-#     (relevance delta <= 0.05 in similarity space) takes
-#     ``cb > 0.5 * 0.05 / 0.35`` = 0.0714.
-#   * What no ``cb`` inside the invariant can buy is the SMALL pages: the clamp
-#     ``min(1.0, graph_boost + cb)`` grants at most ``1.0 - graph_boost`` of
-#     headroom (0.3 on that fixture, where both twins' baseline graph_boost is
-#     0.7) against the 1.4286 requirement.  Measured: cb=2.0 still ranks the
-#     contested twin second on a 2-row page (final 0.5000 vs 0.8950, its graph
-#     term pinned at the 1.0 clamp) — the CLAMP binding, not an unbounded
-#     requirement.  Covering every page with one value therefore needs the
-#     documented [0, 1] graph_boost invariant raised, which is a
-#     retrieval-semantics decision and not a tuning value.
-#
-# Every listed remedy is a PRODUCT decision, which is why this is reported
-# rather than enacted: (1) boost inside fusion = score-based fusion, the open
-# owner ruling on #4210; (2) raise the boost = a magnitude choice that repairs
-# the default page and an invariant change that repairs the small ones (above);
-# (3) tie on the contested signal = reverses #3019's id tie-break, which
-# ``temporal_leg.py`` consumes positionally; (4) restate the promise = the
-# recorded #2102 E2E-1 indicator, also the owner's.  Pinned by
-# ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``.
+# WHAT IS *NOT* CLAIMED HERE: this boost does not reorder a contested claim
+# against rows whose EVIDENCE genuinely differs — it is a nudge of
+# ``W4_CONTESTED_BOOST * graph_boost_weight`` and nothing more.  Sizing it,
+# raising the ``[0, 1]`` clamp, or restating the #2102 E2E-1 indicator stay
+# product decisions tracked on #7704 (options 2a/2b/B); no measurement made
+# here pre-empts them.  ⛔ Do NOT re-derive the page-scoped "required cb"
+# accounting recorded on #7704 (PRs #8952/#9353): it measured the requirement
+# against a fused gap that a TIE created, and that gap no longer exists — it
+# applies only to twins whose evidence differs, which is not the E2E-1 claim.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this
 # many alphanumerics (1-3 char function words and subword noise never count;

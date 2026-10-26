@@ -12,7 +12,7 @@ The epic's 9 detailed E2E scenarios (plan §7, `docs/planning/2026-09-01-2080-gb
 
 | E2E | Surfaces | Suite(s) executed at `d1f2d345c` | Result |
 |---|---|---|---|
-| E2E-1 conflict-surfacing | S6/S7/S8/S15 | `tests/test_w4_why_enrichment.py` (29), `tests/test_ranking_w4b.py` (23) | ✅ PASS (shipped assertions) — the ranking-participation ordering holds on a **single-leg read** only (#7704, addendum 2026-10-15) |
+| E2E-1 conflict-surfacing | S6/S7/S8/S15 | `tests/test_w4_why_enrichment.py` (29), `tests/test_ranking_w4b.py` (23) | ✅ PASS (shipped assertions) — the ranking-participation ordering holds on a **single-leg read** only (#7704, addendum 2026-10-15); **the fused read now holds it too** (addendum 2, 2026-10-25) |
 | E2E-2 write-path planted gold | S1/S2/S4/S5/S15 | `tests/eval/write_path/` corpus 85 + grading 47 + prescreen 48 + semantic_judge 41 + operator_lane 7 (docker) | ⚠️ PARTIAL (2 heavy gate files see gap note) |
 | E2E-3 reflex know-to-ask / false-fire | S3/S4/S5/S10 | `tests/eval/harness/` (62) + `tests/test_volunteer_reflex_harness_seam.py` (3) | ❌ NOT PASS |
 | E2E-4 source-isolation = 0 | S3/S4 | `tests/eval/harness/` isolation suite + committed baselines | ✅ PASS |
@@ -29,6 +29,20 @@ The epic's 9 detailed E2E scenarios (plan §7, `docs/planning/2026-09-01-2080-gb
 `tests/test_w4_why_enrichment.py` **29 passed** (168 s) and `tests/test_ranking_w4b.py` **23 passed** (136 s), both on the embedded lane. The E2E's own assertions are present and green: `test_e2e1_conflict_surfacing_rate`, `test_flag_drift_all_four_surfaces` (search / analyze / eval-only ask / MCP `recall_state`), `test_flag_off_emission_byte_identical`, `test_flag_off_mcp_surfaces_byte_identical` (the R11 golden-ordering guard), `test_clean_points_carry_no_conflict_noise`, `test_assembly_bounded_batch_reads` (the N+1 guard), `test_assembly_fail_open_never_breaks_turn`, plus the ranking-participation arm in `test_ranking_w4b.py` (strict threshold boundary, uncalibrated-never-contested, delta-causality, `[0,1]` clamp).
 
 **Addendum (2026-10-15, refs #7704).** The ranking-participation arm cited above — the E2E-1 ordering claim "the contested twin outranks its uncontested twin" — was green on a **pinned single-leg read** (`force_sparse_tfidf`), which the SDK's single-list shortcut answers without calling `rrf_fusion` at all (#7629, fixed by PR #8572, which also added a fused-path arm that pins the path-independent contract and deliberately asserts **no** ordering). Re-measured at `cb38dee1b` with the dense leg live: the claim does **not** hold on the fused read — the content-identical twins tie on every leg, each leg's `ORDER BY score DESC, node.<id> ASC` tie-break (#3019) hands the lower-ULID twin rank 0, and the post-fusion min-max similarity gap (0.0377 ⇒ 0.0188 of final score on this 4-row fixture) exceeds the boost's contribution (0.0175), so the calm twin ranks first. The gap is normalized over the **page**, so the outcome is a function of the caller's `limit` (measured: settles on the contested twin winning only at limit ≥ 40 on a 404-point graph). This is a live product question — the remedies collide with recorded decisions (#4210 open; #3019's tie-break; the #2102 E2E-1 indicator) and are **not** enacted by this report. E2E-1's conflict-surfacing assertions are unaffected; only the ranking-participation ordering is path-limited.
+
+**Addendum 2 (2026-10-25, refs #7704 — the fused path now holds the ordering).** `rrf_fusion` no longer
+consumes a row's POSITION: it averages the ranks of a leg's score-tied group, so two documents a leg
+scored identically get the SAME fused relevance instead of a difference manufactured by the leg's
+`ORDER BY score DESC, node.<id> ASC` tie-break (#3019). Re-measured on the E2E-1 twin fixture with the
+dense leg live (embedded lane, `0ede8ce3c` + the fix): the twins' fused rrf is now identical
+(`0.040260162…` both) and the contested twin ranks FIRST at `limit` 3, 4, 10 and 40, with a twin delta
+of exactly `-W4_CONTESTED_BOOST × graph_boost_weight` (-0.0175) — i.e. the outcome is no longer a
+function of the caller's `limit`. Pinned by
+`tests/test_ranking_w4b.py::test_integration_equal_evidence_twins_need_no_boost_magnitude` and
+`tests/test_rrf_tie_rank_7704.py`. **This does not decide the rest of #7704:** the boost's magnitude
+(2a), the `[0, 1]` clamp (2b) and the #2102 E2E-1 indicator's wording (B) are untouched, and no
+score-based fusion was adopted (#4210 stays open). The `limit`-dependence and the `required cb`
+accounting in the 2026-10-15 addendum above measured a gap a TIE created; that gap is gone.
 
 Latency: the ≤ 300 ms p95 hard wall-clock assertion is assigned by the plan to a dedicated perf lane that **does not exist** (#3992). The blocking mechanism assertions (zero-LLM read path, bounded traversal, batch EP reads, fail-open `degraded_reason`) are green; the wall-clock SLO is unverifiable in this repo. See Residuals.
 
@@ -140,7 +154,7 @@ So production exposure remains (correctly) gated, and the epic's branch *"if the
 | #2522 why-layer baseline publication | open | baseline is the empty template | E2E-7 standing baseline comparison; `comparison-systems.md` why-layer row |
 | #2093 test-design surface map | open child | artifact delivered in the issue body; amendments recorded in the plan; bookkeeping only | nothing |
 | #3992 dedicated perf lane does not exist | open | referenced by the plan but unimplemented | E2E-1 / E2E-9 wall-clock SLOs unverifiable |
-| #7704 W4-b contested boost vs RRF fusion | open | the E2E-1 ranking-participation **ordering** holds only on a pinned single-leg read; on the fused (shipped) read the id tie-break decides, and the outcome is a function of `limit`. Re-measured 2026-10-15; not a lane-actionable fix (every remedy is an owner decision) | E2E-1 ranking participation — the "contested outranks its twin" claim is path-limited, not corpus-wide |
+| #7704 W4-b contested boost vs RRF fusion | open (fusion half FIXED 2026-10-25) | the tie-to-relevance mechanism is gone (`rrf_fusion` averages a leg's tied ranks): the E2E-1 ordering now holds on the FUSED read at `limit` 3/4/10/40 — see addendum 2. The boost's magnitude (2a), the `[0, 1]` clamp (2b) and the #2102 E2E-1 wording (B) remain the owner's; #4210 (fusion formula) stays open | E2E-1 ranking participation — path-independent as of the fix |
 | Graded-reflex harness re-bless (reflex null→graded) + EP warm-start on graded cells | filed: **#8125** | no owner after #2102/#2103 closed — E2E-3 target unmet | E2E-3; epic indicator (3) |
 | `falkordb/falkordb:latest` panics the server under a shipped test | filed: **#8124** | `reply.rs:655` `reply_compact` unwrap; container exits | any docker-lane run on the floating tag; the shared container's restart class (#5084) |
 

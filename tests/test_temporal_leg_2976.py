@@ -405,9 +405,13 @@ def test_head_boundary_is_the_candidate_index_not_the_dated_index():
 
 
 def test_empty_temporal_leg_leaves_rrf_order_byte_identical():
+    # ``base`` is a POSITION list (every row the same 0.0 score — the shape
+    # ``temporal_leg`` fuses), so ``position_is_rank`` declares that its order,
+    # not a score, is the rank (#7704: without it the tied block would share
+    # one averaged rank and fall through to the id sort).
     base = [(f"p{i}", 0.0) for i in range(60)]
     fused = rrf_fusion([base, []], strategy_names=["semantic", "temporal"],
-                       weights={"temporal": 1.0})
+                       weights={"temporal": 1.0}, position_is_rank=True)
     assert list(fused) == [pid for pid, _ in base]
 
 
@@ -499,13 +503,17 @@ def test_window_tail_placement_keeps_picks_out_of_the_head():
     base = [(f"cluster{i}", 0.0) for i in range(60)]
     base[45] = ("gold_a", 0.0)
     base[50] = ("gold_b", 0.0)
+    # Both lists are position lists (constant 0.0 scores) — see the note in
+    # ``test_empty_temporal_leg_leaves_rrf_order_byte_identical``.
     rank_zero = rrf_fusion(
         [base, [("gold_a", 0.0), ("gold_b", 0.0)]],
-        strategy_names=["semantic", "temporal"], weights={"temporal": 1.0})
+        strategy_names=["semantic", "temporal"], weights={"temporal": 1.0},
+        position_is_rank=True)
     assert list(rank_zero)[:2] == ["gold_a", "gold_b"]
     tail = rrf_fusion(
         [base, [*base[:10], ("gold_a", 0.0), ("gold_b", 0.0)]],
-        strategy_names=["semantic", "temporal"], weights={"temporal": 1.0})
+        strategy_names=["semantic", "temporal"], weights={"temporal": 1.0},
+        position_is_rank=True)
     assert list(tail)[:2] == ["cluster0", "cluster1"], list(tail)[:4]
 
 
@@ -555,8 +563,9 @@ def test_deictic_only_anchors_are_dropped():
 
 
 def test_zero_weight_temporal_leg_is_a_no_op_on_membership_and_order():
+    # Position list — see ``test_empty_temporal_leg_leaves_rrf_order_byte_identical``.
     base = [(f"p{i}", 0.0) for i in range(20)]
     fused = rrf_fusion([base, [("deep", 0.0)]],
                        strategy_names=["semantic", "temporal"],
-                       weights={"temporal": 0.0})
+                       weights={"temporal": 0.0}, position_is_rank=True)
     assert list(fused) == [pid for pid, _ in base] + ["deep"]

@@ -448,6 +448,11 @@ def temporal_leg_fusion_order(
         [[(pid, 0.0) for pid in order_ids], leg],
         strategy_names=["semantic", "temporal"],
         weights={"temporal": weight},
+        # Both lists are position lists: every row carries the same 0.0 score
+        # by construction, so an equal score here MEANS "the position is the
+        # rank" (the placement contract above, #2976) and must not be averaged
+        # into one block by ``rrf_fusion``'s score-tie handling (#7704).
+        position_is_rank=True,
     )
     known = set(order_ids)
     return [pid for pid in fused if pid in known], picks
