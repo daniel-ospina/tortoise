@@ -28,7 +28,10 @@ did not. This is the home.
 Same corpus, same code path, one variable — whether the record can hold the turns.
 
 **Corpus:** 25 sessions × 40 turns × 1,500 characters, one 384-dim `float32` vector per turn
-(the production embedding width). **25,000 turns is 1,509,500 bytes of text and 1,536,000 bytes of vector.**
+(the production embedding width). **1,000 turns is 1,509,500 bytes of text and 1,536,000 bytes of vector**
+(1,509.5 B and 1,536 B per turn — the text figure includes the `[user]` / `[assistant]` role prefix
+the writer stores, 7 and 12 bytes counting each one's trailing space, so 1,500 + (7+12)/2 per turn),
+and the committed `expected_rows` is `sessions × turns` = `1,000`.
 
 | arm | what it is | bytes per captured session in the graph | ×3 runs | nodes the corpus added |
 |---|---|---|---|---|
@@ -64,8 +67,14 @@ Same corpus, same code path, one variable — whether the record can hold the tu
 **32,032 bytes per session, and it is one node per turn that carries no text.** The armed graph holds
 **:GraphEvent 1,008** (one `PointAdded` carrier per turn, plus the public capture's), `:Session` 26,
 `:Source` 1, `:Point` 1 — and `sdk._capture_turn_ids` returns `[]`. Each `:GraphEvent`'s payload is
-`{"id", "kind", "content_hash"}`: **the text is not in it**, which the graph-wide scan confirms
-(1,000 needles, 0 hits, over `n.c`, `n.content`, `n.text`, `n.payload` and `n.props`).
+`{"id", "kind", "content_hash"}`: **the text is not in it.** ⚠️ **Two different scans are in play
+here, and only one of them is this measurement.** The figure in the committed JSON
+(`graphwide_text_hits_over_sessions` = 0) comes from the probe's scan over **three** properties —
+`n.c`, `n.content`, `n.text` — with **25 needles** (one session prefix each, and every turn of that
+session shares it, so the 1,000 turn texts are all covered: 0 hits). The **`payload`/`props`** half is
+NOT in that figure; it is pinned by
+`tests/test_10000_turns_record_only.py::test_an_armed_capture_puts_the_turn_text_in_no_node_at_all`,
+which scans all five properties — on a 2-turn capture, not on this corpus.
 
 So the acceptance bullet's wording — *"no per-turn node carrying the turn's text"* — is met, and the
 residual is the **journal's graph mirror**, not the transcript. Whether those carriers should also leave
@@ -87,7 +96,23 @@ The nodes already in live graphs are untouched by any of this and are #10017's d
 - **A fresh private FalkorDB container per run** (`tools/test_lane.py down` → `uri`). Runs taken on a
   container that already held other graphs read lower — **272,374** B/session was measured once in that
   state, and allocator reuse after a wipe is the only mechanism identified for the gap. Three runs per
-  arm, fresh container each, spread ≤ 0.5% within an arm.
+  arm, fresh container each — and **the spread is reported as measured, not bounded**:
+
+  | arm | the three runs | spread (max−min ÷ quoted) | max vs mean |
+  |---|---|---|---|
+  | before | 323,292 · 322,063 · 321,785 | **0.47%** | 0.28% |
+  | after, unarmed | 321,212 · 321,033 · 321,175 | **0.06%** | 0.02% |
+  | after, armed | 32,003 · 32,032 · 33,513 | **4.7%** | 3.1% |
+
+  ⚠️ **The armed arm is the noisy one** — 4.7% run-to-run at ~32 KB, where a fixed ~1,500 B of allocator
+  bookkeeping is a large fraction. That is why its figure is quoted as measured and never dressed as a
+  precision bound, and why the comparison that carries the claim is the **90.0% delta**, which is three
+  orders of magnitude larger than the noise on either side of it.
+- **One run per arm is committed, and here is which one.** `measurement-before.json` is `before` run
+  **2**, `measurement-after-unarmed.json` is run **3**, `measurement-after-armed.json` is run **2**
+  (`…_r2` / `…_r3` in each `namespace`). The quoted per-arm figure in the table above **is** that
+  committed run in all three arms — the middle value each time — so 6 of the 9 runs behind the spread
+  column above cannot be re-read from the artifact; they are the numbers the table states.
 - **The turn store is driven through its chokepoint** (`sdk._write_session_and_turns`, the ONE writer both
   capture lanes call) with synthetic vectors, so the figure is the turn store's graph cost. The `:Source`,
   `:Event` and extraction rows are present in both arms and are excluded from the delta by construction —

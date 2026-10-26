@@ -55,8 +55,15 @@ RUN IT (a fresh, private FalkorDB — never the shared one):
 
 The ``before`` arm must be run from a worktree at ``6b48f7cef^`` (or any
 pre-#10000 commit) — this script is committed on the branch that adds it, so the
-parent commit does not carry it; copy it in, or run it with ``PYTHONPATH``
-pointing at this worktree while ``cd``'d into the parent's.
+parent commit does not carry it: **COPY it into that worktree** and run it there.
+⛔ Not ``PYTHONPATH``. The script puts the tree that CONTAINS IT first on
+``sys.path`` (``repo = Path(__file__).resolve().parents[3]``, then
+``sys.path.insert(0, str(repo))``), so a ``PYTHONPATH`` aimed at this worktree
+LOSES to the worktree the copy sits in — the run would import the AFTER writer
+while being labelled ``before``, silently, on the one arm the whole delta is
+measured against. Every JSON therefore records ``git_head`` AND the resolved
+``tortoise_module`` path, so an arm label and the code that actually ran cannot
+disagree unnoticed.
 """
 from __future__ import annotations
 
