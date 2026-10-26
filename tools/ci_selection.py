@@ -300,7 +300,7 @@ SHARED_MODULES = (
     # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
     # cannot see it and this registration has to be made by hand.
     "tests/_change_feed_isolation.py",
-    # this PR (#1869 / #5084 remainder): the in-process live-skip gate
+    # this PR (#1436 / #5084 remainder): the in-process live-skip gate
     # (`tests/_live_gate.py`) is imported at conftest MODULE level and is applied
     # from `pytest_runtest_setup` — i.e. it runs before EVERY test on EVERY
     # surface (api, ep, sdk, onboarding, eval, battery), not just `core`. Same

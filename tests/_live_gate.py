@@ -1,4 +1,4 @@
-"""In-process fail-closed gate for live-storage skips (#1869, #5084 remainder).
+"""In-process fail-closed gate for live-storage skips (#1436, #5084 remainder).
 
 THE DEFECT (measured on this box, 2026-10-25). Every live-FalkorDB file in the
 suite guards itself with a module-level probe plus
@@ -9,9 +9,10 @@ suite guards itself with a module-level probe plus
 On a host with no usable server that is a SILENT GREEN: `tests/test_ep_directional.py`
 reported "14 skipped in 2.50s" with **rc=0**, so a suite that says
 `N passed, k skipped` claimed nothing about the live behaviour it exists to
-verify. That is #1869 broken inside the suite — a skipped check standing in for
-an unread one — and it is what made "verified by tests" possible tonight for a
-P0 whose acceptance criteria require a database.
+verify. That is #1436 broken inside the suite — a skipped check standing in for
+an unread one (#1436 measured this exact file: "72 skipped", CI 'green' masking
+EP regressions) — and it is what made "verified by tests" possible tonight for
+a P0 whose acceptance criteria require a database.
 
 The reason string is also not the truth it appears to be. The same run's probe
 failed because the shared instance was PRESENT and REFUSING WRITES (its
@@ -60,6 +61,18 @@ THE LANE DECLARATION, and what stays a legitimate skip:
     optional extra (`pytest.importorskip`, a missing HF model, a platform guard)
     is untouched by design.
 
+A WHOLE-MODULE ABORT IS A THIRD ENFORCEMENT POINT, one phase EARLIER. The
+`pytest.skip(..., allow_module_level=True)` gate in twelve `tests/*.py` files is
+decided during COLLECTION, so no item ever exists and the mark hook above cannot
+see it — pytest's `wrap_session` returns NO_TESTS_COLLECTED/OK for an all-skipped
+selection (#1436's class). CI reds it through the junitxml matcher's
+`is_collection_skip_violation`, so an in-process gate that ignored it would leave
+exactly the CI/lane asymmetry this module exists to remove. `collection_violation`
+applies that SAME guard function to pytest's `CollectReport`, from the same two
+halves the junit matcher reads (`_pytest/junitxml.py` writes the constant message
+"collection skipped" plus `str(report.longrepr)` as the detail), so the two
+enforcement points still cannot disagree.
+
 WHAT THIS GATE CANNOT SEE (declared, because a silence about it is
 indistinguishable from coverage). It applies the guard's REASON families, so it
 inherits their boundary: a live-storage skip phrased outside them — e.g.
@@ -69,6 +82,12 @@ families is a policy change to `tools/skip-guard.py` (the recorded #1436/#3592
 calibration), not something this module may do on its own initiative. Likewise
 it says nothing about a live test that PASSES against the wrong backend; that
 is `tests/conftest.py::_assert_backend_identity`'s job.
+
+The guard's THIRD class — `is_embedder_reason_violation` — is deliberately NOT
+applied in process, in either hook. A missing optional extra (no HF model, no
+provider key) is a legitimate skip in a lane and the decision table below pins
+those reasons as non-violations; CI keeps the verdict for the surface that
+no longer carries the extra.
 """
 from __future__ import annotations
 
@@ -140,6 +159,17 @@ def pending_skip_reason(item: pytest.Item) -> str | None:
     return reason if isinstance(reason, str) else str(reason)
 
 
+#: pytest's CONSTANT `message` attribute on a whole-module collection abort —
+#: the reason rides in the element TEXT / the report's longrepr instead. Verified
+#: against the pinned pytest (9.1.1): `_pytest/junitxml.py` writes
+#: `self._add_simple("skipped", "collection skipped", str(report.longrepr))`, and
+#: `_pytest/runner.py::pytest_make_collect_report` builds that `str(report.longrepr)`
+#: from `(str(path), lineno, message)` — the two halves `is_collection_skip_violation`
+#: keys on. Kept here (not read from the guard) because it is pytest's contract,
+#: not the guard's, and `tests/test_live_storage_fail_closed.py` pins it.
+_COLLECTION_SKIP_MESSAGE = "collection skipped"
+
+
 def violation(item: pytest.Item) -> str | None:
     """The fail-closed message for `item`, or None when its skip is legitimate."""
     reason = pending_skip_reason(item)
@@ -157,10 +187,33 @@ def refuse_live_skip(item: pytest.Item) -> None:
         pytest.fail(message, pytrace=False)
 
 
+def collection_violation(report: pytest.CollectReport) -> str | None:
+    """The fail-closed message for a whole-module abort, or None.
+
+    Reads the SAME two halves the junitxml matcher reads, from the report itself:
+    the constant `collection skipped` message pytest stamps on such a report, and
+    `str(report.longrepr)` — the `(path, lineno, message)` tuple that carries the
+    real reason. Passing them through `is_collection_skip_violation` keeps ONE
+    policy for the question, so the in-process and CI verdicts cannot drift.
+
+    A report that is not a skip (a genuine collection ERROR, or a collected
+    module) is never this class: an error already fails the run, and the guard
+    keys on the structural skip signal.
+    """
+    if getattr(report, "outcome", None) != "skipped":
+        return None
+    detail = str(getattr(report, "longrepr", "") or "")
+    if not _GUARD.is_collection_skip_violation(
+            _COLLECTION_SKIP_MESSAGE, detail, lane=lane_declaration()):
+        return None
+    return _collection_message(str(getattr(report, "nodeid", "<unknown>")),
+                               detail)
+
+
 def _message(nodeid: str, reason: str) -> str:
     return (
         "live storage is REQUIRED by this test and this run could not provide "
-        "one, so it would SKIP — refusing that (#1869): a skipped check is an "
+        "one, so it would SKIP — refusing that (#1436): a skipped check is an "
         "unread one, and a suite reporting `N passed, k skipped` reads as green "
         "whether or not the live behaviour ever ran.\n"
         f"  test:   {nodeid}\n"
@@ -175,5 +228,23 @@ def _message(nodeid: str, reason: str) -> str:
         "  eval \"$(uv run python tools/test_lane.py uri)\"\n"
         "Or opt this run into the embedded/carve-out lane explicitly (the only "
         "lane whose live-storage skips are legitimate):\n"
+        "  TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest <selection>"
+    )
+
+
+def _collection_message(nodeid: str, detail: str) -> str:
+    return (
+        "live storage is REQUIRED by this MODULE and this run could not provide "
+        "one, so its whole module would SKIP — refusing that (#1436): pytest "
+        "decides `pytest.skip(..., allow_module_level=True)` during COLLECTION, "
+        "so no test item exists, no item-level hook and no session fixture ever "
+        "runs, and the run reports `N skipped` with rc=0.\n"
+        f"  module: {nodeid}\n"
+        f"  report: {detail}\n"
+        "Give the run a database (a private throwaway container is the "
+        "preferred shape, #5084):\n"
+        "  eval \"$(uv run python tools/test_lane.py uri)\"\n"
+        "Or opt this run into the embedded/carve-out lane explicitly (the only "
+        "lane whose whole-module URI gates are legitimate):\n"
         "  TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest <selection>"
     )

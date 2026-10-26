@@ -1,4 +1,4 @@
-"""The in-process live-storage gate: a live test FAILS, it does not skip (#1869).
+"""The in-process live-storage gate: a live test FAILS, it does not skip (#1436).
 
 Posture, and the reasoning behind it, live in `tests/_live_gate.py`. These tests
 pin the two things that could quietly undo it:
@@ -12,6 +12,11 @@ pin the two things that could quietly undo it:
     the fix. The failing direction (no database) is the reported defect; the
     carve-out direction proves the legitimate lane still works. A gate that
     proved only the failing direction would let the carve-out die silently.
+  * the COLLECTION class (`pytest.skip(..., allow_module_level=True)`), which
+    pytest decides one phase EARLIER than a mark: no item exists, so the mark
+    hook and the `_p4_uri_required` fixture are both unreachable and a mixed
+    selection exits 0 with the module counted as a skip. That is the class CI's
+    junitxml matcher already reds, so it is pinned here in both directions too.
 
 The "run WITH a private container executes the live tests" direction needs
 Docker, so it is not automated here: it is proved by
@@ -40,6 +45,14 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 14 tests, every one of them mark-skipped by the module-level availability
 #: probe — the file that reported "14 skipped in 2.50s", rc=0, in the report.
 LIVE_FILE = "tests/test_ep_directional.py"
+#: A module-level `pytest.skip(..., allow_module_level=True)` gate: pytest aborts
+#: it during COLLECTION, so no item exists for the mark hook to see.
+COLLECTION_FILE = "tests/test_capabilities_endpoint.py"
+#: One hermetic sibling, so the selection still COLLECTS an item. The MIXED
+#: shape is the false PASS: before the collection half of the gate the same
+#: selection exited 0 reporting the aborted module as a skip.
+COLLECTED_WITNESS = ("tests/test_live_storage_fail_closed.py::"
+                     "test_the_pytest_api_the_gate_depends_on_still_exists")
 
 
 class _FakeItem:
@@ -79,6 +92,12 @@ def test_the_pytest_api_the_gate_depends_on_still_exists():
 
     assert callable(evaluate_skip_marks)
     assert Skip("x").reason == "x"
+    # The collection class's signal is pytest's CONSTANT message attribute — the
+    # value `_pytest/junitxml.py` stamps on a whole-module abort
+    # (`_add_simple("skipped", "collection skipped", str(report.longrepr))`),
+    # and the only half available in process. Pinned so a rename cannot quietly
+    # turn `collection_violation` into a no-op for every module.
+    assert _live_gate._COLLECTION_SKIP_MESSAGE == "collection skipped"
 
 
 def test_the_gate_reads_the_reason_pytest_would_skip_with():
@@ -151,7 +170,65 @@ def test_an_explicit_uri_promise_outranks_the_carve_out_flag(monkeypatch):
     assert _live_gate.violation(item) is not None
 
 
-def _run_pytest(*, carve_out: bool) -> subprocess.CompletedProcess:
+class _FakeCollectReport:
+    """Just enough CollectReport for `collection_violation`.
+
+    `outcome`/`longrepr`/`nodeid` are the three attributes it reads, and
+    `longrepr` is the `(path, lineno, message)` tuple pytest's
+    `pytest_make_collect_report` builds for a module-level skip.
+    """
+
+    nodeid = "tests/test_x.py"
+
+    def __init__(self, outcome: str, longrepr: object):
+        self.outcome = outcome
+        self.longrepr = longrepr
+
+
+def _abort(reason: str) -> _FakeCollectReport:
+    return _FakeCollectReport(
+        "skipped", ("tests/test_x.py", 29, f"Skipped: {reason}"))
+
+
+@pytest.mark.parametrize(
+    "report, env, violation",
+    [
+        # A lane that PROMISED the URI and aborted the whole module anyway: the
+        # CI junit matcher reds this, so the in-process gate must too.
+        (_abort("docker-lane caps tests require TORTOISE_DB_URI "
+                "(tier-2 embedded legs skip)"),
+         {"TORTOISE_TEST_EXPECT_URI": "1"}, True),
+        # The same abort on the declared URI-less (carve-out) lane is the
+        # deliberate epic-#1647-P4 gate, not a vacancy.
+        (_abort("docker-lane caps tests require TORTOISE_DB_URI"),
+         {"TORTOISE_TEST_CARVE_OUT": "1"}, False),
+        (_abort("docker-lane caps tests require TORTOISE_DB_URI"),
+         {"TORTOISE_TEST_EXPECT_URI": "0"}, False),
+        # …and on an undeclared local run the historical exemption stands,
+        # exactly as it does for the mark class and in CI.
+        (_abort("docker-lane caps tests require TORTOISE_DB_URI"), {}, False),
+        # The STRUCTURAL arm: an abort naming no URI precondition is a vacancy
+        # in every lane (the #4221 class — 26 tests green for months).
+        (_abort("no fastapi on this interpreter"), {}, True),
+        # Not a skip: a real collection ERROR already fails the run, and a
+        # collected module must never be touched.
+        (_FakeCollectReport("failed", "ImportError: boom"), {}, False),
+        (_FakeCollectReport("passed", None), {}, False),
+    ],
+)
+def test_collection_verdict_table(report, env, violation, monkeypatch):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    message = _live_gate.collection_violation(report)
+    assert (message is not None) is violation
+    if violation:
+        assert "REQUIRED by this MODULE" in message
+        assert report.nodeid in message
+
+
+def _run_pytest(*, carve_out: bool, expect_uri: bool = False,
+                paths: tuple[str, ...] = (LIVE_FILE,)
+                ) -> subprocess.CompletedProcess:
     """Run the live file in a CHILD pytest, so the hook runs as it really does.
 
     In-process would prove nothing here: the defect is about WHERE in pytest's
@@ -167,8 +244,12 @@ def _run_pytest(*, carve_out: bool) -> subprocess.CompletedProcess:
     env["TORTOISE_TEST_DOCKER_PORT"] = "1"
     if carve_out:
         env["TORTOISE_TEST_CARVE_OUT"] = "1"
+    if expect_uri:
+        # The lane PROMISED the URI (#3592) — the CI docker lane's declaration,
+        # which is the shape a whole-module abort is a contradiction in.
+        env["TORTOISE_TEST_EXPECT_URI"] = "1"
     return subprocess.run(
-        [sys.executable, "-m", "pytest", LIVE_FILE, "-q", "-rs",
+        [sys.executable, "-m", "pytest", *paths, "-q", "-rs",
          "-p", "no:cacheprovider"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=900,
     )
@@ -183,9 +264,42 @@ def test_without_a_database_the_live_file_fails_instead_of_skipping():
     assert "live storage is REQUIRED by this test" in proc.stdout, \
         proc.stdout[-3000:]
     # The old signature was a skip summary with rc=0: no case of the availability
-    # family may be reported SKIPPED any more (the count is not asserted — a
-    # test added to that file must not break this pin).
+    # family may be reported SKIPPED any more. Only the LIVE-STORAGE reasons are
+    # refused, not every skip in that file — a future optional-extra or platform
+    # skip there is legitimate and must not break this pin.
+    live_skips = [line for line in proc.stdout.splitlines()
+                  if line.startswith("SKIPPED [")
+                  and ("FalkorDB" in line or "TORTOISE_DB_URI" in line)]
+    assert not live_skips, live_skips
+
+
+def test_a_whole_module_live_skip_fails_instead_of_reporting_a_skip():
+    """A module-level abort is decided at COLLECTION: rc used to be 0.
+
+    The observed defect one phase before the mark hook: with one hermetic test
+    in the selection the aborted module was counted as a skip and the run
+    exited 0, so a lane could report green while a live module never ran. On
+    pre-fix code this run prints `SKIPPED [1] tests/test_capabilities_endpoint.py`
+    and exits 0 — both assertions below fail there.
+    """
+    proc = _run_pytest(carve_out=False, expect_uri=True,
+                       paths=(COLLECTION_FILE, COLLECTED_WITNESS))
+    assert "live storage is REQUIRED by this MODULE" in proc.stdout, \
+        proc.stdout[-3000:]
     assert "SKIPPED [" not in proc.stdout, proc.stdout[-3000:]
+    assert proc.returncode != 0, (
+        f"a whole-module live-storage skip exited 0:\n{proc.stdout[-2000:]}")
+
+
+def test_the_carve_out_lane_still_skips_a_whole_module_by_design():
+    """The declared URI-less lane keeps its module-level gates (epic #1647 P4)."""
+    proc = _run_pytest(carve_out=True,
+                       paths=(COLLECTION_FILE, COLLECTED_WITNESS))
+    assert proc.returncode == 0, proc.stdout[-3000:]
+    assert "live storage is REQUIRED by this MODULE" not in proc.stdout
+    # The gate is exempted, not deleted: the legitimate skip is still reported.
+    assert "docker-lane capabilities tests require TORTOISE_DB_URI" \
+        in proc.stdout, proc.stdout[-3000:]
 
 
 def test_the_carve_out_lane_still_skips_by_design():
