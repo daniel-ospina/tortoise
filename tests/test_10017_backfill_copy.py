@@ -45,15 +45,22 @@ def test_classify_refuses_every_unplaceable_node_by_its_own_class() -> None:
         (2, "s1_t0", {"id": "s1_t0"}, []),                        # orphan
         (3, "s1_t1", {"id": "s1_t1"}, ["s1", "s2"]),              # cross wired
         (4, "s1_t2", {"id": "s1_t2"}, ["s2"]),                    # wired elsewhere
+        (5, "s1_t3", {"id": "s1_t3"}, ["s2", "s1"]),              # derived NOT first
     ]
     by_session, anomalies = copy_mod.classify_copy(rows)
     # A CROSS-WIRED node IS copied, under the session its id derives: the census
     # counts it as that session's turn, and the parity gate fails a session whose
     # graph turn has no record row — refusing it would fail that gate forever.
-    assert list(by_session) == ["s1"] and list(by_session["s1"]) == [1]
+    # Row 5 exists to pin MEMBERSHIP (`derived in sids`) rather than the FIRST
+    # element: `collect()` has no defined order, so a `sids[0]` read passes row 3
+    # and DROPS row 5 (as a `session_mismatch` whose wired and derived session
+    # are the same id) — the order-dependent population defect this line closed.
+    assert list(by_session) == ["s1"] and list(by_session["s1"]) == [1, 3]
     assert anomalies["off_shape"] == ["not-a-turn"]
     assert anomalies["orphan"] == ["s1_t0"]
-    assert anomalies["cross_wired"] == [{"id": "s1_t1", "sessions": ["s1", "s2"]}]
+    assert anomalies["cross_wired"] == [
+        {"id": "s1_t1", "sessions": ["s1", "s2"]},
+        {"id": "s1_t3", "sessions": ["s1", "s2"]}]
     assert anomalies["session_mismatch"] == [{
         "id": "s1_t2", "wired_session": "s2", "derived_session": "s1"}]
 
@@ -147,6 +154,37 @@ def test_the_turn_payload_goes_through_the_embedding_seam() -> None:
     assert isinstance(event["point"]["embedding"], list)
     assert event["point"]["embedding"] == [0.5, 0.25]
     json.dumps(event["point"])          # the payload the record serialises
+
+
+def test_the_turn_snapshot_is_stamped_as_re_emitted_not_creating(monkeypatch) -> None:
+    """`creating=False` is a DELIBERATE departure from #10017's recorded copy
+    recipe, so it is pinned rather than merely written down.
+
+    The recipe says `creating=True` (read off the SDK's CREATING emission site,
+    where the vector is computed in the same write). Here the vector is a
+    read-back that may predate a model change, so attesting the machine's
+    configured model would stamp a false origin on it — and the creating record
+    owns that attestation (`tortoise/embeddings.py`). Unpinned, the next lane
+    following the recipe reverts it invisibly: `creating=True` on a snapshot with
+    no `embedding_text_hash` still returns a payload, so nothing else reddens.
+    """
+    import tortoise.embeddings as embeddings
+
+    seen: dict[str, object] = {}
+
+    def _stamp(payload: dict, *, creating: bool) -> dict:
+        seen["creating"] = creating
+        seen["payload"] = dict(payload)
+        return payload
+
+    monkeypatch.setattr(embeddings, "stamp_journal_embedding", _stamp)
+    event = copy_mod.build_turn_event(
+        "s1", {"id": "s1_t0", "embedding": [0.1, 0.2]}, event_id="E")
+    assert seen["creating"] is False, (
+        "the copy attests `creating=True` on a snapshot it did not compute — the "
+        "vector would be stamped with this machine's model identity")
+    assert seen["payload"]["embedding"] == [0.1, 0.2]   # the vector is untouched
+    assert event["type"] == "PointAdded" and event["contains_session"] == "s1"
 
 
 def test_an_unrepresentable_vector_is_dropped_but_the_field_stays_owned() -> None:
@@ -366,16 +404,21 @@ def test_positioned_counts_only_a_proven_position() -> None:
     file green.
     """
     graph = _FakeGraph(
-        sessions=[(1, "s1", {}), (2, "s2", {})],
+        sessions=[(1, "s1", {}), (2, "s2", {}), (3, "s3", {})],
         turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
-               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])])
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"]),
+               (3, "s3_t0", {"id": "s3_t0", "pointKind": "event"}, ["s3"])])
 
     def emit(sid, events):
-        return 7 if sid == "s1" else None      # s2: no position was measured
+        # ⛔ TWO proven, ONE unproven. An even 1-of-2 split is satisfied by the
+        # INVERTED guard as well (counting the `None` branch and skipping the
+        # measured one still yields 1), which is how this test stayed green
+        # against `if positioned is None:`. The counts must differ.
+        return 7 if sid in ("s1", "s3") else None   # s2: no position was measured
 
     stats = copy_mod.copy_phase(graph, emit, event_id=lambda: "E")
-    assert stats["sessions"] == 2 and stats["turns"] == 2
-    assert stats["positioned"] == 1
+    assert stats["sessions"] == 3 and stats["turns"] == 3
+    assert stats["positioned"] == 2      # the inverted guard reports 1
 
 
 def test_a_record_seam_failure_still_writes_the_artifact(monkeypatch, tmp_path) -> None:
@@ -611,8 +654,22 @@ def test_a_failed_session_write_aborts_the_copy_instead_of_being_counted() -> No
 
 
 def test_a_fresh_journal_path_is_refused_not_numbered_from_one(tmp_path) -> None:
+    """BOTH halves of the guard: a path that does not exist, and an EXISTING file
+    with no entries.
+
+    The empty-file half is the one `EventLog` ordinals from 1 on, after which
+    `journal_event`'s `ON CONFLICT DO NOTHING` swallows the collision — the
+    record comes to believe the real journal's seqs are consumed while every
+    position row it wrote is silently discarded. Pinned separately because a
+    non-existent path alone leaves that half free to be deleted.
+    """
     with pytest.raises(copy_mod.CopyRefused, match="non-empty journal"):
         copy_mod._journal_emit(str(tmp_path / "new.jsonl"), "dsn", "org", "g")
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    assert empty.stat().st_size == 0
+    with pytest.raises(copy_mod.CopyRefused, match="non-empty journal"):
+        copy_mod._journal_emit(str(empty), "dsn", "org", "g")
 
 
 def test_an_unproven_position_mid_segment_is_named_as_such(monkeypatch, tmp_path) -> None:
