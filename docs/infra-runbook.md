@@ -3334,9 +3334,12 @@ why the two recipes above are the verification and the deploy status is not.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
-   **graph-bound** — a graph-bound credential cannot land in `no_tenant` — and
-   treat `no_tenant` growth as the residual it then is: it is a fail-and-fix only
-   when the capture ran **unbound**, or when item 1's row did not appear. ⛔ **Do
+   **graph-bound** — a graph-bound **control-plane** credential cannot land in
+   `no_tenant` (the self-host registry lane above is a graph-bound key that
+   resolves through no control plane, so its writes are counted there by
+   design) — and treat `no_tenant` growth as the residual it then is: it is a
+   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
+   not appear. ⛔ **Do
    not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a

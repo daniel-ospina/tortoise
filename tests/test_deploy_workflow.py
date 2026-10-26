@@ -2553,7 +2553,21 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "`record_writer` reasons only `circuit_open` carries the record type, so "
         "that step cannot be performed"
     )
-    assert re.search(r"capture ran \*\*unbound\*\*", section), (
+    # The message above states the EVIDENCE for the impossibility (which reasons
+    # carry what), so pin the evidence too — otherwise the parenthetical can be
+    # deleted and the claim stands on an assertion that no longer measures it
+    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
+    # record_writer.py:1184; `malformed_dsn` and `write_failed` log the exception).
+    assert re.search(r"`circuit_open` is the\s+only one that carries the record type", section), (
+        "the section gives no evidence for why the log cannot attribute growth — "
+        "only `circuit_open` carries the record type, so a reader cannot check "
+        "the claim it is asked to act on"
+    )
+    # ⛔ Pin the CLAUSE, not the token: `capture ran **unbound**` alone survives
+    # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
+    # "fail-and-fix whether or not the capture ran **unbound**" — the arm inverted
+    # with the pin still green (#10071 review P1). `only when` is load-bearing.
+    assert re.search(r"fail-and-fix only\s+when the capture ran \*\*unbound\*\*", section), (
         "the section gives no executable discriminator for `no_tenant` growth — "
         "an unbound capture is the one state that makes the growth the capture's"
     )
