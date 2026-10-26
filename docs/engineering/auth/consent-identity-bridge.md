@@ -304,6 +304,22 @@ bearer path untouched); step 4 is where the flow changes.
 - single-use is **per process** until §2.3's shared `jti` store (step 1) lands. The register is the
   seam step 1 replaces; until then this step is not fit for a multi-instance AS.
 
+Two properties of the arm that a later step must be written against, because they are limits of the
+contract rather than of the implementation:
+
+- **the token does not attest the org or the scope.** `bind` is exactly §2.1's four params, so
+  `resource` (the D4 org picker) and `scope` are taken from the redemption REQUEST and are bounded
+  only by `parse_resource` + the membership and suspension checks inside `issue_auth_code`. That
+  keeps them inside the asserted user's own authority, but it means a token minted while the visitor
+  was approving team A can be redeemed naming team B. Step 4's page must therefore not present the
+  picker as token-attested; widening the bind set is a spec decision, not an implementation one.
+- **a failure after the nonce is spent consumes it.** The `jti` is recorded before the code is
+  inserted (so one consent cannot yield two codes), and `issue_auth_code` can then still refuse —
+  no active team, a suspended org, a transient control-plane failure. The retry answers
+  `401 invalid_token` "already redeemed", so the recovery is a **re-mint**, not a re-login. The
+  refusals that can be evaluated for free (the assertion, the binding, a malformed `resource`) are
+  evaluated first.
+
 Steps 3 → 4 remain, and step 4 still lands last: a page that half-reads a token and half-reads the
 old cookie is the "strictly worse than not starting" state.
 
@@ -314,7 +330,7 @@ old cookie is the "strictly worse than not starting" state.
 | **Mint authority** | `app.premiselabs.co` — the single session-bearing origin (`SCOPE.md` §3). |
 | **Signing** | HMAC-SHA256, dedicated `CONSENT_TOKEN_SECRET`, `kid`-scoped rotation. Never the service-role key; never the anon key (public: the page embeds it). |
 | **TTL / replay** | `exp = iat + 120 s` (leeway ≤30 s) **and** a single-use `jti`; neither substitutes for the `bind` set. |
-| **Redemption** | `POST /oauth/consent` (`@app.post("/oauth/consent")` in `hosted_api.py`) — currently `verify_session_jwt` only, `session_auth.py:588`. |
+| **Redemption** | `POST /oauth/consent` (`@app.post("/oauth/consent")` in `hosted_api.py`) — TWO identity sources as of §9 step 2: the bearer (`verify_session_jwt`, `session_auth.py:588`) or a `consent_token` in the body verified by `tortoise/consent_token.verify_consent_token`. |
 | **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2100`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |
 | **CORS** | new, exact-origin to the AS origin, on the mint route only. The BFF carries none today; `/oauth/token` must never become reachable through it (`SCOPE.md` §9 class 3). |
 | **Bindings to declare** | `CONSENT_TOKEN_SECRET` (`config/required-bindings.yml`, `tortoise-dashboard`), checked pre-deploy by `tools/check_pages_bindings.py` (the #3616 gate). |

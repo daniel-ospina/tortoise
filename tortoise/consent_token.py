@@ -74,6 +74,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets as _secrets
@@ -212,6 +213,12 @@ def _bind_mismatch(bound: dict, presented: dict) -> str | None:
     return None
 
 
+#: The handler's name for the SAME refusal shape `verify_consent_token` raises, so a refusal the
+#: handler adds (a bind this client cannot be delivered to) is indistinguishable to the client from
+#: one the verifier raises — one error contract, one place it is defined.
+_consent_refusal = _refuse
+
+
 # ── verification (§2.1, §2.2, §9 step 2) ───────────────────────────────────
 
 def _number(claims: dict, name: str) -> float:
@@ -219,6 +226,13 @@ def _number(claims: dict, name: str) -> float:
     # `bool` is an `int` in Python; `True` as a timestamp is a type confusion, not a time.
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise _refuse(f"{name} is missing or not a number")
+    # ⛔ NaN must be refused HERE, not left to the comparisons below: every one of them is False
+    # for NaN, so `iat = exp = NaN` would pass the expiry check, pass the TTL check, and be stored
+    # in the `jti` register with an expiry that never arrives (the entry is never pruned). That
+    # defeats exactly the bound §2.2 requires. ±Infinity is already refused by the TTL check, but
+    # finiteness is the property, so it is stated as the property.
+    if not math.isfinite(value):
+        raise _refuse(f"{name} is not a finite number")
     return float(value)
 
 
@@ -278,7 +292,10 @@ def verify_consent_token(token: str, *, presented: dict) -> dict:
     """
     if not isinstance(token, str) or not token.strip():
         raise _refuse("it is missing or not a string")
-    if len(token.encode()) > _MAX_TOKEN_BYTES:
+    # `len(token)`, not `len(token.encode())`: a lone surrogate (sendable as a JSON escape, which
+    # `json.loads` accepts) raises `UnicodeEncodeError` out of `.encode()`, which escaped as a 500
+    # with a captured Sentry event per request — the exact "bare 500" class #3026 exists to close.
+    if len(token) > _MAX_TOKEN_BYTES:
         raise _refuse("it is too large")
 
     secret = consent_token_secret()
@@ -291,6 +308,11 @@ def verify_consent_token(token: str, *, presented: dict) -> dict:
     parts = token.split(".")
     if len(parts) != 3:
         raise _refuse("it is not a compact-JWS token (header.payload.signature)")
+    if not all(_B64URL_RE.match(part) for part in parts):
+        # Charset FIRST, and for every segment — including `parts[1]`, which is folded into the
+        # signature's input before its own decode: a non-ASCII character there would reach
+        # `.encode()` and raise, so it must be refused as a shape error, not as an exception.
+        raise _refuse("its segments are not base64url")
 
     header = _json_segment(parts[0], "header")
     algorithm = header.get("alg")
@@ -348,7 +370,12 @@ def verify_consent_token(token: str, *, presented: dict) -> dict:
     bound = _checked_bind(claims)
     mismatch = _bind_mismatch(bound, presented)
     if mismatch is not None:
-        # §2.2/§2.4 — the ONLY half that bounds cross-flow substitution and consent fixation.
+        # §2.2/§2.4 — the binding bounds REPLAY and CROSS-FLOW SUBSTITUTION. §2.4 is explicit
+        # that it does NOT bound fixation: "Single-use + short TTL bounds replay, not fixation.
+        # An attacker's own live link still fixes the victim. Only the binding addresses that" —
+        # and that sentence is about the binding's limit, not its reach: a victim driven to the
+        # attacker's authorize URL FRESH is still fixed, and that half is an attested client
+        # identity (§9 class 4(i), #8218), which is not built. Do not upgrade this line.
         raise _refuse(f"bind.{mismatch} does not match the request")
 
     return {"sub": subject, "email": email, "bind": bound, "jti": jti, "exp": expires_at}
@@ -373,19 +400,26 @@ class ProcessLocalJtiStore:
     nonce through the session origin, which is a network call.
     """
 
-    def __init__(self, *, max_entries: int = _MAX_STORE_ENTRIES) -> None:
+    def __init__(self, *, max_entries: int = _MAX_STORE_ENTRIES,
+                 clock=time.time) -> None:
         self._seen: dict[str, float] = {}
         self._lock = threading.Lock()
         self._max_entries = max_entries
+        # Injectable so the BOUNDARY (an entry kept at the token's last valid instant) can be
+        # measured rather than raced: a test that reads the wall clock twice cannot land on an
+        # exact expiry, which is precisely the instant the prune predicate is about.
+        self._clock = clock
 
     async def consume(self, jti: str, expires_at: float) -> bool:
         """``True`` on FIRST use; ``False`` on replay; raises when it cannot answer."""
-        now = time.time()
+        now = self._clock()
         # An entry is dropped only once the TOKEN it stands for can no longer pass `exp`, so the
-        # register never forgets a `jti` that could still be replayed.
+        # register never forgets a `jti` that could still be replayed. Strict `<` on purpose: the
+        # verifier refuses only when `exp + LEEWAY < now`, so at EXACT equality the token is still
+        # acceptable and its entry must still be there.
         forget_before = now
         with self._lock:
-            for key in [k for k, expiry in self._seen.items() if expiry <= forget_before]:
+            for key in [k for k, expiry in self._seen.items() if expiry < forget_before]:
                 del self._seen[key]
             if jti in self._seen:
                 return False
@@ -431,11 +465,22 @@ def reset_consent_jti_store() -> None:
 async def consume_consent_jti(jti: str, expires_at: float) -> None:
     """Spend `jti`, refusing a replay (§2.2/§2.3).
 
-    CALL THIS LAST — after every other refusal, and immediately before the code is minted:
+    CALL THIS LAST — after every refusal the caller can evaluate, and immediately before the code
+    is minted:
       * spending it on a request that could never mint is a denial-of-service on the real flow
         (one malformed consent POST invalidates the token the page is about to present);
       * minting BEFORE spending it would allow one consent to yield two codes, which is the replay
         `jti` exists to bound.
+
+    ⚠️ THE RESIDUAL, named rather than implied: the CALLEE that mints can still refuse AFTER this
+    returns — `_resolve_org` (403 no active team / not a member), a suspended org (403), or a
+    control-plane transport failure (503). Those consume the nonce, and a retry of the same token
+    answers 401 `invalid_token` "already redeemed". That is deliberate and fail-closed: spending
+    after the insert would admit two codes for one consent in the window between them, and the
+    cost of the residual is a RE-MINT (the 120 s TTL was nearly spent anyway), never a re-login.
+    The refusals that are PURE are evaluated by the caller before this call — a malformed
+    `resource`, an invalid assertion, a bind that names another flow — so a caller typo does not
+    burn the token.
     """
     try:
         first_use = await consent_jti_store().consume(jti, expires_at)

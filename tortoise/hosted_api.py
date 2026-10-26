@@ -40770,7 +40770,10 @@ async def oauth_consent(request: Request):
     present it is the ONLY identity input, and the code is minted with the
     token's bound params (§9 step 2). When it is absent this function runs
     exactly as it did before the bridge existed — same order, same errors,
-    same response — because that path is the only one live in production.
+    same mid-flight state — because it is the path every existing caller takes
+    and this change must not alter it. (Which sources are LIVE is an operator
+    fact, not a property of this function: it depends on the deployed secret,
+    so it is recorded where it is measured, not asserted here.)
     The arm is unavailable (typed 503, never a 500 and never a silent
     fall-through) when `CONSENT_TOKEN_SECRET` is unset (§2.3).
 
@@ -40822,14 +40825,19 @@ async def oauth_consent(request: Request):
                 code_challenge_method=body.get("code_challenge_method") or "S256",
                 scope=body.get("scope") or None),
             op="oauth_consent_params")
-        # #3443: the destination is rebuilt here too — the consent round trip
-        # is where the CODE is minted, so the target it returns is the one the
-        # page navigates to deliver it, computed on the same validated request
-        # (the page's `redirect_target` stays the source for the deny path,
-        # which never reaches this endpoint). Resolved BEFORE the mint: a code
-        # nobody can be sent to must not be issued. `None` is unreachable while
-        # the matcher and this helper agree (same predicate, same list); the
-        # guard is the fail-closed direction if that ever stops being true.
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
+    try:
+        # #3443 — the destination the browser is sent to, rebuilt from the
+        # registered URI (never the raw request string), and resolved BEFORE the
+        # identity check and the mint: "a code nobody can be sent to must not be
+        # issued", and an anonymous request must get the SAME 400 rather than a
+        # 401 that tells it whether a session would have been accepted.
+        # `tests/test_oauth_mcp.py::test_the_consent_handler_never_mints_for_an_
+        # undeliverable_target` pins that order — do NOT move this below the
+        # identity block. The token arm re-derives it from the BOUND value below.
         redirect_target = canonical_redirect_target(client, body.get("redirect_uri"))
         if redirect_target is None:
             raise OAuthError(400, "invalid_request",
@@ -40858,9 +40866,11 @@ async def oauth_consent(request: Request):
     else:
         # §2.1/§2.2/§9 step 2 — verify, then mint with the BOUND params.
         from tortoise.consent_token import (
+            _consent_refusal,
             consume_consent_jti,
             verify_consent_token,
         )
+        from tortoise.oauth import parse_resource
         try:
             assertion = verify_consent_token(consent_token, presented={
                 "client_id": body.get("client_id") or "",
@@ -40868,17 +40878,52 @@ async def oauth_consent(request: Request):
                 "code_challenge": body.get("code_challenge") or None,
                 "state": body.get("state"),
             })
-            # §2.2/§2.3 — the nonce is spent HERE, and this position is the
-            # contract: every refusal above (params, token, binding) has already
-            # happened, so a request that could never mint cannot burn the token,
-            # and it is spent BEFORE the insert so one consent can never yield
-            # two codes. Nothing between this line and `issue_auth_code` can
-            # refuse.
+            # §2.2/§2.3 — the nonce is spent HERE, and the position is the
+            # contract: every refusal that CAN be evaluated first has been (the
+            # request params, the token, the binding, and — below — the pure
+            # resource check), so a request that could never mint does not burn
+            # the token; and it is spent BEFORE the insert, so one consent can
+            # never yield two codes.
+            #
+            # ⚠️ THE RESIDUAL, stated because the comment above used to hide it:
+            # `issue_auth_code` is a callee and CAN still refuse AFTER this line —
+            # `_resolve_org`'s 403 (no active team / not a member), a suspended
+            # org, or a control-plane transport error surfacing as 503. Those
+            # consume the token, and the retry of it answers 401 "already been
+            # redeemed". That is deliberate and fail-closed (the alternative —
+            # spending after the insert — admits two codes for one consent in a
+            # race), and it costs a RE-MINT, not a re-login: the 120 s TTL was
+            # about to expire and step 4's page mints again on load. Only the
+            # pure, caller-fault resource 400 is pre-evaluated, below.
+            #
+            # The destination the page must NAVIGATE to is re-derived from the
+            # token's BOUND `redirect_uri`, not from the presented one the
+            # #3443 guard above used: §2.2 compares the bind through
+            # `_redirect_uri_matches`, whose RFC 8252 §7.3 loopback relaxation
+            # lets the port differ, while `/oauth/token` compares `redirect_uri`
+            # EXACTLY. Pairing the response's `redirect_uri` (the bound value)
+            # with a `redirect_target` rebuilt from the PRESENTED value would
+            # hand the page two destinations, one of which cannot redeem the
+            # code. `None` here means the bind names a URI this client cannot be
+            # delivered to — an assertion fault, so it is a 401 and is
+            # evaluated before the spend (a refusal must not burn the token).
+            bound_target = canonical_redirect_target(client, assertion["bind"]["redirect_uri"])
+            if bound_target is None:
+                raise _consent_refusal(
+                    "consent token is bound to a redirect_uri this client cannot be sent to")
+            resource = body.get("resource") or None
+            if resource:
+                # `_resolve_org` parses the RFC 8707 resource and refuses a
+                # malformed one with 400 invalid_resource. That check is PURE, so
+                # evaluate it before the spend — a caller typo must not consume
+                # the consent.
+                parse_resource(_oauth_base(request), resource)
             await consume_consent_jti(assertion["jti"], assertion["exp"])
         except OAuthError as exc:
             return _oauth_error_response(exc)
         except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
             return _oauth_unconverted_failure(exc, where="oauth/consent token")
+        redirect_target = bound_target
         bound = assertion["bind"]
         mint = {
             # The CLIENT is the resolved row — the same authority the bearer
@@ -40912,10 +40957,13 @@ async def oauth_consent(request: Request):
             "redirect_uri": mint["redirect_uri"],
             # #3443: the destination the browser must be sent to, rebuilt from
             # the registered URI — ADDITIVE, so an existing consumer reading
-            # `redirect_uri` (the presented value, still what the code is bound
-            # to) is unaffected. The page prefers this one and falls back to the
-            # page-scoped `redirect_target` for the deny path / mixed-version
-            # deploys; both are server-rebuilt values, never the request string.
+            # `redirect_uri` is unaffected. Both fields now describe the SAME
+            # URI (the one the code is bound to) on BOTH arms; see the
+            # `canonical_redirect_target` call above for why the token arm must
+            # not derive this from the presented value. The page prefers this
+            # one and falls back to the page-scoped `redirect_target` for the
+            # deny path / mixed-version deploys; both are server-rebuilt values,
+            # never the request string.
             "redirect_target": redirect_target}
 
 

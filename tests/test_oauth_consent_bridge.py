@@ -68,6 +68,7 @@ from tests.test_oauth_mcp import (
     REDIRECT,
     TEAM_FREE,
     TEAM_TEAM,
+    TEST_BASE,
     _enable_supabase,
     _exchange,
     _member,
@@ -1801,15 +1802,12 @@ def test_a_claim_that_breaks_the_contract_is_refused(bridge_client, mint_spy, be
     assert mint_spy == []
 
 
-@pytest.mark.parametrize("overrides,needle", [
-    ({"bind": {"client_id": "c", "redirect_uri": REDIRECT, "code_challenge": "x"}}, "bind"),
-    # An EXTRA bind key is refused too: `bind` is exactly the four params in §2.1, and a
-    # verifier that ignored unknown keys would accept a future contract it does not implement.
-    ({"bind": _bind("c", "x") | {"org_id": "smuggled"}}, "bind"),
-    ({"bind": "not-an-object"}, "bind"),
+@pytest.mark.parametrize("overrides", [
+    ({"bind": {"client_id": "c", "redirect_uri": REDIRECT, "code_challenge": "x"}}),
+    ({"bind": "not-an-object"}),
 ])
 def test_a_malformed_bind_is_refused(bridge_client, mint_spy, bearer_refuses,
-                                     overrides: dict, needle: str) -> None:
+                                     overrides: dict) -> None:
     """`bind` is the security-relevant field, so its SHAPE is part of the contract (§2.1)."""
     tc, _ = bridge_client
     client_id = _register_client(tc)["client_id"]
@@ -1819,7 +1817,99 @@ def test_a_malformed_bind_is_refused(bridge_client, mint_spy, bearer_refuses,
 
     r = _post_token(tc, token, bind)
     assert r.status_code == 401, r.text
-    assert needle in r.json()["error_description"], r.text
+    assert "bind" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_a_bind_carrying_a_key_the_contract_does_not_name_is_refused(
+        bridge_client, mint_spy, bearer_refuses) -> None:
+    """`bind` is EXACTLY §2.1's four params — an unknown key is refused, not ignored.
+
+    The four bound fields here all MATCH the request, so the mismatch branch cannot fire and the
+    exact-set rule is the only thing that can refuse. That is why this is its own test: the earlier
+    version reused a bind whose `client_id`/`code_challenge` were `"c"`/`"x"`, which the mismatch
+    branch refused first, so deleting the shape check left it GREEN (measured, review round 1).
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    smuggled = bind | {"org_id": "another-team"}
+    token = _signed(_claim_set(bind, bind=smuggled))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert "unexpected" in r.json()["error_description"], (
+        "the refusal must come from the exact-set rule (which names the unexpected key), not from "
+        f"the bind mismatch: {r.text}")
+    assert mint_spy == []
+
+
+def test_a_token_without_a_kid_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§2.1 puts `kid` in the header for rotation (§2.3); a mint without one is refused."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    r = _post_token(tc, _signed(_claim_set(bind), kid=""), bind)
+    assert r.status_code == 401, r.text
+    assert "kid" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+@pytest.mark.parametrize("overrides", [
+    # NaN: every ordering comparison is False for it, so without an explicit finiteness check
+    # `iat = exp = NaN` never expires, never trips the TTL bound, AND is never pruned out of the
+    # register (its stored expiry never arrives) — an immortal token, which is the one thing the
+    # TTL exists to stop, plus a permanently occupied register slot.
+    ({"iat": float("nan"), "exp": float("nan")}),
+    ({"iat": float("inf"), "exp": float("inf")}),
+])
+def test_a_non_finite_timestamp_is_refused(bridge_client, mint_spy, bearer_refuses,
+                                           overrides: dict) -> None:
+    """§2.2's TTL bound is only a bound if the numbers are real numbers."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind, **overrides))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert mint_spy == []
+
+
+def test_a_token_that_is_not_base64url_is_refused_and_never_500s(
+        bridge_client, mint_spy, bearer_refuses) -> None:
+    """A LONE SURROGATE must be a typed refusal, not a 500 (#3026's class).
+
+    `json.loads` accepts a `\\ud800` JSON escape, and encoding that string raises
+    `UnicodeEncodeError`. Measured before the fix (review round 1): a `500 server_error` **plus** a
+    captured Sentry event per request, from an unauthenticated caller — an error-tracker flood on a
+    public endpoint, and a contradiction of this module's "never a 500" contract.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # The case that reaches the SIGNATURE's own `.encode()`: a VALID header (alg/typ/kid are all
+    # checked before the signature) plus a payload segment carrying the surrogate. Without a
+    # charset check on every segment, that encode raises and the refusal becomes a 503 — typed, but
+    # the wrong answer to a malformed token, and one captured event per unauthenticated request.
+    header, payload_b64, signature = _signed(_claim_set(bind)).split(".")
+    malformed_payload = f"{header}.{payload_b64}\ud800.{signature}"
+
+    for token in ("\ud800", "a.\ud800.c", malformed_payload):
+        # Sent as a JSON ESCAPE in raw bytes: httpx refuses to encode a lone surrogate itself (which
+        # is why the first version of this test could not reach the server at all), while the AS's
+        # `json.loads` decodes the escape into exactly the str that used to 500.
+        payload = _consent_payload(tc, bind) | {"consent_token": token}
+        r = tc.post("/oauth/consent", content=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"})
+        assert r.status_code == 401, f"{token!r} must be a typed refusal: {r.status_code} {r.text}"
+        assert r.json()["error"] == "invalid_token", r.text
     assert mint_spy == []
 
 
@@ -1902,10 +1992,61 @@ def test_a_request_refused_before_the_token_is_checked_does_not_spend_the_jti(
     assert refused.status_code == 400, refused.text
     assert mint_spy == []
 
+    # ⛔ And the case the params-stage refusal CANNOT reach: a refusal of the ASSERTION itself.
+    # A verifier that spent the nonce while refusing (burn-at-verify) is invisible to the check
+    # above — `validate_authorize_params` never lets it run — and it is the same denial of service,
+    # from a request anyone can send: one bind-mismatch attempt would invalidate the token the page
+    # is about to use. Measured: the burn-at-verify mutant passed this test before this block.
+    _, other_challenge = _pkce()
+    mismatched = _post_token(tc, token, bind, code_challenge=other_challenge)
+    assert mismatched.status_code == 401, mismatched.text
+    assert mint_spy == []
+
+    # …and the third refusal that CAN be evaluated before the spend, but only if someone does:
+    # `_resolve_org` (inside the mint) parses the RFC 8707 `resource` and refuses a malformed one.
+    # That check is pure, so it runs first — a caller typo must not consume the consent.
+    bad_resource = _post_token(tc, token, bind, resource=f"{TEST_BASE}/nope")
+    assert bad_resource.status_code == 400, bad_resource.text
+    assert mint_spy == []
+
     accepted = _post_token(tc, token, bind)
     assert accepted.status_code == 200, (
-        "a refusal that happens BEFORE the token is verified must leave the token usable — the "
-        f"jti was spent too early: {accepted.text}")
+        "a refused assertion or resource must leave the token usable — the jti was spent too "
+        f"early: {accepted.text}")
+
+
+def test_a_mint_failure_after_the_spend_consumes_the_token_fail_closed(
+        bridge_client, monkeypatch, bearer_refuses) -> None:
+    """THE DOCUMENTED RESIDUAL, pinned so it cannot drift into an unstated claim.
+
+    The `jti` is recorded before the code is inserted (so one consent can never yield two codes),
+    and `issue_auth_code` can then still refuse — no active team, a suspended org, a transient
+    control-plane failure. Those consume the nonce. The honest consequences, both asserted here:
+    the first attempt reports the REAL cause, and the retry reports "already redeemed" — a
+    RE-MINT, never a re-login. If a later change makes the nonce recoverable, this test reds and
+    the docstring / spec §9 paragraph must be updated with it.
+    """
+    import tortoise.oauth as oauth_module
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+
+    def _boom(cp, **kwargs):
+        raise OAuthTemporarilyUnavailable(
+            "Temporary control-plane failure — retry.")
+
+    monkeypatch.setattr(oauth_module, "issue_auth_code", _boom)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    first = _post_token(tc, token, bind)
+    assert first.status_code == 503, first.text
+    assert first.json()["error"] == "temporarily_unavailable", first.text
+
+    second = _post_token(tc, token, bind)
+    assert second.status_code == 401, second.text
+    assert "already" in second.json()["error_description"], second.text
 
 
 def test_an_unset_secret_leaves_the_bearer_path_working_and_the_token_arm_unavailable(
@@ -1986,6 +2127,37 @@ def test_the_bound_redirect_uri_wins_over_a_relaxed_loopback_variant(bridge_clie
     assert mint_spy[0]["redirect_uri"] == bind["redirect_uri"], (
         "the mint must carry the token's bound redirect_uri (§9 step 2), not the presented one")
     assert r.json()["redirect_uri"] == bind["redirect_uri"]
+    # ⛔ And `redirect_target` — the field the page actually NAVIGATES the browser to — must name
+    # the same URI. It is rebuilt from the registered URI, and an earlier version rebuilt it from
+    # the PRESENTED value: the response then told the page two different destinations, and the code
+    # (bound to the token's URI, compared EXACTLY by /oauth/token) would have been unredeemable
+    # after the user approved. Both fields now derive from the bound value.
+    assert r.json()["redirect_target"] == bind["redirect_uri"], (
+        "the browser would have been sent to a destination the code is not bound to: "
+        f"redirect_target={r.json()['redirect_target']!r} vs {bind['redirect_uri']!r}")
+
+
+def test_the_register_outlives_the_tokens_last_valid_instant() -> None:
+    """§2.2 — the replay window must be CLOSED at the token's last valid instant, not half-open.
+
+    The verifier refuses an expired token only when `exp + LEEWAY < now`, so at EXACT equality the
+    token still verifies. The register therefore has to keep the `jti` at that instant; dropping it
+    on `<=` opens a (one-microsecond) replay hole and makes the class's own comment false. Driven
+    directly on the store, because no HTTP request can land on an exact expiry instant.
+    """
+    import asyncio
+
+    from tortoise.consent_token import CONSENT_TOKEN_LEEWAY_S, ProcessLocalJtiStore
+
+    frozen = 1_000_000.0
+    store = ProcessLocalJtiStore(clock=lambda: frozen)
+    # The store keys the entry on `exp + LEEWAY`, so this expiry puts the entry's own expiry at
+    # EXACTLY `now` — the instant the verifier still accepts the token (`exp + LEEWAY < now` is
+    # false) and the instant a `<=` prune would have already forgotten it.
+    expires_at = frozen - CONSENT_TOKEN_LEEWAY_S
+    assert asyncio.run(store.consume("boundary-jti", expires_at)) is True
+    assert asyncio.run(store.consume("boundary-jti", expires_at)) is False, (
+        "the jti was pruned at the very instant the token is still valid, so it could be replayed")
 
 
 def test_the_contract_in_the_code_is_the_contract_in_the_spec() -> None:
