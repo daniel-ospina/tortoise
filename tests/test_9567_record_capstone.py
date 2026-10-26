@@ -387,7 +387,23 @@ def test_D5_D6_the_restore_reproduces_the_record_per_label_and_per_predicate(res
         "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS n"
     ).result_set
     got_rels = {t: int(n) for t, n in rel_rows}
-    expected_rels = Counter(rel.rel_type for rel in view.relations)
+    # Relations are counted over the SAME admissible endpoint set as the nodes
+    # above: a relation whose endpoint the restore reported as `refused` cannot
+    # be written (a `MATCH` on a missing node yields no edge), so counting it
+    # here would red this leg for a "the projection dropped an edge family"
+    # reason that is not the projection's — the bounded-restore contract
+    # (`Outcome.refused_keys`, `record_restore.py`) permits exactly that.
+    # Latent today (D4 asserts `coverage == "complete"` ⇒ `refused` empty on
+    # this capture); this keeps the assertion measuring dropped edges, not
+    # refusals, when that stops being true (#10100 review P2).
+    def _admissible(endpoint: tuple[str, str]) -> bool:
+        return endpoint not in refused
+
+    expected_rels = Counter(
+        rel.rel_type
+        for rel in view.relations
+        if _admissible((rel.src_label, rel.src_key)) and _admissible((rel.tgt_label, rel.tgt_key))
+    )
     for rel_type, count in expected_rels.items():
         assert got_rels.get(rel_type, 0) == count, (
             f"relation {rel_type}: the record carries {count} and the "
@@ -579,9 +595,16 @@ def org(tmp_path, monkeypatch):
     sdk.close()
 
 
-def test_D11_a_write_over_the_org_limit_is_refused_and_the_refusal_is_visible(org):
-    """D11: over the cap is REFUSED (with a machine-readable refusal), under
-    the cap succeeds.
+def test_D11_the_gate_refuses_at_the_org_limit_and_the_refusal_is_visible(org):
+    """D11: at the cap the GATE refuses (machine-readable), under the cap the
+    gate admits and the write lands.
+
+    The claim is scoped to the gate on purpose: this leg calls
+    `enforce_org_limit` directly and does NOT attempt a write through a
+    production door while over the cap, so the name must not read as "a write
+    was refused". The write doors that call this gate
+    (`tortoise/mcp_server.py`, `tortoise/hosted_api.py`) are the end-to-end
+    form and belong to #9559's storage meter, not here.
 
     The allowance is a TEST value set at the MEASURED usage, never a hardcoded
     number (`resolve_org_limits` supplies the rest of the dict).
@@ -641,3 +664,36 @@ def test_D12_a_gate_with_no_usage_reading_fails_closed(org, monkeypatch):
     # The SAME write with a reading succeeds — so the refusal above came from
     # the absent reading, not from the gate refusing everything.
     enforce_org_limit(limits, "points", sdk=sdk)
+
+
+# ── the pin that keeps this file ARMED, not merely present ─────────────────
+
+
+def test_ci_runs_this_file_in_the_armed_record_job():
+    """A capstone no job runs armed is prose with extra steps.
+
+    Every record leg here SKIPS by name without `TEST_RECORD_DB_URI`, and the
+    only job that arms it is `test-record-postgres` (#9551). So the job's
+    `run:` must name this file: a lane that deleted that one line would leave
+    the record job green (its leg gate is satisfied by the sibling files) and
+    the fast pool green (7 legs skip silently) while the capstone executed
+    only its DB-free legs — the #9551 defect one level up.
+
+    Pinned structurally, the same way `test_9664` pins its own job and
+    `test_9078` pins its: a `run:` string cannot be executed, so a substring
+    assertion is the closest thing to running it.
+    """
+    import yaml
+
+    workflow = REPO_ROOT / ".github" / "workflows" / "python-ci.yml"
+    jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
+    job = jobs.get("test-record-postgres")
+    assert job is not None, (
+        "`test-record-postgres` is gone — that job is the only place the record "
+        "is armed, so this file would never run armed anywhere (#9551)"
+    )
+    runs = "\n".join(str(step.get("run", "")) for step in job.get("steps") or [])
+    assert Path(__file__).name in runs, (
+        f"`test-record-postgres` does not run {Path(__file__).name}: the capstone "
+        "legs would skip in every other job and the job would stay green"
+    )

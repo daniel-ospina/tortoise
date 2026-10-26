@@ -14,9 +14,9 @@ throwaway `postgres:16` on an ephemeral loopback port via
 
 | what | command | observed |
 |---|---|---|
-| the capstone (lane-shaped: `TORTOISE_DB_URI` set) | `TEST_RECORD_DB_URI=… uv run --extra postgres pytest tests/test_9567_record_capstone.py -q` | **11 passed in 17.20s** |
-| the capstone (CI-shaped: no `TORTOISE_DB_URI`, `TORTOISE_TEST_CARVE_OUT=1` — the `test-record-postgres` job's env) | same, with the graph URI unset | **11 passed in 16.82s** |
-| the capstone + the quota file together | `… pytest tests/test_9567_record_capstone.py tests/test_quota.py -q` | **73 passed in 47.54s** |
+| the capstone (lane-shaped: `TORTOISE_DB_URI` set) | `TEST_RECORD_DB_URI=… uv run --extra postgres pytest tests/test_9567_record_capstone.py -q` | **12 passed in 85.82s** |
+| the capstone (CI-shaped: no `TORTOISE_DB_URI`, `TORTOISE_TEST_CARVE_OUT=1` — the `test-record-postgres` job's env) | same, with the graph URI unset | **12 passed in 33.39s** (unarmed: 5 passed, 7 skipped — the record legs skip by name, the DB-free legs + the CI pin still run) |
+| the capstone + the quota file together | `… pytest tests/test_9567_record_capstone.py tests/test_quota.py -q` | **74 passed in 75.99s** |
 | the quota gate (full file, with the new fail-closed pin) | `uv run pytest tests/test_quota.py -q` | **62 passed** |
 | the same file WITHOUT the new pin (the baseline the pin is added to) | `uv run pytest tests/test_quota.py -q -k "not missing_limit_key"` | **61 passed, 1 deselected** |
 | the two file-registry gates the new test trips | `pytest tests/test_markers.py tests/test_uri_env_mutations_declared.py -q` | **61 passed** |
@@ -37,7 +37,7 @@ throwaway `postgres:16` on an ephemeral loopback port via
 | **D9** | cross-tenant **read = 0 rows** *and* cross-tenant **write refused** with `42501` (a `WITH CHECK` refusal, asserted by code so a FK/CHECK error cannot be mistaken for the boundary), through `record_projection.scope_connection` — the same prologue both production doors use | `test_D9_a_cross_tenant_read_is_empty_and_a_cross_tenant_write_is_refused` | read 0 rows; A sees its own rows ≥ 1; write raises `pgcode=42501` | ✅ this lane — the migration's `point_app_tenant` changed to `USING (true) WITH CHECK (true)` ⇒ **`tenant A read tenant B's point — the tenant predicate is not the boundary`**, `assert 1 == 0` |
 | **D9 (pooler)** | **NOT MEASURED.** G1 requires the read/write pair over the pooler DSN; this lane has a direct connection and no Supavisor. The mechanism that makes the pooler safe is measured, not the pooler | — | — | — |
 | **D10** | a record table whose `*_app_tenant` policy is **dropped** returns **0 rows and does not raise**; re-applying the production migration restores the rows. This is the first **committed** behavioural drill for D10 (the prior run measured it with a probe outside the repo) | `test_D10_a_record_table_without_its_policy_fails_closed` | `≥1` → **0 rows, no exception** → `≥1` again | ✅ this lane — the migration made fail-open (`ALTER TABLE public.point DISABLE ROW LEVEL SECURITY`) ⇒ **`a table whose tenant policy is GONE still returned rows`**, `assert 42 == 0` |
-| **D11** | **SUBSTITUTE, NOT THE ISSUE'S LITERAL ITEM.** The shipped org-resource gate refuses a write over a *test* allowance and the refusal is machine-readable, while the under-cap write passes. The issue's D11/D12 name the **storage-allowance** meter (`_enforce_storage_allowance`, #9559), which is still absent from `tortoise/` — see "What this does not discharge" | `test_D11_a_write_over_the_org_limit_is_refused_and_the_refusal_is_visible` | `QuotaExceededError`; `payload = {code: quota_exceeded, resource: points, used: N, limit: N}`; under-cap write lands | the falsifier direction (under-cap passes) is exercised in the same run; no source mutation |
+| **D11** | **SUBSTITUTE, NOT THE ISSUE'S LITERAL ITEM.** The shipped org-resource gate refuses **at** a *test* allowance and the refusal is machine-readable, while the under-cap write passes. The leg calls the gate directly — it does not attempt a write through a production door while over the cap, so it proves the gate, not the door. The issue's D11/D12 name the **storage-allowance** meter (`_enforce_storage_allowance`, #9559), which is still absent from `tortoise/` — see "What this does not discharge" | `test_D11_the_gate_refuses_at_the_org_limit_and_the_refusal_is_visible` | `QuotaExceededError`; `payload = {code: quota_exceeded, resource: points, used: N, limit: N}`; under-cap write lands | the falsifier direction (under-cap passes) is exercised in the same run; no source mutation |
 | **D12** | **SUBSTITUTE, as D11.** With an allowance configured and the meter **unreadable**, the gate refuses (`QuotaCheckError`), and the same call passes once a reading exists | `test_D12_a_gate_with_no_usage_reading_fails_closed` | `QuotaCheckError("quota count failed …")`; second call passes | no source mutation; the two-direction pair is in-run |
 | **unpinned branch** | the **missing-limit-key** branch (`raise QuotaCheckError` → currently UNPINNED by the suite) is now pinned, in `tests/test_quota.py`, as an **addition** (no existing test changed) | `TestEnforceTeamLimit::test_missing_limit_key_fails_closed` | 62 passed (61 before the pin) | ✅ this lane — the branch's `raise` mutated to `return` ⇒ **`DID NOT RAISE QuotaCheckError`**, **1 failed, 61 passed** |
 
@@ -58,8 +58,12 @@ throwaway `postgres:16` on an ephemeral loopback port via
 3. **The CI exit criterion is not observed yet** (`python-ci` green at the head sha with `TEST_RECORD_DB_URI` armed). This lane ran the file directly against a provisioned Postgres; the job's zero-skip gate
    (`.github/scripts/record-postgres-leg-gate.py`) must confirm it on the PR.
    The file is added to the `test-record-postgres` job's pytest list so its record legs run **armed** there
-   (without that, registering it in `core` would run it in the fast pool with no DSN, where 7 of its 11 legs
+   (without that, registering it in `core` would run it in the fast pool with no DSN, where 7 of its 12 legs
    SKIP — the exact "green while the leg never ran" shape #9551 exists to remove).
+   That dependence is **pinned**, not assumed: `test_ci_runs_this_file_in_the_armed_record_job`
+   asserts this file's name is in the `test-record-postgres` job's `run:` text, so a lane deleting
+   the line cannot leave both jobs green (the record job's leg gate would be satisfied by the
+   sibling files alone). **#10100 review P2** — the pin did not exist in the first head.
    It is registered in `config/ci-surfaces.yml` under `core`, and its two suite-level declarations
    (`tests/test_markers.py`'s `ROUTED_NAMESPACES`, `tests/test_uri_env_mutations_declared.py`) were added.
 4. **The owner's data migration remains deferred** (owner statement, 2026-10-22). Nothing here migrates the owner's hosted/local graphs, and this artifact must not be cited as evidence that it was done. Every leg runs against a **fresh, empty record** and produces the rows it then proves.
