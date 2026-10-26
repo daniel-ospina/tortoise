@@ -21,7 +21,17 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 > (`tools/longmem_eval/w7_publish.py`, tested in
 > `tests/test_w7_publish.py`). The receipt is machine-built and validated —
 > no hand-authored numbers, no n=1 smoke substitute, no variant mixed into
-> the official number (R12).
+> the official number (R12). The judge pin is **derived from the judge the
+> report records** (`judge_pin_for`), never minted as a constant: the official
+> pin belongs to `gpt-4o-2024-08-06` over any transport, a stub records the
+> mock pin, any other model records `unpinned:<model>`. The `verdict` is
+> derived from that **same** identity, so the receipt is self-consistent
+> rather than merely refused downstream: only an official-pinned completed
+> run records `verdict: pass`, and a mock- or substituted-judge run records
+> `inconclusive`. `validate_receipt` additionally refuses a pin that does not
+> belong to the recorded judge, and a `pass` from any non-official judge or
+> from any non-completed run — on **every** `run_status`, so a hand-written
+> receipt cannot claim either by declaring itself `failed`/`skipped` (`#8486`).
 >
 > **RUN STATUS (this commit): PENDING — full-run NOT executed.** The 9-step
 > run_protocol gates 1–4 (corpus seal, answer-key manifest, dataset_audit

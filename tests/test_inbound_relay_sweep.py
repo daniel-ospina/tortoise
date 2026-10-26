@@ -690,8 +690,9 @@ def test_a_retry_resumes_instead_of_re_posting(sweep: Any) -> None:
     The sequence is relay → comment → close → label, so an item whose close
     failed is selected again 15 minutes later. Without a resume it would re-post
     the same boilerplate comment on an external contributor's PR every 15
-    minutes for as long as the close keeps failing. The relay's own footer is
-    the marker that says "we already spoke".
+    minutes for as long as the close keeps failing — or until the item ages out
+    of the `--since-hours` window. The relay's own footer is the marker that
+    says "we already spoke".
 
     ⛔ The RECORD is still posted on a resume. The marker proves we commented,
     never that intake accepted the record — the event path posts intake LAST
@@ -1096,12 +1097,24 @@ def test_the_rails_promise_no_retry_that_the_label_step_cannot_get(
     # all — a YAML comment run needs a new `#` on every continuation line, so a
     # whitespace-only collapse leaves that `#` sitting BETWEEN the words
     # (`… again and # reds this workflow`), i.e. the pre-fix text the negative
-    # half names reads as already absent. Measured on `origin/main` and pinned
-    # here so it cannot silently go inert again (#9990 review).
+    # half names reads as already absent. Measured on the pre-fix text at
+    # `3d851d2f6` (the base this pin was written against) and pinned here so it
+    # cannot silently go inert again (#9990 review).
+    #
+    # ⛔ AND THE PREFIX IS TWO CHARACTERS WHERE `tools/` USES IT. `#:` (the Sphinx
+    # prefix those two copies carry) leaves `":"` behind after a bare `#` strip,
+    # so every wrap becomes `… every 15 minutes : without ever closing it …` and
+    # the negative half is inert there — the same defect one character further
+    # along, and wrapping is the normal shape of a `#:` comment (#9990 review).
+    # The end marker is ASSERTED because `split(end, 1)[0]` returns the whole
+    # remainder of the file when `end` is missing, which silently widens one
+    # copy's pin to every later copy instead of failing.
     def _block(text: str, start: str, end: str) -> str:
+        tail = text.split(start, 1)[1]
+        assert end in tail, f"slice end marker {end!r} not found after {start!r}"
         return " ".join(
-            line.lstrip(" #")
-            for line in text.split(start, 1)[1].split(end, 1)[0].splitlines()
+            line.lstrip(" #").lstrip(":").strip()
+            for line in tail.split(end, 1)[0].splitlines()
         )
 
     sweep_workflow = SWEEP_WORKFLOW.read_text(encoding="utf-8")
@@ -2197,8 +2210,9 @@ def test_the_resume_read_walks_to_the_newest_comments(sweep: Any, monkeypatch: A
     asks for "newest first" and stops therefore reads the oldest page — so the
     relay's own footer, posted at close time (i.e. LAST), is invisible on any
     item with more than `per_page` comments. The retry then re-posts the
-    identical comment every 15 minutes for as long as the close keeps failing,
-    which is the exact failure this marker exists to prevent.
+    identical comment every 15 minutes for as long as the close keeps failing —
+    or until the item ages out of the `--since-hours` window. That re-post is
+    the exact failure this marker exists to prevent.
 
     Three shapes, because the terminal page is not enough on its own: the marker
     sits mid-thread once a contributor replies after it, and an EXACT multiple of

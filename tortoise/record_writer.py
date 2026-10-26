@@ -206,6 +206,7 @@ __all__ = [
     "RecordWriteOutcome",
     "RecordWriter",
     "current_record_tenant",
+    "dsn_fingerprint",
     "record_dsn",
     "record_tenant",
     "record_tenant_for",
@@ -421,16 +422,42 @@ class RecordWrite:
         return status_vocabulary.classify(configured=True, reached=True)
 
 
+def dsn_fingerprint(dsn: str) -> str:
+    """The 8-hex fingerprint of a DSN value — the ONLY form of it that may be published.
+
+    A DSN is secret material (#2903/#2796), so a surface that must let an
+    operator tell WHICH value a process holds (a stale secret, a value that
+    never reached the machine) publishes this instead of the value: 32 bits of
+    sha256 over a high-entropy string is a comparison handle, not a disclosure.
+
+    ONE definition **inside the record seam**, called by :func:`record_dsn`'s
+    refusal messages and by the arming report on the hosted ``/health`` (#9548).
+    Two copies of this convention would drift, and the copy that drifts is the
+    one that prints a DSN.
+
+    Not the tree's only fingerprint, and this docstring does not claim to be:
+    ``audit_events``, ``hosted_backup`` and ``backup_config`` each have their own
+    for their own variable, and all three hash ``raw.strip()`` while this one is
+    handed an already-stripped value (`record_dsn()`'s ``.strip()``). Folding them
+    together is a separate change with its own blast radius (#9997), so the honest
+    statement is the scoped one.
+    """
+    return hashlib.sha256(dsn.encode()).hexdigest()[:8]
+
+
 def record_dsn(
     explicit: str | None = None, *, surface: str | None = None
 ) -> str | None:
     """The armed DSN, or ``None`` when the record is not armed.
 
     ``explicit`` wins over the environment (an injected value makes the DB-free
-    pin possible). Unset/blank ⇒ ``None``. A value that is not a Postgres DSN
-    raises :class:`RecordWriteError` carrying only a fingerprint of the value —
-    the same secret-hygiene rule ``tortoise/audit_events.py`` applies to
-    ``TORTOISE_AUDIT_DSN`` (#2903/#2796).
+    pin possible). Unset/blank ⇒ ``None``. A value that is not a Postgres DSN —
+    or one no connection can reach — raises :class:`RecordWriteError` carrying
+    only a fingerprint of the value: the same secret-hygiene rule
+    ``tortoise/audit_events.py`` applies to ``TORTOISE_AUDIT_DSN``
+    (#2903/#2796). The reachability half is the HOST rule at the bottom; it
+    exists so the value's shape and the seam's verdict cannot disagree — see
+    there.
 
     ``surface`` names the arm the value came from when it is NOT
     ``TORTOISE_RECORD_DSN`` itself (#9801): the record's backup leg has its own
@@ -444,11 +471,49 @@ def record_dsn(
     if not dsn:
         return None
     if not dsn.startswith(_DSN_SCHEMES):
-        got = hashlib.sha256(dsn.encode()).hexdigest()[:8]
+        got = dsn_fingerprint(dsn)
         raise RecordWriteError(
             f"{surface or RECORD_DSN_ENV} must start with postgresql:// or "
             f"postgres:// (got <{got}>...) — a configured-but-unusable record "
             f"DSN is a misconfiguration, not an unarmed record"
+        )
+    # ── HOST rule: a right-scheme value can still be one no connection can use.
+    # `libpq` does NOT fail a hostless URI — it fills the host from `PGHOST` or a
+    # unix socket, i.e. it silently connects somewhere nobody named. For THIS
+    # variable the codebase already refused that shape twice, in the legs that
+    # dump and delete: `record_backup.libpq_env` ("the record DSN names no host
+    # — refusing to let libpq fall back to a local socket, which would back up
+    # the wrong database") and `record_backup.reset_record_tables` ("libpq would
+    # fall back to PGHOST or a local socket, which can be the record"). The
+    # WRITE path was the leg that still accepted it — so a clipped `gh secret
+    # set` paste (`postgresql://user:pw@`) counted a failure per capture while
+    # `/health` reported `armed: true`, which is the same false green #9548
+    # exists to end, one predicate in from the scheme check.
+    #
+    # Both facts are decidable from the STRING alone (no connect, no env
+    # fallback), so the refusal belongs HERE, in the seam that already owns
+    # "usable"; a re-check in a reader would be a second definition of it, which
+    # is the drift `dsn_fingerprint()` was extracted to prevent.
+    # A whitespace-bearing value is the mangled-paste shape: a real URI must
+    # percent-encode a space, so no driver could have been meant by it.
+    problem: str | None = None
+    if any(ch.isspace() for ch in dsn):
+        problem = "contains whitespace (a URI must percent-encode it)"
+    else:
+        try:
+            host = urlsplit(dsn).hostname
+        except ValueError as exc:
+            problem = f"is not a readable URI ({exc})"
+        else:
+            if not host:
+                problem = "names no host"
+    if problem is not None:
+        got = dsn_fingerprint(dsn)
+        raise RecordWriteError(
+            f"{surface or RECORD_DSN_ENV} {problem} (got <{got}>...) — a "
+            f"configured-but-unusable record DSN is a misconfiguration, not an "
+            f"unarmed record. Name the server explicitly: without a host, "
+            f"libpq falls back to PGHOST or a local socket"
         )
     return dsn
 
