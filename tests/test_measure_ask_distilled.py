@@ -29,6 +29,7 @@ These tests cover, one per verification-checklist row of the issue:
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -216,6 +217,21 @@ def _receipt(scored: dict, *, commit: str = "a" * 40, cost_usd: float = 0.0,
     fixture that carried only one of them would be exactly the inconsistency
     that check exists to catch.
     """
+    scored = copy.deepcopy(scored)
+    recorded = scored.get("code_identity") or {}
+    scored["code_identity"] = {
+        "schema": m.CODE_IDENTITY_SCHEMA,
+        "commit": commit,
+        "dirty_paths": [],
+        # A run that STARTED and ENDED on that tree: the two halves have to
+        # agree or the receipt is refused for having straddled two trees, which
+        # is a different finding from the one each test here is making.
+        "at_end": {"schema": m.CODE_IDENTITY_SCHEMA, "commit": commit,
+                   "dirty_paths": [], "repo": recorded.get("repo"),
+                   "reason": None},
+        "repo": recorded.get("repo"),
+        "reason": None,
+    }
     prereg_sha256 = prereg_sha256 or "sha256:" + "0" * 64
     return m.build_receipt(
         scored=scored, commit=commit, cost_usd=cost_usd,
@@ -376,10 +392,14 @@ def _make_bound_repo(base: Path) -> dict:
     gold.write_text(json.dumps(rekeyed, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
     rekeyed_commit = _git_commit(repo, "gold: re-keyed after the run")
-    # The WORKTREE goes back to the scored corpus, so HEAD (c3) is dirty on
-    # purpose: the mismatch lives ONLY in the commit, which is what makes the
-    # refusal below a test of the sha and not of the disk.
-    gold.write_text(original_gold, encoding="utf-8")
+    # The WORKTREE goes back to ``c2`` — the commit a publish may legitimately
+    # record — so the mismatch lives ONLY in the commit ``c3``, which is what
+    # makes the refusal below a test of the sha and not of the disk. It also
+    # leaves HEAD clean at the run commit, which is the shape a published run
+    # must have (a run records the tree it executed from, and that tree has to
+    # BE the commit the report names).
+    assert m._git(repo, "checkout", "-q", run_commit).returncode == 0
+    assert m.code_identity(repo)["dirty_paths"] == []
     return {"repo": repo, "corpus_dir": corpus_dir, "prereg_path": prereg_path,
             "prereg_commit": prereg_commit, "run_commit": run_commit,
             "rekeyed_commit": rekeyed_commit}
@@ -391,13 +411,18 @@ def bound_repo(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def shared_run(tmp_path_factory):
+def shared_run(tmp_path_factory, bound_repo):
     """ONE run of the two-case subset, shared by the assertions that read it.
 
     These tests grade the same observations in different ways (the bar, the
     receipt, the report, the config comparisons). Re-running the lane per
     assertion would cost CI minutes and measure nothing new — the substrate is
     a stub reader, so the observations are deterministic.
+
+    The run records its code identity from ``bound_repo`` (HEAD == the commit a
+    publish may name, clean): the corpus it reads lives in a tmp directory, and
+    both corpora are generated from ``_small_cases()``, so they are byte-for-byte
+    the same corpus the bound repo carries.
     """
     import os
 
@@ -409,7 +434,7 @@ def shared_run(tmp_path_factory):
     _reset()
     tmp = tmp_path_factory.mktemp("shared-run")
     root = _small_corpus(tmp)
-    run = m.run_sealed(corpus_root=root,
+    run = m.run_sealed(corpus_root=root, repo_root=bound_repo["repo"],
                        reader_factory=_factory(_RecordingReader(_answer_map(), [])))
     scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
                      judge_spec=_StubJudge.model_id)
@@ -759,18 +784,26 @@ def test_the_report_claims_no_unpre_registered_threshold(shared_run):
 
 # ── 6. the CLI writes what the pipeline reads ─────────────────────────────
 
-def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
+def test_cli_preregister_run_score_publish(tmp_path, monkeypatch, capsys):
     """End to end through the CLI, with the mock judge (wiring, not a number).
 
     A MOCK-graded run is wiring, never a measurement: publish refuses it even
-    though its bar verdict is PASS. The run is recorded at a real commit in a
-    real repository (see :func:`_make_bound_repo`), so the ONLY thing left for
-    publish to refuse is the mock pin — which is what this test is about.
+    though its bar verdict is PASS. Asserting `rc == 2` alone would NOT prove
+    that: a refusal from any other clause satisfies it, and there is now more
+    than one. The assertion therefore names the clause this test exists for.
+
+    `_REPO_ROOT` is pinned to the repository this test builds: `run` records
+    THIS module's tree by design (it is not a `--repo` flag), so driving the
+    CLI against the real checkout would record the checkout's identity —
+    including whatever `__pycache__` the test session just wrote — and refuse
+    the run at its own byte-cache guard rather than exercising the publish
+    path.
     """
     monkeypatch.chdir(tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     _git_init(repo)
+    monkeypatch.setattr(m, "_REPO_ROOT", repo)
     corpus_dir = repo / "tests" / "eval" / "ask"
     generate_corpus.write_corpus(corpus_dir, _small_cases())
     prereg_path = corpus_dir / "preregistration.json"
@@ -785,6 +818,13 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory",
                         lambda: _RecordingReader(_answer_map(), []))
+    # ⛔ The CLI `run` refuses an interpreter that WRITES byte-caches: it would
+    # cache the runner under the executed surface before the identity is taken,
+    # so the run could never be published (see
+    # `test_the_run_REFUSES_to_start_when_the_interpreter_would_write_byte_caches`).
+    # A real lane launches it `-B` / `PYTHONDONTWRITEBYTECODE=1`, and this test
+    # drives the same path rather than dodging it.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
     obs_path = tmp_path / "obs.json"
     assert m._main(["run", "--out", str(obs_path),
                     "--corpus-root", str(corpus_dir)]) == 0
@@ -810,6 +850,8 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
            "--receipt", str(receipt), "--prereg", str(prereg_path),
            "--corpus-root", str(corpus_dir), "--repo", str(repo)]
     assert m._main(pub) == 2
+    err = capsys.readouterr().err
+    assert "MOCK-graded run cannot publish" in err, err
     assert not report.exists() and not receipt.exists()
 
 
@@ -1605,3 +1647,844 @@ def test_a_receipt_may_not_publish_an_unproven_ordering(shared_run):
     del no_proof["commit_binding"]["ordering_proof"]
     assert any("commit_binding.ordering_proof" in issue
                for issue in m.validate_ask_receipt(no_proof))
+
+# ── 8. the RUN records the tree that produced the numbers ─────────────────
+#
+# §7's binding makes the named sha vouch for the CORPUS and the PROTOCOL at
+# that sha. It says nothing about the tree the NUMBERS came from: a lane can run
+# the corpus at tree A, then name a commit B whose corpus and protocol are
+# byte-identical (any `main` merge between the run and the publish has exactly
+# that shape) and still publish a report telling a reader to `git checkout B`.
+# These pin the other half — the run records the commit it executed from and
+# whether that tree was clean, and publish refuses a run it cannot vouch for.
+
+def test_the_run_records_the_commit_and_the_clean_tree_it_ran_from(bound_repo):
+    """The record is produced by the step that ran, not by the publisher."""
+    identity = m.code_identity(bound_repo["repo"])
+    assert identity["schema"] == m.CODE_IDENTITY_SCHEMA
+    assert identity["commit"] == bound_repo["run_commit"]
+    assert identity["dirty_paths"] == []
+
+    run = m.run_sealed(corpus_root=bound_repo["corpus_dir"],
+                       repo_root=bound_repo["repo"],
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    assert run["code_identity"]["commit"] == bound_repo["run_commit"]
+    assert run["code_identity"]["dirty_paths"] == []
+    scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
+                     judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+    # The scored artifact carries it forward; publish compares it, so a score
+    # step that dropped it would turn the check off silently.
+    assert scored["code_identity"]["commit"] == bound_repo["run_commit"]
+
+
+def test_a_run_that_records_no_tree_cannot_be_published(shared_run):
+    """`run_sealed()` with no repository records the absence, and a run that
+    cannot say where it came from is not publishable — the receipt refuses it."""
+    run = m.run_sealed(corpus_root=shared_run["root"],
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    assert run["code_identity"]["commit"] is None
+    assert "no repository" in run["code_identity"]["reason"]
+    scored = copy.deepcopy(shared_run["scored"])
+    scored["code_identity"] = run["code_identity"]
+    receipt = m.build_receipt(
+        scored=scored, commit=shared_run["scored"]["code_identity"]["commit"],
+        cost_usd=0.0,
+        commit_binding=_binding(shared_run["scored"]["code_identity"]["commit"],
+                                scored["corpus_hash"]))
+    assert any("not a full 40-hex sha" in issue
+               for issue in m.validate_ask_receipt(receipt))
+
+
+def test_publish_refuses_a_run_that_ran_from_a_different_commit(
+        tmp_path, shared_run, bound_repo, capsys):
+    """FAIL-BEFORE: this publish returned 0 and wrote the report.
+
+    The run recorded `c1`; the publish names `c2`. Both commits carry the same
+    corpus and the same protocol — which is exactly why §7's binding passes —
+    and the numbers in the report came from `c1`'s code, so `git checkout c2`
+    reproduces this corpus and re-runs DIFFERENT code. That is the residual of
+    "reproducible from the recorded sha alone" that a free-text `--commit` left
+    open one step earlier in the pipeline.
+    """
+    scored = copy.deepcopy(shared_run["scored"])
+    scored["code_identity"]["commit"] = bound_repo["prereg_commit"]
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored), encoding="utf-8")
+    report = tmp_path / "run-report.md"
+    receipt = tmp_path / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+        receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+        prereg=bound_repo["prereg_path"], repo=bound_repo["repo"]))
+    err = capsys.readouterr().err
+    assert rc == 2, "a run from a DIFFERENT tree must never be published"
+    assert "DIFFERENT tree" in err, err
+    assert not report.exists() and not receipt.exists()
+
+
+def test_publish_refuses_a_run_made_from_a_dirty_tree(
+        tmp_path, shared_run, bound_repo, capsys):
+    """FAIL-BEFORE: this publish returned 0 and wrote the report.
+
+    A run from a tree with uncommitted changes reproduces from "sha plus a
+    patch nobody recorded", which is not the recorded sha alone. The path is
+    named in the refusal, so the lane knows what to commit and re-run.
+    """
+    scored = copy.deepcopy(shared_run["scored"])
+    scored["code_identity"]["dirty_paths"] = ["tortoise/ask_lane.py"]
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored), encoding="utf-8")
+    report = tmp_path / "run-report.md"
+    receipt = tmp_path / "receipt.json"
+    rc = m._main(_publish_argv(
+        scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+        receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+        prereg=bound_repo["prereg_path"], repo=bound_repo["repo"]))
+    err = capsys.readouterr().err
+    assert rc == 2, "a run from a dirty tree must never be published"
+    assert "uncommitted path" in err and "tortoise/ask_lane.py" in err, err
+    assert not report.exists() and not receipt.exists()
+
+
+def test_the_published_report_names_the_tree_the_run_executed_from(published,
+                                                                  bound_repo):
+    """§1 and §6 must state it, so a reader can audit the provenance from the
+    rendered document rather than from the machinery that made it."""
+    assert published["rc"] == 0
+    identity = published["receipt"]["code_identity"]
+    assert identity["commit"] == bound_repo["run_commit"]
+    assert identity["dirty_paths"] == []
+    text = published["report"].read_text(encoding="utf-8")
+    # TWICE: §1's provenance row AND §6's binding table. Asserting presence
+    # alone passes on §1 by itself, which would let the §6 row be deleted
+    # unnoticed — and §6 is the half a re-verifier re-checks the binding from.
+    assert text.count("Tree the run executed from") == 2
+    assert text.count("clean at run time") >= 1
+
+
+# ── 8b. the checks that ask the repository must be MEASURED, not injected ──
+#
+# The refusal tests above inject `code_identity` values, so they pin the
+# VALIDATION. None of them ran `code_identity()` against a dirty tree, which
+# left the half that decides everything — is a dirty tree DETECTED? — unpinned:
+# a `dirty_paths` that was always `[]` (or a `git status` failure read as clean)
+# passed the whole file. These measure the detection, and they measure the two
+# ways a run can escape its own record: a tree that changes WHILE it runs, and a
+# renderer that turns an absent record into the word "clean".
+
+def _make_surface_repo(base: Path) -> Path:
+    """A throwaway repo that HAS the executed surface (``EXECUTED_SURFACE``).
+
+    ``code_identity`` asks git about the surface a measurement run can import,
+    so a mechanism test needs a repository where that surface EXISTS — the
+    corpus fixtures in this file (a corpus, a pre-registration and a marker) do
+    not. The corpus loader is included because the RUNNER imports it
+    (``tests.eval.ask.corpus``), which is the entry an earlier hand-written
+    surface missed. Also asserts the surface is clean before a test dirties it,
+    which is the other half of the discriminating power: the new scan must not
+    refuse a tree that is actually clean.
+    """
+    repo = base / "surface-repo"
+    (repo / "tools").mkdir(parents=True)
+    (repo / "tortoise").mkdir()
+    (repo / "tests" / "eval" / "ask").mkdir(parents=True)
+    _git_init(repo)
+    (repo / "tools" / "probe_step.py").write_text("VALUE = 1\n",
+                                                   encoding="utf-8")
+    (repo / "tortoise" / "ask_lane.py").write_text("VALUE = 1\n",
+                                                    encoding="utf-8")
+    (repo / "tests" / "eval" / "ask" / "corpus.py").write_text(
+        "def load_fixtures(root):\n    return []\n", encoding="utf-8")
+    assert _git_commit(repo, "the executed surface")
+    assert m.code_identity(repo)["dirty_paths"] == []
+    return repo
+
+
+def test_the_recorded_surface_COVERS_every_module_the_run_imports():
+    """The surface is MEASURED here, because listing it by hand was WRONG.
+
+    ``EXECUTED_SURFACE`` is the set of paths :func:`code_identity` asks git
+    about, and the claim it carries is "the modules a run can execute". A
+    hand-written list is an ASSERTION about that claim, and it was wrong in the
+    way this whole class of defect takes: the runner imports
+    ``tests.eval.ask.corpus`` at module load, so with the list at
+    ``tortoise/`` + ``tools/`` an ``--assume-unchanged`` patch to that loader
+    produced ``dirty_paths == []`` and publish ACCEPTED it — numbers produced by
+    code the recorded sha does not contain, with the corpus hash unchanged
+    (it digests the corpus files, not the code that reads them).
+
+    So a fresh interpreter imports the runner and every repository module it
+    loaded must sit under these prefixes. A future import from outside the
+    surface fails HERE, naming the file, instead of silently becoming a way for
+    a run to claim an identity it did not have.
+    """
+    repo_root = Path(m.__file__).resolve().parents[2]
+    # A checkout can carry its OWN virtualenv (``uv sync`` puts ``.venv`` at the
+    # repository root, and it is gitignored), so "physically under the repo
+    # root" is NOT the same question as "a module of this repository". The
+    # surface is what ``code_identity`` asks git about; a dependency installed
+    # under ``.venv``/``site-packages`` is neither a repository module nor
+    # something the record claims to vouch for, and counting it made this test
+    # fail under ``uv run pytest`` while passing where deps live outside the
+    # tree — a false failure on the repository's own documented command.
+    census = (
+        "import json, pathlib, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import tools.longmem_eval.measure_ask_distilled\n"
+        "root = pathlib.Path(sys.argv[1]).resolve()\n"
+        "loaded = set()\n"
+        "for name, mod in list(sys.modules.items()):\n"
+        "    where = getattr(mod, '__file__', None)\n"
+        "    if not where:\n"
+        "        continue\n"
+        "    try:\n"
+        "        rel = pathlib.Path(where).resolve().relative_to(root)\n"
+        "    except ValueError:\n"
+        "        continue\n"
+        "    if 'site-packages' in rel.parts or rel.parts[0].startswith('.'):\n"
+        "        continue\n"
+        "    loaded.add(rel.as_posix())\n"
+        "print(json.dumps(sorted(loaded)))\n")
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", census, str(repo_root)],
+        capture_output=True, text=True, check=False, cwd=str(repo_root),
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert proc.returncode == 0, proc.stderr
+    loaded = json.loads(proc.stdout)
+    # A census that loaded nothing would make this test pass by being blind —
+    # the same shape of vacuity the record itself exists to refuse.
+    assert loaded, "the surface census loaded no repository module"
+    outside = [path for path in loaded
+               if not path.startswith(m.EXECUTED_SURFACE)]
+    assert not outside, (
+        f"the run imports {outside}, which is OUTSIDE the recorded surface "
+        f"{m.EXECUTED_SURFACE} — an index flag or an ignore rule can then hide "
+        f"a modified executed module while this record reads CLEAN")
+
+
+def test_an_IGNORE_RULE_cannot_hide_an_untracked_executed_module(tmp_path):
+    """FAIL-BEFORE: an ignored, importable module read as CLEAN.
+
+    `git status --untracked-files=normal` never lists an ignored path, so a
+    `.gitignore` entry (or `.git/info/exclude`, or a global `core.excludesFile`)
+    hides an untracked module that a run imports — the tree reads clean and the
+    report tells a reader the numbers came from the recorded sha. The premise is
+    asserted (`status` really prints nothing) so this cannot pass by the harness
+    failing to reproduce the hiding rule.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / ".gitignore").write_text("local_patch.py\n", encoding="utf-8")
+    assert _git_commit(repo, "ignore: a local patch")
+    patched = repo / "tortoise" / "local_patch.py"
+    patched.write_text("VALUE = 999  # unrecorded patch\n", encoding="utf-8")
+    assert m._git(repo, "status", "--porcelain",
+                  "--untracked-files=normal").stdout.strip() == "", (
+        "the fixture did not reproduce the hiding ignore rule")
+    identity = m.code_identity(repo)
+    assert any("tortoise/local_patch.py" in path
+               for path in identity["dirty_paths"]), identity
+
+
+def test_an_INDEX_FLAG_cannot_hide_a_modified_executed_module(tmp_path):
+    """FAIL-BEFORE: a modified module behind an index flag read as CLEAN.
+
+    `--assume-unchanged` and `--skip-worktree` both tell git not to examine a
+    file's working-tree content (git-update-index, ASSUME UNCHANGED / and
+    SKIP-WORKTREE BIT), so the patched executed module prints NOTHING in
+    `git status` while the bytes on disk are the patched ones — the exact false
+    PASS this record exists to close, with no receipt field tampered with.
+    Both flags are exercised: they are different mechanisms (the tag is `h`
+    versus `S`) and a check that reads only one of them leaves the other open.
+
+    Both SURFACES are exercised too, and the second one is the case that was
+    still open: `tests/eval/ask/corpus.py` is imported by the runner but sat
+    outside a hand-written surface, so this patch published.
+    """
+    for flag in ("--assume-unchanged", "--skip-worktree"):
+        for target in ("tools/probe_step.py", "tests/eval/ask/corpus.py"):
+            label = f"{flag.lstrip('-')}-{target.replace('/', '-')}"
+            repo = _make_surface_repo(tmp_path / label)
+            assert m._git(repo, "update-index", flag, target).returncode == 0
+            (repo / target).write_text("VALUE = 999  # unrecorded patch\n",
+                                       encoding="utf-8")
+            assert m._git(repo, "status", "--porcelain",
+                          "--untracked-files=normal").stdout.strip() == "", (
+                f"the fixture did not reproduce the {flag} hiding flag")
+            identity = m.code_identity(repo)
+            assert any(target in path
+                       for path in identity["dirty_paths"]), (
+                flag, target, identity)
+            # ... and clearing the flag clears the refusal: the record is about
+            # the suppression, not about the file having a patch someone could
+            # see.
+            assert m._git(repo, "update-index", "--no" + flag[1:],
+                          target).returncode == 0
+            assert m._git(repo, "checkout", "--", target).returncode == 0
+            assert m.code_identity(repo)["dirty_paths"] == [], (flag, target)
+
+
+def test_a_BYTE_CACHE_under_the_executed_surface_is_refused(tmp_path):
+    """FAIL-BEFORE: an UNTRACKED ``.pyc`` was excused by suffix, so the tree
+    read as clean and a forged byte-cache could publish as "clean at run time".
+
+    ``NOISE_SUFFIXES`` lists ``.pyc``/``.pyo`` only so the guard's
+    ``--allow-bytecode`` opt-out has something to name: ``_is_bytecode`` is what
+    REFUSES them by default (#3712). Excusing them here imported half a policy
+    while the comment promised the whole of it, and a byte-cache is executable
+    code this record does not verify — PEP 552's hash-based pyc with
+    ``check_source`` unset loads WITHOUT the source being read, and a forged
+    header matches its source by construction.
+
+    Both suffixes are exercised, and ``git status`` is asserted to print nothing
+    first: without that premise the test could pass because status happened to
+    see the cache, not because the surface scan refused it.
+    """
+    for suffix in (".pyc", ".pyo"):
+        repo = _make_surface_repo(tmp_path / suffix.lstrip("."))
+        # An ignore rule is what makes this a REAL lane shape: in a repository
+        # that gitignores byte-caches (this one does), `git status` never
+        # mentions them. Committing the rule first is also what makes the
+        # premise assertion below meaningful.
+        (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n*.pyo\n",
+                                         encoding="utf-8")
+        assert _git_commit(repo, "ignore: byte-caches")
+        cache = repo / "tortoise" / "__pycache__" / f"ask_lane{suffix}"
+        cache.parent.mkdir()
+        cache.write_bytes(b"\x00forged byte-cache: not in any sha\n")
+        assert m._git(repo, "status", "--porcelain",
+                      "--untracked-files=normal").stdout.strip() == "", (
+            "the fixture did not reproduce git hiding an untracked byte-cache")
+        identity = m.code_identity(repo)
+        assert identity["dirty_paths"], (suffix, identity)
+        assert "byte-cache" in identity["dirty_paths"][0], identity
+        # The remedy is named, because the refusal IS reachable in a real
+        # checkout (pytest writes caches) and a lane must know what clears it.
+        assert "__pycache__" in identity["dirty_paths"][0], identity
+
+
+def test_a_TRACKED_byte_cache_is_refused_too(tmp_path):
+    """FAIL-BEFORE: a COMMITTED ``.pyc`` was invisible to both oracles.
+
+    The surface scan only refused a non-``H`` index tag, and a committed
+    byte-cache carries the ordinary ``H`` — while ``git status`` calls the tree
+    clean because nothing about it changed. The guard refuses byte-caches over
+    every set it checks (#3712: untracked, tracked, present at the rev), so a
+    committed cache is refused on the same ground: CPython prefers it over the
+    ``.py`` beside it.
+    """
+    repo = _make_surface_repo(tmp_path)
+    cache = repo / "tools" / "probe_step.pyc"
+    cache.write_bytes(b"\x00forged byte-cache: part of the sha\n")
+    assert _git_commit(repo, "a committed byte-cache")
+    assert m._git(repo, "status", "--porcelain",
+                  "--untracked-files=normal").stdout.strip() == "", (
+        "the fixture did not reproduce a clean status over a tracked cache")
+    identity = m.code_identity(repo)
+    assert identity["dirty_paths"], identity
+    assert "byte-cache" in identity["dirty_paths"][0], identity
+
+
+def test_an_ordinary_untracked_module_is_reported_ONCE_without_an_ignore_claim(
+        tmp_path):
+    """FAIL-BEFORE: ONE file was reported TWICE, as "2 uncommitted path(s)",
+    and the reason said an ignore rule hid it — sending the operator to look for
+    a `.gitignore` entry that does not exist.
+
+    ``git ls-files --others`` without ``--exclude-standard`` returns EVERY
+    untracked file, ignored or not, so the ordinary "write a new module under
+    `tools/`, run it, then commit" lane shape hit both scans. The collapsed
+    directory shape is pinned too: `--untracked-files=normal` prints
+    `?? tools/newdir/` and not its contents, so a file inside it must dedupe
+    against that row rather than exact-match a path status never printed.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / "tools" / "new_tool.py").write_text("VALUE = 2\n", encoding="utf-8")
+    nested = repo / "tools" / "newdir"
+    nested.mkdir()
+    (nested / "nested_module.py").write_text("VALUE = 3\n",
+                                              encoding="utf-8")
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    assert "tools/new_tool.py" in status and "tools/newdir/" in status, status
+    identity = m.code_identity(repo)
+    dirty = identity["dirty_paths"]
+    # One row per reported path: the two status rows and NOTHING re-reported.
+    assert len(dirty) == 2, dirty
+    assert dirty.count("tools/new_tool.py") == 1, dirty
+    assert not any("nested_module.py" in path for path in dirty), dirty
+    assert not any("ignore rule" in path for path in dirty), dirty
+
+
+def test_an_UNTRACKED_byte_cache_is_reported_ONCE(tmp_path):
+    """FAIL-BEFORE: ONE untracked ``.pyc`` became "2 uncommitted path(s)".
+
+    ``git ls-files --others`` without ``--exclude-standard`` returns EVERY
+    untracked file, so in a repository that does NOT gitignore byte-caches
+    ``git status`` prints the same ``?? tools/probe_step.pyc`` the surface scan
+    finds. The byte-cache branch appended BEFORE the status dedupe, so the one
+    file got a status row and the aggregate byte-cache row — the exact
+    inflation the ordinary-module test above pins, one branch over, and the
+    opposite of the docstring's promise that a path status saw needs no second
+    row. The repository here deliberately has NO ``.gitignore``: that is what
+    makes status list the cache, and the premise is asserted before the
+    count so the test cannot pass because status happened to stay silent.
+    """
+    repo = _make_surface_repo(tmp_path)
+    cache = repo / "tools" / "probe_step.pyc"
+    cache.write_bytes(b"\x00forged byte-cache: uncommitted\n")
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    assert "tools/probe_step.pyc" in status, (
+        "the fixture did not reproduce a byte-cache git status DOES list")
+    dirty = m.code_identity(repo)["dirty_paths"]
+    # One file, one row: the status row stands alone, the aggregate row must
+    # not re-count it.
+    assert dirty == ["tools/probe_step.pyc"], dirty
+
+
+def test_a_C_QUOTED_untracked_path_is_reported_ONCE(tmp_path):
+    """FAIL-BEFORE: ONE non-ASCII untracked file became ``2 uncommitted
+    path(s)``, and the second row said "an ignore rule hides it" about a path
+    ``git status`` had just listed.
+
+    ``git status --porcelain`` C-QUOTES a path carrying non-ASCII bytes and
+    spells them as octal escapes (``"tortoise/\303\2512.py"``) unless
+    ``core.quotePath=false``; ``git ls-files -z`` prints the raw bytes. The
+    dedupe stripped the surrounding quotes but did not UNESCAPE, so
+    ``"tortoise/\303\2512.py"`` never matched ``tortoise/é2.py``: the hidden
+    scan re-reported the file it had just been told about, with the wrong
+    reason, and the recorded path kept its quotes.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / "tortoise" / "é2.py").write_text("VALUE = 2\n", encoding="utf-8")
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    # Non-vacuity: the premise is that git really did quote this path, so the
+    # test cannot pass because quoting happened to be off in the reader's
+    # config (the same trap `--untracked-files=normal` is pinned for).
+    assert "\\303\\251" in status, (
+        f"the fixture did not reproduce a C-quoted status row: {status!r}")
+    dirty = m.code_identity(repo)["dirty_paths"]
+    assert dirty == ["tortoise/é2.py"], dirty
+    assert not any("ignore rule" in path for path in dirty), dirty
+
+
+def test_a_RENAMED_C_quoted_path_is_recorded_as_the_PATHS_not_the_row(
+        tmp_path):
+    """FAIL-BEFORE: a rename recorded ``tortoise/é.py" -> "tortoise/ü.py`` —
+    ONE string that names no path in the tree.
+
+    ``code_identity`` unquoted the WHOLE status row, so for a rename it stripped
+    only the OUTERMOST quotes and kept the inner ones: the dirty path carried
+    into the observations, and echoed in the publish refusal, was a string no
+    ``git`` resolves. ``_status_covered`` already split on ``" -> "`` before
+    unquoting, which is why the dedupe still worked by luck — two parse sites,
+    one right. Both sides are recorded, each decoded, and the collapse case is
+    pinned by the untracked-directory test above.
+    """
+    repo = _make_surface_repo(tmp_path)
+    (repo / "tortoise" / "é.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert _git_commit(repo, "a module that is about to move")
+    assert m._git(repo, "mv", "tortoise/é.py", "tortoise/ü.py").returncode == 0
+    status = m._git(repo, "status", "--porcelain",
+                    "--untracked-files=normal").stdout
+    # Non-vacuity: the fixture really did produce a C-quoted RENAME row, so the
+    # split below is exercised rather than skipped by a quoting config.
+    assert status.startswith("R"), status
+    assert status.count('\\303') == 2 and " -> " in status, status
+
+    dirty = m.code_identity(repo)["dirty_paths"]
+    assert "tortoise/é.py" in dirty, dirty
+    assert "tortoise/ü.py" in dirty, dirty
+    # The property, not just the spelling: EVERY recorded row is a path git
+    # answers for — present in the worktree, or in the recorded commit.
+    for path in dirty:
+        in_worktree = (repo / path).exists()
+        at_commit = m._git(repo, "cat-file", "-e", f"HEAD:{path}").returncode == 0
+        assert in_worktree or at_commit, (
+            f"the recorded dirty path {path!r} resolves nowhere in the tree")
+    assert not any('" -> "' in path for path in dirty), dirty
+
+
+def test_the_reproduce_instructions_carry_the_byte_code_free_spelling(
+        shared_run, tmp_path):
+    """FAIL-BEFORE: §6 and the pre-registration template printed a ``run``
+    command that the run-start guard REFUSES.
+
+    The report's §6 is the audit surface a reader reproduces the numbers from,
+    so handing them a command that exits 1 — on any tree, cache-free or not —
+    defeats the artifact this change exists to make honest.
+
+    §6 is the surface pinned here, and ONLY §6. The committed
+    ``tests/eval/ask/preregistration.json``'s ``reproduce.run`` is a hash-bound
+    historical record that the report's binding re-hashes, so amending it is
+    the owner's call on #9097 — ``test_preregistration_pins_the_corpus_and_the_
+    protocol`` (``committed == fresh``) is the guard that keeps this change
+    from drifting the protocol as a side effect.
+    """
+    prereg, _ = _prereg(tmp_path)
+    scored = copy.deepcopy(shared_run["scored"])
+    receipt = m.build_receipt(
+        scored=scored, commit="a" * 40, cost_usd=0.0,
+        commit_binding=_binding("a" * 40, scored["corpus_hash"]))
+    text = m.render_report(receipt=receipt, scored=scored, prereg=prereg,
+                           prereg_sha256="sha256:" + "0" * 64)
+    reproduction = text.split("## 6.", 1)[1]
+    run_lines = [line for line in reproduction.splitlines()
+                 if "measure_ask_distilled run" in line]
+    assert run_lines, reproduction
+    assert all("python -B -m" in line for line in run_lines), run_lines
+
+
+def test_the_run_REFUSES_to_start_when_the_interpreter_would_write_byte_caches(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE: the documented ``run`` command measured for minutes and
+    then could not be published — and the remedy it printed LOOPED.
+
+    ``run_protocol`` launches ``tools.longmem_eval.run`` and ``full_context``
+    with ``-B``; it never launches this module, so the byte-code-free property
+    the docstrings and the README claimed was inherited is this command's OWN.
+    A bare interpreter caches this module (and its imports) BEFORE any code here
+    runs, so the recorded identity carries byte-caches, ``publish`` refuses, and
+    deleting them is undone by the next identical launch.
+
+    ``run_sealed`` is stubbed: the assertion is that the refusal lands BEFORE
+    the measurement, which a test that actually ran the corpus could not.
+    A stub also makes the pre-fix behaviour fail loudly (the stub report has no
+    cases) instead of measuring for minutes.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or {})
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    out = tmp_path / "obs.json"
+    with pytest.raises(SystemExit) as exc:
+        m._main(["run", "--out", str(out)])
+    assert calls == [], "the refusal must land BEFORE the measurement"
+    assert not out.exists(), "a refused run writes no observations"
+    message = str(exc.value)
+    # The refusal must carry the REMEDY, not just the objection: earlier
+    # revisions made the operator loop, because the only printed remedy was
+    # "delete the caches" — which the next identical launch undoes.
+    assert "__pycache__" in message, message
+    assert "PYTHONDONTWRITEBYTECODE=1" in message, message
+    assert "byte-cache" in message, message
+    # …and the corrected claim about WHO launches this module, since the false
+    # "run_protocol already passes -B" is what left the requirement unwired.
+    assert ("NOT launched by `tools/longmem_eval/run_protocol.py`" in message), \
+        message
+
+
+def test_the_run_PROCEEDS_when_the_interpreter_is_byte_code_free(
+        tmp_path, monkeypatch):
+    """The other half of the refusal: ``-B`` / ``PYTHONDONTWRITEBYTECODE=1`` is
+    ACCEPTED, so the guard refuses the launch that loses the record — not the
+    one that keeps it.
+
+    ``_REPO_ROOT`` is the tree ``run`` records (it is deliberately NOT a flag),
+    so a tmp repository is pinned here: the real checkout normally carries
+    ``__pycache__`` from its own test session, and this test is about the
+    INTERPRETER half, not about a tree that would be refused for the other
+    reason (:func:`test_the_run_REFUSES_to_start_over_a_tree_that_already_
+    carries_byte_caches` covers that one).
+    """
+    repo = _make_surface_repo(tmp_path)
+    calls: list[dict] = []
+    report = {"schema": m.RUN_SCHEMA, "cases": [], "arms": [],
+              "code_identity": {"commit": None, "dirty_paths": []}}
+    monkeypatch.setattr(m, "_REPO_ROOT", repo)
+    monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or report)
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    out = tmp_path / "obs.json"
+    assert m._main(["run", "--out", str(out)]) == 0
+    assert len(calls) == 1, "a byte-code-free launch must reach the measurement"
+    assert calls[0]["repo_root"] == repo, calls[0]["repo_root"]
+    assert json.loads(out.read_text(encoding="utf-8"))["schema"] == m.RUN_SCHEMA
+
+
+def test_the_run_REFUSES_to_start_over_a_tree_that_already_carries_byte_caches(
+        tmp_path, monkeypatch):
+    """FAIL-BEFORE: the flag check passed a tree it claimed to protect.
+
+    ``-B``/``PYTHONDONTWRITEBYTECODE=1`` stop caches being WRITTEN and remove
+    none, so an operator who follows the README's summary — set the env var —
+    over a tree an earlier launch already cached measures for minutes and is
+    then refused at publish. That is the outcome this guard exists to prevent,
+    and it validated the interpreter's flag instead of the tree.
+
+    ``run_sealed`` is stubbed, so the assertion is the ORDERING: the refusal
+    lands before the measurement.
+    """
+    repo = _make_surface_repo(tmp_path)
+    cache = repo / "tools" / "__pycache__" / "probe_step.cpython-312.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"\x00forged byte-cache: already on disk\n")
+    calls: list[dict] = []
+    monkeypatch.setattr(m, "_REPO_ROOT", repo)
+    monkeypatch.setattr(m, "run_sealed", lambda **kw: calls.append(kw) or {})
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    out = tmp_path / "obs.json"
+    with pytest.raises(SystemExit) as exc:
+        m._main(["run", "--out", str(out)])
+    assert calls == [], "the refusal must land BEFORE the measurement"
+    assert not out.exists(), "a refused run writes no observations"
+    message = str(exc.value)
+    # Both halves of the remedy: remove the caches AND launch byte-code-free.
+    assert "already carries byte-caches" in message.lower(), message
+    assert "-name __pycache__" in message, message
+    assert "PYTHONDONTWRITEBYTECODE=1" in message, message
+
+
+def test_a_dirty_tree_is_DETECTED_and_refused_end_to_end(bound_repo, tmp_path,
+                                                         capsys):
+    """FAIL-BEFORE with `code_identity` forced clean: this published (rc 0).
+
+    The identity is COMPUTED from a genuinely dirty repository — a modified
+    tracked file and an untracked one — and carried through `run_sealed` and
+    `score`, so nothing in the chain is injected. The refusal must then come
+    from the record the run made.
+    """
+    repo = bound_repo["repo"]
+    tracked = repo / "run.marker"
+    tracked.write_text("edited after the run\n", encoding="utf-8")
+    (repo / "untracked_note.txt").write_text("never committed\n",
+                                              encoding="utf-8")
+    # ⛔ try/finally: `bound_repo` is MODULE-scoped, so an assertion that fires
+    # below would otherwise leave HEAD dirty and fail every later test in the
+    # file for a reason that is not its own subject.
+    try:
+        identity = m.code_identity(repo)
+        assert "run.marker" in identity["dirty_paths"], identity
+        assert "untracked_note.txt" in identity["dirty_paths"], identity
+
+        run = m.run_sealed(corpus_root=bound_repo["corpus_dir"], repo_root=repo,
+                           reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+        assert run["code_identity"]["dirty_paths"], "the run lost the dirty paths"
+        scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
+                         judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+        scored_path = tmp_path / "scored.json"
+        scored_path.write_text(json.dumps(scored), encoding="utf-8")
+        report = tmp_path / "run-report.md"
+        receipt = tmp_path / "receipt.json"
+        rc = m._main(_publish_argv(
+            scored_path=scored_path, commit=bound_repo["run_commit"], report=report,
+            receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+            prereg=bound_repo["prereg_path"], repo=repo))
+        err = capsys.readouterr().err
+        assert rc == 2, "a run from a dirty tree must never be published"
+        assert "uncommitted path" in err and "untracked_note.txt" in err, err
+        assert not report.exists() and not receipt.exists()
+    finally:
+        # Leave the fixture as the other tests expect it (the module is scoped).
+        m._git(repo, "checkout", "--", "run.marker")
+        (repo / "untracked_note.txt").unlink(missing_ok=True)
+    assert m.code_identity(repo)["dirty_paths"] == []
+
+
+def test_a_git_read_that_FAILS_is_not_a_clean_tree(tmp_path, capsys):
+    """FAIL-BEFORE with either failed-read branch defaulting to ``[]``/``pass``:
+    this published a number attributed to a tree nobody measured.
+
+    ``git status`` and ``git ls-files`` answer "was the tree clean?", and both
+    fail with EMPTY stdout when git cannot read its own index. Folding that
+    failure into `dirty_paths == []` is a fail-open on the one question this
+    record exists to answer — the same shape as the ``--untracked-files`` config
+    trap above, and it was pinned by NOTHING: both branches could be flipped to
+    a plausible "git can't tell, so assume clean" and the whole file stayed
+    green, because every other test measures a git answer that SUCCEEDS.
+
+    The fixture corrupts ``.git/index`` so ``HEAD`` still resolves (the receipt's
+    commit is derivable) while the cleanliness question is unanswerable — a
+    truncated index, not a missing repository, so this cannot pass because git
+    died on something the other tests already cover. Both failure rows are
+    asserted independently, so flipping EITHER branch reddens this test.
+    """
+    fixture = _make_bound_repo(tmp_path)
+    repo = Path(fixture["repo"])
+    index = repo / ".git" / "index"
+    original_index = index.read_bytes()
+    try:
+        index.write_bytes(b"not an index git can read")
+        # Non-vacuity: the two premises that make this the RIGHT shape. HEAD is
+        # still resolvable (so a publish of the recorded commit is reachable),
+        # and both cleanliness oracles really do fail.
+        assert m._resolve_commit(repo, "HEAD") == fixture["run_commit"]
+        assert m._git(repo, "status", "--porcelain",
+                      "--untracked-files=normal").returncode != 0
+        assert m._git(repo, "ls-files", "-z", "-v", "--",
+                      *m.EXECUTED_SURFACE).returncode != 0
+
+        identity = m.code_identity(repo)
+        status_row = "<git status failed: the tree is not provably clean>"
+        hidden_row = "<git ls-files failed: the tree is not provably clean>"
+        assert identity["commit"] == fixture["run_commit"], identity
+        assert status_row in identity["dirty_paths"], (
+            "a status that FAILED read as a clean tree", identity)
+        assert hidden_row in identity["dirty_paths"], (
+            "a failed ls-files read as 'nothing hidden'", identity)
+
+        run = m.run_sealed(corpus_root=fixture["corpus_dir"], repo_root=repo,
+                           reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+        assert run["code_identity"]["dirty_paths"], (
+            "the run lost the unreadable-tree rows")
+        scored = m.score(run_report=run, corpus_root=fixture["corpus_dir"],
+                         judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+        scored_path = tmp_path / "scored.json"
+        scored_path.write_text(json.dumps(scored), encoding="utf-8")
+        report = tmp_path / "run-report.md"
+        receipt = tmp_path / "receipt.json"
+        rc = m._main(_publish_argv(
+            scored_path=scored_path, commit=fixture["run_commit"],
+            report=report, receipt=receipt,
+            corpus_root=fixture["corpus_dir"], prereg=fixture["prereg_path"],
+            repo=repo))
+        err = capsys.readouterr().err
+        assert rc == 2, "an unreadable tree must never be published"
+        assert "uncommitted path" in err and "not provably clean" in err, err
+        assert not report.exists() and not receipt.exists(), (
+            "a refused publish wrote an artifact")
+    finally:
+        index.write_bytes(original_index)
+    assert m.code_identity(repo)["dirty_paths"] == []
+
+
+def test_a_tree_that_moves_WHILE_the_run_measures_is_refused(
+        bound_repo, tmp_path, capsys):
+    """FAIL-BEFORE with the identity captured AFTER the case loop: this published.
+
+    A real reader call takes seconds; a lane that commits while the run is in
+    flight leaves a clean worktree at a NEWER commit. Recording the identity at
+    the end would then name that newer commit as "the tree the numbers came
+    from" — the exact false PASS this record exists to close, reached with no
+    misbehaviour at all. The identity is read BEFORE the run and re-read after
+    it, and a start≠end pair is refused because no single sha reproduces a run
+    that straddled two trees.
+    """
+    repo = bound_repo["repo"]
+    start_commit = m.code_identity(repo)["commit"]
+
+    moved = []
+
+    def _commit_mid_run(_sdk):
+        """Runs INSIDE the case loop (the gate arm's post-seed hook), so the
+        commit lands while the measurement is in flight — the shape a lane
+        produces when it lands its own work between starting a run and reading
+        its numbers. Idempotent: the hook fires once per gate arm, and only the
+        FIRST call has anything to commit."""
+        if moved:
+            return
+        moved.append(1)
+        (repo / "mid_run.marker").write_text("landed mid-run\n",
+                                            encoding="utf-8")
+        m._git(repo, "add", "mid_run.marker")
+        assert _git_commit(repo, "moved during the run")
+
+    run = m.run_sealed(corpus_root=bound_repo["corpus_dir"], repo_root=repo,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])),
+                       mutate=_commit_mid_run,
+                       mutate_label="test hook: the tree moved mid-run")
+    # ⛔ try/finally: `bound_repo` is MODULE-scoped. Without it, one failing
+    # assertion below leaves HEAD at the mid-run commit and every later test in
+    # the file fails for a reason that is not its own subject.
+    try:
+        identity = run["code_identity"]
+        assert identity["commit"] == start_commit, (
+            "the record must name the tree the run STARTED on")
+        assert identity["at_end"]["commit"] != start_commit, (
+            "the run did not notice that HEAD moved under it")
+
+        scored = m.score(run_report=run, corpus_root=bound_repo["corpus_dir"],
+                         judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+        scored_path = tmp_path / "scored.json"
+        scored_path.write_text(json.dumps(scored), encoding="utf-8")
+        report = tmp_path / "run-report.md"
+        receipt = tmp_path / "receipt.json"
+        rc = m._main(_publish_argv(
+            scored_path=scored_path, commit=start_commit, report=report,
+            receipt=receipt, corpus_root=bound_repo["corpus_dir"],
+            prereg=bound_repo["prereg_path"], repo=repo))
+        err = capsys.readouterr().err
+        assert rc == 2, "a run that straddled two trees must never be published"
+        assert "CHANGED while the run was in progress" in err, err
+        assert not report.exists() and not receipt.exists()
+    finally:
+        # Leave the module-scoped fixture where the other tests expect it.
+        m._git(repo, "checkout", "-q", start_commit)
+    assert m.code_identity(repo)["commit"] == start_commit
+
+
+def test_an_absent_record_never_renders_as_a_clean_tree(shared_run, tmp_path):
+    """FAIL-BEFORE: `(identity or {}).get('dirty_paths') or []` rendered
+    "clean at run time" for a receipt that carried NO record at all — the
+    fail-open default in the one function the README calls the audit surface."""
+    scored = copy.deepcopy(shared_run["scored"])
+    scored.pop("code_identity", None)
+    receipt = m.build_receipt(
+        scored=scored, commit="a" * 40, cost_usd=0.0,
+        commit_binding=_binding("a" * 40, scored["corpus_hash"]))
+    assert "code_identity" not in receipt, "nothing to render — that is the point"
+    prereg, _ = _prereg(tmp_path)
+    text = m.render_report(receipt=receipt, scored=scored, prereg=prereg,
+                           prereg_sha256="sha256:" + "0" * 64)
+    assert "NOT RECORDED" in text
+    assert "clean at run time" not in text
+
+    # ⛔ And a record that NAMES NO TREE — `code_identity(None)`, the shape a
+    # run without a repository produces — is the same assertion with an empty
+    # `dirty_paths` list: a list, and empty, so a renderer that checks only the
+    # list renders "clean at run time" beside a commit column of "—".
+    nameless = copy.deepcopy(scored)
+    nameless["code_identity"] = m.code_identity(None)
+    assert nameless["code_identity"]["commit"] is None
+    assert nameless["code_identity"]["dirty_paths"] == []
+    receipt = m.build_receipt(
+        scored=nameless, commit="a" * 40, cost_usd=0.0,
+        commit_binding=_binding("a" * 40, nameless["corpus_hash"]))
+    text = m.render_report(receipt=receipt, scored=nameless, prereg=prereg,
+                           prereg_sha256="sha256:" + "0" * 64)
+    assert "NOT RECORDED" in text
+    assert "clean at run time" not in text
+
+
+def test_untracked_files_are_seen_even_when_git_is_configured_to_hide_them(
+        bound_repo):
+    """FAIL-BEFORE without `--untracked-files=normal`: this read as CLEAN.
+
+    `git status --porcelain` answers "was the tree clean?" using the READER's
+    git config, so `status.showUntrackedFiles=no` — a common setting on a
+    repository this size — makes an untracked, importable file invisible and the
+    tree reads clean. The question must be asked of the TREE, not of the
+    operator's config.
+    """
+    repo = bound_repo["repo"]
+    assert m._git(repo, "config", "status.showUntrackedFiles", "no").returncode == 0
+    try:
+        (repo / "invisible_module.py").write_text("X = 1\n", encoding="utf-8")
+        # The premise: with the config in force, an unpinned ask says "clean".
+        unpinned = m._git(repo, "status", "--porcelain")
+        assert unpinned.stdout.strip() == "", (
+            "the fixture did not reproduce the hiding config")
+        identity = m.code_identity(repo)
+        assert "invisible_module.py" in identity["dirty_paths"], identity
+    finally:
+        m._git(repo, "config", "--unset", "status.showUntrackedFiles")
+        (repo / "invisible_module.py").unlink()
+    assert m.code_identity(repo)["dirty_paths"] == []
+
+
+def test_an_end_record_that_cannot_say_whether_it_was_clean_is_refused(
+        shared_run):
+    """`(at_end.get('dirty_paths') or [])` folded an ABSENT key into "clean".
+
+    The start half type-checks the field, so `None`/`""`/`{}` cannot read as
+    clean there; the end half folded it, and a record that cannot say whether
+    the END tree was clean is not evidence that it was.
+    """
+    scored = copy.deepcopy(shared_run["scored"])
+    receipt = _receipt(scored)
+    del receipt["code_identity"]["at_end"]["dirty_paths"]
+    assert any("at_end.dirty_paths: expected a list" in issue
+               for issue in m.validate_ask_receipt(receipt))
+
+    # The same record with the field present is valid: the refusal is about the
+    # missing datum, not about the record's shape in general.
+    assert m.validate_ask_receipt(_receipt(copy.deepcopy(shared_run["scored"]))) == []
