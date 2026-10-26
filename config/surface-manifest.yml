@@ -119,9 +119,11 @@ response_fields:
   emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, the end-only `unknown`
     marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant (`TBD`
     — no granularity to claim; #9201, and #9244 for a caller-DECLARED token: a declaration annotates a bound, it
-    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change end_state,
-    which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no end at
-    all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and end_state'
+    cannot summon one — the same gate the start row records, applied to BOTH ends; null here pairs with
+    end_state `unknown`, because a stored end that names no instant is an un-datable end — owner ruling 2026-10-25,
+    #9202). ABSENT (not null) when the window has no
+    end at all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and
+    end_state'
   unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state
@@ -202,18 +204,19 @@ response_fields:
   emitted_when: '#2350 — the additive precision block on EVERY chain entry and on each resolved entry: valid_from_precision
     (year|month|day, or null for a PRESENT bound that names no instant — #9201), valid_to_precision (year|month|day,
     the end-only `unknown`, or null for a present un-datable end), end_state (open|known|unknown; a stored-but-un-datable
-    END still reads `known` until #9202''s owner ruling). Resolved by `window_read_fields` in tortoise/validity.py,
+    END reads `unknown` — owner ruling 2026-10-25, #9202). Resolved by `window_read_fields` in tortoise/validity.py,
     the ONE read-projection home'
   unchanged_when_off: n/a — not flag-gated; additive keys, and a legacy dated window still reads as day / open
 - response: sdk:get_historical_knowledge
   field: end_state_unknown
   emitted_when: '#2350 — only when at least one COVERING candidate''s end is un-datable (validToPrecision = unknown
-    with no validTo); true, and always alongside indeterminate_end_ids'
+    with no validTo, or a stored validTo that names no instant — owner ruling 2026-10-25, #9202); true, and always
+    alongside indeterminate_end_ids'
   unchanged_when_off: yes — absent when no covering candidate has an unknown end, so those replies stay byte-identical
 - response: sdk:get_historical_knowledge
   field: indeterminate_end_ids
-  emitted_when: the same condition as end_state_unknown, always alongside it — the ids of the covering candidates
-    whose end is un-datable (#2350)
+  emitted_when: 'the same condition as end_state_unknown, always alongside it — the ids of the covering candidates
+    whose end is un-datable (#2350, #9202)'
   unchanged_when_off: yes — absent when no covering candidate has an unknown end
 - response: sdk:capture_session
   field: graph_ops
