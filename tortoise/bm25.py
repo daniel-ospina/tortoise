@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections.abc import Mapping, Sequence
 
 from .env_truthy import env_flag
@@ -270,22 +271,28 @@ def bm25_rank(
 ) -> list[tuple[str, float]]:
     """``[(doc_id, score), ...]`` ranked descending — the shape a leg returns.
 
-    The sort key is ``(-score, doc_id)``, not ``-score``: a score tie must not
-    fall through to insertion order (#3019 — every other leg in
-    ``search_engine`` makes the same pair, because RRF is rank-based and an
-    unstable tie makes the fused order a function of dict order).
+    The sort key is ``(score, recency, doc_id)`` — all descending — not
+    ``-score``: a score tie must not fall through to insertion order (#3019 —
+    RRF is rank-based and an unstable tie makes the fused order a function of
+    dict order), and it must not fall through to OLDEST-first either (#10121).
+
+    ``recency`` is supplied by the caller because the arm cannot derive it from
+    text: ``run_bm25_query`` reads ``coalesce(n.updatedAt, n.createdAt, '')``
+    alongside each document and hands it over. A doc missing from the map sorts
+    as ``''`` — OLDEST — which is exactly how
+    :func:`tortoise.search_engine.recency_tie_clause` treats an undated row.
+
+    Why the direction matters (measured, #10121): an arm that ranks a tie
+    oldest-first returns the newest match LAST, and with a ``limit`` it drops
+    it: on a 21-row tie the just-created point was absent from
+    ``run_bm25_query(limit=5)``. Sorting the corpus window newest-first and then
+    ranking it oldest-first is how that survived the first pass at this fix.
     """
     scores = bm25_scores(query, docs, k1=k1, b=b, keep_numeric=keep_numeric)
-    # ⛔ The arm ranks its OWN corpus, so it must resolve a tie like every other
-    # ranking leg (#10121): recency first, then the id — both DESCENDING. The
-    # previous key was ``(-score, id)`` ASCENDING, i.e. OLDEST-first on this
-    # tree's timestamp-minted ULIDs, so on a tie the arm dropped the NEWEST
-    # match at ``limit`` (measured: absent from ``run_bm25_query(limit=5)`` on a
-    # 21-row tie, rank 20/21).
-    stamp = recency or {}
+    timestamp = recency or {}
     ranked = sorted(
         scores.items(),
-        key=lambda kv: (kv[1], stamp.get(kv[0]) or "", kv[0]),
+        key=lambda kv: (kv[1], timestamp.get(kv[0], ""), kv[0]),
         reverse=True,
     )
     if limit is not None:

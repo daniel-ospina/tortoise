@@ -218,22 +218,38 @@ class TestBM25Scorer:
         assert scores["three"] > scores["one"]
         assert scores["three"] < 3 * scores["one"]
 
-    def test_score_tie_breaks_by_recency_then_id_not_by_dict_order(self):
-        """#3019 + #10121: a tie is a function of the data, NEWEST first.
+    def test_score_tie_breaks_by_id_not_by_dict_order(self):
+        """#3019 + #10121: a tie must be a function of the data, and the data
+        says NEWEST first.
 
-        #3019 closed the dict-order half with ``(-score, id)`` — which on this
-        tree's timestamp-minted ULIDs is OLDEST-first, so the arm ranked its
-        corpus newest-first and then dropped the newest match at ``limit``.
-        #10121 made the tie recency-then-id, both DESCENDING.
+        #3019 closed the "function of dict order" half with ``(-score, id)``,
+        which — because ``id`` is a timestamp-minted ULID — was oldest-first.
+        #10121 made it newest-first: the newest match must not be the one a
+        ``limit`` truncates.
         """
         docs = [("b", "alpha beta"), ("a", "alpha beta")]
         assert [pid for pid, _ in bm25_rank("alpha", docs)] == ["b", "a"]
         assert [pid for pid, _ in bm25_rank("alpha", list(reversed(docs)))] == [
             "b", "a"]
-        # A supplied stamp outranks the id.
-        assert [pid for pid, _ in bm25_rank(
-            "alpha", docs, recency={"a": "2026-10-01", "b": "2026-01-01"}
-        )] == ["a", "b"]
+
+    def test_recency_outranks_the_id_on_a_tie(self):
+        """#10121: the tie follows the RECENCY key the caller supplies.
+
+        Two documents tie on score; the OLDER id holds the NEWER timestamp, so
+        recency must put it first even though the id key alone would not. This
+        is the arm's half of the shared rule — without it the arm ranks its
+        corpus newest-first and then throws the newest match away at
+        ``limit`` (measured: absent from ``limit=5`` on a 21-row tie).
+        """
+        docs = [("b", "alpha beta"), ("a", "alpha beta")]
+        ranked = [pid for pid, _ in bm25_rank(
+            "alpha", docs, recency={"a": "2026-10-01T00:00:00Z",
+                                    "b": "2026-01-01T00:00:00Z"})]
+        assert ranked == ["a", "b"], ranked
+        # An unlisted doc sorts as oldest, exactly as the shared clause does.
+        ranked = [pid for pid, _ in bm25_rank(
+            "alpha", docs, recency={"b": "2026-01-01T00:00:00Z"})]
+        assert ranked == ["b", "a"], ranked
 
     def test_no_shared_token_is_absent_rather_than_zero(self):
         """"unscorable" and "scored zero" must stay distinguishable."""
@@ -444,8 +460,9 @@ class TestReadPath:
         the dense leg's (``LEXICAL_WEIGHT_MAX``), so the arm RE-RANKS within the
         pool rather than vaulting past the dense leg's whole list — that is the
         recorded production balance (``{"vector": 1.5}``, k=60, #1657) and
-        moving it is a measurement decision (#8486), not a lane's. So this test
-        asserts a strict rank IMPROVEMENT, not rank 1.
+        moving it is a measurement decision (#8486), not a lane's. So the
+        FUSED rank claim is "does not regress" (below), and the STRICT claim is
+        the one the arm actually makes: the target's LEXICAL rank.
 
         Mutation: drop the ``raw_results["fts"] = _bm25_hits`` assignment (the
         lexical arm disabled) → the lexical score assertions below go red.
@@ -460,14 +477,22 @@ class TestReadPath:
         topic documents sit in a DENSE tie cluster (vector 0.9496 ×4 vs the
         target's 0.4142) that the bounded lexical weight cannot cross (measured
         gate-off rrf 0.0410/0.0403/0.0397/0.0391/0.0385, gate-on
-        0.0400/0.0398/0.0397/0.0396/0.0395 — the target is last in both). The
-        arm's MECHANISM still lands where it always did: the target carries the
-        strongest lexical score with the gate on (1.3863 vs 0.5754 for every
-        topic doc — the assertion below), which is what the arm is for. So the
-        fused-rank claim becomes "does not regress", and the score claim stays
-        strict. This is the "a lexical rank gain is worth roughly half a dense
-        place" bound this module already documents, now visible on a fixture
-        whose ordering no longer supplies a free lift.
+        0.0400/0.0398/0.0397/0.0396/0.0395 — the target is last in both).
+        NOTE the direction of that cause: the topics are NOT tied on the lexical
+        leg (they score 3.0 against the target's 2.0, before and after), so
+        this is not a tie-order effect here. The lift disappeared because the
+        DENSE leg's equal-distance topic order flipped with #10121's recency tie
+        while the lexical leg's did not — the two legs then handed the same row
+        different ranks, so the best lexical rank was no longer paired with the
+        best dense rank and the fused spread compressed. That pairing mismatch
+        is exactly what the arm's own recency sort (``bm25_rank(recency=...)``)
+        now fixes; re-measure this fixture's fused delta after that lands rather
+        than trusting either number.
+
+        What stays STRICT is the arm's own mechanism: with the gate on the
+        target carries the strongest lexical score (1.3863 vs 0.5754 for every
+        topic doc) and therefore the best LEXICAL rank — asserted below, and it
+        is what the arm is for. The fused-rank claim is "does not regress".
         """
         sdk, target = _e2e_sdk()
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
@@ -495,18 +520,18 @@ class TestReadPath:
             f"WORSE than the shipped scorer did; off={off_ids}, on={on_ids}")
 
         def _lexical_rank(rows: list[dict]) -> int:
-            """Rows scoring strictly higher than the target on the lexical leg."""
+            """Rank by lexical SCORE within the page: rows scoring strictly
+            higher than the target. Strictly-better rather than position, so a
+            tie among the peers cannot make the claim look tighter than it is."""
             target_score = next(
                 r["scores"]["fts"] for r in rows if r["id"] == target)
             return sum(1 for r in rows
                        if r["id"] != target
                        and r["scores"]["fts"] > target_score)
 
-        # THE STRICT CLAIM lives where the arm acts: the LEXICAL rank. The fused
-        # position does not move on this fixture because the four topic
-        # documents sit in a DENSE tie cluster the bounded lexical weight cannot
-        # cross (#8488's recorded effect size: a lexical rank gain is worth
-        # roughly half a dense place at k=60). Measured 4 -> 0.
+        # THE STRICT CLAIM (#10121 review): the arm's mechanism is a lexical
+        # re-scoring, so the lexical rank is where it must show. Measured
+        # 4 -> 0 on this fixture.
         assert _lexical_rank(on) < _lexical_rank(off), (
             "the arm must strictly improve the target's LEXICAL rank; "
             f"off={_lexical_rank(off)}, on={_lexical_rank(on)}")
@@ -829,23 +854,25 @@ class TestReadPath:
             self, monkeypatch, lexicon_embedder):
         """A corpus WIDER than the cap declines — the whole-label rows survive.
 
-        The shipped leg answers over the WHOLE label (index-backed); the arm's
-        window is the first ``cap`` ids in id order — oldest-first on ULID ids,
-        so the newest documents are invisible to it. Replacing the shipped
-        rows with that window makes the read lexically weaker than the leg it
-        replaced, silently, and #8486 would baseline it as the arm's answer.
-        So the leg returns ``[]`` and records ``declined`` — NOT ``degraded``,
+        The shipped leg answers over the WHOLE label (index-backed); the arm
+        reads a ``cap``-row WINDOW of it. Replacing the shipped rows with that
+        window makes the read a subset dressed as a complete ranking, silently,
+        and #8486 would baseline it as the arm's answer. So the leg returns
+        ``[]`` and records ``declined`` — NOT ``degraded``,
         which would relabel this complete read as an impaired memory (see
         ``TestDeclineIsNotAReadDegradation``) — the same fail-safe an empty
         arm gets.
 
         The cap is driven through the REAL sdk wiring by wrapping
         ``run_bm25_query`` (the sdk imports it at call time), so the assertion
-        is about the composition, not about a helper called by the test. The
-        target is created LAST, so it holds the highest id and is outside a
-        one-row window. Control first: the same wiring with a cap the corpus
-        fits in DOES change the read — otherwise "unchanged" below could be
-        explained by the arm not being wired at all.
+        is about the composition, not about a helper called by the test. Since
+        #10121 the window holds the NEWEST ``cap`` rows, and the target is
+        created LAST — i.e. it is INSIDE a one-row window rather than outside
+        it (the pre-#10121 story read the other way round; the decline does not
+        depend on the target's position, only on the corpus exceeding the cap).
+        Control first: the same wiring with a cap the corpus fits in DOES change
+        the read — otherwise "unchanged" below could be explained by the arm not
+        being wired at all.
 
         Mutation: return ``ranked`` instead of ``[]`` when over the cap → the
         arm's windowed rows enter the read and ``on == off`` reds.

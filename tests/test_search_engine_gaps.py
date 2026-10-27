@@ -697,7 +697,9 @@ class TestRunVectorQuery:
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("alpha", 0.0), ("zulu", 0.0)]
+        # #10121: the equal-distance tie is recency-then-id DESC, so the
+        # HIGHER id leads. (This pin asserted the pre-#10121 oldest-first order.)
+        assert result == [("zulu", 0.0), ("alpha", 0.0)]
 
     def test_docker_mode_both_signatures_fail_falls_back_to_brute_force(self):
         """#1359: sig A 'not registered' AND sig B fails → brute-force is
@@ -809,7 +811,9 @@ class TestRunVectorQuery:
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api=None)
 
-        assert result == [("alpha", 1.0), ("zulu", 1.0)]
+        # #10121: recency-then-id DESC — the higher id leads (oldest-first was
+        # the pre-#10121 policy).
+        assert result == [("zulu", 1.0), ("alpha", 1.0)]
         assert len(graph.query_calls) == 2
 
     def test_docker_mode_signature_a_carries_a_distance_and_ties_by_id(self):
@@ -821,7 +825,9 @@ class TestRunVectorQuery:
         code could not be fixed by sorting alone).
 
         Two rows tie on distance (0.0), and the engine mock hands them back
-        ``zulu`` first, so ``alpha`` first is reachable only via the id key.
+        ``zulu`` first, so the id key decides — #10121 turned it DESC, so
+        ``zulu`` is the expected lead and ``alpha`` last is reachable only
+        through that key.
         """
         graph = MultiCallGraph([
             ([("zulu", 0.0), ("alpha", 0.0)], None),   # sig A succeeds
@@ -831,7 +837,9 @@ class TestRunVectorQuery:
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api="procedure")
 
-        assert result == [("alpha", 1.0), ("zulu", 1.0)]
+        # #10121: recency-then-id DESC — the higher id leads (oldest-first was
+        # the pre-#10121 policy).
+        assert result == [("zulu", 1.0), ("alpha", 1.0)]
         assert len(graph.query_calls) == 1
         sig_a = graph.query_calls[0][0]
         assert "'embedding', $query_vec, $limit)" in sig_a   # A's argument order
@@ -1008,9 +1016,15 @@ def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
     Three Points are created in DESCENDING id order with IDENTICAL embeddings,
     so every distance ties and the engine's own order is
     ``[tie6214_zulu, tie6214_mike, tie6214_alpha]`` (measured on
-    falkordb-server:v4.16.7 and falkordb:latest). ``[alpha, mike, zulu]`` is
-    unreachable unless the ``(distance, id)`` secondary key is applied:
-    removing that key leaves the engine order and FAILS this test.
+    falkordb-server:v4.16.7 and falkordb:latest). #10121: the tie is
+    ``recency DESC, id DESC``, and the stamps are set so recency and id DISAGREE
+    — ``alpha`` (the LOWEST id) carries the NEWEST ``createdAt`` — so
+    ``[alpha, mike, zulu]`` is reachable only through the RECENCY key, i.e. the
+    column the index signature projects. Dropping that column falls back to
+    ``''`` for every row and the id key then returns the INVERSE order, which
+    FAILS this test: that is the regression this pin exists for (a round-2
+    review measured that deleting the column from both index signatures redded
+    nothing).
 
     WHY THIS IS THE INDEX PATH AND NOT A SUBSTITUTED SCAN: the leg trace's
     ``mechanism`` is asserted to be ``index``, so a silent fall-through to the
@@ -1033,11 +1047,17 @@ def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
         vec = [0.0] * EMBEDDING_DIM
         vec[0] = 1.0
         vec[1] = 1.0
-        for pid in (f"{prefix}zulu", f"{prefix}mike", f"{prefix}alpha"):
+        # Recency OPPOSES id on purpose — see the docstring.
+        stamps = {
+            f"{prefix}zulu": "2026-01-01T00:00:00Z",
+            f"{prefix}mike": "2026-06-01T00:00:00Z",
+            f"{prefix}alpha": "2026-12-01T00:00:00Z",
+        }
+        for pid, stamp in stamps.items():
             g.query(
                 "CREATE (n:Point {id:$id, text:$id, status:'active', "
-                "embedding: vecf32($vec)})",
-                params={"id": pid, "vec": vec})
+                "createdAt:$c, updatedAt:$c, embedding: vecf32($vec)})",
+                params={"id": pid, "vec": vec, "c": stamp})
 
         trace: list[dict] = []
         out = run_vector_query(
@@ -1055,8 +1075,9 @@ def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
             "the vector leg did not answer from the index, so the tie-order "
             f"assertion below would not be about the index path: {trace}")
         assert got == [f"{prefix}alpha", f"{prefix}mike", f"{prefix}zulu"], (
-            "equal-distance rows are not id-ordered on the index path: "
-            f"{got}")
+            "equal-distance rows are not RECENCY-then-id ordered on the index "
+            "path (#10121) — recency and id disagree in this fixture, so the "
+            f"id key alone would return the inverse: {got}")
     finally:
         try:
             g.query(f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")

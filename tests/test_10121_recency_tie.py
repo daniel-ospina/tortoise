@@ -100,6 +100,10 @@ def test_fresh_match_survives_the_tie_at_every_corpus_size():
         rows = run_fts_query(graph, QUERY, limit=10)
         ids = [pid for pid, _ in rows]
         assert len(rows) == 10, f"FIXTURE NOT REACHED (n={n}): leg not saturated"
+        full = run_fts_query(graph, QUERY, limit=n + 5)
+        assert len({round(s, 6) for _, s in full}) == 1, (
+            f"TIE PREMISE BROKEN (n={n}): the corpus no longer scores "
+            f"uniformly — this sweep exists for the all-tied case")
         assert fresh in ids, (
             f"n={n}: a boundary tie must not truncate the NEWEST match out of "
             f"the leg — fresh point absent from {len(rows)} rows (#10121)"
@@ -271,7 +275,167 @@ def test_recency_tie_clause_is_one_shared_expression():
     """
     clause = recency_tie_clause("node", "id")
     assert clause == (
-        "coalesce(node.updatedAt, node.createdAt, '') DESC, node.id DESC"
+        "CASE WHEN coalesce(node.updatedAt, '') = '' "
+        "THEN coalesce(node.createdAt, '') ELSE node.updatedAt END DESC, "
+        "node.id DESC"
     ), clause
-    # The guard is the whole point: a bare property DESC sorts NULL FIRST.
-    assert "coalesce(" in clause and "''" in clause, clause
+    # Both guards are load-bearing: a bare property DESC sorts NULL FIRST, and
+    # a plain coalesce would let an EMPTY updatedAt suppress a valid createdAt.
+    assert "coalesce(node.updatedAt, '') = ''" in clause, clause
+    assert "coalesce(node.createdAt, '')" in clause, clause
+
+
+def test_an_empty_updated_at_falls_through_to_created_at():
+    """The empty-string trap the CASE closes (measured on both engines).
+
+    ``coalesce`` stops at the first non-NULL, so ``updatedAt: ''`` would have
+    been taken as a value and the row would have sorted as OLDEST despite a
+    valid ``createdAt``. No writer stamps ``''`` today; the clause no longer
+    depends on that staying true.
+    """
+    sdk = _sdk()
+    graph = sdk._get_proj().g
+    graph.query(
+        "CREATE (n:Point {id:'empty-updated', content:'capstone-9664 write "
+        "probe', pointKind:'statement', createdAt:'2026-09-01T00:00:00Z', "
+        "updatedAt:''})")
+    graph.query(
+        "CREATE (n:Point {id:'older-dated', content:'capstone-9664 write "
+        "probe', pointKind:'statement', createdAt:'2026-01-01T00:00:00Z', "
+        "updatedAt:'2026-01-01T00:00:00Z'})")
+    ids = [pid for pid, _ in run_fts_query(graph, QUERY, limit=10)]
+    assert ids[:1] == ["empty-updated"], (
+        "a row with an EMPTY updatedAt must fall through to its createdAt "
+        f"rather than sorting as oldest: {ids}")
+
+
+def test_writers_stamp_zero_padded_iso_timestamps():
+    """The lexicographic comparison assumes zero-padded ISO-8601.
+
+    Measured: ``'2026-1-5T00:00:00Z'`` sorts ABOVE ``'2026-06-01T00:00:00Z'``,
+    so an unpadded stamp would silently invert recency. The assumption is
+    pinned at its SOURCE — the writer — rather than left implicit in the clause.
+    """
+    import re
+
+    sdk = _sdk()
+    pid = sdk.create_point("statement", "a point whose stamps are pinned")["id"]
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.createdAt, n.updatedAt",
+        params={"i": pid}).result_set
+    assert rows, "FIXTURE NOT REACHED: the point was not written"
+    from datetime import datetime
+
+    stamp = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+    for value in rows[0]:
+        if value is None:
+            continue
+        text = str(value)
+        assert stamp.match(text), (
+            f"a writer stamped a non-zero-padded timestamp ({value!r}); the "
+            "recency tie compares these as STRINGS, so padding is required")
+        # The SUFFIX matters as much as the padding: ``Z`` and ``+00:00`` are
+        # the same instant but different strings, and the tie is a string
+        # comparison — one authoring format, asserted here.
+        datetime.fromisoformat(text)
+        assert text.endswith(("+00:00", "Z")) and text[-6:] in ("+00:00", ":00:00Z"), (
+            f"a writer stamped a non-canonical UTC suffix ({value!r}) — the tie "
+            "compares these as STRINGS, so every writer must agree on one "
+            "spelling")
+
+
+# ── the two legs that rank themselves ─────────────────────────────────────
+
+
+def test_bm25_arm_keeps_the_newest_match_in_its_own_window():
+    """The arm ranks its own corpus, so it needs the same rule.
+
+    Measured before this pin existed: the corpus WINDOW was newest-first but
+    ``bm25_rank`` still sorted ``(-score, id)`` ASC, so on a 21-row tie the
+    just-created point came back at rank 20 and was dropped by ``limit``.
+
+    FAIL VALUE: revert ``bm25_rank``'s key to ``(-score, id)`` and the fresh
+    point leaves the arm's window.
+    """
+    from tortoise.search_engine import run_bm25_query
+
+    sdk = _sdk()
+    graph = sdk._get_proj().g
+    for content in _lookalikes(20):
+        sdk.create_point("statement", content)
+    fresh = sdk.create_point("statement", QUERY)["id"]
+
+    rows = run_bm25_query(graph, QUERY, limit=5, excluded_statuses=())
+    ids = [pid for pid, _ in rows]
+    assert ids, "FIXTURE NOT REACHED: the arm returned no rows"
+    assert fresh in ids, (
+        "the BM25 arm must keep the NEWEST match inside its own window, not "
+        f"rank it last and truncate it (#10121): {ids}"
+    )
+
+    # The WIRING assertion: the LOWEST-id look-alike (last under the id key
+    # alone) is stamped NEWEST, so it can lead the arm only if
+    # ``run_bm25_query`` really passes its recency map into ``bm25_rank``.
+    # Without this, an edit dropping ``recency=recency`` at the call site stays
+    # invisible — the fresh point also holds a high id, so the assertion above
+    # passes on the id key alone.
+    others = [pid for pid, _ in run_bm25_query(
+        graph, QUERY, limit=25, excluded_statuses=()) if pid != fresh]
+    assert others, "FIXTURE NOT REACHED: no look-alike to restamp"
+    restamped = min(others)
+    graph.query(
+        "MATCH (n:Point {id:$i}) SET n.updatedAt = '2027-01-01T00:00:00Z'",
+        params={"i": restamped})
+    ids2 = [pid for pid, _ in run_bm25_query(
+        graph, QUERY, limit=5, excluded_statuses=())]
+    assert ids2 and ids2[0] == restamped, (
+        "a look-alike stamped NEWER than the fresh point must LEAD the arm "
+        "even though its id sorts last — otherwise the recency map is not "
+        f"reaching bm25_rank (#10121 review): {ids2}"
+    )
+
+
+def test_vector_scan_branch_breaks_equal_distance_ties_newest_first():
+    """The scan branch and the index branch must agree on the tie.
+
+    #10121's review found the two branches tie-breaking in OPPOSITE directions
+    (scan newest-first, index oldest-first), which made the fused order depend
+    on whether an HNSW index happened to exist. Both now use the shared rule;
+    this pins the SCAN side, and the index side is pinned by
+    ``tests/test_search_engine_gaps.py::TestRunVectorQuery``.
+
+    FAIL VALUE: revert the scan branch to ``id ASC`` and the three connected
+    points come back oldest-first.
+    """
+    from tortoise.search_engine import run_vector_query
+
+    sdk = _sdk()
+    graph = sdk._get_proj().g
+    vec = [0.1] * 4
+    # Recency and id point in OPPOSITE directions on purpose: ``aaa`` holds the
+    # NEWEST stamp while ``zzz`` holds the newest ID. A test where both agree
+    # proves only the id key (the review caught exactly that in the first
+    # draft), so the expected order here is reachable through recency ALONE.
+    stamps = {
+        "vec-tie-aaa": "2026-12-01T00:00:00Z",
+        "vec-tie-mmm": "2026-06-01T00:00:00Z",
+        "vec-tie-zzz": "2026-01-01T00:00:00Z",
+    }
+    for pid, stamp in stamps.items():
+        graph.query(
+            "CREATE (n:Point {id:$id, content:$id, pointKind:'statement', "
+            "createdAt:$c, updatedAt:$c})",
+            params={"id": pid, "c": stamp})
+        graph.query(
+            "MATCH (n:Point {id:$id}) SET n.embedding = vecf32($v)",
+            params={"id": pid, "v": vec})
+
+    rows = run_vector_query(graph, vec, limit=10, is_embedded=True,
+                            excluded_statuses=())
+    ids = [pid for pid, _ in rows if str(pid).startswith("vec-tie-")]
+    assert len(ids) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {rows}"
+    assert ids == ["vec-tie-aaa", "vec-tie-mmm", "vec-tie-zzz"], (
+        "equal-distance rows on the SCAN path must be RECENCY-then-id DESC "
+        f"(recency and id disagree here, so the id key alone gives the inverse "
+        f"order): {ids}"
+    )

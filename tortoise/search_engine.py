@@ -1391,9 +1391,28 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
     its direction carries no meaning; branching it per label is precisely how
     the first attempt at this fix got the id-less ``:Object`` case wrong.
     """
+    return f"{recency_key_expr(alias)} DESC, {alias}.{id_field} DESC"
+
+
+def recency_key_expr(alias: str) -> str:
+    """The recency EXPRESSION alone — the one a projection must RETURN.
+
+    Split out of :func:`recency_tie_clause` because #10121's review found the
+    window and the ranking disagreeing: the ORDER BY used the CASE below while
+    the BM25 arm's corpus read and both vector index signatures projected a
+    plain ``coalesce``, so a row stamped ``updatedAt: ''`` (or a numeric stamp)
+    was admitted as the NEWEST by the window and then sorted as OLDEST — or
+    dropped — by the ranking. One expression now decides both.
+
+    The CASE (not a plain ``coalesce``) is load-bearing: ``coalesce`` stops at
+    the first NON-NULL, so ``updatedAt: ''`` would SUPPRESS a valid
+    ``createdAt``. Measured on both engines, the CASE falls through and orders
+    ``['2026-09-01', '2026-01-01', '']``. (``nullif`` is not registered on
+    FalkorDB 4.20.6, hence the explicit comparison.)
+    """
     return (
-        f"coalesce({alias}.updatedAt, {alias}.createdAt, '') DESC, "
-        f"{alias}.{id_field} DESC"
+        f"CASE WHEN coalesce({alias}.updatedAt, '') = '' "
+        f"THEN coalesce({alias}.createdAt, '') ELSE {alias}.updatedAt END"
     )
 
 
@@ -1621,13 +1640,21 @@ def run_fts_query(
 #: and on a WINDOW it returns NO rows at all, recording ``declined=True``
 #: (NOT ``degraded`` — see below). The
 #: shipped graph-side leg answers over the whole label (it is index-backed), so
-#: replacing its rows with a ranking over the first ``cap`` ids in id order —
-#: oldest-first on this tree's ULID ids, i.e. blind to the newest documents,
-#: which are the likeliest lexical answer — would make the read lexically
-#: WEAKER than the leg it replaced, silently, on a store the operator never
-#: measured. Declining keeps the shipped rows (the same fail-safe the empty
-#: arm gets) and leaves the signal in the trace. Raise the cap (or add an
-#: id-descending window) before enabling the arm on a store that large.
+#: replacing its rows with a ranking over only ``cap`` of the label's rows
+#: would make the read a WINDOW masquerading as a complete ranking — silently,
+#: on a store the operator never measured. Declining keeps the shipped rows
+#: (the same fail-safe the empty arm gets) and leaves the signal in the trace.
+#: Raise the cap before enabling the arm on a store that large.
+#:
+#: #10121 fixed the half that made this decline look like a ranking verdict:
+#: the window used to be the first ``cap`` ids in id order — OLDEST-first on
+#: this tree's ULID ids, blind to the newest documents, which are the likeliest
+#: lexical answer. It is now the shared recency order
+#: (:func:`recency_tie_clause`), so the rows that survive the cap are the
+#: NEWEST ones. The decline itself stands, and for a narrower reason than
+#: before: a window is still not the whole-label answer the shipped leg gave,
+#: so the arm still declines rather than silently answering over a subset. The
+#: cap's remaining job is purely a memory/latency bound.
 #:
 #: ⛔ What the decline must NOT cost the read (#8488 follow-up). The decline
 #: used to record ``degraded=True`` so that a measurement could not read a
@@ -1917,7 +1944,7 @@ def run_bm25_query(
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
             "n.search_keys, "
-            "coalesce(n.updatedAt, n.createdAt, '') "
+            f"{recency_key_expr('n')} "
             f"ORDER BY {recency_tie_clause('n', id_field)} LIMIT $cap"
         )
         rows = graph.query(
@@ -1934,8 +1961,8 @@ def run_bm25_query(
         truncated = len(rows) > int(corpus_cap)
         if truncated:
             # DECLINE, do not return a window. The shipped graph-side leg
-            # answered over the whole label; a ranking over the first ``cap``
-            # ids (oldest-first on ULID ids) is not the same answer and is
+            # answered over the whole label; a ranking over only ``cap`` of its
+            # rows is not the same answer and is
             # often a weaker one — so the caller keeps the shipped rows, the
             # same fail-safe an empty arm gets. ``declined`` records WHY the
             # slot was left alone; ``count=0`` because nothing was returned.
@@ -1948,8 +1975,9 @@ def run_bm25_query(
             # an impairment of the memory layer (see ``DEFAULT_BM25_CORPUS_CAP``).
             logger.warning(
                 "BM25 corpus exceeds the %d-row cap — declining to replace "
-                "the shipped lexical rows with a ranking over the first %d "
-                "ids; raise %s or measure on a smaller corpus (#8486)",
+                "the shipped lexical rows with a ranking over only %d of "
+                "the label's rows; raise %s or measure on a smaller corpus "
+                "(#8486)",
                 corpus_cap, corpus_cap, "DEFAULT_BM25_CORPUS_CAP")
             _breaker_record("bm25", True)
             _record(ran=True, degraded=False, reason="empty_results",
@@ -1958,15 +1986,18 @@ def run_bm25_query(
         docs = [
             (row[0], index_text(row[1], row[2])) for row in rows if row[0]
         ]
-        # #10121: hand the arm the recency stamps it cannot derive from text, so
-        # its own tie resolves newest-first like every other leg.
-        _recency = {
+        # #10121: the arm's own tie must follow the SAME recency-then-id rule as
+        # every other leg. It sorts its whole corpus itself, so fixing only the
+        # corpus-read ORDER BY would leave the newest match truncated at this
+        # sort (measured before this fix: the just-created point absent from
+        # ``run_bm25_query(limit=5)`` on a 21-row tie, rank 20 of 21).
+        recency = {
             row[0]: ("" if len(row) <= 3 or row[3] is None else str(row[3]))
             for row in rows if row[0]
         }
         ranked = bm25_rank(
             query, docs, limit=limit, keep_numeric=keep_numeric,
-            recency=_recency)
+            recency=recency)
         _breaker_record("bm25", True)
         _record(ran=True, degraded=False,
                 reason=("ok" if ranked else "empty_results"),
@@ -2268,7 +2299,8 @@ def run_vector_query(
                         f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit, vecf32($query_vec)) "
                         "YIELD node, score "
                         + vec_status_filter +
-                        f"RETURN node.{id_field}, score "
+                        f"RETURN node.{id_field}, score, "
+                        f"{recency_key_expr('node')} AS recency "
                         "LIMIT $limit"
                     )
                 # Signature A (RediSearch-style): repo-pinned docker image
@@ -2288,7 +2320,8 @@ def run_vector_query(
                     "YIELD node "
                     + vec_status_filter +
                     f"RETURN node.{id_field}, "
-                    "vec.cosineDistance(node.embedding, vecf32($query_vec)) AS score "
+                    "vec.cosineDistance(node.embedding, vecf32($query_vec)) AS score, "
+                    f"{recency_key_expr('node')} AS recency "
                     "LIMIT $limit"
                 )
 
@@ -2355,21 +2388,36 @@ def run_vector_query(
             # distance, so they agree on polarity. Cosine distance lies in
             # [0, 2], so `1 - d` lies in [-1, 1] and the [0, 1] clamp still
             # maps a perfect match to 1.0.
-            annotated: list[tuple[float | None, str]] = []
+            # #10121: the equal-distance tie is the SAME recency-then-id rule the
+            # other legs use. Before this, the index branch sorted
+            # ``(distance, id ASC)`` while the scan branch used the recency tie,
+            # so on an indexed store the dense and sparse legs handed DIFFERENT
+            # twins rank 0 — and RRF is rank-based, so the fused order depended
+            # on whether an HNSW index happened to exist. The recency column
+            # rides the cypher RETURN above; a row shape without it (an older
+            # signature, a degraded path) falls back to ``''``, which sorts as
+            # OLDEST exactly as the shared clause does.
+            annotated: list[tuple[float | None, str, str]] = []
             for row in rows:
                 try:
                     distance = float(row[1])
                 except (IndexError, TypeError, ValueError):
                     distance = None
-                annotated.append((distance, row[0]))
-            # An unreadable distance carries no evidence of similarity — rank
-            # it LAST and id-order it among its peers rather than letting it
-            # win a tie. `inf` is the sort key, not the reported score.
+                recency = (
+                    "" if len(row) <= 2 or row[2] is None else str(row[2]))
+                annotated.append((distance, recency, row[0]))
+            # An unreadable distance carries no evidence of similarity — rank it
+            # LAST. `inf` is the sort key, not the reported score. THREE stable
+            # passes express `(distance ASC, recency DESC, id DESC)` without
+            # string negation: id first (the determinism base), then recency,
+            # then the primary key.
+            annotated.sort(key=lambda item: item[2], reverse=True)
+            annotated.sort(key=lambda item: item[1], reverse=True)
             annotated.sort(key=lambda item: (
-                item[0] if item[0] is not None else float("inf"), item[1]))
+                item[0] if item[0] is not None else float("inf")))
             out = [
                 (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
-                for dist, pid in annotated
+                for dist, _recency, pid in annotated
             ]
             if min_similarity is not None and out:
                 # Score is a true cosine similarity now, for BOTH signatures —
