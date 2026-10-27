@@ -2779,9 +2779,32 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # lane NO line exists for the operator to find. A section that offered only the
     # fault grep would present an empty read as "no fault" on a fail-and-fix case —
     # the same fail-open, one cause further out (#10083 review cycle 3, P1).
-    assert re.search(r"No nameable default row", flat), (
-        "the bar's third arm names only the FAULT cause — the no-nameable-row "
-        "refusal is a fail-and-fix too and must be a reading of its own"
+    # ⛔ The VERDICT is the load-bearing half, and it was pinned by a bare 3-word
+    # token (`No nameable default row`) that cannot see it (measured at this head:
+    # `so it is a fail-and-fix as well` → `so it is NOT a fail-and-fix at all`
+    # left all 100 green — #10083 review P2, unfixed across cycles 3-4). A
+    # reading whose verdict can be inverted silently is the exact class this PR
+    # closes: the arm would then contradict the summary sentence above it
+    # (`… it is a fail-and-fix only when … a tenant the record CAN key on`).
+    # The LEAD-IN is pinned with it: "read BOTH" over two causes is what makes
+    # the silent second reading executable — "read ONE" restores the fail-open
+    # the bullet exists to remove.
+    assert re.search(
+        r"TWO readings, because it has two causes; read BOTH before you call the "
+        r"growth other traffic",
+        flat,
+    ), (
+        "the no-nameable-row lead-in no longer says to read BOTH causes, so the "
+        "SILENT reading can be skipped and an empty grep read as 'no fault'"
+    )
+    assert re.search(
+        r"\*\*No nameable default row\*\* \(absent, inactive, or the `default` "
+        r"sentinel\) is also a refusal of a tenant the record CAN key on, so it "
+        r"is a fail-and-fix as well",
+        flat,
+    ), (
+        "the no-nameable-row arm's VERDICT is unpinned — it must be a refusal of "
+        "a tenant the record CAN key on, and therefore a fail-and-fix"
     )
     assert re.search(
         r"on the seed / indexing lane it logs \*\*NOTHING\*\*\s+at all", flat
