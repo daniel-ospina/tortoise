@@ -4208,3 +4208,96 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
     assert _merged_tree_guard_problem(doc) is None, (
         "`uv pip install ruff==<pin>` installs exactly the pin; the pin must accept it"
     )
+
+
+# ── the OTHER half of #9115: the guard must not be starvable itself ────────
+#
+# The guard above keeps a reporting workflow from TAKING the runner budget.
+# This one pins the complementary failure, measured 2026-10-27: the workflow
+# that MEASURES the queue was itself served by the pool it was measuring.
+#
+#     runs busy 9/9 · queued 78 · ci-queue-health: 1 success in its last 8
+#     scheduled runs (6 cancelled, 1 pending)
+#
+# Two independent reasons a tick is lost; the first is this file's subject and
+# the second is why the pin has to be a LABEL, not a flag:
+#
+#   1. `runs-on: ubuntu-latest` resolves to the repo's SELF-HOSTED pool, so the
+#      governor queues behind every test shard in the fleet;
+#   2. GitHub keeps ONE pending run per concurrency group, so each 10-minute
+#      tick cancels the previous PENDING tick while it waits — `cancel-in-progress:
+#      false` prevents cancelling a RUNNING governor and does nothing for a
+#      queued one.
+#
+# So a guard whose job is to relieve a full pool must not run ON that pool.
+# `ubuntu-24.04` is the hosted-only pin this repo already uses for
+# `finding-provenance`; it stays hosted-only because the pool is forbidden from
+# claiming it (`tests/test_ci_runner_x64_install.py`), and the measured label
+# set on 2026-10-27 confirmed all nine runners advertise `ubuntu-latest` and
+# none advertises `ubuntu-24.04`. The repo is public, so hosted minutes are
+# free — the pin costs nothing.
+HOSTED_ONLY_PIN = "ubuntu-24.04"
+
+#: Workflows whose job is to OBSERVE or GOVERN the fleet rather than to test
+#: product code. Every one of these was measured starved on 2026-10-27, and a
+#: monitor that cannot run is worse than no monitor: it reports nothing and
+#: reads as "nothing to report".
+FLEET_OBSERVER_WORKFLOWS = {
+    "ci-queue-health.yml": "queue-health",
+    "ci-check-repair.yml": "repair",
+    "availability-liveness.yml": "check",
+    "availability-watchdog.yml": "probe",
+}
+
+
+def test_a_fleet_observer_runs_on_the_hosted_pin_not_the_pool_it_observes() -> None:
+    """Each observer's job must pin the hosted label, not `ubuntu-latest`."""
+    for name, job_id in FLEET_OBSERVER_WORKFLOWS.items():
+        doc = _load(WORKFLOW_DIR / name)
+        job = doc["jobs"][job_id]
+        assert job.get("runs-on") == HOSTED_ONLY_PIN, (
+            f"{name}:{job_id} runs on {job.get('runs-on')!r}. An observer or "
+            f"governor of the runner pool must run on the HOSTED-only pin "
+            f"({HOSTED_ONLY_PIN!r}) — `ubuntu-latest` is served by the "
+            f"self-hosted pool this repo fills with test shards, so the "
+            f"workflow waits behind the condition it exists to relieve "
+            f"(measured 2026-10-27: 9/9 runners busy, ci-queue-health completed "
+            f"1 of its last 8 scheduled runs). Public repo: hosted is free.")
+
+
+def test_the_hosted_pin_stays_out_of_the_pools_label_set() -> None:
+    """The pin only works while the pool cannot claim `ubuntu-24.04`.
+
+    The BEHAVIOURAL half is owned by `tests/test_ci_runner_x64_install.py:127`,
+    which asserts the installer's own label output never contains
+    `self-hosted-arm64`, `ARM64`, `ubuntu-24.04` or `ubuntu-22.04`. That test is
+    cited here rather than duplicated, and this one asserts the thing that test
+    cannot see: that the observer roster above is still pinning a label which is
+    NOT the fallback label the pool is allowed to advertise. Pinning the pool's
+    own fallback label would be the same starvation with extra steps.
+    """
+    pool_fallback_label = "ubuntu-latest"
+    assert pool_fallback_label != HOSTED_ONLY_PIN, (
+        "the observer pin collapsed onto the label the self-hosted pool is "
+        "explicitly allowed to advertise (`self-hosted-x64,ubuntu-latest`) — "
+        "the pin would then be served by the starved pool again"
+    )
+    for name in FLEET_OBSERVER_WORKFLOWS:
+        doc = _load(WORKFLOW_DIR / name)
+        seen = {
+            job.get("runs-on")
+            for job in doc["jobs"].values()
+            if isinstance(job, dict)
+        }
+        assert pool_fallback_label not in seen, (
+            f"{name} still carries `{pool_fallback_label}` on a job — every job "
+            f"of an observer workflow must pin the hosted-only label"
+        )
+
+
+def test_a_fleet_observer_pin_is_asserted_not_merely_written() -> None:
+    """A roster that drifts to empty would pass both tests above vacuously."""
+    assert len(FLEET_OBSERVER_WORKFLOWS) >= 4, (
+        "the observer roster shrank — if a workflow was renamed, update the "
+        "roster rather than deleting its entry, or the pin stops being checked"
+    )

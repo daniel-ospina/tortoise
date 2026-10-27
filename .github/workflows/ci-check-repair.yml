@@ -72,7 +72,22 @@ jobs:
   # NOT a branch-protection required context. It repairs and reports; it gates
   # nothing, so a red here cannot block a merge.
   repair:
-    runs-on: ubuntu-latest
+    # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
+    # `ubuntu-latest` is served by the repo's SELF-HOSTED pool (the runners
+    # advertise that label), so a job written `runs-on: ubuntu-latest` waits
+    # behind every test shard in the fleet. That is wrong for a workflow whose
+    # job is to WATCH or GOVERN that pool: measured 2026-10-27, 9/9 runners
+    # busy and 78 runs queued, `ci-queue-health` completed 1 of its last 8
+    # scheduled runs (6 cancelled, 1 pending) — the guard was starved by the
+    # condition it exists to relieve, so #9115's flood-trimming could not fire.
+    # Two independent reasons a tick is lost: it competes for the same slots,
+    # and GitHub keeps only ONE pending run per concurrency group, so each
+    # 10-minute tick cancels the previous PENDING one while it waits.
+    # `ubuntu-24.04` is HOSTED-ONLY here — verified live: all nine runners
+    # advertise `ubuntu-latest` and none advertises `ubuntu-24.04`, and
+    # `tests/test_ci_runner_x64_install.py` fails if the pool starts claiming
+    # it. Public repo, so hosted minutes are free: this spends no money.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
