@@ -93,19 +93,31 @@ export function isLoopbackHost(hostname: string): boolean {
 }
 
 function ipv4Loopback(host: string): boolean {
-  const parts = host.split(".").map(Number);
-  return parts.length === 4 && parts.every((p) => p >= 0 && p <= 255) && parts[0] === 127;
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    // ⛔ A LEADING ZERO IS REFUSED, exactly as `ipaddress` refuses it (`127.0.0.01` is ambiguous:
+    // octal or decimal?). WHATWG reads it as decimal and normalises to 127.0.0.1, so a looser
+    // check here ACCEPTED a redirect the AS refuses — 60 of them in a 3k-uri sweep.
+    if (part.length > 1 && part.startsWith("0")) return false;
+    if (Number(part) > 255) return false;
+  }
+  return Number(parts[0]) === 127;
 }
 
 /**
- * The HOST as WRITTEN in the uri's authority (port and userinfo removed), or `null` when the uri
+ * The host as WRITTEN in the uri's authority (port and userinfo removed), or `null` when the uri
  * carries no explicit `//authority`.
  *
- * Needed because WHATWG and Python's `urlsplit` do not agree about every spelling: `new URL` fills
- * an authority for a special scheme (`https:client.example/cb`), strips a trailing dot, and
- * REWRITES `127.1` / `2130706433` / `0.0.0.0x7f000001` into `127.0.0.1` — while `urlsplit` reports
- * each of those verbatim (so `_is_loopback` answers False and the AS REFUSES). A BFF that accepted
- * one of them would advance a flow the AS then refuses.
+ * THIS IS THE HOST THE AS DECIDES ON: `urlsplit(...).hostname` reports the authority verbatim.
+ * WHATWG instead NORMALISES it (`127.1` → `127.0.0.1`, decimal/hex addresses, a trailing dot
+ * dropped, an IDN → punycode), which is why the loopback verdict below must read THIS function's
+ * answer and not `parsed.hostname` — otherwise the BFF and the AS disagree about `127.1` and one
+ * of them refuses what the other accepts.
+ *
+ * `null` when there is no `scheme://` at all: `urlsplit` yields `hostname=None` there (`WHATWG`
+ * invents an authority for a special scheme), and the AS refuses such a uri, so we do too.
  */
 function rawAuthorityHost(uri: string): string | null {
   const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/.exec(uri);
@@ -124,14 +136,18 @@ function rawAuthorityHost(uri: string): string | null {
 /**
  * Why a `redirect_uri` is unacceptable, or `null` when it is fine.
  *
- * A MIRROR of the AS's `_unsafe_redirect_uri_bytes` + `_valid_redirect_uri`, so the two halves
- * cannot disagree about what a flow may be started for. `start.ts` refuses what the AS refuses and
- * — the direction that was broken — ACCEPTS what the AS accepts.
+ * A MIRROR of the AS's `_unsafe_redirect_uri_bytes` + `_valid_redirect_uri`:
  *
- * The mirror is pinned by a cross-half table test in `tests/test_oauth_consent_bff_routes.py` that
- * hands ONE uri list to both halves. Two spellings are refused here ON PURPOSE and are named in
- * that test rather than silently tolerated: an authority both parsers would read differently, and
- * (below) a port they disagree about.
+ *   https          — any host the AS can see at all (its https branch does NOT consult
+ *                    `_is_loopback`, so NORMALISED spellings are fine here and must not be refused);
+ *   http           — only a LOOPBACK host, judged from the RAW authority (`127.1` is not loopback
+ *                    to `ipaddress`, so the AS refuses it even though WHATWG rewrites it);
+ *   native scheme  — allowlisted, and must name a destination.
+ *
+ * ⛔ THE ONE PLACE THIS IS STRICTER THAN THE AS is a uri WHATWG cannot PARSE at all (a port past
+ * 65535, `:abc`). `urlsplit` never validates a port, so the AS accepts those; a browser would
+ * never navigate one, so handing it out is worse than a 400 at start. That divergence is named in
+ * the cross-half table so it cannot quietly grow into a class.
  */
 export function redirectUriProblem(uri: string): string | null {
   // Bytes we refuse to reason about: a raw backslash is a real parser differential between the
@@ -145,6 +161,7 @@ export function redirectUriProblem(uri: string): string | null {
   try {
     parsed = new URL(uri);
   } catch {
+    // Includes the `:99999`-style port: WHATWG refuses to parse it (the documented divergence).
     return "redirect_uri must be an absolute URI";
   }
   // A fragment is never a valid redirect component (RFC 6749 §3.1.2): the code would land where
@@ -158,37 +175,13 @@ export function redirectUriProblem(uri: string): string | null {
     return parsed.host || parsed.pathname ? null : "redirect_uri must name a destination";
   }
 
-  // ⛔ BOTH PARSERS MUST SEE THE SAME HOST. `urlsplit` reports the authority verbatim; WHATWG
-  // normalises it. Where the two differ, one half's verdict is a guess about the other's — so we
-  // refuse rather than pick a side. (IPv6 literals are exempt: WHATWG rewrites their SPELLING
-  // `[0:0:0:0:0:0:0:1]` → `[::1]` while the ADDRESS is identical, and the loopback test below is
-  // address-based. The same exemption is what lets the IPv4-mapped forms through.)
   const rawHost = rawAuthorityHost(uri);
-  if (rawHost === null) {
-    // A special scheme with no `//authority`: WHATWG invents one, urlsplit does not.
+  if (rawHost === null || rawHost === "") {
+    // No `//authority`: `urlsplit` sees no hostname and the AS refuses, whatever WHATWG invented.
     return "redirect_uri must be an absolute URI with an explicit authority";
   }
-  const rawIsV6 = rawHost.startsWith("[") && rawHost.endsWith("]");
-  const parsedIsV6 = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]");
-  if (rawHost.toLowerCase() !== parsed.hostname.toLowerCase() && !(rawIsV6 && parsedIsV6)) {
-    return (
-      "redirect_uri host is not written in a form both parsers read the same way " +
-      "(e.g. 127.1, a decimal/hex address, or a trailing dot)"
-    );
-  }
-
-  if (parsed.protocol === "https:" && parsed.hostname) {
-    // A port past the 16-bit range throws in WHATWG but is never validated by `urlsplit`, so the
-    // AS would accept a URI no browser can navigate. Strict here ON PURPOSE, and named as a
-    // deliberate divergence in the cross-half table.
-    if (parsed.port !== "" && Number(parsed.port) > 65535) {
-      return "redirect_uri port is out of range";
-    }
-    return null;
-  }
-  if (parsed.protocol === "http:" && parsed.hostname && isLoopbackHost(parsed.hostname)) {
-    return null;
-  }
+  if (parsed.protocol === "https:") return null;
+  if (parsed.protocol === "http:" && isLoopbackHost(rawHost)) return null;
   return "redirect_uri must use https (http is allowed only for loopback)";
 }
 

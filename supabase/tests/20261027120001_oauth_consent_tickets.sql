@@ -20,11 +20,12 @@
 --     replay §2.2's `jti` exists to bound.
 --
 -- HONEST LIMIT: PGlite is SINGLE-CONNECTION, so this suite cannot stage two
--- genuinely concurrent claimants. The atomicity that matters is structural
--- (`INSERT … ON CONFLICT DO NOTHING RETURNING` is one statement, so the loser
--- gets NULL) and is covered functionally by the repeat/replay assertions below.
--- The same limit is recorded by the `redeem_oauth_code` suite (#3025), whose CAS
--- this migration mirrors.
+-- genuinely concurrent claimants. The atomicity that matters is therefore pinned
+-- STRUCTURALLY (SECTION 2, from `pg_get_functiondef`) as well as functionally: the
+-- body must decide with `ON CONFLICT` and must not pre-read existence. Mutation-
+-- verified that a SELECT-then-INSERT rewrite leaves a behaviour-only suite green —
+-- which is why the catalog assertion is not optional. The same limit is recorded by
+-- the `redeem_oauth_code` suite (#3025), whose CAS this migration mirrors.
 --
 -- HOW TO RUN (no Docker — PGlite harness):
 --   npm --prefix supabase/tests/pglite run validate
@@ -219,6 +220,50 @@ DO $$ BEGIN
     'a row stamped at EXACTLY now() was pruned — at equality the token still verifies, so its jti is replayable again (prune uses <= instead of <)');
 END $$;
 COMMIT;
+
+-- ── The SHAPE, from the catalog ─────────────────────────────────────────────
+-- The comment above says single-use is decided BY THE PRIMARY KEY rather than by a read-then-write.
+-- That is not observable through behaviour on a single-connection harness: mutation-verified that
+-- replacing the body with a genuine TOCTOU (`SELECT NOT EXISTS … INTO claimed; IF claimed THEN
+-- INSERT …`) leaves every assertion in this file GREEN, and `ON CONFLICT` removal reds only by a
+-- primary-key EXCEPTION rather than by an assertion. So the shape is pinned here, where PGlite CAN
+-- see it — two machines both reading "absent" is the failure this whole migration exists to prevent.
+DO $$
+DECLARE
+  def text;
+  at  integer;
+BEGIN
+  def := pg_get_functiondef(
+    'public.consume_oauth_consent_ticket(text,timestamptz)'::regprocedure);
+  PERFORM tests.assert(def ~* 'ON\s+CONFLICT',
+    'the claim no longer uses ON CONFLICT — it is a read-then-write again, so two machines can both win');
+  PERFORM tests.assert(def !~* 'SELECT\s+NOT\s+EXISTS',
+    'the function pre-reads whether the jti exists — a TOCTOU across machines');
+  PERFORM tests.assert(
+    strpos(lower(def), 'insert into public.oauth_consent_tickets') > 0,
+    'the function no longer inserts');
+  at := strpos(lower(def), 'insert into public.oauth_consent_tickets');
+  PERFORM tests.assert(
+    strpos(substr(lower(def), at + 40), 'insert into public.oauth_consent_tickets') = 0,
+    'the claim inserts the nonce more than once');
+  -- The bound: a request-path prune must cost the same however far behind the backlog is.
+  PERFORM tests.assert(def ~* 'LIMIT\s+500',
+    'the prune lost its LIMIT — its cost now grows with the backlog');
+END $$;
+
+-- ── The BOUND, driven: 700 expired rows, one call, exactly 500 collected ───
+INSERT INTO public.oauth_consent_tickets (jti, expires_at)
+SELECT '3524-bulk-' || g, now() - interval '1 hour'
+  FROM generate_series(1, 700) g;
+SELECT public.consume_oauth_consent_ticket('3524-prunebound-probe', now() + interval '1 hour');
+DO $$
+DECLARE remaining integer;
+BEGIN
+  SELECT count(*) INTO remaining
+    FROM public.oauth_consent_tickets WHERE jti LIKE '3524-bulk-%';
+  PERFORM tests.assert(remaining = 200,
+    format('the prune collected %s of 700 expired rows; LIMIT 500 means exactly 500 (remaining 200) — unbounded, its cost grows with the backlog', 500 - remaining + 200));
+END $$;
 
 -- ── Cleanup ────────────────────────────────────────────────────────────────
 DELETE FROM public.oauth_consent_tickets WHERE jti LIKE '3524-%';
