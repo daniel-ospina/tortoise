@@ -86,6 +86,7 @@ slow_shards: 5
 
 surfaces:
   api:
+  - test_10156_alert_registers.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
