@@ -222,7 +222,7 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 
 **What this does NOT authorise — stated because the answer was broader than the question.** The
 **18** existing `RETIRED_USE_INSTEAD` forward entries are a *different population*: every one of them
-names a **live** replacement (`tortoise_get` → `tortoise_get_entity(id, type="point")`,
+names a **live** replacement (`tortoise_get` → `tortoise_get_entity(id, type=...)`,
 `tortoise_health` → `tortoise_overview(section="health")`, … — 18 of 18 verified). They are neither
 "machinery serving a caller who does not exist" nor covered by the question that was asked, and they
 carry two recorded decisions **in this document**: the 2026-10-17 amendment (retired *"through

@@ -103,8 +103,8 @@ direction — a name wrongly kept is privatised, a name wrongly deleted breaks a
 
 The intermediate counts from readings 1 and 2 are deliberately **not** quoted: they were produced by scripts that differed in more than the one property each row names, so the numbers cannot be reproduced from the description and quoting them would be a second, quieter error. The **governing command is the one above**, and it reproduces 27 exactly. `test_guard` is then removed by reading a ruling, not a scan.
 
-**26 is the number the deleting PR must use.** The 1st reading's "26" is a coincidence with the
-governing number, not a confirmation — it was a different 26.
+**26 is the number the deleting PR must use.** The 1st reading happened to land on the same number;
+that is a coincidence, not a confirmation — it was a different set.
 
 ## How the archive works — a tag, and this index
 
@@ -203,15 +203,15 @@ will not find. All of these land **in the same commit**:
   `docs/product/sdk-surface-declaration.md`. `tools/sdk_surface.py --check` runs unconditionally in
   the required `docs` context and reds on a stale declaration *and* on stale doc text;
   `tests/test_sdk_surface.py` pins `DECLARED_COUNT = 150`, `tests/test_surface_manifest.py` pins
-  `sdk == 150`, and this document itself says *"`config/surface-manifest.yml` declares **150** public
-  methods"* — all three go with it.
+  `sdk == 150`, and the canonical MCP doc's sequencing list says *"`config/surface-manifest.yml`
+  declares **150** public methods"* — all three go with it.
 - **`tests/test_sdk_rename_table.py`** — beyond the name literals, its **count pins** go: the
   150-entry `TARGETS_LITERAL` / `ROW_CITE_LITERAL` dicts (asserted by equality),
   `assert len(rows) == 150`, `assert ordinals == list(range(1, 151))`, and the prose pins
   *"150 public methods"*, *"109 of the 150 are renames"*, *"25 are discarded"*, *"3 have no
   destination"*. Those four numbers become **124 / 95 / 14 / 2** after deleting the 26.
 - **`docs/product/sdk-rename-table.md` is NOT in the tree — do not commit it.** It was
-  **de-committed on purpose in #5373** (".gitignore" line for it; `git ls-tree` has no such path), and
+  **de-committed on purpose in #5373** (`.gitignore` line for it; `git ls-tree` has no such path), and
   the gate renders it to a temp path. `tools/sdk_rename_table.py --check` printing `DRIFT` today is
   **not** a stale committed copy — it is the tool finding no `--out` file to compare, because the
   file does not exist. Ignore that line; `git add -f` on it would recreate the conflict #5373 removed.
