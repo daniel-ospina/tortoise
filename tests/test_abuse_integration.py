@@ -809,19 +809,57 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
-    def test_the_review_message_promises_a_REQUEST_not_an_act(self):
-        """P2 (round 9 review). "our team is reviewing it" was the deleted
-        future-tense promise ("and will be in touch") in the present tense, and
-        the module states plainly that no human has acted when the row is
-        written. The endpoint renders this string verbatim to the customer."""
+    def test_no_customer_string_claims_what_a_HUMAN_is_doing(self):
+        """Rounds 6 / 9 / 10 (review findings). The same promise was deleted
+        three times: "and will be in touch" → "our team is reviewing it" → "an
+        operator has been asked to look at it". Each rewrite was weaker and still
+        a claim the plumbing cannot back: delivery of the operator signal is
+        BEST-EFFORT, so in the configurations this module names (no
+        ``DR_ISSUES_PAT``, no usable object store) no operator was ever asked.
+
+        The round-9 version of this test asserted the presence of
+        "an operator has been asked" — it PINNED the false claim and called the
+        pin the proof, so it could never fail for the reason it existed. This
+        asserts a PROPERTY over every rendered field of every alert type: a
+        string may state what was MEASURED, what was NOT changed, and how to
+        reach us — and may not assert a human FOLLOW-UP the plumbing cannot
+        guarantee.
+
+        Two scopes are excluded ON PURPOSE, and stated so the property is not
+        wider than the assertion (the first version was):
+        * `suspend`'s "Organization suspended by an operator" names a human act,
+          but the ROW'S EXISTENCE is the proof — `suspend_org()` is the only
+          writer of EVENT_SUSPEND and the engine no longer suspends, so it is
+          backed by construction, not a promise. Removing it would imply the
+          system auto-suspended, which would be the false claim.
+        * a second-person IMPERATIVE ("review your API keys in Keys") is the
+          customer's own action, and is exactly what this copy exists for."""
         import re
 
-        from tortoise.abuse import _alert_dict
+        from tortoise.abuse import ALERT_TYPES, _alert_dict
+        # Claims about what WE / an operator did, are doing, or will do. A
+        # second-person IMPERATIVE ("review your API keys") is the customer's
+        # own action and is exactly what this copy is FOR, so it must not match —
+        # the first version of this regex did, and that is why it is spelled out.
+        human = re.compile(
+            r"(our team|an operator has|has been asked|we are|we will|we'll|"
+            r"under review|(is|are) reviewing|being reviewed|"
+            r"will be in touch|investigat(e|ing))", re.I)
+        for etype in ALERT_TYPES:
+            row = _alert_dict({"event_type": etype,
+                               "details": {"scope": "key", "id": "k-1",
+                                           "count": 3, "ip": "1.2.3.4"},
+                               "created_at": "2026-09-25T17:19:05+00:00"})
+            for field in ("label", "message"):
+                text = str(row.get(field) or "")
+                assert not human.search(text), (
+                    f"{etype}.{field} claims what a human is doing: {text!r} — "
+                    "the operator signal is best-effort, so we cannot know")
+        # …and the review row still says the two things it CAN know.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "our team is reviewing" not in msg, msg
-        assert not re.search(r"\b(is|are) reviewing\b", msg), msg
-        assert "an operator has been asked" in msg, msg
+        assert "Nothing has been disabled" in msg, msg
+        assert "support@premiselabs.co" in msg, msg
 
     def test_only_owner_or_admin_may_acknowledge(self, env):
         """An ack hides a security row from the whole org — that is a

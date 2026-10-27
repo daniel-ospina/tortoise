@@ -1288,7 +1288,12 @@ def _alert_dict(row: dict) -> dict:
     # `type`.
     labels = {
         EVENT_FLAG: "Suspicious activity",
-        EVENT_REVIEW: "Activity under review",
+        # Round 10 (review finding): "Activity under review" asserted an
+        # ongoing human review in the SAME response whose message was just
+        # rewritten to stop asserting one — two different claims about the same
+        # fact, one of them false. Stage 2 is a MEASUREMENT (a flag a full
+        # window old, with continuity), so the label names the measurement.
+        EVENT_REVIEW: "Sustained high activity",
         EVENT_SUSPEND: "Organization suspended",
         EVENT_AUTH_IP: "New location",
         EVENT_READ_VELOCITY: "Unusual read volume",
@@ -1318,17 +1323,21 @@ def _alert_dict(row: dict) -> dict:
         # string must not promise a human follow-up the plumbing cannot
         # guarantee; it now states what IS true (nothing was disabled) and
         # leaves the route where the customer can reach us.
-        # Round 9 (review finding): "our team is reviewing it" was the SAME
-        # promise as the deleted "and will be in touch", in the present tense and
-        # therefore strictly stronger — and it is false whenever the operator
-        # signal was dropped AND whenever nobody has read the row yet, which this
-        # module states plainly a few hundred lines up ("the ENGINE writes this
-        # when a rule wants an operator to look, and no human has acted yet").
-        # The string says what the plumbing guarantees: the REQUEST exists. It
-        # deliberately does not say when, or that anyone has started.
+        # Rounds 6, 9, 10 — the same promise three times, so the rule is now
+        # stated as a PROPERTY and pinned as one: a customer-facing string in
+        # this dict says NOTHING about what a human has done, is doing, or will
+        # do. Round 6 deleted "and will be in touch"; round 9 replaced it with
+        # "our team is reviewing it" (the same promise in the present tense);
+        # round 10 replaced THAT with "an operator has been asked to look at it",
+        # which is weaker but still a factual claim — and the paragraph above
+        # says delivery of the operator signal is BEST-EFFORT, so in exactly the
+        # configurations it names (no `DR_ISSUES_PAT`, no usable object store) no
+        # operator was asked at all. A string may state what was MEASURED (a
+        # rule threshold was crossed), what was NOT changed (nothing is
+        # disabled), and how to reach us. A human's involvement is not one of
+        # the facts this row can know.
         EVENT_REVIEW: ("Unusually high activity on this team. Nothing has been "
-                       "disabled, and an operator has been asked to look at it. "
-                       "If you need a higher limit, contact "
+                       "disabled. If you need a higher limit, contact "
                        "support@premiselabs.co."),
         EVENT_SUSPEND: "Organization suspended by an operator",
         # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
