@@ -1287,12 +1287,24 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     upper_key = "apikey_" + (first + "_" + second).upper()
     out, counts = redact_secrets(f"key {upper_key}")
     assert upper_key not in out, "an UPPERCASE mint leaked"
+    # ⛔ `upper_key not in out` is satisfied by redacting SEGMENT 1 ALONE, so on its
+    # own it does not pin the TAIL's hex class: with the tail narrowed to
+    # `[0-9a-f]` the whole suite stayed green (78 passed) while
+    # `apikey_<UPPER36>_<UPPER64>` came out as `[REDACTED:typesafe_api_key]_E5F6…`
+    # with the count still 1 — the "record looks redacted" leak, in the leg whose
+    # docstring says "a future uppercase mint must not leak". Pin the SEGMENT.
+    assert second.upper() not in out, (
+        "the SECOND SEGMENT of an uppercase mint survived — the tail's hex class "
+        "is not case-insensitive")
     assert counts.get("typesafe_api_key") == 1
     heading = "APIKEY_" + (first + "_" + second).upper()
     heading_out, heading_counts = redact_secrets(f"key {heading}")
     assert heading not in heading_out, (
         "an UPPERCASE-PREFIX mint leaked whole — the prefix must be "
         "case-insensitive, like the body")
+    assert second.upper() not in heading_out, (
+        "the SECOND SEGMENT of an uppercase-PREFIX mint survived — the prefix "
+        "matched and the tail did not")
     assert heading_counts.get("typesafe_api_key") == 1, heading_counts
     # …and the NEGATIVE half of (c), pinned rather than probed by hand: widening the
     # prefix to BOTH cases must not eat prose that merely starts with the literal.
@@ -1331,6 +1343,10 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     assert tail_counts.get("typesafe_api_key") == 1, (
         "a second-segment split must redact the leading part")
     assert second[:47] not in tail_out, tail_out
+    # …and the SURVIVOR of that shape, by the doctrine stated for the 30-hex split
+    # above: the rest of the tail is the residual this shape is documented to leave,
+    # and a rule that widened to swallow it would keep the assertion green.
+    assert second[47:] in tail_out, tail_out
     # …and BELOW the tail floor (6 hex before the break) the whole remaining tail
     # survives while the count still reads 1 — the widest surviving span of any
     # split shape, so it is asserted rather than described.
