@@ -2372,6 +2372,19 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             "/healthz`) — it prints nothing in every state, so an empty grep reads "
             "as a pass"
         )
+    # ⛔ The PHRASE is not the READ SURFACE: `the record write did not happen`
+    # occurs four times in this section, three of them in prose, so the membership
+    # pin below is satisfied with the fenced command DELETED — measured
+    # (#10083 review cycle 2, P2: replacing the block with `echo 'no recipe here'`
+    # left the suite at 100 passed). The class the message names is "a command the
+    # operator can run", so pin one.
+    assert any(
+        re.search(r"grep[^\n]*the record write did not happen", b) for b in blocks
+    ), (
+        "no PRESCRIBED command greps the refused-write line — the section may quote "
+        "the phrase in prose, but then the reader who follows the recipe greps "
+        "nothing and the section has no read surface for a refused write"
+    )
     # ... and the check that DOES exist is named: the seam logs every non-write at
     # WARN with its reason (`tortoise/record_writer.py`).
     # `flat`, not `section`: the phrase is wrappable prose (the ⚠️ `no_tenant`
@@ -2663,7 +2676,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # code — left every pin green (#10083 review, P2, measured). Pin the direction
     # AND forbid the inversion, or F5's correction is unpinned prose.
     assert re.search(
-        r"counted there\s+\*\*unless the process has declared the single-tenant pair\*\*",
+        r"counted there\s+\*\*unless the process (?:has )?declare[sd] the "
+        r"single-tenant pair\*\*",
         flat,
     ), (
         "the self-host lane's `unless` is unpinned — the #9192 declaration is what "
@@ -2885,7 +2899,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # remedy naming only the id form leaves the operator free to read a paused row as
     # healthy. Measured: inverting it to `inactive` left every pin green (#10083
     # review, P3).
-    assert re.search(r"its `status` must be `active`", flat), (
+    assert re.search(r"its `status` (?:must be|must read) `active`", flat), (
         "the remedy never says the default row must be `active` — the silent arm's "
         "whole point is a row that exists but names nothing, so an inactive row read "
         "as healthy clears the growth a control-plane fault produced"
@@ -2994,15 +3008,27 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "below is the only thing that makes the arm executable"
     )
     for _sentence in _sentences:
+        # The REJECT half. Two families, both measured to have slipped a
+        # polarity-only filter (#10083 review cycle 2, P2):
+        #   (a) a DOUBLE NEGATIVE asserts possibility in the language of
+        #       impossibility — "attribution is not impossible", "impossible to
+        #       avoid";
+        #   (b) a POSITIVE feasibility predicate, however it is hedged — "There is
+        #       no doubt that per-request attribution is possible" passed the
+        #       first fix's `\bno\b[^.]*\battribut\w*` accept disjunct, and
+        #       "…impossible to prove: the log names the request" re-asserts the
+        #       false premise in its own tail.
         assert not re.search(
             r"\b(?:is|are|was|were|remains?)\s+not\s+(?:impossible|infeasible|"
-            r"unexecutable|unavailable)\b|\bimpossible\s+to\s+(?:avoid|prevent)\b",
+            r"unexecutable|unavailable)\b|\bimpossible\s+to\s+(?:avoid|prevent)\b|"
+            r"\battribut\w*\s+(?:is|are|remains|would\s+be)\s+(?:possible|feasible|"
+            r"available|executable)\b|\b(?:log|line)\b[^.]*\bnames\s+the\s+request\b",
             _sentence, re.I,
         ), (
-            "the section asserts the OPPOSITE of its ruling through a double "
-            "negative — 'attribution is not impossible' / 'impossible to avoid' "
-            "says the log CAN attribute the growth, which is the step the ⛔ ruling "
-            f"forbids: {_sentence.strip()!r}"
+            "the section asserts that per-request attribution IS possible — through "
+            "a double negative, a hedged feasibility predicate, or a tail that "
+            "re-asserts that the log names the request. Every one of those is the "
+            f"step the ⛔ ruling forbids: {_sentence.strip()!r}"
         )
         assert re.search(
             r"(?:(?:\bDo not\b|\bNever\b|\bnot\b|\bmay not\b|\bmust not\b|"
