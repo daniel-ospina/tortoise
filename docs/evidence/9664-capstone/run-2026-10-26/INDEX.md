@@ -27,7 +27,7 @@ artifact.
   * **Two `org_…` spellings appear in the artifacts, and they are two different fields — not two
     workspaces.** `step2e-graph-create-failed-error.txt` carries
     `org_3326a01ea34ae595d84de5d8f9_g_f0f1139860af41b89ba0675b00`, a **custom**-graph namespace in the
-    shape `org_{org_id}_{gid}` (`tortoise/sdk.py:33279,33284`), so the `org_id` on that side is
+    shape `org_{org_id}_{gid}` (`tortoise/sdk.py:33927,33932`), so the `org_id` on that side is
     `3326a01ea34ae595d84de5d8f9`; `step7`/`step12` carry `org_2e34bf114bd077dc819619daaf`, the
     **default** graph's namespace, which `graph_metadata` sets to `organizations.graph_name` and never
     to `org_id` (`tortoise/supabase_control.py:3959,3962`). One org produces both by construction —
