@@ -1249,7 +1249,9 @@ jobs:
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
         # 200 with status:degraded). Verify the release on BOTH planes:
         # fail fast ONLY on app-unreachable (curl error); poll db.ok (the
-        # FalkorDB data plane) for >=3 min (cold-start DB connection exceeds
+        # FalkorDB data plane) over its OWN budget — 270 s, DERIVED in the
+        # gate's per-request-bound block as `DB_TRIES × (CURL_MAX_TIME_HEALTH +
+        # DB_SLEEP)`, never a literal here (cold-start DB connection exceeds
         # 60s per #338; DNS propagation after a restart runs ~2 min per
         # #1381); then poll /health/ready (it ANDs the Supabase control plane
         # + the data plane) over its OWN budget, LAST.

@@ -3261,3 +3261,53 @@ def test_the_health_gate_budget_stays_under_the_cap_that_kills_it() -> None:
         "thing that ends a hung probe, and a timeout-minutes kill skips the #2240 "
         "alert. Either bound the gate tighter or raise the cap in the same commit."
     )
+
+
+def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
+    """The gate's BEHAVIOUR header must state the windows its knobs DERIVE.
+
+    The header said "poll for up to 3 min" for BOTH phase 2 and phase 3. That
+    was true while a phase's window was ``tries x sleep`` (``18 x 10 s = 180 s``)
+    and the per-request bounds added alongside this pin made it false: the
+    window is ``tries x (sleep + request bound)``, i.e. 270 s (4.5 min) and
+    414 s (6.9 min). The file then stated a poll window and its own refutation
+    ~100 lines apart, and the header understated phase 3 by 2.3x — the same
+    "a diagnosis that understates its own wait" defect the runtime messages
+    were fixed for, in the copy a maintainer reads when deciding whether a
+    phase budget is too tight.
+
+    Nothing pinned it, so it could be reverted green, and any knob change
+    re-opened it silently. This reads the SHIPPED defaults, recomputes each
+    window, and requires the header to state that window.
+    """
+    gate_path = _REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh"
+    gate = gate_path.read_text(encoding="utf-8")
+
+    header = gate[gate.index("# BEHAVIOUR"):gate.index("# CONTRACT (#4771)")]
+    # `BEHAVIOUR` numbers its phases `#   1. …`, `#   2. …`, `#   3. …`; the split
+    # keeps each phase's (possibly wrapped) prose in its own segment.
+    phases = re.split(r"\n#   \d\. ", header)
+    assert len(phases) == 4, f"expected 3 numbered phases in the header, got {phases}"
+
+    windows = [
+        _gate_knob(gate, "APP_PROBES") * (
+            _gate_knob(gate, "APP_PROBE_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_APP")),
+        _gate_knob(gate, "DB_TRIES") * (
+            _gate_knob(gate, "DB_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_HEALTH")),
+        _gate_knob(gate, "READY_TRIES") * (
+            _gate_knob(gate, "READY_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_READY")),
+    ]
+
+    for segment, seconds in zip(phases[1:], windows):
+        stated = f"up to {seconds} s ({seconds / 60:.1f} min)"
+        assert stated in segment, (
+            f"the gate's BEHAVIOUR header does not state {stated!r} — the window "
+            "its own knobs derive. The header had to be corrected by hand once "
+            "(it claimed 3 min for a 270 s and a 414 s phase); restate the derived "
+            f"window, or change the knob and the header together. Header segment:\n{segment}"
+        )
+        # The stale claim, in the spelling that was there, must not return.
+        assert "3 min" not in segment and "3-minute" not in segment, (
+            "the gate's BEHAVIOUR header still says 3 min for a phase whose "
+            "derived window is not 180 s"
+        )

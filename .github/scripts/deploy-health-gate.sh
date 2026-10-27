@@ -35,24 +35,31 @@
 #   same invariant one level up — to the DECISION (see the CONTRACT note below).
 #
 # BEHAVIOUR
-#   1. app reachable  — 5 quick probes; a dead app is a deploy failure, not a
-#                       DB wait, so this fails FAST.
-#   2. db.ok          — poll for up to 3 min (cold-start DB connect >60s per
-#                       #338; DNS propagation after a restart ~2 min per
-#                       #1381). IT DOES NOT DECIDE THE RUN (#4771): it is the
-#                       WEAKER predicate (the FalkorDB data plane ALONE), so on
-#                       exhaustion it reports a loud `::warning::` and the run
-#                       proceeds to phase 3. The field is READ from parsed JSON,
-#                       never text-matched: /health's additive `backup_watcher`
-#                       block added a SECOND `"ok": true` to the body, and a
-#                       `grep -q '"ok": *true'` matched the WATCHER's ok while
-#                       db.ok was still false — silently neutralising the
-#                       3-minute tolerance (#4470). A field's VALUE must be
-#                       read, not its spelling.
-#   3. /health/ready  — polled for up to 3 min, its own budget (#4545). It ANDs
-#                       both planes, so it is the STRONGEST signal — and it is
-#                       what DECIDES the run (#4771): exactly 200 → exit 0;
-#                       never 200 → exit 1.
+#   ⛔ Every window stated below is `tries × (sleep + the phase's per-REQUEST
+#   bound)`, DERIVED in the "per-REQUEST bounds" block further down. That block
+#   is the ONE place the arithmetic lives; the numbers are restated here only so
+#   this header is readable, and
+#   `tests/test_deploy_workflow.py::test_the_health_gate_header_states_the_budgets_its_knobs_derive`
+#   pins all three lines to the shipped knobs, so a knob change reds CI instead
+#   of leaving this header describing a window the script does not have.
+#   1. app reachable  — up to 75 s (1.2 min) of quick probes; a dead app is a
+#                       deploy failure, not a DB wait, so this fails FAST.
+#   2. db.ok          — polled for up to 270 s (4.5 min) (cold-start DB connect
+#                       >60s per #338; DNS propagation after a restart ~2 min
+#                       per #1381). IT DOES NOT DECIDE THE RUN (#4771): it is
+#                       the WEAKER predicate (the FalkorDB data plane ALONE), so
+#                       on exhaustion it reports a loud `::warning::` and the
+#                       run proceeds to phase 3. The field is READ from parsed
+#                       JSON, never text-matched: /health's additive
+#                       `backup_watcher` block added a SECOND `"ok": true` to
+#                       the body, and a `grep -q '"ok": *true'` matched the
+#                       WATCHER's ok while db.ok was still false — silently
+#                       neutralising the phase-2 tolerance (#4470). A field's
+#                       VALUE must be read, not its spelling.
+#   3. /health/ready  — polled for up to 414 s (6.9 min), its own budget
+#                       (#4545). It ANDs both planes, so it is the STRONGEST
+#                       signal — and it is what DECIDES the run (#4771):
+#                       exactly 200 → exit 0; never 200 → exit 1.
 #
 # CONTRACT (#4771) — THE WEAKER PREDICATE INFORMS, THE STRONGEST DECIDES.
 #   Phase 2's `db.ok` and phase 3's `/health/ready` are two INDEPENDENT probes
@@ -93,7 +100,9 @@ GATE_BASE="${GATE_BASE:-https://api.premiselabs.co}"
 APP_PROBES="${APP_PROBES:-5}"
 APP_PROBE_SLEEP="${APP_PROBE_SLEEP:-5}"
 
-#: Data-plane (db.ok) poll — the 3-minute cold-start tolerance.
+#: Data-plane (db.ok) poll — the cold-start tolerance. Its window is
+#: `DB_TRIES × (CURL_MAX_TIME_HEALTH + DB_SLEEP)` = 270 s, i.e. the sleep alone
+#: is NOT the window; the BEHAVIOUR header above restates it and a test pins it.
 DB_TRIES="${DB_TRIES:-18}"
 DB_SLEEP="${DB_SLEEP:-10}"
 
