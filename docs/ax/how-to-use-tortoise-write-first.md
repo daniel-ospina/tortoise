@@ -181,7 +181,7 @@ copy of it.
 ```text
 Subject: Acme (organization) · role: CFO
 Object:  Series B tranche state (funded 2 of 3) · pricing stance (hold)
-Event:   tranche 2 released (2026-05-14, eventKind: disbursement)
+Event:   tranche 2 released (2026-05-14, eventKind: disbursement)  # venture pack's kind; else occurrence
          board meeting (2026-06-03, eventKind: meeting)
          decision to hold pricing (2026-06-03, eventKind: decision,
                                    aboutObject -> pricing stance)
@@ -209,7 +209,7 @@ nothing:
 | Point | `pointKind` | `incident` is an Object kind; on a Point it is legal to the flat registry and wrong for every reader |
 | Subject | `subjectKind` | `person` — the declared spelling is `naturalPerson`; `company` → `organization` |
 | Object | `objectKind` | `offering` — declare a product/offering kind, or use `other` deliberately |
-| Event | `eventKind` | `tranche` — an Object kind; the release itself is a `disbursement` |
+| Event | `eventKind` | `tranche` — an Object kind; the release itself is a `disbursement` (the `venture` pack's kind — declare it, or write `occurrence`) |
 | Source | `sourceKind` | `research` is **not** a `sourceKind`; it is a `documentKind` |
 | Source genre | `documentKind` | a genre is not a credibility tier and not a source type |
 
@@ -407,12 +407,12 @@ every audit eventually asks.
   edges as part of the supersede.** Never move edges by hand afterwards — except
   one. ⚠️ **The transfer is blanket; `docs/ONTOLOGY.md` §3.1 scopes it to
   restatement:** a rebuttal that *motivated* a correction must come off the
-  successor explicitly.
+  successor explicitly — nothing does it for you, and removing it (a Point) destroys the refutation's own content.
 - **Retract** when it stops being true with no replacement. Retraction is
   terminal: a re-assertion creates a new node, it does not revive the old one.
-- **Superseded operators still propagate.** An operator is a node with its own
-  life; one left live on a superseded claim keeps moving confidence for a claim
-  nobody holds. Check the operators that pointed at the belief you superseded.
+- **Superseding a claim does not supersede its operators.** An operator is a node
+  with its own life: the transfer moves it onto the successor, so it prices the
+  new claim; one left on the old node is dangling wiring the check reports.
 - **Delete** is for a node that should never have existed — a mis-write, a
   duplicate. It destroys content, leaving a journal record of the destruction —
   not how you express a change of mind.
@@ -423,9 +423,9 @@ every audit eventually asks.
 
 - **Stamp the source in the same write that mints the belief.** The predicate that
   carries a source on a claim is not in the structural edge allowlist — the
-  generic edge writer refuses it — so an "I'll wire the source after" plan
-  silently produces a claim with no source. Pass the reference to the belief's
-  own create call.
+  generic edge writer raises on it — so an "I'll wire the source after" plan
+  leaves the claim unsourced: the create returns a `no_source` advisory (unless
+  you passed `credibility`) and the later edge write raises. Stamp it at the create.
 - **The provenance predicates the edge writer *does* accept are a trap.** They
   land, and the one that anchors a version cannot get that anchor through this
   path — a bare edge also *pre-empts* the writer that would have stamped it, so
