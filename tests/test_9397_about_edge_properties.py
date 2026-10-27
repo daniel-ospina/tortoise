@@ -403,6 +403,15 @@ WHAT IS PINNED (one entry per test, in file order)
    edge mints call — NOT `sdk.create_edge`, whose door-level emission `#9827`
    added and this change replaced with the mint-level one.
 
+33. `test_no_retracted_claim_has_come_back` — `RETRACTED_CLAIMS` is the verbatim
+   list of false sentences five review cycles on #9417 found, one per cycle, each
+   corrected and each invisible to the numeral pins. A restored sentence reds.
+   This is the repo's own retraction idiom (`test_entity_attachment_brief_claims`,
+   `test_csp_plan_doc_consistency`), adopted in #10149.
+34. `test_every_writer_is_described_by_the_table_it_is_in` — the SENTENCE a reader
+   acts on must match the table the writer is in: a `MAP_WRITERS` member must not
+   be called an exemption. Sentence-level and history-aware, so "it WAS declared a
+   false positive before #9417" is true and not a finding. (#10149)
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
 (that is a design question, recorded, not resolved here — what IS pinned is
@@ -421,6 +430,7 @@ checkout IS a NETWORK call (one per depth, each bounded by a 120 s timeout) and 
 SIDE EFFECT on the checkout under test: it deepens that clone's object database.
 The leg SKIPS, never passes, when the rev stays unreachable. No DB, no graph, no
 server.
+
 """
 
 from __future__ import annotations
@@ -3910,3 +3920,75 @@ def test_every_direct_edge_created_producer_is_safe_for_an_about_edge():
         "and the `NOT_AN_ABOUT_WRITER` row plus the documents' 'carries no "
         "property on an about edge' would have to be re-derived"
     )
+
+
+# ── #10149: pin the CLAIMS, not only the numerals ─────────────────────────────
+#: Every sentence that has been measured FALSE at some head and then silently
+#: survived — the class this file kept failing to catch, because §13's numerals are
+#: pinned as substrings and the sentences around them are not. Each entry is a
+#: verbatim fragment; the leg below reds if any of them comes back.
+RETRACTED_CLAIMS = (
+    # cycles 3-5: `supersede_point` described as an exempt non-writer
+    "supersede_point` is NOT one of them",
+    "the guard declares that row a FALSE POSITIVE rather than counting it",
+    "the about edge is transferred by a separate BARE",
+    # cycles 3-4: population numerals left behind by the 5 -> 6 move
+    "A sixth site is in the code today",
+    "One of the two re-materializers adds a name",
+    # cycle 4: the header's stale exemption count
+    "two MORE use it on an `IMPL|NAND` leg",
+)
+
+
+def test_no_retracted_claim_has_come_back():
+    """#10149: a false sentence must not survive on a green suite.
+
+    Five review cycles on #9417 found documentation that CI called green while it
+    contradicted the code. Each sentence above was measured false, corrected, and
+    would have passed again unnoticed. Numeral pins cannot see them; a verbatim
+    retraction pin can — the idiom this repo already uses
+    (`test_entity_attachment_brief_claims.py`, `test_csp_plan_doc_consistency.py`).
+    """
+    doc = (ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text(
+        encoding="utf-8")
+    flat = " ".join(doc.split())          # sentence fragments may wrap
+    offenders = [frag for frag in RETRACTED_CLAIMS if frag in flat]
+    assert not offenders, (
+        "a retracted claim is back in STORAGE-ARCHITECTURE.md: "
+        + "; ".join(repr(f) for f in offenders)
+        + " — re-derive it against the census tables rather than restoring the "
+          "sentence (#10149)")
+
+
+def test_every_writer_is_described_by_the_table_it_is_in():
+    """#10149: the SENTENCE a reader acts on must match the table it came from.
+
+    `MAP_WRITERS` members must not be described as exemptions — the
+    misattribution cycles 2-5 kept producing, one sentence per review, on a green
+    suite. Sentence-level and history-aware: a sentence that says the writer
+    *was* exempt before #9417 is true and is not a finding.
+    """
+    import re as _re
+    doc = (ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text(
+        encoding="utf-8")
+    flat = " ".join(doc.split())
+    sentences = [x.strip() for x in _re.split(r"(?<=[.!?])\s+", flat) if x.strip()]
+    history = ("before #9417", "until #9417", "was a declared", "was one of these",
+               "declared one until", "left that table", "#10149", "#10139")
+    exempt_words = ("declared false positive", "is NOT one of them",
+                    "carries NO property")
+    checked = 0
+    for sent in sentences:
+        for key in MAP_WRITERS:
+            symbol = key[1]
+            if symbol not in sent:
+                continue
+            checked += 1
+            if any(h in sent for h in history):
+                continue
+            hits = [w for w in exempt_words if w in sent]
+            assert not hits, (
+                f"§13 calls `{symbol}` (a MAP_WRITERS member) {hits[0]!r} in the "
+                f"same sentence — the table says it writes the property, the prose "
+                f"says it does not: {sent[:180]!r} (#10149)")
+    assert checked, "§13 no longer mentions any MAP_WRITERS member"
