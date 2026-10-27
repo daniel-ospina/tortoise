@@ -62,6 +62,38 @@ def _lookalikes(n: int) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
+def _embedder_off(force_sparse_tfidf):
+    """Pin the embedder OFF for this module — the write path is not the subject.
+
+    Every assertion here is LEXICAL + recency: none depends on a vector, and the
+    only vectors that matter are the ones a test SEEDS by hand (``vecf32`` in the
+    scan-branch pin). Unpinned, each ``sdk.create_point`` pays one real
+    transformer forward whenever the lane has the model — and this file writes
+    **558** of them (the acceptance sweep's 10+50+119+130+200 look-alikes, plus
+    the BM25 arm's 21 and the small fixtures). Measured on the D14
+    (``embedded_only``) leg, run 40559368109 job 122408095621: the acceptance
+    sweep hit pytest's ``--timeout=300`` with its stack inside
+    ``sdk.create_point`` -> ``embeddings.encode_for_row`` ->
+    ``sentence_transformers.encode`` -> BERT forward, which reddened the leg and
+    through it the required ``python-ci-gate``.
+
+    That lane installs ``.[test,embeddings]`` so the bge model is PRESENT; a dev
+    lane without a model cache has ``EmbeddingModel.get() is None`` and runs the
+    same file in ~17 s — which is exactly the environment-dependence this seam
+    exists to remove (#2573/#2772: *"CI may run with the bge embedder cache
+    present or absent … any test pinning exact retrieval pool sizes must pin the
+    embedder state or it is environment-dependent"*). The seam is
+    ``tests/conftest.py``'s ``force_sparse_tfidf``; with it requested, the same
+    file performs **0** encodes.
+
+    ⚠️ Not a weakening: the tie premise and the pool sizes are unchanged, and
+    ``create_point`` still writes the id/timestamps the ranking reads — only the
+    optional vector column (``sdk.py``: *"embedding is optional"*) is skipped.
+    """
+    return force_sparse_tfidf
+
+
+@pytest.fixture(autouse=True)
 def _reclaim_sdks():
     yield
     while _SDKS:
