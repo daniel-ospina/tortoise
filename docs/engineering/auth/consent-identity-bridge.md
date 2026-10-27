@@ -40,9 +40,9 @@ that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-to
 
 | Fact | Evidence |
 |---|---|
-| The page mints session material client-side | `supabaseClient.auth.signInWithOAuth` `oauth.py:2875` / `signInWithPassword` `oauth.py:2890` |
+| The page mints session material client-side | `supabaseClient.auth.signInWithOAuth` `oauth.py:2909` / `signInWithPassword` `oauth.py:2924` |
 | The page reads the session back out of the cookie | `storage: cookieStorage, storageKey: COOKIE_NAME`, `oauth.py:2439-2440` |
-| The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2909-2914`; `/oauth/consent/preview` `oauth.py:2516-2522` |
+| The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2943-2948`; `/oauth/consent/preview` `oauth.py:2516-2522` |
 | The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers.get("Authorization", "")` (`:600`) and nothing else. ⚠️ Measured BEFORE §9 step 2: `POST /oauth/consent` also accepts a bound consent token now — see §10 *Redemption*. `/oauth/consent/preview` remains bearer-only |
 | `/oauth/authorize` carries **no** identity | `GET /oauth/authorize` (`@app.get("/oauth/authorize")` in `hosted_api.py`) — the authorize handler reads query params only |
 
@@ -170,10 +170,10 @@ consolidation dropped their citation block. Confirmed against today's code:
 
 | # | Property (`SCOPE.md` §4 W3) | Authoritative anchor (CONFIRMED) | Server-side equivalent that exists today | Gap |
 |---|---|---|---|---|
-| 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2547` (`let previewInFlight`), `oauth.py:2659` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2661` | `token.ts` — the module-level `inFlightRefreshes` map keyed by handle: concurrent callers for one handle share ONE provider refresh and all await it (same-isolate single-flight); the CAS `… AND refresh_token = ?5` is the cross-isolate half, and its loser **re-reads the winner's token** instead of clobbering it | none |
-| 2 | **refresh-once** — a refresh must not be issued twice concurrently | `oauth.py:2549` (`staleRefreshes`), `:2652`, `:2657-2665` (≤1 per stale cycle) | `token.ts::invalidateCachedToken` (`cooldownMs = 30_000`) bounds invalidations to one per window; the 60 s `REFRESH_SKEW_MS` cache keeps the hot path off the provider; and `inFlightRefreshes` dedupes concurrent refreshes (property 1) | none — **load-bearing assumption:** two racing ISOLATES are safe only because GoTrue tolerates ~10 s of refresh-token reuse. The in-flight map is per isolate and the CAS makes the write safe, but neither can un-spend a token another isolate has already presented. |
-| 3 | **never-sign-out** — a transient failure must never clear the session (the #3485 class) | `oauth.py:2556` (*"NEVER call the auth logout API here"*; function at `:2555`), `:2669` (`showExpiredSignin`, never a refresh-token revoke) | `token.ts` — `getAccessTokenForSession` (`:134`) and `refreshAndPersist` (`:191`) keep `no_session` (401) and `unavailable` (503) distinct: reason returns at `:152`, `:163`, `:200`, `:206`, `:208`; `isRefreshTokenDead(refreshed.status, refreshed.error)` (`:205`) — a `403`/`404`/`400` from the provider is **infrastructure**, not a dead session | none |
-| 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:3152-3160` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2659-2661`) | **implemented, not yet routed** — `decideConsentAdvance` (`website/apps/dashboard/functions/_shared/auth/consent-flow.ts`) | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. **Gap (recorded): the decision is implemented and behaviourally tested; the route that calls it is §9 step 3 and is NOT built, because §9 orders steps 2→4 to land together.** |
+| 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2547` (`let previewInFlight`), `oauth.py:2660` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2661` | `token.ts` — the module-level `inFlightRefreshes` map keyed by handle: concurrent callers for one handle share ONE provider refresh and all await it (same-isolate single-flight); the CAS `… AND refresh_token = ?5` is the cross-isolate half, and its loser **re-reads the winner's token** instead of clobbering it | none |
+| 2 | **refresh-once** — a refresh must not be issued twice concurrently | `oauth.py:2549` (`staleRefreshes`), `:2652`, `:2658-2666` (≤1 per stale cycle) | `token.ts::invalidateCachedToken` (`cooldownMs = 30_000`) bounds invalidations to one per window; the 60 s `REFRESH_SKEW_MS` cache keeps the hot path off the provider; and `inFlightRefreshes` dedupes concurrent refreshes (property 1) | none — **load-bearing assumption:** two racing ISOLATES are safe only because GoTrue tolerates ~10 s of refresh-token reuse. The in-flight map is per isolate and the CAS makes the write safe, but neither can un-spend a token another isolate has already presented. |
+| 3 | **never-sign-out** — a transient failure must never clear the session (the #3485 class) | `oauth.py:2556` (*"NEVER call the auth logout API here"*; function at `:2555`), `:2670` (`showExpiredSignin`, never a refresh-token revoke) | `token.ts` — `getAccessTokenForSession` (`:134`) and `refreshAndPersist` (`:191`) keep `no_session` (401) and `unavailable` (503) distinct: reason returns at `:152`, `:163`, `:200`, `:206`, `:208`; `isRefreshTokenDead(refreshed.status, refreshed.error)` (`:205`) — a `403`/`404`/`400` from the provider is **infrastructure**, not a dead session | none |
+| 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:3191-3199` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2660-2662`) | **implemented, not yet routed** — `decideConsentAdvance` (`website/apps/dashboard/functions/_shared/auth/consent-flow.ts`) | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. **Gap (recorded): the decision is implemented and behaviourally tested; the route that calls it is §9 step 3 and is NOT built, because §9 orders steps 2→4 to land together.** |
 
 **Consequence for the implementation.** Properties 1–3 are already implemented server-side by the BFF
 (#3522/#4054) — the bridge's job for them is to *route the consent page onto that path* and delete the
@@ -215,7 +215,7 @@ The mint requires the browser to reach the session origin even though the consen
   pins the same-origin, exact-path and trailing-slash cases, plus that both well-known routes still
   carry their decorator, so a future `base` change cannot silently cross the origins.
 
-## 6. Task 5 — the sign-in return origin: the entry is PRESENT, the target was the wrong string (#10088)
+## 6. Task 5 — the sign-in return origin: the entry is PRESENT and the string was not the one the record names; the CAUSE is not established (#10088)
 
 **Status (measured 2026-10-26 on production, `#10088`):** the allow-list entry `https://api.premiselabs.co/**`
 **is present** (the owner read it in the project's Redirect URLs — the earlier "the row is missing" reading of
@@ -247,8 +247,8 @@ Google), so the decision is only visible at the callback, which needs a real pro
 indeterminacy is the reason for the bare path**, not a settled claim about which string GoTrue rejected.
 
 **Recorded fix (#10088, in the code):** the target is now the **bare path** — `authorizeReturnTo()` returns
-`origin + "/oauth/authorize"` and nothing else (`oauth.py:2735`) — and the authorize request crosses the
-round trip in the page's OWN origin-scoped store (`stashAuthorizeFlow` / `takeAuthorizeFlow`, `oauth.py:2746`),
+`origin + "/oauth/authorize"` and nothing else (`oauth.py:2747`) — and the authorize request crosses the
+round trip in the page's OWN origin-scoped store (`stashAuthorizeFlow` / `takeAuthorizeFlow`, `oauth.py:2757`),
 the same store the PKCE verifier already has to survive in. The bare path is byte-identical to the entry
 the record names, so it survives every entry SHAPE the record allows (`/**`, or the bare path written out) and
 depends on neither the query-vs-glob behaviour nor the dashboard's exact wildcard. The AS serves the page for
@@ -281,8 +281,8 @@ bridge plus the page rewrite. Deleted by this issue when the bridge lands (not b
 | the inline `cookieStorage` adapter + the aux-store probe chain | `oauth.py:2285-2514` |
 | `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2242-2265` (`:2242`, `:2257`, `:2258`, `:2259`, `:2265`), `:2420`, `:2430` |
 | the supabase-js CDN `<script>` + `createClient` + `flowType: "pkce"` + `detectSessionInUrl` | `oauth.py:2216-2218`, `:2437-2447` |
-| `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2775-3148` |
-| `onAuthStateChange` (property 4's anchor) | `oauth.py:3152` |
+| `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2786-3188` |
+| `onAuthStateChange` (property 4's anchor) | `oauth.py:3191` |
 
 **`SCOPE.md` §10 item:** `oauth.py:2258` hardcodes `COOKIE_DOMAIN = ".premiselabs.co"`, and Gate 4 required
 that scope to be **configuration, not a literal**, so the Python surface and the BFF cannot disagree about

@@ -2654,6 +2654,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     if (REQUEST_MISSING) {
       showSignin();
       showError(terminalMessage());
+      disableProviderSignin();
       return Promise.resolve("missing");
     }
     if (previewInFlight) return previewInFlight;
@@ -2728,10 +2729,20 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // So the authorize request crosses the provider boundary in the page's own
   // origin-scoped aux store (`stashAuthorizeFlow`), the SAME store the PKCE
   // verifier already has to survive in — if that store cannot hold the request,
-  // the exchange could not complete either. That store is not a trust boundary:
-  // the page posts the restored values to /oauth/consent, which re-validates
-  // `client_id` and rebuilds the target from the REGISTERED `redirect_uri`, so a
-  // restored value can never widen what the grant is bound to.
+  // the exchange could not complete either. What a restored entry is WORTH is a
+  // property of the path that reads it, not of the store:
+  //
+  //  - the APPROVE path re-posts the restored values to /oauth/consent, which
+  //    re-validates `client_id` and rebuilds the target from the REGISTERED
+  //    `redirect_uri` — so there a restored value can never widen what the grant
+  //    is bound to (this is the claim the previous wording made for the whole
+  //    store, and it holds only here);
+  //  - the DENY path has NO server round trip: `redirectBack` navigates the
+  //    restored `redirect_target` as-is, so its bound is not that re-validation
+  //    but the store write itself — reaching the entry already means same-origin
+  //    script, and on this page that is already session-fatal (the JS-readable
+  //    session cookie). Recorded as a residual; not an escalation, and not
+  //    closed by the consent server's rebuild.
   function authorizeReturnTo() {
     return window.location.origin + AUTHORIZE_PATH;
   }
@@ -2829,6 +2840,23 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       + "(or leave private browsing) and reload, or sign in with email and password below.",
   };
   const PROVIDER_LABEL = { github: "GitHub", google: "Google" };
+  // #10088: the missing-request state is not retryable HERE, so the PROVIDER
+  // buttons have to go with the retry affordance. The round trip cannot recreate
+  // the request, and a click does not fail harmlessly: `stashAuthorizeFlow`
+  // writes a `{client_id: "", …}` entry, `signInWithOAuth` spends a freshly
+  // minted provider code, and the return leg takes that entry, rejects it for
+  // having no client, and renders this identical screen again.
+  //
+  // Not routed through `renderCapability`: that notice explains an INCAPACITY of
+  // the page (no crypto / no store), which is not what happened here, and the
+  // terminal message already carries this cause and remedy.
+  function disableProviderSignin() {
+    for (const id of ["btn-github", "btn-google"]) {
+      const b = document.getElementById(id);
+      b.disabled = true;
+      b.setAttribute("aria-disabled", "true");
+    }
+  }
   function renderCapability(incap) {
     const blocked = !!incap;
     for (const id of ["btn-github", "btn-google"]) {
@@ -2842,6 +2870,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     notice.style.display = blocked ? "block" : "none";
   }
   async function signInWithProvider(provider) {
+    // #10088: the missing-request state has no round trip it can make — the
+    // request it would need cannot be recreated here — so refuse BEFORE the
+    // store write and before the provider is asked for a code. The buttons are
+    // disabled in this state (see `disableProviderSignin`); this guard is the
+    // handler half, so a regressed affordance still cannot spend the round trip.
+    if (REQUEST_MISSING) return;
     // #5734: a new user-initiated attempt supersedes a pending refusal, so the
     // capability refusal below can still report itself.
     writeRefused = false;
@@ -3094,8 +3128,13 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     showError(terminalMessage());
     // #10088: a missing request is not retryable HERE (its copy's remedy is the
     // client), so the affordance stays away — a control the message does not
-    // imply is the state invariant 21 exists to prevent.
-    if (!REQUEST_MISSING) showRetrySignin();
+    // imply is the state invariant 21 exists to prevent. The provider buttons
+    // are a second retry affordance in this state and go for the same reason.
+    if (REQUEST_MISSING) {
+      disableProviderSignin();
+      return;
+    }
+    showRetrySignin();
   }
   function sanitiseUrl() {
     try {

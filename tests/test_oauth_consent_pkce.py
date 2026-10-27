@@ -119,7 +119,10 @@ Invariants pinned here:
    sign-in view instead, so a page that stopped restoring cannot pass
 26 a return leg whose request did NOT come back fails CLOSED and says so: no
    consent view for a client the page cannot name, a message naming the client
-   as the remedy, and NO retry affordance (the message implies none)
+   as the remedy, and NO retry affordance (the message implies none) — neither
+   the retry control NOR the two provider buttons, whose bound handlers are
+   driven to prove a click cannot spend a provider code and land back on the
+   same screen
 
 Every field the tests assert on is produced by the page's own code running in the
 context, never read back from a shim.
@@ -945,9 +948,19 @@ def test_10088_a_return_with_no_request_fails_closed() -> None:
     Two lines matter, in opposite directions: the message names the CLIENT as the
     remedy (retrying the sign-in here cannot recreate the request), and the retry
     affordance stays away — a control the copy does not imply is the dead end
-    invariant 21 exists to prevent."""
+    invariant 21 exists to prevent.
+
+    #10088 review: the provider buttons are the OTHER retry affordance on this
+    screen, and they were the live ones. A click does not fail harmlessly —
+    `stashAuthorizeFlow` accepts `{client_id: ""}`, `signInWithOAuth` spends a
+    freshly minted provider code, and the return leg renders this identical
+    screen — so they are disabled here AND refused in the handler, and both
+    halves are asserted (the bound handler is invoked, as in
+    `click_after_load`: a programmatic click runs a handler whose affordance is
+    disabled, which is exactly what pins the handler guard).
+    """
     r = _run("flow_return", search="?code=THECODE", seedVerifier="verifier-abc",
-             previewOk=True, page=_render_shell())
+             previewOk=True, page=_render_shell(), clickProvider="github")
     assert r["exchangeCount"] == 1, r
     assert r["viewConsent"] != "block", (
         f"consent rendered for a client the page cannot name: {r}"
@@ -964,6 +977,23 @@ def test_10088_a_return_with_no_request_fails_closed() -> None:
         f"a non-retryable message offered a retry control: {r}"
     )
     assert r["navs"] == [], f"the fail-closed arm navigated somewhere: {r['navs']}"
+    # The SECOND retry affordance: two enabled provider buttons are a working
+    # retry on a screen that says retrying cannot work, and each click spends a
+    # provider code to land back here.
+    assert r["githubDisabled"] is True, (
+        f"the missing-request state left GitHub clickable, so the screen offers a "
+        f"retry whose own message says it cannot work: {r}"
+    )
+    assert r["googleDisabled"] is True, r
+    assert r["navsBeforeClick"] == [], r
+    assert r["navsAfterClick"] == [], (
+        f"a provider click in the missing-request state navigated (spending a "
+        f"provider code to re-render this same screen): {r['navsAfterClick']}"
+    )
+    assert r["flowEntriesAfterClick"] == [], (
+        f"a provider click in the missing-request state stashed a request with no "
+        f"client, which the return leg can only reject: {r['flowEntriesAfterClick']}"
+    )
 
 
 # ── #3443: the navigation target is the SERVER's rebuild ────────────────────
@@ -2193,6 +2223,23 @@ function innerTarget(assignUrl) {
       .filter(function (k) { return k.indexOf('-authorize-flow') >= 0; });
     out.retrySigninVisible = els['btn-retry-signin']
       ? String(els['btn-retry-signin'].style.display) : null;
+    // #10088: the missing-request state must not offer a SECOND retry — the two
+    // provider buttons are the only other live controls in that view, and a
+    // click spends a provider code to land back on the same screen. Disabled
+    // state is read here; `clickProvider` then drives the BOUND handler (as in
+    // `click_after_load`, where a programmatic call runs a handler even when the
+    // affordance is disabled), so the handler half is pinned too.
+    out.githubDisabled = els['btn-github'] ? els['btn-github'].disabled : null;
+    out.googleDisabled = els['btn-google'] ? els['btn-google'].disabled : null;
+    if (opts.clickProvider) {
+      out.navsBeforeClick = navs.slice();
+      await q('document.getElementById("btn-' + opts.clickProvider + '").onclick()');
+      await sleep(40);
+      out.navsAfterClick = navs.slice();
+      out.flowEntriesAfterClick = Array.from(sessionStorage._map.keys())
+        .concat(Array.from(localStorage._map.keys()))
+        .filter(function (k) { return k.indexOf('-authorize-flow') >= 0; });
+    }
     out.exchangeCount = fetchCalls.filter(function (c) {
       return c.url.indexOf('/auth/v1/token') >= 0;
     }).length;
