@@ -259,12 +259,16 @@ def classify_terminalizer_miss(
 
     ``name_unregistered`` is the sibling caller-decision for
     ``ObjectSuperseded`` only (#3590 D2): the caller has scanned the journal
-    and found NO ``ObjectRegistered`` carrying the record's ``name``, so the
-    record is unaddressable by the journal's own content. Also a journal
-    question this module cannot answer — it is passed in for the same reason
-    as ``target_deleted``, and it must NOT be inferred from the graph, because
-    a live-holder probe is exactly the ambiguity the exemption excludes. It is
-    ignored for every other ``event_type``.
+    and found the record's NAME not established — no ``ObjectRegistered``
+    created it, no ``EntityMutated`` state op carried it into the merge key,
+    and no ``EventRecorded`` mention stub minted it — **and** its ``id`` (when
+    it carries one) not an id the journal established. Both limbs are
+    required; a name alone is NOT the contract, and a caller that sets this
+    flag on a name-only reading exempts a supersede that could have landed.
+    Also a journal question this module cannot answer — passed in for the same
+    reason as ``target_deleted``, and it must NOT be inferred from the graph,
+    because a live-holder probe is exactly the ambiguity the exemption
+    excludes. It is ignored for every other ``event_type``.
 
     The default arm is fail-CLOSED: a terminalizer type outside the four
     named below returns :data:`SHAPE_UNCLASSIFIED_TERMINALIZER`, which is NOT
