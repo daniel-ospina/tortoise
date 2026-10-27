@@ -308,8 +308,9 @@ downtime so far.
    (the default, `strict`) still creates the per-graph user on every graph
    mint, and *there* the **app** credential genuinely needs:
 
-   - **the vendor's `Write` preset string, VERBATIM** (copy it from the console
-     or from the vendor's ACL page — it already carries `GRAPH.QUERY`,
+   - **the vendor's `Write` preset string, VERBATIM** (the vendor's ACL page
+     prints its exact string; there is no console on a self-hosted server to
+     copy from — it already carries `GRAPH.QUERY`,
      `GRAPH.RO_QUERY`, `GRAPH.LIST`, `GRAPH.DELETE`, `GRAPH.COPY`, `EXISTS`,
      `INFO` and the key verbs), **plus `+GRAPH.MEMORY`** for the storage meter.
      ⛔ Do **not** hand-write the set from a prose list, including the one in the
@@ -336,10 +337,14 @@ downtime so far.
      reconcile breaks down `absent` by reason, not `denied`. (Only the two
      VERSION probes degrade safely without this grant; see the Cloud bullet.)
 
-   There are no console presets on a self-hosted server — that vocabulary is
-   FalkorDB Cloud's; write the ACL from the list above. The requirement's home
-   is `tortoise/acl_graph_users.py` (`_GRAPH_COMMANDS`, `_falkordb_present`,
-   `layer_mode`).
+   So the self-hosted app ACL is: the vendor's `Write` string, **plus
+   `+GRAPH.MEMORY`**, **`+ACL`**, **`+MODULE|LIST`** (and `+BGSAVE` if
+   `tortoise backup` runs against this credential — the CLI issues it, and a
+   denial is loud and never corrupts the file backup). The *mechanism* that
+   consumes these lives in `tortoise/acl_graph_users.py` (`_falkordb_present`,
+   `_setuser`, `layer_mode`) — that module is where the recipe is implemented,
+   not a list of grants to copy, and `_GRAPH_COMMANDS` inside it is the TENANT
+   user's allowlist.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.

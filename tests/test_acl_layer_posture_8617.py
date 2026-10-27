@@ -255,7 +255,7 @@ def test_the_reason_vocabulary_is_distinct():
               acl.REASON_NO_GRAPH_MODULE, acl.REASON_PROBE_DENIED,
               acl.REASON_SETUSER_DENIED, acl.REASON_LAYER_DOWN,
               acl.REASON_PROBE_UNREADABLE]
-    assert len(set(values)) == len(values) == 7, values
+    assert len(set(values)) == len(values), values
 
 
 def test_the_hook_forwards_the_reason_it_was_given(monkeypatch, caplog):
