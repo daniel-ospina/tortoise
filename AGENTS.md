@@ -411,10 +411,12 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   measured. The fleet's model constant is `jev-latest` by owner ruling 2026-10-27, and the
   switch is staged in agent-infra#2914 — ⚠️ **on the branch, not on `main`, at the time of
   writing**: a checkout at `main` still sends the pin, so name which you are reading. The
-  deployed copies under `~/.pi/agent/` are DERIVED from an agent-infra checkout, so they mirror
-  whatever that checkout held WHEN BOOTSTRAPPED — a bootstrap from `main` reverts them to the
-  pin (observed twice, most recently 2026-10-27 12:52), which is a derivation artefact, not a
-  decision. Assert them after any bootstrap:
+  two deployed SCRIPTS under `~/.pi/agent/scripts/` are DERIVED from an agent-infra checkout, so
+  they mirror whatever that checkout held WHEN BOOTSTRAPPED — a bootstrap from `main` reverts
+  them to the pin (observed 2026-10-27 12:52), a derivation artefact rather than a decision.
+  `~/.pi/agent/state/lane-verdict.py` is the exception: bootstrap never writes `state/`, so it
+  is hand-maintained and a pin there is an edit, not a derivation. Assert all three after any
+  bootstrap:
   `grep -rn 'JEV_MODEL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py`
   (three paths — a bare `grep 'JEV_MODEL ='` reads stdin and answers nothing). Either way a measurement
   of this seam must name its model rather than assume one. Prompt version
