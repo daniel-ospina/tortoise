@@ -2501,7 +2501,7 @@ class TestCommitPointsGate:
         production lane happens to put in the dict, which is the property that
         keeps the contract from depending on a lane's resolver.
         WHICH lanes arrive raw and which die earlier is stated ONCE, in
-        `quota.enforce_org_limit`'s SCOPE note — not restated here (four copies
+        `quota.enforce_org_limit`'s SCOPE note — not restated here (copies
         of that inventory drifted apart inside this change; a copy claiming the
         `/v1/index/docs` documents gate arrives raw survived three review rounds,
         and it is false: that lane is handled by the DERIVED branch, and
@@ -2587,7 +2587,7 @@ class TestCommitPointsGate:
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
             "a :CommitRecord with status='partial' IS merged before the gate "
             "(`store.acquire(..., status='partial')`, hosted_api.py:17865, which "
-            "runs ahead of the gate at :17961); replay-safe, and invisible to "
+            "runs ahead of the gate at :17968); replay-safe, and invisible to "
             "_chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 

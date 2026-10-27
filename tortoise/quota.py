@@ -1168,7 +1168,7 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # ⚠️ SCOPE — this validates the dict the GATE IS GIVEN. It cannot fix a
     # corrupt value that dies EARLIER or is coerced ELSEWHERE (both tracked as
     # #10136). THE LANE INVENTORY LIVES HERE, ONCE — do not restate it at a
-    # caller or in a test docstring; three copies drifted apart inside #4051's
+    # caller or in a test docstring; copies drifted apart inside #4051's
     # own change.
     #   • ARRIVES RAW (this refusal owns it): `get_current_org_session` →
     #     `_session_user_org` takes the Org node's `max_api_keys` UNCOERCED
