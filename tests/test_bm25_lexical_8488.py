@@ -467,27 +467,30 @@ class TestReadPath:
         Mutation: drop the ``raw_results["fts"] = _bm25_hits`` assignment (the
         lexical arm disabled) → the lexical score assertions below go red.
 
-        #10121 (2026-10-27) changed what "climbs" can mean HERE, and the
-        measurement is recorded rather than papered over. The shipped leg used
-        to resolve a score tie OLDEST-first, so on this fixture it put the
-        target last on the lexical leg and the arm's re-scoring moved the FUSED
-        rank from 5/5 to 3/5. The tie is now recency-then-id DESC, i.e. the
-        target is no longer last on the lexical leg for an ordering reason — and
-        on this fixture the fused order does not move at all, because the four
-        topic documents sit in a DENSE tie cluster (vector 0.9496 ×4 vs the
-        target's 0.4142) that the bounded lexical weight cannot cross (measured
-        gate-off rrf 0.0410/0.0403/0.0397/0.0391/0.0385, gate-on
-        0.0400/0.0398/0.0397/0.0396/0.0395 — the target is last in both).
-        NOTE the direction of that cause: the topics are NOT tied on the lexical
-        leg (they score 3.0 against the target's 2.0, before and after), so
-        this is not a tie-order effect here. The lift disappeared because the
-        DENSE leg's equal-distance topic order flipped with #10121's recency tie
-        while the lexical leg's did not — the two legs then handed the same row
-        different ranks, so the best lexical rank was no longer paired with the
-        best dense rank and the fused spread compressed. That pairing mismatch
-        is exactly what the arm's own recency sort (``bm25_rank(recency=...)``)
-        now fixes; re-measure this fixture's fused delta after that lands rather
-        than trusting either number.
+        #10121 (2026-10-27) RE-MEASURED this fixture at its own head, embedded
+        lane: gate-off fused rrf 0.0410/0.0403/0.0397/0.0391/0.0385 with the
+        target LAST (5/5); gate-on 0.0407/0.0401/0.0395/0.0394/0.0388 with the
+        target 3/5. So the lift is 5/5 → 3/5 — the same delta the pre-#10121
+        measurement recorded — and the claim below is STRICT (``<``) again.
+
+        Why an intermediate state of this PR had it relaxed to ``<=``, and why
+        that reading is superseded rather than dropped: #10121 flips the DENSE
+        leg's equal-distance tie (the four topic documents sit in one: vector
+        0.9496 ×4 vs the target's 0.4142, while the lexical leg is NOT tied —
+        topics 3.0 vs the target's 2.0). Flipping the dense order alone while
+        the lexical leg still ordered oldest-first handed the same row different
+        ranks on the two legs, so the best lexical rank stopped pairing with the
+        best dense rank and the fused spread compressed — a measured intermediate
+        state (gate-on 0.0400/0.0398/0.0397/0.0396/0.0395, target last in both),
+        not the shipped behaviour. The arm's own recency sort
+        (``bm25_rank(recency=...)``) lands in the SAME change and restores the
+        pairing; the numbers above are the post-pairing re-measurement, which is
+        why this assertion is strict and why no relaxation is left behind.
+
+        Honest scope, unchanged from the fixture note at the module top: the
+        embedder here is the lexicon stand-in, so this proves the MECHANISM. The
+        live numeric improvement is #8486's measurement (postponed by owner
+        ruling) and is NOT claimed here.
 
         What stays STRICT is the arm's own mechanism: with the gate on the
         target carries the strongest lexical score (1.3863 vs 0.5754 for every
@@ -515,9 +518,12 @@ class TestReadPath:
                    for e in on_trace), (
             f"the lexical leg must be BM25-scored when the gate is on; "
             f"trace={on_trace}")
-        assert on_ids.index(target) <= off_ids.index(target), (
-            "the BM25-scored lexical leg must not rank the rare-token record "
-            f"WORSE than the shipped scorer did; off={off_ids}, on={on_ids}")
+        # STRICT (#10121 re-measurement): measured 5/5 -> 3/5 at this head. A
+        # ``<=`` here would be satisfied by an arm that changes nothing.
+        assert on_ids.index(target) < off_ids.index(target), (
+            "the BM25-scored lexical leg must rank the rare-token record "
+            f"BETTER than the shipped scorer did, not merely not-worse; "
+            f"off={off_ids}, on={on_ids}")
 
         def _lexical_rank(rows: list[dict]) -> int:
             """Rank by lexical SCORE within the page: rows scoring strictly
@@ -1586,3 +1592,4 @@ def _bm25_env_block(env: str) -> str:
     end = next((j for j in range(start + 1, len(lines))
                 if lines[j].startswith("# ──")), len(lines))
     return "\n".join(lines[start:end])
+
