@@ -7506,8 +7506,12 @@ def _check_org_limit(org: dict, resource: str, *,
     - Fail-closed is the secure default: when you can't verify, don't grant.
     - Customer harm is bounded: a DB outage that breaks count queries typically
       also breaks the actual write (same store), so we're failing fast.
-    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
-      level with org_id and resource, visible in production dashboards.
+    - Alerting mitigates ops risk: every data-fault QuotaCheckError — a
+      counting failure, a MISSING limit key, an UNREADABLE limit value — is
+      logged at ERROR level with org_id and resource, visible in production
+      dashboards. (`unknown quota resource` is an internal programming error —
+      a bad `resource` literal, never tenant data — and is deliberately not
+      logged here; #4051 review round 5.)
 
     #329: delegates to the shared fail-closed quota helper.
     #683: the limits dict is the authenticated org dict (resolved once by
@@ -7539,8 +7543,11 @@ def _check_org_limit(org: dict, resource: str, *,
             detail=quota_refusal_payload(e),
         )
     except QuotaCheckError as e:
-        # quota._count_resource already logged at ERROR level (#686);
-        # avoid double-logging — this site only records the HTTP context.
+        # `quota` already logged the refusal at ERROR level — `_count_resource`
+        # for a counting failure (#686), and the limit validation for an
+        # UNREADABLE limit (#4051, on BOTH the generic path and the `documents`
+        # derived branch) or a MISSING one (#4051 review round 5); avoid
+        # double-logging — this site only records the HTTP context.
         _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             org_id, resource, str(e),
@@ -14837,6 +14844,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             raise HTTPException(
                 status_code=500, detail=f"Quota check failed: {e}") from None
 
+    # ⚠️ #10133 — the SAME VACUOUS PROXY the commit lane lost in #4051: since
+    # #4010 every resolver supplies `max_sessions: None`, so this call can never
+    # 402 (it does not even count). It is NOT the org-limit gate for this lane;
+    # the binding one is the points ESTIMATE gate above, which is conditional on
+    # `(not session_existed or retry_failed_capture) and not store_only`. What
+    # this call still does is refuse (500) a limits dict with no `max_sessions`
+    # key at all — the #310 GAP-B presence check the MCP capture bridge relies on
+    # (`tests/test_capture_session.py::test_mcp_capture_missing_max_sessions_fails_closed`).
+    # Removing it needs that contract re-pointed at `max_points` AND a decision
+    # for the store-only lanes, so it is tracked separately rather than copied
+    # half-way here.
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -17659,8 +17677,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract,
-    org points ceiling, per-org ingest budget (#4051: 429 + Retry-After)
+    [3] L2 reconciliation IN MEMORY → [4] org points ceiling (the org's OWN
+    limit — #4051 removed the vacuous sessions-cap stand-in), per-org ingest
+    budget (#4051: 429 + Retry-After)
     and budget adjudication on the reconciled net-new delta (soft 15 → WARN
     telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
     [5] the four-node chain + entities + operators + supersede_point +
@@ -17854,27 +17873,65 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         if plan.duplicate:
             return _commit_response(payload, duplicate=True, warnings=warnings)
 
-        # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
-        # unlimited for every tier, so every resolver supplies an explicit None
-        # and this call cannot 402; it remains the fail-closed presence check
-        # (#310 GAP-B) that a limits dict built without the key does not slip
-        # past. Replays already returned above: quota never gates a duplicate
+        # [4a] The ORG-LIMIT gate — the org's OWN limit, read from its own
+        # source. Replays already returned above: quota never gates a duplicate
         # (zero writes).
-        _check_org_limit(org, "sessions")
-        # #4051 — the org points gate (the second half of step [4a]). The sessions
-        # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+        #
+        # ⛔ #4051 — `_check_org_limit(org, "sessions")` STOOD HERE AND IS
+        # REMOVED, not relocated. Since #4010 sessions are unlimited for every
+        # tier, so every resolver supplies `max_sessions: None` and that call
+        # could never 402: it was a session CAP standing in for the org limit,
+        # i.e. a guard that cannot see what it guards — and it read as "this
+        # lane has an org-limit gate" while enforcing nothing.
+        # What it still DID was refuse (HTTP 500) when the resolved limits dict
+        # carried no `max_sessions` key at all (the #310 GAP-B presence
+        # contract). That contract is NOT dropped: it rides on the limit that
+        # actually binds, `max_points`, which the gate below reads and
+        # VALIDATES (`quota.enforce_org_limit`): a limit that is missing OR that
+        # cannot be read as a number is a `QuotaCheckError` naming the field,
+        # never a pass. A limit whose absence cannot change any decision (an
+        # unlimited one) is not worth a refusal.
+        # ⚠️ What that means for THIS lane, stated so the two are not conflated:
+        # the gate validates the dict it is GIVEN, and this lane's dependency
+        # (`get_current_org_gated`) coerces `max_points` with `int(mp)` before
+        # the handler ever runs — so a corrupt STORED value fails earlier, in
+        # auth, as an unnamed 500 (`"Auth error"` on the Supabase lane). That is
+        # the resolver's gap, tracked as #10136; it is NOT closed by this gate.
+        # WHICH lanes hand the gate a raw value — and which do their own
+        # `int(...)` and so stay unnamed — is stated ONCE, in
+        # `quota.enforce_org_limit`'s SCOPE note. Do not restate the inventory
+        # here: copies of it drifted apart repeatedly inside this very change
+        # (this one claimed create_graph / invite reached the gate, which they
+        # never do — create_graph calls its own `int(max_graphs)` and
+        # invite_to_org reads no limit at all — while `quota`'s copy denied it
+        # for key-mint, the one lane that really does arrive raw).
+        #
+        # #4051 — the org points gate. It enforces the org's OWN `max_points`:
+        # the value this handler's sole dependency (`get_current_org_gated`)
+        # resolved from the org's row + pricing.json, read by
+        # `enforce_org_limit`. No MCP bridge reaches this handler (the only MCP
+        # session tool proxies the capture impl), so that resolver is the one
+        # producer.
+        # ⚠️ `.get(limit_key)` is why a dict built WITHOUT the key is refused as
+        # a `QuotaCheckError` naming the field instead of raising `KeyError` —
+        # but it does NOT make the missing-key branch a live path on THIS lane:
+        # the resolver above always emits the key (`hosted_api.py:6234`,
+        # `supabase_control.py:1158-1159`). Here that branch is reached only
+        # through the test seam
+        # (`tests/test_commit_endpoint.py::test_missing_max_points_refuses_and_mints_nothing`).
+        # Do not read it as a production branch on this lane.
         #
         # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
         # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
         # :Object/:Subject nodes entities mint), because `_count_resource("points")`
         # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
         # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
-        # n.is_episodic = false))` (tortoise/quota.py:734-736).
+        # n.is_episodic = false))` (tortoise/quota.py:1024-1030).
         # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
         # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
         # lane's own commit can leave behind — the lane writes in bulk and carries
         # no payload estimate, so a commit from just under the cap can finish past
-        # it. (The capture lane's `count + est > max_points` at :10888 IS
+        # it. (The capture lane's `count + est > max_points` at :14755 IS
         # estimate-aware; this is the pre-write form every OTHER write endpoint
         # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
         # asked for, NOT a new bound.)
@@ -17891,8 +17948,8 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         #
         # What it buys: parity with every other write endpoint's points gate
         # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
-        # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
-        # (after every replay return above) so an idempotent re-POST is never gated
+        # removed sessions-cap stand-in. Same pre-write site as the old sessions
+        # call (after every replay return above) so an idempotent re-POST is never gated
         # — a replay writes no nodes and must never 402 (#1727's lesson); the
         # budget 402 below is unchanged. Same shipped machinery + structured
         # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
@@ -17926,7 +17983,7 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # wants more speaks to us (#5425's posture — rate limit, not refusal of
         # the customer's data).
         #
-        # WHY HERE — the SAME site as the sessions/points gates above, i.e. after
+        # WHY HERE — the SAME site as the points gate above, i.e. after
         # every replay return and BEFORE the budget adjudication. Before the
         # adjudication is load-bearing, not cosmetic: the `held` outcome WRITES
         # (it MERGEs the :Session node with its `value_nodes_held` counter, and
@@ -18383,14 +18440,91 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
+def _record_unavailable() -> HTTPException:
+    """#8447: fail-CLOSED 503 when the RECORD did not answer and nothing could be
+    served in its place.
+
+    On an armed **journaling** deployment the turns are RECORD rows (the
+    per-turn `PointAdded` records, #10000/#10011) and the graph keeps only the
+    Session's counters — so when the record read FAILS, the fail-soft fallback
+    below answers zero turn nodes, which is byte-identical to a session that has
+    no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
+    forbids — a refusal rendered as a legitimate empty answer, with the only
+    signal in a WARNING the caller never reads.
+
+    ⚠️ "JOURNALING" is load-bearing, and `_record_holds_turns` does NOT test it:
+    that predicate asks only whether the DSN is set (``return _dsn() is not
+    None``), while the WRITE side asks the same capability question with both
+    conjuncts — ``sdk._get_event_log() is not None and _record_dsn() is not
+    None`` (`tortoise/sdk.py:2652`), because a per-turn `PointAdded` record is
+    gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
+    write door declines `no_durable_journal` and the GRAPH keeps the turns, so
+    "the graph keeps only the counters" is a property of armed+journaling, not
+    of arming alone. This refusal's own behaviour is unaffected there: the guard
+    at the bottom of the read measures the fallback against the Session's own
+    ``turn_count``, and on that config the graph holds all of them, so a
+    complete copy is still served 200.
+
+    The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
+    repealed: a graph copy that is COMPLETE against the Session's own
+    ``turn_count`` is still served byte-identically, because it protects a
+    transcript that is really there. A copy that is only a stale PREFIX of that
+    transcript — or a stale SUPERSET of it — is NOT protected; serving it would be
+    the same silent truncation in a less obvious shape. `sess[2]` is the count this
+    endpoint already publishes, and it is what makes the copy checkable at all.
+    This body is for the cases that arm cannot cover: the Session carries no
+    ``turn_count`` to check the copy against, or the copy disagrees with the count
+    it would report alongside.
+
+    Same envelope as :func:`_graph_unavailable` on this route (``503`` +
+    ``error_code``) rather than a new one, because on this route that body is
+    already the shape for "the data plane could not answer": it is body-only
+    today — **no client maps it yet** (that function's own docstring says so),
+    and the agents/SDKs that consume this lane treat any 5xx as retryable. The
+    ENVELOPE is borrowed from there; its TRANSIENCE argument is NOT.
+
+    ⛔ The two doors fail in different units. ``_graph_unavailable``'s unit is an
+    offloaded SDK construction that may never have run ("a submission that never
+    ran did NO work"); the unit here is a synchronous record connect plus SQL
+    read on a worker thread, which DID run and did fail. What makes a retry safe
+    here is only that this is a ``GET`` — a SAFE method (RFC 9110 §9.2.1) — so a
+    retry can never re-apply work, whatever the cause was.
+
+    ⚠️ And the cause is NOT always transient. The ``except Exception`` above
+    cannot tell an outage from a PERMANENT record failure — an RLS denial, a
+    missing migration, a query defect — so those surface to the caller as this
+    same retryable body. That is a known limit of the arm, stated rather than
+    papered over; the distinction IS recoverable from the log, where the
+    fail-soft arm records the exception class and its traceback
+    (``exc_info=True``).
+
+    ⚠️ Deliberately NOT a response field. A new key on the session-detail
+    projection (`SESSION_DETAIL_FIELDS`) would widen a public wire surface, which
+    is an owner approval and not a lane decision; an explicit error is the
+    narrowest visible shape available (#8447: "an explicit error, or a reply
+    field that says so").
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": "The record could not answer for this session, and no "
+                       "complete copy could be served in its place — retry; if "
+                       "it persists the record needs an operator.",
+        },
+    )
+
+
 def _record_holds_turns() -> bool:
     """#10000: does the RECORD hold captured turns (rather than the graph)?
 
-    The same capability question the capture writer asks, asked from the read
-    side: turns reach the record only through the per-turn `PointAdded` records,
-    which require a configured journal, and the record must be ARMED
-    (`TORTOISE_RECORD_DSN`). When either is absent the graph is what holds them
-    and every read stays exactly as it was before #10000.
+    ⛔ IT DOES NOT ASK THE QUESTION THE CAPTURE WRITER ASKS, and the difference is
+    live. Turns reach the record only through the per-turn `PointAdded` records,
+    which need a configured journal AND the DSN — `sdk.py:2652`'s two conjuncts —
+    while this predicate tests the DSN ONLY. So on an armed-but-NOT-journaling
+    deployment the writer puts the turns in the GRAPH while this read still asks
+    the record, and the record's empty answer then stands for turns the graph
+    holds. The previous text claimed both sides asked one question; they do not.
     """
     from tortoise.record_writer import record_dsn as _dsn
 
@@ -18505,6 +18639,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # makes the pre-arming deployment byte-identical.
     turns = []
     _record_turns = None
+    _record_read_failed = False
     if _record_holds_turns():
         try:
             def _read_record_turns():
@@ -18521,9 +18656,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # transcript the cache still holds. This fallback is the transitional
             # half of #10000 and disappears with the graph-side purge step.
             _record_turns = None
+            _record_read_failed = True
             _logger.warning(
-                "session %s turns read from the record failed — serving the graph "
-                "copy for this request", session_id, exc_info=True)
+                "session %s turns read from the record failed — falling back to "
+                "the graph copy for this request", session_id, exc_info=True)
     if _record_turns is not None:
         for _t in _record_turns:
             turns.append({
@@ -18559,6 +18695,70 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 "content": body,
                 "created_at": created_at,
             })
+
+    # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. On an
+    # armed JOURNALING deployment the record was the store holding these turns and
+    # it did not answer, so the graph fallback may stand in for it only when it
+    # AGREES with the Session's own `turn_count` (`sess[2]`, written on every
+    # capture — `sdk.py`'s `merge_sets`), which is the count this endpoint
+    # publishes as `turns` below.
+    #
+    # `!=`, not `<`: the stale-turn sweep is gated on the write predicate
+    # (`sdk.py:2696`), so a re-capture after arming leaves the OLDER node set in
+    # place, and that superset is as much "not this transcript" as a prefix is.
+    #
+    # `turn_count` is NOT collapsed to 0 when absent (`or 0`): KNOWN ZERO (a
+    # capture that stored no turns) makes an empty copy the COMPLETE answer, while
+    # ABSENT — no capture ever wrote a count: the commit path's `MERGE (s:Session)`
+    # at `hosted_api.py:16928`, the held path at `:18036` — cannot be told from a
+    # legacy capture whose count went missing.
+    #
+    # ⛔ AN ABSENT COUNT IS REFUSED WHATEVER THE COPY'S SIZE, not only when the
+    # copy is empty. The bound is what makes a copy verifiable: absent means no
+    # `turn_count` was ever written, so NEITHER a prefix NOR a superset can be
+    # ruled out — and a non-empty copy served on that evidence is exactly the
+    # `#8447` shape ("never a silently truncated result indistinguishable from a
+    # complete one"), which the `!=` arm above closes only where a count exists.
+    # Serving the non-empty sub-case was the hole: it made "absent is
+    # fail-closed" true only for the empty copy, and no test read it.
+    #
+    # ⚠️ NAMED LIMITS. Equality here proves only that the COUNTS agree — the same
+    # arithmetic `tools/backfill_graph_turns.py:522-528` refuses to attribute a
+    # CAUSE to ("a MEASUREMENT … a correct state that looks identical to a loss"),
+    # so this guard reads a disagreement as "not proven complete", never as "the
+    # copy is stale":
+    #   * a same-length pre-arming copy is served and is indistinguishable from a
+    #     post-arming re-capture on this route — count agreement is necessary,
+    #     not sufficient;
+    #   * the guard runs only when the record read FAILS. A record read that
+    #     SUCCEEDS with a short or empty answer is served as the LIST while `turns`
+    #     still reports `sess[2]` — the same self-contradicting body — and this
+    #     route cannot see it. That half belongs to #10021 (recorded there with
+    #     code evidence); doing it here would be a second store-decision rewrite
+    #     against that open branch;
+    #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so this `!=` assumes
+    #     the offset-0 single-capture shape that is the only one wired today. A
+    #     non-zero `turn_offset` append leaves `offset + turn_count` nodes and
+    #     would make a COMPLETE copy refuse — revisit this line when an append
+    #     caller is wired (`tools/backfill_graph_turns.py:503-520` already treats
+    #     that shape as correct);
+    #   * over-block: `_record_holds_turns` tests only the DSN, so a record outage
+    #     on a session with no turns — including any session created without a
+    #     capture — turns a truthful `200 {"turn_points": []}` into a 503. It needs
+    #     the read to fail, and the message is worded not to claim the record held
+    #     the transcript. #10021's shared predicate closes it. The ABSENT-count
+    #     refusal widens this deliberately: a legacy session whose `turn_count`
+    #     went missing but whose graph still holds its turns is also refused on a
+    #     record outage, though the graph copy may in fact be complete. That is
+    #     the fail-closed direction on evidence that cannot distinguish it from a
+    #     partial copy (`tools/backfill_graph_turns.py:522-528` calls the same
+    #     comparison a MEASUREMENT, never a cause).
+    _expected_turns = sess[2]
+    if _record_read_failed:
+        if _expected_turns is None:
+            raise _record_unavailable()
+        if len(turns) != _expected_turns:
+            raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
