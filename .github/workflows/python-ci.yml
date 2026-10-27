@@ -3565,10 +3565,18 @@ jobs:
           # here: that leg destroys and rebuilds a FalkorDB cache, and this
           # job's leg gate FAILS on ANY skip (#9551) — a leg that cannot arm
           # here would red the job over a cache this job does not have.
+          # #9567: the capstone is the one file whose SUBJECT is the seams
+          # between the files above, and its record legs SKIP without this
+          # job's DSN — so a lane that left it out of this list would report
+          # the capstone green while it executed only its DB-free legs. Last
+          # in the list on purpose: D10's policy drill re-applies the tenancy
+          # migration, so nothing another file asserts on may run after it
+          # without its own re-read.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
+            tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \
             2>&1 | tee "$SCRATCH/pytest.log"

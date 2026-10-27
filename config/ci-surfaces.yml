@@ -1185,7 +1185,7 @@ surfaces:
   - test_mcp_refusal_telemetry_9084.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
-  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix.
+  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec + verifier guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5), and (since §9 step 2 landed) the `tortoise/consent_token.py` verifier's bind/`alg`/`jti`/strength contract. DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix. The verifier half is reachable through `api` only because `tortoise/consent_token.py` is a `SOURCE_PATTERNS["api"]` entry (tools/ci_selection.py; pinned by tests/test_ci_selection.py::test_a_consent_token_only_diff_runs_the_bridge_guard) — a named-surface match replaces the `core` fallback, and this file is not registered on `core`.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
   # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
@@ -1646,9 +1646,11 @@ surfaces:
   - test_vector_write_seam_4520.py
   core:
   - test_10017_cache_tier.py
+  - test_10017_record_carrier.py  # #10017 step 3: the raw-turn carrier's declaration, its refusals, and the journal-vs-record agreement over a record-carried capture
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
+  - test_9567_record_capstone.py
   - test_9583_openapi_read_only_claim.py
   # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
   # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that
@@ -3348,6 +3350,17 @@ surfaces:
   # `SOURCE_PATTERNS` row matches, so a selector edit lands in the unknown-path
   # fail-closed branch -> FULL matrix, where this pin runs too.
   - test_ci_selection_changed_files_9109.py
+  # #10130: the LOCAL affected-subset run (`tools/run_affected.sh`) — the wrapper
+  # pipes the changed-name LIST into `--changed-files -` on stdin, prints the
+  # selected `tests/…` set, refuses a `full: true` selection unless `--allow-full`,
+  # and refuses the #9109 path-as-argument shape instead of reproducing it. Pin:
+  # `tests/test_run_affected.py` (the refusal's exit code 3, the selector same-pass
+  # comparison, and a static pin that the only `--changed-files` form used is `-`).
+  # `core` is CLASSIFICATION only: a `tools/run_affected.sh`-only diff is a
+  # non-python path and takes tier-1 smoke (measured: surfaces=[], 64 files), and
+  # this lane may not add a `CORE_ALSO` claim — that is `tools/ci_selection.py`,
+  # which #10131/#10132/#10133 share. A `core`-tier selection runs this pin.
+  - test_run_affected.py
   # #9790: the batch-review harness (`tools/batch_review.py`) — per-PR schema
   # validation, the per-PR head/diff binding, and the fail-closed record refusals
   # (no record for a result that fell out, for `issues`, without its own evidence
@@ -3956,6 +3969,20 @@ surfaces:
   # (#1262) AND runs in no leg (#1349/#2938) — without this row the 16 pins
   # here, including the parity grid, would be green-by-absence.
   - test_5140_pending_extraction.py
+  # #5140 finding 8: the `:Document` → `:Source` relabel migration
+  # (`tortoise/migrate_kinds.py::relabel_legacy_documents`) and the two things
+  # it unblocks — the `document` kind rows can finally SEE the population they
+  # re-type, and the pre-D10 extraction backlog becomes discoverable for the
+  # part of it a relabel can fold (a `_event_plain_merge` document has no clock,
+  # so the pass refuses it as `undated` instead of inventing §4.6's
+  # `ingestedAt`; and the REBUILT-graph backlog stays a product decision on
+  # #5140). Same
+  # surface as its sibling (`tortoise/migrate_kinds.py` and `tortoise/ingest.py`
+  # match no SOURCE_PATTERN, so both fall through to this `core` arm). Docker
+  # lane (`_live_db` skipif, per-test `test_5140_relabel_*` graphs), so NOT in
+  # `carve_out:`. Registered because an unlisted file is a `manifest-integrity`
+  # red (#1262) AND runs in no leg (#1349/#2938) — green by absence.
+  - test_5140_d10_relabel_migration.py
   - test_ingest.py
   - test_ingest_audit.py
   - test_ingest_bundle.py
@@ -8997,6 +9024,16 @@ durations:
   test_5089_operator_status_parity.py: 0.6
   test_5097_capture_source_replay.py: 5.8
   test_5140_pending_extraction.py: 2.1
+  # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
+  # per-test graphs; two of the functions are parametrised, so the collected
+  # count is larger than the function count — deliberately not restated here,
+  # because a hard number in a timing-provenance note goes stale on the next
+  # test added and reads as a stale timing). ADDED BY THIS PR, so the
+  # refresher — which samples push-to-main junit — cannot have measured it; the
+  # flat `DEFAULT_FAST_WEIGHT` is the only honest row, and a local reading is not
+  # a shard-layout input (#3419/#2818). `tools/ci_timing.py --refresh-durations`
+  # replaces it.
+  test_5140_d10_relabel_migration.py: 2.0  # unmeasured — new in #5140
   test_5321_embedder_accessor_liveness.py: 0.1
   test_5346_paged_read_total_order.py: 10.7
   test_5404_entity_type_guard.py: 0.1
