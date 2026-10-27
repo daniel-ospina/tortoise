@@ -47,9 +47,11 @@
 # #10194. They have their OWN runner — `.github/workflows/eval-suite-manual.yml`
 # — because they need the DOCKER shape the gating shards ran them in, while this
 # lane is the embedded redislite shape. A blank dispatch here therefore runs the
-# lane's LITERAL entries only (`on_demand_files() - on_demand_subtree_files()`),
-# so exactly one runner owns each file and no file is executed in an environment
-# it was not chosen for. Reading this as "one runner per lane" would be wrong on
+# lane's LITERAL entries (`on_demand_files() - on_demand_subtree_files()`, plus
+# any literal that also happens to sit inside a subtree — `eval/retrieval/
+# test_integration.py` is BOTH, and its own entry is what keeps this workflow its
+# runner), so no file is executed in an environment it was not chosen for.
+# Reading this as "one runner per lane" would be wrong on
 # purpose-reason: the lane is a MEMBERSHIP statement (must not gate), and a
 # membership can have several runners with different environments (#3992 already
 # established that with perf-lane.yml).
@@ -151,12 +153,15 @@ jobs:
             python3 - > /tmp/lane.txt <<'PY'
           import sys
           sys.path.insert(0, 'tools')
-          from ci_selection import (load_manifest, on_demand_files,
-                                    on_demand_subtree_files)
+          from ci_selection import load_manifest, on_demand_literal_runner_files
           # #10194: this workflow owns the LITERAL entries; the subtree entries
           # belong to eval-suite-manual.yml (docker shape). See the header.
-          lane = sorted(on_demand_files(load_manifest())
-                        - on_demand_subtree_files(load_manifest()))
+          # #10206 review: the expression lives in the selector, not here — a
+          # literal that ALSO sits inside a subtree (`eval/retrieval/
+          # test_integration.py`, the file this workflow was created for, #4711)
+          # must not be subtracted away with the subtree it happens to live in.
+          # Pinned by `test_the_embedded_runner_keeps_the_literal_inside_the_subtree`.
+          lane = sorted(on_demand_literal_runner_files(load_manifest()))
           if not lane:
               # Fail loudly: an EMPTY lane means the exclusion silently stopped
               # excluding anything, and a green run here would read as "the

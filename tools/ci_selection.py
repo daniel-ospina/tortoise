@@ -2749,7 +2749,7 @@ def carve_out_by_surface(manifest: dict) -> dict[str, set[str]]:
     return by_surface
 
 
-def _full_selection(manifest: dict, slow: set[str]) -> dict:
+def _full_selection(manifest: dict) -> dict:
     """push/schedule/shared-module/unknown-path selection (tier 3).
 
     The trunk + nightly backstop: full matrix AND both diff-gated legs run
@@ -2758,7 +2758,9 @@ def _full_selection(manifest: dict, slow: set[str]) -> dict:
     # #10194: the full selection's slow leg is `slow_gating_files()` — the ONE
     # definition of the gating slow pool (slow - carve-out - non-gating lane) —
     # so "evals paused" is true on the push/trunk path too, not only on a PR.
-    # `slow` (the caller's pool) is still used for the `full` decision itself.
+    # There is deliberately NO pool parameter: the caller's `slow` set is the
+    # pre-exclusion declaration, and threading it in here is how this function
+    # would grow a second, quietly-different pool (#10206 review).
     gating_slow = slow_gating_files(manifest)
     return {"surfaces": list(manifest["surfaces"]), "full": True,
             "test_files": "ALL", "slow_files": sorted(gating_slow),
@@ -2830,7 +2832,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # #2147/#2148: every return path ALSO carries slow_run / slow_selected /
     # carve_out_run (the test-slow + test-carve-out diff-gate contract).
     if event in ("push", "schedule"):
-        return _full_selection(manifest, slow)
+        return _full_selection(manifest)
 
     tier1 = set(manifest.get("tier1", [])) - slow
     # Filter out non-python-relevant paths — but a path that a SOURCE_PATTERNS
@@ -2985,7 +2987,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
                          if c.startswith(SHARED_MODULES)
                          or _is_linter_policy_path(c)}
                 explain["unknown_all_blast"] = set(unknown) <= blast
-        return _full_selection(manifest, slow)
+        return _full_selection(manifest)
 
     # No separate `SHARED_MODULES` / linter-policy returns here: both causes were
     # appended to `reasons` above, so the `if reasons:` return already answered
@@ -3321,6 +3323,33 @@ def on_demand_files(manifest: dict) -> set[str]:
                 if not (isinstance(e, str)
                         and e.endswith(ON_DEMAND_SUBTREE_SUFFIX))}
     return literals | on_demand_subtree_files(manifest)
+
+
+def on_demand_literal_runner_files(manifest: dict) -> set[str]:
+    """Lane files the EMBEDDED-shape runner owns (`evals-on-demand.yml`).
+
+    #10194 moved the two eval subtrees to their own docker-shaped runner
+    (`.github/workflows/eval-suite-manual.yml`), so the lane now has two runners
+    with different environments. What is left for the embedded one is the lane's
+    LITERAL entries — and a literal that merely happens to live INSIDE a subtree
+    stays here, because its own `on_demand` entry is what keeps this runner its
+    runner.
+
+    ⛔ Subtracting the subtree wholesale (`on_demand_files() -
+    on_demand_subtree_files()`) silently dropped `eval/retrieval/
+    test_integration.py` — the file `evals-on-demand.yml` was created for
+    (#4711) — and left the lane resolving to `test_perf_lane_volunteer_context.py`
+    alone, a file `perf-lane.yml` already runs. The workflow, the config comment
+    and `docs/ci/affected-test-selection.md` all still said the #4711 file ran
+    here, so nothing reddened: the resolver is in a `run:` heredoc, where no test
+    can see it. That is why the expression lives HERE, where it can be pinned
+    (#10206 review).
+    """
+    literals = {e for e in (manifest.get("on_demand") or [])
+                if isinstance(e, str)
+                and not e.endswith(ON_DEMAND_SUBTREE_SUFFIX)}
+    return (on_demand_files(manifest)
+            - on_demand_subtree_files(manifest)) | literals
 
 
 def slow_gating_files(manifest: dict) -> set[str]:
@@ -3924,15 +3953,32 @@ def non_gating_report(manifest: dict) -> str:
     absent from all 9 shards rather than infer it from a total.
     """
     lane = on_demand_files(manifest)
+    prefixes = on_demand_subtree_prefixes(manifest)
     lines = [f"non-gating lane: {len(lane)} file(s) excluded from every gating leg"]
     literals = sorted(e for e in manifest.get("on_demand") or []
                       if not (isinstance(e, str)
                               and e.endswith(ON_DEMAND_SUBTREE_SUFFIX)))
+    # Attribute every file to exactly ONE entry, so the itemization RECONCILES
+    # with the total. A literal that also sits inside a subtree (`eval/
+    # retrieval/test_integration.py` inside `eval/**`) was listed twice and the
+    # lines summed to 44 against a 43-file total — in the one feature whose
+    # whole purpose is an auditable count (#10206 review).
+    accounted = 0
     for entry in literals:
-        lines.append(f"  {entry} -> 1 file")
-    for prefix in on_demand_subtree_prefixes(manifest):
+        inside = next((p for p in prefixes if entry.startswith(p)), None)
+        if inside:
+            lines.append(f"  {entry} -> covered by {inside}** below")
+        else:
+            lines.append(f"  {entry} -> 1 file")
+            accounted += 1
+    for prefix in prefixes:
         n = sum(1 for f in lane if f.startswith(prefix))
         lines.append(f"  {prefix}** -> {n} file(s)")
+        accounted += n
+    if accounted != len(lane):
+        lines.append(f"  ⚠️ itemization does not reconcile: {accounted} of "
+                     f"{len(lane)} file(s) attributed — an `on_demand` entry "
+                     f"resolved to files no line above claims")
     legs = push_legs(manifest)
     lines.append(f"gating fast shards: {len(legs['shards'])} "
                  f"(file counts below EXCLUDE the lane above)")

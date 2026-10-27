@@ -168,6 +168,12 @@
         "drive"
       ]
     ],
+    "eval-suite": [
+      [
+        "eval-suite-manual.yml",
+        "eval-suite"
+      ]
+    ],
     "evals": [
       [
         "evals-on-demand.yml",
@@ -511,7 +517,7 @@
       ]
     ]
   },
-  "gate_digest": "451ab15d1c2c916ea308d8fc0b22fd350a227b2bc0c5f51aa79822bb7a3cf809",
+  "gate_digest": "2aa5a383888a34aa390dcd6a7ca652f6d23aa1e7d629e4820486b743dc79fc97",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -535,5 +541,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-27T03:31:01Z"
+  "verified_at": "2026-10-27T23:28:33Z"
 }

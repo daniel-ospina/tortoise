@@ -90,8 +90,8 @@ git diff --name-only origin/main...HEAD | uv run python tools/ci_selection.py --
 
 ## Trap 2 — a big number is the selector working
 
-The selection is **surface**-based, not import-graph based. `core` alone is **742 test files** out of
-**1,223** in the tree (re-measured 2026-10-27 at `f8970b53` + #10194's own test file; it was
+The selection is **surface**-based, not import-graph based. `core` alone is **743 test files** out of
+**1,224** in the tree (re-measured 2026-10-27 at `77dc2bbba` + #10194's own test file; it was
 737 / 1,218 when this doc was written), and a docs-prose diff still pulls its surface's smoke set.
 Measured at this head:
 
@@ -100,12 +100,13 @@ Measured at this head:
 | `docs/blog-authoring.md` (prose) | surfaces `onboarding`, not full | 137 |
 | `tools/run_affected.sh` (non-python tool) | tier-1 smoke, surfaces `[]` | 64 |
 | `tortoise/sdk.py` (SHARED_MODULE) | `full: true` — blast radius | all |
-| `config/ci-surfaces.yml` (falls to `core`) | surfaces `core`, not full | 686 |
+| `config/ci-surfaces.yml` (falls to `core`) | surfaces `core`, not full | 687 |
 | `HEAD...HEAD` (nothing) | nothing, and it says so | 0 |
 
 So a few hundred files for one small diff is expected — a `config/` edit pulls the whole `core`
-surface (that 686 is this lane's own diff, and it moved from 687 when #10194 took the two
-`tests/eval/` files out of the gate). If a number really looks wrong, the summary line names the
+surface (that 687 is this lane's own diff: it moved from 688 when #10194 took the two
+`tests/eval/` files a `config/` diff used to select out of the gate, and its own test file is the
++1 back). If a number really looks wrong, the summary line names the
 surfaces responsible — that is the diagnostic, not a smaller number.
 
 ## What it does NOT run

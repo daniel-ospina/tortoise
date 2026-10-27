@@ -42,6 +42,9 @@ SUBTREES = ("eval/", "longmem_eval/")
 #: The manual, non-gating runner the subtrees moved to.
 EVAL_WORKFLOW = REPO / ".github" / "workflows" / "eval-suite-manual.yml"
 
+#: The EMBEDDED-shape, non-gating runner that keeps the lane's LITERAL entries.
+EMBEDDED_WORKFLOW = REPO / ".github" / "workflows" / "evals-on-demand.yml"
+
 #: The gating workflow whose shard set the 42 files left.
 GATING_WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 
@@ -281,6 +284,39 @@ def test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file():
         "step reads")
 
 
+def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
+    """#10206 review: `on_demand: eval/**` must not eat the literal it contains.
+
+    `eval/retrieval/test_integration.py` is BOTH a literal lane entry (the file
+    `evals-on-demand.yml` was created for, #4711, 24.9% of all measured test
+    time) AND a file inside `eval/**` (#10194's subtree, which moved to the
+    docker-shaped runner). Resolving the embedded runner as
+    `on_demand_files() - on_demand_subtree_files()` subtracted it with the
+    subtree in which it merely happens to live, so a blank dispatch of
+    `evals-on-demand.yml` ran `test_perf_lane_volunteer_context.py` — a file
+    `perf-lane.yml` already runs — and none of the file the workflow, the config
+    and `docs/ci` all name as its own.
+
+    Nothing reddened, because the resolver is a `run:` heredoc no test can see.
+    It is a selector function now, and this pins it.
+    """
+    lane = cs.on_demand_literal_runner_files(_manifest())
+    assert "eval/retrieval/test_integration.py" in lane, (
+        "the embedded runner must still run the #4711 file its own entry names")
+    assert "test_perf_lane_volunteer_context.py" in lane
+    assert {f for f in lane if f.startswith("eval/")} == {
+        "eval/retrieval/test_integration.py"}, (
+        "only the LITERAL survives from the eval subtree in this runner — the "
+        "other 25 belong to eval-suite-manual.yml (docker shape), not here")
+    # And the workflow must READ that function, not re-inline the subtraction.
+    text = EMBEDDED_WORKFLOW.read_text()
+    assert "on_demand_literal_runner_files" in text, (
+        "evals-on-demand.yml must resolve its lane through the pinned selector "
+        "function rather than re-deriving the subtraction in a heredoc")
+    assert "on_demand_files(load_manifest())" not in text, (
+        "the wholesale subtraction is the bug this test pins")
+
+
 def test_the_gating_workflow_still_logs_what_it_does_not_run():
     """Observability (#10194 requirement 3).
 
@@ -298,6 +334,23 @@ def test_the_gating_workflow_still_logs_what_it_does_not_run():
     assert "test (i)" in report, "the report must list every gating fast shard"
     assert "non-gating total: 43 file(s)" in report, (
         f"the report's counts are the observability: got\n{report}")
+    # #10206 review: the itemization must RECONCILE with that total. A literal
+    # that also sits inside a subtree (`eval/retrieval/test_integration.py`
+    # inside `eval/**`) used to be counted twice, and the per-entry lines summed
+    # to 44 against a 43-file total — in the one feature whose purpose is an
+    # auditable count.
+    assert "does not reconcile" not in report, (
+        f"the report must attribute every lane file to exactly one entry: "
+        f"got\n{report}")
+    assert "covered by eval/** below" in report, (
+        "the literal inside the subtree must be shown as covered by it, not "
+        f"counted a second time: got\n{report}")
+    per_entry = sum(int(chunk.split(" file")[0])
+                    for chunk in report.split("-> ")[1:] if " file(s)" in chunk)
+    literal_only = report.count("-> 1 file")
+    assert per_entry + literal_only == 43, (
+        f"entries attribute {per_entry + literal_only} file(s) against a "
+        f"43-file lane: got\n{report}")
 
 
 def _mutation_dropping_the_subtree_lane() -> dict:
