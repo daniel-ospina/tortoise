@@ -299,7 +299,11 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_uri\)",
         r"from_uri\(_uri\(\)\)",
     ],
-    "test_session_capture_e2e.py": [r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)"],
+    # (removed #10170: a `test_session_capture_e2e.py` row lived here declaring
+    # `from_uri(os.environ["TORTOISE_DB_URI"])`, and that file has ZERO
+    # `from_uri(` sites — the declaration described a call shape the file no
+    # longer has, so it could never fail and never prove anything. A routed-site
+    # row is a claim about a LIVE call; an inert one is a comment with a regex.)
     "test_ingest.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
         r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)",
@@ -365,7 +369,10 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # construction — the finding-provenance gate opens no graph (hermetic temp
     # git repo, subprocess git only); test_from_uri_routing_table_keys_exist
     # pins that the module really exists.
-    "test_finding_provenance.py": [],
+    # (#10170: `"test_finding_provenance.py": []` lived here — an EMPTY row for a
+    # file with zero `from_uri(` sites. Same defect as the session-capture row
+    # below it: a declaration that can never fail, and an empty list reads as
+    # "declared" to anything that only checks for the key's presence.)
     # #1423: the same module live-FalkorDB availability probe shape as #3301
     # above — `_probe(candidates)` constructs, issues `RETURN 1`, and closes,
     # over candidate URIs (the env URI plus _live_utils docker/legacy
@@ -394,15 +401,46 @@ _FROM_URI_EXEMPT_FILES = {
 }
 
 
+def _exempt_stems() -> set[str]:
+    """The two registries, normalised to ONE key space.
+
+    #10170: `TEST_NO_REDIRECT_STEMS` holds BARE STEMS ("test_4921_construct_lock")
+    while `_FROM_URI_EXEMPT_FILES` holds FILENAMES ("test_embedded_lifecycle.py"),
+    and the two call sites compared the union against ``f.name`` — which always
+    ends ``.py``. So every bare stem matched nothing and those files were never
+    exempt: the exemption was a NO-OP that read as coverage, and the 53 embedded
+    carve-out files were silently held to the migration census they exist to be
+    excused from (adding a `from_uri(` call to one would have reddened it and
+    pushed an author to migrate a file that must stay embedded).
+
+    Normalised to stems on BOTH sides, so the registries may be written in either
+    spelling and cannot drift apart again. The mirror test that keeps these two
+    in step with `config/ci-surfaces.yml` is
+    `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`.
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    return {p.removesuffix(".py") for p in _FROM_URI_EXEMPT_FILES} \
+        | set(TEST_NO_REDIRECT_STEMS)
+
+
+def _is_exempt(path) -> bool:
+    """The census's ONE skip decision (#10170).
+
+    Both censuses live in this module and each used to carry its own copy of the
+    `exempt = ...` union + `f.name` comparison. That is why the no-op had to be
+    found twice: two copies of a decision is two chances to key it wrong, and no
+    test can pin the pair as a pair. One helper, one key space, one thing to test.
+    """
+    return path.stem in _exempt_stems()
+
+
 def _from_uri_sites():
     """Yield (file_name, line_number, call_block) for every from_uri( call
     (FalkorProjection or any module-level alias like _FP — review P2: an
     aliased construction must not evade the census) in a migrated file."""
-    from tests._embedded import TEST_NO_REDIRECT_STEMS
-    exempt = _FROM_URI_EXEMPT_FILES | set(TEST_NO_REDIRECT_STEMS)
     call_re = re.compile(r"\b(\w+)\.from_uri\s*\(")
     for f in sorted(_TESTS_ROOT.glob("test_*.py")):
-        if f.name in exempt:
+        if _is_exempt(f):
             continue
         src = f.read_text(encoding="utf-8")
         for m in call_re.finditer(src):
@@ -518,11 +556,11 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
     same file evade. Each raw-construction site's own enclosing block must
     carry the per-test-unique handle + journal append.
     """
-    from tests._embedded import TEST_NO_REDIRECT_STEMS
-    exempt = _FROM_URI_EXEMPT_FILES | set(TEST_NO_REDIRECT_STEMS)
+    # The SAME skip decision as `_from_uri_sites` — one helper, so the two
+    # censuses cannot exempt different files (#10170).
     violations = []
     for f in sorted(_TESTS_ROOT.glob("test_*.py")):
-        if f.name in exempt:
+        if _is_exempt(f):
             continue
         src = f.read_text(encoding="utf-8")
         # every raw-client CONSTRUCTION site (from falkordb import /
@@ -567,3 +605,88 @@ def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
     # the sweep's drop set is the FILE journal — the raw name is in it
     names = (tmp_path / "raw.graphs.jsonl").read_text().splitlines()
     assert names == [gname]
+
+
+def test_the_no_redirect_exemption_is_keyed_in_the_SAME_space_it_filters():
+    """#10170: the exemption matched ZERO files and read as coverage.
+
+    `TEST_NO_REDIRECT_STEMS` holds bare stems, `_FROM_URI_EXEMPT_FILES` holds
+    filenames, and both census sites compared the union against ``f.name`` — which
+    always ends ``.py``. Every bare stem therefore matched nothing, so the 53
+    embedded carve-out files were never exempt and were silently held to the
+    migration census they exist to be excused from. This test pins the KEY SPACE,
+    which is the thing that was wrong: it cannot pass against the old comparison
+    (see the discrimination assertion at the end).
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+
+    exempt = _exempt_stems()
+
+    # (a) one key space: stems, no suffixes — so `f.stem in exempt` can match.
+    assert not [e for e in exempt if e.endswith(".py")], (
+        f"the exemption still carries filenames: {sorted(e for e in exempt if e.endswith('.py'))}")
+
+    # (b) every declared stem names a REAL file (a registry entry that matches
+    # nothing is an inert claim — the same defect as the `from_uri` row this
+    # issue deleted).
+    # A stem that names no file is an inert carve-out — the same defect as the
+    # `from_uri` rows above, one registry over. `test_smoke_embedded` is the one
+    # such entry today: it resolves under neither `tests/` nor `bench/` (the
+    # latter is what `config/ci-surfaces.yml`'s carve_out names, and that file is
+    # gone too). Pinned as an ALLOWLIST rather than silently tolerated, so a NEW
+    # inert stem reds here, and removing this entry is tracked separately — it
+    # belongs to the carve-out mirror in `config/ci-surfaces.yml`, not to this
+    # census (#10170 is scoped to the from_uri census; reported rather than
+    # widened).
+    stale = {s for s in TEST_NO_REDIRECT_STEMS
+             if not (_TESTS_ROOT / f"{s}.py").exists()
+             and not (_TESTS_ROOT.parent / "bench" / f"{s}.py").exists()}
+    assert stale == {"test_smoke_embedded"}, (
+        f"TEST_NO_REDIRECT_STEMS gained a stem that names no file: "
+        f"{sorted(stale - {'test_smoke_embedded'})} — an inert carve-out entry")
+
+    # (c) the union covers BOTH registries, from either spelling.
+    assert set(TEST_NO_REDIRECT_STEMS) <= exempt
+    assert {p.removesuffix(".py") for p in _FROM_URI_EXEMPT_FILES} <= exempt
+
+    # (d) DISCRIMINATION — the exact comparison the census makes now matches a
+    # carve-out file, and the one it made before does not. Without this, the test
+    # above would pass on a union that still never matched `f.name`.
+    sample = sorted(TEST_NO_REDIRECT_STEMS)[0]
+    probe = _TESTS_ROOT / f"{sample}.py"
+    assert probe.exists(), sample
+    assert probe.stem in exempt, "the census would scan an exempt file"
+    assert probe.name not in exempt, (
+        "regression: the exemption is being compared to a FILENAME again — the "
+        "bare stems cannot match, and the exemption silently exempts nothing")
+
+    # (e) BEHAVIOURAL, not introspection: whatever key space the helper uses, the
+    # CENSUS must not actually scan an exempt file. This is the assertion that
+    # reds if the skip decision is keyed on `f.name` again, which (d) alone
+    # cannot see.
+    assert _is_exempt(probe) is True
+    assert _is_exempt(_TESTS_ROOT / "test_ingest.py") is False, (
+        "a routed, non-exempt file was exempted")
+    scanned = {name for name, _ln, _blk in _from_uri_sites()}
+    leaked = sorted(scanned & {f"{s}.py" for s in exempt
+                              if (_TESTS_ROOT / f"{s}.py").exists()})
+    assert not leaked, f"the census scanned exempt file(s): {leaked}"
+
+
+def test_no_routed_from_uri_row_describes_a_call_the_file_no_longer_has():
+    """#10170 (second defect): an inert `_ROUTED_FROM_URI_SITES` row.
+
+    `test_session_capture_e2e.py` carried a declared shape while having zero
+    `from_uri(` sites, so the row could never fail and proved nothing. A routed
+    row is a claim about a LIVE call; this pins every row to one.
+    """
+    gone = []
+    for name in _ROUTED_FROM_URI_SITES:
+        path = _TESTS_ROOT / name
+        if not path.exists():
+            gone.append(f"{name}: file missing")
+            continue
+        if "from_uri(" not in path.read_text(encoding="utf-8"):
+            gone.append(f"{name}: declares {_ROUTED_FROM_URI_SITES[name]} but has "
+                        "no from_uri( site")
+    assert not gone, "\n".join(gone)
