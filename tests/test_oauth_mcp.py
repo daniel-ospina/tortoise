@@ -663,16 +663,38 @@ class TestProviderReturnShell:
     with no authorize params at all: it must reach the PAGE, or the user is
     stranded with a JSON body mid-journey.
 
-    Nothing is granted by serving it — the shell carries empty params, and
-    /oauth/consent still refuses to mint without a validated client — so the
-    assertions that matter are that the page is served, that NOTHING from the
-    return request is reflected into it, and that the gate is a provider-owned
-    marker (a bare `/oauth/authorize` keeps refusing).
+    Nothing is granted by serving it — the shell carries no CLIENT ID and no
+    server-built target, and /oauth/consent still refuses to mint without a
+    validated client — so the assertions that matter are that the page is served,
+    that the provider TRANSIENT is not reflected into it, that whatever the
+    authorize params DO reach it is confined to the page's own JSON blob, and
+    that the gate is a provider-owned marker (a bare `/oauth/authorize` keeps
+    refusing).
+
+    ⛔ The claim is narrowed deliberately, because the wider one was false
+    (measured 2026-10-27 at `1b4766aae`): `state`, `scope`, `resource`,
+    `response_type` and `code_challenge` are read from the query
+    (`hosted_api.py`, the `oauth_authorize` param block) and DO reach the served
+    HTML. What keeps that inert is placement, not absence — they ride
+    `_json_for_script`'s escaped `PARAMS` literal, `client_id` and
+    `redirect_target` are forced empty, and the restore overwrites every
+    `FLOW_FIELDS` entry from the store before anything navigates. Measured, one
+    `GET ?code=…&state=STATEPROBE&scope=…`: `code` count 0, each param count 1,
+    all inside `const PARAMS = {…}`. A test that asserted "nothing is reflected"
+    would have been green today and would have stopped guarding the moment the
+    reflection moved out of the blob.
     """
+
+    #: A non-transient authorize param. It MUST survive into the page (the restore
+    #: depends on the store, not on this, but a future change that echoes params
+    #: into the markup rather than the JSON blob must red here).
+    _REFLECTED_PARAM_PROBE = "STATEPROBE"
 
     def test_a_provider_return_serves_the_page_and_reflects_nothing(self, api_client):
         tc, _ = api_client
-        r = tc.get("/oauth/authorize", params={"code": "RETURNCODEPROBE"},
+        r = tc.get("/oauth/authorize",
+                   params={"code": "RETURNCODEPROBE",
+                           "state": self._REFLECTED_PARAM_PROBE},
                    follow_redirects=False)
         assert r.status_code == 200, r.text
         assert "text/html" in r.headers["content-type"]
@@ -683,6 +705,22 @@ class TestProviderReturnShell:
         # page restores the request or reports that the return lost it.
         assert '"client_id": ""' in r.text
         assert '"redirect_target": ""' in r.text
+        # …and the authorize params that DO reach the page are confined to the
+        # escaped JSON blob, exactly once. Assert the CONFINEMENT, not absence:
+        # absence is false (measured), and a bare "not in" would pass again the
+        # moment the value moved into the markup.
+        assert r.text.count(self._REFLECTED_PARAM_PROBE) == 1, (
+            f"the authorize param {self._REFLECTED_PARAM_PROBE!r} should appear exactly once "
+            f"(inside the page's PARAMS blob); found {r.text.count(self._REFLECTED_PARAM_PROBE)} "
+            "— if it appears in the markup, some value has escaped the JSON literal"
+        )
+        blob_start = r.text.find("const PARAMS = ")
+        assert blob_start != -1, "the page no longer carries a `const PARAMS = ` literal"
+        blob_end = r.text.find("\n", blob_start)
+        assert self._REFLECTED_PARAM_PROBE in r.text[blob_start:blob_end], (
+            "the authorize param does not appear inside the PARAMS literal — it reached the "
+            "page through some other channel, which is the reflection this test exists to stop"
+        )
 
     def test_a_provider_refusal_reaches_the_page(self, api_client):
         tc, _ = api_client

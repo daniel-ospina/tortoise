@@ -224,11 +224,15 @@ def _render_shell() -> str:
     """Render what the AS serves on a PROVIDER RETURN (#10088).
 
     The handler renders this page for a request that carries a provider marker
-    (`code`/`error`) and no authorize params — the authorize request crossed the
-    round trip in the page's own store, so every param is empty and there is no
-    server-built target. Rendering it with `_render_page()`'s populated params
-    would hand the page a request it is supposed to RESTORE, and every assertion
-    about the restore would then pass without it (#10088's first draft did exactly
+    (`code`/`error`) and no AUTHORIZE CLIENT — the authorize request crossed the
+    round trip in the page's own store, so `client_id`, `redirect_target` and
+    `client_name` are empty and there is no server-built target. Note the other
+    authorize params are NOT empty when sent: the query values reach the page's
+    escaped `PARAMS` blob (measured — `state`/`scope`/`resource`/
+    `response_type`/`code_challenge` each appear once). Rendering it with
+    `_render_page()`'s populated params would hand the page a request it is
+    supposed to RESTORE, and every assertion about the restore would then pass
+    without it (#10088's first draft did exactly
     that and stayed green with the restore deleted).
 
     `code_challenge_method` is `"S256"`, NOT `""`: the handler defaults it

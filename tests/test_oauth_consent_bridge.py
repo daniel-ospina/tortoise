@@ -412,12 +412,24 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
 #: that predates #10105's rewrite, so a resolution in its favour restores the refuted heading and
 #: mechanism while every anchor/count guard stays green. (b) The #3524 lane DELETES this page, and
 #: a rewrite that copies forward the retracted premise sends the next reader after a cause that
-#: was measured false. Cheap to satisfy — both strings are simply absent — and it fails closed on
-#: the one edit that would re-assert the retraction.
+#: was measured false. Cheap to satisfy — both strings are simply absent from an ASSERTING
+#: paragraph, and it fails closed on the one edit that would re-assert the retraction.
+#:
+#: Paragraph granularity, not substring: §6's own house style RECORDS refutations ("the earlier
+#: 'the row is missing' reading of this section is refuted"), and a bare substring pin reds on a
+#: paragraph that quotes the premise in order to retract it — which pushes the next lane to delete
+#: the provenance this guard exists to protect (#10105 review cycle 2, P3). A paragraph that both
+#: carries the premise and says it was retracted is exactly the record we want, so it passes.
+_RETRACTION_MARKERS = ("refut", "retract", "withdrawn", "earlier reading")
 _REFUTED_6_PREMISES = (
     "**NOT allowlisted",
     "GoTrue refuses a `redirect_to` it does not recognise",
 )
+
+
+def _paragraphs_with(body: str, needle: str) -> list[str]:
+    """Blank-line-separated blocks of `body` that contain `needle`."""
+    return [p for p in body.split("\n\n") if needle in p]
 
 
 def test_section_6_does_not_restore_the_refuted_premise() -> None:
@@ -427,6 +439,9 @@ def test_section_6_does_not_restore_the_refuted_premise() -> None:
     the Supabase redirect allow-list. My 'D2 = the entry is missing' claim above is **refuted**"*.
     §6 is the record the #3524 rewrite lane reads before deleting this page, so the retracted
     premise is not allowed back in as a heading, a mechanism, or a merge-resolution accident.
+
+    A paragraph that carries the premise AND marks it retracted passes on purpose — that is the
+    corrected record, not a regression of it.
     """
     spec = SPEC.read_text()
     section = spec.split("## 6. Task 5", 1)
@@ -436,12 +451,18 @@ def test_section_6_does_not_restore_the_refuted_premise() -> None:
     )
     body = section[1].split("## 7.", 1)[0]
     for premise in _REFUTED_6_PREMISES:
-        assert premise not in body, (
+        asserting = [
+            p for p in _paragraphs_with(body, premise)
+            if not any(m in p.lower() for m in _RETRACTION_MARKERS)
+        ]
+        assert not asserting, (
             f"§6 of docs/engineering/auth/consent-identity-bridge.md re-asserts {premise!r}, the "
             "premise #10088's owner correction REFUTED: the allow-list entry is present, and "
             "GoTrue does not refuse an unrecognised `redirect_to` — it silently falls back to "
             "the project Site URL and delivers a live `code` there. Restoring the sentence sends "
-            "the next lane after a cause that was measured false (#10105 vs #10090)."
+            "the next lane after a cause that was measured false (#10105 vs #10090).\n"
+            "If you are RECORDING the retraction, say so in the same paragraph (any of "
+            f"{list(_RETRACTION_MARKERS)} is enough) and this pin will let it through."
         )
 
 
