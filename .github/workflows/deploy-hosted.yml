@@ -193,9 +193,52 @@ on:
         default: 'false'
         type: boolean
 
+# ⛔ A DEPLOY MUST NEVER BE CANCELLED MIDWAY. `cancel-in-progress: false` is the
+# rule `supabase-deploy.yml` ("a cancelled migration apply leaves the schema
+# half-migrated, which no re-run repairs deterministically") and every
+# `publish-*.yml` already carry; this workflow was the one that did not.
+#
+# MEASURED, not asserted (`gh run list --workflow deploy-hosted.yml`, 2026-10-27;
+# runner-minutes are summed from each run's JOB start/end, NOT its wall clock —
+# a queued-then-cancelled run costs the pool nothing and must not be counted as
+# if it did): **19 of the last 30 runs were cancelled** — 16 `push`, 3 operator
+# `workflow_dispatch` — and those 19 spent **225.1 of the 295.5 completed
+# runner-minutes** (the 6 successful runs spent 31.0). A cancelled deploy is the
+# worst shape available to the pool: it spends the minutes AND publishes
+# nothing, so under a merge flood no deploy ever completes. That is the recorded
+# cause of the stale-production class — #10109: "4 cancelled by its own
+# `cancel-in-progress: true` as later merges landed", production 7 commits behind
+# for 9 hours — and it is the same reading again on #10152. `supabase-deploy.yml`'s own co-move message names this file's
+# flag as the hazard: "A concurrent push to main cancels an in-flight flip
+# (deploy-hosted.yml 'concurrency.cancel-in-progress')".
+#
+# What `false` does and does NOT buy — be precise, because the difference IS the
+# bound: it stops cancelling a RUNNING deploy. A shared group still supersedes a
+# merely PENDING one, so a third landing cancels the second's not-yet-started run
+# and the NEWEST push always survives (the trade `redis-guard.yml` states). An
+# intermediate merge is therefore superseded BEFORE it spends a runner-minute
+# instead of after it has spent forty.
+#
+# The group stays CONSTANT rather than event-scoped on purpose: a push and a
+# manual deploy must never run concurrently, and `supabase-deploy.yml`'s co-move
+# flip dispatches THIS workflow and then watches it (#3627) — the two arms have
+# to queue behind each other, not race.
+#
+# COMPANION BOUND, required BY the change above: with no cancellation there is no
+# escape from a runaway deploy, and no job below declared `timeout-minutes`, so
+# GitHub's 360-minute default was the only bound on a hang that would hold this
+# group — and every deploy behind it — for six hours. Each job is now capped at
+# 2× its measured maximum (nearest 5; the rule #10151 applies to the merge-gating
+# jobs), measured on completed runs 2026-10-27: `packaging-smoke` max 28.2 min
+# (n=27) → 55; `post-deploy-verify` max 0.4 min (n=6) → 15 (the floor).
+# `deploy-api` is the exception, for arithmetic rather than padding: its own
+# retry loop is bounded at 5 × (`--wait-timeout 420` + 45 s) ≈ 39 min and the
+# health gate inside it adds ≤6.4 min, so a 2× cap over its measured 3.5 min
+# would red the fail-safe retry path it exists to allow — 60 bounds the job
+# without ever being the thing that fails it.
 concurrency:
   group: deploy-hosted
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # #1929 (G1 gate, surface 2): the hosted image must ship the pack catalog
@@ -207,6 +250,9 @@ jobs:
   # boot, no secrets, no model load.
   packaging-smoke:
     runs-on: ubuntu-latest
+    # 2× measured max (28.2 min, n=27 completed runs) — see the workflow's
+    # `concurrency:` note for why a bound is now mandatory.
+    timeout-minutes: 55
     if: ${{ ! (inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true') }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
     # a failed pack smoke leaves `deploy-api` SKIPPED, so without an alert here
@@ -325,6 +371,11 @@ jobs:
   deploy-api:
     runs-on: ubuntu-latest
     needs: packaging-smoke
+    # Bounded ABOVE this job's own arithmetic, not at a multiple of its 3.5 min
+    # measured maximum: the retry loop (5 × 465 s ≈ 39 min) + the health gate
+    # (≤6.4 min) are legitimate worst cases, and a cap under them would fail the
+    # fail-safe path. See the workflow's `concurrency:` note.
+    timeout-minutes: 60
     # #2240: the failure alert files/updates a GitHub issue through the shared
     # substrate, which asserts the writer is `github-actions[bot]` — so this job
     # needs `issues: write`. `contents: read` MUST be spelled out: specifying ANY
@@ -1082,6 +1133,9 @@ jobs:
   post-deploy-verify:
     runs-on: ubuntu-latest
     needs: deploy-api
+    # 15 is the floor (measured max 0.4 min, n=6): see the workflow's
+    # `concurrency:` note for why every job here now carries a bound.
+    timeout-minutes: 15
     if: ${{ needs.deploy-api.result == 'success' }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
     # a red here means the release is LIVE and unhealthy, and nothing else in

@@ -449,10 +449,12 @@ def test_a_dispatch_whose_flip_fails_is_refused(tmp_path: Path) -> None:
     State that fails it: the POST is ACCEPTED (`gh` exits 0 with a run id in the
     body) but the dispatched run does not reach success. That is reachable, not
     hypothetical — `deploy-hosted.yml` triggers on `push: branches: [main]` for
-    `tortoise/**` with `concurrency.cancel-in-progress: true`, so an ordinary
-    merge cancels an in-flight co-move flip. Without the watch the step reported
-    a closed window on an accepted POST, leaving the schema applied and the app
-    stale.
+    `tortoise/**` and serialises EVERY run in one constant `concurrency` group,
+    so a merge landing while the co-move flip is still PENDING supersedes it (a
+    shared group holds one pending run; `cancel-in-progress` is `false` there
+    now, which stops a RUNNING deploy being cancelled but cannot save a pending
+    one). Without the watch the step reported a closed window on an accepted
+    POST, leaving the schema applied and the app stale.
     """
     proc = _run_step(
         _DISPATCH_STEP, tmp_path,
