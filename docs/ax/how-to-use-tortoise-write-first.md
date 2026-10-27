@@ -15,7 +15,7 @@ aboutObjects: tortoise, how-to-use-tortoise
 > **What this file is.** The authored text of the rewritten skill, produced from
 > the measured failure list in [`how-to-use-tortoise-step1-eval.md`](how-to-use-tortoise-step1-eval.md)
 > (`#9675` Step 1, landed as `#9695`). **The body is the `## Contents` section
-> through the last line — 520 lines**, line for line: the port is a copy, not a
+> through the last line — 519 lines**, line for line: the port is a copy, not a
 > second rewrite. The port adds only what `writing-skills` requires around it
 > (see below).
 >
@@ -33,6 +33,7 @@ aboutObjects: tortoise, how-to-use-tortoise
 > name: how-to-use-tortoise
 > description: Write to the Tortoise graph — decide the layer (Subject/Object/Point/Event/Source), the kind, state vs occurrence, the edge type, truth vs relevance, supersede, and provenance. Use before ANY graph write; the failures this prevents are silent, or come back only as an advisory.
 > domain: capability
+> subjects.team: epistemic-team
 > type: Workflow
 > status: live
 > tags: [tortoise, graph, epistemology, knowledge-graph, write, entity-type, pack]
@@ -228,10 +229,10 @@ spelled exactly as the pack declares it. If none has your item, the honest answe
 is the declared generic (`other`, `statement`, `occurrence`) plus a pack change —
 not a new word at the call site.
 
-**What the surface will and will not tell you.** A kind declared on another
-*axis* is reported (`kind_other_layer`, naming the layer that declares it). A
-kind declared exclusively on the sibling entity layer is routed there for you. An
-**undeclared** kind is silent — the vocabulary is deliberately open, so nothing
+**What the surface will and will not tell you.** A kind another *axis* declares
+and this one does not is reported (`kind_other_layer`, naming that layer); a
+sibling-entity-layer kind is routed there. A kind this layer declares — or one no
+layer declares — is silent: the vocabulary is deliberately open, so nothing
 comes back. That is why the measured failures are what they are: `person`,
 `company`, `offering` and `research` are all *undeclared*, so none produced a
 word back.
@@ -553,7 +554,7 @@ Copy this, tick it, and do not skip a line because the write "looks simple".
 | No contradiction on the one contradiction — the support operator was mitigated instead | 5 | the confidence is *wrong*, not missing |
 | A mitigation where a contradiction belonged | 5 | the belief is now priced as merely less relevant |
 | A contradiction with no support edge beside it | 5 | it lowers a number nobody raised |
-| No source written at all | 7 | the claim is uncheckable and looks complete |
+| No source written at all | 7 | the claim is uncheckable; only a `no_source` advisory comes back |
 | A source written with no edge to any belief | 7 | the Source exists; provenance does not |
 
 In the order the eval measured them, not an order of importance. Steps with
@@ -590,5 +591,4 @@ job of their own.
   definitions. `docs/ONTOLOGY.md` §2, §4, §5 and §8 own those, and this document
   points at them rather than restating them. Two ontologies that drift is a
   failure class we keep paying for.
-- **The verb for each operation** — see *Why this draft names no verb* above. The
-decisions do not change when the names do, which is the point.
+- **The verb for each operation** — see *Why this draft names no verb* above; the decisions do not change when the names do.
