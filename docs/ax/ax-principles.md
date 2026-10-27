@@ -23,7 +23,12 @@ states a reply reports.
 
 **Rule 1 — a legible intent in an illegible form is self-healed, not rejected.**
 If what the caller meant is unambiguous and only the *form* is off, normalize it and proceed. The
-human-UX equivalent is accepting `5:02` for `05:02`.
+human-UX equivalent is accepting `5:02` for `05:02`. There are two classes, with **opposite reporting
+rules**: **re-spelling the same value** (format variance — `2024-3-1` → `2024-03-01`) is done
+**silently**, because a receipt for it asks the caller to re-express something we already understood;
+**supplying the meaning** (a marker such as `TBD` / `n/a` becoming the canonical un-datable form) is
+**echoed in the reply**, so the caller can see what its input became. Getting these two the same way
+round is the difference between friction and defensibility.
 
 **Rule 2 — an illegible intent is refused, and the refusal carries three parts.**
 
@@ -97,26 +102,35 @@ The **principle** itself lives here and on #10183, which that issue names as its
 to that file is allowed without the owner's approval of the exact change. An ontology edit reverted
 for exactly this reason is recorded on #9202. Propose the verbatim edit and wait.
 
-## 5. Applying it to a gate (three questions, in order)
+## 5. Applying it to a gate (total ladder — every input has a branch)
 
-1. **Is the intent legible?** No → go to question 3, **before** refusing: every refusal passes the
-   admission test first, or it is the `#10158` defect class wearing the right form. Yes → next. (If the
-   surface cannot establish what the input *means* — not merely how it is spelled — it is not legible;
-   see §2.)
-2. **Is only the form wrong?** Yes → normalize and proceed (never normalize the meaning).
-3. **If refusing: can the fix be written, concretely enough that the caller can act on it?** No → the
-   case must not refuse; make it a recorded, reported, non-failing outcome with its own distinct state.
+1. **Is the intent legible?** No → question 3, **before** refusing. Yes → question 2. (If the surface
+   cannot establish what the input *means* — not merely how it is spelled — it is not legible; see §2.)
+2. **Is the value one we can store?**
+   - **Merely a different spelling of the same value** (`5:02`, `2024-3-1`) → re-spell and proceed,
+     silently (§1).
+   - **Already a value that names an instant** → accept it; nothing to do.
+   - **Well-formed but names no instant** (`2026-02-30`, month 13, an epoch rendered as a string) →
+     question 3. Never re-spell it into the nearest real value: that invents a date the caller did not
+     state.
+3. **If refusing: can the fix be written, concretely enough that the caller can act on it?** Yes →
+   refuse with the three parts. **No → the surface must not refuse**: make it a recorded, reported,
+   non-failing outcome with its own distinct state, and say plainly that there is nothing to do.
 
 ## 6. What this is not
 
 - **Not "never refuse".** A refusal with an actionable third part is exactly what rule 2 asks for.
 - **Not a licence to accept an illegible intent** — rule 2 still refuses it.
 - **Not a licence to guess a meaning** — see §2.
-- **Not a mandate for silent repair.** A self-healed input is still recorded and reported, so the
-  caller can see what its input became.
+- **Not a mandate for silent repair.** Shaping that *supplies a meaning* is echoed in the reply (§1);
+  only a pure re-spelling of the same value may pass silently.
 - **⚠️ Open, and not decided anywhere in this document:** whether an assertion addressing its target
   **by id** and the same assertion **by name** are one intent in two spellings is **#10158's
   question**. It is a reopen of the D2 bound recorded on **#3590** (`6428025133`), argued there with
   the owner; the opposite branch (the refusal stays, and the id-only case is deliberately outside the
   bound) is an equally live outcome. §2's format argument is about *tokens*, not about which component
   of an identity may stand in for the whole.
+- **⚠️ And the home this document points at does not settle it either.** #10183 carries a *derived*
+  sentence in the opposite direction — "a record asserting its target by id only vs by name is one
+  assertion in two spellings". That sentence is **corrected on the issue**: it does not decide
+  #10158, and the bound on #3590 does. Citing the home for the principle is not citing it for this.
