@@ -17,11 +17,12 @@ aboutObjects: "#9664, #9340, #2208, tortoise-onboarding, website/docs.html, app.
 without a browser, and it records three of the ten steps as WRONG-AS-WRITTEN.**
 
 The run's verdict table is the sibling index. Read the two together: this file says what
-*should* happen and why a step's wording was wrong; the run says what *did* happen through a real
-ChatGPT UI, with a dated screenshot or a trace for each row, and it names the two remaining
-blockers — `#8617` (step 2a, graph creation refused by the FalkorDB ACL layer) and `#10088`
-(step 4, the authorize page's sign-in delivers the code to the marketing host). Two of this
-file's claims were superseded by the run and are marked in place below.
+*should* happen and why a step's wording was wrong; the run says what *did* happen, through the two
+surfaces it drove (the Tortoise dashboard and the real ChatGPT UI), with a dated screenshot or a
+trace for each row, and it names the two remaining blockers — `#8617` (step 2a, graph creation
+refused by the FalkorDB ACL layer) and `#10088` (step 4, the authorize page's sign-in delivers the
+code to the marketing host). Two of this file's claims were superseded by the run and are marked in
+place below.
 
 Issue #9664 defines a *manual, agent-run clickthrough* across three surfaces (Tortoise
 web, the ChatGPT UI, our MCP server). It is deliberately **not** a script and **not** a CI
@@ -80,13 +81,16 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 | 9 | run a decision → `decide-completed` closes | VERIFIED-HERE (server layer) | same 42 tests; `decide-completed` is filed only on a decision-shaped write (`tortoise_file_decision`, or a `pointKind` in `DECISION_SHAPED_POINT_KINDS`) — both documented decide protocols. Through ChatGPT: NOT COVERED. |
 | 10 | capture disclosure card: capture unavailable for ChatGPT, not silence | VERIFIED-HERE (copy) | `HARNESS_CAPTURE_SUPPORT.chatgpt === false` renders `HARNESS_CAPTURE_REASON.chatgpt` = *"ChatGPT connects from its own cloud — session capture isn't available for it"* (`harnessStatusCard.jsx:120`), pinned by 38 green tests (`05` log). Not silence. |
 
-**The `NOT COVERED`-through-ChatGPT half of this table is now measured.** Rows 2b, 6, 7, 8, 9 and 10
-were observed through the real ChatGPT UI on 2026-10-26 with dated screenshots and traces
-(`run-2026-10-26/INDEX.md`); rows 3 and 5 were observed *as corrected*; row 2a and row 4 are the two
-blockers left, `#8617` and `#10088`. Row 1 was observed as **state, not as a sign-up** — the run
-started from an existing org and read `team-named` complete in `tortoise_onboarding_state`, so the
-sign-up path itself is still unexercised. Read this table for *what the step should be*, and the run
-index for *what happened* — this one is deliberately not rewritten per row, because its basis column
+**The `NOT COVERED`-through-ChatGPT half of this table is now measured — though not all of it
+*through ChatGPT*.** Rows **6, 7, 8 and 9** were observed through the real ChatGPT UI on 2026-10-26
+with dated screenshots and traces; rows **2b and 10** were observed on the **Tortoise dashboard**
+(`app.premiselabs.co`), which is where the packs dialog and the capture-disclosure card live — row 10
+is the dashboard's own harness list rendering ChatGPT's reason, not a ChatGPT screen. Rows 3 and 5
+were observed *as corrected*; row 2a and row 4 are the two blockers left, `#8617` and `#10088`. Row 1
+was observed as **state, not as a sign-up** — the run started from an existing org and read
+`team-named` complete in `tortoise_onboarding_state`, so the sign-up path itself is still
+unexercised. Read this table for *what the step should be*, and the run index for *what happened* —
+this one is deliberately not rewritten per row, because its basis column
 is a claim about the repo at a measured commit.
 
 **Step 2's premise became `MEASURED` last** (census rows 2a-2e). It was the only step

@@ -1,5 +1,5 @@
 ---
-title: "#9664 capstone — the RUN: every step through the real ChatGPT UI, two blockers named"
+title: "#9664 capstone — the RUN: every step through the two surfaces it drove, two blockers named"
 type: evidence
 domain: platform
 doc_status: live
