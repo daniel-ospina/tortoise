@@ -41,6 +41,18 @@
 # excluded from the gate and claimed by nothing. `on_demand_files()` is the
 # single source of truth, and the step below asserts the lane is non-empty so
 # the silent-empty case fails instead of passing green.
+#
+# #10194: THE SUBTREE ENTRIES ARE NOT THIS WORKFLOW'S
+# `on_demand:` also carries `eval/**` + `longmem_eval/**` (42 files) since
+# #10194. They have their OWN runner — `.github/workflows/eval-suite-manual.yml`
+# — because they need the DOCKER shape the gating shards ran them in, while this
+# lane is the embedded redislite shape. A blank dispatch here therefore runs the
+# lane's LITERAL entries only (`on_demand_files() - on_demand_subtree_files()`),
+# so exactly one runner owns each file and no file is executed in an environment
+# it was not chosen for. Reading this as "one runner per lane" would be wrong on
+# purpose-reason: the lane is a MEMBERSHIP statement (must not gate), and a
+# membership can have several runners with different environments (#3992 already
+# established that with perf-lane.yml).
 
 name: On-demand evals
 
@@ -139,8 +151,12 @@ jobs:
             python3 - > /tmp/lane.txt <<'PY'
           import sys
           sys.path.insert(0, 'tools')
-          from ci_selection import load_manifest, on_demand_files
-          lane = sorted(on_demand_files(load_manifest()))
+          from ci_selection import (load_manifest, on_demand_files,
+                                    on_demand_subtree_files)
+          # #10194: this workflow owns the LITERAL entries; the subtree entries
+          # belong to eval-suite-manual.yml (docker shape). See the header.
+          lane = sorted(on_demand_files(load_manifest())
+                        - on_demand_subtree_files(load_manifest()))
           if not lane:
               # Fail loudly: an EMPTY lane means the exclusion silently stopped
               # excluding anything, and a green run here would read as "the
