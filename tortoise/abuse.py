@@ -1271,10 +1271,21 @@ def _read_velocity_message(details: dict) -> str:
                 "did not change anything. If you don't recognise this activity, "
                 "review your API keys in Keys — an unrecognised key should be "
                 "revoked there.")
+    # Round 12 (review finding): the total-scope branch stated the benign
+    # READING as fact ("a retrieval-heavy agent routinely reads at this rate")
+    # and offered no remedy. The row knows ONE fact — the total crossed a
+    # threshold. It cannot know the reads came from the customer's own agents:
+    # an org-wide spike from a leaked key is precisely what this detector cannot
+    # exclude, so presenting the benign interpretation as fact would reassure a
+    # customer whose key IS being abused. The reading is a CONDITION now, and
+    # the remedy is conditional on it failing — the same shape the key branch
+    # already uses. No revoke instruction: there is no single key to point at,
+    # so the route offered is the list where an unrecognised key would appear.
     return ("Total read volume for this Organization crossed our "
             "unusual-activity threshold. This is informational; it did not "
-            "change anything — a retrieval-heavy agent routinely reads at this "
-            "rate.")
+            "change anything. Retrieval-heavy agents commonly read at this "
+            "rate — if these reads don't come from yours, review your API keys "
+            "in Keys.")
 
 
 def _alert_dict(row: dict) -> dict:
@@ -1322,8 +1333,11 @@ def _alert_dict(row: dict) -> dict:
         # only when no alert channel can be built at all (no `DR_ISSUES_PAT`,
         # or an unusable object store). A customer-facing
         # string must not promise a human follow-up the plumbing cannot
-        # guarantee; it now states what IS true (nothing was disabled) and
-        # leaves the route where the customer can reach us.
+        # guarantee; it states what this ALERT did — never the org's state — and
+        # leaves the route where the customer can reach us. (Round 12 review
+        # finding: this comment still quoted the WHOLE-STATE wording round 11
+        # removed — "nothing was disabled" — so an editor reading the rationale
+        # rather than the string was told the removed claim was current copy.)
         # Rounds 6, 9, 10 — the same promise three times, so the rule is now
         # stated as a PROPERTY and pinned as one: a customer-facing string in
         # this dict says NOTHING about what a human has done, is doing, or will

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ from fastapi.testclient import TestClient  # noqa: I001
 
 import tortoise.supabase_control as sc
 from tortoise import abuse
-from tortoise.abuse import SupabaseAbuseStore
+from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
 from tests._verdict import verdict_client
@@ -809,93 +810,133 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
+    #: The property, as THREE order-agnostic arms plus a promise list. Kept at
+    #: module level so the self-fixture below can prove the predicate matches
+    #: the strings it is supposed to reject — a pin that asserts only the
+    #: current copy's ABSENCE cannot show it would have caught anything.
+    _ACTOR = (r"(?:an?\s+operator|operators?|our\s+team|a\s+human|we|us|"
+              r"our\s+[\w-]+\s+(?:engineer|team|staff|sre|developer)|on-?call)")
+    _AUX = (r"(?:has|have|had|is|are|was|were|am|will|would|can|should|must|"
+            r"do|does|did|been|being)")
+    _GAP = r"[\s,;:—-]+(?:\S+[\s,;:—-]+){0,3}"
+    #: actor → auxiliary ("an operator has…") | auxiliary → actor ("was
+    #: escalated to an operator") | actor → contraction ("We're…").
+    _HUMAN = re.compile(
+        rf"(?:\b{_ACTOR}\b{_GAP}{_AUX}\b|\b{_AUX}\b{_GAP}{_ACTOR}\b|"
+        rf"\b{_ACTOR}\b\s*'(?:re|ve|d|m|ll|s)\b)", re.I)
+    #: A promise of contact/timing where the actor is ELIDED ("…, and will be in
+    #: touch"), which the actor arms cannot see.
+    _PROMISE = re.compile(
+        r"(will be in touch|reach(?:ing)? out|get back to you|"
+        r"follow(?:ing)? up with you|hear from us|"
+        r"within \d+\s*(?:hours?|days?|business days?))", re.I)
+
+    def test_the_human_claim_predicate_actually_REJECTS_known_bad_strings(self):
+        """The discriminating-power fixture (round 12 review finding).
+
+        Four rounds of this test failed the same way: the stated guarantee was
+        wider than the assertion, so it could not fail for the reason it exists —
+        round 9 pinned a phrase, round 10 enumerated phrasings, round 11 fixed the
+        word ORDER but not the direction, and a passive rewrite ("was escalated
+        to an operator") or a contraction ("We're") defeated it. So the predicate
+        is now tested against the strings it MUST reject, and the next round has
+        to demonstrate that rather than assert it."""
+        must_reject = [
+            # the three historical wordings, verbatim
+            "Nothing has been disabled, and will be in touch.",
+            "Nothing has been disabled, and our team is reviewing it.",
+            "…and an operator has been asked to look at it.",
+            # ACTOR-LAST (passive) — the round-11 shape could not see this
+            "This alert was escalated to an operator for review.",
+            # CONTRACTION — `\bwe\b` + `\s+` never matches "We're"
+            "We're investigating this now.",
+            # a pure timeline promise with the actor as OBJECT
+            "You will hear from us within 24 hours.",
+            # the round-11 bypasses, kept so they cannot come back
+            "An operator is looking into it.",
+            "An operator will review this.",
+            "Our on-call engineer was paged.",
+        ]
+        for text in must_reject:
+            assert (self._HUMAN.search(text) or self._PROMISE.search(text)), (
+                f"the predicate MISSES a false human claim: {text!r} — a pin "
+                "that cannot reject this cannot guard the real copy either")
+        # …and it must NOT reject the two documented exclusions, or every future
+        # copy iteration would be forced to fight the test instead of the bug.
+        must_accept = [
+            # backed by the ROW'S EXISTENCE: suspend_org() is the only writer
+            "Organization suspended by an operator",
+            # an IMPERATIVE addresses the customer, not us
+            "review your API keys in Keys — an unrecognised key should be "
+            "revoked there",
+            "If you need a higher limit, contact support@premiselabs.co.",
+            "Total read volume for this Organization crossed our threshold. "
+            "This is informational; it did not change anything.",
+        ]
+        for text in must_accept:
+            assert not self._HUMAN.search(text), (
+                f"the predicate rejects an ACCEPTED string: {text!r}")
+            assert not self._PROMISE.search(text), (
+                f"the promise list rejects an ACCEPTED string: {text!r}")
+
     def test_no_customer_string_claims_what_a_HUMAN_is_doing(self):
-        """Rounds 6 / 9 / 10 (review findings). The same promise was deleted
-        three times: "and will be in touch" → "our team is reviewing it" → "an
-        operator has been asked to look at it". Each rewrite was weaker and still
-        a claim the plumbing cannot back: delivery of the operator signal is
+        """Rounds 6 / 9 / 10 / 11 / 12 (review findings). The same promise was
+        deleted five times: "and will be in touch" → "our team is reviewing it" →
+        "an operator has been asked to look at it" → (a whole-state reassurance)
+        → (a benign-cause assertion). Each rewrite was weaker and each was still a
+        claim the plumbing cannot back: delivery of the operator signal is
         BEST-EFFORT, so in the configurations this module names (no
         ``DR_ISSUES_PAT``, no usable object store) no operator was ever asked.
 
-        The round-9 version of this test asserted the presence of
-        "an operator has been asked" — it PINNED the false claim and called the
-        pin the proof, so it could never fail for the reason it existed. This
-        asserts a PROPERTY over every rendered field of every alert type: a
-        string may state what was MEASURED, what was NOT changed, and how to
-        reach us — and may not assert a human FOLLOW-UP the plumbing cannot
-        guarantee.
-
-        Two scopes are excluded ON PURPOSE, and stated so the property is not
-        wider than the assertion (the first version was):
-        * `suspend`'s "Organization suspended by an operator" names a human act,
-          but the ROW'S EXISTENCE is the proof — `suspend_org()` is the only
-          writer of EVENT_SUSPEND and the engine no longer suspends, so it is
-          backed by construction, not a promise. Removing it would imply the
-          system auto-suspended, which would be the false claim.
-        * a second-person IMPERATIVE ("review your API keys in Keys") is the
-          customer's own action, and is exactly what this copy exists for."""
-        import re
-
-        from tortoise.abuse import ALERT_TYPES, _alert_dict
-        # TWO mechanisms, because one cannot cover both shapes:
-        #
-        # (a) A HUMAN SUBJECT BOUND TO AN AUXILIARY — any actor, then any
-        #     auxiliary within a few words. This is the property, not a
-        #     phrase list: "an operator has been asked", "an operator is
-        #     looking into it", "an operator will review this", "our on-call
-        #     engineer was paged" all match. The round-10 version enumerated
-        #     phrasings and let every one of those through while claiming the
-        #     property in this docstring (round-11 review finding).
-        # (b) A SUBJECTLESS FOLLOW-UP PROMISE, where the actor is elided
-        #     ("…, and will be in touch"), which (a) cannot see.
-        actor = (r"(an?\s+operator|operators?|our\s+team|a\s+human|we\b|"
-                 r"our\s+[\w-]+\s+(?:engineer|team|staff|sre|developer)|"
-                 r"support|on-?call)")
-        auxiliary = (r"(has|have|had|is|are|was|were|will|would|can|"
-                     r"should|must|'ll|been|being)")
-        human = re.compile(
-            rf"\b{actor}\b(?:\s+\S+){{0,3}}?\s+{auxiliary}\b", re.I)
-        promise = re.compile(
-            r"(will be in touch|reach(?:ing)? out|get back to you|"
-            r"follow(?:ing)? up with you)", re.I)
+        This asserts the PROPERTY over every rendered field of every alert type,
+        and BOTH branches of ``_read_velocity_message`` — the org-total branch is
+        a separate string and was outside the loop until round 12, i.e. one of the
+        two strings of the type this issue is about was unasserted. The two
+        documented exclusions hold BY CONSTRUCTION and need no exception list:
+        ``suspend``'s "by an operator" binds no auxiliary (the row's existence is
+        the proof), and an imperative addresses the customer."""
+        # Both `scope` branches, plus the empty-details case (which also renders
+        # the `?` fallbacks for count/ip/country).
+        detail_variants = ({"scope": "key", "id": "k-1", "count": 3,
+                            "ip": "1.2.3.4", "country": "ES"},
+                           {"scope": "team", "id": "org-1", "count": 3},
+                           {})
         for etype in ALERT_TYPES:
-            row = _alert_dict({"event_type": etype,
-                               "details": {"scope": "key", "id": "k-1",
-                                           "count": 3, "ip": "1.2.3.4"},
-                               "created_at": "2026-09-25T17:19:05+00:00"})
-            for field in ("label", "message"):
-                text = str(row.get(field) or "")
-                assert not human.search(text), (
-                    f"{etype}.{field} commits a human to an act: {text!r} — "
-                    "the operator signal is best-effort, so we cannot know")
-                assert not promise.search(text), (
-                    f"{etype}.{field} promises a follow-up: {text!r}")
-        # The two documented exclusions hold BY CONSTRUCTION, which is why they
-        # need no exception list: `suspend`'s "by an operator" binds no
-        # auxiliary (the row's EXISTENCE is the proof — `suspend_org()` is the
-        # only writer), and an imperative addresses the customer, not us.
+            for details in detail_variants:
+                row = _alert_dict({"event_type": etype, "details": details,
+                                   "created_at": "2026-09-25T17:19:05+00:00"})
+                for field in ("label", "message"):
+                    text = str(row.get(field) or "")
+                    assert not self._HUMAN.search(text), (
+                        f"{etype}.{field} commits a human to an act: {text!r} — "
+                        "the operator signal is best-effort, so we cannot know")
+                    assert not self._PROMISE.search(text), (
+                        f"{etype}.{field} promises a follow-up: {text!r}")
+        # The two documented exclusions, restated against the REAL strings.
         suspended = _alert_dict({"event_type": "suspend", "details": {},
                                  "created_at": "2026-09-25T17:19:05+00:00"})
         assert "by an operator" in suspended["message"], suspended["message"]
-        assert not human.search(suspended["message"]), suspended["message"]
+        assert not self._HUMAN.search(suspended["message"])
         velocity = _alert_dict({"event_type": "read_velocity",
                                 "details": {"scope": "key"},
                                 "created_at": "2026-09-25T17:19:05+00:00"})
         assert "review your API keys" in velocity["message"], velocity["message"]
-        assert not human.search(velocity["message"]), velocity["message"]
-        # …and the review row still says what it CAN know: what this alert did.
+        assert not self._HUMAN.search(velocity["message"])
+        # …and the review row still says what it CAN know: what THIS alert did.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
         assert "it did not disable anything" in msg, msg
         assert "support@premiselabs.co" in msg, msg
-        # The WHOLE-STATE claim is gone from every string: the same panel can
-        # carry a suspension row, so "nothing has been disabled" contradicts it.
+        # No WHOLE-STATE claim anywhere: the same panel can carry a suspension
+        # row, so "nothing has been disabled" would contradict it.
         for etype in ALERT_TYPES:
-            m = str(_alert_dict({"event_type": etype, "details": {},
-                                 "created_at": "2026-09-25T17:19:05+00:00"}
-                                ).get("message") or "")
-            assert "nothing has been disabled" not in m.lower(), (etype, m)
-            assert "nothing was changed" not in m.lower(), (etype, m)
+            for details in detail_variants:
+                m = str(_alert_dict({"event_type": etype, "details": details,
+                                     "created_at": "2026-09-25T17:19:05+00:00"}
+                                    ).get("message") or "")
+                assert "nothing has been disabled" not in m.lower(), (etype, m)
+                assert "nothing was changed" not in m.lower(), (etype, m)
+                assert "nothing has changed" not in m.lower(), (etype, m)
 
     def test_only_owner_or_admin_may_acknowledge(self, env):
         """An ack hides a security row from the whole org — that is a
