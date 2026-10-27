@@ -181,6 +181,46 @@ def test_getattr_on_an_in_repo_module_taints_but_on_a_third_party_one_does_not()
     assert resolved.unknown == []  # a literal attr is static: not a module, no edge
 
 
+def test_getattr_resolves_a_literal_attr_from_the_binding_s_dotted_target():
+    """P2: the candidate must come from the dotted target, not the local name.
+
+    `module_bindings` used to hold the LOCAL binding, so `from tortoise import
+    projection` made `getattr(projection, 'in_memory')` build
+    `projection.in_memory` — never a module — and the branch then `continue`d
+    with no edge AND no `UNKNOWN`: a real submodule dropped silently, in the
+    under-selecting direction the tool exists to rule out. The shape the old pin
+    covered (`from tortoise import registry`, where the local name equals the
+    module name) agreed by accident.
+    """
+    idx = _index(
+        "tortoise/__init__.py", "tortoise/sdk/__init__.py",
+        "tortoise/sdk/hosted_api.py", "tortoise/projection/__init__.py",
+        "tortoise/projection/in_memory.py",
+    )
+    from_name = _scan(
+        idx, "tests/test_a.py",
+        "from tortoise import projection\ngetattr(projection, 'in_memory')\n",
+    )
+    assert "tortoise.projection.in_memory" in {d.target for d in from_name.deps}
+    assert from_name.unknown == []
+
+    aliased = _scan(
+        idx, "tests/test_b.py",
+        "import tortoise.sdk as s\ngetattr(s, 'hosted_api')\n",
+    )
+    assert "tortoise.sdk.hosted_api" in {d.target for d in aliased.deps}
+    assert aliased.unknown == []
+
+    # A local name that is NOT a module attribute still yields no edge — the
+    # literal is static, so this is silence about a non-module, not a drop.
+    dead = _scan(
+        idx, "tests/test_c.py",
+        "import tortoise.sdk as s\ngetattr(s, 'no_such_submodule')\n",
+    )
+    assert dead.unknown == []
+    assert not {d.target for d in dead.deps} - {"tortoise", "tortoise.sdk"}
+
+
 def test_unparseable_file_is_reported_with_a_reason():
     idx = _index("tortoise/__init__.py")
     scan = _scan(idx, "tests/test_broken.py", "def f(:\n")
@@ -345,6 +385,55 @@ def test_unparseable_junit_is_reported_not_silently_empty():
     parsed = parse_junit_failures(b"<not-xml")
     assert parsed["files"] == []
     assert "error" in parsed
+
+
+def test_junit_classname_fallback_resolves_the_module_not_a_stub_path():
+    """P2: `file` exists ONLY under `junit_family=xunit1`; `xunit2` is the ini
+    default. The old fallback did `classname.rpartition('.')`, which turns the
+    module-level `tests.test_ci_import_closure` into **`tests.py`** — a path that
+    intersects nothing, so the failure is scored `not_in_current`, the one branch
+    that absolves the derivation."""
+    module_level = _junit(
+        '<testcase classname="tests.test_ci_import_closure" name="test_foo">'
+        '<failure message="boom">trace</failure></testcase>'
+    )
+    assert parse_junit_failures(module_level)["files"] == [
+        "tests/test_ci_import_closure.py"]
+
+    class_based = _junit(
+        '<testcase classname="tests.test_ci_import_closure.TestX" name="t1">'
+        '<failure message="boom">trace</failure></testcase>'
+    )
+    assert parse_junit_failures(class_based)["files"] == [
+        "tests/test_ci_import_closure.py"]
+
+
+def test_a_failing_test_with_no_resolvable_file_is_recorded_not_dropped():
+    """The silent alternative is worse than a partial window: an unattributable
+    failure is either dropped (under-counting misses) or attributed to a bogus
+    path that reads as "the derivation is safe"."""
+    xml = _junit(
+        '<testcase classname="nowhere.test_gone" name="t1">'
+        '<failure message="boom">trace</failure></testcase>'
+    )
+    parsed = parse_junit_failures(xml)
+    assert parsed["files"] == []
+    assert parsed["unresolved"] == ["nowhere.test_gone::t1"]
+
+
+def test_ground_truth_reports_a_junit_whose_failures_have_no_file(monkeypatch, tmp_path):
+    """Producer half of the fallback fix: the PARSE result must reach
+    `artifact_errors` (and so block the cache write), not just `unresolved`."""
+    from tools import ci_import_closure as module
+    junit = _junit(
+        '<testcase classname="nowhere.test_gone" name="t1">'
+        '<failure message="boom">trace</failure></testcase>'
+    )
+    _fake_ground_truth(monkeypatch, module, junit=junit,
+                       listing_names=["pytest-log-test-a"])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["artifact_errors"]
+    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
 
 
 def test_artifact_name_contract_for_shard_and_plain_jobs():
@@ -637,13 +726,15 @@ def test_ground_truth_counts_a_non_failure_red_conclusion(monkeypatch, tmp_path)
     tests and uploaded no junit — was dropped before `failed_jobs` existed, so
     neither `artifact_errors` nor the window's unread-PR guard could see it and a
     window could still exit 0/1. `cancelled` stays NON-red (repo polarity), so both
-    directions are asserted.
+    directions are asserted. `None` (a run GitHub has not concluded yet — a
+    re-trigger at the same sha) is RED: it sat in the skip set while the comment
+    above it said an unnamed value is red, which is the same fail-open shape.
     """
     from tools import ci_import_closure as module
     _fake_ground_truth(monkeypatch, module, junit=None, listing_names=[])
 
     for conclusion, is_red in (("timed_out", True), ("startup_failure", True),
-                               ("cancelled", False)):
+                               (None, True), ("cancelled", False)):
         monkeypatch.setattr(module, "_check_runs", lambda repo, sha, c=conclusion: [
             {"name": "test (a)", "conclusion": c, "id": 99,
              "details_url": "https://github.com/o/r/actions/runs/99/job/1"}])

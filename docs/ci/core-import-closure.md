@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (41 tests, incl. the harness mutation check)
+- Pins: `tests/test_ci_import_closure.py` (47 tests, incl. the harness mutation check)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
   is **classification only**: a diff that changes *this instrument* and nothing else
   (`tools/ci_import_closure.py`-only) is a non-Python change — `tools/` is in
@@ -75,9 +75,19 @@ itself deferred. Measured both ways on the same tree:
 
 A closure that reads only top-level imports would have selected **299** of 742 files for a change to
 `tortoise/sdk.py`, against **628** with every nesting walked — and its median closure is 21 modules
-where this tool's is 186. The gap is the **329** core files that reach `tortoise.sdk` only from a
-function body; 329 files carry a direct `tortoise.sdk` import at all, and 233 of those do so at
-module level. This is the reason the tool walks the whole tree and tags every edge `in_function`.
+where this tool's is 186. Three different populations are in play here, and two of them happen to be
+`329`; they are stated separately because they are not the same set (their overlap is 77 files):
+
+| quantity | value | definition |
+|---|---|---|
+| closure gap | **329** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`628 − 299`) |
+| direct importers | **329** | of 742 core files, those with any `tortoise.sdk` edge of their own |
+| direct, module-level | **233** | of those 329, the ones with a module-level `tortoise.sdk` edge — so **96** import it only inside a function body |
+
+This is the reason the tool walks the whole tree and tags every edge `in_function`: a reader that
+kept only module-level edges would lose `tortoise.sdk` from 329 closures, and only 96 of those files
+import `sdk` inside a function themselves — the other 252 reach it transitively, through another
+module's deferred edge.
 
 **59 distinct sets sounds like granularity. It is not.** 425 + 114 = **539 of 742 (72.6 %)** core
 files sit in one of two degenerate buckets — "the entire 186-module block" or "nothing at all" —
@@ -171,7 +181,7 @@ and its ceiling is the 15 % in §1.
 | `from __future__` | **not a dependency**, counted and named | no `tortoise/**` target can match it; excluding it silently would make the exclusion invisible. |
 | re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.6 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
 | dynamic imports | constant argument **resolved**; computed argument → `UNKNOWN` with reason | `importlib.import_module("tortoise.x")` is still static information; only a computed name is a blind spot. |
-| `getattr(module, ...)` | in-repo module + literal attr → resolve (or no edge); computed attr → `UNKNOWN`; third-party module → **no taint** | taint must mean "may be MISSING a `tortoise` module" or it says nothing: over-tainting marks the whole connected component and the signal collapses (measured: 89 % tainted before this rule, 19 % after). |
+| `getattr(module, ...)` | in-repo module + literal attr → resolve (or no edge); computed attr → `UNKNOWN`; third-party module → **no taint** | the candidate is built from the binding's **dotted target**, never its local name: `from tortoise import projection` + `getattr(projection, "in_memory")` resolves `tortoise.projection.in_memory`, where a local-name candidate (`projection.in_memory`) is not a module at all and would drop a real submodule with neither an edge nor an `UNKNOWN`. Taint must mean "may be MISSING a `tortoise` module" or it says nothing: over-tainting marks the whole connected component and the signal collapses (measured: 89 % tainted before this rule, 19 % after). |
 | package/module name collision | **package wins** (CPython's `FileFinder` order) | `tortoise/projection/__init__.py` and `tortoise/projection.py` share a name; resolving to the module under-selected by 7 modules and is reported in `shadowed_modules`. |
 | unparseable / unresolvable | `UNKNOWN` + reason (`syntax`, `unresolved-name`, `dynamic-import-call`, `dynamic-module-attr`, `module-loader`) | reported, never dropped. |
 
@@ -185,6 +195,15 @@ is fine, so the harness reports `job_failed_without_test_failure` separately and
 retried-and-green job exists beside its red attempt — the harness reads every artifact of the
 failed runs and unions the failures. A red run it cannot read at all is never scored as clean: it
 is counted and the window exits **2**, see §5.)
+
+The failing FILE comes from the xunit1 `file` attribute, with a `classname` fallback for legs that
+omit the repo's `-o junit_family=xunit1` override (`xunit2` is pytest's ini default, and it drops
+`file`/`line` entirely). The fallback resolves the module by trying every prefix of the dotted
+`classname` against the checkout, longest first — `tests.test_a` → `tests/test_a.py`. Taking
+`classname.rpartition(".")` instead produced `tests.py` for every module-level test: a path that
+intersects nothing, so the failure is scored `no-closure-intersection` — i.e. as evidence the
+derivation is SAFE. A failure whose file neither key can attribute blocks the cache and makes the
+window PARTIAL.
 
 ## 4. Prior art, and why the choices above differ from it
 
@@ -229,9 +248,11 @@ truth under `.ci-selection/closure-cache/` (gitignored), so re-runs are offline 
 exits **2** when the window is partial — an artifact it could not read, an unparseable or missing
 `junit.xml`, a red leg whose artifact listing was **empty** (artifacts expire after 90 days by
 default, and deleting a run deletes its artifacts, so "nothing uploaded" is an ordinary state, not
-a clean one), or a window with no PRs at all — **1** when it found a miss, and **0** only for a
-complete, miss-free window. A `core` member that resolves to no test file is named on stdout and
-carried in the JSON as `unresolved_core`, because every percentage here is a ratio over that count.
+a clean one), a failing test whose **file** neither the xunit1 `file` attribute nor the `classname`
+fallback can attribute to a file in the checkout, or a window with no PRs at all — **1** when it
+found a miss, and **0** only for a complete, miss-free window. A `core` member that resolves to no
+test file is named on stdout and carried in the JSON as `unresolved_core`, because every percentage
+here is a ratio over that count.
 
 ## 6. Verdict
 

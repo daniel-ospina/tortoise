@@ -409,14 +409,25 @@ class Scanner:
             )
             return scan
 
-        module_bindings: set[str] = set()
+        # local binding name -> the DOTTED module it is bound to. The dotted
+        # target is what a `getattr(<binding>, "<literal>")` candidate must be
+        # built from: `import tortoise.sdk as s` binds `s` to `tortoise.sdk`,
+        # and resolving from the LOCAL name built `s.hosted_api`, which can
+        # never be a module — a real submodule then vanished with no edge and no
+        # `UNKNOWN` (#10143 review P2).
+        module_bindings: dict[str, str] = {}
         for node, in_tc, in_fn in _imports_with_context(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     self._add_import(scan, alias.name, node.lineno, in_tc, in_fn)
                     bound = alias.asname or alias.name.split(".")[0]
                     if self.index.is_in_repo_root(alias.name):
-                        module_bindings.add(bound)
+                        # `import tortoise.x` binds the ROOT package; an alias
+                        # binds the whole dotted path.
+                        module_bindings[bound] = (
+                            alias.name if alias.asname
+                            else alias.name.split(".")[0]
+                        )
             else:
                 base = _resolve_relative(node, pkg_parts)
                 if base == "__future__":
@@ -436,7 +447,7 @@ class Scanner:
                         self._add_import(scan, sub, node.lineno, in_tc, in_fn,
                                          kind=FROM_SUBMODULE)
                         if self.index.is_in_repo_root(sub):
-                            module_bindings.add(alias.asname or alias.name)
+                            module_bindings[alias.asname or alias.name] = sub
 
         self._scan_dynamic(tree, scan, module_bindings, pkg_parts)
         # Dedupe edges: a module imported at module level AND inside a function
@@ -469,7 +480,7 @@ class Scanner:
             ))
 
     def _scan_dynamic(
-        self, tree: ast.AST, scan: FileScan, module_bindings: set[str],
+        self, tree: ast.AST, scan: FileScan, module_bindings: dict[str, str],
         pkg_parts: list[str],
     ) -> None:
         """`importlib`-shaped and `getattr`-shaped dynamic access.
@@ -505,11 +516,16 @@ class Scanner:
             base = node.args[0]
             if not (isinstance(base, ast.Name) and base.id in module_bindings):
                 continue
+            bound = module_bindings[base.id]
             attr_node = node.args[1] if len(node.args) > 1 else None
             if isinstance(attr_node, ast.Constant) and isinstance(attr_node.value, str):
                 # A literal attribute name is fully static: either it names a
                 # submodule (a resolvable edge) or it does not (no edge at all).
-                sub = f"{base.id}.{attr_node.value}"
+                # The candidate comes from the binding's DOTTED target, never its
+                # local name: after `from tortoise import projection`,
+                # `getattr(projection, 'in_memory')` is `tortoise.projection.
+                # in_memory` — `projection.in_memory` is not a module at all.
+                sub = f"{bound}.{attr_node.value}"
                 if self.index.exists(sub):
                     self._add_import(scan, sub, node.lineno, in_tc, in_fn,
                                      kind=DYNAMIC_LITERAL)
@@ -1037,12 +1053,51 @@ def artifact_names_for_job(job_name: str) -> list[str]:
     return [f"pytest-log-{job_name}"]
 
 
+def _path_from_classname(classname: str) -> str:
+    """The module path a junit `classname` was mangled from, or `""`.
+
+    `mangle_test_address()` builds `classname` as the FILE PATH dotted, then the
+    class name and/or the test name — so the module is a PREFIX and the number of
+    trailing components to drop is not derivable from the string alone. Resolve
+    by trying every prefix against the checkout, longest first:
+
+        tests.test_a              -> tests/test_a.py
+        tests.test_a.TestX        -> tests/test_a.py
+        tests.eval.harness.test_x -> tests/eval/harness/test_x.py
+
+    Longest-first matters: `tests/eval/harness.py` (a package `__init__`) must not
+    shadow `tests/eval/harness/test_x.py`, the file that actually failed.
+
+    The previous fallback took `classname.rpartition('.')` and produced **`tests.py`**
+    for every module-level test — a path that intersects nothing, so `misses_for()`
+    scored the failure as `not_in_current`, the one branch that ABSOLVES the
+    derivation (#10143 review P2). `file` exists only under `junit_family=xunit1`;
+    `xunit2` is pytest's ini default, so the fallback goes live on any leg that
+    omits the repo's `-o junit_family=xunit1` override.
+    """
+    parts = classname.split(".")
+    for n in range(len(parts), 0, -1):
+        candidate = "/".join(parts[:n]) + ".py"
+        if (REPO / candidate).is_file():
+            return candidate
+    return ""
+
+
 def parse_junit_failures(xml_bytes: bytes) -> dict:
-    """Failing test FILES from a `junit.xml` (xunit1 `file` attr, classname fallback)."""
+    """Failing test FILES from a `junit.xml` (xunit1 `file` attr, classname fallback).
+
+    `unresolved` lists failing tests whose file could be attributed by NEITHER
+    key. It is not cosmetic: such a failure would otherwise be dropped from the
+    ground truth (under-counting misses) or attributed to a bogus path that
+    intersects nothing (which `misses_for()` reads as `not_in_current`, i.e. as
+    evidence the derivation is SAFE). The caller turns it into an
+    `artifact_errors` entry so the window reads PARTIAL.
+    """
     import xml.etree.ElementTree as ET
 
     files: set[str] = set()
     names: list[str] = []
+    unresolved: list[str] = []
     executed = 0
     try:
         root = ET.fromstring(xml_bytes)
@@ -1055,18 +1110,18 @@ def parse_junit_failures(xml_bytes: bytes) -> dict:
             continue
         path = case.get("file") or ""
         if not path:
-            classname = case.get("classname") or ""
-            if "." in classname:
-                head, _, tail = classname.rpartition(".")
-                if head.startswith("tests") or tail.startswith("test"):
-                    path = head.replace(".", "/") + ".py"
+            path = _path_from_classname(case.get("classname") or "")
         if path:
             path = path.replace("\\", "/")
             if path.startswith("./"):
                 path = path[2:]
             files.add(path)
-        names.append(f"{case.get('classname', '')}::{case.get('name', '')}")
-    return {"files": sorted(files), "names": names, "executed": executed}
+        label = f"{case.get('classname', '')}::{case.get('name', '')}"
+        if not path:
+            unresolved.append(label)
+        names.append(label)
+    return {"files": sorted(files), "names": names, "executed": executed,
+            "unresolved": unresolved}
 
 
 def _download_artifact(repo: str, artifact_id: int, cache: Path) -> Path:
@@ -1117,8 +1172,16 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         # skipped}, cancelled/stale are non-red, and EVERY OTHER CONCLUSION IS
         # RED. A conclusion GitHub has not named yet, and a null one, are red
         # too — an unnamed value must never fall through a gap.
+        #
+        # `None` is NOT in the skip set: a run GitHub has not concluded yet (a
+        # re-trigger at the same sha, queued or in progress) has a null
+        # conclusion, and the paragraph above says an unnamed value is red. It
+        # was in the skip set here, which put the code back on the fail-open
+        # side of its own contract — dropped before `failed_jobs`, so its
+        # artifacts were never read, `artifact_errors` stayed empty and a window
+        # containing it could still exit 0 (#10143 review P2).
         conclusion = run.get("conclusion")
-        if conclusion in {None, "success", "neutral", "skipped", "cancelled",
+        if conclusion in {"success", "neutral", "skipped", "cancelled",
                           "stale"}:
             continue
         name = run.get("name") or ""
@@ -1185,6 +1248,16 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
                 artifact_errors.append(
                     f"{art.get('name')}: {parsed['error']}"[:200])
                 continue
+            if parsed.get("unresolved"):
+                # A failing test whose FILE neither key can attribute is a
+                # partial ground truth: keep the failures it did attribute, but
+                # say so — otherwise the omission reads as "nothing failed
+                # here" (and a bogus path would read as "the derivation is
+                # safe", the `not_in_current` absolution).
+                artifact_errors.append(
+                    f"{art.get('name')}: {len(parsed['unresolved'])} failing "
+                    f"test(s) with no resolvable file "
+                    f"({parsed['unresolved'][0]})"[:200])
             if parsed["files"]:
                 pr_found = True
                 failed_files.update(parsed["files"])
