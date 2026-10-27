@@ -121,8 +121,8 @@ declared beside it).
 
 1. **Is the intent legible?** No → question 3, **before** refusing. Yes → next. (If the surface cannot
    establish what the input *means* — not merely how it is spelled — it is not legible; see §2.)
-2. **Is only the form off?** A different spelling of the same value (`5:02`, `2024-3-1`) **on a shaped
-   door** → re-spell and proceed, silently (§1). This is the window END only: the START has no
+2. **Is only the form off?** A different spelling of the same value (`2024-3-1`, `2024/03/01`, both
+   measured) **on a shaped door** → re-spell and proceed, silently (§1). This is the window END only: the START has no
    normalizing door, so a non-ISO start is a present-but-unorderable start rather than a re-spell. For
    anything else, use the table.
 3. **If refusing: can the fix be written, concretely enough that the caller can act on it?** Yes →
@@ -154,7 +154,8 @@ is stale.
 | absent | `unknown` | **accept** — this *is* the canonical un-datable form |
 | absent | a concrete granularity | **refuse** — a granularity cannot describe a bound that does not exist |
 | any bound | a word outside `year`/`month`/`day`/`unknown` | **refuse** — a caller error, not a granularity; name the four legal words |
-| well-formed but names no instant (`2026-02-30`, month 13) | any | question 3 — never re-spell it into the nearest real value |
+| well-formed but names no calendar day (`2026-02-30`, month 13) | any | **refuse** — an attempted instant that is not a calendar day; the repair names a real one. Never re-spell it into the nearest real value |
+| a Unix epoch supplied as a STRING (`"1719792000"`) | any | **refuse** — the repair names its own fix: pass the NUMBER, not a string |
 
 **The START** (no shaping door; #6140 governs)
 
@@ -169,7 +170,10 @@ is stale.
 
 ⚠️ The asymmetry is deliberate and twice decided: **never refuse a present-but-unorderable START**
 (#6140: watch, do not block), and **never mint an `unknown` start** (the vocabulary is end-only).
-Narrowing the START's write contract is #9244's open question, not this page's.
+#9244 shipped the READ-side gate on orderability and left the write contract unchanged — a
+`validFromPrecision` beside an unorderable START is still accepted and stored verbatim. Narrowing
+that write boundary is **undecided and tracked by no open issue**; it is not this page's call, and
+reading this page as having decided it would be wrong in either direction.
 
 ## 6. What this is not
 
