@@ -119,8 +119,11 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   hosted REST lane carries the SAME pair by value rather than through this
   `ContextVar` — `hosted_api._data_sdk` → `sdk._bind_record_tenant` — which is
   the seam its `TortoiseSDK` reads. Unwired still: a SESSION/JWT credential and
-  an OAuth `oat_` token (neither carries a `default_graph_id`) and the
-  seed/index runners that build their own SDK — #10047.
+  an OAuth `oat_` token, neither of which carries a `default_graph_id` (#10046).
+  The lanes that build their OWN SDK — the background indexing jobs and the
+  seed runners — are wired since #10047
+  (`hosted_api._bind_default_graph_record_tenant`, same `record_tenant_for`
+  answer, org default graph by construction).
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
   consults the env pair ONLY when the deployment declared itself single-tenant
   (`record_writer.single_tenant_declared()` → `TORTOISE_RECORD_SINGLE_TENANT`,
@@ -250,6 +253,7 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # pre-move contract (`Object -> name`) while the database enforced the
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
+    "20261029000001_record_point_cache_tier.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -781,8 +785,19 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "PointRetracted": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
                   literals=(("status", "retracted"),),
-                  from_payload=frozenset()),
-        note="tombstone — the node is KEPT (the hard delete is EntityMutated)",
+                  from_payload=frozenset({"valid_to"})),
+        note="tombstone — the node is KEPT (the hard delete is EntityMutated). "
+             "#4282: `valid_to` rides the payload when the retraction named a "
+             "WINDOW END (the `valid_until`/`invalid_at` field on "
+             "`update_knowledge`, beta row 22) — the caller's instant is the "
+             "datum, so the record carries it and the fold replays it verbatim "
+             "instead of a rebuild losing it; the DECLARATION half is pinned by "
+             "`tests/test_4282_phase2_merges.py`, and the PARITY half (the "
+             "producer really puts the key on the record, the rebuild really "
+             "restores it, and the durability gate stays clean) by "
+             "`tests/test_4282_dated_retraction_durability.py` — a declared "
+             "`from_payload` on a record that never carries the key is exactly "
+             "the vacuous shape that file exists to prevent",
     ),
     "PointSuperseded": Mutation(
         NodePatch(Node("point", "Point", "id"), key_from="id",
@@ -1308,6 +1323,20 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # cache is the projection). `test_record_projection`'s storable-primary leg
     # is what keeps that distinction honest.
     "agent_id",
+    # #10017 R2: a PLACEMENT declaration, not a derived value.
+    # ⛔ This is the RECORD's strip set, and deleting it as "redundant now that
+    # the column exists and the schema refuses it" would be a silent data
+    # disaster: `_split_properties` checks `column in cols` BEFORE `refused`, so
+    # a payload `cache_tier` is written to the COLUMN — the refusal cannot catch
+    # it. Without this entry any `PointAdded` could set
+    # `cache_tier='record_only'` and hide a real graph point from the cache.
+    # The GRAPH half is `projection/entities.py::_META_KEYS` (the `agent_id`
+    # precedent — the record strip alone was never sufficient for that key).
+    # ⛔ And because this strips it, the tier can NOT be set through an event
+    # payload: it is dropped before the insert, so the row lands the DEFAULT
+    # `graph` and the turn would be materialised again. Step 7 must write it as
+    # its own column statement.
+    "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -2175,7 +2204,13 @@ def _op_dispatch_statements(
         col_values, tail = _split_properties(
             table, dict(state),
             columns=columns, refused=refused,
-            drop=dispatch.never_store.get(table, frozenset()),
+            # #10017 R2: `cache_tier` is a placement declaration, so the
+            # `EntityMutated` path must drop it too. Without it a `state` map
+            # carrying the tier writes `object.props`/`subject.props`, and a
+            # record-sourced rebuild sets it on the node while the journal
+            # replay strips it (`_META_KEYS`) — the two rebuild routes diverging
+            # on a property, which is the class this change exists to close.
+            drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]

@@ -92,7 +92,7 @@ def _record_tenant_scope(org: dict, *, control_plane_ids: bool):
     (#10025; `20261028000001` mints that row per organization). That resolves
     org-wide **API KEYS** (``tt_``/``tk_``); the OAuth family (``oat_``, see
     :func:`tortoise.oauth.resolve_oauth_access_token`) carries no
-    ``default_graph_id`` yet and stays refused — #10047. When the control
+    ``default_graph_id`` yet and stays refused — #10046. When the control
     plane cannot name it — no row, no field — the write is REFUSED and counted
     (``no_tenant``) instead. Nothing is guessed here: a guess is the
     cross-tenant write this whole seam exists to prevent.
@@ -622,7 +622,9 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     request's own credential — MCP and hosted REST included. What is still
     unwired is THIS seam and the credentials that carry no `default_graph_id`
     at all: a SESSION/JWT credential and an OAuth `oat_` token. Closing that is
-    #10047's scope, and it is a deferral of those lanes only.
+    #10046's scope, and it is a deferral of those credentials only — the lanes
+    that build their own SDK and write the org DEFAULT graph are #10047, and
+    they are named there rather than here.
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None
@@ -1429,8 +1431,8 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
         # (`oat_`, introspected by `tortoise.oauth.resolve_oauth_access_token`)
         # is NOT covered: that resolver never calls `resolve_api_key` and puts
         # no `default_graph_id` on the dict, so an OAuth write stays refused and
-        # counted (`no_tenant`). Wiring it is #10047's scope, named in that
-        # issue's own `mcp_auth.py` bullet — this lane carries whatever the
+        # counted (`no_tenant`). Wiring it is #10046's scope, named in that
+        # issue's own credential table — this lane carries whatever the
         # resolver handed it and guesses nothing.
         #
         # It also stays REFUSED and counted (`no_tenant`) whenever the control
