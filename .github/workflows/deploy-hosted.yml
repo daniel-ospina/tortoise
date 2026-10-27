@@ -1059,7 +1059,7 @@ jobs:
           # becomes the thing that ends the job — which is the failure this bound
           # exists to remove (a `timeout-minutes` kill ends the job BEFORE
           # `if: failure()`, silencing the #2240 alert). Measured semantics: a
-          # child that ignores TERM under `timeout 1s` ran 6 s and still exited
+          # child that ignores TERM under `timeout 1s` ran 5 s and still exited
           # 124. With the grace the loop's worst case is 5 × 11.5 + 4 × 0.75 =
           # 60.5 min, which the 65-minute cap covers.
           # MEASURED for THIS STEP, not the job — a `deploy-api` JOB duration

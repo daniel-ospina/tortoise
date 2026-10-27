@@ -320,6 +320,13 @@ assert_eq "$RC" "1" "exits 1 — readiness never 200, so the run FAILS"
 assert_contains "$OUT" "/health/ready not 200" "names the readiness plane"
 assert_contains "$OUT" "db.ok was ALSO never true" "records the db.ok observation in the failure too"
 assert_contains "$OUT" "FalkorDB unreachable" "preserves the specific FalkorDB diagnosis"
+# ⛔ The DURATION the operator reads is part of the diagnosis: `TRIES × SLEEP`
+# omits the per-request bound, so it understates the wait by up to 2.3× and
+# makes a probe that never finished read as a dead app. These two pins are on
+# the shipped arithmetic (3 × (0 + 5) s and 4 × (0 + 13) s under this driver's
+# knobs), so reverting either message to `TRIES × SLEEP` (0s here) reddens CI.
+assert_contains "$OUT" "for 15s" "the db.ok wait counts the per-request bound (3 × (0 + 5))"
+assert_contains "$OUT" "for 52s" "the readiness wait counts the per-request bound (4 × (0 + 13))"
 assert_eq "$READY_POLLS" "4" "phase 3 was reached and polled to exhaustion (positive control)"
 
 echo "12. every request is BOUNDED (the phase budgets are not bounds on their own)"
@@ -381,7 +388,7 @@ done
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=52
+expected_assertions=54
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"
