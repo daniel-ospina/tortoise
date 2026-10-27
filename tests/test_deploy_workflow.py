@@ -2746,13 +2746,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # `no_tenant` (#10083 review F3). Pin all three parts.
     assert re.search(
         r"fail-and-fix only when the capture ran \*\*unbound\*\*, when item 1's "
-        r"row did not appear, or when the capture's own tenant resolution faulted",
+        r"row did not appear, or when the capture's credential was refused a "
+        r"tenant the record CAN key on",
         flat,
     ), (
         "the section gives no executable discriminator for `no_tenant` growth — "
         "an unbound capture makes the growth the capture's, a bound capture whose "
-        "item-1 row never appeared is the second case, and a failed tenant "
-        "resolution is the third"
+        "item-1 row never appeared is the second case, and a credential the record "
+        "CAN key on being REFUSED a tenant is the third"
+    )
+    # ⛔ The third arm must be WINDOW-scoped, not OWNERSHIP-scoped: the sentence used
+    # to read "when the capture's OWN tenant resolution faulted", which asks the
+    # operator to decide that a fault line was the capture's — the ownership
+    # judgement the ⛔ ruling below ("no request identity") declares impossible
+    # (#10083 review cycle 3, P2, measured: inverting it left all 99 green).
+    assert not re.search(r"the capture's OWN tenant resolution", flat), (
+        "the third arm is ownership-scoped again — a resolution-fault line carries no "
+        "request identity, so the operator cannot show it was the capture's"
     )
     # The third disjunct must name a command that actually FINDS the fault. Recipe 1
     # greps `the record write did not happen`, and this fault is logged under a
@@ -2761,6 +2771,27 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # an operator who greps recipe 1, sees nothing and clears the capture passes a
     # capture-own `no_tenant` growth as other traffic — a fail-open in the very
     # verification this section exists to provide (#10083 review P1).
+    # ⛔ TWO causes, TWO readings — and the second one is SILENT. `no nameable
+    # default row` is a refusal of a tenant the record CAN key on, so it is a
+    # fail-and-fix; but `_bind_default_graph_record_tenant` returns without logging
+    # (`if not default_graph_id: return`, hosted_api.py), so on the seed/indexing
+    # lane NO line exists for the operator to find. A section that offered only the
+    # fault grep would present an empty read as "no fault" on a fail-and-fix case —
+    # the same fail-open, one cause further out (#10083 review cycle 3, P1).
+    assert re.search(r"No nameable default row", flat), (
+        "the bar's third arm names only the FAULT cause — the no-nameable-row "
+        "refusal is a fail-and-fix too and must be a reading of its own"
+    )
+    assert re.search(
+        r"on the seed / indexing lane it logs \*\*NOTHING\*\*\s+at all", flat
+    ), (
+        "the section does not say the no-nameable-row arm is SILENT on the "
+        "seed / indexing lane, so an empty grep read is taken as 'no fault'"
+    )
+    assert re.search(r"empty read of that grep does not clear\s+this arm", flat), (
+        "the section does not rule out the empty-read misreading — read the "
+        "`kind='default'` row, not the log"
+    )
     # ⛔ The command must match EVERY message that carries a resolution fault, not
     # just the per-request one. There are three: `hosted_api._resolve_record_tenant`
     # ("could not resolve the record tenant for this request"),
@@ -2768,43 +2799,60 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # DEFAULT-graph record tenant for org …", the seed / indexing lanes), and
     # `supabase_control.default_graph_id_for` ("graphs default-row read failed …"),
     # which SWALLOWS its exception and returns None — so on a default-row read
-    # fault neither hosted_api line is emitted at all. A single-message grep sends
-    # the operator to an empty read on two of the three, i.e. "no fault" on a
-    # fail-and-fix `no_tenant` growth: the same fail-open this PR closes, one
-    # message further out (#10083 review cycle 2, P1).
+    # fault neither hosted_api line is emitted at all. The mint failures warn under
+    # their own message ("default graph(s) row NOT minted …", the org create/rename
+    # paths). A narrower grep sends the operator to an empty read on some of them,
+    # i.e. "no fault" on a fail-and-fix `no_tenant` growth (#10083 review cycle 2 P1,
+    # widened in cycle 3).
     assert re.search(
         r'grep -E "could not resolve the record tenant\|could not resolve the '
-        r'DEFAULT-graph record tenant\|graphs default-row read failed"',
+        r'DEFAULT-graph record tenant\|graphs default-row read failed\|default '
+        r'graphs\? row NOT minted"',
         flat,
     ), (
-        "the fault disjunct's grep matches only ONE of the three resolution-fault "
-        "messages, so a default-row read fault (or a seed/indexing bind fault) "
-        "reads as 'no fault'"
+        "the fault disjunct's grep misses at least one reachable resolution-fault "
+        "message, so that fault reads as 'no fault'"
     )
+    # ⛔ Scoped to the (c) PARAGRAPH, not the whole section: the same two literals
+    # appear elsewhere in this section, so a section-wide search let (c) stop naming
+    # a member while the pin stayed green (#10083 review cycle 3, P2, measured).
+    _excl_c = flat[
+        flat.index("(c) The tenant-RESOLUTION faults"):
+        flat.index("⛔ **`no_journal` and `seam_unimportable` ARE in it**")
+    ]
     for _msg in (r"could not resolve the DEFAULT-graph record tenant for org",
                  r"graphs default-row read failed — the record tenant stays unnamed"):
-        assert re.search(re.escape(_msg), flat), (
+        assert re.search(re.escape(_msg), _excl_c), (
             f"recipe 1's exclusion (c) does not name {_msg!r} among the resolution "
             "faults, so its 'three MESSAGES' count and its members disagree"
         )
-    # ⛔ Attribution is forbidden, not merely unmentioned: EVERY sentence that
-    # speaks of attributing growth per request must be a prohibition. The old
-    # negative pin required the article and the backticked counter
-    # (`attribute (?:any|a|each|the) `no_tenant` growth`), so `Attribute any
-    # `no_tenant` growth per request …` (sentence-initial capital) and `Then
-    # attribute that growth per request …` — the document's own phrasing — both
-    # stayed GREEN while instructing the impossible step (#10083 review cycle 2,
-    # P2, measured). Sentence-scoped and case-insensitive instead.
-    _attribution = re.findall(r"[^.]{0,80}attribute[^.]{0,40}growth per request", flat, re.I)
-    assert _attribution, (
+    # ⛔ Attribution is forbidden, not merely unmentioned: every SENTENCE that names
+    # attribution (or its synonym `assign`) AND a request must be a prohibition.
+    # Two earlier forms of this pin were measured evadable (#10083 review cycles 2
+    # and 3): the first required an article plus the backticked counter, so
+    # sentence-initial capital and "that growth" slipped through; the second keyed
+    # on the literal phrase "growth per request", so "Per-request attribution of
+    # that growth is possible from the log" and "Assign each `no_tenant` growth to
+    # the request that caused it" both stayed green. Sentence-scoped over both verb
+    # families now. RESIDUAL, stated rather than implied: a synonym this section
+    # never uses (e.g. "pin the growth on") is still not detected — a regex pins the
+    # vocabulary that exists, and a reviewer, not a regex, judges a rewrite.
+    _sentences = [s for s in re.split(r"(?<=\.)\s+", flat)
+                  if re.search(r"attribut|assign", s, re.I)
+                  and re.search(r"\brequest", s, re.I)]
+    assert _sentences, (
         "the section never rules per-request attribution out at all — the ruling "
         "below is the only thing that makes the arm executable"
     )
-    for _sentence in _attribution:
-        assert re.search(r"(?:Do not|Never|not try|may not|must not)", _sentence, re.I), (
-            "the section instructs per-request attribution of growth — the step "
-            "the ⛔ ruling below forbids, and the log carries no request identity: "
-            f"{_sentence.strip()!r}"
+    for _sentence in _sentences:
+        assert re.search(
+            r"(?:\bDo not\b|\bNever\b|\bnot try\b|\bmay not\b|\bmust not\b|"
+            r"\bcannot\b|\bcan't\b|\bimpossible\b|\bunexecutable\b)",
+            _sentence, re.I,
+        ), (
+            "the section presents per-request attribution of growth as possible — "
+            "the step the ⛔ ruling below forbids, and the log carries no request "
+            f"identity: {_sentence.strip()!r}"
         )
     # REVERT-DETECTOR, not a claim pin: this reds only if one draft's exact wording
     # ("recipe 1 logs …") comes back — the phrase exists nowhere else in the tree,

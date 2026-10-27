@@ -3394,12 +3394,22 @@ why the two recipes above are the verification and the deploy status is not.
    cross-tenant note below for what that declaration may and may not cover.
    Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
    only when the capture ran **unbound**, when item 1's row did not appear, or
-   when the capture's own tenant resolution faulted — a tenant-RESOLUTION fault,
-   which logs one of THREE messages (all three are listed in recipe 1's
-   exclusion (c) above) and
-   **recipe 1's grep does NOT match** (it greps
-   `the record write did not happen`) any of them, so read the faults with
-   `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed"`.
+   when the capture's credential was refused a tenant the record CAN key on.
+   That last arm has TWO readings, because it has two causes; read BOTH before
+   you call the growth other traffic:
+   - **A resolution FAULT** logs one of THREE messages (recipe 1's exclusion (c)
+     above) — **recipe 1's grep does NOT match** (it greps
+     `the record write did not happen`) any of them, so read the faults with
+     `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed|default graphs? row NOT minted"`.
+   - **No nameable default row** (absent, inactive, or the `default` sentinel)
+     is also a refusal of a tenant the record CAN key on, so it is a
+     fail-and-fix as well — and on the seed / indexing lane it logs **NOTHING**
+     at all: `hosted_api._bind_default_graph_record_tenant` returns without a
+     word when `default_graph_id_for` yields no row, whose only other caller-side
+     trace is the mint failure. So an **empty read of that grep does not clear
+     this arm** — read the org's `kind='default'` `public.graphs` row itself
+     (active, and not the `default` name sentinel) before calling the growth
+     other traffic.
    ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
