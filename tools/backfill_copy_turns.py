@@ -110,6 +110,15 @@ MB at the largest production graph (6,432 turns), not a constant.
   to it means a later ``rebuild()`` re-creates the turns this migration deletes
   from the graph. That is a design consequence recorded on #10017, not a
   side effect to be discovered later.
+* Every turn row this tool files carries ``cache_tier = 'record_only'``, so the
+  RECORD-sourced rebuild does not re-materialise it (``read_record_view`` reads
+  only ``cache_tier = 'graph'``). The tier is its own COLUMN statement inside
+  each session's transaction, because ``_RECORD_ONLY_KEYS`` strips it from a
+  ``PointAdded`` payload (#10070) — and the copy REFUSES if that statement
+  reaches fewer rows than the turns it filed, so a run cannot report a clean
+  copy whose rows the cache would node-ify. ``record_only_turns`` in the
+  artifact is the number of committed rows it reached (``null`` on a dry run,
+  which opens no record connection).
 """
 
 from __future__ import annotations
@@ -182,6 +191,39 @@ _RECORD_FLOOR_SQL = (
     "UNION ALL "
     "SELECT session_id, turn_count, NULL "
     "FROM public.session_narrative WHERE org_id = %s AND graph_id = %s"
+)
+
+
+#: The tier every turn row this tool files must carry (#10017 R2 / #10070).
+#:
+#: ⛔ IT CANNOT RIDE THE EVENT. `record_projection._RECORD_ONLY_KEYS` contains
+#: `cache_tier`, so the key is stripped from the snapshot before
+#: `_split_properties` ever sees it — the row then lands the schema's DEFAULT
+#: `'graph'`, and `cache_projection.read_record_view` (whose point read is
+#: `AND cache_tier = 'graph'`) hands every copied turn back to `record_plan`,
+#: which plans a `MERGE` for each. An operator `record-restore` — the disaster
+#: path this migration itself relies on — would then RE-CREATE the entire legacy
+#: turn population the delete phase removes: the RAM the purge exists to reclaim
+#: comes back, and the two rebuild routes produce two different graphs, which is
+#: exactly what R2/step 1 (`"Blocks everything else"`) was ordered to prevent.
+#: The migration's own acceptance checks stay green through it (the graph has 0
+#: episodic points and the byte census reads correctly) until that first restore.
+#:
+#: #10070 shipped the column, the reader filter and the strip, and deferred the
+#: WRITER to step 7's live carrier. This tool is a fourth writer and the only one
+#: that creates the migrated population in bulk (~37.5k episodic points on the
+#: recorded census), and its output is what the delete phase certifies — so it
+#: states the tier itself, as its own COLUMN statement (#10070's named shape) in
+#: the same transaction `emit` already commits.
+#:
+#: The predicate names `org_id`, `graph_id` and the row keys, and the record's RLS
+#: policies scope the UPDATE to `app.current_org_id`, which `replay` sets on this
+#: very transaction — so a WRONG TENANT matches zero rows rather than another
+#: tenant's, and `_stamp_record_only_tier` refuses on a short rowcount instead of
+#: certifying a placement that did not land.
+_RECORD_ONLY_TIER_SQL = (
+    "UPDATE public.point SET cache_tier = 'record_only' "
+    "WHERE org_id = %s AND graph_id = %s AND node_key = ANY(%s)"
 )
 
 
@@ -663,6 +705,66 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id,
     return stats
 
 
+def _turn_keys(events: list[dict]) -> list[str]:
+    """The record's ``node_key`` for every turn event in one session's batch.
+
+    The envelope ``id`` first and the snapshot second — the same two carriers the
+    record's own ``key_from="id"`` fallback reads (`_key_value`), so this cannot
+    name a different row than the insert did. No usable id is a REFUSAL: a turn
+    whose key cannot be derived is a row whose tier cannot be proven to have
+    landed, and filing it at the default ``'graph'`` is the defect this states.
+    """
+    keys: list[str] = []
+    for event in events:
+        if event.get("type") != "PointAdded":
+            continue
+        key = event.get("id") or (event.get("point") or {}).get("id")
+        if not isinstance(key, str) or not key:
+            raise CopyRefused(
+                "a PointAdded event carries no usable id, so the `record_only` "
+                "tier cannot be proven to reach the row it files")
+        keys.append(key)
+    return keys
+
+
+def _stamp_record_only_tier(conn: object, org_id: str, graph_id: str,
+                            keys: list[str], session_id: str) -> int:
+    """State `cache_tier = 'record_only'` on the turn rows just written.
+
+    Called as `_commit_or_refuse`'s ``before_commit`` hook, so the connection is
+    the one the seam OPENED, the statement is executed on it BEFORE the commit,
+    and a refusal here leaves the session's rows uncommitted (and that call's
+    ``finally`` closes the handle).
+
+    A SHORT ROWCOUNT REFUSES. Every key named here was just upserted under the
+    same `(org_id, graph_id)` in the same transaction, so the only ways the count
+    can differ are the ones that must not be certified: a tenant the policies
+    filtered (`app.current_org_id` not this org — the update reaches another
+    tenant's rows or none), a row the insert did not land, or a key list that
+    stopped naming the rows. Each of those leaves a turn at the DEFAULT
+    `'graph'`, which `read_record_view` then hands to `record_plan` — the P1
+    outcome — so the copy refuses instead of reporting a clean run.
+    """
+    if not keys:
+        return 0
+    cursor = conn.cursor()
+    try:
+        cursor.execute(_RECORD_ONLY_TIER_SQL, (org_id, graph_id, list(keys)))
+        stamped = cursor.rowcount
+    finally:
+        with contextlib.suppress(Exception):
+            cursor.close()
+    if stamped != len(keys):
+        raise CopyRefused(
+            f"{session_id}: the `record_only` tier reached {stamped} of "
+            f"{len(keys)} turn row(s) — a row left at the schema's default "
+            "'graph' is re-materialised by `rebuild_from_record`, so the copy "
+            "would certify a placement the delete phase makes untrue. Nothing "
+            "is copied for this session (check that --org-id/--graph-id name "
+            "the tenant the record rows are actually under)")
+    return stamped
+
+
 def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
     """The production ``emit``: journal position, then the record, committed.
 
@@ -745,14 +847,33 @@ def _journal_emit(journal_path: str, dsn: str, org_id: str, graph_id: str):
             events, org_id=org_id, graph_id=graph_id,
             position=True, first_seq=first,
             conn=None, writer=writer)
-        write = _commit_or_refuse(write, RecordWriteOutcome, session_id)
+        # ⛔ THE TIER, IN THE SAME TRANSACTION (see `_RECORD_ONLY_TIER_SQL`), as
+        # this call's `before_commit` hook: the statement runs on the connection
+        # the seam opened and has NOT committed, so a stamp that cannot reach
+        # every turn row leaves the session's rows uncommitted — never a
+        # committed copy the cache would re-materialise.
+        #
+        # The count is captured HERE and read only after the commit returned, so
+        # it measures COMMITTED rows and not statements issued. A write that is
+        # not APPLIED never runs the hook; `_commit_or_refuse` refuses it with
+        # its own, more precise message.
+        stamped_rows: list[int] = []
+        write = _commit_or_refuse(
+            write, RecordWriteOutcome, session_id,
+            before_commit=lambda connection: stamped_rows.append(
+                _stamp_record_only_tier(connection, org_id, graph_id,
+                                        _turn_keys(events), session_id)))
+        emit.record_only_turns += stamped_rows[0] if stamped_rows else 0
         return first
 
+    #: Committed turn rows carrying the `record_only` tier. Read by `main` for the
+    #: artifact; `0` here is "nothing committed yet", never "no tier stated".
+    emit.record_only_turns = 0
     return emit
 
 
 def _commit_or_refuse(write, applied, session_id: str, *,
-                      owns_connection: bool = True):
+                      owns_connection: bool = True, before_commit=None):
     """Commit the seam's connection, and refuse a write that did not land.
 
     ``owns_connection`` is True because this module calls the seam with
@@ -762,6 +883,13 @@ def _commit_or_refuse(write, applied, session_id: str, *,
     transaction AND the handle: it must pass False, and this function then
     neither accuses it of committing nothing, nor commits, nor closes what it
     does not own.
+
+    ``before_commit(connection)`` runs AFTER the write is proven to have executed
+    statements on a connection, and BEFORE the commit — for statements that must
+    ride THIS transaction (the copy's `cache_tier` stamp, #10017 R2). Putting it
+    here rather than beside the call site is what makes the ordering structural
+    and the cleanup single: a hook that raises leaves the transaction uncommitted,
+    and the ``finally`` below still closes the handle.
     """
     connection = getattr(write, "connection", None)
     try:
@@ -782,6 +910,10 @@ def _commit_or_refuse(write, applied, session_id: str, *,
                 f"{session_id}: the record executed {statements} statement(s) "
                 "but returned no connection to commit — an uncommitted write is "
                 "not a copy")
+        if before_commit is not None:
+            # INSIDE this transaction: its statements commit or vanish with the
+            # write's own (the copy's `cache_tier` stamp, #10017 R2).
+            before_commit(connection)
         if owns_connection and connection is not None:
             try:
                 connection.commit()
@@ -887,6 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
     # `RecordConnectError` subclasses `RecordWriteError`, so one name covers both.
     from tortoise.record_writer import RecordWriteError
 
+    emit = None
     try:
         # A dry run proves NO position: it never opens the journal. Returning `0`
         # here made every session count as positioned, so the one number an
@@ -918,6 +1051,10 @@ def main(argv: list[str] | None = None) -> int:
             partial.update({"graph": shown, "dry_run": args.dry_run,
                             "record_tenant": {"org_id": args.org_id,
                                               "graph_id": args.graph_id},
+                            # Committed before the refusal, so the partial
+                            # artifact states the tier that DID land.
+                            "record_only_turns": getattr(
+                                emit, "record_only_turns", None),
                             "refused": str(exc)})
             if args.out:
                 _write_artifact(args.out, partial)
@@ -935,6 +1072,12 @@ def main(argv: list[str] | None = None) -> int:
     # evidence should name the pair that was used rather than leave it to be
     # re-derived from the command line.
     stats["record_tenant"] = {"org_id": args.org_id, "graph_id": args.graph_id}
+    # The tier the rows above carry, COUNTED from the transactions that committed
+    # it — `_stamp_record_only_tier` refuses unless every turn row of a session
+    # was reached, and `emit` adds to this only after its commit returned. `null`
+    # is a dry run: it opens no record connection, so no tier was stated (never
+    # `0`, which reads as "measured: none" — the same rule as `positions_measured`).
+    stats["record_only_turns"] = getattr(emit, "record_only_turns", None)
     if args.out:
         _write_artifact(args.out, stats)
     print(json.dumps(stats, indent=2, sort_keys=True))

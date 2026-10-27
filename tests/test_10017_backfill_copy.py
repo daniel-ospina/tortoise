@@ -199,13 +199,50 @@ def test_an_unrepresentable_vector_is_dropped_but_the_field_stays_owned() -> Non
 
 # ── the write: commit, or refuse ───────────────────────────────────────────
 
+class _Cursor:
+    """The one statement the copy issues on the seam's own connection: the tier.
+
+    `rowcount` is DERIVED from the keys the statement names (`_Conn.tier_rowcount`
+    overrides it), because the real UPDATE's rowcount is "how many of these rows
+    this tenant's policies let me touch" — a fake that always answered "all of
+    them" could not express the wrong-tenant case".
+    """
+
+    def __init__(self, conn: _Conn) -> None:
+        self._conn = conn
+        self.rowcount = -1
+        self.closed = False
+
+    def execute(self, sql: str, params=()) -> None:
+        self._conn.executed.append((sql, list(params)))
+        self._conn.sequence.append("tier")
+        keys = list(params[2]) if len(params) > 2 else []
+        self.rowcount = (len(keys) if self._conn.tier_rowcount is None
+                         else self._conn.tier_rowcount)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _Conn:
-    def __init__(self) -> None:
+    def __init__(self, tier_rowcount: int | None = None) -> None:
         self.commits = 0
         self.closed = False
+        #: Every statement executed on this connection, in order.
+        self.executed: list[tuple[str, list]] = []
+        #: `"tier"` / `"commit"` — the ORDER is the claim that the stamp rides the
+        #: write's transaction, so it is recorded rather than assumed.
+        self.sequence: list[str] = []
+        #: `None` = the UPDATE reached every key it named; an int is a partial
+        #: reach (the shape a wrong tenant under RLS produces: 0).
+        self.tier_rowcount = tier_rowcount
+
+    def cursor(self) -> _Cursor:
+        return _Cursor(self)
 
     def commit(self) -> None:
         self.commits += 1
+        self.sequence.append("commit")
 
     def close(self) -> None:
         self.closed = True
@@ -267,7 +304,7 @@ def test_a_commit_failure_refuses_and_still_closes_the_connection() -> None:
 
 # ── the journal position ───────────────────────────────────────────────────
 
-def _patch_journal(monkeypatch, positions, tmp_path=None):
+def _patch_journal(monkeypatch, positions, tmp_path=None, *, tier_rowcount=None):
     import tortoise.log as log_mod
     import tortoise.record_writer as rw
 
@@ -280,11 +317,15 @@ def _patch_journal(monkeypatch, positions, tmp_path=None):
             self.i += 1
             return value
 
+    # `(events, kwargs, write)` — the write is the third element so a test can
+    # reach the connection the seam handed back (the tier stamp runs on it);
+    # every existing reader indexes [0]/[1], so adding it changes nothing.
     calls = []
 
     def _write(events, **kwargs):
-        calls.append((events, kwargs))
-        return _Write(_outcome().APPLIED, len(events), _Conn())
+        write = _Write(_outcome().APPLIED, len(events), _Conn(tier_rowcount))
+        calls.append((events, kwargs, write))
+        return write
 
     monkeypatch.setattr(log_mod, "EventLog", _Log)
     monkeypatch.setattr(rw, "write_records", _write)
@@ -679,6 +720,129 @@ def test_an_unproven_position_mid_segment_is_named_as_such(monkeypatch, tmp_path
     emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
     with pytest.raises(copy_mod.CopyRefused, match="could not prove a position"):
         emit("s1", [{"a": 1}, {"b": 2}])
+
+
+# ── the tier: the record's own placement declaration (#10017 R2 / #10070) ──
+
+def _session_batch(session_id: str, turns: int) -> list[dict]:
+    """The shape `copy_phase` really emits: one `SessionRecorded`, then turns."""
+    return [{"event_id": "e0", "type": "SessionRecorded", "id": session_id}] + [
+        {"event_id": f"e{i + 1}", "type": "PointAdded",
+         "id": f"{session_id}_t{i}",
+         "point": {"id": f"{session_id}_t{i}"}, "contains_session": session_id}
+        for i in range(turns)
+    ]
+
+
+def test_a_copied_turn_row_is_stamped_record_only_before_the_commit(
+        monkeypatch, tmp_path) -> None:
+    """The P1 this change answers (PR #10064 review at `9b5e9522`).
+
+    `_RECORD_ONLY_KEYS` strips `cache_tier` from a `PointAdded` payload BEFORE the
+    insert (`record_projection.py:1429`), so a copy that only calls
+    `write_records` files every legacy turn at the schema's DEFAULT `'graph'` —
+    and `cache_projection.read_record_view` reads exactly `cache_tier = 'graph'`,
+    so `record-restore` re-creates the whole population the delete phase removes,
+    while the journal rebuild correctly skips it. Two rebuild routes, two
+    different graphs: the divergence R2/step 1 was ordered first to prevent.
+
+    ⛔ DELETE THE STAMP and this is the test that reddens (measured). It asserts
+    the statement itself, the exact row keys it names, the tenant pair in its
+    predicate, and that it runs on the seam's connection BEFORE the commit — the
+    last of which is what makes it the write's own transaction rather than a
+    second one that `close()` would roll back.
+    """
+    calls, _built = _patch_journal(monkeypatch, [7, 8, 9])
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    assert emit("s1", _session_batch("s1", 2)) == 7
+
+    conn = calls[0][2].connection
+    assert conn.executed, "no tier statement was issued on the seam's connection"
+    sql, params = conn.executed[0]
+    assert "UPDATE public.point" in sql and "cache_tier = 'record_only'" in sql
+    # The tenant pair the rows were written under, and ONLY the turn keys — the
+    # session row lives in `public.session` and carries no tier.
+    assert params == ["org", "graph", ["s1_t0", "s1_t1"]], params
+    assert conn.sequence == ["tier", "commit"], conn.sequence
+    assert emit.record_only_turns == 2
+
+
+def test_a_tier_that_cannot_reach_every_turn_row_refuses_the_run(
+        monkeypatch, tmp_path) -> None:
+    """A WRONG TENANT is what this refusal exists for, and it is not an error the
+    database raises: `public.point`'s policies filter on `app.current_org_id`, so
+    an UPDATE under another tenant matches ZERO rows and SUCCEEDS. A copy that
+    shrugged at the rowcount would file the whole legacy population at the
+    default tier, print the number it "copied", and exit 0 — the silent-success
+    shape this phase exists to close, one level down from the P0 it already
+    closed.
+
+    Driven through `main`, because the artifact and the exit code are the
+    contract: 2 = REFUSED, nothing committed, and the manifest says why.
+    """
+    calls, _built = _patch_journal(monkeypatch, [7, 8], tier_rowcount=0)
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(journal), "--out", str(out)])
+    assert excinfo.value.code == 2
+    conn = calls[0][2].connection
+    assert conn.commits == 0, "a refused tier was committed anyway"
+    assert conn.closed is True, "the refused transaction's handle leaked"
+    report = json.loads(out.read_text())
+    # The partial artifact still says what LANDED — and what did not.
+    assert report["record_only_turns"] == 0
+    assert "reached 0 of 1 turn row" in report["refused"]
+
+
+def test_a_session_with_no_turns_issues_no_tier_statement(
+        monkeypatch, tmp_path) -> None:
+    """A session-only write must not run the UPDATE.
+
+    `rowcount == 0` is ALSO what an empty key list produces, so the count check
+    cannot be what distinguishes them: without the empty-keys branch, every
+    turn-less session would either run a pointless statement or — worse, if the
+    comparison were written the other way round — refuse a run that was correct.
+    The session's provenance is still filed; only the tier statement is skipped.
+    """
+    calls, _built = _patch_journal(monkeypatch, [7])
+    emit = copy_mod._journal_emit(_journal(tmp_path), "dsn", "org", "graph")
+    assert emit("s1", _session_batch("s1", 0)) == 7
+    conn = calls[0][2].connection
+    assert conn.executed == [], conn.executed
+    assert conn.commits == 1 and emit.record_only_turns == 0
+
+
+def test_the_artifact_states_the_tier_the_run_committed(monkeypatch, tmp_path) -> None:
+    """The count an operator reads before the DELETE, and `null` when unmeasured.
+
+    A dry run opens no record connection, so it stated no tier: reporting `0`
+    there would read as "measured: none", the same lie `positions_measured`
+    exists to avoid.
+    """
+    _patch_journal(monkeypatch, [7, 8])
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    out = tmp_path / "summary.json"
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                          "--journal", str(journal), "--out", str(out)]) == 0
+    report = json.loads(out.read_text())
+    assert report["record_only_turns"] == report["turns"] == 1
+
+    dry = tmp_path / "dry.json"
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                          "--dry-run", "--out", str(dry)]) == 0
+    assert json.loads(dry.read_text())["record_only_turns"] is None
 
 
 # ── the DSN the copy was named, not merely "a writer" ─────────────────────
