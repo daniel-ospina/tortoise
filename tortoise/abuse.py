@@ -168,6 +168,12 @@ EPISODE_GAP_S = 3 * 3600
 #: not a count.
 _ALERT_SCAN = 500
 
+#: How many ACKNOWLEDGEMENT rows are read per org (#10156). Deliberately larger
+#: than a feed page and small enough to be a single bounded read: an ack that
+#: falls outside this window reappears as a CURRENT row, so the bound must sit
+#: far above any plausible number of dismissals (one per episode, not per row).
+_ACK_SCAN = 2000
+
 #: The event type an ACKNOWLEDGEMENT is persisted as (#10156). See
 #: ``record_alert_ack`` on both stores for why an ``abuse_events`` row rather
 #: than a new table: the alert history already lives there, ``abuse_cleanup``
@@ -802,7 +808,8 @@ class MemoryAbuseStore:
                     if r["org_id"] == org_id
                     and r["event_type"] == EVENT_AUTH_IP and r["country"]}
 
-    def recent_alerts(self, org_id: str, limit: int = 20) -> list[dict]:
+    def recent_alerts(self, org_id: str, limit: int = 20,
+                      include_identity: bool = False) -> list[dict]:
         with self._lock:
             alerts_only = [r for r in self.rows
                            if r["org_id"] == org_id
@@ -811,23 +818,36 @@ class MemoryAbuseStore:
             # slice cuts — a count taken after it is always exactly
             # ``_ALERT_SCAN`` and could never say "there may be more".
             scanned = len(alerts_only)
+            # ONE EXTRA row, so "the scan returned exactly the budget" is
+            # distinguishable from "there is more": `>` then means what it says
+            # on both stores (review finding — the Supabase store used `>=` and
+            # would call a complete 500-row set truncated).
             rows = sorted(alerts_only, key=lambda r: r["created_at"],
-                          reverse=True)[:_ALERT_SCAN]
+                          reverse=True)[:_ALERT_SCAN + 1]
             acks = _acks_from_rows(self.rows, org_id)
-        return _alert_feed(rows, acks=acks, limit=limit,
-                           scan_saturated=scanned > _ALERT_SCAN)
+        return _alert_feed(rows[:_ALERT_SCAN], acks=acks, limit=limit,
+                           scan_saturated=scanned > _ALERT_SCAN,
+                           include_identity=include_identity)
 
-    def alert_acks(self, org_id: str) -> set[str]:
+    def alert_acks(self, org_id: str) -> list[dict]:
         with self._lock:
             return _acks_from_rows(self.rows, org_id)
 
     def record_alert_ack(self, org_id: str, episode: str,
+                         ack_of: dict | None = None,
                          by: str | None = None,
                          now: datetime | None = None) -> None:
         self.record_event(org_id, EVENT_ALERT_ACK,
-                          details={"episode": episode,
-                                   **(({"by": by}) if by else {})},
+                          details=_ack_details(
+                              episode, ack_of or self._resolve_episode(org_id, episode),
+                              by=by),
                           created_at=now)
+
+    def _resolve_episode(self, org_id: str, episode: str) -> dict | None:
+        """The episode as this store currently derives it, or None."""
+        return next((a for a in self.recent_alerts(
+            org_id, limit=_ALERT_SCAN, include_identity=True)
+            if a.get("episode") == episode), None)
 
     def _durable(self, org_id: str, field: str, value) -> None:
         """Field-scoped write-through to the registry Org node when a
@@ -1017,7 +1037,8 @@ class SupabaseAbuseStore:
         )
         return {r["country"] for r in rows if r.get("country")}
 
-    def recent_alerts(self, org_id: str, limit: int = 20) -> list[dict]:
+    def recent_alerts(self, org_id: str, limit: int = 20,
+                      include_identity: bool = False) -> list[dict]:
         rows = self._cp.query(
             "abuse_events",
             select=["event_type", "created_at", "country", "key_id",
@@ -1040,7 +1061,7 @@ class SupabaseAbuseStore:
             filters=[("org_id", "eq", org_id),
                      ("event_type", "neq", EVENT_POINT_CREATE),
                      ("event_type", "neq", EVENT_KEY_CREATE)],
-            order="created_at.desc", limit=_ALERT_SCAN,
+            order="created_at.desc", limit=_ALERT_SCAN + 1,
         )
         # #10156 review finding: saturation must be measured on the ROW SCAN,
         # i.e. BEFORE the alert-type filter. Computing it after the filter (as
@@ -1051,12 +1072,15 @@ class SupabaseAbuseStore:
         # the scan that produced these rows hit its budget?"), each with the
         # budget its own read actually has.
         scanned = len(rows)
+        saturated = scanned > _ALERT_SCAN
+        rows = rows[:_ALERT_SCAN]
         rows = [r for r in rows if r.get("event_type") in ALERT_TYPES]
         return _alert_feed(rows, acks=self.alert_acks(org_id), limit=limit,
-                           scan_saturated=scanned >= _ALERT_SCAN)
+                           scan_saturated=saturated,
+                           include_identity=include_identity)
 
-    def alert_acks(self, org_id: str) -> set[str]:
-        """The episode keys this org has ACKNOWLEDGED (#10156).
+    def alert_acks(self, org_id: str) -> list[dict]:
+        """The acknowledgements this org has recorded (#10156).
 
         Its own read, deliberately NOT a fold over ``recent_alerts``' scan: the
         scan is a 500-row newest-first WINDOW, so an ack written after 500
@@ -1076,19 +1100,35 @@ class SupabaseAbuseStore:
                 "abuse_events", select=["org_id", "event_type", "details"],
                 filters=[("org_id", "eq", org_id),
                          ("event_type", "eq", EVENT_ALERT_ACK)],
+                # Bounded and newest-first (review nit): the server already
+                # filtered to this one event_type, so this read must not depend
+                # on PostgREST's silent `max_rows` to stay finite. Newest first,
+                # because if the bound ever bites it must bite on the OLDEST
+                # acknowledgement — an ack that falls out of the read reappears
+                # as a current row, which is the failure this whole mechanism
+                # exists to prevent.
+                order="created_at.desc", limit=_ACK_SCAN,
             )
         except Exception:
             logger.debug("alert ack read failed (%s)", org_id)
-            return set()
+            return []
         return _acks_from_rows(rows, org_id)
 
     def record_alert_ack(self, org_id: str, episode: str,
+                         ack_of: dict | None = None,
                          by: str | None = None,
                          now: datetime | None = None) -> None:
         self.record_event(org_id, EVENT_ALERT_ACK,
-                          details={"episode": episode,
-                                   **(({"by": by}) if by else {})},
+                          details=_ack_details(
+                              episode, ack_of or self._resolve_episode(org_id, episode),
+                              by=by),
                           created_at=now)
+
+    def _resolve_episode(self, org_id: str, episode: str) -> dict | None:
+        """The episode as this store currently derives it, or None."""
+        return next((a for a in self.recent_alerts(
+            org_id, limit=_ALERT_SCAN, include_identity=True)
+            if a.get("episode") == episode), None)
 
 
 def _read_velocity_message(details: dict) -> str:
@@ -1225,16 +1265,24 @@ def _episode_identity(alert: dict) -> tuple:
 def _episode_key(alert: dict) -> str:
     """A STABLE, reason-bearing identifier for an episode (#10156).
 
-    Identity + the episode's FIRST timestamp. Stability is what makes an
-    acknowledgement durable: the key is recomputed on every read, so anything
-    derived from live state (the count, the last-seen time) would re-key an
-    acknowledged episode the moment another window fires and the ack would
-    silently evaporate. Identity + start cannot move while the episode is open.
+    Identity + the episode's FIRST timestamp. The key is recomputed on every
+    read, so anything derived from live state (the count, the last-seen time)
+    would re-key an acknowledged episode the moment another window fires.
+
+    ⚠️ ``first_at`` is NOT stable, and an earlier version of this docstring
+    wrongly said it was: it is the oldest row THE SCAN CAN SEE, so it moves
+    whenever the bounded newest-first window slides past the episode's start —
+    at the live org's volume (~440 ``flag`` rows/day) within about a day.
+    Matching acknowledgements by this key alone therefore lost them (P1, round-3
+    review). The key stays because it is a good human-readable identifier and a
+    good exact-match fast path; durability comes from ``_episode_acknowledged``,
+    which matches on identity plus WINDOW OVERLAP. Do not reintroduce a
+    key-only ack match.
 
     ⚠️ STATED TRADE-OFF, because it is the one path by which an acknowledgement
     can hide something: an acked bout that Grows inside its own gap chain (more
-    windows firing, no silence longer than ``EPISODE_GAP_S``) keeps the same key,
-    so it stays acknowledged and stays behind "Show older". That is the
+    windows firing, no silence longer than ``EPISODE_GAP_S``) overlaps the
+    acknowledged window, so it stays acknowledged and stays behind "Show older". That is the
     requested semantics — one episode, one decision — and the alternative
     (re-keying on count) would break the ack the first time another window
     fired. The upper bound on the risk is the gap chain itself (3h of unbroken
@@ -1264,16 +1312,118 @@ def _alert_subject(row: dict) -> tuple:
     return ()
 
 
-def _acks_from_rows(rows, org_id: str) -> set[str]:
-    """Episode keys the org has acknowledged, from ``EVENT_ALERT_ACK`` rows."""
-    out: set[str] = set()
+def _ack_details(episode: str, ack_of: dict | None = None,
+                 by: str | None = None) -> dict:
+    """The ``details`` written for an ``alert_ack`` row (#10156).
+
+    Carries the episode KEY and the WINDOW it covers. The window is what makes
+    the acknowledgement survive the episode being re-derived with a moved
+    ``first_at`` (see ``_episode_acknowledged``); without it the row is matched
+    only by a key that the 500-row scan is free to change.
+
+    The window is derived from ``ack_of`` — the episode as WE resolved it — never
+    taken as loose arguments from the caller. An earlier signature accepted
+    ``identity`` / ``first_at`` / ``at`` separately and a caller that omitted them
+    silently wrote a key-only ack, which is the failure this whole mechanism
+    exists to prevent (found by writing the P1 regression test: the store-level
+    call omitted them and the acknowledgement evaporated).
+    """
+    details: dict = {"episode": episode}
+    if isinstance(ack_of, dict):
+        ident = ack_of.get("_identity")
+        if isinstance(ident, (list, tuple)) and ident:
+            details["identity"] = [str(p) for p in ident]
+        for field in ("first_at", "at"):
+            value = ack_of.get(field)
+            if value:
+                details[field] = str(value)
+    if by:
+        details["by"] = by
+    return details
+
+
+def _flat_identity(etype, subject) -> tuple[str, ...]:
+    """``(type, subject...)`` in the flat, JSON-safe form acks store."""
+    return tuple([str(etype)] + [str(p) for p in (subject or ())])
+
+
+def _acks_from_rows(rows, org_id: str) -> list[dict]:
+    """The acknowledgements an org has recorded, from ``EVENT_ALERT_ACK`` rows.
+
+    Each entry is ``{"episode", "identity", "first", "at"}`` — a KEY plus the
+    WINDOW it was written for. The window is not decoration: it is what keeps an
+    acknowledgement alive when the episode is re-derived (see
+    ``_episode_acknowledged``).
+    """
+    out: list[dict] = []
     for row in rows or ():
         if row.get("org_id") != org_id or row.get("event_type") != EVENT_ALERT_ACK:
             continue
         details = row.get("details")
-        if isinstance(details, dict) and details.get("episode"):
-            out.add(str(details["episode"]))
+        if not isinstance(details, dict) or not details.get("episode"):
+            continue
+        ident = details.get("identity")
+        out.append({
+            "episode": str(details["episode"]),
+            "identity": (tuple(str(p) for p in ident)
+                         if isinstance(ident, (list, tuple)) and ident else None),
+            "first": _parse_ts(details.get("first_at")),
+            "at": _parse_ts(details.get("at")),
+        })
     return out
+
+
+def _episode_acknowledged(episode: dict, acks) -> bool:
+    """Is this episode covered by one of the org's acknowledgements (#10156)?
+
+    NOT ``episode["episode"] in acks``. That was the first implementation and it
+    had a silent failure the issue explicitly forbids: the episode key is
+    ``identity + first_at``, and ``first_at`` is the OLDEST ROW THE SCAN CAN SEE
+    — so it MOVES whenever the bounded 500-row window slides past the episode's
+    beginning. Reproduced before this fix: ack a 300-window bout, let 300 newer
+    alert rows arrive, and the same still-firing bout comes back with a new key,
+    ``acked: False`` — an acknowledged row reappearing as CURRENT with no way to
+    dismiss it again (the acks that would match it are keyed to a first_at that
+    no longer exists anywhere). At the live org's ~440 ``flag`` rows/day the
+    scan rolls over in about a day, so this was the common case, not the edge.
+
+    So an acknowledgement is matched on what actually identifies the episode —
+    its identity, plus an OVERLAP between the window that was acknowledged and
+    the window now visible:
+
+    * overlap ⇒ same bout, still acknowledged. A bout that only loses its oldest
+      rows keeps its acknowledgement, and so does one that grows at its newest
+      end (the direction the previous version already handled).
+    * no overlap ⇒ the acknowledged stretch has slid entirely out of view and
+      this is a genuinely later bout, so it is NOT acknowledged and renders as
+      current. That is the property the key was trying to express, and it holds
+      without depending on a moving anchor.
+    * a legacy ack row with no stored window (nothing has shipped that writes
+      one, but a hand-written row could exist) falls back to exact key equality,
+      which is the old behaviour rather than silently un-acknowledging it.
+    """
+    key = episode.get("episode")
+    # `_identity` is set by `group_alert_episodes` and is still present here (the
+    # `_`-field strip runs later, on the way out). Recomputing it from `_subject`
+    # would read `()` — that field is already popped — and the identity check
+    # would then never match, which is why this must read the stored form.
+    flat = episode.get("_identity")
+    if flat is None:
+        flat = list(_flat_identity(*_episode_identity(episode)))
+    for ack in acks or ():
+        if ack.get("episode") == key:
+            return True
+        ident = ack.get("identity")
+        if ident is None or tuple(ident) != tuple(flat):
+            continue
+        first, last = ack.get("first"), ack.get("at")
+        e_first = _parse_ts(episode.get("first_at"))
+        e_last = _parse_ts(episode.get("at"))
+        if None in (first, last, e_first, e_last):
+            continue
+        if first <= e_last and e_first <= last:
+            return True
+    return False
 
 
 def group_alert_episodes(alerts: list[dict],
@@ -1321,12 +1471,18 @@ def group_alert_episodes(alerts: list[dict],
         episode["episode"] = _episode_key(episode)
         # The identity is an INTERNAL grouping field; it must not reach the API
         # response (a client would see a private convention it cannot rely on).
+        # It is kept under `_identity` for the ONE caller that legitimately
+        # needs it — the acknowledgement route, which must record the window it
+        # is acknowledging without trusting the client to supply one — and
+        # `_alert_feed` strips every `_`-prefixed field by default.
+        episode["_identity"] = list(_flat_identity(*_episode_identity(episode)))
         episode.pop("_subject", None)
     return episodes
 
 
 def _alert_feed(rows, *, acks, limit: int,
-                scan_saturated: bool = False) -> list[dict]:
+                scan_saturated: bool = False,
+                include_identity: bool = False) -> list[dict]:
     """Rows (newest first) → the episode feed both stores return (#10156)."""
     alerts = []
     for row in rows:
@@ -1335,7 +1491,7 @@ def _alert_feed(rows, *, acks, limit: int,
         alerts.append(alert)
     episodes = group_alert_episodes(alerts)
     for episode in episodes:
-        episode["acked"] = episode["episode"] in acks
+        episode["acked"] = _episode_acknowledged(episode, acks)
     # The scan is newest-first, so only the OLDEST episode can have been cut by
     # it. Saying so is the difference between "×100" and "×100+": a count
     # measured on a truncated window is a floor, and rendering it as a count
@@ -1348,6 +1504,11 @@ def _alert_feed(rows, *, acks, limit: int,
     out = episodes[:limit]
     if scan_saturated and out and len(episodes) <= limit:
         out[-1]["truncated"] = True
+    for episode in out:
+        if not include_identity:
+            # Private grouping conventions must never reach a client.
+            for field in [k for k in episode if k.startswith("_")]:
+                episode.pop(field, None)
     return out
 
 
@@ -1648,18 +1809,37 @@ class ReadVelocityTracker:
     first-party traffic able to alert whenever it out-runs its own baseline — so
     setting them is part of rolling this out, not an optional tuning.
 
-    MEASURED FIRING RATE before/after (``tests/test_10156_alert_registers.py``
-    re-runs these; counts are firing windows over 60 simulated windows):
+    MEASURED FIRING RATE — firing WINDOWS, defaults (floor 100, factor 3,
+    samples 6), re-runnable from ``tests/test_10156_alert_registers.py``'s
+    helpers. "before" is the pre-#10156 detector, i.e. the floor alone:
 
-    ================  =======  ======  =======
-    traffic profile   before   after   note
-    ================  =======  ======  =======
-    20 reads/5min        0       0      normal traffic, silent either way
-    sustained 130/5min  60       1      the defect: every window an alert
-    sustained 500/5min  60       1      no longer punished for being steady
-    5 -> 400/5min        —       fires   the case the detector is FOR
-    cold start 0->100+   —       fires   first sighting has no baseline
-    ================  =======  ======  =======
+    ==================================  ======  =====  =====================
+    traffic profile                     before  after  note
+    ==================================  ======  =====  =====================
+    steady 130/5min × 20 windows            20      1  the defect itself
+    steady 500/5min × 20 windows            20      1  busy is not suspicious
+    steady 20/5min × 20 windows              0      0  normal traffic
+    bursty 20/500 alternating × 20          10      4  a real agent pattern
+    bursty 50/300 alternating × 20          10      2
+    geometric ×1.5/window ramp               6      6  still caught
+    geometric ×1.3/window ramp               2      0  ⚠️ LOST
+    linear +10…+40/window ramp             10-11     0  ⚠️ LOST
+    5 → 400 in one window                    1      1  the case it is FOR
+    cold start, 150 in the first window      1      1  no baseline ⇒ floor
+    ==================================  ======  =====  =====================
+
+    ⚠️ STATED LOSS, because a detector that quietly stops seeing something is
+    worse than a noisy one: a MONOTONE RAMP slower than ~1.5×/window no longer
+    breaches. It is not a small gap — every linear ramp measured (＋10 to ＋40
+    reads per window, ending at 540/5min) is now silent where the floor alerted
+    on 10 of 11 windows. The mechanism is the EWMA's lag: the baseline trails a
+    rising series by a few windows, so ``3 × baseline`` stays above a series that
+    climbs slowly. ``baseline_factor`` is the knob, and it is a REAL trade in both
+    directions — at factor 2 a linear ramp is still missed AND bursty 20/500
+    alternating goes from 4 firing windows back to 10, i.e. the pre-#10156 noise
+    returns. That is why the default stays 3: the profile it protects (a normal
+    agent's alternating quiet/busy turns) is the product's ordinary traffic, while
+    a clean monotone ramp from a cold start is rarer than the noise it would cost.
 
     The floor is unchanged, so nothing is reported that a cold start could not
     already report; what changes is that a scope which is ALWAYS busy is no

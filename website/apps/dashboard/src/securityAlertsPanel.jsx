@@ -24,6 +24,7 @@ import React from 'react'
 import {
   ACKED_CHIP,
   ALL_RECENT_ACKED,
+  isEmptyFeed,
   ACK_BUTTON,
   ACK_PENDING,
   ACTIVITY_HEADING,
@@ -109,21 +110,36 @@ function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError,
  */
 function Register({ heading, lead, className, group, now, onAcknowledge,
                    ackPending, ackError, canAcknowledge }) {
-  // The hook is called UNCONDITIONALLY, before the empty-group bail-out: a
-  // `useState` after an early `return null` changes the hook count between
-  // renders the moment an empty register receives its first row, which React
-  // rejects at runtime ("Rendered more hooks than during the previous render").
+  // The hook is called UNCONDITIONALLY, before the empty-group bail-out: React's
+  // contract is that a component calls the same hooks in the same order on every
+  // render, and a `useState` after an early `return null` breaks that the moment
+  // an empty register receives its first row.
+  //
+  // Honest note (review finding): no assertion in this package can SEE that
+  // violation. The DOM test at `securityAlertsPanel.dom.test.jsx` renders the
+  // behaviour (an empty register that gains its first row renders it), but I
+  // moved the hook below the bail-out and the suite stayed green — React 19 as
+  // installed here did not raise for this 0→1 transition in this harness. So the
+  // ordering is a rule held by this comment and by the diff, not a pinned
+  // property; do not read the passing test as proof of it.
   const [showOlder, setShowOlder] = React.useState(false)
   if (!group || group.total === 0) return null
   const olderHidden = group.older.length > 0 && !showOlder
   return (
     <section className={`overview ${className}`} aria-label={heading}>
       <h2>{heading}</h2>
-      <p className="dim small">{lead}</p>
-      {/* Review finding: with every current row acknowledged, the lead sentence
-          ("Something happened…") rendered above an EMPTY list. State what is
-          actually true of the collapsed group instead of leaving a claim over
-          nothing. */}
+      {/* The lead is a claim about what is BELOW it ("Something happened…",
+          "these are measurements"), so it renders only when there is a row for
+          it to be about. The case that forced this: every recent row
+          acknowledged — the list is empty, and the previous version printed the
+          incident imperative over nothing. The fix must REPLACE that sentence
+          with the collapsed-state line, not append after it (review finding).
+          An aged, un-acknowledged row still gets the lead: it is behind "Show
+          older", but it is still something to review. */}
+      {group.current.length > 0
+        || (group.older.length > 0 && group.recentHidden === 0) ? (
+          <p className="dim small">{lead}</p>
+        ) : null}
       {group.current.length === 0 && group.recentHidden > 0 ? (
         <p className="dim small">{ALL_RECENT_ACKED}</p>
       ) : null}
@@ -176,7 +192,10 @@ export function SecurityAlertsPanel({
   canAcknowledge = false,
 }) {
   const grouped = groupAlerts(alerts, now, OLD_AFTER_DAYS)
-  if (!grouped.alerts.total && !grouped.activity.total) return null
+  // The shared predicate, not a second copy of it (review nit): two spellings of
+  // "is this feed empty" drift apart, and the one that matters is the one the
+  // tests exercise.
+  if (isEmptyFeed(grouped)) return null
   return (
     <>
       <Register

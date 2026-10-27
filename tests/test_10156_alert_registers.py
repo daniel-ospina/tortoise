@@ -260,7 +260,7 @@ class TestEpisodeGrouping:
         False. It must be measured on the row scan instead."""
         base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
         rows = []
-        for i in range(abuse._ALERT_SCAN):
+        for i in range(abuse._ALERT_SCAN + 1):
             is_alert = i % 3 == 0
             rows.append({
                 "id": i + 1, "org_id": ORG,
@@ -273,6 +273,46 @@ class TestEpisodeGrouping:
         assert alerts, "the fixture must produce at least one episode"
         assert alerts[-1]["truncated"] is True, (
             "the row scan was cut but the store reported an exact count")
+
+    def test_exactly_a_full_scan_is_NOT_reported_as_truncated(self):
+        """The mirror of the test above, and the reason both stores now request
+        ONE EXTRA row: a scan that returns exactly its budget may have seen
+        EVERYTHING, so calling it cut is a false `×N+` (review finding — the two
+        stores answered with `>` and `>=` and disagreed)."""
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = [{
+            "id": i + 1, "org_id": ORG, "event_type": EVENT_READ_VELOCITY,
+            "details": {"scope": "key", "id": KEY},
+            "created_at": (base + timedelta(minutes=5 * i)).isoformat(),
+        } for i in range(abuse._ALERT_SCAN)]
+        alerts = SupabaseAbuseStore(
+            FakeControlPlane(tables={"abuse_events": rows})).recent_alerts(ORG)
+        assert alerts[-1].get("truncated") is not True
+        assert alerts[-1]["count"] == abuse._ALERT_SCAN
+
+    def test_a_busy_org_s_NON_ALERT_volume_cannot_hide_an_alert(self):
+        """#10156: the scan used to read the newest 100 rows of EVERY type and
+        filter client-side, so a busy org (the live project holds 6 450
+        ``point_create`` rows) could have no alert row in its window at all and
+        the panel read "nothing ever happened". The non-alert types are excluded
+        SERVER-side now and the budget is 500.
+
+        Pins both halves: the two ``neq`` filters and the depth. Dropping either
+        filter, or lowering the budget back below the noise, reds here.
+        """
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = [{"id": i + 1, "org_id": ORG,
+                 "event_type": "point_create", "details": {},
+                 "created_at": (base + timedelta(seconds=10 * i)).isoformat()}
+                for i in range(600)]
+        rows.append({"id": 9999, "org_id": ORG, "event_type": EVENT_READ_VELOCITY,
+                     "details": {"scope": "key", "id": KEY},
+                     "created_at": base.isoformat()})
+        alerts = SupabaseAbuseStore(
+            FakeControlPlane(tables={"abuse_events": rows})).recent_alerts(ORG)
+        assert [a["type"] for a in alerts] == [EVENT_READ_VELOCITY], (
+            "600 newer non-alert rows hid the one real alert — the false "
+            "negative the ageing/collapse affordances exist to prevent")
 
     def test_grouping_is_pure_and_keeps_the_newest_row_s_fields(self):
         """The folded episode answers with the NEWEST row's label/message, so
@@ -319,7 +359,7 @@ class TestAcknowledgementPersistence:
         assert acks[0]["details"]["episode"] == episode
         assert acks[0]["details"]["by"] == "u1"
         # …and it is READ back as the acknowledgement, not re-derived in memory.
-        assert store.alert_acks(ORG) == {episode}
+        assert [a["episode"] for a in store.alert_acks(ORG)] == [episode]
         assert store.recent_alerts(ORG)[0]["acked"] is True
 
     def test_the_ack_row_never_renders_as_an_alert(self):
@@ -352,6 +392,74 @@ class TestAcknowledgementPersistence:
         assert newest["episode"] == episode, "the key moved — the ack is lost"
         assert newest["acked"] is True
 
+    def test_an_ack_survives_the_SCAN_SLIDING_PAST_the_episode_s_start(self):
+        """P1 (round-3 review). The episode key is ``identity + first_at``, and
+        ``first_at`` is the OLDEST ROW THE SCAN CAN SEE — so the key MOVES when
+        the bounded 500-row window slides past the episode's beginning. Matching
+        the acknowledgement by key alone therefore lost it: the row came back
+        un-acknowledged, still CURRENT (the bout kept firing), and — when the
+        ack route also refused truncated episodes — undismissable forever.
+
+        Reproduced exactly as the reviewer did it: ack a 300-window bout, then
+        let 300 newer alert rows of a DIFFERENT key arrive, so the scan drops the
+        bout's first 100 rows. This is the ordinary case at the live org's volume
+        (~440 ``flag`` rows/day ⇒ a 500-row scan rolls over in about a day)."""
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
+        for i in range(300):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=base + timedelta(minutes=5 * i))
+        first = store.recent_alerts(ORG)[0]
+        assert first["count"] == 300 and first.get("truncated") is not True
+        store.record_alert_ack(ORG, first["episode"], by="u1")
+        assert store.recent_alerts(ORG)[0]["acked"] is True
+
+        # 300 newer alerts for ANOTHER key push the bout's first 100 rows out of
+        # the scan window. The bout is unchanged and still firing.
+        for i in range(300):
+            store.record_event(ORG, EVENT_FLAG, rule="disjoint_rate",
+                               details={"rule": "disjoint_rate"},
+                               created_at=base + timedelta(minutes=5 * (i + 300)))
+        after = [a for a in store.recent_alerts(ORG, limit=abuse._ALERT_SCAN)
+                 if a["type"] == EVENT_READ_VELOCITY]
+        assert after, "the bout fell out of the feed entirely"
+        slid = after[0]
+        assert slid["episode"] != first["episode"], (
+            "fixture error: the key was expected to MOVE here — that is the "
+            "condition this test exists for")
+        assert slid["count"] == 200, slid
+        assert slid["truncated"] is True
+        assert slid["acked"] is True, (
+            "the acknowledgement evaporated when the scan slid past the "
+            "episode's start — the row is current again and undismissable")
+
+    def test_a_LATER_bout_of_the_same_identity_is_not_acknowledged(self):
+        """The other half of overlap matching: the acknowledgement must not leak
+        forward forever. Once the acknowledged stretch has slid entirely out of
+        view and a genuinely later bout fires (a silence longer than
+        ``EPISODE_GAP_S``), the new episode is un-acknowledged and current."""
+        store = MemoryAbuseStore()
+        for ts in REAL_READ_VELOCITY_TS:
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=datetime.fromisoformat(ts))
+        first = store.recent_alerts(ORG)[0]
+        store.record_alert_ack(ORG, first["episode"], by="u1")
+        assert store.recent_alerts(ORG)[0]["acked"] is True
+        # A new bout, days later, on the same key: no window overlap.
+        for ts in ("2026-10-02T09:00:00+00:00", "2026-10-02T09:05:00+00:00"):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=datetime.fromisoformat(ts))
+        newest = store.recent_alerts(ORG)[0]
+        assert newest["episode"] != first["episode"]
+        assert newest["acked"] is False, (
+            "an acknowledgement from last week must not silence a new bout")
+        # …and the ORIGINAL episode keeps its own acknowledgement.
+        older = [a for a in store.recent_alerts(ORG) if a["episode"] == first["episode"]]
+        assert older and older[0]["acked"] is True
+
     def test_an_unreadable_ack_register_reads_as_unacknowledged(self):
         """Fail-soft in the honest direction: fail to read is ABSENT, never
         PRESENT (a phantom acknowledgement would hide a live alert) — and it
@@ -371,7 +479,7 @@ class TestAcknowledgementPersistence:
                          "details": {}}]
 
         store = SupabaseAbuseStore(_Broken())
-        assert store.alert_acks(ORG) == set()
+        assert store.alert_acks(ORG) == []
         feed = store.recent_alerts(ORG)
         assert [a["type"] for a in feed] == [EVENT_SUSPEND], (
             "a failed ack read must not remove the alert feed — on a suspended "
@@ -495,8 +603,54 @@ def _drive(tracker, key_id, org_id, per_window, windows, start=1_000_000.0):
     return fires
 
 
+def _firing_windows(series, **kw):
+    """How many WINDOWS breach, for a list of reads-per-window. The tracker's
+    dedup is one notify per window, so this is the alert count."""
+    params = dict(threshold=100, window_s=300, baseline_factor=3,
+                  baseline_samples=6)
+    params.update(kw)
+    tracker = ReadVelocityTracker(**params)
+    fired = 0
+    for window, count in enumerate(series):
+        for i in range(count):
+            if tracker.record_read("k", "o", now=1e6 + window * 300 + i * 1e-3):
+                fired += 1
+    return fired
+
+
 class TestCalibration:
-    """A key at its own normal rate must not alert (#10156 step 4)."""
+    """A key at its own normal rate must not alert (#10156 step 4).
+
+    ⚠️ The measured trade is pinned HERE, both halves, because a test that only
+    asserts the win would let the loss grow silently (finding H: the PR body
+    previously claimed a sensitivity property that did not reproduce — a 2x/window
+    ramp DOES fire). The numbers below are the table in
+    ``ReadVelocityTracker``'s docstring; change one and this reds on purpose.
+    """
+
+    def test_the_measured_trade_is_pinned_on_both_sides(self):
+        steady_busy = [130] * 20
+        bursty = [20, 500] * 10
+        geometric = [min(2000, int(5 * 1.5 ** i)) for i in range(14)]
+        linear = [100 + 40 * i for i in range(11)]
+        # …and the pre-#10156 detector, for the "before" column.
+        floor_only = lambda series: sum(1 for c in series if c > 100)  # noqa: E731
+
+        assert floor_only(steady_busy) == 20
+        assert _firing_windows(steady_busy) == 1, (
+            "a scope that is simply busy must not be re-reported every window")
+        assert (floor_only(bursty), _firing_windows(bursty)) == (10, 4), (
+            "bursty traffic is the product's ordinary pattern: it must be "
+            "quieter than before, and it must NOT be silenced (that is what "
+            "baseline_factor=2 would do — 10 firing windows, the old noise)")
+        assert (floor_only(geometric), _firing_windows(geometric)) == (6, 6), (
+            "a fast geometric ramp must still fire as often as it did before")
+        assert (floor_only(linear), _firing_windows(linear)) == (10, 0), (
+            "STATED LOSS: a monotone linear ramp is now invisible. If a future "
+            "change makes this fire, the docstring table and the PR's stated "
+            "trade are stale — update them with the new numbers, do not just "
+            "flip this assertion")
+
 
     def test_a_key_at_its_own_normal_rate_does_not_keep_alerting(self):
         """THE DEFECT'S MECHANISM: 130 reads/5min is a normal retrieval-heavy

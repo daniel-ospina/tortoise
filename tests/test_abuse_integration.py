@@ -798,11 +798,15 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
-    def test_ack_refuses_a_TRUNCATED_episode(self, env):
-        """#10156 review finding: a truncated episode's key is anchored to the
-        oldest row the scan can SEE, so as the window slides the key moves and an
-        acknowledgement would silently evaporate — 200 now, current again on the
-        next poll. That must be a refusal, not a pretend-success."""
+    def test_a_TRUNCATED_episode_can_be_acknowledged_and_the_ack_survives(self, env):
+        """P1 (round-3 review), the shape that costs a customer most.
+
+        A truncated episode's KEY is anchored to the oldest row the scan can see,
+        so it moves as the window slides. An intermediate version refused those
+        with 409 — which made the oldest, longest-running bout PERMANENTLY
+        undismissable (a current security row with no way to clear it). The ack
+        now records the WINDOW it saw and is matched by OVERLAP, so it survives
+        the scan sliding past the episode's start."""
         self._owner(env)
         fake = env["fake"]
         base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
@@ -819,9 +823,38 @@ class TestAlertRegistersAndAcks:
                 r = tc.post("/v1/team/alerts/ack",
                             json={"org_id": TEAM,
                                   "episode": feed[-1]["episode"]})
-            assert r.status_code == 409, r.text
-            assert not [x for x in fake.tables["abuse_events"]
-                        if x["event_type"] == "alert_ack"]
+                assert r.status_code == 200, r.text
+                # The window we saw was recorded, from OUR feed — not from the
+                # request (the client only ever sends the key).
+                ack = [x for x in fake.tables["abuse_events"]
+                       if x["event_type"] == "alert_ack"][-1]
+                assert ack["details"]["identity"] == [
+                    "read_velocity", "key", "k-10156"], ack["details"]
+                assert ack["details"]["first_at"] and ack["details"]["at"]
+                assert tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][-1]["acked"] is True
+
+                # Now the scan slides past the bout's start: 500 newer alerts of
+                # a DIFFERENT key. Same bout, moved anchor, still acknowledged.
+                # 300, not `_ALERT_SCAN`: enough to push the bout's first 200
+                # rows out of the scan while leaving 200 of it visible. Seeding a
+                # full scan's worth of newer rows would empty the window and the
+                # bout would (correctly) not be in the feed at all.
+                fake.seed("abuse_events", [
+                    {"id": 10_000 + i, "org_id": TEAM, "event_type": "flag",
+                     "rule": "disjoint_rate", "details": {"rule": "disjoint_rate"},
+                     "created_at": (base + timedelta(
+                         minutes=5 * (i + abuse._ALERT_SCAN + 10))).isoformat()}
+                    for i in range(300)])
+                slid = [a for a in tc.get(
+                    f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+                    if a["type"] == "read_velocity"]
+                assert slid, "the bout fell out of the feed"
+                assert slid[0]["episode"] != feed[-1]["episode"], (
+                    "fixture error: the key was expected to MOVE here")
+                assert slid[0]["acked"] is True, (
+                    "the acknowledgement evaporated on the next poll — the row "
+                    "is current again and cannot be cleared")
         finally:
             env["app"].dependency_overrides.clear()
 
@@ -830,21 +863,68 @@ class TestAlertRegistersAndAcks:
         reappear on the next poll and read as a broken control."""
         self._owner(env)
         fake = env["fake"]
-        fake.seed("abuse_events", [])
+        self._seed_velocity(fake)
         import tortoise.supabase_control as _sc
         original = _sc.get_abuse_store
 
-        class _Failing:
-            def record_alert_ack(self, *a, **kw):
-                raise RuntimeError("HTTP 500 from the control plane")
+        # The stub must RESOLVE the episode, or the route 503s at the resolve
+        # step and `record_alert_ack` is never reached — which is what the first
+        # version of this test did while claiming to pin the write (review
+        # finding). It delegates the read to the real store so only the WRITE
+        # fails.
+        real = _sc.get_abuse_store()
 
-        _sc.get_abuse_store = lambda: _Failing()
+        class _FailingWrite:
+            def __init__(self):
+                self.writes = 0
+
+            def recent_alerts(self, *a, **kw):
+                return real.recent_alerts(*a, **kw)
+
+            def alert_acks(self, *a, **kw):
+                return real.alert_acks(*a, **kw)
+
+            def record_alert_ack(self, *a, **kw):
+                self.writes += 1
+                # NOT an outage-shaped error: this must exercise the route's own
+                # 503 branch, not `_raise_503_if_cp_outage`'s (which answers 503
+                # with its own message and would make the assertion vacuous).
+                raise ValueError("schema rejected the row")
+
+        stub = _FailingWrite()
+        _sc.get_abuse_store = lambda: stub
+        try:
+            with verdict_client(env["app"]) as tc:
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+                assert feed, "the fixture must expose an episode to acknowledge"
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM, "episode": feed[0]["episode"]})
+            assert stub.writes == 1, "the write was never attempted"
+            assert r.status_code == 503, r.status_code
+            assert "could not be stored" in r.text
+            assert not [x for x in fake.tables["abuse_events"]
+                        if x["event_type"] == "alert_ack"]
+        finally:
+            _sc.get_abuse_store = original
+            env["app"].dependency_overrides.clear()
+
+    def test_a_failed_RESOLVE_is_a_503_not_a_silent_success(self, env):
+        self._owner(env)
+        env["fake"].seed("abuse_events", [])
+        import tortoise.supabase_control as _sc
+        original = _sc.get_abuse_store
+
+        class _Unreadable:
+            def recent_alerts(self, *a, **kw):
+                raise ValueError("schema rejected the read")
+
+        _sc.get_abuse_store = lambda: _Unreadable()
         try:
             with verdict_client(env["app"]) as tc:
                 r = tc.post("/v1/team/alerts/ack",
                             json={"org_id": TEAM, "episode": "x"})
-            assert r.status_code in (503, 500), r.status_code
-            assert r.status_code != 200
+            assert r.status_code == 503, r.status_code
+            assert "could not be resolved" in r.text
         finally:
             _sc.get_abuse_store = original
             env["app"].dependency_overrides.clear()

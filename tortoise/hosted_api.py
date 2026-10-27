@@ -11108,13 +11108,19 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
     * an arbitrary/stale ``episode`` string is refused instead of being written
       as a row that nothing will ever match (the previous version accepted any
       string from an owner and accumulated one row per attempt);
-    * a ``truncated`` episode — one whose oldest row fell outside the alert
-      scan — is refused with 409. Its key is anchored to the oldest row WE CAN
-      SEE, so as the window slides that anchor moves and the acknowledgement
-      would silently evaporate on the next poll: the write would return 200 and
-      the row would reappear as current. That is exactly the failure the
-      503-not-200 rule exists to prevent, so it must be a refusal, not a
-      pretend-success. The panel does not offer the control on those rows.
+    * the WINDOW written with the acknowledgement is the one from OUR feed, not
+      from the request: the client sends only the key it rendered, and a
+      client-supplied window would let a caller acknowledge an episode it was
+      never shown.
+
+    A ``truncated`` episode IS acknowledgeable. An intermediate version refused
+    it with 409 on the reasoning that its key is anchored to the oldest row we
+    can see, so it moves as the window slides — which was true of the KEY. It is
+    not true of the ACKNOWLEDGEMENT: ``_episode_acknowledged`` matches on
+    identity plus window OVERLAP, so a record of the window we can see survives
+    the scan sliding past the episode's start. Refusing would have made the
+    oldest, longest-running episode permanently undismissable — a live security
+    row with no way to clear it (review finding P1).
     """
     try:
         body = await request.json()
@@ -11136,7 +11142,8 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
         store = get_abuse_store()
         # A LARGE limit: the caller's `episode` may be any episode in the feed,
         # not just the newest 20 the dashboard renders.
-        current = store.recent_alerts(org_id, limit=_ALERT_ACK_SCAN)
+        current = store.recent_alerts(org_id, limit=_ALERT_ACK_SCAN,
+                                      include_identity=True)
     except Exception as exc:
         _raise_503_if_cp_outage(exc)
         raise HTTPException(
@@ -11147,13 +11154,15 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
         raise HTTPException(
             status_code=404,
             detail="no such alert episode on this Organization")
-    if match.get("truncated"):
-        raise HTTPException(
-            status_code=409,
-            detail=("this episode is older than the alert window we can "
-                    "identify, so it cannot be acknowledged"))
+    # The WINDOW is taken from OUR feed, never from the request: the client
+    # sends only the key it rendered, and a client-supplied window would let a
+    # caller acknowledge an episode it was never shown (review finding).
+    # `truncated` episodes ARE acknowledgeable — the window we can see is enough,
+    # because `_episode_acknowledged` matches by OVERLAP rather than by the key,
+    # so the acknowledgement survives the scan sliding past the episode's start.
     try:
-        store.record_alert_ack(org_id, episode, by=user.get("user_id"))
+        store.record_alert_ack(org_id, episode, ack_of=match,
+                               by=user.get("user_id"))
     except Exception as exc:
         _raise_503_if_cp_outage(exc)
         raise HTTPException(

@@ -37,6 +37,13 @@ import assert from 'node:assert/strict'
 import React from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
+// The stylesheet is IMPORTED HERE on purpose. `css: true` in vite.config.js only
+// injects CSS that this file's own module graph pulls in, so without this import
+// the "a stylesheet that hides a row reds this file" test was checking computed
+// styles in a document with NO index.css in it — vacuously green (review
+// finding: the reviewer added `li.alert-row{display:none}` and the file still
+// passed). With the import the guarantee the PR advertises is real.
+import './index.css'
 import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
 import {
   ACTIVITY_HEADING,
@@ -210,20 +217,30 @@ test('#10156: a TRUNCATED episode is not acknowledgeable, and says why', () => {
 })
 
 test('#10156: an ALL-acknowledged register does not print a lead over an empty list', () => {
-  // Self-review catch: the incident lead ("Something happened…") rendered above
-  // an empty <ul> when every current row was acknowledged.
-  const fresh = { ...velocity, at: at(0.02), acked: true }
-  const { container } = renderPanel({ alerts: [fresh] })
+  // The incident register's lead is "Something happened on this Organization.
+  // Review it…" — an imperative. Rendering it above an empty list, because every
+  // current row is acknowledged, was a real defect (review finding), and the
+  // first version of this test could not see it: it asserted only that the
+  // collapsed-state line was PRESENT, so a version that printed the lead AND the
+  // line passed. The lead's ABSENCE is the assertion.
+  const acked = { ...suspension, at: at(0.02), acked: true }
+  const { container } = renderPanel({ alerts: [acked] })
   assert.equal(rows(container).length, 0, 'nothing current is rendered')
+  assert.ok(!text(container).includes(ALERTS_LEAD),
+    'an imperative must not stand over an empty list')
   assert.ok(text(container).includes(ALL_RECENT_ACKED),
     'the collapsed state must be stated, not left as an empty list under a claim')
+  assert.ok(text(container).includes(ALERTS_HEADING),
+    'the register itself stays — losing the heading would hide that a suspension '
+    + 'exists at all')
 })
 
-test('#10156: a register that gains its FIRST row keeps its hook order', () => {
-  // Self-review catch: `Register` bailed out on an empty group BEFORE its
-  // `useState`, so the render that delivered the first row changed the hook
-  // count and React threw ("Rendered more hooks than during the previous
-  // render"). The hook is unconditional now; this pins it.
+test('#10156: a register that gains its FIRST row renders it', () => {
+  // Scope, stated honestly (review finding): this proves the BEHAVIOUR — a mounted
+  // register that receives its first row renders it rather than staying blank or
+  // throwing. It does NOT pin the hook ordering that makes that safe; moving the
+  // `useState` below the empty-group bail-out leaves this test green in this
+  // harness (see the note on `Register`).
   const fresh = { ...velocity, at: at(0.02) }
   const { rerender } = render(<SecurityAlertsPanel alerts={[]} now={NOW} />)
   rerender(<SecurityAlertsPanel alerts={[fresh]} now={NOW} />)

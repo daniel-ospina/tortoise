@@ -5453,7 +5453,24 @@ function claimIntentInFlight() {
         body: JSON.stringify({ org_id: tid, episode: alert.episode }),
       })
       if (!res.ok) {
-        setAckError({ episode: alert.episode, message: 'Could not save that acknowledgement — try again.' })
+        // A REFUSAL is not a transient failure, and telling the reader to "try
+        // again" on one is the same unactionable-remedy defect this change
+        // exists to remove (review nit): 404 means the episode is no longer in
+        // our feed, 409 is the truncation guard (now only reached by a caller
+        // that bypassed the panel), 403 means the role cannot acknowledge.
+        // Retryable wording only where retrying can actually work.
+        const refusal = {
+          403: 'Only an owner or admin can acknowledge an alert.',
+          404: 'That alert is no longer in the feed — reload to refresh.',
+          409: 'That alert is older than the window we can identify.',
+          422: 'That alert could not be identified — reload to refresh.',
+        }[res.status]
+        setAckError({
+          episode: alert.episode,
+          message: refusal
+            || 'Could not save that acknowledgement — try again.',
+        })
+        if (refusal) await loadAlerts(tid)
         return
       }
       await loadAlerts(tid)
