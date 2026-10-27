@@ -656,47 +656,46 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
     assert not violations, "\n".join(violations)
 
 
-def _enclosing_block(src: str, pos: int) -> str:
-    """The def body (or module-level statement run) that contains `pos`.
+def _block_end(masked: str, start: int, indent: int) -> int:
+    """Index where the block starting at `start` (indented `indent`) ends: the
+    first following line whose indentation is <= `indent`. Computed on the MASKED
+    source so a flush-left comment or docstring line cannot cut it short."""
+    for m in re.finditer(r"(?m)^([ ]*)\S", masked[start:]):
+        if m.start() == 0:
+            continue
+        if len(m.group(1)) <= indent:
+            return start + m.start()
+    return len(masked)
 
-    Resolved by INDENTATION, not by a fixed "newline + def" search: that form
-    mis-answers whenever module-level code follows a def (the block became that
-    unrelated def's header) and whenever the file opens with a def. The END bound
-    is computed on the MASKED source — same length, so the index transfers —
-    because a column-0 comment or docstring line inside a function is legal and
-    would otherwise truncate the block before the bulk DETACH it must contain
-    (#10170 review round 4).
+
+def _enclosing_block(src: str, pos: int) -> str:
+    """The block that CONTAINS `pos`: the innermost enclosing def, else the
+    enclosing indented suite (module-level try/if/with), else the statement run.
+
+    Resolved by INDENTATION and then VERIFIED BY CONTAINMENT — a preceding `def`
+    at a smaller indent is only the answer if `pos` actually falls inside its
+    span. Without that check a site in a module-level suite appearing after a
+    def was attributed to that unrelated def's body, which cannot contain it, and
+    the violation was silently skipped (#10170 review rounds 4-6).
     """
     masked = _mask_strings_and_comments(src)
     line_start = masked.rfind("\n", 0, pos) + 1
     indent = len(masked[line_start:]) - len(masked[line_start:].lstrip(" "))
     if indent == 0:
-        # module-level: this statement run, up to the next top-level def/class/
-        # decorator — so a following bulk DETACH is visible, and a later
-        # function's journal cannot launder it.
         nxt = re.search(r"\n(?=(?:async )?(?:def |class |@))", masked[pos:])
         return src[line_start:pos + nxt.start() if nxt else len(src)]
-    block_start, block_indent, found = 0, 0, False
-    for m in re.finditer(r"(?m)^([ ]*)(?:async )?def ", masked[:line_start]):
+    # innermost enclosing def, verified to contain the site
+    for m in reversed(list(re.finditer(r"(?m)^([ ]*)(?:async )?def ", masked[:line_start]))):
         ind = len(m.group(1))
-        if ind < indent:
-            block_start, block_indent, found = m.start(), ind, True
-    if not found:
-        # No enclosing `def`: a module-level try/if/with suite, or a class-body
-        # statement. Take the nearest OUTER indented line, so the slice still
-        # contains the site and the DETACH below it — falling through to (0, 0)
-        # returned the file's FIRST line, a block that cannot contain the site,
-        # so the violation was skipped (#10170 review round 5).
-        for m in re.finditer(r"(?m)^([ ]*)\S", masked[:line_start]):
-            ind = len(m.group(1))
-            if ind < indent:
-                block_start, block_indent = m.start(), ind
-    for m in re.finditer(r"(?m)^([ ]*)\S", masked[block_start:]):
-        if m.start() == 0:
-            continue
-        if len(m.group(1)) <= block_indent:
-            return src[block_start:block_start + m.start()]
-    return src[block_start:]
+        if ind < indent and m.start() <= pos < _block_end(masked, m.start(), ind):
+            return src[m.start():_block_end(masked, m.start(), ind)]
+    # no enclosing def: the nearest OUTER indented suite (module-level try/if/with,
+    # or a class body), again verified to contain the site.
+    for m in reversed(list(re.finditer(r"(?m)^([ ]*)\S", masked[:line_start]))):
+        ind = len(m.group(1))
+        if ind < indent and m.start() <= pos < _block_end(masked, m.start(), ind):
+            return src[m.start():_block_end(masked, m.start(), ind)]
+    return src[line_start:]
 
 
 def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
@@ -760,6 +759,15 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
         "    client = FalkorDB(host=\"h\")\n"
         "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
         "\n"
+        "def helper_not_enclosing():\n"
+        "    return 1\n"
+        "\n"
+        "if True:\n"
+        "    import os as _os\n"
+        "    from falkordb import FalkorDB as _FDB\n"
+        "    _c = _FDB(host=\"h\")\n"
+        "    _c.query(\"MATCH (n) DETACH DELETE n\")\n"
+        "\n"
         "def test_journaled_third():\n"
         "    import os\n"
         "    from falkordb import FalkorDB\n"
@@ -781,7 +789,10 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
         f"the from_uri VERDICT did not fire on the peer: {flagged}")
 
     bad = _raw_detach_violations(root=tmp_path)
-    assert len(bad) == 1, (
+    # TWO sites must be flagged in the PEER: the def body's and the module-level
+    # suite's (which sits after an unrelated def, so only a containment check finds
+    # it). The exempt file must still contribute none.
+    assert len(bad) == 2, (
         f"expected exactly the peer's one unjournaled site, got {bad}")
     assert bad[0].startswith("test_zz_not_exempt.py:"), (
         f"the raw-client census did not skip {exempt_stem!r}: {bad}")
