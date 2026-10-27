@@ -7506,8 +7506,12 @@ def _check_org_limit(org: dict, resource: str, *,
     - Fail-closed is the secure default: when you can't verify, don't grant.
     - Customer harm is bounded: a DB outage that breaks count queries typically
       also breaks the actual write (same store), so we're failing fast.
-    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
-      level with org_id and resource, visible in production dashboards.
+    - Alerting mitigates ops risk: every data-fault QuotaCheckError — a
+      counting failure, a MISSING limit key, an UNREADABLE limit value — is
+      logged at ERROR level with org_id and resource, visible in production
+      dashboards. (`unknown quota resource` is an internal programming error —
+      a bad `resource` literal, never tenant data — and is deliberately not
+      logged here; #4051 review round 5.)
 
     #329: delegates to the shared fail-closed quota helper.
     #683: the limits dict is the authenticated org dict (resolved once by
@@ -7540,10 +7544,10 @@ def _check_org_limit(org: dict, resource: str, *,
         )
     except QuotaCheckError as e:
         # `quota` already logged the refusal at ERROR level — `_count_resource`
-        # for a counting failure (#686), the limit validation for an unreadable
-        # limit (#4051, on BOTH the generic path and the `documents` derived
-        # branch); avoid double-logging — this site only records the HTTP
-        # context.
+        # for a counting failure (#686), and the limit validation for an
+        # UNREADABLE limit (#4051, on BOTH the generic path and the `documents`
+        # derived branch) or a MISSING one (#4051 review round 5); avoid
+        # double-logging — this site only records the HTTP context.
         _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             org_id, resource, str(e),

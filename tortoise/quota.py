@@ -1045,10 +1045,20 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         limits: resolved org limits dict (from resolve_org_limits or the
             authenticated caller). None → skip (stdio/operator, no org).
             A key that is PRESENT and None means UNLIMITED (skip); a MISSING
-            key is fail-closed (QuotaCheckError) for every resource — build
-            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010). A value
-            that cannot be READ as a number is fail-closed the same way and
-            names the field (#4051) — a limit nobody can read is never a pass.
+            key is fail-closed (QuotaCheckError) — build the dict from
+            _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010). ⚠️ The one resource that
+            does NOT fail closed on a missing key is `documents`: its cap is
+            DERIVED from `max_points` by the branch below, which reads it with
+            `limits.get` and so cannot tell an absent key from an explicit
+            None — both skip. That branch is reached only from
+            `resolve_org_limits`, which always emits the key (#4051).
+            A value that cannot be READ as a number is fail-closed, names the
+            field, and is logged at ERROR (#4051) — a limit nobody can read is
+            never a pass. A value that IS readable is COERCED with `int()` and
+            then ENFORCED — a numeric string is honoured and a float truncates
+            — so only an unreadable one is refused, and the coercion direction
+            is stated here because it is the half a future reader would
+            otherwise have to measure (#4051 review round 5).
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
@@ -1128,6 +1138,19 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         # DEFAULT_MAX_SESSIONS` branch is deleted, not relocated.
         if limit_key in limits:
             return
+        # ERROR level, for the reason the unreadable-limit refusal below states:
+        # `_check_org_limit`'s docstring promises a data-fault refusal is logged
+        # with org_id and resource, and this one raised SILENTLY, so that caller
+        # demoted the whole class to DEBUG and the fault was ops-invisible. It
+        # matters more since #4051 removed the commit lane's `max_sessions`
+        # proxy: this is now the commit lane's ONLY presence gate, and a limits
+        # dict built without the key refuses every write (a real path —
+        # docs/plans/2026-09-11-2977-object-retraction.md records a live
+        # "quota check failed: team limits missing max_points" 500 from a stub
+        # team).
+        _logger.error(
+            "quota limit missing (fail-closed): team=%s resource=%s field=%s",
+            org_id, resource, limit_key)
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     # #4051: the limit is read from the org's OWN source (the resolved
     # `<limit_key>` value) — and a value that cannot be READ as a number is

@@ -145,7 +145,7 @@ class TestEnforceTeamLimit:
         with pytest.raises(QuotaCheckError):
             enforce_org_limit({"org_id": "t", "max_points": 10}, "widgets")
 
-    def test_missing_limit_key_fails_closed(self):
+    def test_missing_limit_key_fails_closed(self, caplog):
         """#310 GAP-B: a MISSING limit key is fail-closed; present-None is not.
 
         THE HOLE THIS CLOSES (measured by the #9567 capstone): the suite had no
@@ -157,9 +157,22 @@ class TestEnforceTeamLimit:
 
         Nothing is counted: the branch fires before the count, so no sdk.
         """
+        import logging
         with pytest.raises(QuotaCheckError, match="missing max_points"):
             enforce_org_limit({"org_id": "team1"}, "points")
         enforce_org_limit({"org_id": "team1", "max_points": None}, "points")
+        # ALERTING (#4051 review round 5): this refusal is a DATA FAULT that
+        # refuses every write, and it raised silently — `_check_org_limit`
+        # documents that a refusal is logged with org_id and resource, and then
+        # demoted the whole class to DEBUG, so the fault was ops-invisible. The
+        # pin names the FIELD, not the shared prefix, so a mutant that logs a
+        # different key stays green only if it really logs this one. Mutation
+        # REDs it: drop the `_logger.error` at the missing-key raise site.
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any("quota limit missing (fail-closed)" in m
+                   and "resource=points" in m and "max_points" in m
+                   for m in errors), errors
 
     def test_unreadable_limit_fails_closed(self, caplog):
         """#4051: a limit that cannot be READ is refused, never "unlimited".
