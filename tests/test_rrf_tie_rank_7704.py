@@ -3,11 +3,13 @@
 ``rrf_fusion`` ranks **positionally** (``1/(k + rank + 1)``), so when a leg
 scores two documents identically, the *leg's own* tie order becomes a fusion
 **relevance** difference between documents whose evidence is identical. On the
-search legs that tie order is the leg's secondary sort on its own id field
-(#3019) — ``url`` for source/document, ``eventId`` for events, and for points
+search legs that tie order is the shared recency-then-id key the legs
+interpolate (#10121; the id half was #3019's whole rule) — recency first, then
+the leg's own id field: ``url`` for source/document, ``eventId`` for events, and
+for points
 ``id``: a ULID on the create paths (chronological) but ``pt_<sha256>`` on the
-extraction/commit paths (``commit_schema.point_content_id``), where the order is
-content-hash and the two id spaces sort as blocks.
+extraction/commit paths (``commit_schema.point_content_id``), where the id
+half's order is content-hash and the two id spaces sort as blocks.
 
 Measured on ``origin/main`` at ``248940bf1`` (this file's red run; the same
 quantity the issue body measured at ``38c3b6ea5``)::

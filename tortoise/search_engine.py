@@ -2441,6 +2441,26 @@ def run_vector_query(
             # one Python sort, over the one shape both signatures now produce,
             # so the two cannot drift apart.
             #
+            # ⛔ RESIDUAL (`#10121` review): this replaces the tie order **of
+            # the rows the engine chose**, not the CHOICE. `queryNodes` picks
+            # its `$limit` rows by distance with an arbitrary order WITHIN a
+            # distance tie, and the sort below can only reorder what it was
+            # handed — so on an INDEXED store whose tie group is larger than
+            # the caller's `limit`, a member of that group (in principle the
+            # NEWEST) can sit outside the window and no sort here can recover
+            # it. That is NOT the `#10121` defect: it needs an exact distance
+            # tie across more than `limit` rows on an indexed store, where
+            # `#10121` is the lexical scorer's constant score across the whole
+            # corpus. It is stated rather than over-fetched because a bigger k
+            # only shrinks the window (any tie group above it still
+            # truncates) and would change this leg's cost and its
+            # `min_similarity` semantics for a case no pin covers yet. A
+            # remedy belongs here as its own change — over-fetch or an ordered
+            # scan — with a docker-lane pin that ties MORE rows than the
+            # caller's `limit`; `tests/test_search_engine_gaps.py::
+            # TestRunVectorQuery`'s `#6214` case ties THREE rows at `limit=10`
+            # and cannot see it.
+            #
             # #5583: the engine's value is a DISTANCE (lower is better), NOT a
             # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
             # `similarityFunction: 'cosine'` index: a PERFECT match comes back
@@ -2960,14 +2980,23 @@ def rrf_fusion(
     #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
     #
     # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
-    # legs that is the leg's secondary sort on its own id field (#3019):
+    # legs that is the shared recency-then-id key the legs interpolate
+    # (``recency_tie_clause`` / ``recency_key_expr`` / ``recency_tie_key`` —
+    # #10121; the id half was #3019's whole rule): recency first, so a tie
+    # surfaces the latest revision, then the leg's own id field —
     # ``url`` for source/document, ``eventId`` for events, and for points the
     # node id — a ULID on the create paths (chronological) but
     # ``pt_<sha256>`` on the extraction/commit paths
-    # (``commit_schema.point_content_id``), so a tie's order is chronological
-    # for one population and content-hash for the other, and the two id spaces
-    # sort as blocks ('p' after the digits). Arbitrary-but-stable, never a
-    # relevance proxy. The single-leg path does not fuse (``sdk.py``'s
+    # (``commit_schema.point_content_id``), so the ID half's order is
+    # chronological for one population and content-hash for the other, and the
+    # two id spaces sort as blocks ('p' after the digits). That id half is
+    # arbitrary-but-stable by design — it is the total order that makes the key
+    # deterministic, never a relevance proxy; the RECENCY half is the one that
+    # carries meaning, and it is why a tie is no longer "whichever id sorts
+    # first". The FUSED score's own tie at the end of this function remains
+    # ``(-score, id)`` — fusion consumes leg POSITIONS, so it has no recency
+    # signal of its own (#10121 scopes itself to the legs). The single-leg path
+    # does not fuse (``sdk.py``'s
     # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
     # score there: the two paths disagree about identical evidence.
     #
