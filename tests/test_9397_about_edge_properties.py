@@ -2345,7 +2345,7 @@ def test_the_document_population_counts_match_the_census():
     # occurrences to carry the ordinal the table implies.
     ordinal_hits = re.findall(rf"\b{ordinals[named]} NAMED form writer\b", storage, re.I)
     assert len(ordinal_hits) == 2, (
-        f"§11.1 must say '{ordinals[named]} NAMED form writer' in both places it names "
+        f"the document must say '{ordinals[named]} NAMED form writer' in both places it names "
         f"that writer (RECORDED_WRITERS={named}); found {len(ordinal_hits)}"
     )
     # ⛔ The matcher is PROBED before it is used, because this loop was DEAD
