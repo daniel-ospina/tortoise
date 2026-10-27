@@ -1,0 +1,223 @@
+"""#10122 — a Point's ``name`` is STORED but not lexically indexed (advisory pin).
+
+THE DEFECT, measured on both lanes. The Point FULLTEXT index is created over
+``content`` + ``search_keys`` only (``tortoise/projection/__init__.py``::
+``_FULLTEXT_INDEX_LABEL_FIELDS``), yet the write path ACCEPTS and STORES
+``name`` on a Point: ``create_point("statement", "body", name="…")`` and
+``update_point(pid, name="…")`` both succeed and the node holds ``n.name``.
+That point is then invisible to the lexical leg — a ``run_fts_query`` for its
+own exact name returns nothing. ``Event``/``Subject``/``Object`` DO index
+``name``, so a Point is the one label where an ACCEPTED write mints a silently
+un-findable record: the #5482 class (a write that reported success while
+leaving the record unfindable by ``queryNodes``).
+
+THE RULING recorded on the issue: do NOT add ``name`` to the index. That is a
+RANKING change — it moves collection statistics and every Point's field length
+— and it is gated on the #8486 measurement, which is postponed. Option A
+instead, which is what landed: a WARN-NOT-BLOCK advisory on the Point write
+path (the #1934 precedent for a declaration gap — it warns, never refuses).
+So this file pins four things, and the reasons differ:
+
+* the ADVISORY fires where the identifier is stored but not findable, and the
+  write STILL LANDS (warn, never block);
+* NO FALSE POSITIVE on the common shape — a name also carried by ``content``
+  or by ``search_keys`` IS findable, so it must not warn;
+* the advisory is POINT-gated and post-write: ``update_entity`` reaches every
+  label (and ``name`` is indexed on Subject/Object/Event), and a missed write
+  must not cry wolf;
+* the GAP itself stays VISIBLE — the name-only point is absent from the
+  FTS leg, pinned with a POSITIVE CONTROL, because an absence assertion alone
+  also passes on a lane with no Point FTS index at all (the #5534
+  blank-instrument trap: a pin that cannot fail certifies nothing). When the
+  #8486-gated index change lands, this test reds on purpose and must be
+  flipped DELIBERATELY — that is the point of keeping it.
+
+Zero ranking effect is part of the contract: the advisory reads the caller's
+own payload, does no graph read and writes nothing, so the sum over the
+index's fields and collection statistics is unchanged.
+
+LANE NOTE. Module-level ``pytestmark = pytest.mark.embedded_only`` — the lane
+this defect was measured on. The file is therefore routed to the URI-unset
+carve-out job and registered in all three of its homes
+(``config/ci-surfaces.yml`` `carve_out:`, ``tests/_embedded.py::
+TEST_NO_REDIRECT_STEMS``, and the declaration pin in ``tests/test_markers.py``);
+a ``core``-only registration would leave the manifest green and run the file in
+no leg under a docker URI (the #8488 trap).
+"""
+from __future__ import annotations
+
+import logging
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tortoise.sdk import TortoiseSDK
+from tortoise.search_engine import run_fts_query
+
+pytestmark = pytest.mark.embedded_only
+
+#: The SDK module that owns the write doors — the advisory's logger.
+_SDK_LOGGER = "tortoise.sdk"
+#: The issue id every advisory record carries, used to isolate advisory records
+#: from the OTHER ``tortoise.sdk`` warnings a write can emit (the #3377 rename
+#: deferral, for one) so a count assertion cannot be satisfied by the wrong one.
+_MARK = "#10122"
+#: A title shaped like the measured case: an identifier that belongs in the
+#: indexed text, not only in ``name``.
+_TITLE = "capstone-9664 write probe 2026-10-26"
+
+
+@pytest.fixture
+def sdk(tmp_path):
+    s = TortoiseSDK(str(tmp_path / "10122.db"))
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def _advisories(caplog) -> list[str]:
+    """The #10122 advisory records emitted so far, as messages."""
+    return [r.getMessage() for r in caplog.records
+            if r.name == _SDK_LOGGER and _MARK in r.getMessage()]
+
+
+# ── the advisory: fires, and never blocks ──────────────────────────────────
+
+def test_create_point_with_unindexed_name_warns_and_still_lands(sdk, caplog):
+    """The measured write. It must WARN (the identifier is stored and not
+    findable) and it must still LAND — warn-not-block is #1934's recorded
+    decision, and refusing this write would break every existing caller."""
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        created = sdk.create_point("statement", "the body says nothing else",
+                                   name=_TITLE)
+
+    advisories = _advisories(caplog)
+    assert len(advisories) == 1, advisories
+    message = advisories[0]
+    assert "create_point" in message, message
+    # It names the two places the identifier CAN go, and says why.
+    assert "content" in message and "search_keys" in message, message
+    assert "name" in message, message
+
+    # WARN, NEVER BLOCK: the write landed and the node holds the name.
+    point = sdk.get_point(created["id"])
+    assert point.get("name") == _TITLE
+
+
+def test_update_point_with_unindexed_name_warns(sdk, caplog):
+    """The second door the issue measured (``update_point(pid, name=…)``)."""
+    pid = sdk.create_point("statement", "the body says nothing else")["id"]
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        sdk.update_point(pid, name=_TITLE)
+
+    advisories = _advisories(caplog)
+    assert len(advisories) == 1, advisories
+    assert "update_point" in advisories[0], advisories[0]
+    assert sdk.get_point(pid).get("name") == _TITLE
+
+
+def test_update_entity_point_branch_warns(sdk, caplog):
+    """The THIRD Point write seam. It writes with a live ``SET n += $p`` and
+    does NOT pass through the projection's shared Point writer, so it needs the
+    advisory at its own door — this pins that it has one."""
+    pid = sdk.create_point("statement", "the body says nothing else")["id"]
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        sdk.update_entity(pid, name=_TITLE)
+
+    advisories = _advisories(caplog)
+    assert len(advisories) == 1, advisories
+    assert "update_entity" in advisories[0], advisories[0]
+    assert sdk.get_point(pid).get("name") == _TITLE
+
+
+# ── no false positives on the shapes that ARE findable ─────────────────────
+
+def test_a_name_already_in_content_does_not_warn(sdk, caplog):
+    """THE COMMON SHAPE. The title reaches the index through ``content``, so it
+    is findable and there is nothing to advise — a warning here would be noise
+    that hides a genuine one."""
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        created = sdk.create_point(
+            "statement", f"the body does say {_TITLE} verbatim", name=_TITLE)
+
+    assert _advisories(caplog) == []
+    assert sdk.get_point(created["id"]).get("name") == _TITLE
+
+
+def test_a_name_already_in_search_keys_does_not_warn(sdk, caplog):
+    """The OTHER indexed field. ``search_keys`` is flattened to its stored
+    string form BEFORE the coverage check, so a list-valued caller sees the
+    same verdict as the graph does."""
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        created = sdk.create_point("statement", "the body says nothing else",
+                                   name=_TITLE,
+                                   search_keys=[_TITLE, "extra-alias"])
+
+    assert _advisories(caplog) == []
+    assert sdk.get_point(created["id"]).get("name") == _TITLE
+
+
+def test_update_entity_on_a_non_point_does_not_warn(sdk, caplog):
+    """``update_entity`` reaches EVERY label, and ``name`` IS indexed on
+    Subject/Object/Event (``_FULLTEXT_INDEX_LABEL_FIELDS``). A label-blind
+    advisory would warn on exactly the shape the index supports — so the check
+    is POINT-gated, and this is the pin for that gate."""
+    subject = sdk.create_subject("10122 subject")
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        sdk.update_entity(subject["id"], name="10122 subject renamed")
+
+    assert _advisories(caplog) == []
+
+
+def test_update_entity_miss_does_not_warn(sdk, caplog):
+    """A write that matched nothing stored no name — ``update_entity``'s own
+    rule for its rename warning ("must not cry wolf"), applied to this one."""
+    with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
+        sdk.update_entity("no-such-id-10122", name=_TITLE)
+
+    assert _advisories(caplog) == []
+
+
+# ── the defect itself, kept visible (with a positive control) ──────────────
+
+def test_the_name_only_point_is_invisible_to_the_fts_leg(sdk):
+    """THE GAP, unchanged by the advisory: ``name`` is stored, and a lexical
+    query for it does NOT find the point.
+
+    The POSITIVE CONTROL is load-bearing, not decoration. Asserting only the
+    absence would also pass on a lane where no Point FTS index exists at all
+    (#5534's blank instrument), certifying nothing — so the same title is
+    written into ``content`` on a sibling point and MUST be found.
+    """
+    name_only = sdk.create_point("statement", "the body says nothing else",
+                                 name=_TITLE)
+    in_content = sdk.create_point("statement",
+                                  f"the body carries {_TITLE} verbatim")
+
+    hits = [pid for pid, _score in run_fts_query(
+        sdk._get_proj().g, _TITLE, entity_type="point", limit=20)]
+
+    # POSITIVE CONTROL: the index works, so the absence below means something.
+    assert in_content["id"] in hits, (
+        "the Point FTS leg found nothing even for a title carried by "
+        "`content` — the index is absent/broken on this lane, so the "
+        "negative half of this test would be vacuous")
+    # THE DEFECT: the same title supplied only as `name` is not findable.
+    assert name_only["id"] not in hits, (
+        f"a Point named {_TITLE!r} is now findable by its OWN name — `name` "
+        f"has been "
+        "added to the Point fulltext index. That reverses the #10122 ruling "
+        "(option A: a warn-not-block advisory, zero ranking effect) and needs "
+        f"the #8486 measurement released first: flip this assertion "
+        f"DELIBERATELY, together with the index change, not to make this "
+        f"green. title={_TITLE!r}")

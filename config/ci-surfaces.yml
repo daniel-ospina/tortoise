@@ -4412,6 +4412,16 @@ surfaces:
   # — a `core`-only registration would leave the manifest green and the file
   # never executed.
   - test_bm25_lexical_8488.py
+  # #10122: a Point's `name` is STORED but not lexically indexed — the
+  # warn-not-block advisory at the three Point write doors, and the gap kept
+  # visible (name-only point absent from the FTS leg, with a positive control).
+  # `tortoise/sdk.py` matches no SOURCE_PATTERNS entry, so a diff to it takes the
+  # `core` fallback and would otherwise never run these pins. The file is ALSO
+  # in `carve_out:`: its module-level `pytestmark` is `embedded_only` (the lane
+  # the defect was measured on), so under a docker URI the D-2 hook SKIPS it — a
+  # `core`-only registration would leave the manifest green and the file never
+  # executed (the #8488 trap recorded two rows above).
+  - test_10122_point_name_not_indexed.py
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
@@ -6882,6 +6892,13 @@ carve_out:
 # Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
 # test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_bm25_lexical_8488.py
+# #10122: module-level `embedded_only` (the Point `name` advisory and the
+# FTS-gap evidence, measured on the embedded lane), so the stem is routed to the
+# URI-unset carve-out job exactly as #8488 above — a `core`-only registration
+# would make the manifest green and run NOTHING on a docker leg. Mirrored in
+# tests/_embedded.TEST_NO_REDIRECT_STEMS and declared in the test_markers.py pin
+# (the same three-way mirror the rows above document).
+- test_10122_point_name_not_indexed.py
 - test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
