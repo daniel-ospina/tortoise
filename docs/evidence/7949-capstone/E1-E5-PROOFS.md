@@ -61,9 +61,21 @@ failure the epic's closing rule exists to catch, and it was unpinned.
 One test, one behaviour. It re-runs the registered scorer (stdlib only, no DB, no
 network, no model, ~2.4 s) and compares §10's published cells against what that run
 produced: the two pooled arm rows (loss/absent/flattened, distortion, recall,
-precision, claims emitted) and the holdout decision-input row (n, both losses, Δloss).
-It pins **no prose** and not the run-1 block, whose receipts were never retained
-(`#9738`).
+precision, claims emitted) and the holdout decision-input row (n, both losses, Δloss,
+and the Δprecision/Δrecall legs the registered rule also reads). It pins **no prose**
+and not the run-1 block, whose receipts were never retained (`#9738`).
+
+⚠️ **The Δprecision/Δrecall legs were unpinned in the first draft of this pin**, and
+the gap is worth recording because it is this document's own failure mode: the pin
+compared the holdout row up to Δloss and stopped, so `Δprecision +0.8` could be
+retyped `+8.0` and stay **GREEN** — publishing a branch-1 FIRING the run does not
+have, in the one cell §10's prose immediately below reads (*"the holdout's (+0.8) is
+inside it"*, sc. the registered ±5 tolerance; `+8.0` is outside it). The registered
+rule consumes all three legs (`tests/eval/write_path/score_qualifiers.py:760-761`
+`evaluate_branches(hold["delta_loss_pp"], hold["delta_precision_pp"],
+hold["delta_recall_pp"], …)`), so an unpinned leg was an unpinned verdict. Found by
+the `#10108` review, measured both ways (`+8.0` and `Δrecall +9.0` now red); the cell
+is pinned by `_DELTA_CELL`.
 
 ---
 

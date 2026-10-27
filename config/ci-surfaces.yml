@@ -3844,8 +3844,14 @@ surfaces:
   # test_the_committed_score_artifact_regenerates_byte_identically`); the write-back
   # half had NO pin, so the architecture doc's decisive table could be retyped or
   # deleted while every gate stayed green and #7949/#7947 kept citing it. Stdlib
-  # only, no DB/network/model, ~2.4 s. `core` is the home because the diff that can
-  # break it is a `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` edit.
+  # only, no DB/network/model, ~2.4 s. `core` carries the SCORER-side diffs: measured,
+  # `select(["tests/eval/write_path/score_qualifiers.py"])` → surfaces
+  # `['core', 'eval']`, which selects this pin — so an instrument change with no
+  # write-back runs it. `core` is NOT what reaches the docs-only diff: measured,
+  # `select(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])` → surfaces `[]`, and
+  # only `tier1` runs. That is why the row below exists, and the `tier1` comment
+  # states the same thing — reading this sentence as "`core` covers the docs edit"
+  # would let the next lane delete the `tier1` row believing the pin still fires.
   - test_7949_e5_section10_writeback.py
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),

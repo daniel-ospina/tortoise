@@ -28,7 +28,10 @@ figures the registered falsifier produces when it is run now.
 **FAILS IF** the cells §10 publishes for the replicated run move: each arm's
 pooled loss / absent / flattened, distortion, recall, precision and claims emitted
 (measured: raw's `52.0%` to `53.0%` reds this), the holdout `(decision input)`
-row's subset label, n / both losses / Δloss, the `#### ⚠️ REPLICATED 2026-10-18` heading itself
+row's subset label, n / both losses / **Δloss and its Δprecision / Δrecall legs**
+(the `#10108` review measured the leg gap: `+0.8` retyped to `+8.0` stayed GREEN
+while publishing a branch-1 firing the run does not have), the
+`#### ⚠️ REPLICATED 2026-10-18` heading itself
 (deleted or renamed reds, named in the failure), a duplicated or deleted table row
 (exactly-one-match), or the scorer's own thresholds (an instrument change with no
 write-back).
@@ -86,6 +89,14 @@ def _loss_cell(cell: str, *, row: str) -> tuple[int, float]:
 #: A bare rate cell (`20.0%`, `52%`) — the unit the document prints on its own
 #: one-decimal grid.
 _RATE_CELL = re.compile(r"^(\d+(?:\.\d+)?)\s*%$")
+
+
+#: The holdout row's LAST cell: the decision rule's precision/recall legs
+#: (`Δprecision +0.8, Δrecall +3.0`). A separate unit from the loss cells, because
+#: `evaluate_branches` reads all three legs (`score_qualifiers.py:760-761`) — a pin
+#: that stops before this cell leaves the verdict's other two inputs free.
+_DELTA_CELL = re.compile(
+    r"^Δprecision\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Δrecall\s*([+-]?\d+(?:\.\d+)?)$")
 
 
 def _rate(cell: str, *, row: str) -> float:
@@ -269,3 +280,26 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
         "§10's holdout decision-input row no longer publishes the Δloss the "
         f"registered rule reads.\n  §10:    {got_holdout[4]}\n  scorer: "
         f"+{holdout['delta_loss_pp']:.1f} pp")
+
+    # …and its LAST cell, which was UNPINNED until the `#10108` review (P2). The pin
+    # stopped at `[4]` (Δloss), so `Δprecision +0.8` could be retyped `+8.0` and stay
+    # GREEN — publishing a branch-1 FIRING the run does not have, in the one cell
+    # §10's own prose reads (`EXTRACTOR-V4-ARCHITECTURE.md:1338-1340`: *"the holdout's
+    # (+0.8) is inside it"*, sc. the registered ±5 tolerance; `+8.0` is outside it).
+    # The registered rule consumes all three legs (`score_qualifiers.py:760-761`
+    # `evaluate_branches(hold["delta_loss_pp"], hold["delta_precision_pp"],
+    # hold["delta_recall_pp"], …)`), so an unpinned leg is an unpinned verdict.
+    m = _DELTA_CELL.match(got_holdout[5])
+    assert m, (
+        "§10's holdout decision-input 'other' cell is no longer "
+        f"`Δprecision <pp>, Δrecall <pp>`: {got_holdout[5]!r} — the row's other "
+        "two decision inputs can no longer be read, so this pin would be "
+        "comparing nothing")
+    for published, key, label in (
+            (m.group(1), "delta_precision_pp", "Δprecision"),
+            (m.group(2), "delta_recall_pp", "Δrecall")):
+        assert abs(float(published) - holdout[key]) <= 0.05, (
+            f"§10's holdout row publishes {label} {published}; the registered "
+            f"falsifier produced {holdout[key]:+.4g} — the decision input's "
+            "precision/recall legs move `evaluate_branches`, so the row's "
+            "verdict is no longer the one the run produced")
