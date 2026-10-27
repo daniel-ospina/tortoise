@@ -24,6 +24,7 @@ import React from 'react'
 import {
   ACKED_CHIP,
   ALL_RECENT_ACKED,
+  SCAN_SATURATED_EMPTY,
   isEmptyFeed,
   ACK_BUTTON,
   ACK_PENDING,
@@ -204,7 +205,20 @@ export function SecurityAlertsPanel({
   ackPending = null,
   ackError = null,
   canAcknowledge = false,
+  scanSaturated = false,
 }) {
+  // An EMPTY feed whose scan was cut is not "nothing ever happened": the window
+  // was full of rows that can never render, and alerts may sit just below it.
+  // There is no row to carry the caveat, so it is said once, plainly (#10156
+  // round-8 review finding — the silent-empty path).
+  if (scanSaturated && (!alerts || alerts.length === 0)) {
+    return (
+      <section className="overview" aria-label={ALERTS_HEADING}>
+        <h2>{ALERTS_HEADING}</h2>
+        <p className="dim small">{SCAN_SATURATED_EMPTY}</p>
+      </section>
+    )
+  }
   const grouped = groupAlerts(alerts, now, OLD_AFTER_DAYS)
   // The shared predicate, not a second copy of it (review nit): two spellings of
   // "is this feed empty" drift apart, and the one that matters is the one the

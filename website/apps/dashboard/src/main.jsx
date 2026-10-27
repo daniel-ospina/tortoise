@@ -3171,6 +3171,7 @@ function claimIntentInFlight() {
   // list comes from the session-authed /v1/team/alerts.
   const [suspended, setSuspended] = React.useState(null)
   const [alerts, setAlerts] = React.useState([])
+  const [alertsSaturated, setAlertsSaturated] = React.useState(false)
   // #10156: the pending episode + the per-episode error. ONE row is disabled at
   // a time via `ackPending`, but that is a UI convention, NOT a single-flight
   // lock: clicking two rows starts two writes, and the first to finish clears
@@ -5434,6 +5435,11 @@ function claimIntentInFlight() {
       if (res.ok) {
         const d = await res.json()
         setAlerts(d.alerts || [])
+        // #10156: the server says whether its scan was CUT. With no rows there is
+        // nothing to carry a per-row `truncated` marker, so an empty feed could
+        // read as "nothing ever happened" when the window was simply full of
+        // non-alert rows (round-8 review finding).
+        setAlertsSaturated(Boolean(d.scan_saturated))
       }
     } catch { /* best-effort — alert history never blocks the dashboard */ }
   }
@@ -11138,7 +11144,7 @@ function claimIntentInFlight() {
           </div>
         )}
 
-        {tab === 'overview' && alerts.length > 0 && (
+        {tab === 'overview' && (alerts.length > 0 || alertsSaturated) && (
           // #10156: TWO REGISTERS, never one list. The old block rendered every
           // entry under "Security alerts / Suspicious activity detected on this
           // Organization. Revoke any key you don't recognize." — including
@@ -11148,6 +11154,7 @@ function claimIntentInFlight() {
           // decisions and their tests live in `securityAlerts.js`.
           <SecurityAlertsPanel
             alerts={alerts}
+            scanSaturated={alertsSaturated}
             onAcknowledge={acknowledgeAlert}
             ackPending={ackPending}
             ackError={ackError}

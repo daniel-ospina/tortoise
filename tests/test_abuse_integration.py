@@ -922,6 +922,13 @@ class TestAlertRegistersAndAcks:
             def alert_acks(self, *a, **kw):
                 return real.alert_acks(*a, **kw)
 
+            def alert_scan_saturated(self, *a, **kw):
+                # Part of the store protocol the route reads. Without it the GET
+                # route's best-effort `except` swallowed the AttributeError and
+                # returned an EMPTY feed, which is how this test went red when the
+                # probe was added — the protocol is part of the stub's contract.
+                return real.alert_scan_saturated(*a, **kw)
+
             def record_alert_ack(self, *a, **kw):
                 self.writes += 1
                 # NOT an outage-shaped error: this must exercise the route's own

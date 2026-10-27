@@ -80,6 +80,13 @@ export const NOTHING_RECENT = 'Nothing in the last two weeks.'
 //: shown and read "everything is acknowledged" while #21 sat unacknowledged and
 //: unreturned (review finding). This wording is exactly as wide as the evidence.
 export const ALL_RECENT_ACKED = 'Everything shown here is acknowledged.'
+//: Shown INSTEAD of the panel when the server reports an empty feed whose scan
+//: was cut. There is no row to carry a `truncated` marker (that flag rides on a
+//: row), and "nothing here" would be a false claim about a window full of rows
+//: that can never render (#10156 round-8 review finding).
+export const SCAN_SATURATED_EMPTY = ("This Organization's newest activity is "
+  + 'entirely routine, and our alert window is full — logs are intact, but '
+  + 'older alerts may sit outside the window we read.')
 
 //: Types that are an incident BY DEFINITION, used as a fallback when a row
 //: arrives with no `register` field at all — i.e. from an API deploy that predates

@@ -52,6 +52,7 @@ import {
   ALERTS_LEAD,
   ACKED_CHIP,
   ALL_RECENT_ACKED,
+  SCAN_SATURATED_EMPTY,
 } from './securityAlerts.js'
 
 afterEach(cleanup)
@@ -262,6 +263,19 @@ test('#10156: "everything shown here is acknowledged" needs EVERY visible row ac
     'the lead IS warranted: there is a row left to review')
   fireEvent.click(screen.getByRole('button', { name: /show 2 older/i }))
   assert.equal(rows(container).length, 2)
+})
+
+test('#10156: an EMPTY feed whose scan was cut says so instead of rendering nothing', () => {
+  // The silent-empty path (review finding): `truncated` rides on a row, so a scan
+  // whose window was full of non-alert rows has nothing to carry the caveat and
+  // the panel showed NOTHING — indistinguishable from "nothing ever happened".
+  // The server reports `scan_saturated`; the panel must not stay silent.
+  const { container } = renderPanel({ alerts: [], scanSaturated: true })
+  assert.ok(text(container).includes(SCAN_SATURATED_EMPTY), text(container))
+  assert.ok(!text(container).includes(ALERTS_LEAD),
+    'it must not claim something happened either')
+  // …and the ordinary empty feed still renders nothing at all.
+  assert.equal(text(renderPanel({ alerts: [] }).container), '')
 })
 
 test('#10156: a register that gains its FIRST row renders it', () => {

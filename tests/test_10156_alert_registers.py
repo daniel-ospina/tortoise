@@ -343,6 +343,52 @@ class TestEpisodeGrouping:
             "the caller's limit was reported as SCAN truncation — the episode "
             "returned is complete and its count is exact")
 
+    def test_a_scan_FULL_of_non_alert_rows_is_reported_as_cut(self):
+        """P2 (round-8 review). `truncated` rides on a ROW, so a scan that its own
+        filters emptied has nothing to carry it: the newest `_ALERT_SCAN` rows can
+        all be non-alert (a burst of dismissals — the type THIS change writes — or
+        a day of `flag_clear`), the feed is legitimately empty, and the dashboard
+        showed NOTHING at all: not `×N+`, not "Show older", not even "nothing in
+        the last two weeks". That is a silent "nothing ever happened", and this PR
+        exists to delete exactly that class of claim.
+
+        The store now answers the question separately, and the route forwards it.
+        """
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = [{"id": i + 1, "org_id": ORG, "event_type": EVENT_ALERT_ACK,
+                 "details": {"episode": f"e{i}"},
+                 "created_at": (base + timedelta(minutes=i)).isoformat()}
+                for i in range(3)]
+        rows += [{"id": 1000 + i, "org_id": ORG, "event_type": "flag_clear",
+                  "details": {},
+                  "created_at": (base + timedelta(minutes=10 + i)).isoformat()}
+                 for i in range(abuse._ALERT_SCAN + 1)]
+        fake = FakeControlPlane(tables={"abuse_events": rows})
+        store = SupabaseAbuseStore(fake)
+        assert store.recent_alerts(ORG) == [], (
+            "fixture: the filtered scan must leave nothing to render")
+        assert store.alert_scan_saturated(ORG) is True, (
+            "an empty feed whose window was full must not read as 'nothing "
+            "happened'")
+
+    def test_the_acks_this_feature_writes_do_not_consume_the_scan_budget(self):
+        """A dismissal can never render, so it must not push real alerts out of
+        the window — and before this fix the type this PR writes was NOT excluded
+        server-side (round-8 review finding). An org that acknowledges a lot would
+        have been hiding its own alerts."""
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = [{"id": 5000 + i, "org_id": ORG, "event_type": EVENT_ALERT_ACK,
+                 "details": {"episode": f"e{i}"},
+                 "created_at": (base + timedelta(seconds=i)).isoformat()}
+                for i in range(600)]
+        rows.append({"id": 1, "org_id": ORG, "event_type": EVENT_SUSPEND,
+                     "details": {}, "created_at": base.isoformat()})
+        store = SupabaseAbuseStore(
+            FakeControlPlane(tables={"abuse_events": rows}))
+        assert [a["type"] for a in store.recent_alerts(ORG)] == [EVENT_SUSPEND], (
+            "600 acknowledgements hid a suspension — the feature's own writes "
+            "consumed the scan budget")
+
     def test_a_busy_org_s_NON_ALERT_volume_cannot_hide_an_alert(self):
         """#10156: the scan used to read the newest 100 rows of EVERY type and
         filter client-side, so a busy org (the live project holds 6 450

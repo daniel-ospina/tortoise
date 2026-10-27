@@ -813,6 +813,22 @@ class MemoryAbuseStore:
                     if r["org_id"] == org_id
                     and r["event_type"] == EVENT_AUTH_IP and r["country"]}
 
+    def alert_scan_saturated(self, org_id: str) -> bool:
+        """Was the last ``recent_alerts`` scan cut by its own budget? (#10156)
+
+        `truncated` rides on a ROW, so a scan that its own filters emptied has no
+        row to carry it: the newest ``_ALERT_SCAN`` rows can all be non-alert (a
+        burst of dismissals, a day of ``flag_clear``), leaving a legitimately
+        EMPTY feed while older alerts sit just below the window. Rendering
+        nothing there is a silent "nothing happened" — the failure mode this
+        whole change exists to remove (round-8 review finding) — so the route
+        reports it and the panel says so.
+        """
+        with self._lock:
+            return sum(1 for r in self.rows
+                       if r["org_id"] == org_id
+                       and r["event_type"] in ALERT_TYPES) > _ALERT_SCAN
+
     def recent_alerts(self, org_id: str, limit: int = 20,
                       include_identity: bool = False) -> list[dict]:
         with self._lock:
@@ -1065,13 +1081,38 @@ class SupabaseAbuseStore:
         )
         return {r["country"] for r in rows if r.get("country")}
 
+    def alert_scan_saturated(self, org_id: str) -> bool:
+        """Was the last ``recent_alerts`` scan cut by its own budget? (#10156)
+
+        `truncated` rides on a ROW, so a scan that its own filters emptied has no
+        row to carry it: the newest ``_ALERT_SCAN`` rows can all be non-alert (a
+        burst of dismissals, a day of ``flag_clear``), leaving a legitimately
+        EMPTY feed while older alerts sit just below the window. Rendering
+        nothing there is a silent "nothing happened" — the failure mode this
+        whole change exists to remove (round-8 review finding) — so the route
+        reports it and the panel says so.
+        """
+        try:
+            rows = self._cp.query(
+                "abuse_events", select=["event_type"],
+                filters=[("org_id", "eq", org_id),
+                         ("event_type", "neq", EVENT_POINT_CREATE),
+                         ("event_type", "neq", EVENT_KEY_CREATE),
+                         ("event_type", "neq", EVENT_ALERT_ACK)],
+                order="created_at.desc", limit=_ALERT_SCAN + 1,
+            )
+        except Exception:
+            logger.debug("alert saturation probe failed (%s)", org_id)
+            return False
+        return len(rows) > _ALERT_SCAN
+
     def recent_alerts(self, org_id: str, limit: int = 20,
                       include_identity: bool = False) -> list[dict]:
         rows = self._cp.query(
             "abuse_events",
             select=["event_type", "created_at", "country", "key_id",
                     "details"],
-            # #10156: exclude the two high-volume NON-alert types at the server.
+            # #10156: exclude the high-volume NON-alert types at the server.
             # Without this the scan below is a window over ALL events, and a
             # busy org's ordinary traffic starves it: the live project holds
             # 6 450 ``point_create`` + 67 ``key_create`` rows against 16
@@ -1088,7 +1129,14 @@ class SupabaseAbuseStore:
             # costs scan depth, never correctness.
             filters=[("org_id", "eq", org_id),
                      ("event_type", "neq", EVENT_POINT_CREATE),
-                     ("event_type", "neq", EVENT_KEY_CREATE)],
+                     ("event_type", "neq", EVENT_KEY_CREATE),
+                     # …and THIS change's own write (round-8 review finding):
+                     # an `alert_ack` row can never render, so letting dismissals
+                     # consume the scan budget means a customer who acknowledges
+                     # a lot pushes their real alerts out of the window. Three
+                     # `neq` filters on one column AND together correctly (they
+                     # are negations, unlike `eq`s which would be unsatisfiable).
+                     ("event_type", "neq", EVENT_ALERT_ACK)],
             order="created_at.desc", limit=_ALERT_SCAN + 1,
         )
         # #10156 review finding: saturation must be measured on the ROW SCAN,

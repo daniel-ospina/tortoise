@@ -11072,16 +11072,28 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     `first_at` (one row per sustained BOUT, not per detector window), `acked`,
     and the opaque `episode` key the acknowledgement route takes. The panel
     renders the two registers separately and can say "nothing was changed"
-    only because the register travels with the row."""
+    only because the register travels with the row.
+
+    ``scan_saturated`` says the scan was cut. It is NOT a per-row flag (that is
+    ``truncated``): it exists for the empty-feed case, where there is no row to
+    carry the caveat."""
     membership = await _membership_org(user["user_id"], org_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
+    saturated = False
     try:
         from tortoise.supabase_control import get_abuse_store
-        alerts = get_abuse_store().recent_alerts(org_id, limit=20)
+        store = get_abuse_store()
+        alerts = store.recent_alerts(org_id, limit=20)
+        # #10156 round-8 review finding: `truncated` rides on a row, so an EMPTY
+        # feed that is empty only because the scan was cut (the newest rows were
+        # all non-alert) would otherwise read as "nothing ever happened" — the
+        # exact false negative this change exists to remove. Reported as a
+        # separate flag so the panel can say "there may be more" without a row.
+        saturated = bool(store.alert_scan_saturated(org_id))
     except Exception:
         alerts = []  # best-effort — an alert-history failure is not a 500
-    return {"org_id": org_id, "alerts": alerts}
+    return {"org_id": org_id, "alerts": alerts, "scan_saturated": saturated}
 
 
 @app.post("/v1/team/alerts/ack")
