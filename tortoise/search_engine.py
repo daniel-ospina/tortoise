@@ -1587,13 +1587,19 @@ def run_fts_query(
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
     #
-    # #3019 KNOWN RESIDUAL (sibling gap, NOT a regression): `object` has the
-    # same NULL-key shape and is not closed here. A :Object is merged by its
-    # `name`, and the live write path mints it id-less (`MERGE (o:Object
-    # {name:$name})`, hosted_api), so the `else` below orders those rows on a
-    # NULL `id`. Out of this change's scope: the remedy is a coalesce KEY, not
-    # a field rename, so it changes the ORDER BY expression shape in all three
-    # legs. Evidence recorded on #3019.
+    # #3019 KNOWN RESIDUAL — NARROWED by #10121, and closed exactly this far.
+    # `object` has the same NULL-key shape: a :Object is merged by its `name`,
+    # and the live write path mints it id-less (`MERGE (o:Object {name:$name})`,
+    # hosted_api), so the `else` below resolves `id` and every :Object row sorts
+    # on a NULL identity there. #10121 APPLIED that coalesce KEY — #3019's own
+    # named remedy, not the field rename it ruled out — because
+    # `recency_tie_clause` emits `coalesce(<alias>.<id_field>, '') DESC` at
+    # every site, so those rows no longer take the HEAD of the window from a
+    # NULL-as-largest sort; they land at its TAIL (pinned by
+    # `test_10121_recency_tie.py::test_an_id_less_row_does_not_lead_a_tie_group
+    # _without_timestamps`). What REMAINS residual is the order INSIDE that
+    # population: `coalesce(id, '')` is a constant for all-id-less rows, so
+    # their relative order is still engine row order. Evidence on #3019.
     if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
@@ -1992,11 +1998,15 @@ def run_bm25_query(
 
     try:
         start = time.monotonic()
-        # Order by the id key so the corpus read is DETERMINISTIC (the cap
-        # contract in DEFAULT_BM25_CORPUS_CAP); ``coalesce`` lets a node family
-        # whose text lives on ``_searchText`` (the multi-field FTS index's
-        # field) be scored rather than skipped. One row over the cap is
-        # requested on purpose — see ``truncated`` below.
+        # #10121: the ORDER BY is the SHARED recency tie — newest first, id last
+        # as the determinism key. This read used to be `n.<id> ASC`, which is
+        # OLDEST-first on ULID ids, so the `cap` window dropped the NEWEST
+        # documents first (the #10121 defect at its cap variant). What the cap
+        # contract in DEFAULT_BM25_CORPUS_CAP requires is DETERMINISM, not that
+        # direction; ``coalesce`` lets a node family whose text lives on
+        # ``_searchText`` (the multi-field FTS index's field) be scored rather
+        # than skipped. One row over the cap is requested on purpose — see
+        # ``truncated`` below.
         cypher = (
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
@@ -2688,10 +2698,14 @@ def run_structural_query(
         # order — the defect this PR exists to close — and every returned pid
         # was None. url is the key that is correct in BOTH states.
         #
-        # `object` is a KNOWN RESIDUAL: its canonical key is `name` and the
-        # live write path mints it id-less, so the `else` below still orders
-        # those rows on NULL — see the same note where the key is first resolved
-        # (the FTS leg's id_field block).
+        # `object` is a NARROWED residual (#10121): its canonical key is `name`
+        # and the live write path mints it id-less, so the `else` below resolves
+        # `id` and those rows carry no identity — but the ORDER BY now routes
+        # every key through `recency_tie_clause`, whose `coalesce(..., '')`
+        # sends the id-less rows to the TAIL of the window instead of its head
+        # (a bare DESC sorted the NULL as the LARGEST value). Their order INSIDE
+        # that tail is still engine row order. See the same note where the key is
+        # first resolved (the FTS leg's id_field block).
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"

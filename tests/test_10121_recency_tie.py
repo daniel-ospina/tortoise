@@ -411,22 +411,25 @@ def test_vector_scan_branch_breaks_equal_distance_ties_newest_first():
     this pins the SCAN side, and the index side is pinned by
     ``tests/test_search_engine_gaps.py::TestRunVectorQuery``.
 
-    FAIL VALUE: revert the scan branch to ``id ASC`` and the three connected
-    points come back oldest-first.
+    FAIL VALUE: revert the scan branch to ``id ASC`` — or drop the recency
+    key and leave ``id DESC`` — and the three connected points come back in a
+    different order (see the permutation note at the stamps below).
     """
     from tortoise.search_engine import run_vector_query
 
     sdk = _sdk()
     graph = sdk._get_proj().g
     vec = [0.1] * 4
-    # Recency and id point in OPPOSITE directions on purpose: ``aaa`` holds the
-    # NEWEST stamp while ``zzz`` holds the newest ID. A test where both agree
-    # proves only the id key (the review caught exactly that in the first
-    # draft), so the expected order here is reachable through recency ALONE.
+    # The recency order is a NON-MONOTONIC permutation of the ids on purpose:
+    # newest is ``mmm``, then ``zzz``, then ``aaa``. Ordered on the id alone —
+    # ASCENDING (the pre-#10121 clause) or DESCENDING (the determinism key with
+    # the recency key dropped) — the answer is different, so this ordering is
+    # reachable through the recency key ALONE. (A fixture where recency and id
+    # agree one way passes under the very mutation it claims to catch.)
     stamps = {
-        "vec-tie-aaa": "2026-12-01T00:00:00Z",
-        "vec-tie-mmm": "2026-06-01T00:00:00Z",
-        "vec-tie-zzz": "2026-01-01T00:00:00Z",
+        "vec-tie-mmm": "2026-12-01T00:00:00Z",
+        "vec-tie-zzz": "2026-06-01T00:00:00Z",
+        "vec-tie-aaa": "2026-01-01T00:00:00Z",
     }
     for pid, stamp in stamps.items():
         graph.query(
@@ -441,11 +444,68 @@ def test_vector_scan_branch_breaks_equal_distance_ties_newest_first():
                             excluded_statuses=())
     ids = [pid for pid, _ in rows if str(pid).startswith("vec-tie-")]
     assert len(ids) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {rows}"
-    assert ids == ["vec-tie-aaa", "vec-tie-mmm", "vec-tie-zzz"], (
-        "equal-distance rows on the SCAN path must be RECENCY-then-id DESC "
-        f"(recency and id disagree here, so the id key alone gives the inverse "
-        f"order): {ids}"
+    assert ids == ["vec-tie-mmm", "vec-tie-zzz", "vec-tie-aaa"], (
+        "equal-distance rows on the SCAN path must be RECENCY-then-id DESC — "
+        "this ordering is neither the id ASC nor the id DESC one, so nothing "
+        f"but the recency key can produce it: {ids}"
     )
+
+
+def test_hop_expansion_breaks_equal_hop_ties_newest_first():
+    """The hop-expansion leg's tie DIRECTION is pinned behaviourally.
+
+    #10121's census names six sites. Five carry a behavioural pin; this one
+    carried only ``assert "ORDER BY hops" in cypher``
+    (``tests/test_search_engine_gaps.py::TestExpandStructuralHops::test_hop1_
+    direct_neighbor_full_score``), which passes under ANY tie — including the
+    oldest-first one this change removed — and the AST census cannot cover it
+    either, because it asks whether the helper is *called* inside the function,
+    not which direction or alias it was called with. So a flipped direction or a
+    wrong alias on this leg reds nothing (review P2). This closes it.
+
+    FAIL VALUE: order on ``hops ASC, n.id ASC`` again — or drop the recency
+    key and leave ``id DESC`` — and the three equal-hop peers come back in a
+    different order (see the permutation note at the stamps below).
+    """
+    from tortoise.search_engine import expand_structural_hops
+
+    sdk = _sdk()
+    graph = sdk._get_proj().g
+    graph.query("CREATE (n:Point {id:'hop-seed', content:'hop seed', "
+                "pointKind:'statement', is_operator:false})")
+    # The recency order is a NON-MONOTONIC permutation of the ids on purpose:
+    # newest is ``mmm``, then ``zzz``, then ``aaa``. Ordered either ASCENDING or
+    # DESCENDING on the id alone the answer is different (``aaa,mmm,zzz`` /
+    # ``zzz,mmm,aaa``), so this fixture is reachable ONLY through the recency
+    # key — a fixture where recency and id agree one way passes under the
+    # mutation it claims to catch, which is how this pin's first draft was
+    # vacuous (it passed with the clause reverted to ``n.id ASC``).
+    stamps = {
+        "hop-peer-mmm": "2026-12-01T00:00:00Z",
+        "hop-peer-zzz": "2026-06-01T00:00:00Z",
+        "hop-peer-aaa": "2026-01-01T00:00:00Z",
+    }
+    for pid, stamp in stamps.items():
+        graph.query(
+            "CREATE (n:Point {id:$id, content:'hop peer', "
+            "pointKind:'statement', is_operator:false, createdAt:$c, "
+            "updatedAt:$c})",
+            params={"id": pid, "c": stamp})
+        graph.query(
+            "MATCH (s:Point {id:'hop-seed'}), (n:Point {id:$id}) "
+            "CREATE (s)-[:IMPL]->(n)", params={"id": pid})
+
+    rows = expand_structural_hops(graph, ["hop-seed"], excluded_statuses=())
+    assert len(rows) == 3, f"FIXTURE NOT REACHED: expected 3 peers, got {rows}"
+    # HOP PREMISE: all three at hop 1, or ``hops ASC`` decides and the recency
+    # key never engages.
+    assert {score for _, score in rows} == {1.0}, (
+        f"HOP PREMISE BROKEN: the three peers are not all one hop out: {rows}")
+    got = [pid for pid, _ in rows]
+    assert got == ["hop-peer-mmm", "hop-peer-zzz", "hop-peer-aaa"], (
+        "equal-hop peers must come back RECENCY-then-id DESC — this ordering "
+        "is neither the id ASC nor the id DESC one, so nothing but the recency "
+        f"key can produce it: {got}")
 
 
 def test_the_recency_key_normalises_an_absent_identity():

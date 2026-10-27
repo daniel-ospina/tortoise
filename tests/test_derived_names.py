@@ -300,6 +300,22 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_uri\(\)\)",
     ],
     "test_session_capture_e2e.py": [r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)"],
+    # #10135 landed `test_5140_d10_relabel_migration.py` with two no-graph_name
+    # sites and no declaration, so this pin went RED on main and took every PR's
+    # fast shard with it (#10166). Both sites are SAFE, and the argument lives
+    # here because that is what a declaration is:
+    #   * `from_uri(_probe_uri)` — the module-level availability probe. It
+    #     constructs and closes; it never DETACHes, so no graph is bulk-wiped.
+    #   * `from_uri(uri)` — the per-test `graph` fixture. `uri` comes from
+    #     `_live_uri(name)` with `name = f"test_5140_relabel_{os.urandom(4).hex()}"`,
+    #     i.e. a per-test TEST-PREFIXED graph, so its two
+    #     `MATCH (n) DETACH DELETE n` statements can only reach that graph. The
+    #     path is a runtime value, so the literal-prefix branch above cannot see
+    #     it — which is exactly why this declaration exists.#10166
+    "test_5140_d10_relabel_migration.py": [
+        r"from_uri\(_probe_uri\)",
+        r"from_uri\(uri\)",
+    ],
     "test_ingest.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
         r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)",
