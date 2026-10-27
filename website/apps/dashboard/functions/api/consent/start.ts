@@ -47,7 +47,7 @@ import {
   type SessionOutcome,
   decideConsentAdvance,
 } from "../../_shared/auth/consent-flow";
-import { recordConsentAttempt } from "../../_shared/auth/consent-bridge";
+import { recordConsentAttempt, redirectUriProblem } from "../../_shared/auth/consent-bridge";
 
 /** The authorize params this route accepts. `response_type` is implied (`code`). */
 export interface ValidatedParams {
@@ -76,20 +76,13 @@ export function validate(params: URLSearchParams): ValidatedParams | string {
 
   const redirect_uri = (params.get("redirect_uri") ?? "").trim();
   if (!redirect_uri) return "redirect_uri is required";
-  let parsed: URL;
-  try {
-    parsed = new URL(redirect_uri);
-  } catch {
-    return "redirect_uri must be an absolute URI";
-  }
-  // RFC 8252 §7.3: a loopback redirect is `http`, everything else must be `https`. A
-  // `javascript:`/`data:` origin reaching this point would be an XSS pivot, so the protocol
-  // check is explicit rather than "not-http".
-  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "::1" || parsed.hostname === "localhost";
-  if (parsed.protocol !== "https:" && !(loopback && parsed.protocol === "http:")) {
-    return "redirect_uri must use https (http is allowed only for loopback)";
-  }
-  if (parsed.hash) return "redirect_uri must not carry a fragment";
+  // Delegated to the MIRROR of the AS's own predicate (consent-bridge.ts::redirectUriProblem).
+  // A local approximation of it refused `cursor://` (the beta's only native-scheme harness) and
+  // every IPv6 loopback (WHATWG keeps the brackets, so `=== "::1"` was dead code), which killed a
+  // flow AFTER the visitor had consented — the same silent failure as the reverse direction, and
+  // the cross-half table test pins the two apart from drifting again.
+  const redirectProblem = redirectUriProblem(redirect_uri);
+  if (redirectProblem) return redirectProblem;
 
   const code_challenge = (params.get("code_challenge") ?? "").trim();
   // RFC 7636 §4.2: base64url of a 32-byte SHA-256 digest = 43 chars; the spec allows 43..128.

@@ -48,6 +48,75 @@ export const CONSENT_TOKEN_TTL_S = 120;
  */
 export const CONSENT_ATTEMPT_TTL_S = 15 * 60;
 
+/**
+ * Private-use redirect schemes a harness may register — the MIRROR of
+ * `tortoise/oauth.py::_NATIVE_REDIRECT_SCHEMES`.
+ *
+ * An explicit allowlist for the same reason the AS uses one: the code is delivered by
+ * NAVIGATING to the target, so a scheme the browser EXECUTES (`javascript:`, `data:`) must never
+ * be registrable. `cursor` is the only native-scheme harness in the beta.
+ *
+ * ⛔ TWO COPIES, ONE MEANING. This file cannot import Python and the AS cannot import this, so the
+ * pair is pinned by a cross-half table test in `tests/test_oauth_consent_bff_routes.py`, which
+ * hands ONE uri list to both halves and asserts the verdicts agree. Drift is the failure that
+ * matters: a BFF that refuses a redirect the AS accepts kills a flow AFTER the visitor consented.
+ */
+export const NATIVE_REDIRECT_SCHEMES = ["cursor"] as const;
+
+/**
+ * Loopback host, mirroring `tortoise/oauth.py::_is_loopback` (RFC 8252 §7.3).
+ *
+ * `new URL("http://[::1]:9/cb").hostname` is `"[::1]"` — WITH the brackets — so comparing it to
+ * `"::1"` is dead code that refuses the RFC's own IPv6 example. `localhost` and the whole of
+ * `127.0.0.0/8` are loopback; nothing else is.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  let host = hostname;
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (host.toLowerCase() === "localhost") return true;
+  if (host === "::1") return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return v4 !== null && Number(v4[1]) === 127;
+}
+
+/**
+ * Why a `redirect_uri` is unacceptable, or `null` when it is fine.
+ *
+ * A MIRROR of the AS's `_unsafe_redirect_uri_bytes` + `_valid_redirect_uri`, in the same order, so
+ * the two halves cannot disagree about what a flow may be started for. `start.ts` refuses what the
+ * AS refuses and — the direction that was broken — ACCEPTS what the AS accepts.
+ */
+export function redirectUriProblem(uri: string): string | null {
+  // Bytes we refuse to reason about: a raw backslash is a real parser differential between the
+  // server's urlparse and the browser, and control characters corrupt the Location header.
+  for (const ch of uri) {
+    if (ch === "\\" || ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) {
+      return "redirect_uri must not carry control characters or a backslash";
+    }
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return "redirect_uri must be an absolute URI";
+  }
+  // A fragment is never a valid redirect component (RFC 6749 §3.1.2): the code would land where
+  // the browser never sends it. Tested as the literal delimiter, because a bare trailing `#`
+  // parses to an EMPTY fragment which `parsed.hash` reports as "".
+  if (uri.includes("#")) return "redirect_uri must not carry a fragment";
+  const scheme = parsed.protocol.replace(/:$/, "");
+  if ((NATIVE_REDIRECT_SCHEMES as readonly string[]).includes(scheme)) {
+    // Not a network location, so "https or loopback" does not describe it. It must still name
+    // something to hand the code to: an authority or at least a path.
+    return parsed.host || parsed.pathname ? null : "redirect_uri must name a destination";
+  }
+  if (parsed.protocol === "https:" && parsed.hostname) return null;
+  if (parsed.protocol === "http:" && parsed.hostname && isLoopbackHost(parsed.hostname)) {
+    return null;
+  }
+  return "redirect_uri must use https (http is allowed only for loopback)";
+}
+
 /** The four authorize params §2.2 binds, plus the scope/resource the flow was started with. */
 export interface ConsentAttempt {
   state: string;
