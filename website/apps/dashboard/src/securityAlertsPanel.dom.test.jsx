@@ -206,13 +206,21 @@ test('#10156: a MEMBER is not offered an action that can never succeed', () => {
   assert.equal(screen.queryByRole('button', { name: /^acknowledge$/i }), null)
 })
 
-test('#10156: a TRUNCATED episode is not acknowledgeable, and says why', () => {
-  // Its key is anchored to the oldest row the scan can SEE, so the
-  // acknowledgement would evaporate as that window slides. The server refuses it
-  // (409); the panel must not offer it and must not look like an oversight.
+test('#10156: a TRUNCATED episode IS acknowledgeable, and says what ×N+ means', () => {
+  // The gate that used to hide this control came from a 409 refusal the server
+  // no longer makes: acks now match by identity + window OVERLAP, so a moving
+  // key cannot lose one. Leaving the gate in place made the OLDEST current
+  // episode undismissable for any org that saturates the scan — the live org
+  // (review finding P1). The truncation note stays as INFORMATION: it explains
+  // the `×N+` count, it does not withhold the control.
   const fresh = { ...velocity, at: at(0.02), truncated: true }
-  const { container } = renderPanel({ alerts: [fresh], onAcknowledge: () => {} })
-  assert.equal(screen.queryByRole('button', { name: /^acknowledge$/i }), null)
+  const seen = []
+  const { container } = renderPanel({
+    alerts: [fresh], onAcknowledge: (a) => seen.push(a),
+  })
+  fireEvent.click(screen.getByRole('button', { name: /^acknowledge$/i }))
+  assert.equal(seen.length, 1, 'the oldest episode must be dismissable')
+  assert.equal(seen[0].episode, fresh.episode)
   assert.match(text(container), /older than the window we can identify/)
 })
 

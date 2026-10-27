@@ -839,9 +839,27 @@ class MemoryAbuseStore:
                          now: datetime | None = None) -> None:
         self.record_event(org_id, EVENT_ALERT_ACK,
                           details=_ack_details(
-                              episode, ack_of or self._resolve_episode(org_id, episode),
+                              episode, self._ack_of(org_id, episode, ack_of),
                               by=by),
                           created_at=now)
+
+    def _ack_of(self, org_id: str, episode: str,
+                ack_of: dict | None) -> dict:
+        """The episode to record an acknowledgement FOR, or raise.
+
+        Raising on an unresolvable episode is deliberate (review nit): an
+        acknowledgement with no window is written as a KEY-ONLY row, which is
+        exactly the shape that cannot survive the scan sliding — the failure this
+        whole mechanism exists to prevent. The route already 404s an unknown
+        episode before it gets here; this makes the store fail LOUD rather than
+        quietly persist something that will evaporate.
+        """
+        resolved = ack_of or self._resolve_episode(org_id, episode)
+        if not isinstance(resolved, dict):
+            raise ValueError(
+                f"cannot acknowledge {episode!r}: no such episode in {org_id} "
+                "(a key-only acknowledgement would evaporate)")
+        return resolved
 
     def _resolve_episode(self, org_id: str, episode: str) -> dict | None:
         """The episode as this store currently derives it, or None."""
@@ -1118,11 +1136,37 @@ class SupabaseAbuseStore:
                          ack_of: dict | None = None,
                          by: str | None = None,
                          now: datetime | None = None) -> None:
+        """Persist the acknowledgement as an ``alert_ack`` row.
+
+        ⚠️ ``now`` is accepted for signature parity with the in-memory store but
+        is NOT transmitted on this path (``record_event`` deliberately does not
+        send ``created_at``; the column default decides). Passing it does nothing
+        rather than raising, because the value has no consumer — matching reads
+        the stored WINDOW fields, never the ack row's own timestamp (review nit).
+        """
         self.record_event(org_id, EVENT_ALERT_ACK,
                           details=_ack_details(
-                              episode, ack_of or self._resolve_episode(org_id, episode),
+                              episode, self._ack_of(org_id, episode, ack_of),
                               by=by),
                           created_at=now)
+
+    def _ack_of(self, org_id: str, episode: str,
+                ack_of: dict | None) -> dict:
+        """The episode to record an acknowledgement FOR, or raise.
+
+        Raising on an unresolvable episode is deliberate (review nit): an
+        acknowledgement with no window would be written as a KEY-ONLY row, which
+        is exactly the shape that cannot survive the scan sliding — the failure
+        this whole mechanism exists to prevent. The route 404s an unknown episode
+        before reaching here; this makes the store fail LOUD rather than quietly
+        persist something that will evaporate.
+        """
+        resolved = ack_of or self._resolve_episode(org_id, episode)
+        if not isinstance(resolved, dict):
+            raise ValueError(
+                f"cannot acknowledge {episode!r}: no such episode in {org_id} "
+                "(a key-only acknowledgement would evaporate)")
+        return resolved
 
     def _resolve_episode(self, org_id: str, episode: str) -> dict | None:
         """The episode as this store currently derives it, or None."""
@@ -1823,18 +1867,24 @@ class ReadVelocityTracker:
     bursty 50/300 alternating × 20          10      2
     geometric ×1.5/window ramp               6      6  still caught
     geometric ×1.3/window ramp               2      0  ⚠️ LOST
-    linear +10…+40/window ramp             10-11     0  ⚠️ LOST
+    linear 100→500 (+40/window, 11 win)     10      0  ⚠️ LOST
+    linear 100→200 (+10/window, 11 win)     10      0  ⚠️ LOST
+    linear 20→540 (+40/window, 14 win)      11      2  reduced, not silent
+    linear 5→705 (+100/window, 8 win)        7      5  reduced, not silent
     5 → 400 in one window                    1      1  the case it is FOR
     cold start, 150 in the first window      1      1  no baseline ⇒ floor
     ==================================  ======  =====  =====================
 
     ⚠️ STATED LOSS, because a detector that quietly stops seeing something is
-    worse than a noisy one: a MONOTONE RAMP slower than ~1.5×/window no longer
-    breaches. It is not a small gap — every linear ramp measured (＋10 to ＋40
-    reads per window, ending at 540/5min) is now silent where the floor alerted
-    on 10 of 11 windows. The mechanism is the EWMA's lag: the baseline trails a
-    rising series by a few windows, so ``3 × baseline`` stays above a series that
-    climbs slowly. ``baseline_factor`` is the knob, and it is a REAL trade in both
+    worse than a noisy one: whether a MONOTONE ramp is still seen depends on where
+    it STARTS relative to the floor, not on its slope alone. A ramp that begins
+    already above the floor bends the EWMA up in its first windows, so
+    ``3 × baseline`` outruns it: ``100 → 500`` (+40/window) and ``100 → 200``
+    (+10/window) both go from 10 firing windows to **0**. A ramp that begins BELOW
+    the floor keeps a low baseline and is merely damped: ``20 → 540`` goes 11 → 2
+    and ``5 → 705`` goes 7 → 5. The mechanism is the EWMA's lag — the baseline
+    trails a rising series by a few windows, so ``3 × baseline`` stays above a
+    series that climbs slowly from a high start. ``baseline_factor`` is the knob, and it is a REAL trade in both
     directions — at factor 2 a linear ramp is still missed AND bursty 20/500
     alternating goes from 4 firing windows back to 10, i.e. the pre-#10156 noise
     returns. That is why the default stays 3: the profile it protects (a normal

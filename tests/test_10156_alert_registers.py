@@ -40,6 +40,8 @@ import itertools
 import re
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from tests.fake_control_plane import FakeControlPlane
 from tortoise import abuse
 from tortoise.abuse import (
@@ -290,6 +292,38 @@ class TestEpisodeGrouping:
         assert alerts[-1].get("truncated") is not True
         assert alerts[-1]["count"] == abuse._ALERT_SCAN
 
+    def test_a_limit_cut_tail_is_not_reported_as_truncated(self):
+        """`truncated` means THE SCAN was cut, not the caller's `limit`.
+
+        Both are `out = episodes[:limit]`-shaped, so the distinction lives in one
+        condition (review nit: deleting it left the suite green). Here the scan
+        sees everything and only the caller asks for less — labelling the last
+        returned episode `×N+` would overstate in the other direction.
+        """
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
+        # The distinction only exists when BOTH bounds bite: the scan must be
+        # saturated (so `scan_saturated` is True) AND there must be more episodes
+        # than the caller asked for. 250 rows of one key then 251 of another is
+        # one saturated scan (501 rows) holding TWO episodes.
+        for i in range(250):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": "k-a"},
+                               created_at=base + timedelta(seconds=30 * i))
+        for i in range(251):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": "k-b"},
+                               created_at=base + timedelta(seconds=30 * (250 + i)))
+        everything = store.recent_alerts(ORG, limit=abuse._ALERT_SCAN)
+        assert len(everything) == 2, everything
+        assert everything[-1]["truncated"] is True, (
+            "fixture: the scan must actually be saturated")
+        cut = store.recent_alerts(ORG, limit=1)
+        assert len(cut) == 1
+        assert cut[0].get("truncated") is not True, (
+            "the caller's limit was reported as SCAN truncation — the episode "
+            "returned is complete and its count is exact")
+
     def test_a_busy_org_s_NON_ALERT_volume_cannot_hide_an_alert(self):
         """#10156: the scan used to read the newest 100 rows of EVERY type and
         filter client-side, so a busy org (the live project holds 6 450
@@ -362,11 +396,21 @@ class TestAcknowledgementPersistence:
         assert [a["episode"] for a in store.alert_acks(ORG)] == [episode]
         assert store.recent_alerts(ORG)[0]["acked"] is True
 
+    def test_acknowledging_an_EPISODE_THAT_IS_NOT_THERE_raises(self):
+        """A key-only ack is the shape that cannot survive the scan sliding, so
+        the store refuses to write one (review nit): the route 404s first, and
+        this is the second guard — a caller that skipped the resolve must not get
+        a silently useless row."""
+        store = SupabaseAbuseStore(FakeControlPlane())
+        with pytest.raises(ValueError, match="would evaporate"):
+            store.record_alert_ack(ORG, "made-up|episode", by="u1")
+
     def test_the_ack_row_never_renders_as_an_alert(self):
         store = SupabaseAbuseStore(FakeControlPlane())
         store.record_event(ORG, EVENT_READ_VELOCITY,
                            details={"scope": "key", "id": KEY})
-        store.record_alert_ack(ORG, "some|episode", by="u1")
+        episode = store.recent_alerts(ORG)[0]["episode"]
+        store.record_alert_ack(ORG, episode, by="u1")
         types = {a["type"] for a in store.recent_alerts(ORG)}
         assert EVENT_ALERT_ACK not in types
         assert EVENT_ALERT_ACK not in ALERT_TYPES
@@ -487,14 +531,50 @@ class TestAcknowledgementPersistence:
         assert feed[0]["acked"] is False
 
     def test_acks_are_org_scoped(self):
+        # IDENTICAL timestamps, on purpose: with distinct ones this test passed
+        # even after the `org_id` guard in `_acks_from_rows` was removed, because
+        # the two episodes then fell outside each other's window (review nit —
+        # discriminating only by accident). Same instant, same key, different org:
+        # the guard is now the only thing that can tell them apart.
         store = MemoryAbuseStore()
+        ts = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
         store.record_event(ORG, EVENT_READ_VELOCITY,
-                           details={"scope": "key", "id": KEY})
+                           details={"scope": "key", "id": KEY}, created_at=ts)
         episode = store.recent_alerts(ORG)[0]["episode"]
         store.record_alert_ack(ORG, episode, by="u1")
         store.record_event("other-org", EVENT_READ_VELOCITY,
-                           details={"scope": "key", "id": KEY})
-        assert store.recent_alerts("other-org")[0]["acked"] is False
+                           details={"scope": "key", "id": KEY}, created_at=ts)
+        assert store.recent_alerts("other-org")[0]["acked"] is False, (
+            "an acknowledgement in one org silenced the same episode in another")
+
+    def test_an_ack_does_not_cover_a_DIFFERENT_subject_s_episode(self):
+        """The identity arm of the overlap match, which is the only thing
+        stopping an ack for one key silencing ANOTHER key's live, overlapping
+        episode (review finding: removing the identity guard entirely left the
+        whole suite green — every ack test used one subject).
+
+        Two keys, identical windows, one acknowledged: only the acknowledged
+        one may leave the current list.
+        """
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        for i in range(13):
+            ts = base + timedelta(minutes=5 * i)
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY}, created_at=ts)
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": "other-key"},
+                               created_at=ts)
+        feed = store.recent_alerts(ORG)
+        mine = next(a for a in feed if KEY in a["episode"])
+        theirs = next(a for a in feed if "other-key" in a["episode"])
+        assert mine["first_at"] == theirs["first_at"], "fixture: windows must overlap"
+        store.record_alert_ack(ORG, mine["episode"], by="u1")
+        feed = store.recent_alerts(ORG)
+        assert next(a for a in feed if KEY in a["episode"])["acked"] is True
+        assert next(a for a in feed if "other-key" in a["episode"])["acked"] is False, (
+            "acknowledging one key's episode silenced a DIFFERENT key's "
+            "overlapping episode — a live alert disappeared")
 
 
 # ── 4. The copy (the point of the change) ───────────────────────────────────
@@ -632,7 +712,10 @@ class TestCalibration:
         steady_busy = [130] * 20
         bursty = [20, 500] * 10
         geometric = [min(2000, int(5 * 1.5 ** i)) for i in range(14)]
-        linear = [100 + 40 * i for i in range(11)]
+        # Two linear shapes, because the answer differs by STARTING POINT, not
+        # slope: one begins above the floor (silent), one below it (damped).
+        linear_high = [100 + 40 * i for i in range(11)]
+        linear_low = [20 + 40 * i for i in range(14)]
         # …and the pre-#10156 detector, for the "before" column.
         floor_only = lambda series: sum(1 for c in series if c > 100)  # noqa: E731
 
@@ -645,11 +728,15 @@ class TestCalibration:
             "baseline_factor=2 would do — 10 firing windows, the old noise)")
         assert (floor_only(geometric), _firing_windows(geometric)) == (6, 6), (
             "a fast geometric ramp must still fire as often as it did before")
-        assert (floor_only(linear), _firing_windows(linear)) == (10, 0), (
-            "STATED LOSS: a monotone linear ramp is now invisible. If a future "
-            "change makes this fire, the docstring table and the PR's stated "
-            "trade are stale — update them with the new numbers, do not just "
-            "flip this assertion")
+        assert (floor_only(linear_high), _firing_windows(linear_high)) == (10, 0), (
+            "STATED LOSS: a monotone ramp that STARTS above the floor is now "
+            "invisible. If a future change makes this fire, the docstring table "
+            "and the PR's stated trade are stale — update them with the new "
+            "numbers, do not just flip this assertion")
+        assert (floor_only(linear_low), _firing_windows(linear_low)) == (11, 2), (
+            "a ramp that starts BELOW the floor is damped, not silenced — the "
+            "docstring says so, and the distinction is what the previous "
+            "overstated claim got wrong")
 
 
     def test_a_key_at_its_own_normal_rate_does_not_keep_alerting(self):

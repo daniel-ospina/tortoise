@@ -52,12 +52,17 @@ function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError,
   // control to a member offers an action that can NEVER succeed — every click
   // would render the retryable wording for a permanent 403. The role decision
   // travels in as a prop (the panel cannot read the team's role itself).
-  // A `truncated` episode is not acknowledgeable either: its key is anchored to
-  // the oldest row we can SEE, so the acknowledgement would evaporate as the
-  // scan window slides — the server refuses it (409) and the panel must not
-  // offer it.
+  // A `truncated` episode IS acknowledgeable. An earlier version hid the
+  // control on the reasoning that its key moves as the scan window slides — true
+  // of the KEY, and the server has since been changed to match acknowledgements
+  // by identity + window OVERLAP precisely so a moving key cannot lose one. The
+  // panel's gate was never updated, so it kept refusing the one acknowledgement
+  // the server accepts, which left the OLDEST current episode permanently
+  // undismissable — for any org busy enough to saturate the 500-row scan, i.e.
+  // the live one (review finding P1, and the exact failure this branch was
+  // meant to end). Both halves now agree: the server accepts, the panel offers.
   const canAck = canAcknowledge && typeof onAcknowledge === 'function'
-    && alert.episode && !alert.truncated
+    && Boolean(alert.episode)
   // #10156: the pending/error state is PER EPISODE, not per panel — one write at
   // a time, and a failure lands on the row it belongs to rather than turning
   // every row's control into an error message.
@@ -94,6 +99,7 @@ function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError,
       {error ? (
         <span className="error small"> · {error}</span>
       ) : null}
+      {/* Informational, NOT a gate: it explains the `×N+` floor above it. */}
       {alert.truncated ? (
         <span className="dim small"> · older than the window we can identify</span>
       ) : null}

@@ -72,7 +72,14 @@ export const NOTHING_RECENT = 'Nothing in the last two weeks.'
 //: acknowledged — distinct from "nothing happened", which is what the line above
 //: means (#10156 review finding: an acknowledged 1-minute-old row rendered the
 //: incident lead over an empty list).
-export const ALL_RECENT_ACKED = 'Everything in the last two weeks is acknowledged.'
+//:
+//: "shown here", NOT "in the last two weeks": the feed is bounded twice — the
+//: endpoint returns at most 20 episodes and the store scans at most 500 rows (~1
+//: day at the live org's `flag` volume) — so a wider claim is one the server
+//: cannot support. An org with 25 recent episodes could acknowledge the 20 it was
+//: shown and read "everything is acknowledged" while #21 sat unacknowledged and
+//: unreturned (review finding). This wording is exactly as wide as the evidence.
+export const ALL_RECENT_ACKED = 'Everything shown here is acknowledged.'
 
 /** Register for one alert row. Unknown → the quiet register (see module note). */
 export function registerOf(alert) {

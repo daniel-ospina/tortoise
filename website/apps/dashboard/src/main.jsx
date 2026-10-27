@@ -5455,14 +5455,14 @@ function claimIntentInFlight() {
       if (!res.ok) {
         // A REFUSAL is not a transient failure, and telling the reader to "try
         // again" on one is the same unactionable-remedy defect this change
-        // exists to remove (review nit): 404 means the episode is no longer in
-        // our feed, 409 is the truncation guard (now only reached by a caller
-        // that bypassed the panel), 403 means the role cannot acknowledge.
-        // Retryable wording only where retrying can actually work.
+        // exists to remove (review nit). The statuses below are the ones the
+        // route actually returns: 403 (role), 404 (episode no longer in our
+        // feed), 422 (missing org_id/episode), 503 (store failure — that one IS
+        // retryable). There is deliberately no 409: an earlier version refused
+        // truncated episodes, and that refusal is gone.
         const refusal = {
           403: 'Only an owner or admin can acknowledge an alert.',
           404: 'That alert is no longer in the feed — reload to refresh.',
-          409: 'That alert is older than the window we can identify.',
           422: 'That alert could not be identified — reload to refresh.',
         }[res.status]
         setAckError({
