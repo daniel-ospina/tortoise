@@ -186,29 +186,29 @@ order for the deleting PR, and a restore recipe in
 licence to re-add them: a restored method returning to the public surface is a new surface change
 and needs this document amended again.
 
-> ⛔ **`test_guard` is the one the scan finds dead and a ruling forbids deleting.**
-> `beta-sdk-surface.md:390` (owner-approved) says it is *"Kept and relocated … it guards the
-> production-wipe incident, so the code must survive"*, and `tools/sdk_rename_table.py:709` records
-> `RELOCATED`. It leaves the public surface; it stays in the tree. A scan that finds no caller is
-> not licence to delete code a ruling says must survive — which is why the count is **26, not 27**.
+⛔ **`test_guard` is the one the scan finds dead and a ruling forbids deleting.**
+`beta-sdk-surface.md:390` (owner-approved) says it is *"Kept and relocated … it guards the
+production-wipe incident, so the code must survive"*, and `tools/sdk_rename_table.py:709` records
+`RELOCATED`. It leaves the public surface; it stays in the tree. A scan that finds no caller is
+not licence to delete code a ruling says must survive — which is why the count is **26, not 27**.
 
-> **The 111 include six methods that look unreferenced to any scan that skips `sdk.py`** —
-> `delete_point`, `create_direct_edge`, `create_derivation`, `compute_reputation`,
-> `dream_health_state`, `resolve_id` — because the only caller is the class itself
-> (`self.<name>(...)`). They are load-bearing: deleting them breaks live tools (`tortoise_delete`,
-> `tortoise_delete_point`, `tortoise_ingest`, `tortoise_assess_source`, `tortoise_dream_health`,
-> `tortoise_review_connections`) and the approved target method **`link_entities`**. The selection
-> rule therefore reads `sdk.py` as well; see the archive doc's correction table for the three wrong
-> counts that preceded **26**.
+**The 111 include six methods that look unreferenced to any scan that skips `sdk.py`** —
+`delete_point`, `create_direct_edge`, `create_derivation`, `compute_reputation`,
+`dream_health_state`, `resolve_id` — because the only caller is the class itself
+(`self.<name>(...)`). They are load-bearing: deleting them breaks six live tools (`tortoise_delete`,
+`tortoise_delete_point`, `tortoise_ingest`, `tortoise_assess_source`, `tortoise_dream_health`,
+`tortoise_review_connections`) and the approved target method **`link_entities`**. The selection
+rule therefore reads `sdk.py` as well; see the archive doc's correction table for the three wrong
+counts that preceded **26**.
 
-> **Callers and artifacts outside the scanned population.** `tools/purge_test_residue.py:133` calls
-> `store.delete_point(...)` — that method is in the **111**, so the call site re-points to the private
-> name. And **all 26 are referenced from `tests/`**, while **17** are per-method keys in
-> `tools/sdk_rename_table.py` and all 26 are members of the canonical partition in
-> `docs/product/canonical-sdk-methods.md` — and that file's **rows are quoted verbatim by the rename
-> table's citation anchors**, so editing a row breaks them too. Leaving any of it stale reds
-> `tests/test_sdk_rename_table.py::test_check_mode_is_clean`. The deletion lane follows the archive
-> doc's work order; `tortoise/**` is not a safe list of unreferenced names.
+**Callers and artifacts outside the scanned population.** `tools/purge_test_residue.py:133` calls
+`store.delete_point(...)` — that method is in the **111**, so the call site re-points to the private
+name. And **all 26 are referenced from `tests/`**, while **17** are per-method keys in
+`tools/sdk_rename_table.py` and all 26 are members of the canonical partition in
+`docs/product/canonical-sdk-methods.md` — and that file's **rows are quoted verbatim by the rename
+table's citation anchors**, so editing a row breaks them too. Leaving any of it stale reds
+`tests/test_sdk_rename_table.py::test_check_mode_is_clean`. The deletion lane follows the archive
+doc's work order; `tortoise/**` is not a safe list of unreferenced names.
 
 **(b) A retiring tool does not need a no-replacement warning.** Owner: *"2 we dont have customers
 other than 2 guys using it self-hosted so let's not worry about migration and rather focus on
@@ -246,10 +246,11 @@ methods on their own.
 different trap.** The number first published on #4282 was **26** (a non-recursive **regex** over
 `tortoise/*.py` — it never read the subpackages, and a regex counts prose like
 `` `sdk.capture_session` `` in a docstring as usage). It then read **34** (AST, but with **`sdk.py`
-excluded** from the readers, which hid the six methods the class calls on itself). It then read
-**27** (AST, `sdk.py` included) — and the owner-approved `RELOCATED` disposition of `test_guard`
-brings it to **26**. The archive doc carries the four-row table of how each reading was produced
-plus the single command that reproduces 27→26. Any deletion PR must use **26 / 111**.
+excluded** from the readers, which hid the seven methods the class calls on itself — the six
+load-bearing ones listed above, plus `membership_get`). It then read **27** (AST, `sdk.py` included)
+— and the owner-approved `RELOCATED` disposition of `test_guard` brings it to **26**. The archive doc
+carries the table of how each reading was produced plus the single command that reproduces 27→26.
+Any deletion PR must use **26 / 111**.
 
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 

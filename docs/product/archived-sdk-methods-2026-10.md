@@ -98,7 +98,7 @@ direction — a name wrongly kept is privatised, a name wrongly deleted breaks a
 |---|---|---|
 | 1st (published on #4282) | a **regex** over file text, `tortoise/*.py` only | **(a) not recursive** — it never read the subpackages, so a name used only under `tortoise/projection/**` read as dead; **(b) regex cannot tell code from prose** — docstrings such as `` `sdk.capture_session` `` (`write_verb.py:36`, `capture_consent.py:52`, `quota.py:1008`, `retry.py:48`) counted as *usage*, so genuinely dead names read as referenced. The two errors pull in OPPOSITE directions, which is why the same scan produced both a false delete list and a false keep list |
 | 2nd | the same regex, recursive and matching attribute access only | prose still counted as usage; and attribute-only matching cannot see a bare-name call |
-| 3rd | **AST**, recursive, but with **`sdk.py` excluded** from the readers | this file calls its own public methods (`self.delete_point(...)`); excluding it made **7** load-bearing methods look dead. **This is the trap that would have broken five live tools and an approved method** |
+| 3rd | **AST**, recursive, but with **`sdk.py` excluded** from the readers | this file calls its own public methods (`self.delete_point(...)`); excluding it made **7** methods look dead. **This is the trap that would have broken six live MCP tools and an approved method** (`link_entities`) |
 | **4th — governing** | **AST**, recursive, `sdk.py` **included** | **27 with no caller**, of which `test_guard` is `RELOCATED` by an owner-approved decision → **26 to delete** |
 
 The intermediate counts from readings 1 and 2 are deliberately **not** quoted: they were produced by scripts that differed in more than the one property each row names, so the numbers cannot be reproduced from the description and quoting them would be a second, quieter error. The **governing command is the one above**, and it reproduces 27 exactly. `test_guard` is then removed by reading a ruling, not a scan.
@@ -112,7 +112,7 @@ The code is kept by a git tag, so nothing is copied into the tree and no dead co
 package. The tag holds the **whole `TortoiseSDK` class** at a pre-deletion commit, so it covers
 every name here and any later correction to this list:
 
-```
+```text
 tag:    archive/4282-surplus-sdk-methods
 points: 17f604b0543209b8ae98f82412b45296d2967cee   (origin/main, 2026-10-27 — all 26 still present)
 remote: pushed (`git ls-remote --tags origin` → TWO lines: the tag object and its ^{} commit)
@@ -185,7 +185,10 @@ invent a disposition.
 **14 of the 26 already carry a target** and **11 carry `delete`**; **1 is `UNBACKED`** — its delete
 verdict is deliberately unstaked, and **stating it is the only disposition work the deleting PR
 owes**. Nine of the 26 are not per-method `OVERRIDE` entries: their row is derived from the group
-default, which is *why* they still have a target — do **not** overwrite it with `DISCARDED`.
+default — **six of those nine derive a target** (`capture_session`, `commit_session`,
+`get_org_structure`, `traverse`, `index_file`, `operator_action`) and **three derive `DISCARDED`**
+(the `invitation_*` trio). So **do not stamp a `DISCARDED` target on the six**: that would overwrite a
+recorded fold such as `capture_session → mine_knowledge_from_session`.
 
 ## The work order for the deleting PR — obey this document exactly, or CI reds
 
@@ -194,12 +197,24 @@ will not find. All of these land **in the same commit**:
 
 - **`tools/sdk_rename_table.py`** — **17** of the 26 are per-method `OVERRIDE` keys: delete the key
   with the method. The other nine derive their row from the group default, so they need no key
-  change — **and must not be given a `DISCARDED` stamp**, which would overwrite a recorded fold such
-  as `capture_session → mine_knowledge_from_session`.
-- **`docs/product/sdk-rename-table.md` is generated** — it is rewritten by running the tool without
-  `--check`, and that regenerated copy is committed. (As of 2026-10-27 the committed copy is already
-  stale on `main`, so `--check` reports `DRIFT` before any deletion is made; do not read that red as
-  your own.)
+  change — **and the six of them that derive a target must not be given a `DISCARDED` stamp**, which
+  would overwrite a recorded fold such as `capture_session → mine_knowledge_from_session`.
+- **`tools/sdk_surface.py`** — run it to regenerate `config/sdk-surface.json` **and**
+  `docs/product/sdk-surface-declaration.md`. `tools/sdk_surface.py --check` runs unconditionally in
+  the required `docs` context and reds on a stale declaration *and* on stale doc text;
+  `tests/test_sdk_surface.py` pins `DECLARED_COUNT = 150`, `tests/test_surface_manifest.py` pins
+  `sdk == 150`, and this document itself says *"`config/surface-manifest.yml` declares **150** public
+  methods"* — all three go with it.
+- **`tests/test_sdk_rename_table.py`** — beyond the name literals, its **count pins** go: the
+  150-entry `TARGETS_LITERAL` / `ROW_CITE_LITERAL` dicts (asserted by equality),
+  `assert len(rows) == 150`, `assert ordinals == list(range(1, 151))`, and the prose pins
+  *"150 public methods"*, *"109 of the 150 are renames"*, *"25 are discarded"*, *"3 have no
+  destination"*. Those four numbers become **124 / 95 / 14 / 2** after deleting the 26.
+- **`docs/product/sdk-rename-table.md` is NOT in the tree — do not commit it.** It was
+  **de-committed on purpose in #5373** (".gitignore" line for it; `git ls-tree` has no such path), and
+  the gate renders it to a temp path. `tools/sdk_rename_table.py --check` printing `DRIFT` today is
+  **not** a stale committed copy — it is the tool finding no `--out` file to compare, because the
+  file does not exist. Ignore that line; `git add -f` on it would recreate the conflict #5373 removed.
 - **`docs/product/canonical-sdk-methods.md`** — all 26 are members of its canonical partition, and
   some carry evidence links there. Removing them is required (otherwise `tools/sdk_rename_table.py
   check` reports `STALE canonical member`).
