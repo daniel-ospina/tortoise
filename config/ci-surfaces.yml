@@ -1900,6 +1900,15 @@ surfaces:
   # exits 1 with `manifest drift: ['test_9391_replay_window_raw_query_width.py']`,
   # and `fast_pool()` is manifest-derived, so the pins would run in NO leg.
   - test_9391_replay_window_raw_query_width.py
+  # #10121: the recency tie every ranking leg shares. `core` is the right arm
+  # for the same reason the rows above state — the file pins
+  # `tortoise/search_engine.py` (a SHARED_MODULE, so a diff to it already runs
+  # the full matrix) and `tortoise/bm25.py`; both fall through to `core`, and
+  # the subject is the read funnel every surface uses. Without this row
+  # `python3 tools/ci_selection.py --integrity` exits 1 with
+  # `manifest drift: ['test_10121_recency_tie.py']`, and `fast_pool()` is
+  # manifest-derived, so the pins would run in NO leg.
+  - test_10121_recency_tie.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
