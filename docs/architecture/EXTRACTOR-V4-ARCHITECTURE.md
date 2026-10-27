@@ -676,7 +676,7 @@ unfirable (block at the top of §10).
 | **A mechanical kNN fast path** → margin gate → `nearMisses` rerank → **batched LLM only for the low-margin tail** | `#1695` |
 | **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:4467` / `:4492`, called at `:4803` and `:4888` |
 | **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:512`, `:4656` |
-| **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser | `kind_classifier.py:93`, `:309` |
+| **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser — ✅ **now built, OFF by default: `s2_decision_seam.classify_decider` replaces the tail's DECISION SOURCE via `KindClassifier(tail_decider=…)`** | `kind_classifier.py:93`, `:309`; `s2_decision_seam.py` (`#5087`) |
 
 **⇒ The step is `TORTOISE_CLASSIFY_LATER=1`, off by default.** Three things are wrong with its current placement, and they are the actual work:
 
@@ -812,6 +812,14 @@ S6  COMMIT
 
 #### ✅ Jev for classification is cheap — but ⚠️ `llm_tail` is not the seam
 
+> **STATUS (2026-10-26, `#5087`): the seam now EXISTS — internal, and OFF by default.**
+> `tortoise/s2_decision_seam.py` is the adapter + the two versioned prompts (`vet-v1`,
+> `classify-v1`) + the validating parser; it is consumed through the seams that already
+> existed (`vet_gate.vet_candidates(arbiter=…)`, `kind_classifier.KindClassifier(tail_decider=…)`)
+> and armed only by `TORTOISE_S2_DECISION_SEAM`. **What it does, what it deliberately does not
+> do, and its measured cost per call: `docs/architecture/S2-DECISION-SEAM.md`.** The paragraph
+> below is kept as the record of *why* the seam was needed, not as its current status.
+
 **Classification is exactly ONE question** — a `Choice` over the supplied kinds. Measured Jev cost: **$0.000144 at 1 question** (`$0.000194` at 2q, `$0.000243` at 3q) — **~4–7× cheaper than a frontier model**, not the vendor's claimed 40–400×.
 
 **⚠️ But the bigger saving is that most items never reach Jev at all.** The kNN + margin fast path covers the easy majority with **no model call**; only the **low-margin tail** is batched. So Jev's cost is bounded by the **tail size, not the item count**:
@@ -862,7 +870,7 @@ S6  COMMIT
 
 **The evidence bar and the arbiter (proposed).** A row is eligible only when it is **unreferenced** (`ref_count == 0`; an unreadable count is never zero — `dd.ref_count.unreadable`) **and** positively classified as a definite description (`dd.reclassify.bare_definite`) **and** arbitrated by **Jev over the row plus its narrative span** — §16.4 O4's arbiter. **Never a name pattern and never a bare reference count:** measured on the live graph 2026-09-25 (`#5059`), **≈52% of the `the <X>` rows are load-bearing** (2,570 of 4,901), so a bare name-pattern delete carries **≈48% precision on an irreversible delete** — worse than a coin flip — and 11 of the 12 most-referenced Objects match a drop pattern.
 
-⚠️ **The bar is not buildable today, and that is a second gate behind the ruling.** The Jev seam does not exist: the classifier's `llm_tail` is a hardcoded prompt and a JSON parser, so swapping Jev in *"requires an adapter, a prompt, and a parser"* (§4.2). Authorising the pass buys a two-part job, not a flag.
+⚠️ **The bar is not buildable today, and that is a second gate behind the ruling.** The Jev seam did not exist when this paragraph was written: the classifier's `llm_tail` is a hardcoded prompt and a JSON parser, so swapping Jev in *"requires an adapter, a prompt, and a parser"* (§4.2). **That adapter now EXISTS (`#5087`, `tortoise/s2_decision_seam.py`, OFF by default — `docs/architecture/S2-DECISION-SEAM.md`)**, so what authorising this pass still buys is the *evidence bar* (unreferenced + positively bare-definite + arbitrated over the row **and its narrative span**) and the relocation itself — **not** the seam. The ruling this paragraph sits behind is unchanged and is still the owner's.
 
 **What a user is told (proposed).** Reported, never silent: the row keeps its id, the report names the rule id and the statement the row was judged by, and the reversal is a journaled status write back to the value the journal already holds — the `#4899` counterfactual contract applied to a row that already exists. A row that cannot be positively classified stays `REPORT` and is never relocated — the **§4.4** per-step FAILURE POLICY form (`#8495`) of the S3 `HOLD` direction, applied here to the relocation pass. It is stated as a **proposal**: §4.4 declares the policy for the **eight** pipeline steps (§4.1's canonical set), so this is the same rule carried over, **not a ninth declaration**.
 
@@ -1093,7 +1101,7 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 |---|---|
 | **`Projection`** — a **two-method** event-sourced Protocol (`apply`, `rebuild`) with `InMemoryProjection` as an existing second implementation | `tortoise/projection/__init__.py` |
 | **`classify_consolidation`** — pure, no LLM, no graph I/O, post-extraction/pre-write; emits `noops`/`deletions` on a channel not written to the graph | `tortoise/extractor_v2.py` (E7/`#1539`) |
-| **`KindClassifier`** — kNN top-5 → margin gate → `nearMisses` rerank (no LLM) → batched LLM for the low-margin tail → fail-open + census. ⚠️ **Jev does NOT slot into its LLM tail**: the tail is a **hardcoded prompt + a JSON parser** and `llm_tail` is a **boolean** (`kind_classifier.py:93`), so the swap needs **an adapter, a prompt, and a parser** (§4.2). | `tortoise/kind_classifier.py` (`#1695`) |
+| **`KindClassifier`** — kNN top-5 → margin gate → `nearMisses` rerank (no LLM) → batched LLM for the low-margin tail → fail-open + census. ✅ The tail's **decision source** is injectable (`tail_decider=…`, `#5087`, OFF by default): `s2_decision_seam.classify_tail` is the adapter + prompt + parser this row used to say did not exist. `llm_tail` remains the boolean switch for *whether* the tail runs at all — it is not the seam, and swapping the decider changes nothing about it (§4.2). | `tortoise/kind_classifier.py` (`#1695`) |
 | **S2/S4 merge** | `merge_embed_lists` (def `extractor_v2.py:2284`; **called at `:4845`**) |
 | **Pack enforcement machinery** — `chains` with `enforcement` levels, `nearMisses`, `subclassOf`, `equivalentTo`, `extraction.sourceTypes` | `packs/*/manifest.yaml`; 20+ files reference each |
 | **The narrative prompt slot** — S1's granularity rule is injected here | `_granularity_text()` |

@@ -128,18 +128,48 @@ def test_prompt_digest_covers_the_vet_switch(monkeypatch):
     assert runner.extractor_prompt_digest() != off
 
 
+def test_prompt_digest_covers_the_seam_and_value_gate_switches(monkeypatch):
+    """#5087: ``TORTOISE_S2_DECISION_SEAM`` arms S2.2 (it IS the arbiter) and the
+    S2.3 tail, so it changes extraction output; ``TORTOISE_VALUE_GATE`` removes
+    identifier-only candidates outright. Either one toggled between QA cycles
+    with the digest unchanged serves the other arm's cached graph — the
+    silent-stale-HIT bug the tuple's docstring forbids."""
+    for flag in ("TORTOISE_S2_DECISION_SEAM", "TORTOISE_VALUE_GATE"):
+        monkeypatch.delenv(flag, raising=False)
+        off = runner.extractor_prompt_digest()
+        monkeypatch.setenv(flag, "1")
+        assert runner.extractor_prompt_digest() != off, (
+            f"{flag} changes extraction output but does not move the ingest "
+            f"fingerprint — a cached graph would be reused across the two arms")
+        monkeypatch.delenv(flag, raising=False)
+
+
 def test_prompt_digest_knobs_are_names_the_extractor_reads():
     """The tuple rotted once — it listed ``TORTOISE_LABEL_SEED`` while the
     extractor reads ``TORTOISE_LABEL_ORDER_SEED``, so the shuffle seed sat
     silently outside the fingerprint. Pin every
-    entry to a name the extractor source actually contains: a dead entry is
-    exactly the maintenance failure that leaks a stale cache hit."""
+    entry to a name some module on the extractor's own gate path actually
+    contains: a dead entry is exactly the maintenance failure that leaks a
+    stale cache hit.
+
+    The corpus is the extractor PLUS the gate modules it delegates those
+    switches to: ``value_gate`` owns ``TORTOISE_VALUE_GATE`` and
+    ``s2_decision_seam`` owns ``TORTOISE_S2_DECISION_SEAM``. Only the former is a
+    string absent from ``extractor_v2`` entirely (the seam flag happens to appear
+    there in docstrings, which a substring check counts) — but that accident is
+    not something to rely on, and reading only ``extractor_v2`` would have
+    false-red'd a correct ``TORTOISE_VALUE_GATE`` addition, which is how that gap
+    survived this long.
+    """
     import inspect
 
     from tortoise import extractor_v2 as v2
-    src = inspect.getsource(v2)
+    from tortoise import kind_classifier, s2_decision_seam, value_gate, vet_gate
+
+    src = "".join(inspect.getsource(m) for m in (
+        v2, vet_gate, value_gate, kind_classifier, s2_decision_seam))
     dead = [n for n in runner.INGEST_CACHE_PROMPT_ENVS if n not in src]
-    assert not dead, f"dead digest knob(s) not read by extractor_v2: {dead}"
+    assert not dead, f"dead digest knob(s) not read by the extractor's gate path: {dead}"
 
 
 def test_ingest_fingerprint_sensitive_to_every_input(tmp_path):

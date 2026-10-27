@@ -4725,6 +4725,15 @@ surfaces:
   # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
   # sibling `test_vet_gate_5005.py` because it guards the same seam.
   - test_value_gate_4899.py
+  # #5087: the S2.2/S2.3 typed-decision seam (`tortoise/s2_decision_seam.py` —
+  # the adapter + `vet-v1`/`classify-v1` + the validating parser) and its TWO
+  # call sites (`_vet_enabled`/`_run_vet_pass` in `extractor_v2.py`,
+  # `KindClassifier(tail_decider=…)`). Registered beside its S2.2 siblings
+  # because it guards the same seam from the model side; `core` is also the lane
+  # a diff to the new module falls through to (it matches no SOURCE_PATTERNS
+  # entry), so this membership is what makes `--integrity` able to classify the
+  # file at all. Graph-free and DB-free (stub transport, stub encoder).
+  - test_s2_decision_seam_5087.py
   # #5008: the S5 EMBED gate — `tortoise/embed_gate.py` (the predicate, whose
   # rule set IS `tortoise/value_gate.py`'s: one rule set, two questions,
   # `STORAGE-ARCHITECTURE.md` §12.2a) plus its submission seam

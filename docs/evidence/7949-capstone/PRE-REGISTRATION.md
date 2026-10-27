@@ -235,10 +235,13 @@ reported once, on the full 7-session replay. It has no TUNE/HELD-OUT reading and
 environments are recorded in the evidence log:
 
 - **CONTROL (before):** the selection flags unset — `TORTOISE_VET`, `TORTOISE_VALUE_GATE`,
-  `TORTOISE_CLASSIFY_LATER` all absent (their default is OFF, `tortoise/extractor_v2.py:88-89`).
+  `TORTOISE_CLASSIFY_LATER` and `TORTOISE_S2_DECISION_SEAM` all absent (their default is OFF,
+  `tortoise/extractor_v2.py:88-89`; the fourth is #5087's typed-decision seam, which arms S2.2
+  unconditionally because it IS the arbiter).
 - **TREATMENT (after):** the selection arm as the capstone run configures it. Whatever seam the epic
   lands before the run, the two arms' environment dicts **may differ only in keys matching
-  `TORTOISE_(VET|VALUE_GATE|CLASSIFY_LATER|SALIENCE.*|DD_.*|SELECT.*)`**; a difference outside that
+  `TORTOISE_(VET|VALUE_GATE|CLASSIFY_LATER|S2_DECISION_SEAM|SALIENCE.*|DD_.*|SELECT.*)`**; a
+  difference outside that
   set means the comparison is not of the selection change and the run is **refused**.
 
 **Counts, not rates, when the denominator is small.** A denominator below its stated floor makes a

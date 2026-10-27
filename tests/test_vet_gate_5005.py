@@ -216,6 +216,34 @@ def test_arbiter_raising_fails_open_and_warns():
     assert new["entities"] == el["entities"]
 
 
+def test_arbiter_raising_does_not_undo_a_mechanical_discard(monkeypatch):
+    """The raise path decides NOTHING — it must not undo what the gate decided.
+
+    ``verdicts = {}`` in the arbiter's ``except`` branch means no verdict is
+    APPLIED, so a mechanical ``#4899`` ``DISCARD`` already sitting in
+    ``decisions`` stands. The warning here used to claim
+    "all N candidate(s) kept (fail-open)", i.e. the opposite of what the code
+    does — a false record in the one artifact an operator reads after an
+    arbiter outage, and a misdescription of the fail-CLOSED direction the gate
+    exists for (#10072 review). Both directions are pinned: the DISCARD
+    survives AND the warning counts it.
+    """
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+
+    def boom(_cands, _story):
+        raise RuntimeError("vendor down")
+
+    # identifier-only (commit hash) ⇒ the mechanical #4899 predicate discards it
+    el = _cand("a1b2c3d4e5f6a7b8c9d0")
+    out = vg.vet_candidates(el, narrative="n", arbiter=boom)
+    assert {d["outcome"] for d in out["decisions"].values()} == {vg.DISCARD}, (
+        "a raising arbiter must not undo the gate's own mechanical DISCARD — "
+        f"got {out['decisions']}")
+    assert any("1 DISCARD of 1 candidate(s)" in w for w in out["warnings"]), (
+        "the warning must NAME what survived, not claim a keep that did not "
+        f"happen — got {out['warnings']}")
+
+
 def test_unknown_outcome_and_missing_verdict_fail_open():
     el = _cand("the plan doc")
 
@@ -1377,7 +1405,14 @@ def _discard(cands, _story):
 
 
 def test_flag_off_is_off_path(monkeypatch):
+    # ALL THREE S2.2 switches, not the one this test is named for: `vet_enabled`
+    # ORs `TORTOISE_VET`, `TORTOISE_VALUE_GATE` and — since #5087 —
+    # `TORTOISE_S2_DECISION_SEAM`, so a leftover ambient value arms the pass
+    # inside the state this test calls OFF. Deleting only `TORTOISE_VET` reds
+    # this test for an operator who armed either of the other two.
     monkeypatch.delenv("TORTOISE_VET", raising=False)
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    monkeypatch.delenv("TORTOISE_S2_DECISION_SEAM", raising=False)
     from tortoise import extractor_v2 as v2
     out = v2.extract_session_v2(_Model(), _conv())
     assert out["vet"] == {"enabled": False, "s2": {}, "union": {}}
@@ -1404,7 +1439,11 @@ def test_flag_on_removes_discarded_candidate_before_the_tail(monkeypatch):
 
 
 def test_flag_on_without_arbiter_changes_nothing(monkeypatch):
+    # The seam flag is a second ARBITER SUPPLIER (#5087): leaving it ambient
+    # turns the union's `arbiter` from "none" to "present", which is the very
+    # fact this test asserts about `TORTOISE_VET` alone.
     monkeypatch.setenv("TORTOISE_VET", "1")
+    monkeypatch.delenv("TORTOISE_S2_DECISION_SEAM", raising=False)
     from tortoise import extractor_v2 as v2
     out = v2.extract_session_v2(_Model(), _conv())
     assert out["vet"]["enabled"] is True

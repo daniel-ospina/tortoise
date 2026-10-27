@@ -405,7 +405,14 @@ mechanics** — pre-filter, batching, thresholds, caching, and fail-closed degra
 not let the model's probability *be* the verdict: the threshold band, the cache identity, and the
 failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
 
-- **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
+- **In-repo use:** ✅ **one, internal and OFF by default** — `tortoise/s2_decision_seam.py` (`#5087`)
+  is the S2.2/S2.3 seam: `vet-v1` (`noul` + `score` per candidate) and `classify-v1` (a `choice`
+  over the kinds the kNN offered), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
+  `vet_gate.vet_candidates(arbiter=…)` and `KindClassifier(tail_decider=…)`. That flag arms S2.2
+  unconditionally (it overrides an explicit `TORTOISE_VET=0`, because the seam *is* the arbiter) and
+  arms S2.3 only where a `KindClassifier` is built (`TORTOISE_CLASSIFY_LATER=1`). What it does, what
+  it does not do, and its measured cost: `docs/architecture/S2-DECISION-SEAM.md`. **Do not rebuild it.**
+  ⛔ **The previous use is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
   lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0` (the pin
   survives the move: the fleet's DEPLOYED callers send that same version to `api.typesafe.ai`, and the
@@ -418,18 +425,16 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   is gone — `lane_live_map` folds a terminal workspace to dead even then, so the gate reads the pid
   directly). The reasons are recorded in that module's docstring under "Claim gate —
   the HOLDER, never prose"; the short version is that a **probability that only the caller can
-  interpret is not a mechanical answer**, and this gate needs one. The capability itself is
-  unchanged and still shared; the extraction journey is its next consumer, and it must
-  **build** the seam — `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §"✅ Jev for
-  classification is cheap — but ⚠️ the seam does **NOT** yet exist" (S2.2/S2.3): wiring it
-  "requires an adapter, a prompt, and a parser … it is work, not a config flag."
+  interpret is not a mechanical answer**, and this gate needs one.
 - **When a caller does wire it:** the request shape is pinned by the caller and verified against the
   live endpoint — it is deliberately NOT restated here. A shape copied out of prose is how the next
   caller gets a 400 that blames its own code; copy the working construction in the caller instead
   (#7866 is the open finding on that shape).
 - **Rationale and JEV's decision-only properties:** `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
-  (§"✅ Jev for classification is cheap — but ⚠️ the seam does **NOT** yet exist"; the extraction
-  journey's S2.2/S2.3 is where that seam would be built) — not this file.
+  §"✅ Jev for classification is cheap — but ⚠️ `llm_tail` is not the seam" (the live rationale), and
+  `docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md` §"… the seam does NOT yet exist" — kept as
+  the record of *why* the seam was needed; the seam itself is built, see
+  `docs/architecture/S2-DECISION-SEAM.md` — not this file.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
