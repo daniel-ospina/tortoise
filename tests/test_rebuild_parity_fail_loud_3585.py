@@ -2283,7 +2283,10 @@ def test_journal_object_established_counts_every_address_and_separates_ids():
     assert names == frozenset({"KNOWN", "MENTIONED", "RENAMED"}), names
     assert "POINT-NAME" not in names, (
         "a Point rename is not an Object name — the label gate is load-bearing")
-    assert ids == frozenset({"o-1", "o-2"}), ids
+    assert ids == frozenset({"o-1", "o-2",
+                             _entity_name_id("Object", "MENTIONED")}), (
+        "a mention stub's DETERMINISTIC id is established too, not just its "
+        f"name: {ids}")
     assert "" not in names, names
 
 
@@ -2372,6 +2375,34 @@ def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
         f"the exemption widened past its bound: {ei.value}")
     r = check_consistency(str(events / "events.jsonl"), proj)
     assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+
+
+def test_mention_stub_id_with_an_unestablished_name_still_refuses(env):
+    """#10107 review P1 (round 4): the mention stub's deterministic ID is an
+    established id, so a record carrying it must not be exempted on a name.
+
+    FAILS IF: the id limb is populated from `ObjectRegistered` alone. A
+    mention mints the stub with `id = entity_name_id("Object", name)` written
+    `ON CREATE`, and a later registration can re-id that node — so at sweep
+    time `Sup(id=<stub id>, name=<nothing established>)` misses BOTH ways, yet
+    `rebuild()` folded it at the record's own seq when the stub still carried
+    that id. One journal, two graphs, opposite verdicts; `main` refused.
+    """
+    sdk, events = env
+    _raw(events, type="EventRecorded", id="e-ms-1", eventKind="k",
+         object="ACME-MS", event_id="e-ms-rec")
+    _raw(events, type="ObjectSuperseded",
+         id=_entity_name_id("Object", "ACME-MS"), name="GHOST-MS",
+         supersedes_by="y", event_id="e-ms-sup")
+    _raw(events, type="ObjectRegistered", id="obj-real-ms", name="ACME-MS",
+         status="live", event_id="e-ms-reg")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), (
+        "the mention stub's established id was exempted because the record's "
+        f"NAME was unestablished: {ei.value}")
 
 
 def test_mention_established_then_deleted_name_still_refuses(env):

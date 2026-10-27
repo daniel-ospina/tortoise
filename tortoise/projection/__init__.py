@@ -8981,7 +8981,21 @@ def journal_object_surviving_keys(
     return frozenset(id_to_name), frozenset(name_to_ids)
 
 
-def journal_object_established(events) -> tuple[frozenset[str], frozenset[str]]:
+class JournalObjectEstablished(NamedTuple):
+    """``(names, ids)`` the journal ESTABLISHES for Objects — the #3590 D2
+    addressability oracle's return type.
+
+    A NAMED tuple, deliberately: :func:`journal_object_surviving_keys` returns
+    the same pair in the OPPOSITE order, and a positional 2-tuple let a future
+    caller mix the two silently (#10107 review P3). Attribute access makes the
+    halves unambiguous.
+    """
+
+    names: frozenset[str]
+    ids: frozenset[str]
+
+
+def journal_object_established(events) -> JournalObjectEstablished:
     """``(names, ids)`` of every Object the journal ESTABLISHES — the
     addressability oracle for the #3590 D2 exemption.
 
@@ -9039,15 +9053,25 @@ def journal_object_established(events) -> tuple[frozenset[str], frozenset[str]]:
             state = ev.get("state")
             name = state.get("name") if isinstance(state, dict) else None
         elif t == "EventRecorded":
-            names.update(
-                stub for stub_label, stub in _event_mentioned_name_stubs(ev)
-                if stub_label == "Object")
+            for stub_label, stub in _event_mentioned_name_stubs(ev):
+                if stub_label != "Object" or not stub:
+                    continue
+                names.add(stub)
+                # The stub's DETERMINISTIC id is established too, not just the
+                # name: `_event_plain_merge` writes it `ON CREATE`, so a record
+                # carrying that id IS addressable (the same id
+                # `journal_object_surviving_keys` counts as a carrier). Missing
+                # it exempted a record `rebuild()` folds — one journal, two
+                # graphs, opposite verdicts (#10107 review P1).
+                stub_id = _entity_name_id("Object", stub)
+                if isinstance(stub_id, str) and stub_id:
+                    ids.add(stub_id)
             continue
         else:
             continue
         if isinstance(name, str) and name:
             names.add(name)
-    return frozenset(names), frozenset(ids)
+    return JournalObjectEstablished(frozenset(names), frozenset(ids))
 
 
 def _supersede_name_unregistered(ev: dict, established) -> bool:
@@ -12573,8 +12597,9 @@ class FalkorProjection(
         # forward reference (which ``rebuild_all``'s deferred sweep folds).
         journal_object_surviving = journal_object_surviving_keys(events)
         # #3590 D2: the journal's own addressability oracle, the sibling of the
-        # pair above — `apply()` exempts a supersede whose target NAME the
-        # journal never registered, and refuses one it did.
+        # pair above — `apply()` exempts a supersede only when NEITHER limb of
+        # its identity is established (the name by registration / rename /
+        # mention, AND the id), and refuses one where either was.
         object_established = journal_object_established(events)
         # #7719: the object-delete set is derived from the GATED map, judged by
         # the shared ``_hard_deleted_any``: an anchor-suppressed delete does not
@@ -14433,9 +14458,9 @@ class FalkorProjection(
         # nothing) for a forward reference, while a target that was created and
         # then HARD-DELETED (first <= seq) still attempts the fold and refuses.
         first_materialized = journal_first_materialization(events)
-        # #3590 D2: the journal's OWN addressability oracle for an id-less
-        # supersede (see `journal_object_established`). Computed once for
-        # the whole journal, like the other whole-journal maps above.
+        # #3590 D2: the journal's OWN addressability oracle for a supersede
+        # (see `journal_object_established`) — BOTH limbs, name and id.
+        # Computed once for the whole journal, like the other maps above.
         object_established = journal_object_established(events)
         # #7936 review: the ORDERED creation/hard-delete boundary for the
         # BELIEF gate. Pass 1a hoists every Point/Operator creation, so a
