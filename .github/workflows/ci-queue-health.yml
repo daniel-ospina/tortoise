@@ -89,20 +89,37 @@ jobs:
   # cannot block a merge — see the header.
   queue-health:
     # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
-    # `ubuntu-latest` is served by the repo's SELF-HOSTED pool (the runners
-    # advertise that label), so a job written `runs-on: ubuntu-latest` waits
-    # behind every test shard in the fleet. That is wrong for a workflow whose
-    # job is to WATCH or GOVERN that pool: measured 2026-10-27, 9/9 runners
-    # busy and 78 runs queued, `ci-queue-health` completed 1 of its last 8
-    # scheduled runs (6 cancelled, 1 pending) — the guard was starved by the
-    # condition it exists to relieve, so #9115's flood-trimming could not fire.
-    # Two independent reasons a tick is lost: it competes for the same slots,
-    # and GitHub keeps only ONE pending run per concurrency group, so each
-    # 10-minute tick cancels the previous PENDING one while it waits.
+    # `ubuntu-latest` is served by BOTH GitHub-hosted runners AND this repo's
+    # self-hosted pool (the pool advertises that label), and measured over these
+    # observer workflows' own scheduled runs, 23 of 35 jobs went to hosted and 8
+    # to the pool. So the pin is not "escape a queue that is always the pool";
+    # it removes the arm that FAILS.
+    #
+    # The pool arm does not starve — it HANGS. Both jobs that landed there died
+    # in `actions/checkout` and were killed at this job's `timeout-minutes: 10`
+    # with the measuring step SKIPPED, which reads as a finished run that
+    # measured nothing:
+    #     run 40456347720 → pi-runner-vm-2: checkout 8m40s, then cancelled
+    #     run 40451686065 → pi-runner-vm-4: checkout 4m41s, then cancelled
+    # (same day: 9/9 runners busy, 78 runs queued, and `ci-queue-health`
+    # completed 1 of its last 8 scheduled runs — 6 cancelled, 1 pending.)
+    #
+    # ⛔ THE PIN IS NOT A COMPLETE FIX, and this comment must not read as one.
+    # Hosted is queued too: 18 jobs were waiting on `ubuntu-24.04` with a max
+    # wait of 56m, and one `ci-queue-health` run spent 65 minutes on a hosted
+    # runner to do 15 seconds of work. GitHub keeps only ONE pending run per
+    # concurrency group, so while a wait exceeds this workflow's cadence each
+    # tick still cancels the previous PENDING tick. The pin removes the arm that
+    # hangs and usually serves in minutes; the cadence/concurrency question stays
+    # open and is tracked separately.
+    #
     # `ubuntu-24.04` is HOSTED-ONLY here — verified live: all nine runners
-    # advertise `ubuntu-latest` and none advertises `ubuntu-24.04`, and
-    # `tests/test_ci_runner_x64_install.py` fails if the pool starts claiming
-    # it. Public repo, so hosted minutes are free: this spends no money.
+    # advertise `ubuntu-latest` and NONE advertises `ubuntu-24.04`; the
+    # installer's `resolve_labels()` can emit only `self-hosted-x64` or
+    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh, and
+    # docs/ops/ci-runner-x64.md:26 records the same rule), and
+    # `tests/test_ci_runner_x64_install.py:127` asserts it. Public repo, so
+    # hosted minutes are free: this spends nothing.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

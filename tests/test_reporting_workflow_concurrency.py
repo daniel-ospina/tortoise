@@ -4260,21 +4260,53 @@ def test_a_fleet_observer_runs_on_the_hosted_pin_not_the_pool_it_observes() -> N
             f"governor of the runner pool must run on the HOSTED-only pin "
             f"({HOSTED_ONLY_PIN!r}) — `ubuntu-latest` is served by the "
             f"self-hosted pool this repo fills with test shards, so the "
-            f"workflow waits behind the condition it exists to relieve "
-            f"(measured 2026-10-27: 9/9 runners busy, ci-queue-health completed "
-            f"1 of its last 8 scheduled runs). Public repo: hosted is free.")
+            f"arm that FAILS: `ubuntu-latest` is served by both, and the jobs "
+            f"that land on the pool hung in `actions/checkout` (8m40s, 4m41s) "
+            f"until the job's own timeout killed them with the measuring step "
+            f"SKIPPED (measured 2026-10-27; same day ci-queue-health completed 1 "
+            f"of its last 8 scheduled runs). Public repo: hosted is free.")
 
 
-def test_the_hosted_pin_stays_out_of_the_pools_label_set() -> None:
-    """The pin only works while the pool cannot claim `ubuntu-24.04`.
+def _runs_on_labels(job: dict) -> set[str]:
+    """Every label string a job's ``runs-on`` names, in either legal form.
 
-    The BEHAVIOURAL half is owned by `tests/test_ci_runner_x64_install.py:127`,
-    which asserts the installer's own label output never contains
-    `self-hosted-arm64`, `ARM64`, `ubuntu-24.04` or `ubuntu-22.04`. That test is
-    cited here rather than duplicated, and this one asserts the thing that test
-    cannot see: that the observer roster above is still pinning a label which is
-    NOT the fallback label the pool is allowed to advertise. Pinning the pool's
-    own fallback label would be the same starvation with extra steps.
+    ``runs-on`` may be a string, a list of strings, or a mapping with a
+    ``labels`` key. Flattening it here is the point of this helper: a reviewer
+    measured that the first version put ``runs-on`` into a SET directly, so the
+    legal list form died of ``TypeError: unhashable type: 'list'`` — a traceback
+    from the comparison instead of the assertion message written for exactly
+    that case, which fails closed but tells the reader nothing.
+    """
+    raw = job.get("runs-on")
+    if isinstance(raw, str):
+        return {raw}
+    if isinstance(raw, list):
+        return {item for item in raw if isinstance(item, str)}
+    if isinstance(raw, dict):
+        labels = raw.get("labels")
+        if isinstance(labels, str):
+            return {labels}
+        if isinstance(labels, list):
+            return {item for item in labels if isinstance(item, str)}
+    return set()
+
+
+def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() -> None:
+    """A structural cross-check on the pin, in every legal ``runs-on`` spelling.
+
+    This is NOT a second safety net for the pin — ``test_a_fleet_observer_runs_
+    on_the_hosted_pin_not_the_pool_it_observes`` owns that, and since each of
+    these workflows has exactly one job, a reviewer correctly measured that no
+    repo mutation reds this test ALONE. What it adds is shape coverage the pin
+    test cannot express: it reads ``runs-on`` through a flattening helper, so a
+    job written ``runs-on: [self-hosted, ubuntu-latest]`` (legal, satisfies
+    nothing this PR wants, and equal to no single string) is reported by name
+    here instead of crashing the other test's set comprehension.
+
+    The pool's fallback label is ``ubuntu-latest`` — the installer's
+    ``resolve_labels()`` attaches it deliberately (``self-hosted-x64,ubuntu-
+    latest``), so carrying it on an observer job is the starvation this PR
+    removes, however it is spelled.
     """
     pool_fallback_label = "ubuntu-latest"
     assert pool_fallback_label != HOSTED_ONLY_PIN, (
@@ -4284,15 +4316,18 @@ def test_the_hosted_pin_stays_out_of_the_pools_label_set() -> None:
     )
     for name in FLEET_OBSERVER_WORKFLOWS:
         doc = _load(WORKFLOW_DIR / name)
-        seen = {
-            job.get("runs-on")
-            for job in doc["jobs"].values()
-            if isinstance(job, dict)
-        }
-        assert pool_fallback_label not in seen, (
-            f"{name} still carries `{pool_fallback_label}` on a job — every job "
-            f"of an observer workflow must pin the hosted-only label"
-        )
+        for job_id, job in doc["jobs"].items():
+            assert isinstance(job, dict), f"{name}:{job_id} is not a mapping"
+            labels = _runs_on_labels(job)
+            assert pool_fallback_label not in labels, (
+                f"{name}:{job_id} names `{pool_fallback_label}` in runs-on "
+                f"({sorted(labels)}) — an observer job must not accept the "
+                f"label the self-hosted pool advertises"
+            )
+            assert labels, (
+                f"{name}:{job_id} has an unreadable runs-on value "
+                f"({job.get('runs-on')!r}) — this check cannot see what it pins"
+            )
 
 
 def test_a_fleet_observer_pin_is_asserted_not_merely_written() -> None:
@@ -4301,3 +4336,43 @@ def test_a_fleet_observer_pin_is_asserted_not_merely_written() -> None:
         "the observer roster shrank — if a workflow was renamed, update the "
         "roster rather than deleting its entry, or the pin stops being checked"
     )
+
+
+def test_a_workflow_edit_keeps_its_steps() -> None:
+    """A comment edit must not eat the workflow it annotates.
+
+    Measured while writing this very PR: a note-splice written
+    ``s[:i] + NEW_NOTE + RUNS_ON`` (no ``s[j:]``) silently DELETED everything
+    below ``runs-on:`` — ``timeout-minutes``, ``env`` and every step — in four
+    workflows. Every check that existed still passed: the YAML blocks that
+    remained still parsed, and the pin test still read the pinned label from a
+    file that no longer did anything. `availability-watchdog.yml` went from 275
+    lines to 121 with a green suite.
+
+    So the pin above needs a companion that answers the question the pin cannot:
+    is the workflow still a workflow? Cheap invariants, checked on the four
+    observers (which is where the splice happened), not on all 40 files — a
+    step-count floor and the presence of the keys every job in this repo needs.
+    """
+    required_job_keys = {"runs-on", "steps"}
+    for name, job_id in FLEET_OBSERVER_WORKFLOWS.items():
+        doc = _load(WORKFLOW_DIR / name)
+        job = doc["jobs"][job_id]
+        missing = required_job_keys - set(job)
+        assert not missing, (
+            f"{name}:{job_id} is missing {sorted(missing)} — the job cannot run. "
+            f"A comment-only edit that drops keys below `runs-on:` reads as a "
+            f"successful edit to every other test in this file."
+        )
+        steps = job["steps"]
+        assert isinstance(steps, list) and len(steps) >= 2, (
+            f"{name}:{job_id} has {len(steps) if isinstance(steps, list) else 'no'} "
+            f"step(s) — an observer workflow has a checkout/setup step plus the "
+            f"step that does its job, so fewer than 2 means the body was cut."
+        )
+        # The step that makes each observer an observer, by the name this repo
+        # gives it. A truncated file loses it silently.
+        assert any(
+            isinstance(step, dict) and (step.get("name") or "")
+            for step in steps
+        ), f"{name}:{job_id} has anonymous steps only — its body was cut"
