@@ -166,7 +166,7 @@ protocol, and it stays ONE tool.** No tool is added, removed, or renamed; `torto
   `tests/test_dry_run_preview.py` re-pins the one tool whose DEFAULT path is now a preview.
 status: approved · principal: daniel-ospina · issue #9660 · date: 2026-10-25.
 
-**Amended 2026-10-27** (owner ruling in answer to the two questions posted on **#4282**, **PR #__PR__**):
+**Amended 2026-10-27** (owner ruling in answer to the two questions posted on **#4282**, **PR #10187**):
 **what may be deleted, and that a retiring tool does not need a no-replacement warning.** Both
 answers are **relayed verbatim by the lane that asked them, not posted by the owner** — the relay is
 comment `6451…` on #4282 (search the issue for *"cna re-use"*). Neither answer is a word in the
@@ -232,7 +232,7 @@ say `` `sdk.capture_session` `` in docstrings and comments, which kept 9 genuine
 imported from `tortoise/ids.py` — was reported as dead. The AST rule in the archive doc fixes both,
 and any deletion PR must use **34**.
 
-status: approved · principal: daniel-ospina · PR #__PR__ · date: 2026-10-27.
+status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 ## Principle: reads and writes never share a tool
 
