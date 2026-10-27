@@ -1214,10 +1214,11 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         spares `apikey_a1b2`. Both halves are asserted, the prose one included;
     (d) the separator tolerates a WHITESPACE wrap (a literal newline or spaces
         around the `_` — NOT an escaped `\n`, which is a different residual and is
-        asserted as such in (e)), and the second segment is OPTIONAL: a
-        TRUNCATED key (`apikey_<36 hex>_<16 hex>…`, what a compaction summary or a
-        display ellipsis leaves — present in the measured corpus) must not survive
-        in full;
+        asserted as such in (e)); the tail FLOOR (8) catches a TRUNCATED key
+        (`apikey_<36 hex>_<16 hex>…`, what a compaction summary or a display
+        ellipsis leaves — present in the measured corpus), and the second segment
+        being OPTIONAL is what catches the TAIL-ABSENT form (`apikey_<36 hex>`,
+        cut AT the separator) — two different cases, pinned separately;
     (e) the SPLIT shapes are recorded here rather than narrated in the rule's
         comment, so the record cannot drift from the behaviour.
     """
@@ -1270,6 +1271,16 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
             # redacted" failure. Pin the SEGMENT, not the string.
             assert hexes[:seg2] not in out, (
                 f"{seg1}/{seg2} hex: the SECOND SEGMENT survived in cleartext")
+
+    # …and the TAIL-ABSENT form: optionality is what catches `apikey_<36 hex>` with
+    # no separator at all, and it is pinned HERE because a required tail redacts
+    # every row above identically (a 16-hex tail is already above the floor). Its
+    # only other exercise is the linearity family, whose subject is speed.
+    bare_out, bare_counts = redact_secrets(f"key apikey_{first}")
+    assert first not in bare_out, (
+        "a tail-less key (`apikey_<36 hex>`, cut at the separator) survived — the "
+        "second segment is no longer optional")
+    assert bare_counts.get("typesafe_api_key") == 1, bare_counts
 
     # (c) prefix case-sensitivity, body case-insensitivity — the PREFIX is the
     # vendor's lowercase literal, the HEX is a mint we do not control

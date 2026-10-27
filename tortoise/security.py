@@ -974,9 +974,13 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # the worse failure, because the record looks redacted).
     # `\s*` around the separator follows the `jwt` precedent: this token is 108
     # chars and its separator is the one a terminal wrap is likely to split.
-    # The SECOND segment is OPTIONAL: a truncated key (`apikey_<36 hex>_<16 hex>…`,
-    # the shape a compaction summary or a display ellipsis leaves) must not survive
-    # in full, and it is present in the measured corpus. The vendor literal
+    # The SECOND segment is OPTIONAL, and what that buys is the TAIL-ABSENT form
+    # (`apikey_<36 hex>` with no separator at all — a cut at the separator, which a
+    # display ellipsis or a compaction summary produces). It is NOT what catches a
+    # truncated tail: `apikey_<36 hex>_<16 hex>` is above the tail FLOOR, so a
+    # required tail redacts it identically — the floor buys that case, the
+    # optionality buys the tail-less one. Both are asserted in
+    # `test_the_typesafe_rule_is_pinned_at_its_measured_shape`. The vendor literal
     # `apikey_` anchors the match tightly enough that a bare segment-1 form cannot
     # be ordinary prose — the class this module refuses to match is an UNANCHORED
     # hex run, not this one.
