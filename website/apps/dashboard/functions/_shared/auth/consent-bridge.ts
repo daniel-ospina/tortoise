@@ -67,24 +67,71 @@ export const NATIVE_REDIRECT_SCHEMES = ["cursor"] as const;
  * Loopback host, mirroring `tortoise/oauth.py::_is_loopback` (RFC 8252 §7.3).
  *
  * `new URL("http://[::1]:9/cb").hostname` is `"[::1]"` — WITH the brackets — so comparing it to
- * `"::1"` is dead code that refuses the RFC's own IPv6 example. `localhost` and the whole of
- * `127.0.0.0/8` are loopback; nothing else is.
+ * `"::1"` is dead code that refuses the RFC's own IPv6 example. `localhost`, all of `127.0.0.0/8`,
+ * and the IPv4-MAPPED IPv6 forms of that range are loopback; nothing else is.
+ *
+ * ⛔ THE MAPPED FORMS ARE NOT AN EDGE CASE. `ipaddress.ip_address("::ffff:127.0.0.1").is_loopback`
+ * is True, so the AS accepts such a redirect at REGISTRATION; a mirror that only knew `::1` would
+ * refuse it here — after the visitor had consented — which is exactly the failure this function
+ * exists to prevent. Both spellings (`::ffff:127.0.0.1` dotted, `::ffff:7f00:1` hex) appear.
  */
 export function isLoopbackHost(hostname: string): boolean {
   let host = hostname;
   if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
-  if (host.toLowerCase() === "localhost") return true;
-  if (host === "::1") return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  return v4 !== null && Number(v4[1]) === 127;
+  const lower = host.toLowerCase();
+  if (lower === "localhost") return true;
+  if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
+  const mapped = /^::ffff:(.+)$/.exec(lower);
+  if (mapped) {
+    const rest = mapped[1];
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) return ipv4Loopback(rest);
+    // `::ffff:7f00:1` — the same address in hex group form: the FIRST embedded octet decides.
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+    return hex !== null && parseInt(hex[1], 16) >> 8 === 127;
+  }
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(lower) && ipv4Loopback(lower);
+}
+
+function ipv4Loopback(host: string): boolean {
+  const parts = host.split(".").map(Number);
+  return parts.length === 4 && parts.every((p) => p >= 0 && p <= 255) && parts[0] === 127;
+}
+
+/**
+ * The HOST as WRITTEN in the uri's authority (port and userinfo removed), or `null` when the uri
+ * carries no explicit `//authority`.
+ *
+ * Needed because WHATWG and Python's `urlsplit` do not agree about every spelling: `new URL` fills
+ * an authority for a special scheme (`https:client.example/cb`), strips a trailing dot, and
+ * REWRITES `127.1` / `2130706433` / `0.0.0.0x7f000001` into `127.0.0.1` — while `urlsplit` reports
+ * each of those verbatim (so `_is_loopback` answers False and the AS REFUSES). A BFF that accepted
+ * one of them would advance a flow the AS then refuses.
+ */
+function rawAuthorityHost(uri: string): string | null {
+  const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/.exec(uri);
+  if (!m) return null;
+  let authority = m[1];
+  const at = authority.lastIndexOf("@");
+  if (at !== -1) authority = authority.slice(at + 1);
+  if (authority.startsWith("[")) {
+    const end = authority.indexOf("]");
+    return end === -1 ? null : authority.slice(0, end + 1);
+  }
+  const colon = authority.indexOf(":");
+  return colon === -1 ? authority : authority.slice(0, colon);
 }
 
 /**
  * Why a `redirect_uri` is unacceptable, or `null` when it is fine.
  *
- * A MIRROR of the AS's `_unsafe_redirect_uri_bytes` + `_valid_redirect_uri`, in the same order, so
- * the two halves cannot disagree about what a flow may be started for. `start.ts` refuses what the
- * AS refuses and — the direction that was broken — ACCEPTS what the AS accepts.
+ * A MIRROR of the AS's `_unsafe_redirect_uri_bytes` + `_valid_redirect_uri`, so the two halves
+ * cannot disagree about what a flow may be started for. `start.ts` refuses what the AS refuses and
+ * — the direction that was broken — ACCEPTS what the AS accepts.
+ *
+ * The mirror is pinned by a cross-half table test in `tests/test_oauth_consent_bff_routes.py` that
+ * hands ONE uri list to both halves. Two spellings are refused here ON PURPOSE and are named in
+ * that test rather than silently tolerated: an authority both parsers would read differently, and
+ * (below) a port they disagree about.
  */
 export function redirectUriProblem(uri: string): string | null {
   // Bytes we refuse to reason about: a raw backslash is a real parser differential between the
@@ -110,7 +157,35 @@ export function redirectUriProblem(uri: string): string | null {
     // something to hand the code to: an authority or at least a path.
     return parsed.host || parsed.pathname ? null : "redirect_uri must name a destination";
   }
-  if (parsed.protocol === "https:" && parsed.hostname) return null;
+
+  // ⛔ BOTH PARSERS MUST SEE THE SAME HOST. `urlsplit` reports the authority verbatim; WHATWG
+  // normalises it. Where the two differ, one half's verdict is a guess about the other's — so we
+  // refuse rather than pick a side. (IPv6 literals are exempt: WHATWG rewrites their SPELLING
+  // `[0:0:0:0:0:0:0:1]` → `[::1]` while the ADDRESS is identical, and the loopback test below is
+  // address-based. The same exemption is what lets the IPv4-mapped forms through.)
+  const rawHost = rawAuthorityHost(uri);
+  if (rawHost === null) {
+    // A special scheme with no `//authority`: WHATWG invents one, urlsplit does not.
+    return "redirect_uri must be an absolute URI with an explicit authority";
+  }
+  const rawIsV6 = rawHost.startsWith("[") && rawHost.endsWith("]");
+  const parsedIsV6 = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]");
+  if (rawHost.toLowerCase() !== parsed.hostname.toLowerCase() && !(rawIsV6 && parsedIsV6)) {
+    return (
+      "redirect_uri host is not written in a form both parsers read the same way " +
+      "(e.g. 127.1, a decimal/hex address, or a trailing dot)"
+    );
+  }
+
+  if (parsed.protocol === "https:" && parsed.hostname) {
+    // A port past the 16-bit range throws in WHATWG but is never validated by `urlsplit`, so the
+    // AS would accept a URI no browser can navigate. Strict here ON PURPOSE, and named as a
+    // deliberate divergence in the cross-half table.
+    if (parsed.port !== "" && Number(parsed.port) > 65535) {
+      return "redirect_uri port is out of range";
+    }
+    return null;
+  }
   if (parsed.protocol === "http:" && parsed.hostname && isLoopbackHost(parsed.hostname)) {
     return null;
   }
