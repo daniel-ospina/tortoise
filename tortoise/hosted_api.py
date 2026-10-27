@@ -17924,7 +17924,7 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
         # lane's own commit can leave behind — the lane writes in bulk and carries
         # no payload estimate, so a commit from just under the cap can finish past
-        # it. (The capture lane's `count + est > max_points` at :10888 IS
+        # it. (The capture lane's `count + est > max_points` at :14755 IS
         # estimate-aware; this is the pre-write form every OTHER write endpoint
         # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
         # asked for, NOT a new bound.)

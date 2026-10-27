@@ -2495,10 +2495,11 @@ class TestCommitPointsGate:
         """#4051: the org limit is read from its OWN source, and a value that
         cannot be READ is refused — a miss is never a pass.
 
-        Scope, stated precisely: this drives the GATE's input (a dependency-
-        overridden limits dict), which is how a non-int reaches
-        `enforce_org_limit` on the one lane that hands it a RAW value —
-        `get_current_org_session` (uncoerced `max_api_keys`, key-mint / rotate).
+        Scope, stated precisely: this drives the GATE's input through a
+        dependency-overridden limits dict. That override is a TEST SEAM — it
+        exercises the gate's refusal contract independently of what any one
+        production lane happens to put in the dict, which is the property that
+        keeps the contract from depending on a lane's resolver.
         WHICH lanes arrive raw and which die earlier is stated ONCE, in
         `quota.enforce_org_limit`'s SCOPE note — not restated here (four copies
         of that inventory drifted apart inside this change; a copy claiming the
