@@ -2472,6 +2472,49 @@ def test_mention_established_then_deleted_name_still_refuses(env):
     assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
 
 
+def test_mention_stub_only_carrier_folds_on_every_engine(env):
+    """#10157: a mention stub IS an Object node, so a supersede that names it
+    FOLDS — the reference fold must agree, not refuse.
+
+    FAILS IF: `_object_target` resolves carriers from `entities` alone. The
+    stub is a node the GRAPH has and the ENTITY model deliberately does not
+    (#3590 D1: a mention creates no entity), so the reference fold recorded
+    `object-superseded-miss` and reported `divergence="non-folded"` on a
+    journal `rebuild_all` folds — the split #10157 names, reached from the
+    other side once the oracle learned to count a mention stub as an ADDRESS
+    (#10107's name limb). Counting the address without teaching the resolver
+    to reach it is what this pins.
+
+    `test_mention_established_then_deleted_name_still_refuses` above is this
+    test's opposite polarity: hard-delete the stub first and the record really
+    is unresolvable, so it must still refuse. Together they pin that the fix
+    is a resolution and not a licence to stop refusing.
+
+    MEASURED (this file's fixture, embedded engine): before the resolution
+    limb `non_folded_refused_count=1` / `divergence="non-folded"` while
+    `rebuild_all` accepted; after it, `0` / `None`.
+    """
+    sdk, events = env
+    _raw(events, type="EventRecorded", id="e-ment-alive", eventKind="k",
+         object="MENT-ALIVE", event_id="e-ment-alive-rec")
+    _raw(events, type="ObjectSuperseded", name="MENT-ALIVE", supersedes_by="y",
+         event_id="e-ment-alive-sup")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    # The graph folded it onto the stub — the premise the reference fold must
+    # agree with, asserted rather than assumed.
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": "MENT-ALIVE"}).result_set
+    assert [r[0] for r in rows] == ["superseded"], (
+        f"the graph did not fold the supersede onto the mention stub: {rows}")
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, (
+        "the reference fold refused a supersede the graph folded onto a "
+        f"mention-stub node: {r['non_folded_events']}")
+    assert r["divergence"] != "non-folded", r["divergence"]
+
+
 def test_nested_supersede_of_an_established_name_agrees_on_every_engine(env):
     """#10107 review P2: the reference fold's RESOLUTION must read the same
     spelling the predicate does.
