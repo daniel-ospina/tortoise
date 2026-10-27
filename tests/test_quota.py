@@ -161,6 +161,67 @@ class TestEnforceTeamLimit:
             enforce_org_limit({"org_id": "team1"}, "points")
         enforce_org_limit({"org_id": "team1", "max_points": None}, "points")
 
+    def test_unreadable_limit_fails_closed(self, caplog):
+        """#4051: a limit that cannot be READ is refused, never "unlimited".
+
+        The limit is read from the org's OWN source (here `max_points`), so a
+        corrupt value must not degrade into no limit at all. The raw-value
+        lanes are real: `get_current_org_session` carries `_org_limits_from_node`'s
+        uncoerced `max_api_keys` into `_check_org_limit(org, "api_keys")`, and the
+        `/v1/index/docs` documents gate passes a resolver-produced dict. (The
+        commit/capture lanes' auth resolvers coerce with `int(mp)` first, and
+        create-graph / key-mint do their own `int(...)` without calling this gate,
+        so a corrupt stored value fails THERE as an unnamed 500 — a separate
+        resolver/writer gap this gate cannot close, #10136.)
+
+        Mutation REDs this: drop the validation and let the non-numeric value
+        reach the comparison — pre-change it raised a bare `TypeError`, refused
+        by accident, naming nothing, and escaping the documented
+        `QuotaCheckError` contract every caller handles.
+        """
+        with pytest.raises(QuotaCheckError) as exc_info:
+            enforce_org_limit({"org_id": "t", "max_points": "unreadable"},
+                             "points")
+        assert "max_points" in str(exc_info.value), (
+            f"the refusal must name the unreadable surface: {exc_info.value}")
+        assert "unreadable" in str(exc_info.value)
+        # A NON-FINITE value is the same class: `int(float('inf'))` raises
+        # OverflowError, which must become this refusal rather than an unmapped
+        # 500 that names nothing (review round 1 on #4051). Mutation REDs it:
+        # narrow the except clause back to (TypeError, ValueError).
+        with pytest.raises(QuotaCheckError) as inf_exc:
+            enforce_org_limit({"org_id": "t", "max_points": float("inf")},
+                              "points")
+        assert "max_points" in str(inf_exc.value)
+        # The field named must be the field READ — not a hardcoded
+        # `max_points` (review round 2 on #4051: with only `points` cases, a
+        # mutant that hardcodes the key stayed GREEN, so a corrupt `max_users`
+        # would be reported as `max_points`). Mutation REDs this: replace
+        # `{limit_key}` with the literal `max_points` in the raise above.
+        with pytest.raises(QuotaCheckError) as users_exc:
+            enforce_org_limit({"org_id": "t", "max_users": "unreadable"},
+                              "users")
+        users_msg = str(users_exc.value)
+        assert "max_users" in users_msg, users_msg
+        assert "max_points" not in users_msg, users_msg
+        # The `documents` branch DERIVES its cap from the same field, so it must
+        # refuse a non-finite value the same way (it used to escape as a bare
+        # `OverflowError` — the parity the code comment now claims).
+        with pytest.raises(QuotaCheckError):
+            enforce_org_limit({"org_id": "t", "max_points": float("inf")},
+                              "documents")
+        # ALERTING is part of the fail-closed contract (#686): this refusal is
+        # raised BEFORE the count, so it cannot rely on `_count_resource`'s
+        # ERROR log — and the pre-change crash did reach `logger.exception` +
+        # Sentry, so a silent refusal here would downgrade a money-gate data
+        # fault to an ops-invisible 500 (review round 4 on #4051). Mutation
+        # REDs it: drop the `_logger.error` at the raise site.
+        import logging
+        errors = [r.message for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any("quota limit unreadable (fail-closed)" in m
+                   for m in errors), errors
+
 
 # ── #683: users + graphs enforcement ──────────────────────────────────────
 

@@ -7539,8 +7539,10 @@ def _check_org_limit(org: dict, resource: str, *,
             detail=quota_refusal_payload(e),
         )
     except QuotaCheckError as e:
-        # quota._count_resource already logged at ERROR level (#686);
-        # avoid double-logging — this site only records the HTTP context.
+        # `quota` already logged the refusal at ERROR level — `_count_resource`
+        # for a counting failure (#686), the limit validation for an unreadable
+        # limit (#4051); avoid double-logging — this site only records the HTTP
+        # context.
         _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             org_id, resource, str(e),
@@ -14837,6 +14839,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             raise HTTPException(
                 status_code=500, detail=f"Quota check failed: {e}") from None
 
+    # ⚠️ #10133 — the SAME VACUOUS PROXY the commit lane lost in #4051: since
+    # #4010 every resolver supplies `max_sessions: None`, so this call can never
+    # 402 (it does not even count). It is NOT the org-limit gate for this lane;
+    # the binding one is the points ESTIMATE gate above, which is conditional on
+    # `(not session_existed or retry_failed_capture) and not store_only`. What
+    # this call still does is refuse (500) a limits dict with no `max_sessions`
+    # key at all — the #310 GAP-B presence check the MCP capture bridge relies on
+    # (`tests/test_capture_session.py::test_mcp_capture_missing_max_sessions_fails_closed`).
+    # Removing it needs that contract re-pointed at `max_points` AND a decision
+    # for the store-only lanes, so it is tracked separately rather than copied
+    # half-way here.
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -17659,8 +17672,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract,
-    org points ceiling, per-org ingest budget (#4051: 429 + Retry-After)
+    [3] L2 reconciliation IN MEMORY → [4] org points ceiling (the org's OWN
+    limit — #4051 removed the vacuous sessions-cap stand-in), per-org ingest
+    budget (#4051: 429 + Retry-After)
     and budget adjudication on the reconciled net-new delta (soft 15 → WARN
     telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
     [5] the four-node chain + entities + operators + supersede_point +
@@ -17854,15 +17868,40 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         if plan.duplicate:
             return _commit_response(payload, duplicate=True, warnings=warnings)
 
-        # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
-        # unlimited for every tier, so every resolver supplies an explicit None
-        # and this call cannot 402; it remains the fail-closed presence check
-        # (#310 GAP-B) that a limits dict built without the key does not slip
-        # past. Replays already returned above: quota never gates a duplicate
+        # [4a] The ORG-LIMIT gate — the org's OWN limit, read from its own
+        # source. Replays already returned above: quota never gates a duplicate
         # (zero writes).
-        _check_org_limit(org, "sessions")
-        # #4051 — the org points gate (the second half of step [4a]). The sessions
-        # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+        #
+        # ⛔ #4051 — `_check_org_limit(org, "sessions")` STOOD HERE AND IS
+        # REMOVED, not relocated. Since #4010 sessions are unlimited for every
+        # tier, so every resolver supplies `max_sessions: None` and that call
+        # could never 402: it was a session CAP standing in for the org limit,
+        # i.e. a guard that cannot see what it guards — and it read as "this
+        # lane has an org-limit gate" while enforcing nothing.
+        # What it still DID was refuse (HTTP 500) when the resolved limits dict
+        # carried no `max_sessions` key at all (the #310 GAP-B presence
+        # contract). That contract is NOT dropped: it rides on the limit that
+        # actually binds, `max_points`, which the gate below reads and
+        # VALIDATES (`quota.enforce_org_limit`): a limit that is missing OR that
+        # cannot be read as a number is a `QuotaCheckError` naming the field,
+        # never a pass. A limit whose absence cannot change any decision (an
+        # unlimited one) is not worth a refusal.
+        # ⚠️ What that means for THIS lane, stated so the two are not conflated:
+        # the gate validates the dict it is GIVEN, and this lane's dependency
+        # (`get_current_org_gated`) coerces `max_points` with `int(mp)` before
+        # the handler ever runs — so a corrupt STORED value fails earlier, in
+        # auth, as an unnamed 500 (`"Auth error"` on the Supabase lane). That is
+        # the resolver's gap, tracked as #10136; it is NOT closed by this gate,
+        # and the gate still owns the case where a raw value reaches it (the
+        # `_org_limits_from_node` lanes: create_graph / invite / key-mint).
+        #
+        # #4051 — the org points gate. It enforces the org's OWN `max_points`:
+        # the value this handler's sole dependency (`get_current_org_gated`)
+        # resolved from the org's row + pricing.json, read by
+        # `enforce_org_limit` with `.get(limit_key)` — which is what keeps the
+        # missing-key branch reachable. No MCP bridge reaches this handler (the
+        # only MCP session tool proxies the capture impl), so that resolver is
+        # the one producer.
         #
         # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
         # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
@@ -17891,8 +17930,8 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         #
         # What it buys: parity with every other write endpoint's points gate
         # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
-        # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
-        # (after every replay return above) so an idempotent re-POST is never gated
+        # removed sessions-cap stand-in. Same pre-write site as the old sessions
+        # call (after every replay return above) so an idempotent re-POST is never gated
         # — a replay writes no nodes and must never 402 (#1727's lesson); the
         # budget 402 below is unchanged. Same shipped machinery + structured
         # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
@@ -17926,7 +17965,7 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # wants more speaks to us (#5425's posture — rate limit, not refusal of
         # the customer's data).
         #
-        # WHY HERE — the SAME site as the sessions/points gates above, i.e. after
+        # WHY HERE — the SAME site as the points gate above, i.e. after
         # every replay return and BEFORE the budget adjudication. Before the
         # adjudication is load-bearing, not cosmetic: the `held` outcome WRITES
         # (it MERGEs the :Session node with its `value_nodes_held` counter, and

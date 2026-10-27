@@ -1046,7 +1046,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             authenticated caller). None → skip (stdio/operator, no org).
             A key that is PRESENT and None means UNLIMITED (skip); a MISSING
             key is fail-closed (QuotaCheckError) for every resource — build
-            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010).
+            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010). A value
+            that cannot be READ as a number is fail-closed the same way and
+            names the field (#4051) — a limit nobody can read is never a pass.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
@@ -1082,7 +1084,11 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             return  # explicitly-None = unlimited
         try:
             max_points = int(max_points)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError (#4051 review round 2): a non-finite stored
+            # max_points is the SAME unreadable-limit class the generic path
+            # below now refuses — this branch derives the documents cap from
+            # it, so it must not escape as an unmapped 500 either.
             raise QuotaCheckError(
                 f"team limits max_points invalid for documents resource "
                 f"({max_points!r})") from None
@@ -1114,6 +1120,37 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         if limit_key in limits:
             return
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+    # #4051: the limit is read from the org's OWN source (the resolved
+    # `<limit_key>` value) — and a value that cannot be READ as a number is
+    # refused, never treated as unlimited. Before this, a non-numeric limit
+    # reached the comparison below and raised a bare `TypeError` OUT of the
+    # gate: refused only by accident, with no message naming the field, and
+    # invisible to every caller that handles the documented `QuotaCheckError`.
+    # ⚠️ SCOPE — this validates the dict the GATE IS GIVEN. It cannot fix a
+    # corrupt value that dies EARLIER or is coerced ELSEWHERE (both tracked as
+    # #10136): the commit/capture lanes' auth resolvers coerce first (`int(mp)`),
+    # so a corrupt stored `max_points` there fails in auth as an UNNAMED 500; and
+    # create-graph / key-mint / invite do their OWN `int(...)` without calling
+    # this helper, so they raise the same unnamed error. What DOES arrive here raw:
+    # `get_current_org_session` carries `_org_limits_from_node`'s uncoerced
+    # `max_api_keys` into `_check_org_limit(org, "api_keys")`, and the
+    # `/v1/index/docs` documents gate hands over a resolver-produced dict — so the
+    # gate must not assume its input is an int. OverflowError is the same class
+    # as TypeError/ValueError (`int(float('inf'))`).
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError, OverflowError):
+        # ERROR level, like `_count_resource`'s own failure path (#686): this
+        # raises BEFORE the count, so it must not rely on that log — and the
+        # pre-change crash (a bare TypeError) DID reach `logger.exception` +
+        # Sentry, so a silent refusal here would downgrade a money-gate data
+        # fault to an ops-invisible 500 (#4051 review round 4).
+        _logger.error(
+            "quota limit unreadable (fail-closed): team=%s resource=%s "
+            "field=%s value=%r", org_id, resource, limit_key, limit)
+        raise QuotaCheckError(
+            f"team limits {limit_key} unreadable for resource {resource!r} "
+            f"({limit!r})") from None
     count = _count_resource(org_id, resource, sdk=sdk)
     # #4614: report what the gate COMPARED (post-credit), never a fresh count —
     # the refusal's numbers must be the ones that produced it.
