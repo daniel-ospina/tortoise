@@ -2606,6 +2606,69 @@ def test_mention_stub_rementioned_after_delete_folds_again(env):
     assert r["divergence"] != "non-folded", r["divergence"]
 
 
+def test_id_wide_delete_of_a_mention_stub_refuses_on_every_engine(env):
+    """#10157 review round 10, P1: a stub the journal deletes UNSCOPED is gone.
+
+    FAILS IF: the reference fold's stub-existence limb filters the (never
+    pruned) stub ids by `deleted`, the ENTITY model's end-state set. A mention
+    stub is never an entity (#3590 D1), so an id-wide `EntityMutated delete`
+    (`_delete_entity_by_id`'s fallback when the label is missing) removes it in
+    the GRAPH and is unrepresentable there — the stub kept reporting an
+    address, the sweep saw a hit, and the record was not merely exempt but
+    ABSENT from the report.
+
+    MEASURED before the fix: `rebuild_all` REFUSED `object-superseded-miss`
+    while `check_consistency` returned `ok=True refused=0 nf=[]` — the health
+    gate certifying a journal every engine refuses. The oracle is the journal's
+    own `journal_object_surviving_keys`, which models this delete.
+    """
+    sdk, events = env
+    stub_id = _entity_name_id("Object", "WIDE")
+    _raw(events, type="EventRecorded", id="e-w-1", eventKind="k",
+         object="WIDE", event_id="e-w-rec")
+    _raw(events, type="EntityMutated", op="delete", id=stub_id,
+         event_id="e-w-del")  # ⛔ NO label: the id-wide fallback
+    _raw(events, type="ObjectSuperseded", name="WIDE", supersedes_by="y",
+         event_id="e-w-sup")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, (
+        "the reference fold passed a supersede whose stub the journal deleted "
+        f"id-wide: {r['non_folded_events']}")
+    assert r["ok"] is not True, (
+        "check_consistency certified a journal rebuild_all refuses")
+
+
+def test_mention_stub_reid_by_registration_refuses_on_every_engine(env):
+    """#10157 review round 10, P1 (second stale route): a re-id'd stub moves.
+
+    FAILS IF: the stub-id set is used without an existence filter. A later
+    `ObjectRegistered` re-ids the stub node (`ON MATCH`), so at the sweep the
+    record's stub id addresses nothing — yet the never-pruned set still
+    reported it and the reference fold recorded no miss, while `rebuild_all`
+    refused.
+    """
+    sdk, events = env
+    stub_id = _entity_name_id("Object", "ACME-RI")
+    _raw(events, type="EventRecorded", id="e-ri-1", eventKind="k",
+         object="ACME-RI", event_id="e-ri-rec")
+    _raw(events, type="ObjectSuperseded", id=stub_id, name="GHOST-RI",
+         supersedes_by="y", event_id="e-ri-sup")
+    _raw(events, type="ObjectRegistered", id="obj-real-ri", name="ACME-RI",
+         status="live", event_id="e-ri-reg")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, (
+        "the reference fold passed a supersede whose stub id a later "
+        f"registration had replaced: {r['non_folded_events']}")
+
+
 def test_nested_supersede_of_an_established_name_agrees_on_every_engine(env):
     """#10107 review P2: the reference fold's RESOLUTION must read the same
     spelling the predicate does.

@@ -2248,20 +2248,25 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # also asserts `check_consistency` refuses — the guard below is
             # otherwise pinned by nothing).
             #
-            # ⛔ EXISTENCE is `deleted`, NOT the gated `_object_hard_deleted`
-            # map (review P2). That map's re-creation anchors are seeded only
-            # from `PointAdded` / `OperatorAdded` records, so a stub revived by
-            # a later `EventRecorded` MENTION is not an anchor there: it keeps
-            # reporting the delete and the sweep refused a journal all three
-            # graph engines fold. `deleted` is the fold's own END-state set and
-            # the seeding clears the mark on a re-mint, which is exactly the
-            # "does this node exist now" question this limb asks. (The gated
-            # map remains the right oracle for its own `supersede-target-
-            # deleted` exemption, which must stay anchored — a different
-            # question, asked above.)
-            _surviving_stub_ids = {
-                _sid for _sid in mention_stub_ids
-                if ("Object", _sid) not in deleted}
+            # ⛔ EXISTENCE is the JOURNAL's own surviving-id oracle, not
+            # `deleted` (review 10, P1). `deleted` is the ENTITY model's
+            # end-state set, and a mention stub is never an entity (#3590 D1)
+            # — so a delete that removes the stub in the GRAPH is
+            # unrepresentable there whenever it is not scoped to
+            # `label="Object"` (`_delete_entity_by_id` falls back to the
+            # id-wide delete, and the fold's id-wide branch can only mark keys
+            # that exist in `entities`). Measured: a mention, an id-wide
+            # `EntityMutated delete`, then a supersede by name gave
+            # `rebuild_all` REFUSED while this fold returned `ok=True
+            # refused=0` — a journal the health gate CERTIFIED and every engine
+            # refused, with the record absent from the report entirely.
+            # `mention_stub_ids` is never pruned either (by design, so a
+            # re-mention can revive), so it also reported a stub the journal
+            # re-id'd via a registration or renamed away.
+            # `journal_object_surviving_keys` models all three — the id-wide
+            # delete, the re-id, the rename — and a re-mention revives the id
+            # in it, which is the control this must NOT refuse.
+            _surviving_stub_ids = mention_stub_ids & surviving_ids
             _stub_hit = (
                 (isinstance(oid, str) and oid in _surviving_stub_ids)
                 or any(_sid in _surviving_stub_ids
