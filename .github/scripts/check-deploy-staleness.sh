@@ -58,9 +58,12 @@
 #    WITHOUT deploying anything — by the pipeline's own declared policy. Counting
 #    those as lag reds the check for a condition nobody can act on, and an alarm
 #    that cries wolf is the defect this check exists to prevent, restated.
-#    Measured on main: with a raw-distance bound of 3, ~14% of the time was red
-#    for a non-deployable lag (longest false-red window 3.6 h, 20 alert
-#    create/PATCH cycles per 500 commits). So `behind_deployable=` decides and
+#    Measured on the last 300 commits of main, over the trigger's own filter: at
+#    the default bound of 2, 42 commits (14.0%) sat above it for a NON-deployable
+#    lag — 20 distinct false-red windows, 21.1 h of 148.7 h cumulative, i.e. 20
+#    alert create/PATCH plus 20 "Recovered" comment cycles. At bound 3 the same
+#    metric is 22 commits (7.3%) and 10 windows: still a false alarm, only
+#    rarer, so the bound is not the lever. `behind_deployable=` decides and
 #    `behind=` (the raw distance) is stated alongside it.
 # 2. AGE, because a count bound alone stays GREEN forever in the state #10109
 #    was filed about: one deployable commit pending, tolerated by the bound,
@@ -190,8 +193,10 @@ normalize_max_age_hours() { normalize_uint "${1:-}" "$MAX_AGE_HOURS_DEFAULT" "DE
 
 # ── what a merge must TOUCH to redeploy, read from the trigger itself ────────
 # One glob per line from `on.push.paths` of the deploy workflow. Printed empty
-# when the filter cannot be read (no file, no `on.push.paths`, or a shape this
-# parser does not recognise) — and the call site turns that into a RED, because
+# when the trigger has no path filter, and EXITS NON-ZERO when the block is there
+# but a shape inside it is not recognised — a PARTIAL set is worse than none,
+# because it silently counts fewer deployable commits than the trigger really
+# has and so reads GREEN while they wait. The call site turns BOTH into a RED:
 # a checker that cannot tell which commits deploy cannot judge staleness, and an
 # unanswered question is never a pass (agent-infra#1745 doctrine).
 #
@@ -211,10 +216,21 @@ read_deploy_paths() { # -> globs on stdout, one per line
       if ($0 ~ /^      - /) {
         v=$0; sub(/^      - /,"",v); sub(/[[:space:]]+#.*$/,"",v)
         gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^["\047]|["\047]$/,"",v)
-        if (v!="") print v
+        if (v=="") next
+        # A YAML block scalar (`- >-`, `- |`) is not a glob. Emitting it as one
+        # would put a non-path into the pathspec list.
+        if (v ~ /^[|>]/) exit 3
+        print v
         next
       }
-      exit
+      # Still indented INSIDE `paths:`, but not a list entry: a folded scalar, a
+      # mapping, or some shape this parser does not know. A PARTIAL path set is
+      # not a path set — it would count FEWER deployable commits than the
+      # trigger and read GREEN while they wait, the "silently never fires" class
+      # this check exists to refuse. Exit non-zero so the caller can RED.
+      if ($0 ~ /^      /) exit 3
+      # A dedent (or EOF) is the one clean way the block ends.
+      exit 0
     }
   ' "$DEPLOY_WORKFLOW" 2>/dev/null
 }
@@ -443,8 +459,14 @@ main() {
       # The distance that DECIDES is the deployable one (the deploy trigger's
       # own path filter). `behind` stays stated alongside it: it is the raw lag
       # a reader may want, just not the staleness verdict.
-      deploy_paths="$(read_deploy_paths)"
-      if [ -z "$deploy_paths" ]; then
+      # `if !` is exempt from `set -e`, so an unparseable filter lands on the
+      # NAMED arm below instead of aborting the script with no reason. RED
+      # either way, but a red that says what it could not read is the point.
+      if ! deploy_paths="$(read_deploy_paths)"; then
+        state="unknown"; reason="deploy-paths-unreadable"
+        warn "on.push.paths in ${DEPLOY_WORKFLOW} did not parse unambiguously — RED (a partial path set would UNDER-count the deployable lag and read green while deployable commits wait)"
+        behind_clause="behind=${behind} behind_deployable=unknown (on.push.paths in ${DEPLOY_WORKFLOW} did not parse unambiguously)"
+      elif [ -z "$deploy_paths" ]; then
         # Cannot tell which commits deploy = cannot judge staleness = never a
         # pass (agent-infra#1745). RED, and it names what it could not read.
         state="unknown"; reason="deploy-paths-unreadable"
@@ -482,7 +504,12 @@ main() {
               age_secs=$(( $(date -u +%s) - oldest_ts ))
               [ "$age_secs" -lt 0 ] && age_secs=0   # clock skew must not read as ancient
               age_hours=$(( age_secs / 3600 ))
-              age_clause=" deployable_age_h=${age_hours} max_age_hours=${MAX_AGE_HOURS}"
+              # `deployable_age_h` is FLOORED while the verdict is decided on
+              # SECONDS, so an alert at 6 h 01 m would otherwise print
+              # `deployable_age_h=6 max_age_hours=6` while RED — which reads as
+              # an off-by-one in the check rather than a deploy to investigate.
+              # The seconds are stated so the two can never appear to conflict.
+              age_clause=" deployable_age_h=${age_hours} deployable_age_s=${age_secs} max_age_hours=${MAX_AGE_HOURS}"
             fi
           fi
           if [ -z "$state" ]; then

@@ -141,6 +141,24 @@ on:
 WF_EOF
 # The REAL workflow, for the parity case (never a copy of its path list).
 DEPLOY_WF_REAL="$SCRIPT_DIR/../workflows/deploy-hosted.yml"
+# A PARTIALLY-parsed filter: the block is there, three entries parse, and then a
+# folded scalar appears INSIDE `paths:`. Keeping the three collected entries
+# would count a SMALLER set than the trigger and read GREEN while deployable
+# commits wait, so the parser must exit non-zero and the call site must RED.
+DEPLOY_WF_PARTIAL="$FIX/deploy-hosted.partial.yml"
+cat > "$DEPLOY_WF_PARTIAL" <<'WF_EOF'
+name: Fixture deploy
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tortoise/**'
+      - >-
+          a folded scalar nobody's parser expected
+      - 'packs/**'
+      - 'fly.toml'
+  workflow_dispatch:
+WF_EOF
 
 BIN="$FIX/bin"
 mkdir -p "$BIN"
@@ -435,6 +453,10 @@ if [ -f "$STUB_TMP/created.json" ]; then
   ok "case 18: alert filed"
   assert_contains "$(cat "$STUB_TMP/created.json")" "behind_deployable=1" "case 18: body states the deployable distance"
   assert_contains "$(cat "$STUB_TMP/created.json")" "deployable_age_h=" "case 18: body states the deployable age"
+  # The verdict is decided on SECONDS while `deployable_age_h` is floored, so the
+  # seconds must be stated too — otherwise a 6 h 01 m alert prints
+  # `deployable_age_h=6 max_age_hours=6` while RED and reads as an off-by-one.
+  assert_contains "$(cat "$STUB_TMP/created.json")" "deployable_age_s=" "case 18: body states the age in SECONDS, so it can never appear to sit at the bound it crossed"
 else
   bad "case 18: alert was NOT filed"
 fi
@@ -460,6 +482,15 @@ assert_contains "$OUT" "deployable_age_h=0" "case 19: the age of the pending com
 run_checker_with "$C1" 2 "" "$DEPLOY_WF_NOPATHS" ""
 assert_eq "$RC" 1 "case 20: unreadable deploy paths → exit 1"
 assert_contains "$OUT" "deploy-paths-unreadable" "case 20: reason names the unreadable filter"
+
+# ── 20b. A PARTIAL parse is not a parse ───────────────────────────────────────
+# The fixture keeps 3 usable entries after truncation. Emitting them would have
+# counted a SMALLER deployable set than the trigger, i.e. under-reported the lag
+# — the "silently never fires" shape. Must RED, and must not print a path.
+run_checker_with "$C1" 2 "" "$DEPLOY_WF_PARTIAL" ""
+assert_eq "$RC" 1 "case 20b: partially-parsed deploy paths → exit 1"
+assert_contains "$OUT" "deploy-paths-unreadable" "case 20b: reason names the unreadable filter"
+assert_not_contains "$OUT" "a folded scalar nobody" "case 20b: never emits a non-path as a glob"
 
 # ── 21. PARITY with the REAL deploy-hosted.yml, both directions ─────────────
 # The checker derives the filter at run time instead of duplicating it, and the

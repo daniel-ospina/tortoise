@@ -2830,21 +2830,26 @@ decline channel. This is the positive reading that was missing.
 - **Logic:** `.github/scripts/check-deploy-staleness.sh` — reads the deployed commit from the public
   `GET /v1/version` (`commit_sha`, baked by `deploy-hosted.yml` as `TORTOISE_GIT_SHA`), compares it
   to `origin/main` with `git merge-base --is-ancestor`, and states the distance
-  `deployed=<sha> main=<sha> behind=<n> behind_deployable=<n> deployable_age_h=<n>`. Fails (red + ONE
-  deduped issue) when the deployed commit diverged from main, when the revision cannot be read — an
-  unreadable revision is a RED, never a pass — or on **either** of two bounds:
+  `deployed=<sha> main=<sha> behind=<n> behind_deployable=<n> deployable_age_h=<n> deployable_age_s=<n>`.
+  Fails (red + ONE deduped issue) when the deployed commit diverged from main, when the revision cannot
+  be read — an unreadable revision is a RED, never a pass — when the deploy trigger's `on.push.paths`
+  cannot be parsed **unambiguously** (a PARTIAL path set would under-count the deployable lag and read
+  green while deployable commits wait, so it is a RED too) — or on **either** of two bounds:
   - **count:** more than `vars.DEPLOY_STALENESS_MAX_BEHIND` **deployable** commits behind (default
     **2**). *Deployable* = touching `on.push.paths` of `deploy-hosted.yml`, read from that workflow at
     run time (never a second copy). A merge confined to `docs/`, `skills/`, `tools/`, `.github/`,
     `website/` or `operations/` (or to `tests/` other than `tests/sample_transcript.txt`, which the
     image copies) advances main **without deploying anything** by the pipeline's own
-    declared policy, so it is not staleness — counting it was ~14% false red on main, and an alarm
-    that cries wolf is the defect this check exists to prevent.
+    declared policy, so it is not staleness — counting it was ~14% false red over the last 300 commits
+    of main (20 false-red windows), and an alarm that cries wolf is the defect this check exists to
+    prevent.
   - **age:** the OLDEST undeployed deployable commit older than `vars.DEPLOY_STALENESS_MAX_AGE_HOURS`
     (default **6 h**). This is the *"the deploy is missing for ≥ T hours"* arm, and it is the one that
     catches the #10109 shape a count bound alone reports **green forever**: one pending deployable
     commit that never deploys. Stateless — the age comes from the commit's own committer date, not
-    from any previous tick's memory.
+    from any previous tick's memory. The verdict is decided on **seconds** and `deployable_age_h` is
+    floored, so `deployable_age_s` is printed as well: an alert past the bound must never appear to
+    sit at it.
   Both bounds are plain integers; a mangled value warns and falls back to its default rather than
   disabling the arm.
 - **Harness:** `bash .github/scripts/check-deploy-staleness.test.sh` (the `Deploy staleness detector (#10109)`
