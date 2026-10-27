@@ -31,7 +31,7 @@ from tools.ci_import_closure import (  # noqa: I001
     Closure, ModuleIndex, Scanner, UNKNOWN_DYNAMIC_ATTR, UNKNOWN_DYNAMIC_CALL,
     UNKNOWN_SYNTAX, UNKNOWN_UNRESOLVED, artifact_names_for_job,
     classify_miss, compute_closures, core_test_files, derived_core_selection,
-    misses_for, module_name, parse_junit_failures,
+    misses_for, module_name, parse_junit_failures, summarise,
 )
 
 
@@ -268,7 +268,7 @@ def test_harness_does_not_blame_the_derivation_for_a_test_the_selector_never_run
 
 
 def test_empty_closure_files_survive_only_when_asked_to():
-    """113 of 738 core files import nothing from the package: they guard a
+    """114 of 742 core files import nothing from the package: they guard a
     CONFIG/WORKFLOW/DOC file, which no import edge can carry (#10070, #10120)."""
     core = ["tests/test_config_guard.py", "tests/test_imports_pkg.py"]
     closures = {
@@ -385,7 +385,7 @@ def test_package_init_reaches_the_sdk_hub_through_config(repo_closure):
     """THE #10132 MECHANISM, pinned as evidence rather than prose.
 
     `tortoise/__init__.py` -> (module level) `tortoise.config` ->
-    (function-local) `tortoise.sdk`, the 42k-line hub -> 178 of 257 modules.
+    (function-local) `tortoise.sdk`, the 42k-line hub -> 186 of 258 modules.
     Because importing ANY `tortoise.*` submodule imports the package first, that
     chain lands in ~85% of core closures, which is why a file-level split cannot
     narrow anything. If this assertion starts failing, the chain was broken —
@@ -405,9 +405,10 @@ def test_a_package_owns_its_dotted_name_over_a_same_named_module():
 
     `tortoise/projection/__init__.py` and `tortoise/projection.py` both map to
     `tortoise.projection`. Resolving to the module (the alphabetically first
-    path) drops every module that only the package reaches — measured on this
-    repo as a 178-module closure where the truth is 185. The shadowed file is
-    still scanned and reported, never silently discarded.
+    path) drops every module that only the package reaches. On this tree the
+    pair no longer changes a core closure, so this pin is SYNTHETIC on purpose:
+    it proves the precedence rule and the `shadowed` record, not a live delta.
+    The shadowed file is still scanned and reported, never silently discarded.
     """
     files = ["tortoise/projection.py", "tortoise/projection/__init__.py"]
     idx = _index(*files)
@@ -434,8 +435,8 @@ def test_a_package_owns_its_dotted_name_over_a_same_named_module():
 def test_import_time_only_reproduces_the_naive_reader_that_under_selects():
     """`--import-time-only` is the trap, kept measurable.
 
-    On this repo it reports a median core closure of 5 modules instead of 185 —
-    a "99 % reduction" that would ship a false green, because `tortoise/sdk.py`
+    On this repo it reports a median core closure of 21 modules instead of 186 —
+    a ">88 % reduction" that would ship a false green, because `tortoise/sdk.py`
     reaches 74 of its 89 in-repo modules through function-local imports.
     """
     idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
@@ -452,3 +453,153 @@ def test_import_time_only_reproduces_the_naive_reader_that_under_selects():
                              follow_function_local=False)["tests/test_t.py"]
     assert "tortoise/lazy.py" in full.modules
     assert naive.modules == ()
+
+
+# ---------------------------------------------------------------------------
+# #10143 review round: the four defects found AFTER the first clean verdict.
+# Each test below fails on the code as it was and passes on the fix, so the
+# defect cannot come back silently. They are grouped here, not scattered, so the
+# next reviewer can see exactly what was wrong and re-verify it.
+# ---------------------------------------------------------------------------
+def test_a_target_imported_both_ways_keeps_the_module_level_edge():
+    """P1: the dedupe kept whichever occurrence was YIELDED first.
+
+    `_imports_with_context` is a LIFO stack, so for a target imported both at
+    module level and inside a function the FUNCTION-LOCAL occurrence is yielded
+    first (verified: linelines (3, True) then (1, False)). The old
+    `_dedupe_deps` compared `type_checking` only, so the function-local edge won
+    and the module-level edge was DISCARDED — and then `--import-time-only`
+    filtered the survivor out, leaving the file looking as if it never imported
+    the target at all. That under-selection is the exact false green this tool
+    exists to expose, so it must be produced by the naive READER, never by a bug
+    in the edge set it is reading.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
+    scans = {
+        "tests/test_t.py": _scan(
+            idx, "tests/test_t.py",
+            "from tortoise.lazy import at_module_level\n"
+            "def f():\n"
+            "    from tortoise.lazy import in_a_function\n"
+            "    return in_a_function\n"),
+        "tortoise/__init__.py": _scan(idx, "tortoise/__init__.py", ""),
+        "tortoise/lazy.py": _scan(idx, "tortoise/lazy.py", ""),
+    }
+    deps = scans["tests/test_t.py"].deps
+    lazy = [d for d in deps if d.target == "tortoise.lazy"]
+    assert len(lazy) == 1, f"one edge per (target, kind), got {lazy}"
+    assert lazy[0].in_function is False, (
+        "the MODULE-LEVEL occurrence must survive the dedupe; the function-local "
+        "one is the weaker edge and is what `--import-time-only` filters out")
+    # and the consequence the bug had: the module-level reader must SEE it
+    naive = compute_closures(scans, idx, ["tests/test_t.py"],
+                             follow_function_local=False)["tests/test_t.py"]
+    assert "tortoise/lazy.py" in naive.modules
+
+
+def test_dedupe_prefers_a_runtime_edge_over_a_type_checking_one():
+    """The other half of the ranking: `TYPE_CHECKING` is the weaker context."""
+    idx = _index("tortoise/a.py")
+    scan = _scan(
+        idx, "tests/test_t.py",
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from tortoise.a import thing\n"
+        "from tortoise.a import other\n")
+    a = [d for d in scan.deps if d.target == "tortoise.a"]
+    assert len(a) == 1 and a[0].type_checking is False
+
+
+def test_summarise_reports_the_shim_closure_for_the_reader_that_was_used():
+    """P2: `summarise` recomputed the shim closure with the DEFAULT reader.
+
+    `--import-time-only --json` therefore published `package_init_closure: 186`
+    — the all-nesting number — next to a median of 21, so the one field that
+    answers the issue's own question contradicted the mode the run was in.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/config.py", "tortoise/sdk.py")
+    scans = {
+        "tests/test_t.py": _scan(idx, "tests/test_t.py", "import tortoise.config\n"),
+        # the shim's own edges, module level
+        "tortoise/__init__.py": _scan(
+            idx, "tortoise/__init__.py", "from tortoise.config import x\n"),
+        # the deferred (cycle-breaking) edge that drags the hub in
+        "tortoise/config.py": _scan(
+            idx, "tortoise/config.py",
+            "def f():\n    from tortoise.sdk import g\n    return g\n"),
+        "tortoise/sdk.py": _scan(idx, "tortoise/sdk.py", ""),
+    }
+    closures = compute_closures(scans, idx, ["tests/test_t.py", "tortoise/__init__.py"])
+    full = summarise(closures, idx, scans, follow_function_local=True)
+    naive = summarise(closures, idx, scans, follow_function_local=False)
+    assert full["package_init_closure"] == 3      # the shim + config + sdk
+    assert naive["package_init_closure"] == 2     # the deferred sdk edge is gone
+
+
+def _fake_ground_truth(monkeypatch, module, *, junit: bytes | None,
+                       listing_names: list[str]):
+    """Drive `pr_ground_truth` with a fake check-run + one fake artifact."""
+    import io
+    import zipfile
+
+    run = {"name": "test (a)", "conclusion": "failure", "id": 99,
+           "details_url": "https://github.com/o/r/actions/runs/99/job/1"}
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [run])
+    monkeypatch.setattr(module, "_run_id", lambda r: 99)
+    monkeypatch.setattr(
+        module, "_gh_json",
+        lambda args: {"artifacts": [{"id": 7, "name": n} for n in listing_names]})
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        if junit is not None:
+            zf.writestr("junit.xml", junit)
+        else:
+            zf.writestr("pytest.log", "some log\n")
+    blob = buf.getvalue()
+    monkeypatch.setattr(
+        module, "_download_artifact",
+        lambda repo, aid, cache: _write_tmp(cache, aid, blob))
+
+
+def _write_tmp(cache: Path, aid: int, blob: bytes) -> Path:
+    cache.mkdir(parents=True, exist_ok=True)
+    p = cache / f"artifact-{aid}.zip"
+    p.write_bytes(blob)
+    return p
+
+
+def test_ground_truth_records_an_artifact_that_carries_no_junit(monkeypatch, tmp_path):
+    """P2: a red leg may upload only `pytest.log`; that is NOT "nothing failed"."""
+    from tools import ci_import_closure as module
+    _fake_ground_truth(monkeypatch, module, junit=None, listing_names=["pytest-log-test-a"])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["artifact_errors"], (
+        "an artifact with no junit.xml must be REPORTED — silently dropping it "
+        "makes 'could not read' indistinguishable from 'nothing failed'")
+    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+        "a PARTIAL ground truth must never be cached as truth")
+
+
+def test_ground_truth_records_an_unparseable_junit(monkeypatch, tmp_path):
+    """P2: `parse_junit_failures` returns the parse error in `error`; read it."""
+    from tools import ci_import_closure as module
+    _fake_ground_truth(monkeypatch, module, junit=b"<not-xml",
+                       listing_names=["pytest-log-test-a"])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["artifact_errors"], "unparseable junit must be reported, not dropped"
+    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
+
+
+def test_validate_window_default_is_unset_so_an_explicit_prs_list_is_authoritative():
+    """P2: `--window` defaulted to 10, so `if args.prs and args.window` was ALWAYS
+    true and an explicit `--prs` list was silently clipped to its first 10 ids —
+    making the report's own 40-PR table unreproducible by any documented call."""
+    from tools import ci_import_closure as module
+    parser = module.build_parser()
+    a = parser.parse_args(["validate", "--prs", "1", "2", "3"])
+    assert a.window is None, "an unpassed --window must not masquerade as 10"
+    b = parser.parse_args(["validate", "--window", "40"])
+    assert b.window == 40
+    c = parser.parse_args(["validate", "--prs", "1", "2", "3", "--window", "2"])
+    assert c.window == 2, "an EXPLICIT --window may still clip"

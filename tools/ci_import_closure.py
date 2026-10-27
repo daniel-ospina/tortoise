@@ -87,12 +87,27 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. This file is
+# an entry point under `tools/`, so it is in the corpus `tools/../
+# tests/test_entry_point_python_guard.py` asserts over — and a module-level
+# 3.12+-only construct would otherwise raise ImportError/AttributeError first,
+# with no attribution. `import sys` is the ONE import the preamble allows ahead
+# of the guard, because the guard has to read `sys.version_info`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        "tools/ci_import_closure.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — the repo floor is "
+        "`requires-python` / `.python-version`. Run it as "
+        "`uv run python tools/ci_import_closure.py`."
+    )
+
 import argparse
 import ast
 import json
 import statistics
 import subprocess
-import sys
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -100,6 +115,17 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO / ".ci-selection" / "closure-cache"
+
+# Bump when the GROUND-TRUTH EXTRACTION changes shape. The cache exists so a
+# re-validation is offline and reproducible — but a truth written by an older
+# extractor is a CACHED TRUNCATION, and `pr_ground_truth` short-circuits on
+# `cached.exists()`, so a fixed extractor would keep reading the old answer
+# forever. #10143 review P2 (v1 → v2): v1 dropped an artifact that carried no
+# `junit.xml` and an artifact whose `junit.xml` did not parse, both WITHOUT an
+# `artifact_errors` entry, and then cached the result because `artifact_errors`
+# was empty — so "we could not read the ground truth" was indistinguishable from
+# "nothing failed", permanently. Nothing reads a v1 file now.
+GROUND_TRUTH_VERSION = 2
 
 # The package whose modules a closure REPORTS. Other in-repo roots (`tests/`,
 # `battery/`, `tools/`) are indexed and TRAVERSED — a test that imports
@@ -191,11 +217,13 @@ class ModuleIndex:
     dotted name (`tortoise/projection/__init__.py` beside `tortoise/projection.py`
     — one such pair exists in this repo), `import tortoise.projection` binds the
     PACKAGE: `FileFinder` tries the directory's `__init__` before the same-named
-    `.py`. Resolving to the module instead UNDER-SELECTS by exactly the modules
-    only the package reaches — measured here as 7 missing modules and a closure
-    of 178 instead of 185. The shadowed file is recorded in `shadowed`, not
-    silently discarded: it is still scanned (it may be imported by path), it just
-    does not own the dotted name.
+    `.py`. Resolving to the module instead UNDER-SELECTS by every module that
+    only the package reaches. (How many is a property of the tree, not a
+    constant: on this tree the one shadowing pair no longer changes any core
+    closure, which is why the pin is the SYNTHETIC case in
+    `tests/test_ci_import_closure.py` rather than a recorded delta.) The
+    shadowed file is recorded in `shadowed`, not silently discarded: it is still
+    scanned (it may be imported by path), it just does not own the dotted name.
     """
 
     def __init__(self, files: list[str]) -> None:
@@ -571,12 +599,31 @@ def _resolve_relative_name(name: str, pkg_parts: list[str]) -> str:
 
 
 def _dedupe_deps(deps: list[Dep]) -> list[Dep]:
-    """One edge per (target, kind), keeping the earliest/strongest occurrence."""
+    """One edge per (target, kind), keeping the STRONGEST occurrence.
+
+    Strongest = the occurrence that survives the most restrictive reader: a
+    module-level import beats a function-local one, and a runtime import beats a
+    `TYPE_CHECKING` one. This is not cosmetic. The closure is computed ONCE and
+    then filtered per reader (`follow_function_local`, `follow_type_checking`),
+    so if the function-local edge won the dedupe, an `--import-time-only` run
+    would filter it out and lose the module-level edge ENTIRELY — the file would
+    look as if it never imported the target at all, which is exactly the
+    under-selection the naive reader is supposed to demonstrate, not to be
+    produced by a bug.
+
+    #10143 review P1: this compared `type_checking` only, and
+    `_imports_with_context` is a LIFO stack (`stack.pop()`), so the FUNCTION-LOCAL
+    occurrence is normally yielded BEFORE the module-level one and won by
+    accident. Measured on the `tortoise/b`-imported-both-ways shape: the survivor
+    was `in_function=True`, module-level-only closure came back empty.
+    Ties break on `line` (lowest first) so the reported location is stable.
+    """
     best: dict[tuple[str, str], Dep] = {}
     for dep in deps:
         key = (dep.target, dep.kind)
         cur = best.get(key)
-        if cur is None or (cur.type_checking and not dep.type_checking):
+        if cur is None or (dep.type_checking, dep.in_function, dep.line) < (
+                cur.type_checking, cur.in_function, cur.line):
             best[key] = dep
     return sorted(best.values(), key=lambda d: (d.kind, d.target, d.line))
 
@@ -636,8 +683,8 @@ def compute_closures(
 
     `follow_function_local=False` reproduces the NAIVE reader (module-level
     imports only). It exists to make the trap in the report measurable with the
-    committed tool: on this tree it yields a median core closure of 5 modules
-    instead of 185, which would look like a 99 % reduction and would be a false
+    committed tool: on this tree it yields a median core closure of 21 modules
+    instead of 186, which would look like an 88 % reduction and would be a false
     green (see `docs/ci/core-import-closure.md` §1.1).
     """
     out: dict[str, Closure] = {}
@@ -748,8 +795,18 @@ POSITION_HUB_SHARE = 0.5
 
 
 def summarise(closures: dict[str, Closure], index: ModuleIndex,
-              scans: dict[str, FileScan] | None = None) -> dict:
-    """The numbers a split/no-split verdict is decided on."""
+              scans: dict[str, FileScan] | None = None, *,
+              follow_type_checking: bool = True,
+              follow_function_local: bool = True) -> dict:
+    """The numbers a split/no-split verdict is decided on.
+
+    The two `follow_*` flags MUST be threaded through from the caller: the shim's
+    own closure (`package_init_closure`) is recomputed here, and recomputing it
+    with the DEFAULT reader inside an `--import-time-only` run would publish the
+    all-nesting number as the answer to the module-level question (#10143 review
+    P2: `--import-time-only --json` reported `package_init_closure: 186` next to
+    a median of 21).
+    """
     complete = {k: v for k, v in closures.items() if not v.tainted}
     sizes = sorted(len(v.modules) for v in closures.values())
     complete_sizes = sorted(len(v.modules) for v in complete.values())
@@ -776,8 +833,11 @@ def summarise(closures: dict[str, Closure], index: ModuleIndex,
     init_closure: int | None = None
     init_scan = (scans or {}).get("tortoise/__init__.py")
     if init_scan is not None:
-        init_clo = compute_closures(scans, index, ["tortoise/__init__.py"])[
-            "tortoise/__init__.py"]
+        init_clo = compute_closures(
+            scans, index, ["tortoise/__init__.py"],
+            follow_type_checking=follow_type_checking,
+            follow_function_local=follow_function_local,
+        )["tortoise/__init__.py"]
         init_closure = len(init_clo.modules)
 
     return {
@@ -977,7 +1037,7 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
     is offline and instant — the measurement has to be reproducible.
     """
     cache.mkdir(parents=True, exist_ok=True)
-    cached = cache / f"truth-{sha}.json"
+    cached = cache / f"truth-v{GROUND_TRUTH_VERSION}-{sha}.json"
     if cached.exists():
         try:
             return json.loads(cached.read_text())
@@ -1026,8 +1086,24 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
                 continue
             xml = _junit_from_zip(zip_path)
             if xml is None:
+                # #10143 review P2: a red leg may legitimately upload only
+                # `pytest.log` (the workflow uploads junit with
+                # `if-no-files-found: ignore`). Dropping the artifact silently
+                # made "we could not read the ground truth" indistinguishable
+                # from "nothing failed", and `artifact_errors` — the only field
+                # that records the difference — stayed empty, so the partial
+                # truth was then CACHED. Record it here instead.
+                artifact_errors.append(
+                    f"{art.get('name')}: no junit.xml in artifact"[:200])
                 continue
             parsed = parse_junit_failures(xml)
+            if parsed.get("error"):
+                # Same fail-open one level down: `parse_junit_failures` returns
+                # the parse failure in `error` and an EMPTY `files`/`names`, and
+                # reading only the latter turned corrupt XML into "no failures".
+                artifact_errors.append(
+                    f"{art.get('name')}: {parsed['error']}"[:200])
+                continue
             if parsed["files"]:
                 pr_found = True
                 failed_files.update(parsed["files"])
@@ -1089,7 +1165,7 @@ def derived_core_selection(
       (c) `keep_empty_closures` and its closure is EMPTY.
 
     (c) is not a fudge, it is the one class the closure provably cannot answer:
-    113 of the 738 core files import nothing from the package — they assert
+    114 of the 742 core files import nothing from the package — they assert
     invariants of a CONFIG, WORKFLOW or DOC file, which is exactly why they were
     hand-registered in `SOURCE_PATTERNS`/`CORE_ALSO` in the first place. An
     import closure has no edge to carry that dependency, so a mapping that drops
@@ -1219,32 +1295,23 @@ def cmd_closure(args: argparse.Namespace) -> int:
     _manifest, data, index = _load_all(not args.exclude_type_checking,
                                        not getattr(args, "import_time_only", False))
     closures = data["closures"]
-    summary = summarise(closures, index, data["scans"])
+    summary = summarise(
+        closures, index, data["scans"],
+        follow_type_checking=not args.exclude_type_checking,
+        follow_function_local=not getattr(args, "import_time_only", False),
+    )
     verdict = verdict_from_summary(summary, closures, index)
 
-    if args.module:
-        kept, dropped = [], []
-        for rel, clo in closures.items():
-            (kept if args.module in clo.modules else dropped).append(rel)
-        print(f"# a change to {args.module} would select {len(kept)}/{len(closures)} "
-              f"core test files (today: all {len(closures)})")
-        for rel in sorted(kept)[:args.limit]:
-            print(f"  {rel}")
-        if len(kept) > args.limit:
-            print(f"  … {len(kept) - args.limit} more")
-        return 0
+    def _emit_json() -> None:
+        """Write `--json` if asked. Called on EVERY exit path.
 
-    print(_fmt_table(summary))
-    print()
-    print(f"verdict: split_justified={verdict['split_justified']} — {verdict['rule']}")
-    if args.show_tainted:
-        for rel, clo in sorted(closures.items()):
-            if not clo.tainted:
-                continue
-            reasons = sorted({r["reason"] for r in clo.reasons})
-            print(f"  TAINTED {rel}: {', '.join(reasons)}")
-
-    if args.json:
+        #10143 review: `--module X --json out.json` returned 0 from the module
+        branch BELOW, so the documented flag silently wrote nothing — measured
+        exit 0 with the file never created. A documented flag that no-ops is a
+        false record, so the write is now shared by both exits.
+        """
+        if not args.json:
+            return
         payload = {
             "schema": 1,
             "summary": summary,
@@ -1265,6 +1332,31 @@ def cmd_closure(args: argparse.Namespace) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n")
         print(f"\njson -> {out} ({out.stat().st_size} bytes)")
+
+    if args.module:
+        kept, dropped = [], []
+        for rel, clo in closures.items():
+            (kept if args.module in clo.modules else dropped).append(rel)
+        print(f"# a change to {args.module} would select {len(kept)}/{len(closures)} "
+              f"core test files (today: all {len(closures)})")
+        for rel in sorted(kept)[:args.limit]:
+            print(f"  {rel}")
+        if len(kept) > args.limit:
+            print(f"  … {len(kept) - args.limit} more")
+        _emit_json()
+        return 0
+
+    print(_fmt_table(summary))
+    print()
+    print(f"verdict: split_justified={verdict['split_justified']} — {verdict['rule']}")
+    if args.show_tainted:
+        for rel, clo in sorted(closures.items()):
+            if not clo.tainted:
+                continue
+            reasons = sorted({r["reason"] for r in clo.reasons})
+            print(f"  TAINTED {rel}: {', '.join(reasons)}")
+
+    _emit_json()
     return 0
 
 
@@ -1293,8 +1385,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         p.relative_to(REPO).as_posix() for p in ci.TESTS_DIR.rglob("test_*.py")
     )
 
-    prs = args.prs or merged_pr_numbers(args.repo, args.window)
-    if args.prs and args.window:
+    window = 10 if args.window is None else args.window
+    prs = list(args.prs) or merged_pr_numbers(args.repo, window)
+    if args.prs and args.window is not None:
         prs = prs[:args.window]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1402,19 +1495,34 @@ def cmd_validate(args: argparse.Namespace) -> int:
     errors = sum(len(r["artifact_errors"]) for r in rows)
     print(f"TOTAL MISSES naive={total_naive} keep-non-python={total_safe}"
           f"   (artifacts unreadable: {errors})")
+    if not rows:
+        # #10143 review P2: a window of ZERO PRs was scored as a clean window
+        # (`exit 0`, "TOTAL MISSES 0") — the strongest possible false green for a
+        # harness whose whole job is to be unfoolable. Nothing was read, so
+        # nothing is certified.
+        print("::error:: the window contained no PRs — nothing was measured")
+        return 2
     for label, key in (("naive", "misses_naive"),
                        ("keep-non-python", "misses_keep_non_python")):
         for row in rows:
             for miss in row[key]:
                 print(f"  MISS[{label}] pr#{row['pr']} {miss['file']} [{miss['class']}] "
                       f"changed={row['changed_modules'][:4] or row['changed'][:3]}")
+    if errors:
+        # An unreadable artifact can only UNDER-count misses, so a zero-miss
+        # window with unreadable artifacts is not a clean window. Say so in the
+        # exit code rather than in a parenthetical (#10143 review P2).
+        print(f"::error:: {errors} artifact(s) unreadable — the window is PARTIAL, "
+              "not clean")
+        return 2
     return 0 if total_naive == 0 and total_safe == 0 else 1
 
 
 def cmd_report(args: argparse.Namespace) -> int:
     manifest, data, index = _load_all(not args.exclude_type_checking)
     closures = data["closures"]
-    summary = summarise(closures, index, data["scans"])
+    summary = summarise(closures, index, data["scans"],
+                        follow_type_checking=not args.exclude_type_checking)
     verdict = verdict_from_summary(summary, closures, index)
     payload = {
         "summary": summary,
@@ -1430,7 +1538,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, extracted from `main` so it is TESTABLE.
+
+    #10143 review P2: the `--window` default of 10 could only be observed by
+    running the whole `validate` verb against the network, so nothing pinned it
+    and it shipped broken. A parser builder makes the surface itself assertable.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="verb")
 
@@ -1449,16 +1563,30 @@ def main(argv: list[str] | None = None) -> int:
     p_closure.add_argument(
         "--import-time-only", action="store_true",
         help="ignore function-local imports — the NAIVE reader, kept so the "
-             "false-green trap in the report is measurable (median 5 vs 185)")
+             "false-green trap in the report is measurable (median 21 vs 186)")
 
     p_validate = sub.add_parser("validate", help="replay historical PRs")
     _common(p_validate)
     p_validate.add_argument("--repo", default="daniel-ospina/tortoise")
-    p_validate.add_argument("--window", type=int, default=10)
-    p_validate.add_argument("--prs", type=int, nargs="*", default=[])
+    # #10143 review P2: `default=10` made `args.window` ALWAYS truthy, so the
+    # explicit-PR path was clipped to 10 regardless: `--prs <12 ids>` analysed 10
+    # and reported a clean window, which made the report's own 40-PR table
+    # unreproducible from the artifact by any documented invocation. `None`
+    # means "not passed"; only an EXPLICIT --window may clip.
+    p_validate.add_argument("--window", type=int, default=None,
+                            help="replay the newest N merged PRs (default 10); "
+                                 "an explicit --window clips an explicit --prs list")
+    p_validate.add_argument("--prs", type=int, nargs="*", default=[],
+                            help="explicit PR numbers — authoritative, not clipped "
+                                 "unless --window is also given")
 
     p_report = sub.add_parser("report", help="emit the report data")
     _common(p_report)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
 
     # Bare invocation (`--json x`) means `closure`: argparse would otherwise hand
     # the closure verb's defaults to nobody and `args.json` would not exist.
