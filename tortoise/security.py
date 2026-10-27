@@ -953,65 +953,34 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
      re.compile(r"(?<![A-Za-z0-9])(?:hf_|api_org_)[A-Za-z0-9]{34,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="huggingface_token")),
     # TypeSafe / Jev — the REAL vendor's key: `apikey_<36 hex>_<64 hex>` (measured
-    # 2026-10-26 against a console-minted key at console.typesafe.ai). It is a
-    # SEPARATE kind from `jev_api_key` below on purpose — see that rule's comment.
-    # The hex class AND the prefix accept BOTH cases: the measured key is lowercase,
-    # but a redaction rule that only matches the case it happened to see fails OPEN
-    # on the next mint, and a leaked credential cannot be un-leaked. The prefix was
-    # case-sensitive in an earlier revision on the theory that widening it would
-    # match prose — measured FALSE: both prose forms are spared by the 24-hex
-    # FLOOR and by what FOLLOWS the run, not by case. `APIKEY_THE_FIELD_NAMES…` runs
-    # `THE` and stops at `_` (three), `apikey_a1b2` runs `a1b2` and stops at a space
-    # (four) — both far under a floor of 24 — and `_` is not a body character
-    # either. The hex-NESS of the class only decides what a LONG run may continue
-    # with, and `test_the_typesafe_rule_is_pinned_at_its_measured_shape` pins it
-    # with a 40-character non-hex word after the prefix, which a widened
-    # `[A-Za-z0-9]` body would swallow. The only thing the case-sensitive prefix
-    # did was let `APIKEY_<36 hex>_<64 hex>` (a well-formed uppercase mint) leak
-    # whole with the count at 0.
-    # ⛔ THE TRAILING LOOKAHEAD IS THE BODY CLASS MINUS ITS OWN CHARACTERS — the
-    # invariant stated in this table's own header. It is INERT by construction here
-    # (`{24,}` and the optional `{8,}` are greedy over the same class, so the next
-    # character is non-hex by definition). It is kept as the stated invariant and
-    # NOT credited with closing anything; the class that LEAKS is the ALNUM one —
-    # with it, `…<64 hex>Z` backtracks to the segment-1-only alternative, so the
-    # SECOND SEGMENT survives in cleartext while the count still reads 1 (measured;
-    # the worse failure, because the record looks redacted).
+    # 2026-10-26 against a console-minted key at console.typesafe.ai). A SEPARATE
+    # kind from `jev_api_key` below on purpose: the two credentials retire on
+    # different schedules, and old transcripts keep matching the lookalike host's.
+    # The prefix and the hex body accept EITHER case deliberately — a rule that
+    # matches only the case it happened to see fails OPEN on the next mint, and a
+    # leaked credential cannot be un-leaked. Prose is spared by the 24-hex FLOOR
+    # and by the non-body character that ends a short run, NOT by case.
+    # ⛔ THE TRAILING LOOKAHEAD IS THE BODY CLASS MINUS ITS OWN CHARACTERS — this
+    # table's header invariant, and the reason the scan stays linear. It is INERT
+    # here (the quantifiers are greedy over that same class, so the next character
+    # is non-hex by definition) and is kept as the invariant, not credited with
+    # closing anything. What LEAKS if it is widened to ALNUM is the SECOND SEGMENT:
+    # the match backtracks to the segment-1-only alternative and the count still
+    # reads 1, which is the worse failure because the record looks redacted.
     # `\s*` sits at the TWO TOKEN BOUNDARIES — after the prefix and around the
-    # separator — and deliberately NOWHERE ELSE. The separator is the obvious
-    # wrap point; the prefix-adjacent one is the dangerous one, because a break
-    # there defeats the anchor LITERAL itself: with no `\s*` after `apikey_`,
-    # `apikey_\n<36 hex>_<64 hex>` redacted NOTHING and came back byte-identical
-    # with the count at 0 — the whole body in cleartext and invisible in the counts.
-    # ⛔ A WRAP INSIDE A HEX SEGMENT IS NOT TOLERATED, and that is a measured
-    # choice, not an oversight. Tolerating it means letting whitespace into the
-    # BODY (`[0-9a-fA-F](?:\s*[0-9a-fA-F]){23,}`), and whitespace in the body lets
-    # the match cross into whatever follows: every word starting with `a`-`f` or a
-    # digit becomes a continuation. Measured on this suite's own linearity family
-    # (`" apikey_" + "a"*23 + " "*2048", one hex short of the floor, repeated 200
-    # times), that body made 100 matches over 200 units — ONE PER TWO UNITS, because
-    # each match needs 24 hex, takes the next unit's leading `a` from its `apikey_`
-    # and so destroys that unit's anchor: every unit touched, half of them
-    # mis-redacted across spaces and newlines, which corrupts the stored record the
-    # redaction exists to preserve.
-    # So the residual is: a break inside a segment keeps whatever hex run survives
-    # the break, and the widths of those runs are asserted, not described.
-    # The SECOND segment is OPTIONAL, and what that buys is the TAIL-ABSENT form
-    # (`apikey_<36 hex>` with no separator at all — a cut at the separator, which a
-    # display ellipsis or a compaction summary produces). It is NOT what catches a
-    # truncated tail: `apikey_<36 hex>_<16 hex>` is above the tail FLOOR, so a
-    # required tail redacts it identically — the floor buys that case, the
-    # optionality buys the tail-less one. Both are asserted in
-    # `test_the_typesafe_rule_is_pinned_at_its_measured_shape`. The vendor literal
-    # `apikey_` anchors the match tightly enough that a bare segment-1 form cannot
-    # be ordinary prose — the class this module refuses to match is an UNANCHORED
-    # hex run, not this one.
-    # ⚠️ THE SPLIT AND ESCAPE RESIDUALS ARE ASSERTED IN
-    # `test_the_typesafe_rule_is_pinned_at_its_measured_shape`, deliberately not
-    # stated here: every wrap position has its own threshold, so a narrative of them
-    # goes stale the moment one is added. The shape of the residual: a mid-segment
-    # split keeps whatever hex run survives the break, and an escaped `\n` (a literal
-    # backslash-n, as raw JSONL holds it) does not match `\s*` at either position.
+    # separator — and nowhere else: a wrap at either one defeats the anchor literal
+    # or the separator outright, so both are tolerated, and neither is a licence to
+    # let whitespace into the body.
+    # ⛔ THREE WIDENINGS ARE REFUSED, each measured — do not "helpfully" undo them:
+    # whitespace INSIDE a hex segment (the match then crosses into following text
+    # that begins with a hex character: 100 matches over a 200-unit prose family);
+    # any bounded body class, on either segment (a greedy class with no shorter
+    # alternative matches NOTHING past its ceiling and leaks the key WHOLE); and a
+    # case-sensitive prefix (an uppercase mint then leaks with the count at 0).
+    # Everything else — the split shapes, the escaped `\n`, the tail-absent form,
+    # the 24/8 floors — is asserted in
+    # `test_the_typesafe_rule_is_pinned_at_its_measured_shape` rather than narrated
+    # here, because a narrative of it goes stale the moment one shape changes.
     ("typesafe_api_key",
      re.compile(r"(?<![A-Za-z0-9])(?i:apikey_)\s*[0-9a-fA-F]{24,}"
                 r"(?:\s*_\s*[0-9a-fA-F]{8,})?"
