@@ -211,8 +211,12 @@ on them would be recording a capability we did not ship.
    a foreign id is refused correctly; the **write** shape is blocked by the ChatGPT client
    (`#10084`). See the run index's per-case table and the SUPERSEDED note above.
 
-Screenshots and the model's tool-call trace now exist for every step. What remains is **two
-product blockers**, not two missing artifacts: `#8617` (step 2a) and `#10088` (step 4).
+Screenshots and the model's tool-call traces now exist for every step, with ONE scope to the word
+"screenshots": step 5 is trace-only (`step6e-full-trace.txt`,
+`step7-graphs-and-step5-onboarding-state.txt`) because the run's dashboard half never rendered a
+step-5 screen — there is no `step5*` artifact. Every other row carries a dated screenshot. What
+remains is **two product blockers**, not two missing artifacts: `#8617` (step 2a) and `#10088`
+(step 4).
 
 ## Re-running the measurable half
 
