@@ -1317,7 +1317,7 @@ def _alert_dict(row: dict) -> dict:
         # are internal rule names, and the EVENT_REVIEW comment below states the
         # rule travels on the operator path only. The customer is told what
         # happened, not which rule fired.
-        EVENT_FLAG: "Suspicious activity flagged on this team",
+        EVENT_FLAG: "Suspicious activity flagged on this Organization",
         # #5425: this dict is CUSTOMER-FACING. Its one consumer is the
         # session-authed, membership-gated ``GET /v1/team/alerts``, rendered
         # verbatim in the dashboard's "Security alerts" list — so the message
@@ -1351,9 +1351,16 @@ def _alert_dict(row: dict) -> dict:
         # rule threshold was crossed), what was NOT changed (nothing is
         # disabled), and how to reach us. A human's involvement is not one of
         # the facts this row can know.
-        EVENT_REVIEW: ("Unusually high activity on this team. This is "
-                       "informational; it did not disable anything. If you need "
-                       "a higher limit, contact support@premiselabs.co."),
+        # Round 15: "This is informational" is the ACTIVITY register's own
+        # self-description, and this row is REGISTER_ALERT (it re-opens an
+        # acknowledgement, because a flag is a state change). Saying it here
+        # blurred the one distinction this change exists to draw, so the phrase is
+        # gone while the FACTS it carried stay: nothing was disabled, and here is
+        # the route. The two registers now read as what they are — one reports a
+        # rate it measured, the other reports something that happened.
+        EVENT_REVIEW: ("Unusually high activity on this Organization. It did "
+                       "not disable anything. If you need a higher limit, "
+                       "contact support@premiselabs.co."),
         EVENT_SUSPEND: "Organization suspended by an operator",
         # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
         # really returned by `recent_alerts`, so without a message here the
@@ -1362,8 +1369,26 @@ def _alert_dict(row: dict) -> dict:
         # lists this change edits, and the same class it exists to remove
         # (customer-facing prose nobody reviewed as prose). Now pinned by
         # test_every_alert_type_has_a_customer_message.
-        EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity detected",
-        EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
+        # Round 14 (review finding): this was the only one of the three RATE
+        # detectors whose string carried no informational clause and no next
+        # step — it read as an incident, the exact framing this issue removes.
+        # It now uses the same shape as its siblings, and the shared shape is
+        # what the test pins (every ACTIVITY message must say nothing changed),
+        # rather than one type's phrase.
+        EVENT_RECOVERY_VELOCITY: ("Unusual account-recovery activity on this "
+                                  "Organization. This is informational; it did "
+                                  "not change anything. If you don't recognise "
+                                  "it, contact support@premiselabs.co."),
+        # Round 14 (review finding, narrowed): the row DOES carry the country
+        # (`recent_alerts` selects it, and `check_new_country` only fires with
+        # one), so the earlier "unknown" reading came from a review harness that
+        # passed details without the column. The fallback was still wrong: with a
+        # NULL country the string claimed we do not know where the access came
+        # from, which is a claim of ignorance rather than a fact. The clause is
+        # omitted instead.
+        EVENT_AUTH_IP: ("Access from a new location: " + str(row["country"])
+                        if row.get("country")
+                        else "Access from a new location"),
         # #10156: informational, never incident-grade. See
         # ``_read_velocity_message`` for the defect this replaces.
         EVENT_READ_VELOCITY: _read_velocity_message(details),

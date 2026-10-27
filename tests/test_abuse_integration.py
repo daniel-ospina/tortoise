@@ -810,40 +810,64 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
-    #: The property, as THREE order-agnostic arms plus a promise list. Kept at
-    #: module level so the self-fixture below can prove the predicate matches
-    #: the strings it is supposed to reject — a pin that asserts only the
-    #: current copy's ABSENCE cannot show it would have caught anything.
-    #: Round 13 (review finding): the first-person-possessive branch required a
-    #: THREE-token phrase ("our on-call engineer"), so every single-word role
-    #: escaped it — "Our engineers have been notified." matched nothing. The
-    #: modifier is optional and the role tolerates a plural now.
-    _ACTOR = (r"(?:an?\s+operator|operators?|a\s+human|we|us|on-?call|"
-              r"our\s+(?:[\w-]+\s+)?"
-              r"(?:engineers?|team|staff|sres?|developers?|humans?))")
-    _AUX = (r"(?:has|have|had|is|are|was|were|am|will|would|can|should|must|"
-            r"do|does|did|been|being)")
-    #: Round 13 (review finding): {0,3} let ONE filler word defeat the passive
-    #: arm — "This alert has already been escalated to our team." has four
-    #: intervening tokens. {0,6} still cannot reach any accepted string's actor
-    #: from its auxiliary (asserted in the accept list below).
+    #: A human ROLE or a first-person actor. Round 14 (review finding): every
+    #: previous version enumerated the AUXILIARY/VERB instead, which is an
+    #: open set — "An operator reviewed this." is past tense, matched nothing,
+    #: and shipped green. The ACTOR is the small, closed thing the pin forbids;
+    #: the verb beside it is irrelevant.
+    _ACTOR = (r"(?:(?:an?|the|our)\s+)?"
+              r"(?:operators?|humans?|engineers?|responders?|developers?|"
+              r"analysts?|sres?|staff)"
+              r"|\bwe\b|\bus\b|on-?call"
+              r"|(?:our|the)\s+(?:[\w-]+\s+){0,2}(?:team|engineers?|staff)")
+    #: Anything that commits its subject to an act: every auxiliary, every
+    #: contraction, and ANY past-tense verb (`\w+ed`), which is what the
+    #: enumeration missed.
+    _VERB = (r"(?:has|have|had|is|are|was|were|am|will|would|can|should|must|"
+             r"do|does|did|been|being|\w+ed|'re|'ve|'d|'m|'ll|'s)")
     _GAP = r"[\s,;:—-]+(?:\S+[\s,;:—-]+){0,6}"
-    #: actor → auxiliary ("an operator has…") | auxiliary → actor ("was
-    #: escalated to an operator") | actor → contraction ("We're…").
+    #: TWO order-agnostic arms (actor→verb for active, verb→actor for passive).
     _HUMAN = re.compile(
-        rf"(?:\b{_ACTOR}\b{_GAP}{_AUX}\b|\b{_AUX}\b{_GAP}{_ACTOR}\b|"
-        rf"\b{_ACTOR}\b\s*'(?:re|ve|d|m|ll|s)\b)", re.I)
-    #: A promise of contact/timing where the actor is ELIDED ("…, and will be in
-    #: touch"), which the actor arms cannot see.
-    #: Round 13 (review finding): a BARE "reach(?:ing)? out" is not a promise —
-    #: "If you need a higher limit, reach out to support@…" is the accepted
-    #: imperative shape, with the CUSTOMER as subject, and the old pattern
-    #: rejected it. It now requires the elided-actor auxiliary ("…, and will
-    #: reach out") that the actor arms cannot see.
+        rf"(?:\b{_ACTOR}\b{_GAP}{_VERB}\b|\b{_VERB}\b{_GAP}{_ACTOR}\b)",
+        re.I)
+    #: A promise of contact/timing where the actor is ELIDED ("…, and will reach
+    #: out"), which the actor arms cannot see.
     _PROMISE = re.compile(
         r"(will be in touch|(?:will|'ll)\s+reach(?:ing)?\s+out|"
         r"get back to you|follow(?:ing)? up with you|hear from us|"
         r"within \d+\s*(?:hours?|days?|business days?))", re.I)
+    #: Two things a customer string may legitimately contain that look like a
+    #: human claim, removed BEFORE the match:
+    #:   * an email address ("contact support@…" addresses the support DESK, it
+    #:     does not report what support did);
+    #:   * `suspend`'s "by an operator", which is backed by the row's EXISTENCE —
+    #:     `suspend_org()` is the only writer of EVENT_SUSPEND and the engine no
+    #:     longer suspends, so the row IS the proof.
+    #: BOTH `scope` branches (the org-total string was outside the loop until
+    #: round 12), plus the empty-details case. Also fed to the accept fixture so
+    #: it cannot drift from what actually ships.
+    @staticmethod
+    def _detail_variants() -> tuple[dict, ...]:
+        return ({"scope": "key", "id": "k-1", "count": 3, "ip": "1.2.3.4",
+                 "country": "ES"},
+                {"scope": "team", "id": "org-1", "count": 3},
+                {})
+
+    #: `auth_ip`'s country is a ROW COLUMN, not a `details` key (``recent_alerts``
+    #: selects it, ``check_new_country`` only fires with one), so a loop that only
+    #: varies `details` never renders "…: ES" — round-15 gate finding: that string
+    #: was pinned only as a hand-typed literal, which would go stale silently if
+    #: the clause's format changed. Both column states are rendered here.
+    @staticmethod
+    def _row_variants() -> tuple[dict, ...]:
+        return ({}, {"country": "ES"}, {"country": None})
+
+    @staticmethod
+    def _claims(text: str) -> bool:
+        stripped = re.sub(r"\S+@\S+", "", text)
+        stripped = re.sub(r"\bby an operator\b", "", stripped, flags=re.I)
+        return bool(TestAlertRegistersAndAcks._HUMAN.search(stripped)
+                    or TestAlertRegistersAndAcks._PROMISE.search(stripped))
 
     def test_the_human_claim_predicate_actually_REJECTS_known_bad_strings(self):
         """The discriminating-power fixture (round 12 review finding).
@@ -855,11 +879,9 @@ class TestAlertRegistersAndAcks:
         to an operator") or a contraction ("We're") defeated it. So the predicate
         is now tested against the strings it MUST reject, and the next round has
         to demonstrate that rather than assert it."""
-        #: Caught by the ACTOR arms, and asserted to be caught by THEM: a
-        #: fixture entry that happened to match the promise list instead would
-        #: leave the actor arm unproven for that shape (round-13 finding — the
-        #: timeline entry below matched the auxiliary-first actor arm, so the
-        #: `within N hours` alternative was load-bearing and unasserted).
+        #: Caught by the ACTOR arms. Round 14 (review finding) added the shapes
+        #: an AUXILIARY enumeration could not see: plain past tense
+        #: ("reviewed", "looked") and a role introduced by an article.
         must_reject_human = [
             # the three historical wordings, verbatim
             "Nothing has been disabled, and our team is reviewing it.",
@@ -871,7 +893,7 @@ class TestAlertRegistersAndAcks:
             "An operator is looking into it.",
             "An operator will review this.",
             "Our on-call engineer was paged.",
-            # ONE-WORD ROLES — the three-token possessive branch missed these
+            # ONE-WORD ROLES
             "Our engineers have been notified.",
             "Our SRE will take a look.",
             "Our staff is aware.",
@@ -879,6 +901,12 @@ class TestAlertRegistersAndAcks:
             "This alert has already been escalated to our team.",
             # the actor as OBJECT of the auxiliary
             "You will hear from us within 24 hours.",
+            # PAST TENSE — the auxiliary enumeration could not see these
+            "An operator reviewed this.",
+            "Our team looked into it.",
+            # A ROLE INTRODUCED BY AN ARTICLE, not in any earlier noun list
+            "The security team is investigating.",
+            "An incident responder has been paged.",
         ]
         #: Caught by the PROMISE list where the actor is ELIDED, which no actor
         #: arm can see. Each must NOT match the actor arms, or it proves nothing
@@ -893,7 +921,8 @@ class TestAlertRegistersAndAcks:
             "…and will reach out shortly.",
         ]
         for text in must_reject_human:
-            assert self._HUMAN.search(text), (
+            assert self._HUMAN.search(
+                re.sub(r"\bby an operator\b", "", text)), (
                 f"the ACTOR arms miss a false human claim: {text!r} — a pin "
                 "that cannot reject this cannot guard the real copy either")
         for text in must_reject_promise:
@@ -904,7 +933,9 @@ class TestAlertRegistersAndAcks:
                 "elided) but the actor arms catch it too, so the promise arm "
                 "stays unproven for this shape")
         # …and it must NOT reject legitimate copy, or every future iteration
-        # would fight the test instead of the bug.
+        # would fight the test instead of the bug. The SHIPPED strings are
+        # quoted verbatim (round-14 finding: a paraphrase proved only that the
+        # predicate tolerates a paraphrase).
         must_accept = [
             # backed by the ROW'S EXISTENCE: suspend_org() is the only writer
             "Organization suspended by an operator",
@@ -912,17 +943,27 @@ class TestAlertRegistersAndAcks:
             "review your API keys in Keys — an unrecognised key should be "
             "revoked there",
             "If you need a higher limit, contact support@premiselabs.co.",
-            # the imperative reach-out shape (round-13 finding: the old bare
-            # "reach out" promise pattern rejected this)
             "If you need a higher limit, reach out to support@premiselabs.co.",
-            "Total read volume for this Organization crossed our threshold. "
-            "This is informational; it did not change anything.",
+            # the shipped descriptions of this panel's own subjects/limits
+            "Suspicious activity flagged on this Organization",
+            "Access from a new location: ES",
+            "Access from a new location",
         ]
+        # Add every SHIPPED message + label for every type and detail variant,
+        # so the accept half can never drift from the product.
+        for etype in ALERT_TYPES:
+            for details in self._detail_variants():
+                for extra in self._row_variants():
+                    row = _alert_dict({"event_type": etype, "details": details,
+                                       "created_at": "2026-09-25T17:19:05+00:00",
+                                       **extra})
+                    must_accept.append(str(row.get("label") or ""))
+                    must_accept.append(str(row.get("message") or ""))
         for text in must_accept:
-            assert not self._HUMAN.search(text), (
-                f"the ACTOR arms reject an ACCEPTED string: {text!r}")
-            assert not self._PROMISE.search(text), (
-                f"the PROMISE list rejects an ACCEPTED string: {text!r}")
+            if not text:
+                continue
+            assert not self._claims(text), (
+                f"the predicate rejects SHIPPED/accepted copy: {text!r}")
 
     def test_no_customer_string_claims_what_a_HUMAN_is_doing(self):
         """Rounds 6 / 9 / 10 / 11 / 12 (review findings). The same promise was
@@ -940,44 +981,64 @@ class TestAlertRegistersAndAcks:
         documented exclusions hold BY CONSTRUCTION and need no exception list:
         ``suspend``'s "by an operator" binds no auxiliary (the row's existence is
         the proof), and an imperative addresses the customer."""
-        # Both `scope` branches, plus the empty-details case (which also renders
-        # the `?` fallbacks for count/ip/country).
-        detail_variants = ({"scope": "key", "id": "k-1", "count": 3,
-                            "ip": "1.2.3.4", "country": "ES"},
-                           {"scope": "team", "id": "org-1", "count": 3},
-                           {})
+        detail_variants = self._detail_variants()
         for etype in ALERT_TYPES:
             for details in detail_variants:
+              for extra in self._row_variants():
                 row = _alert_dict({"event_type": etype, "details": details,
-                                   "created_at": "2026-09-25T17:19:05+00:00"})
+                                   "created_at": "2026-09-25T17:19:05+00:00",
+                                   **extra})
                 for field in ("label", "message"):
                     text = str(row.get(field) or "")
-                    assert not self._HUMAN.search(text), (
-                        f"{etype}.{field} commits a human to an act: {text!r} — "
-                        "the operator signal is best-effort, so we cannot know")
-                    assert not self._PROMISE.search(text), (
-                        f"{etype}.{field} promises a follow-up: {text!r}")
+                    # `_claims` applies the two documented exclusions (the
+                    # support ADDRESS, and `suspend`'s "by an operator") and
+                    # then runs BOTH mechanisms.
+                    assert not self._claims(text), (
+                        f"{etype}.{field} asserts a human or a follow-up: "
+                        f"{text!r} — the operator signal is best-effort, so we "
+                        "cannot know")
         # The two documented exclusions, restated against the REAL strings.
         suspended = _alert_dict({"event_type": "suspend", "details": {},
                                  "created_at": "2026-09-25T17:19:05+00:00"})
         assert "by an operator" in suspended["message"], suspended["message"]
-        assert not self._HUMAN.search(suspended["message"])
+        assert not self._claims(suspended["message"])
         velocity = _alert_dict({"event_type": "read_velocity",
                                 "details": {"scope": "key"},
                                 "created_at": "2026-09-25T17:19:05+00:00"})
         assert "review your API keys" in velocity["message"], velocity["message"]
-        assert not self._HUMAN.search(velocity["message"])
+        assert not self._claims(velocity["message"])
         # …and the review row still says what it CAN know: what THIS alert did.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "it did not disable anything" in msg, msg
+        assert "It did not disable anything" in msg, msg
         assert "support@premiselabs.co" in msg, msg
+        # Every RATE detector shares ONE shape (round-14 finding: recovery_velocity
+        # was the only one without the informational clause and read as an
+        # incident). Pinning the SHAPE rather than one type's phrase is what makes
+        # a new rate type fail here instead of shipping with a bare "detected".
+        for etype, register in abuse.ALERT_REGISTER_OF.items():
+            if register != abuse.REGISTER_ACTIVITY:
+                continue
+            m = str(_alert_dict({"event_type": etype, "details": {},
+                                 "created_at": "2026-09-25T17:19:05+00:00"}
+                                ).get("label") or "")
+            body = str(_alert_dict({"event_type": etype, "details": {},
+                                    "created_at": "2026-09-25T17:19:05+00:00"}
+                                   ).get("message") or "")
+            # A rate is a measurement, so the LABEL must not be an incident word
+            # and the MESSAGE must say nothing changed and offer a route.
+            assert not re.search(r"(suspicious|incident|compromis|breach|"
+                                 r"attack)", m, re.I), (etype, m)
+            assert "did not change anything" in body, (etype, body)
+            assert ("keys" in body.lower() or "support@" in body.lower()), (
+                etype, body)
         # No WHOLE-STATE claim anywhere: the same panel can carry a suspension
         # row, so "nothing has been disabled" would contradict it.
         for etype in ALERT_TYPES:
             for details in detail_variants:
                 m = str(_alert_dict({"event_type": etype, "details": details,
-                                     "created_at": "2026-09-25T17:19:05+00:00"}
+                                     "created_at": "2026-09-25T17:19:05+00:00",
+                                     "country": "ES"}
                                     ).get("message") or "")
                 assert "nothing has been disabled" not in m.lower(), (etype, m)
                 assert "nothing was changed" not in m.lower(), (etype, m)
