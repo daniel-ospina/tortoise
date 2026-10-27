@@ -1522,14 +1522,33 @@ def run_fts_query(
         status_filter = ""
     try:
         start = time.monotonic()
+        # #10121: on the MINTED id key, ties resolve NEWEST-first.
+        #
+        # #3019 added this clause for determinism (RRF is rank-based, so an
+        # unordered tie is a different pool every call) and chose ASC without
+        # a direction argument. But `id` is minted from a millisecond
+        # timestamp (`ids.ulid()` -> "<ts-hex>-<uuid>"), so ASCENDING id is
+        # OLDEST-first — and the graph-side scorer returns ONE score for a
+        # whole corpus of look-alike documents (measured: 2.0 across 131
+        # documents). The tie therefore decides everything, and with ASC the
+        # point created LAST loses the LAST pool slot and is truncated out:
+        # a caller asking for the record it just wrote is served an older one,
+        # or — past the pool depth — nothing at all, with no score on the row
+        # (measured on 130 look-alikes; #8488's production reading, `fts: null`).
+        #
+        # Determinism, #3019's actual purpose, is unchanged: only the DIRECTION
+        # of the tie moves. Labels keyed on a non-minted field (`url`,
+        # `eventId`) keep ASC — their id order carries no recency meaning, so
+        # flipping them would be change for its own sake.
+        tie_direction = "DESC" if id_field == "id" else "ASC"
         cypher = (
             f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
             "YIELD node, score "
             + status_filter +
             f"RETURN node.{id_field}, score "
             # #3019: rank alone does not order a tie, and RRF is rank-based — see
-            # the operator path above.
-            f"ORDER BY score DESC, node.{id_field} ASC "
+            # the operator path above. #10121: direction per the note above.
+            f"ORDER BY score DESC, node.{id_field} {tie_direction} "
             "LIMIT $limit"
         )
         rows = graph.query(
