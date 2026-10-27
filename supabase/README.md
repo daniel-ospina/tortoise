@@ -166,7 +166,7 @@ whole pending set in filename order.
 
 Manual fallback — for when the automated co-move has already FAILED. **The run
 says which way, and the distinction that matters is whether the dispatch was
-ACCEPTED.** Five arms exit 1 (`supabase-deploy.yml`, the co-move step), and only
+ACCEPTED.** Six arms exit 1 (`supabase-deploy.yml`, the co-move step), and only
 TWO of them mean the flip was never started or is known to have failed:
 
 **Safe to fall back — the dispatch did not land, or the flip is known to have
@@ -179,7 +179,7 @@ failed:**
   while it was still PENDING. This is the case the fallback below is for.
 
 ⛔ **NOT safe to fall back — the dispatch was accepted and the flip may be
-RUNNING.** All three of these exit 1, so they must not be read as "nothing
+RUNNING.** All four of these exit 1, so they must not be read as "nothing
 happened":
 
 - **`answered with an unreadable body`** — the app flip is **`UNCONFIRMED`**;
@@ -187,8 +187,13 @@ happened":
 - **`did not FINISH within the … wait`** — the flip is **`UNKNOWN`, NOT failed**.
   The watch gave up while the run was still QUEUED or running (runner-queue
   latency is not ours to bound).
+- **`reported a non-zero exit … its state is NOT terminal`** — the flip is
+  **`UNKNOWN`, NOT failed**: the watch exited non-zero on a failed POLL (it
+  returns the same exit code for a transport/API error as for a failed run, and
+  over ~6,600 polls that is a realistic event) while the run's own
+  `status`/`conclusion` say it has not finished.
 
-In those three cases do **NOT** run the fallback and do **NOT** re-dispatch —
+In those four cases do **NOT** run the fallback and do **NOT** re-dispatch —
 both queue behind that run and supersede its pending slot, which leaves the
 schema applied and the app orphaned: exactly the #3627 window this section
 exists to close. Watch it instead

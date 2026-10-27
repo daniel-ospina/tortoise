@@ -361,19 +361,26 @@ jobs:
           echo "   https://github.com/${REPO_SLUG}/actions/runs/${run_id}"
           watch=(gh run watch "${run_id}" --repo "${REPO_SLUG}" --exit-status)
           # `timeout` is GNU coreutils — the ubuntu runner has it, macOS does not.
-          # ⛔ 330m, not the pre-#10155 45m, and the DERIVATION is split in two
-          # because the wait is not execution-dominated:
-          #   • what this workflow can BOUND is execution: a predecessor holds the
-          #     group for at most its job caps (55 + 65 + 25 = 145 min — the caps
-          #     `deploy-hosted.yml` derives, re-derive this sum if they move) and
-          #     this run for the same, so 2 × 145 = 290 min + slack;
-          #   • what it CANNOT bound is runner-queue latency, and that is now the
+          # ⛔ 330m, not the pre-#10155 45m, and the DERIVATION is honest about
+          # what a `timeout-minutes` can and cannot bound:
+          #   • what the caps CAN bound is EXECUTION — `timeout-minutes` is
+          #     measured from when a runner picks the job up. A predecessor spends
+          #     at most 55 + 65 + 25 = 145 min executing (the caps
+          #     `deploy-hosted.yml` derives; re-derive this sum if they move), and
+          #     this run the same.
+          #   • what NO cap can bound is runner-QUEUE latency, and it is the
           #     larger term — measured on the newest SUCCESSFUL deploy-hosted run
-          #     (40458809781, 2026-10-27): wall clock 167.3 min against 16.8 min
-          #     of job execution, i.e. 42.5 + 66.2 + 41.8 min spent QUEUED.
-          #     330 is the largest wait that fits inside the `deploy` job's
-          #     ceiling (GitHub's 360-minute default, which this job does not
-          #     override) with room for the apply steps that run before it.
+          #     (40458809781, 2026-10-27): 167.3 min wall clock against 16.8 min of
+          #     job execution, i.e. 42.5 + 66.2 + 41.8 min spent QUEUED, ~150 min
+          #     of it INSIDE a run that already held the group. That single run's
+          #     occupancy EXCEEDS 145, which is why the wait is not
+          #     `2 × 145 + slack`: two such runs would be 334.6 min and expire a
+          #     bound derived that way (`docs/ops/ci-wall-clock.md` §1 states the
+          #     rule: a job that never gets a runner has no timeout at all).
+          #     330 is instead the largest wait that fits inside the `deploy`
+          #     job's ceiling (GitHub's 360-minute default, which this job does
+          #     not override) with room for the apply steps that run before it —
+          #     a POLICY bound against an unbounded term, not a computed one.
           # ⛔ COST OF THAT BOUND, stated because it is not paid here: this step
           # runs INSIDE the `deploy` job, which holds the constant
           # `supabase-deploy-apply` lock for the job's whole life

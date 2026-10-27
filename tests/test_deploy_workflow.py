@@ -3211,3 +3211,53 @@ def test_the_readiness_request_bound_clears_the_servers_own_bound() -> None:
         f"{hosted_api.CONTROL_PLANE_HARD_TIMEOUT}) — a client bound below it reds "
         "a healthy-but-slow release and reports it as `000 = no response`"
     )
+
+
+def _gate_knob(gate: str, name: str) -> int:
+    """The SHIPPED default of a `NAME="${NAME:-<int>}"` knob in the gate."""
+    match = re.search(rf'{name}="\$\{{{name}:-(\d+)\}}"', gate)
+    assert match, f"{name} is not a numeric default in deploy-health-gate.sh"
+    return int(match.group(1))
+
+
+def test_the_health_gate_budget_stays_under_the_cap_that_kills_it() -> None:
+    """The gate's worst case is DERIVED from its knobs and must fit the job cap.
+
+    `post-deploy-verify`'s `timeout-minutes` is the only thing that can end a
+    hung gate, and a `timeout-minutes` kill ends the job BEFORE `if: failure()`
+    is evaluated — so the #2240 out-of-band alert never runs and a LIVE,
+    unhealthy release reports as a red run with a truncated log. That makes the
+    relationship `gate worst case < cap` load-bearing, and it was PROSE ONLY:
+    the budget appears in `deploy-health-gate.sh`'s comment and in the job's
+    comment, and nothing recomputed it from the knobs. Raising `READY_TRIES`
+    (or adding a phase) would silently make the cap the bound again — the exact
+    failure the per-request bounds were added to remove.
+
+    The harness cannot catch this: it overrides `APP_PROBES` / `DB_TRIES` /
+    `READY_TRIES` / the sleeps per case, so it never sees the shipped defaults.
+    """
+    gate_path = _REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh"
+    gate = gate_path.read_text(encoding="utf-8")
+
+    worst = (
+        _gate_knob(gate, "APP_PROBES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_APP") + _gate_knob(gate, "APP_PROBE_SLEEP"))
+        + _gate_knob(gate, "DB_TRIES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_HEALTH") + _gate_knob(gate, "DB_SLEEP"))
+        + _gate_knob(gate, "READY_TRIES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_READY") + _gate_knob(gate, "READY_SLEEP"))
+    )
+
+    job = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["post-deploy-verify"]
+    cap_minutes = job.get("timeout-minutes")
+    assert isinstance(cap_minutes, int), (
+        f"post-deploy-verify has no integer timeout-minutes ({cap_minutes!r}) — the "
+        "gate's worst case would be bounded by GitHub's 360-minute default, and a "
+        "kill at that point still skips if: failure()"
+    )
+    assert worst < cap_minutes * 60, (
+        f"the gate's worst case is {worst} s ({worst / 60:.2f} min) but "
+        f"post-deploy-verify is capped at {cap_minutes} min — the CAP would be the "
+        "thing that ends a hung probe, and a timeout-minutes kill skips the #2240 "
+        "alert. Either bound the gate tighter or raise the cap in the same commit."
+    )

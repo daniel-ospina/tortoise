@@ -257,11 +257,17 @@ on:
 #     path it exists to allow, because `--wait-timeout 420` bounds only the
 #     release wait and not `flyctl deploy`'s remote build.
 #
-# ⚠️ NOTHING OUTSIDE THIS WORKFLOW IS BOUNDED BY THESE CAPS ALONE: the sum
-# (55 + 65 + 25 = 145 min) is now the worst case a run can HOLD this group for,
-# which is what `supabase-deploy.yml`'s flip watcher has to out-wait (it queues
-# behind a running run instead of pre-empting it) — that watcher's own bound is
-# derived from this 145.
+# ⚠️ NOTHING OUTSIDE THIS WORKFLOW IS BOUNDED BY THESE CAPS ALONE, and be precise
+# about WHAT they bound: `timeout-minutes` bounds the EXECUTION portion of a
+# run's occupancy, measured from when a runner picks the job up — it cannot bound
+# runner-QUEUE latency, which is a separate and (measured) larger term
+# (`docs/ops/ci-wall-clock.md` §1: a job that never gets a runner has no timeout
+# at all; the 167.3-min wall clock of run 40458809781 was 16.8 min of job
+# execution over 42.5 + 66.2 + 41.8 min of queueing). So `55 + 65 + 25 = 145` is
+# the worst case a run can spend EXECUTING while it holds this group — not the
+# worst case it holds the group — and `supabase-deploy.yml`'s flip watcher waits
+# on wall clock, so its 330-minute bound is justified by the `deploy` job's
+# 360-minute ceiling, NOT by 2 × 145.
 concurrency:
   group: deploy-hosted
   cancel-in-progress: false
@@ -398,15 +404,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: packaging-smoke
     # Bounded ABOVE this job's own worst case, NOT at a multiple of its measured
-    # maximum: the retry loop is 5 × 11-minute attempts + 4 × 45 s = 58.0 min
-    # (each attempt is `timeout`-bounded — `--wait-timeout 420` bounds only the
-    # release wait, not the remote build), and this job has THIRTEEN other steps
-    # sharing the same budget (the dependency parity gate alone runs two `uv`
-    # commands). So:
-    #   58.0  loop worst case
+    # maximum: the retry loop is 5 `timeout -k 30s` attempts (11 min + a 30 s
+    # kill grace each) + 4 × 45 s = 60.5 min worst case (each attempt is
+    # `timeout`-bounded — `--wait-timeout 420` bounds only the release wait, not
+    # the remote build — and `-k 30s` makes that bound unconditional), and this
+    # job has THIRTEEN other steps sharing the same budget (the dependency parity
+    # gate alone runs two `uv` commands). So:
+    #   60.5  loop worst case
     # +  0.42 non-Deploy steps — MEASURED max over 8 deploy-api jobs 2026-10-27
     #         (0.22, 0.27, 0.32, 0.33, 0.38, 0.40, 0.40, 0.42)
-    # = 58.42 → 65, i.e. 6.6 min of headroom (15.7× the measured non-Deploy term).
+    # = 60.92 → 65, i.e. 4.1 min of headroom (9.7× the measured non-Deploy term).
     # ⛔ The headroom is the point, not padding: a `timeout-minutes` kill ends the
     # job BEFORE `if: failure()` is evaluated (see the POST-DEPLOY RESIDUAL note
     # below), so a cap the loop alone can reach silences the #2240 out-of-band
@@ -1046,6 +1053,15 @@ jobs:
           # the job's thirteen other steps — so 11 min is 1.75× this step's
           # measured max and the cap is derived ABOVE the loop instead (see
           # `deploy-api`'s `timeout-minutes`).
+          # ⛔ `-k 30s` is not decoration: without `--kill-after`, `timeout` sends
+          # only SIGTERM and then WAITS for the child, so a `flyctl` that traps or
+          # ignores TERM overruns the bound indefinitely and the 65-minute job cap
+          # becomes the thing that ends the job — which is the failure this bound
+          # exists to remove (a `timeout-minutes` kill ends the job BEFORE
+          # `if: failure()`, silencing the #2240 alert). Measured semantics: a
+          # child that ignores TERM under `timeout 1s` ran 6 s and still exited
+          # 124. With the grace the loop's worst case is 5 × 11.5 + 4 × 0.75 =
+          # 60.5 min, which the 65-minute cap covers.
           # MEASURED for THIS STEP, not the job — a `deploy-api` JOB duration
           # says nothing about attempt length: the tempting 55.1-min example,
           # run 40451731878, was `cancelled` with `steps=0`, so the step never
@@ -1054,11 +1070,11 @@ jobs:
           # then 3.03, 2.78, 2.43, 1.63. The retry loop absorbs an attempt that
           # really is slow.
           for attempt in 1 2 3 4 5; do
-            if timeout 11m flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
+            if timeout -k 30s 11m flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
               exit 0
             fi
             # No sleep after the LAST attempt: it is dead time charged against
-            # the job's 60 and buys nothing (the loop exits immediately after).
+            # the job's 65 and buys nothing (the loop exits immediately after).
             if [ "${attempt}" -lt 5 ]; then
               echo "::warning::deploy attempt $attempt failed or hit its 11-minute bound — waiting 45s before retry (Fly lease/API race)"
               sleep 45
