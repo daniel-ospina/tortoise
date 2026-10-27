@@ -231,7 +231,7 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
     early return, so tier1 is the ONLY surface that runs.
 
     Measured before the fix: the document's plan was `surfaces=[]`, the tier-1
-    set (63 files) did not contain this file, and the pin was registered in
+    set (64 files) did not contain this file, and the pin was registered in
     `core` alone — asleep on the exact change it exists to catch. The manifest
     assertion in :func:`test_docs_scanning_gates_stay_in_tier1` catches a deleted
     row; this catches a row that is present but no longer reaches the file

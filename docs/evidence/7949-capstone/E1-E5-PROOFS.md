@@ -75,13 +75,16 @@ It pins **no prose** and not the run-1 block, whose receipts were never retained
   number.** A row moves by re-running the probe and deleting the file it replaces —
   never by editing a number. The new test is a *pin on the write-back*, not a
   verdict change.
-* **No `docs/00_index.md` row.** This file lives inside the already-registered
-  bundle path and its pins are reached through it, so the bundle's existing row is
-  the index's unit. (An earlier draft justified this by `_index_row`'s "exactly
-  one" rule — that was wrong: `_index_row` (`tests/test_e1_e2_measurement.py:1839`)
-  selects rows containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`,
-  so a second row naming this file would not collide. The conclusion stands on the
-  bundle-unit convention alone.)
+* **No `docs/00_index.md` row of its own.** This file lives inside the
+  already-registered bundle path and is reachable through the bundle's rows.
+  (An earlier draft justified this by `_index_row`'s "exactly one" rule — that
+  was wrong: `_index_row` (`tests/test_e1_e2_measurement.py:1839`) selects rows
+  containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`, so a
+  second row would not collide. **It was also the wrong conclusion**, caught by
+  `#10108` review: the bundle carries one row PER ARTEFACT (`docs/00_index.md`
+  `:139` the gate/probes/logs, `:145` PRE-REGISTRATION, `:146` E1+E2), so a
+  reader routing by the documented entry point could not reach this file at all.
+  The row is now added.)
 * **No E1/E2/E4 proof.** Their mechanisms are missing, not their pins (below).
 
 ---
