@@ -332,7 +332,11 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # carries `graph_name=`, so a declaration for that file would be inert and
     # would assert about call shapes the file no longer has.
     # CLI routing unit — from_uri is stubbed by the test (never connects)
-    "test_pipeline_cli.py": [r"from_uri\("],
+    # (#10170 review round 3, found by the strengthened check: a
+    # `"test_pipeline_cli.py": [r"from_uri\\("]` row lived here. The module has
+    # NO `from_uri(` call at all — it defines a stub `_from_uri` and
+    # `monkeypatch.setattr`s it, and its only mentions are in docstrings and
+    # strings. A row that can never be consulted is the defect this issue closes.)
     # #3301: module live-FalkorDB availability probe over candidate URIs
     # (construct + RETURN 1 + close, never DETACHs) — the same shape as
     # test_search_engine_gaps.py above. Every DETACH DELETE in the file
@@ -447,6 +451,45 @@ def _is_exempt(path) -> bool:
     return path.stem in _exempt_stems()
 
 
+def _mask_strings_and_comments(src: str) -> str:
+    """`src` with string literals and `#` comments blanked, SAME LENGTH (indices
+    preserved). Paren counting and site detection must not see a `(` inside a
+    string: one unbalanced quote or an argument like `hint="("` otherwise runs the
+    call-block to EOF, which makes every later site inherit the first block's
+    `graph_name=` and go silently green (#10170 review round 3)."""
+    out, i, n, q = list(src), 0, len(src), None
+    while i < n:
+        c = src[i]
+        if q:
+            if c == "\\" and i + 1 < n:
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            if src.startswith(q, i):
+                for k in range(i, i + len(q)):
+                    out[k] = " "
+                i += len(q)
+                q = None
+                continue
+            if c != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        if c == "#":
+            while i < n and src[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if c in "\"'":
+            q = c * 3 if src.startswith(c * 3, i) else c
+            for k in range(i, i + len(q)):
+                out[k] = " "
+            i += len(q)
+            continue
+        i += 1
+    return "".join(out)
+
+
 def _sites_in_file(path):
     """(line_number, call_block) for every LIVE `from_uri(` call in `path`.
 
@@ -458,23 +501,21 @@ def _sites_in_file(path):
     """
     call_re = re.compile(r"\b(\w+)\.from_uri\s*\(")
     src = path.read_text(encoding="utf-8")
+    masked = _mask_strings_and_comments(src)
     out = []
-    for m in call_re.finditer(src):
+    for m in call_re.finditer(masked):
         line_no = src.count("\n", 0, m.start()) + 1
-        line = src.split("\n")[line_no - 1].strip()
-        if line.startswith("#"):
-            continue
         depth, i = 1, m.end()
-        while i < len(src) and depth:
-            if src[i] == "(":
+        while i < len(masked) and depth:
+            if masked[i] == "(":
                 depth += 1
-            elif src[i] == ")":
+            elif masked[i] == ")":
                 depth -= 1
             i += 1
-        block = src[m.start():i]
-        if not block.strip().rstrip(")").strip():
-            continue  # comment-shaped reference (from_uri() with no args)
-        out.append((line_no, " ".join(block.split())))
+        block = " ".join(src[m.start():i].split())
+        if re.fullmatch(r"\w+\.from_uri\(\s*\)", block):
+            continue  # a zero-argument reference is not a construction
+        out.append((line_no, block))
     return out
 
 
@@ -620,17 +661,21 @@ def _enclosing_block(src: str, pos: int) -> str:
     head = src[:pos]
     last_def = max(head.rfind("\ndef "), head.rfind("\n    def "))
     if last_def < 0 and src.startswith("def "):
-        # A `def` at offset 0 has no PRECEDING newline, so the two searches above
-        # both miss it and the site was treated as module-level: `head` (the text
-        # BEFORE the site) became the "block", which cannot contain the bulk
-        # DETACH that follows. A raw-client site inside the FIRST function of a
-        # file was therefore never flagged (#10170 review — found because the
-        # behavioural fixture starts with `def` on line 1).
-        end = re.search(r"\ndef ", src[1:])
-        return src[:end.start() + 1] if end else src
-    if last_def < 0:
-        return head  # genuinely module-level site — the whole head is the block
-    return src[last_def:]
+        # A `def` at offset 0 has no PRECEDING newline, so both searches miss it.
+        start = 0
+    elif last_def < 0:
+        # Module-level site: the block is the text AFTER it, so a following bulk
+        # DETACH is visible. Returning `head` (the text before) could never
+        # contain it and every import-time wipe was silently skipped.
+        start = pos
+    else:
+        start = last_def + 1
+    tail = src[start:]
+    # Bound at the next column-0 statement, for EVERY branch: a block that runs to
+    # EOF makes a later journaled site launder an earlier unjournaled one and
+    # blames a later DETACH on an earlier construction (#10170 review round 3).
+    end = re.search(r"\n(?=\S)", tail)
+    return tail[:end.start()] if end else tail
 
 
 def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
@@ -655,7 +700,8 @@ def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
 _MUST_HAVE_NO_SITES = ("test_finding_provenance.py",)
 
 
-def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path):
+@pytest.mark.parametrize("registry", ["stems", "filenames"])
+def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
     """#10170 review (P1): the skip decision, tested BEHAVIOURALLY, per census.
 
     The first version asserted `probe.stem in exempt` — introspection, which
@@ -670,22 +716,36 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path):
     """
     from tests._embedded import TEST_NO_REDIRECT_STEMS
 
-    exempt_stem = next(s for s in sorted(TEST_NO_REDIRECT_STEMS)
-                       if s.startswith("test_"))
+    if registry == "stems":
+        exempt_stem = next(s for s in sorted(TEST_NO_REDIRECT_STEMS)
+                           if s.startswith("test_"))
+    else:
+        exempt_stem = sorted(e.removesuffix(".py") for e in _FROM_URI_EXEMPT_FILES
+                             if e.startswith("test_"))[0]
+    # the OFFENDING function sits SECOND, with a journaled one after it: a block
+    # that runs to EOF would inherit that journal and flag nothing.
     offending = (
-        "def test_fixture():\n"
-        "    proj = _FP.from_uri(\"bolt://localhost:6379\")\n"
-        "    from falkordb import FalkorDB\n"
-        "    client = FalkorDB(host=\"h\")\n"
-        "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
-        "\n"
-        "def test_journaled():\n"
+        "def test_journaled_first():\n"
         "    import os\n"
         "    from falkordb import FalkorDB\n"
         "    name = f\"g_{os.urandom(4).hex()}\"\n"
         "    _journal_append(name)\n"
         "    c = FalkorDB(host=\"h\")\n"
         "    c.query(\"MATCH (n) DETACH DELETE n\")\n"
+        "\n"
+        "def test_fixture():\n"
+        "    proj = _FP.from_uri(\"bolt://localhost:6379\")\n"
+        "    from falkordb import FalkorDB\n"
+        "    client = FalkorDB(host=\"h\")\n"
+        "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
+        "\n"
+        "def test_journaled_third():\n"
+        "    import os\n"
+        "    from falkordb import FalkorDB\n"
+        "    other = f\"g2_{os.urandom(4).hex()}\"\n"
+        "    _journal_append(other)\n"
+        "    d = FalkorDB(host=\"h\")\n"
+        "    d.query(\"MATCH (n) DETACH DELETE n\")\n"
     )
     (tmp_path / f"{exempt_stem}.py").write_text(offending, encoding="utf-8")
     assert (tmp_path / f"{exempt_stem}.py") in sorted(tmp_path.glob("test_*.py")), \
@@ -697,8 +757,9 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path):
         f"the from_uri census did not skip {exempt_stem!r}: {scanned}")
 
     bad = _raw_detach_violations(root=tmp_path)
-    assert bad, "the raw-client census flagged nothing, so the fixture proves nothing"
-    assert all(v.startswith("test_zz_not_exempt.py:") for v in bad), (
+    assert len(bad) == 1, (
+        f"expected exactly the peer's one unjournaled site, got {bad}")
+    assert bad[0].startswith("test_zz_not_exempt.py:"), (
         f"the raw-client census did not skip {exempt_stem!r}: {bad}")
 
 
@@ -757,14 +818,25 @@ def test_no_declared_route_or_pin_is_inert():
     uses the census's OWN per-file detector — the same function `_from_uri_sites`
     yields from (#10170 review round 2).
     """
+    # A routed row for an EXEMPT file reads as coverage while the census skips the
+    # file outright and never consults the row.
+    assert not ({n.removesuffix(".py") for n in _ROUTED_FROM_URI_SITES} & _exempt_stems()), \
+        "a routed row names an exempt file, so the census never reads it"
+
     gone = []
-    for name in _ROUTED_FROM_URI_SITES:
+    for name, patterns in _ROUTED_FROM_URI_SITES.items():
         path = _TESTS_ROOT / name
         if not path.exists():
             gone.append(f"{name}: file missing")
-        elif not _sites_in_file(path):
-            gone.append(f"{name}: declares {_ROUTED_FROM_URI_SITES[name]} but has "
-                        "no live from_uri( call")
+            continue
+        blocks = [b for _ln, b in _sites_in_file(path)]
+        if not blocks:
+            gone.append(f"{name}: declares {patterns} but has no live from_uri( call")
+            continue
+        unmatched = [p for p in patterns
+                     if not any(re.search(p, b) for b in blocks)]
+        if unmatched:
+            gone.append(f"{name}: declared pattern(s) match no live site: {unmatched}")
     for name in _MUST_HAVE_NO_SITES:
         path = _TESTS_ROOT / name
         if not path.exists():
