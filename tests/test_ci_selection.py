@@ -1944,6 +1944,30 @@ def test_token_ts_change_selects_the_consent_bridge_guard():
     )
 
 
+def test_a_consent_token_only_diff_runs_the_bridge_guard():
+    """#3524 review (P1): the verifier's own diff must select the guard that pins it.
+
+    `tests/test_oauth_consent_bridge.py` is registered `api` + `onboarding` and
+    NOT `core`; a named-surface match REPLACES the `core` fallback. So before
+    `tortoise/consent_token.py` was a `SOURCE_PATTERNS["api"]` entry, a diff that
+    touched the verifier and nothing else selected `core`, where that guard does
+    not exist — a regression in the signature/`alg`/`bind`/`jti` logic (the
+    security half of the bridge) red nowhere and merged green. Asserts the
+    SELECTION, not the registration, so it reds on the pre-fix patterns.
+    """
+    r = _sel(["tortoise/consent_token.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a consent_token.py-only diff selects {r['surfaces']} — the bridge "
+        "guard is registered on `api`, and `core` does not run it"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a consent_token.py-only diff does not run "
+        "tests/test_oauth_consent_bridge.py, so its verifier guards cannot fire "
+        "on the change they pin (#3524)"
+    )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
