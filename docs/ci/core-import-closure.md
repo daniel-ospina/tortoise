@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (40 tests, incl. the harness mutation check)
+- Pins: `tests/test_ci_import_closure.py` (41 tests, incl. the harness mutation check)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
   is **classification only**: a diff that changes *this instrument* and nothing else
   (`tools/ci_import_closure.py`-only) is a non-Python change — `tools/` is in
@@ -130,7 +130,7 @@ absent). The window is a MOVING set, so the exact one these numbers come from is
 10086, 10081, 10079, 10078, 10075, 10071, 10070, 10069, 10068, 10066, 10055, 10053. A re-run
 `--window 40` after further merges reports different totals — that is the window moving, not a
 contradiction. Coverage: **11 PRs carried ≥ 1 test-level failure**, **22 failing test files (17
-distinct)**; **5 PRs carried an artifact the harness could not read**, so this window is
+distinct)**; **5 artifacts, across 4 PRs, were unreadable**, so this window is
 **PARTIAL** and `validate` exits **2** to say so rather than reporting a clean window it could not
 read. An unreadable artifact can only UNDER-count misses, so the two miss counts below are lower
 bounds (the 40-PR count includes the `init`-level checks only; a green PR contributes nothing here).
@@ -242,9 +242,9 @@ carried in the JSON as `unresolved_core`, because every percentage here is a rat
    258 modules (72 %)**. A change to any module in that block still selects 628 files — 84.6 % of
    the surface — so the ceiling of a split is a 15 % reduction, for a change that would narrow a
    guard.
-2. **The derivation is not safe.** 8 historical misses (9 naive) over 40 merged PRs — a lower
+2. **The derivation is not safe.** 9 historical misses (10 naive) over 40 merged PRs — a lower
    bound, since 5 artifacts were unreadable — in three classes, and only one class is an analysis
-   limitation. A mapping that would not have run 8 tests that actually failed is not a mapping to
+   limitation. A mapping that would not have run 9 tests that actually failed is not a mapping to
    build selection on.
 3. **The lever is import hygiene, not surface bookkeeping.** In order of measured leverage:
    - the **one deferred `config → sdk` import** (§2): worth 179 of the 186 modules in the shim's

@@ -522,7 +522,7 @@ class Scanner:
 
     def _scan_import_call(
         self, node: ast.Call, scan: FileScan, pkg_parts: list[str], name: str,
-        in_tc: bool = False, in_fn: bool = True,
+        in_tc: bool = False, in_fn: bool = False,
     ) -> None:
         if not node.args:
             scan.unknown.append(Unknown(
@@ -545,13 +545,18 @@ class Scanner:
 
     def _scan_loader_call(
         self, node: ast.Call, scan: FileScan, name: str,
-        in_tc: bool = False, in_fn: bool = True,
+        in_tc: bool = False, in_fn: bool = False,
     ) -> None:
         """A module loaded from a PATH (`spec_from_file_location`, loader classes).
 
         `module_from_spec` is skipped: its spec comes from a call already handled
         (or already reported) at the spec site, so counting it again would double
         the taint for one dynamic load.
+
+        `in_fn` defaults to **False**, not True: a module-level call that omitted
+        it used to be tagged function-local and then DELETED by
+        `--import-time-only` (#10143 P2). Both call sites pass the real context;
+        the default must not reintroduce the bug for a future one.
         """
         if name == "module_from_spec":
             return
@@ -631,13 +636,13 @@ def _resolve_relative_name(name: str, pkg_parts: list[str]) -> str:
 
 
 def _dedupe_deps(deps: list[Dep]) -> list[Dep]:
-    """One edge per (target, kind), keeping the STRONGEST occurrence.
+    """One edge per (target, kind, type_checking, in_function) — exact context
+    duplicates collapse, and nothing else does.
 
-    "One edge per (target, kind)" was the original contract and it was WRONG:
-    it made the survivor depend on the reader (see the carriage below). What is
-    deduped now is one edge per (target, kind, type_checking, in_function) —
-    i.e. only exact context duplicates — so a module-level and a function-local
-    occurrence of the same target BOTH survive and each reader filters its own.
+    The ORIGINAL contract was "one edge per (target, kind), keeping the STRONGEST
+    occurrence", and it was WRONG: it made the survivor depend on the reader (see
+    the carriage below). A module-level and a function-local occurrence of the
+    same target BOTH survive now, and each reader filters its own.
     Ties break on `line` (lowest first) so the reported location is stable.
 
     #10143 review P1: this compared `type_checking` only, and
@@ -645,7 +650,6 @@ def _dedupe_deps(deps: list[Dep]) -> list[Dep]:
     occurrence is normally yielded BEFORE the module-level one and won by
     accident. Measured on the `tortoise/b`-imported-both-ways shape: the survivor
     was `in_function=True`, module-level-only closure came back empty.
-    Ties break on `line` (lowest first) so the reported location is stable.
     """
     # ⛔ THE KEY IS (target, kind, type_checking, in_function) — NOT
     # (target, kind).
@@ -1104,7 +1108,18 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
     failed_jobs: list[str] = []
     run_ids: set[int] = set()
     for run in _check_runs(repo, sha):
-        if run.get("conclusion") != "failure":
+        # ⛔ THE RED-CLASS SET, NOT EQUALITY WITH "failure" (#10143 review P2).
+        # A `test*` leg concluding `timed_out` was dropped HERE, before
+        # `failed_jobs` existed — so neither `artifact_errors` nor the window's
+        # unread-PR guard could see it, and a killed suite that may well have
+        # failed tests left the window reading "0 misses, exit 0". This is the
+        # repo's own recorded polarity: green is exactly {success, neutral,
+        # skipped}, cancelled/stale are non-red, and EVERY OTHER CONCLUSION IS
+        # RED. A conclusion GitHub has not named yet, and a null one, are red
+        # too — an unnamed value must never fall through a gap.
+        conclusion = run.get("conclusion")
+        if conclusion in {None, "success", "neutral", "skipped", "cancelled",
+                          "stale"}:
             continue
         name = run.get("name") or ""
         if not name.startswith("test"):
@@ -1453,6 +1468,14 @@ def _tests_rel(path: str) -> str:
 def cmd_validate(args: argparse.Namespace) -> int:
     ci = _selection_module()
     manifest, data, index = _load_all(not args.exclude_type_checking)
+    if data.get("unresolved_core"):
+        # Reported by `closure` and `report` too — and here it matters MOST: the
+        # miss counts below are ratios over this denominator, so a member that
+        # resolved to no test file must be visible in the verb that publishes
+        # them (#10143 review P2).
+        print("::error:: core member(s) resolving to NO test file — the "
+              "denominator below is short by that many: "
+              + ", ".join(data["unresolved_core"][:10]))
     closures = data["closures"]
     core = data["core"]
     core_rel = {_tests_rel(p) for p in core}
@@ -1485,11 +1508,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # carve-out file. Reading only `test_files`/`slow_selected` therefore
         # scored a carve-out failure as `not_in_current` — i.e. it blamed the
         # EXISTING selector for a test the existing selector DID run, and the
-        # derivation was absolved of it. MEASURED on the §3 window: #10134's
+        # derivation was absolved of it. MEASURED on the window as it stood
+        # BEFORE this round re-cut it (the 40 PRs ending at #10027): #10134's
         # `test-carve-out (b)`/`(c)` failed 6 files, 5 of them core-registered;
         # as shipped those 6 landed in `not_in_current` and the totals read
-        # 9/8 instead of 14/13. `not_in_current` is now PRINTED too — the
-        # exclusion was invisible in the console and in the report.
+        # 9/8 instead of 14/13. On the re-cut window the same defect moved the
+        # totals to 10/9 (`docs/ci/core-import-closure.md` §3). `not_in_current`
+        # is now PRINTED too — the exclusion was invisible in the console and in
+        # the report.
         if selection["test_files"] == "ALL":
             current_rel = {_tests_rel(p) for p in all_tests} | {
                 _tests_rel(p) for p in selection.get("slow_files", [])
@@ -1557,6 +1583,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         "total_misses_naive": total_naive,
         "total_misses_keep_non_python": total_safe,
         "artifact_errors": sum(len(r["artifact_errors"]) for r in rows),
+        "unresolved_core": data.get("unresolved_core", []),
         "prs": rows,
     }
     if args.json:

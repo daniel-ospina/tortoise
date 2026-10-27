@@ -79,9 +79,9 @@ def test_from_package_import_name_descends_into_the_submodule():
 
 
 def test_function_local_imports_are_walked_and_tagged():
-    """`tortoise/sdk.py` carries 16 module-level in-repo imports and 74 function-local
-    ones (89 distinct targets, one reached both ways) — a top-level-only reader would
-    miss the hub entirely."""
+    """`tortoise/sdk.py` carries 28 module-level in-repo imports and 61 that arrive
+    ONLY from a function body (89 distinct targets; 13 are reached both ways, so
+    a top-level-only reader would miss the hub entirely)."""
     idx = _index("tortoise/abuse.py", "tortoise/sdk.py")
     src = (
         "def f():\n"
@@ -446,7 +446,7 @@ def test_import_time_only_reproduces_the_naive_reader_that_under_selects():
 
     On this repo it reports a median core closure of 21 modules instead of 186 —
     a ">88 % reduction" that would ship a false green, because `tortoise/sdk.py`
-    reaches 74 of its 89 in-repo modules through function-local imports.
+    reaches 61 of its 89 in-repo modules ONLY from a function body.
     """
     idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
     scans = {
@@ -609,6 +609,51 @@ def test_ground_truth_records_an_unparseable_junit(monkeypatch, tmp_path):
     truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
     assert truth["artifact_errors"], "unparseable junit must be reported, not dropped"
     assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
+
+
+def test_ground_truth_records_a_red_run_that_uploaded_no_artifact(monkeypatch, tmp_path):
+    """P1: drive the PRODUCER of the third drop path, not the string it hands over.
+
+    The two tests above feed an artifact and break it. This one breaks the layer
+    above: a red run whose artifact listing is EMPTY, which the harness used to
+    `continue` past with no `artifact_errors` entry — and then CACHED, so the
+    truncation looked like a clean run on every later invocation. Both halves are
+    asserted: the entry exists, and nothing is written to the cache.
+    """
+    from tools import ci_import_closure as module
+    _fake_ground_truth(monkeypatch, module, junit=None, listing_names=[])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["artifact_errors"], (
+        "a red run with an EMPTY artifact listing is an unread run, not a clean one")
+    assert truth["artifacts"] == 0
+    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+        "a partial ground truth must never be cached as truth")
+
+
+def test_ground_truth_counts_a_non_failure_red_conclusion(monkeypatch, tmp_path):
+    """P2: the red-class set, not equality with `conclusion == "failure"`.
+
+    A `test*` leg concluding `timed_out` — a killed suite that may well have failed
+    tests and uploaded no junit — was dropped before `failed_jobs` existed, so
+    neither `artifact_errors` nor the window's unread-PR guard could see it and a
+    window could still exit 0/1. `cancelled` stays NON-red (repo polarity), so both
+    directions are asserted.
+    """
+    from tools import ci_import_closure as module
+    _fake_ground_truth(monkeypatch, module, junit=None, listing_names=[])
+
+    for conclusion, is_red in (("timed_out", True), ("startup_failure", True),
+                               ("cancelled", False)):
+        monkeypatch.setattr(module, "_check_runs", lambda repo, sha, c=conclusion: [
+            {"name": "test (a)", "conclusion": c, "id": 99,
+             "details_url": "https://github.com/o/r/actions/runs/99/job/1"}])
+        truth = module.pr_ground_truth("o/r", f"sha-{conclusion}", tmp_path)
+        if is_red:
+            assert truth["jobs"] == ["test (a)"], f"{conclusion} must be RED"
+            assert truth["artifact_errors"], (
+                f"a red {conclusion} leg with nothing read must be reported")
+        else:
+            assert truth["jobs"] == [], f"{conclusion} must stay NON-red"
 
 
 def test_validate_window_default_is_unset_so_an_explicit_prs_list_is_authoritative():
