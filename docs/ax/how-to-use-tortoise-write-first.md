@@ -385,8 +385,8 @@ every audit eventually asks.
   marked superseded; the new one takes over its connections. **Transfer the
   edges as part of the supersede** — a superseded node whose edges still
   propagate is a belief the graph still prices but no longer holds. Never move
-  edges by hand afterwards. ⚠️ **Blanket today; `docs/ONTOLOGY.md` §4 forbids it:**
-  disposition is restatement-scoped, so a rebuttal motivating a correction stays off.
+  edges by hand afterwards. ⚠️ **Blanket today; `docs/ONTOLOGY.md` §3.1 says:**
+  disposition is restatement-scoped — a rebuttal motivating a correction stays off.
 - **Retract** when it stops being true with no replacement. Retraction is
   terminal: a re-assertion creates a new node, it does not revive the old one.
 - **Superseded operators still propagate.** An operator is a node with its own
@@ -491,7 +491,7 @@ Copy this, tick it, and do not skip a line because the write "looks simple".
 - [ ] Nothing I contradicted is an **option or a criterion**.
 - [ ] Annotation dimensions are set only **deliberately** — unrated means neutral.
 - [ ] Edge rationale is a **sentence**, not a label.
-- [ ] Changes are **supersessions** with edges transferred — not edits.
+- [ ] Changes are **supersessions** — edges dispositioned per the restatement-vs-correction policy, not edits.
 - [ ] Every belief carries its **Source**, stamped by the same write.
 - [ ] Bundled writes are **promoted** (or I know they are drafts).
 - [ ] I confirmed the **graph** before writing and did not construct any **id**.
@@ -505,7 +505,7 @@ Copy this, tick it, and do not skip a line because the write "looks simple".
 | A state (ARR, headcount) written as a belief while its Object exists | 1, 3 | two homes; both nodes answer, neither authoritatively |
 | A structure (an organisation, a role) written as an Object | 1 | the Objects still traverse; only "what do we know about X" breaks |
 | A decision written as a belief with no occurrence | 1 | the timeline is gone and nothing errors |
-| A kind nothing declares on that layer (`subjectKind: person`) | 2 | warn-not-block: the write succeeds |
+| A kind nothing declares on that layer (`subjectKind: person`) | 2 | no notice at all: the write succeeds |
 | A kind from the wrong axis (`sourceKind: research`) | 2 | it reads as declared; it routes nothing |
 | No contradiction on the one contradiction — the support operator was mitigated instead | 5 | the confidence is *wrong*, not missing |
 | A mitigation where a contradiction belonged | 5 | the belief is now priced as merely less relevant |
