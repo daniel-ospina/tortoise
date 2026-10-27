@@ -786,13 +786,55 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     cur = _rp.scope_connection(conn, org_id)
     for label in labels:
         table = NODE_TABLES[label]
+        # #10017 R2: the tier is a COLUMN, not a reader's opinion. A turn row is
+        # `record_only` — §9.1 keeps raw turns outside the graph — and the cache
+        # must not materialise it, or `rebuild_from_record` would re-create the
+        # turn nodes the journal rebuild correctly skips: two rebuild routes,
+        # two different graphs. An "except turns" predicate here would be
+        # inherited by nobody; the next export or sibling projection reading
+        # this table would node-ify the row again.
+        # ⚠️ Spelled `= 'graph'`, NOT the `<> 'record_only'` a reader might
+        # prefer while there are only two tiers: the migration declares the
+        # partial index `WHERE cache_tier = 'graph'`, and PostgreSQL uses a
+        # partial index only when the query's predicate IMPLIES the index
+        # predicate. Measured on postgres:16 over one tenant's rows —
+        # `= 'graph'` plans as `Index Scan using idx_point_graph_tier` with no
+        # filter, `<> 'record_only'` as `idx_point_scope` plus `Filter:
+        # (cache_tier <> 'record_only')`, i.e. every row of the record's
+        # highest-volume table read and thrown away. A third tier added later
+        # must therefore be a place someone LOOKS, which is the point.
+        tier = " AND cache_tier = 'graph'" if table == "point" else ""
         for row in _rows(cur, f"SELECT * FROM public.{table} "
-                              "WHERE org_id = %s AND graph_id = %s",
+                              "WHERE org_id = %s AND graph_id = %s" + tier,
                          (org_id, graph_id)):
             nodes.append(node_from_row(label, row))
+    # …and its EDGES go with it (#10017 R2 review): a CONTAINS edge to a
+    # `record_only` turn is planned against a node this view deliberately does
+    # not project, so `rebuild_from_record` records it in
+    # `relations_not_written` — which makes the operator-facing "declared
+    # partial" signal permanently non-empty for every tenant with tiered turns,
+    # and therefore worthless. The endpoint subquery is label-agnostic on
+    # purpose: `point` is the only tiered table, and a key that is not a point
+    # simply never matches it.
+    # ⚠️ `<> 'graph'` is the COMPLEMENT and it is deliberately unindexed: a
+    # partial index is only used where the predicate implies it, so this scans
+    # `idx_point_scope` + filter. Acceptable here and nowhere else — this is the
+    # rebuild path, and the node read above keeps the `= 'graph'` spelling that
+    # its index can serve.
+    record_only = ("SELECT node_key FROM public.point "
+                   "WHERE org_id = %s AND graph_id = %s "
+                   "AND cache_tier <> 'graph'")
+    # ⚠️ The exclusion is scoped to `Point` ENDPOINTS: `node_identity` is keyed
+    # `(org_id, graph_id, node_label, node_key)`, so another label may legally
+    # carry the same key STRING as a record-only point — an unscoped `NOT IN`
+    # would drop that edge from the view AND from `relations_not_written`
+    # (whose denominator excludes it): a silent edge loss with no signal.
     for row in _rows(cur, f"SELECT * FROM public.{RELATION_TABLE} "
-                          "WHERE org_id = %s AND graph_id = %s",
-                     (org_id, graph_id)):
+                          "WHERE org_id = %s AND graph_id = %s "
+                          f"AND NOT (src_label = 'Point' AND src_key IN ({record_only})) "
+                          f"AND NOT (tgt_label = 'Point' AND tgt_key IN ({record_only}))",
+                     (org_id, graph_id,
+                      org_id, graph_id, org_id, graph_id)):
         relations.append(relation_from_row(row))
     return RecordView(nodes=tuple(nodes), relations=tuple(relations))
 

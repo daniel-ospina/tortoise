@@ -259,6 +259,15 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # the constraints, `DROP COLUMN IF EXISTS` on the generated column).
     (REPO_ROOT / "supabase" / "migrations"
      / "20261027000001_record_semantic_id_key.sql", None),
+    # #10017 R2 — a COLUMN plus a re-declared refusal for `public.point`, which
+    # this tree's readers parse from the FILES: on a container that predates it,
+    # `table_columns()`/`refused_props_names()` report `cache_tier` and the cache
+    # projection emits a predicate on a column the container does not have
+    # (`42703`) — every record-sourced rebuild fails. Re-apply safe by
+    # construction: `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` +
+    # `ADD`, and `COMMENT ON` are all idempotent.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261029000001_record_point_cache_tier.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -2545,9 +2554,10 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
     ⚠️ NOT covered here, and deliberately: the onboarding/starter seed runners
     open the org's DEFAULT graph by construction (`_make_sdk(namespace=org_id)`,
     not this resolver). Binding them to a graph-bound key's id would file their
-    rows under a graph they never wrote; naming the default-graph tenant for
-    those runners is #10047's scope (the org's `kind='default'` row now exists —
-    these lanes are not wired to it yet).
+    rows under a graph they never wrote; they name the default-graph tenant at
+    their OWN construction site since #10047, through this same
+    `record_tenant_for` answer (`hosted_api._bind_default_graph_record_tenant`),
+    and `tests/test_10047_record_every_lane.py` proves it per lane.
     """
     from tortoise import hosted_api, supabase_control
 
@@ -2579,8 +2589,9 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
     # A credential that carries NO such field stays refused: session/PAT
     # (`_session_user_org` resolves `org_id` + tier only) and OAuth `oat_`
     # (`resolve_oauth_access_token` never calls `resolve_api_key`). Naming those
-    # is #10047's scope, and until it is wired the write is refused `no_tenant`
-    # rather than filed under a tenant nobody named.
+    # is #10046's scope (a RESOLUTION gap at the credential), and until it is
+    # wired the write is refused `no_tenant` rather than filed under a tenant
+    # nobody named.
     hosted_api._data_sdk({"org_id": "org-a"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], (
         f"a field-less request bound a tenant nobody named: {bound}")

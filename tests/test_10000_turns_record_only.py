@@ -1038,3 +1038,92 @@ def test_the_fold_leaves_the_live_id_space_end_after_a_shrink(sdk, monkeypatch):
         "the fold replayed the peak (got "
         f"{rows[0][0] if rows else None!r}), so a rebuilt session reports a "
         "healthy shrunk transcript as truncated")
+
+
+class _RecordingSeam:
+    """A `write_live_record` stand-in that REMEMBERS what the capture handed it.
+
+    Only the door's arguments are recorded; nothing is written anywhere, so the
+    leg stays DB-free. It exists so the assertion below cannot pass vacuously:
+    the same capture must have put the text SOMEWHERE, and this is the somewhere.
+
+    It reports the write as **APPLIED**, and that is load-bearing rather than
+    cosmetic: `write_live_record` spends ``None`` on "nothing was attempted"
+    (unarmed, or a write the record REFUSED), and since #10021 the store
+    decision is made from what each write DID — a turn the record did not take
+    is written to the graph, loudly, precisely so no capture leaves a
+    transcript in neither store (`test_a_refused_record_write_falls_back_to_
+    the_graph`). A stub returning ``None`` therefore describes the refusal case,
+    where the graph is REQUIRED to hold the turn, and pairing it with "no node
+    carries the text" would pin the data loss this PR removes instead of the
+    property this test names.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    def __call__(self, record, **_kwargs):
+        self.records.append(record)
+        return RecordWrite(outcome=RecordWriteOutcome.APPLIED, events=1,
+                           statements=2, first_seq=1, last_seq=1)
+
+    def point_contents(self) -> list[str]:
+        return [r["point"]["content"] for r in self.records
+                if r.get("type") == "PointAdded"]
+
+
+def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
+    """Every node whose stored text contains `needle`, with its label and id.
+
+    The POPULATION is the point (acceptance bullet 5 — *"the property, not the
+    call site"*): the scan is over every node, in every property the writers use
+    to carry text (`c` on a Point, `content`, `text`, and the JSON carriers
+    `payload`/`props` a `:GraphEvent` holds). It therefore does not depend on the
+    turn id derivation, the `:Point` label, `is_episodic`, or the `CONTAINS`
+    wiring — so a second write path that invents its own shape is inside the
+    population. `sdk._capture_turn_ids` (the sibling assertion) is not: it asks
+    one id space on one edge.
+    """
+    return [tuple(row) for row in proj.g.query(
+        "MATCH (n) WHERE n.c CONTAINS $needle OR n.content CONTAINS $needle "
+        "OR n.text CONTAINS $needle OR n.payload CONTAINS $needle "
+        "OR n.props CONTAINS $needle "
+        "RETURN labels(n)[0], coalesce(n.id, '')",
+        params={"needle": needle}).result_set]
+
+
+def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch):
+    """#10000 acceptance bullet 5 — the property, not the call site.
+
+    The record is armed, so the graph must hold no node carrying a turn's text —
+    by ANY route: a new label, a different wiring, a `pointKind` of its own. The
+    sibling pin asserts the id space this writer uses is empty, which a second
+    writer with its own shape would not redden; this one scans the graph.
+
+    Non-vacuity is the record half: the capture must hand the text to the record
+    seam, or "nothing in the graph" would be satisfied by a capture that stored
+    the transcript nowhere at all (the vacuity #10011's pin had and #10021 fixes
+    on its own axis — recorded there, not duplicated here).
+
+    ⚠️ The tenant and the APPLIED outcome are both required for that to be true,
+    and neither is decoration. Since #10021 the store is decided by what each
+    write DID: an armed capture with **no tenant** is refused `no_tenant` and
+    MUST then keep its turns in the graph (`test_an_armed_record_with_no_tenant_
+    keeps_the_turns_in_the_graph`), and a write the record does not take is put
+    in the graph too (`test_a_refused_record_write_falls_back_to_the_graph`).
+    Without the binding this leg would be the untenanted case and would assert
+    the transcript in neither store — the P0 #10021 removes.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    _bind_tenant(sdk)
+    needle = "the transcript line that must never reach the graph"
+    _capture(sdk, "property-session", [{"role": "user", "content": needle},
+                                       {"role": "assistant", "content": "ok"}])
+    assert seam.point_contents() == [f"[user] {needle}", "[assistant] ok"], (
+        "the armed capture handed no turn to the record — the graph is not "
+        "carrying it either, so this assertion would prove nothing")
+    proj = sdk._get_proj()
+    assert _graph_text_hits(proj, needle) == [], (
+        "a turn's text is in the graph while the record was armed")

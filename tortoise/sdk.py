@@ -39419,11 +39419,16 @@ class TortoiseSDK:
         proj.apply honors the source_url override (#205 auto-wire onto the REAL
         Source — no phantom) and the embedding-suppression flag (cycle-19); the
         event rides the JSONL so replay reproduces the edge. Frontmatter→ev-dict
-        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/format/
-        domain/topics; everything else DROPPED (authoredBy never persisted;
-        `doc_status` is RETIRED by D10 (ONTOLOGY §4.4) and is neither read nor
-        emitted; date/startedAt whitelisted-but-dropped → sourceDate falls to
-        ingestedAt)."""
+        WHITELIST (cycle-7/8): the keys actually READ are `title` (by the
+        caller, `title = frontmatter.get("title") or Path(path).stem`), the
+        genre (`type`, then `documentKind`, then `document_kind` — first
+        non-empty wins), `domain` and `topics`; everything else DROPPED
+        (authoredBy never persisted; `doc_status` is RETIRED by D10 (ONTOLOGY
+        §4.4) and is neither read nor emitted; date/startedAt
+        whitelisted-but-dropped → sourceDate falls to ingestedAt). ⛔ `format`
+        is NOT read from frontmatter — the ev always carries the constant
+        `"markdown"`, so naming it here claimed a read that never happens
+        (#5140 finding 10)."""
         # Optional frontmatter-metadata validation (#1362) — warn-only, gated
         # by TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The write logic
         # below is UNCHANGED — this only reports missing/malformed required
