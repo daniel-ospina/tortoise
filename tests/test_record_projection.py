@@ -1626,6 +1626,19 @@ def test_a_folded_records_set_reaches_the_relation_rows():
         _SNAPSHOT, extractedFrom="src1",
         sourceVersionTransit=[["src1", "h1"], ["src2", "h2"]])}
     assert len(_relation_statements(scalar_only)) == 1
+    # AND the folded set also survives into the record's `point.props` tail, so
+    # a record→cache round trip restores the node PROPERTY as well as the edges
+    # (`04-projection.md` §3 states it — this is what stops the sentence from
+    # going false silently: a name added to `chk_point_props_no_derived`'s
+    # refused list, or to `_RECORD_ONLY_KEYS`, would strip it here). The refs
+    # are refused as CALLER props at every door (`sdk._sanitize_props`,
+    # `api.add_point`, `mcp_server._SERVER_MANAGED_PROPS`), so the fold is the
+    # one producer and this tail is its own declaration coming back.
+    point_row = next(
+        s for s in rp.mutations_for(fold, org_id="org-a", graph_id="g1")
+        if s.sql.startswith("INSERT INTO public.point"))
+    assert json.loads(point_row.params[-1])["extractedFromAll"] == ["src1", "src2"], \
+        point_row.params[-1]
 
 
 def test_a_record_sourced_rebuild_materialises_the_provenance_edge():

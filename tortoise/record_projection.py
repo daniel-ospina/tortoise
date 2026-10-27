@@ -2607,6 +2607,10 @@ _POINT_PROPERTY_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
 #: on `extractedFromAll` (#7704), so the record has to read the SET — the same
 #: selector the journal replay's `_upsert_point_edges` uses — or it materialises
 #: one edge where the graph holds N.
+#: ⚠️ All four declared rows name this ONE property today, so the selector's
+#: `else` arm (`_point_property_refs` off the named prop) is a FORWARD guard for
+#: a second declared point property, not a live branch: nothing constructs it
+#: and no pin reds if it is wrong. Said here so it is not read as coverage.
 _POINT_FOLDED_PROP = "extractedFrom"
 
 
@@ -2738,7 +2742,7 @@ def _point_all_source_refs(snapshot: Mapping[str, Any]) -> list[Any]:
 
     Restated rather than imported for the same STANDALONE reason as the
     siblings, and pinned EQUAL to the fold's own over a value table by
-    `tests/test_record_projection.py::test_the_source_version_selector_is_the_folds_own`.
+    `tests/test_record_projection.py::test_the_fold_ref_selector_is_the_records_own`.
 
     ⛔ The record lane needed this for a reason the journal lane does not have:
     `_fold_source_evidence` emits its `PointAdded` through
@@ -2909,6 +2913,8 @@ def _point_property_relation_statements(
         # #9556) then materialised N-1 fewer `extractedFrom` edges than live
         # and than `rebuild_all`. Nothing reported it: `check_consistency`
         # compares graph against JOURNAL, never graph against record.
+        # The `else` arm is a FORWARD guard (all four declared rows name
+        # `_POINT_FOLDED_PROP` today), named at that constant.
         for ref in (_point_all_property_refs(snapshot)
                     if prop == _POINT_FOLDED_PROP
                     else _point_property_refs(snapshot.get(prop))):
