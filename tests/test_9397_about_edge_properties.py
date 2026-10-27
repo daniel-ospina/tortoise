@@ -267,8 +267,8 @@ WHAT IS PINNED (one entry per test, in file order)
    and that composition is false: `projection/entities._fold_entity_linked_reason`
    reproduces on REPLAY what the journal already carried, which is the documents'
    own definition of RE-MATERIALIZING. The census can only see the WRITE FORM
-   (3 named + 2 map), which is why the wrong number read plausibly; the causal
-   split is 2 + 3, and the legs red if the fold is filed as an originator again
+   (3 named + 3 map since #9417), which is why the wrong number read plausibly; the causal
+   split is 2 + 4, and the legs red if the fold is filed as an originator again
    (`#9403` review, P2).
 14. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
    own round-5 rule (`at HEAD` on every number that is not true at the pin) is
@@ -2413,7 +2413,7 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
 
     The axes are separate, which is why the number read plausibly: the census
     can only see the WRITE FORM (named `SET r.<prop>` vs property MAP), and that
-    split really is 3 + 2. The CAUSAL split is 2 originating + 3
+    split really is 3 + 3. The CAUSAL split is 2 originating + 4
     re-materializing. Nothing pinned either, so both readings stayed green.
     """
     storage = _doc(STORAGE)
