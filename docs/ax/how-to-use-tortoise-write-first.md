@@ -15,7 +15,7 @@ aboutObjects: tortoise, how-to-use-tortoise
 > **What this file is.** The authored text of the rewritten skill, produced from
 > the measured failure list in [`how-to-use-tortoise-step1-eval.md`](how-to-use-tortoise-step1-eval.md)
 > (`#9675` Step 1, landed as `#9695`). **The body is the `## Contents` section
-> through the last line — 519 lines**, line for line: the port is a copy, not a
+> through the last line — 523 lines**, line for line: the port is a copy, not a
 > second rewrite. The port adds only what `writing-skills` requires around it
 > (see below).
 >
@@ -99,9 +99,12 @@ wrong that looks authoritative, because the wrong shape is still a shape.
 
 **Almost every failure in this document is silent.** The call returns, the node
 lands, the response looks successful, and nothing tells you the structure is
-wrong. The exceptions — detailed below — arrive as an advisory a caller can
-ignore, and none of them refuses the write. That near-universal silence is the
-whole reason for the decisions below and for the checklist at the end.
+wrong. The exceptions come back as an advisory a caller can ignore — they never
+refuse the belief write. What *is* refused is the correction attempted through
+the wrong door: the generic edge writer will not take a provenance predicate
+(§7), and the mechanism slot takes a mechanism, not a meaning (§4). That
+near-universal silence is the whole reason for the decisions below and for the
+checklist at the end.
 
 The layer decision cannot be recovered later. The kind classifier picks a kind
 **inside a partition chosen before it runs** — entities get object+subject kinds,
@@ -546,7 +549,8 @@ Copy this, tick it, and do not skip a line because the write "looks simple".
 
 | Failure | Step | Why it is silent |
 |---|---|---|
-| A state (ARR, headcount) written as a belief while its Object exists | 1, 3 | two homes; both nodes answer, neither authoritatively |
+| A state (ARR, headcount) written as a belief while no Object holds it | 1, 3 | only the wrong layer has it, so nothing folds it and "has tranche 2 been released?" is unanswerable |
+| The right layer holds an item **and** a second node also holds it (the request, the ship date) | 1 | two homes; both answer, neither authoritatively |
 | A structure (an organisation, a role) written as an Object | 1 | the Objects still traverse; only "what do we know about X" breaks |
 | A decision written as a belief with no occurrence | 1 | the timeline is gone and nothing errors |
 | A kind nothing declares on that layer (`subjectKind: person`) | 2 | no notice at all: the write succeeds |
