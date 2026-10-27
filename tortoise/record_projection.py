@@ -163,6 +163,9 @@ __all__ = [
     "TENANT_GUC_SQL",
     "TENANT_SCOPE_SQL",
     "THE_RECORD_TABLES",
+    "TURNS_RECORD_TYPE",
+    "TURNS_SNAPSHOT_KEYS",
+    "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "RecordProjectionError",
     "RefusedJournalOperation",
     "ReplayReport",
@@ -457,6 +460,65 @@ ENVELOPE_KEYS: frozenset[str] = frozenset({
 #: `create_document(type="SourceCreated")` journal nothing at all.
 NARRATIVE_RECORD_TYPE = "SessionNarrated"
 
+#: The ONE record type whose whole job is to carry a capture's raw TURN SET into
+#: the record (#10017, step 3 of the ruling on that issue). Declared ONCE here and
+#: — from step 7, which turns the producer over — imported by it
+#: (`sdk._write_capture_turns`), for the same reason as
+#: :data:`NARRATIVE_RECORD_TYPE`: a producer and a registry that spell one type
+#: two ways is the class of defect that made `create_document(type="SourceCreated")`
+#: journal nothing at all.
+#:
+#: ⛔ NOTHING EMITS IT YET, and that is the change this declaration belongs to:
+#: declaring the carrier is INERT until step 7 emits it, so the capture writer's
+#: per-turn `PointAdded` records are untouched here.
+#:
+#: ⛔ AND STEP 7 INHERITS A THIRD STORE, not just the two this type names. The
+#: per-turn `PointAdded` records it replaces are ALSO the `:GraphEvent` /
+#: claim-transition stream — `sdk._GRAPH_EVENT_TYPES`, `shared_state.events
+#: .CLAIM_EVENT_TYPES`, and `docs/event-catalog.md`'s `PointAdded` row ("one per
+#: `{session_id}_t{i}` turn Point") — which is what `poll_events` serves. A
+#: "move" that simply stops emitting them silently removes one subscriber row per
+#: turn, and NOTHING gates that: the catalog is prose and no test pins it. So
+#: step 7 must EITHER keep a store-only per-turn emission (the two-store split
+#: this same writer already performs for the stale-turn sweep: `PointRetracted`
+#: store-only + `EntityMutated` for JSONL) OR record the decision to drop the
+#: turn rows from `poll_events`. `TurnsRecorded` must NOT be added to
+#: `_GRAPH_EVENT_TYPES` to compensate — that set's shape is a recorded decision.
+TURNS_RECORD_TYPE = "TurnsRecorded"
+
+#: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a
+#: reshape. Each entry of the carrier's ``turns`` list is one of the
+#: ``_turn_snapshot`` dicts `sdk._write_capture_turns` builds today, verbatim —
+#: these keys ALWAYS, plus at most one branch of the optional set below. The
+#: ``contains_session`` link rides the EVENT ENVELOPE rather than the per-turn
+#: dicts, exactly as it does for `PointAdded` (#3947: it is a capture-write
+#: STRUCTURAL fact, restored by the projection's edge fold, and never a node
+#: property the live write does not set).
+#:
+#: `tests/test_10017_record_carrier.py` reads the snapshots a REAL capture emits
+#: — one with no vector, one that ENCODED one, one that PRESERVED one — and
+#: compares them to these sets, so the pin is against the producer rather than
+#: against this comment.
+TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
+    "id", "content", "pointKind", "speaker", "is_episodic", "status",
+    "createdAt", "embedding",
+})
+#: ``embedding_preserved`` rides a snapshot ONLY when the live write PRESERVED a
+#: prior vector instead of encoding one (#5004 round 3). The three IDENTITY
+#: stamps are the other branch: `embeddings.stamp_journal_embedding(payload,
+#: creating=True)` adds `embedding_model` / `embedding_revision` /
+#: `embedding_text_hash` to the journalled point when the write DID encode one,
+#: and deliberately withholds them from a preserved vector — that vector may come
+#: from a DIFFERENT model, so attesting the active one would record a false
+#: origin, the failure #5004/R1 exists to prevent. So these keys are optional one
+#: branch at a time, NOT absent in practice. ⛔ Step 7 must carry them VERBATIM: a
+#: carrier that kept `embedding` but dropped the identity would replay a vector
+#: with no origin, which is the silent model change the stamps expose.
+TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
+    "embedding_preserved",
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+})
+
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
 #: dispatch (`tortoise/projection/`) and the producers' emit sites, and pinned
 #: by `tests/test_record_projection.py` against both. A type that appears in a
@@ -484,6 +546,7 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
     "DocumentCreated",
     "SessionRecorded",
     NARRATIVE_RECORD_TYPE,
+    TURNS_RECORD_TYPE,
     "SessionDeleted",
     "EntityLinked",
     "DirectEdgeCreated",
@@ -1017,6 +1080,33 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
             "though no declared node effect exists — pinned by "
             "tests/test_9555_narrative_carrier.py and by "
             "tests/test_record_projection.py's totality fixture."
+        ),
+    ),
+    # ── §9.1's raw-TURN carrier (#10017) ─────────────────────────────────────
+    TURNS_RECORD_TYPE: Mutation(
+        NoRecordEffect(
+            "#10017 — §9.1's raw-turn carrier: one capture's turn set on ONE "
+            "record, where the capture writer emits one `PointAdded` per turn "
+            "today. It materialises NO node, and that is the ruling rather than "
+            "an omission: §9.1's D1 places the raw transcript 'not in the "
+            "graph, not a `Document` node, not a `Point`' (owner, 2026-09-23: "
+            "the same rule applies to raw turns). Its RECORD home is "
+            "`public.point` — the table `record_read` already serves the "
+            "transcript from — with `cache_tier = 'record_only'`; NOT a new "
+            "table, and no secondary projection is declared here because "
+            "nothing emits this type yet (step 7 does, in its own change). The "
+            "tier cannot ride the event payload: `_RECORD_ONLY_KEYS` strips it "
+            "before the insert, so step 7 must write it as its own column "
+            "statement (#10070). Until then, FOR THIS TYPE, the two rebuild "
+            "routes agree by BOTH having nothing to do — "
+            "`projection/__init__.py::_NO_PROJECTION_FOLD` folds the type "
+            "nowhere, and this entry projects no row. That agreement is about "
+            "the CARRIER and says nothing about the per-turn `PointAdded` "
+            "records a capture still emits, which BOTH routes still fold into "
+            "turn nodes — so do not read it as §9.1 already holding; see "
+            "that section's measured note in STORAGE-ARCHITECTURE.md. The "
+            "payload is pinned to the writer's per-turn snapshot; see "
+            "TURNS_SNAPSHOT_KEYS."
         ),
     ),
     "SessionDeleted": Mutation(

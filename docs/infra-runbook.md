@@ -2894,6 +2894,67 @@ on the rest; and it is one issue per **failing step** rather than one per run,
 because a key carrying `${{ github.run_id }}` files a new issue on every failing
 run (#2706).
 
+### 8.7 When production runs an old commit — the staleness detector (#10109)
+
+**The gap it closes.** 2026-10-26: production ran **7 commits behind**
+`origin/main` for ~9 hours while every readiness signal stayed green —
+`deploy-hosted` was red on every run (4 cancelled by its own
+`cancel-in-progress: true`, plus a migration-drift gate failing closed), but a
+deploy that cannot land **declines nothing**, and every existing instrument is a
+decline channel. This is the positive reading that was missing.
+
+- **Workflow:** `.github/workflows/deploy-staleness.yml` (schedule `7,37 * * * *` + `workflow_dispatch`;
+  its OWN concurrency group, `cancel-in-progress: false`, and NOT `push: main` — see the workflow header
+  for why it cannot be starved by the same group that ate the deploys).
+- **Logic:** `.github/scripts/check-deploy-staleness.sh` — reads the deployed commit from the public
+  `GET /v1/version` (`commit_sha`, baked by `deploy-hosted.yml` as `TORTOISE_GIT_SHA`), compares it
+  to `origin/main` with `git merge-base --is-ancestor`, and states the distance
+  `deployed=<sha> main=<sha> behind=<n> behind_deployable=<n> deployable_age_h=<n> deployable_age_s=<n>`.
+  Fails (red + ONE deduped issue) when the deployed commit diverged from main, when the revision cannot
+  be read — an unreadable revision is a RED, never a pass — when the deploy trigger's `on.push.paths`
+  cannot be parsed **unambiguously** (a PARTIAL path set would under-count the deployable lag and read
+  green while deployable commits wait, so it is a RED too) — or on **either** of two bounds:
+  - **count:** more than `vars.DEPLOY_STALENESS_MAX_BEHIND` **deployable** commits behind (default
+    **2**). *Deployable* = touching `on.push.paths` of `deploy-hosted.yml`, read from that workflow at
+    run time (never a second copy). A merge confined to `docs/`, `skills/`, `tools/`, `.github/`,
+    `website/` or `operations/` (or to `tests/` other than `tests/sample_transcript.txt`, which the
+    image copies) advances main **without deploying anything** by the pipeline's own
+    declared policy, so it is not staleness — counting it was ~14% false red over the last 300 commits
+    of main (20 false-red windows), and an alarm that cries wolf is the defect this check exists to
+    prevent.
+  - **age:** the OLDEST undeployed deployable commit older than `vars.DEPLOY_STALENESS_MAX_AGE_HOURS`
+    (default **6 h**). This is the *"the deploy is missing for ≥ T hours"* arm, and it is the one that
+    catches the #10109 shape a count bound alone reports **green forever**: one pending deployable
+    commit that never deploys. Stateless — the age comes from the commit's own committer date, not
+    from any previous tick's memory. The verdict is decided on **seconds** and `deployable_age_h` is
+    floored, so `deployable_age_s` is printed as well: an alert past the bound must never appear to
+    sit at it.
+  Both bounds are plain integers; a mangled value warns and falls back to its default rather than
+  disabling the arm.
+- **Harness:** `bash .github/scripts/check-deploy-staleness.test.sh` (the `Deploy staleness detector (#10109)`
+  step of `ops-harnesses`).
+
+**The invariant, in one sentence.** The commit production is running must be an
+ancestor of `origin/main`, and the distance must be stated. The check states it
+even when green, so the bound being approached is visible before it is crossed.
+
+**What to do when it fires.** Read the issue's `reason=` first — it names which bound crossed.
+
+- `reason=behind-deployable` — too many **deployable** commits are waiting. Check
+  `gh run list --workflow deploy-hosted.yml --limit 20`: red/cancelled deploys are the cause, and for
+  a migration-drift block the remediation is the one §8.6 prints (resolve `OUT OF ORDER` first, then
+  `gh workflow run supabase-deploy.yml --ref main`) — **never** a `supabase migration repair`, never a
+  DDL, never a production action by a lane. If there is **no run at all** for the pending commits, the
+  deploy was never triggered — look at the trigger's path filter, not the deploy's logs.
+- `reason=behind-too-long` — the count is within bound but the oldest deployable commit has been
+  undeployed past the age bound. Same investigation; the difference is that this is the *"deploys
+  stopped landing"* signal, not a burst of merges.
+- `behind=` vs `behind_deployable=` — `behind` is every commit on main, `behind_deployable` is the
+  ones that can actually change the deployment. A large `behind` with `behind_deployable=0` is **not**
+  staleness (the pipeline deliberately does not redeploy for those), and the check reports it green.
+- A *diverged* `deployed=` sha (not an ancestor) is a different failure from lag: the app is running a
+  revision main does not contain — compare the sha against `git log` before assuming a deploy backlog.
+
 ## 9. Restore a lost cache graph from the record (#9556 / R8)
 
 **When to run this.** The FalkorDB (hot) graph for an org is gone, corrupt, or

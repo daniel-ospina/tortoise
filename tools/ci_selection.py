@@ -1015,6 +1015,25 @@ SOURCE_PATTERNS = {
             # token-flow fix must change. Paired with CORE_ALSO so the
             # core-registered half is not dropped by the named-surface match.
             "tortoise/oauth.py",
+            # #3524 review (P1): the consent identity bridge's VERIFIER,
+            # `tortoise/consent_token.py`. Its guard
+            # (`tests/test_oauth_consent_bridge.py`) is registered `api` +
+            # `onboarding` (config/ci-surfaces.yml) and NOT `core`, and a
+            # named-surface match REPLACES the `core` fallback — so without this
+            # entry a diff that touches the verifier and nothing else selected
+            # `core`, where that guard does not exist. MEASURED before this
+            # entry: `--changed-files tortoise/consent_token.py --event
+            # pull_request` -> surfaces ['core'], 682 test files,
+            # test_oauth_consent_bridge.py ABSENT (with the test file also in the
+            # diff: surfaces ['api', 'core'], guard present). A one-line fix or a
+            # revert of the signature/`alg`/`bind`/`jti` logic — the security
+            # half of the bridge — therefore red nowhere, and would have merged
+            # green, caught only by a later PR that happened to touch
+            # `hosted_api.py`. Same silent-drop class as the #2938/#3154/#4367
+            # entries above. No CORE_ALSO entry: the module has no
+            # core-registered guard. Pinned by tests/test_ci_selection.py::
+            # test_a_consent_token_only_diff_runs_the_bridge_guard.
+            "tortoise/consent_token.py",
             # #3496: the consent page pins its browser auth client to a CDN
             # specifier whose version must equal the VENDORED bundle the
             # behavioural harness executes (test_oauth_consent_pkce.py, api).

@@ -11,6 +11,24 @@
 #            files (status A against the base) are allowed — the author can
 #            fix their own new migration before merge.
 #
+#            WHICH BASE (#7628 class). DRIFT_BASE_SHA is
+#            `pull_request.base.sha`, i.e. the PR's MERGE BASE, while a CI
+#            `pull_request` checkout is refs/pull/N/merge — a tree that already
+#            contains everything the base branch gained after the fork. Diffing
+#            the fork point against that tree therefore reports the BASE's own
+#            new migrations as this PR's additions: a migrations-free PR is
+#            failed for a file it never touched (tortoise#10110, root recorded
+#            on #7628). So when the checkout is PROVABLY that merge ref (the
+#            #4396 identity: GITHUB_REF is refs/pull/N/merge AND HEAD is
+#            refs/remotes/pull/N/merge) and DRIFT_BASE_SHA is an ANCESTOR of its
+#            first parent, the diff base is that first parent — the base branch
+#            tip the merge was built against. A commit SHAPE alone is never
+#            enough: a local branch that merged main has the same graph, and
+#            narrowing there would hide its earlier commits (a fail-open).
+#            Nothing else is narrowed: a plain-commit checkout, a local merge
+#            commit, and an ancestor-less value all keep DRIFT_BASE_SHA, and an
+#            M/D/T/R of a base-tree migration is still a violation.
+#
 #            EXCEPTION (#1235, duplicate-prefix repair; scoped by #2240): a
 #            FORWARD PREFIX RENAME (git status R*) of a base-tree migration is
 #            allowed ONLY when ALL of the following hold:
@@ -143,8 +161,68 @@ fi
 # diff mode — append-only enforcement
 # Read --name-status output line-by-line (tabs preserved) so filenames survive.
 # Format: "M\tpath" / "R100\told\tnew" / "D\tpath" / "A\tpath"
+# ── WHICH BASE? (#7628 class — MEASURED here, not inferred) ───────────────────
+# A CI `pull_request` run checks out refs/pull/N/merge, so HEAD is GitHub's
+# SYNTHETIC MERGE COMMIT: its FIRST PARENT is the base branch TIP the merge was
+# built against. DRIFT_BASE_SHA, by contrast, is `pull_request.base.sha` — this
+# PR's MERGE BASE (fork point). `git diff A...HEAD` then diffs fork-point → the
+# merged tree, which contains every commit the BASE branch gained after the fork:
+# the base's own new migrations appear as `A`, and an ADDED file at a version prod
+# has already applied is the #1001 divergence this guard reports. So a PR that
+# touches NO migration is failed for one the base branch added — measured on
+# tortoise#10110, where main's `20261029000001_record_point_cache_tier.sql`
+# (b360209f3) was reported against a PR whose own diff is empty for that path.
+#
+# The base is therefore the merge commit's base PARENT whenever the checkout is
+# PROVABLY that merge ref — and "provably" is the load-bearing word (#4396). The
+# COMMIT SHAPE alone is not proof: a feature branch that ran `git merge main`
+# locally has the same two-parent graph, but there `HEAD^1` is the branch's OWN
+# earlier commit and `HEAD^2` is main. Narrowing on the shape alone then diffs
+# HEAD^1...HEAD — only the merge's delta — and everything committed earlier on
+# that branch becomes invisible, so an EDIT of an already-landed migration is
+# reported as OK (measured: rc 0 here, rc 1 on the shape-blind script). That is a
+# fail-open on the guard's documented local usage, so the checkout is identified
+# the way `tools/drift-guard.py` (#4396) already identifies it: the EVENT ref is
+# refs/pull/N/merge AND HEAD IS the commit actions/checkout created for it
+# (refs/remotes/pull/N/merge). `GITHUB_REF` alone is not enough — an explicit
+# `ref:` leaves the event ref at the merge ref while HEAD is something else.
+# Failing any conjunct, DRIFT_BASE_SHA is kept untouched, so an unproven shape
+# can only ever be STRICTER. M/D/T/R of a base-tree migration stays a violation
+# either way: a PR that edits a migration still differs from the base parent,
+# which is the tree it merges into.
+DIFF_BASE="$DRIFT_BASE_SHA"
+DIFF_BASE_NOTE=""
+# `rev-list --parents` prints `<commit> <parent>…`, so a 2-parent merge is 3 words.
+# `|| true` + the numeric guard keep a rev-list failure (an unborn HEAD) on the
+# documented exit-2 path below instead of aborting under `set -euo pipefail`
+# with rc 128 and no diagnostic.
+MERGE_WORDS="$(git -C "$REPO" rev-list --parents -n1 HEAD 2>/dev/null | wc -w | tr -d ' ' || true)"
+case "$MERGE_WORDS" in ''|*[!0-9]*) MERGE_WORDS=0 ;; esac
+EVENT_MERGE_REF=0
+case "${GITHUB_REF:-}" in refs/pull/*/merge) EVENT_MERGE_REF=1 ;; esac
+IS_MERGE_REF=0
+if [ "$MERGE_WORDS" -eq 3 ] && [ "$EVENT_MERGE_REF" = "1" ]; then
+  HEAD_SHA="$(git -C "$REPO" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)"
+  REF_SHA="$(
+    git -C "$REPO" rev-parse --verify --quiet \
+      "refs/remotes/${GITHUB_REF#refs/}^{commit}" 2>/dev/null || true
+  )"
+  if [ -n "$HEAD_SHA" ] && [ -n "$REF_SHA" ] && [ "$HEAD_SHA" = "$REF_SHA" ]; then
+    IS_MERGE_REF=1
+  fi
+fi
+if [ "$IS_MERGE_REF" = "1" ]; then
+  BASE_PARENT="$(git -C "$REPO" rev-parse --verify --quiet 'HEAD^1' 2>/dev/null || true)"
+  if [ -n "$BASE_PARENT" ] && [ "$BASE_PARENT" != "$DRIFT_BASE_SHA" ] \
+     && git -C "$REPO" merge-base --is-ancestor "$DRIFT_BASE_SHA" "$BASE_PARENT" 2>/dev/null; then
+    DIFF_BASE="$BASE_PARENT"
+    DIFF_BASE_NOTE=" (fork point ${DRIFT_BASE_SHA} is an ancestor of the merge base parent)"
+  fi
+fi
+echo "check-migration-append-only: diff base $DIFF_BASE${DIFF_BASE_NOTE}"
+
 STATUS_OUTPUT="$(
-  git -C "$REPO" diff --find-renames=20% "$DRIFT_BASE_SHA"...HEAD \
+  git -C "$REPO" diff --find-renames=20% "$DIFF_BASE"...HEAD \
     --name-status -- supabase/migrations/ 2>&1
 )" || {
   echo "check-migration-append-only: git diff failed (bad DRIFT_BASE_SHA?) (exit 2)" >&2
@@ -278,20 +356,19 @@ if [ -n "$VIOLATIONS" ] || [ -n "$ADDED" ]; then
       # already resolved for `git diff` above — no network call, and not another
       # view of the same lagging API. An empty reading (a base tree with no
       # migration) fail-closes: the bound below is skipped and no rename passes.
-      # P2-3 (#6862) — this bound reads a DIFFERENT TREE than the diff it
-      # accompanies. `git diff "$DRIFT_BASE_SHA"...HEAD` above diffs from
-      # `merge-base(DRIFT_BASE_SHA, HEAD)`; the `git ls-tree` below reads
-      # tree(DRIFT_BASE_SHA). When DRIFT_BASE_SHA is not an ancestor of HEAD
+      # P2-3 (#6862) — this bound must read the SAME TREE as the diff it
+      # accompanies. `git diff "$DIFF_BASE"...HEAD` above diffs from
+      # `merge-base(DIFF_BASE, HEAD)`; when DIFF_BASE is not an ancestor of HEAD
       # those differ, and the bound may OVER-block — reject a rename the printed
       # diff reads as forward (reproduced: merge-base max 20260813000099, base
       # max 20260901000000, destination 20260820000000 -> rc=1). It can never
       # UNDER-block: it is an ADDITIONAL conjunct alongside `new_ver >
       # REMOTE_MAX`, so it only turns an otherwise-exempt rename into a
-      # violation. The shipped CI path sets DRIFT_BASE_SHA to the base parent of
-      # the pull-request merge commit, where `merge-base(A, HEAD) == A`, so the
-      # two trees are equal and this cannot fire.
+      # violation. Both now read the SAME resolved base, so on the shipped CI
+      # path `merge-base(DIFF_BASE, HEAD) == DIFF_BASE` holds by construction and
+      # this cannot fire.
       BASE_VERSION_MAX="$(
-        git -C "$REPO" ls-tree -r --name-only "$DRIFT_BASE_SHA" -- supabase/migrations/ 2>/dev/null \
+        git -C "$REPO" ls-tree -r --name-only "$DIFF_BASE" -- supabase/migrations/ 2>/dev/null \
           | sed -nE 's#.*/([0-9]+)_.*#\1#p' | sort | tail -n1
       )"
       KEEP=""
