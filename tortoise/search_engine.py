@@ -1391,7 +1391,20 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
     its direction carries no meaning; branching it per label is precisely how
     the first attempt at this fix got the id-less ``:Object`` case wrong.
     """
-    return f"{recency_key_expr(alias)} DESC, {alias}.{id_field} DESC"
+    # ``coalesce(<id>, '')`` on the id key, for the same reason the recency key
+    # has one: the engine sorts NULL as the LARGEST value, so a BARE
+    # ``<id> DESC`` puts every ID-LESS row at the HEAD of the window — and
+    # ``:Object`` stubs are minted id-less (``MERGE (o:Object {name:$name})``),
+    # so those head slots are spent on rows the resolver then discards
+    # (``assembly.py``: ``if oid``). Measured on BOTH engines: bare
+    # ``ORDER BY n.id DESC`` → ``[None, None, 'obj-aaa']``; with the coalesce →
+    # ``['obj-aaa', None, None]``. This is also what makes the cypher half and
+    # the Python half (:func:`recency_tie_key`) agree — both send an absent
+    # identity to the TAIL.
+    return (
+        f"{recency_key_expr(alias)} DESC, "
+        f"coalesce({alias}.{id_field}, '') DESC"
+    )
 
 
 def recency_tie_key(recency: object, ident: object) -> tuple[str, str]:
@@ -1405,10 +1418,12 @@ def recency_tie_key(recency: object, ident: object) -> tuple[str, str]:
 
     ⚠️ Scope, stated with its DIRECTION rather than as "not our problem": the
     comparison is STRING-based, as the cypher clause's is. A non-string stamp (a
-    numeric epoch) sorts as the NEWEST here — ``str(20261201)`` starts with
-    ``'2'``, which beats the ``'-'`` in every ISO stamp — while cypher's type
-    precedence puts numbers FIRST under ``DESC`` too, so the two agree in
-    direction but not necessarily in order. No writer emits one today (the
+    numeric epoch) sorts as the NEWEST here: ``str(20261201)`` is
+    ``'20261201'`` and the discriminating character is the fifth one — ``'1'``
+    against every ISO stamp's ``'-'`` — so it wins under ``DESC``. What the
+    ENGINE does with a numeric stamp is type-precedence-dependent and is NOT
+    asserted here (no measurement in this repo); the two sides are therefore
+    known to agree for every string stamp and unverified for a numeric one. No writer emits one today (the
     writer test pins the stamps of ``create_point``; a props passthrough could
     still carry one), and making that impossible is its own change, not a silent
     guess made here.

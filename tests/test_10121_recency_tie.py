@@ -277,7 +277,7 @@ def test_recency_tie_clause_is_one_shared_expression():
     assert clause == (
         "CASE WHEN coalesce(node.updatedAt, '') = '' "
         "THEN coalesce(node.createdAt, '') ELSE node.updatedAt END DESC, "
-        "node.id DESC"
+        "coalesce(node.id, '') DESC"
     ), clause
     # Both guards are load-bearing: a bare property DESC sorts NULL FIRST, and
     # a plain coalesce would let an EMPTY updatedAt suppress a valid createdAt.
@@ -344,9 +344,11 @@ def test_writers_stamp_zero_padded_iso_timestamps():
             "compares these as STRINGS, so the timezone spelling is part of "
             "the ordering")
         suffixes.add(text[-6:] if text.endswith("+00:00") else text[-1:])
+    assert suffixes, (
+        "FIXTURE NOT REACHED: no stamp was read, so the suffix check is vacuous")
     assert len(suffixes) == 1, (
-        "writers disagree on the UTC suffix spelling, so the string tie is not "
-        f"a total order across them — ``Z`` sorts above ``+00:00``: {suffixes}")
+        "this writer emits TWO UTC suffix spellings — the tie is a string "
+        f"compare, so ``Z`` and ``+00:00`` are not interchangeable: {suffixes}")
 
 
 # ── the two legs that rank themselves ─────────────────────────────────────
@@ -461,3 +463,45 @@ def test_the_recency_key_normalises_an_absent_identity():
         "2026-01-01T00:00:00Z", "abc")
     # A numeric stamp keeps its own ordering direction — stated, not fixed.
     assert recency_tie_key(20261201, "abc") == ("20261201", "abc")
+
+
+def test_an_id_less_row_does_not_lead_a_tie_group_without_timestamps():
+    """Both halves of the rule must send an absent identity to the TAIL.
+
+    #10121 round-4 review: the cypher id key was a BARE ``<id> DESC``, and the
+    engine sorts NULL as the LARGEST value — so inside a group whose RECENCY
+    ties (every row undated), the id key decided and put the ID-LESS rows at
+    the HEAD, where the caller discards them (``assembly.py``: ``if oid``).
+    The Python half (:func:`recency_tie_key`) normalised ``None`` to ``''``;
+    the cypher half did not, and the two disagreed on exactly the population
+    the object leg serves. Measured on both engines: bare ``id DESC`` →
+    ``[None, None, 'obj-aaa']``; with ``coalesce(id, '')`` → ``['obj-aaa',
+    None, None]``.
+
+    FAIL VALUE: drop the ``coalesce`` from the id key and the id-less rows take
+    the first slots of this window.
+    """
+    sdk = _sdk()
+    graph = sdk._get_proj().g
+    # Every row is UNDATED *and carries the same NAME TOKENS* — the Object
+    # fulltext index is on ``name``, so a name that matched fewer query terms
+    # would let the SCORE decide and the id key would never engage (the trap an
+    # earlier draft of this test fell into). With all four names holding
+    # ``obj dated``, the scores tie, recency ties at ``''``, and the id key
+    # alone decides.
+    graph.query("CREATE (o:Object {id:'obj-aaa', name:'obj dated a', "
+                "objectKind:'concept', content:'obj dated probe'})")
+    for suffix in ("b", "c", "d"):
+        graph.query(
+            "CREATE (o:Object {name:$n, objectKind:'concept', "
+            "content:'obj dated probe'})", params={"n": f"obj dated {suffix}"})
+
+    rows = run_fts_query(graph, "obj dated", entity_type="object", limit=2,
+                         excluded_statuses=())
+    ids = [pid for pid, _ in rows]
+    assert len(ids) == 2, f"FIXTURE NOT REACHED: expected 2 rows, got {rows}"
+    assert ids[0] == "obj-aaa", (
+        "an id-less row took the head of a tie group whose recency is equal — "
+        "the cypher id key is sorting NULL first, so the pool is spent on rows "
+        f"the caller cannot address (#10121 round-4 P1): {ids}"
+    )

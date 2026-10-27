@@ -438,6 +438,32 @@ def test_every_leg_query_carries_a_secondary_sort_key():
                 return func.attr
         return "<unresolved>"
 
+    def _bound_names(scope: ast.AST) -> set[str]:
+        """Every name the scope BINDS, in any shape — not only ``x = ...``.
+
+        A parameter, a ``for``/``with`` target, an ``AnnAssign``, a tuple unpack
+        or a walrus all bind a local that :func:`_assignments` cannot resolve.
+        Those must FAIL CLOSED rather than fall through to a same-named
+        module constant (round-4 review), so this set is consulted first.
+        """
+        bound: set[str] = set()
+        stack = list(scope.body) if hasattr(scope, "body") else []
+        if hasattr(scope, "args"):
+            args = scope.args
+            for group in (args.posonlyargs, args.args, args.kwonlyargs):
+                bound.update(a.arg for a in group)
+            for extra in (args.vararg, args.kwarg):
+                if extra is not None:
+                    bound.add(extra.arg)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                bound.add(node.id)
+            stack.extend(ast.iter_child_nodes(node))
+        return bound
+
     def _resolve(name: str, scope: ast.AST, line: int) -> ast.expr | None:
         """The assignment that DOMINATES the call: latest one at or before it."""
         candidates = [
@@ -447,11 +473,10 @@ def test_every_leg_query_carries_a_secondary_sort_key():
         ]
         if candidates:
             return max(candidates, key=lambda pair: pair[0])[1]
+        if name in _bound_names(scope):
+            return None        # bound in a shape we cannot read: fail closed
         if scope is tree:      # module-level site: only module-level names apply
             return None
-        # A function-level site may use a MODULE constant — but not another
-        # function's local and not a name it never assigns (a parameter, a
-        # for-target, an AnnAssign): those stay UNRESOLVABLE, i.e. fail closed.
         module_level = [
             (assign_line, value) for assign_line, assign_name, value
             in _assignments(tree) if assign_name == name
@@ -495,6 +520,17 @@ def test_every_leg_query_carries_a_secondary_sort_key():
                         f"{cypher.id} in {site[0]} from {iterable}")
                 continue
             cypher = resolved
+            # A resolved expression with NO literal text means the clause was
+            # BUILT elsewhere (a helper, a module constant aliased through a
+            # Name, a builder call): the census cannot judge it, so it fails
+            # closed rather than counting it as clean (round-4 review).
+            if not _literal_text(resolved):
+                iterable = _for_target_iterable(scope, cypher.id, node.lineno)
+                if (getattr(scope, "name", "<module>"), iterable) not in DYNAMIC_ALLOWED:
+                    unresolvable.append(
+                        f"{cypher.id} in {getattr(scope, 'name', '<module>')} "
+                        f"resolved to a textless expression")
+                continue
             if id(resolved) in resolved_ids:
                 # Two legs must not be judged by the SAME clause — that is the
                 # collapse this census exists to avoid.
