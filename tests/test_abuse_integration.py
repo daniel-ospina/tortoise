@@ -825,16 +825,25 @@ class TestAlertRegistersAndAcks:
     #: customer's own action, and "us" cannot be the subject of a claim
     #: ("us will review" is not English) — the elided-actor promise list below
     #: covers "hear from us".
-    _ROLE = (r"(?:an?|the|our|your)?\s*"
-             r"(?:operators?|humans?|engineers?|responders?|developers?|"
-             r"analysts?|sres?|staff|support(?:ers?)?|desks?|security|teams?)")
-    #: First person is a special case: `we` is a claim in any tense, and the only
-    #: legitimate first-person string this panel ships is an imperative that names
-    #: the customer ("contact support@…"), not us. Contractions are listed because
-    #: they glue the auxiliary on with no separator.
+    #: Split for a reason (round 18 finding): the second group are AMBIGUOUS
+    #: common nouns that a legitimate customer-directed string can use — "Review
+    #: your security settings." names the CUSTOMER's settings, not a claim about
+    #: us — so they are matched only when they are not customer-determined. The
+    #: first group are our staff and ours alone; a string naming one of those is
+    #: making a claim about us whatever determiner precedes it.
+    _ROLE = (r"(?:(?:an?|the|our)\s+)?(?:operators?|humans?|engineers?|"
+             r"responders?|developers?|analysts?|sres?|support(?:ers?)?)"
+             r"|(?:(?:an?|the|our)\s+)?(?<!your )(?<!your own )"
+             r"(?:staff|desks?|security|teams?)")
+    #: First person is a special case: `we` in any tense is a claim about us, and
+    #: the only legitimate first-person string this panel ships is an imperative
+    #: that names the customer ("contact support@…"), not us. `\bwe\b` also
+    #: covers the contractions ("We're", "We’ve") — `'` and `’` are not word
+    #: characters, so the boundary is between "e" and the apostrophe — which is
+    #: why there is no separate contraction arm (round 18: there was one, and it
+    #: had no discriminating power; a dead arm in a pin reads as coverage).
     _HUMAN = re.compile(
-        rf"(?:\b(?:{_ROLE})\b|\bwe\b|\bwe['\u2019](?:re|ve|ll|d|m|s)\b)",
-        re.I)
+        rf"(?:\b(?:{_ROLE})\b|\bwe\b|\bby\s+us\b)", re.I)
     #: A promise of contact/timing where the actor is ELIDED ("…, and will reach
     #: out"), which the actor arms cannot see.
     _PROMISE = re.compile(
@@ -869,7 +878,15 @@ class TestAlertRegistersAndAcks:
 
     @staticmethod
     def _claims(text: str, etype: str | None = None) -> bool:
-        stripped = re.sub(r"\S+@\S+", "", text)
+        # Round 18 (review finding): stripping EVERY address deleted the SUBJECT
+        # of a sentence too ("You'll hear from support@…", "Support@… has been
+        # notified"), so an actor named by address sailed through. Only an
+        # ADDRESS AS OBJECT of a contact imperative is a legitimate match-free
+        # zone — "contact support@…" tells the customer where to write, it does
+        # not report what support did.
+        stripped = re.sub(
+            r"(?i)\b(?:contact|email|e-mail|reach(?:\s+out)?\s+to|write\s+to"
+            r"|message)\s+\S+@\S+", "", text)
         # The `suspend` exemption, and ONLY for that row type. `suspend_org()`
         # writing the row proves an operator suspended the org — not what an
         # operator did next, and not anything about any OTHER event type.
@@ -878,8 +895,13 @@ class TestAlertRegistersAndAcks:
         # would also bless "Key revoked by an operator." on any other row, so it
         # is now (a) clause-final and (b) scoped to `suspend`.
         if etype == "suspend":
-            stripped = re.sub(r"\bby an operator\b(?=\s*[.;!?]|\s*$)", "",
-                              stripped, flags=re.I)
+            # Bound to the PREDICATE, not just the position (round 18 finding):
+            # "Organization suspended. Your API key was revoked by an operator."
+            # is also clause-final, and stripping it there blessed a claim about
+            # a different action entirely. The row proves the SUSPENSION.
+            stripped = re.sub(
+                r"(?i)\bsuspended\s+by an operator\b(?=\s*[.;!?]|\s*$)",
+                "suspended", stripped)
         return bool(TestAlertRegistersAndAcks._HUMAN.search(stripped)
                     or TestAlertRegistersAndAcks._PROMISE.search(stripped))
 
@@ -906,7 +928,9 @@ class TestAlertRegistersAndAcks:
         goes. It is a FLOOR, not a proof. Two shapes still pass, by construction:
         an ACTOR-ELIDED passive ("Your keys have been reviewed.") and a noun
         outside our vocabulary ("A specialist reviewed your account."). Both are
-        false claims the row cannot know. The pin cannot be made exhaustive
+        false claims the row cannot know. (Round 18 closed three shapes that had
+        been hiding INSIDE the exemptions — an address in subject position, a
+        second clause after "by an operator", and "by us" as a passive agent.) The pin cannot be made exhaustive
         without a grammar, so the rule for a future copy change is: if you add a
         new word for our staff, add it to `_ROLE` in the same commit. The error
         direction is deliberate — an unlisted benign phrase that NAMES our staff
@@ -944,6 +968,11 @@ class TestAlertRegistersAndAcks:
             "Support has been notified.",
             "The support desk has been notified.",
             "Team will review this.",
+            # round 18: an address in SUBJECT position names the actor
+            "You'll hear from support@premiselabs.co.",
+            "Support@premiselabs.co has been notified.",
+            # round 18: the passive by-agent form of the first person
+            "Your keys will be reviewed by us.",
         ]
         #: Caught by the PROMISE list where the actor is ELIDED, which no actor
         #: arm can see. Each must NOT match the actor pattern, or it proves
@@ -979,6 +1008,11 @@ class TestAlertRegistersAndAcks:
             "Organization suspended by an operator after reviewing your "
             "request.", "suspend"), (
             "the exemption laundered a continued predicate")
+        assert self._claims(
+            "Organization suspended. Your API key was revoked by an operator.",
+            "suspend"), (
+            "the exemption blessed a SECOND clause: it must be bound to the "
+            "suspension predicate, not merely to a clause-final position")
         # …and legitimate copy must still pass, including every SHIPPED string.
         #: (text, etype) pairs, because the `suspend` exemption is per-ROW: the
         #: same sentence on another type is a claim, so the type must travel with
@@ -990,6 +1024,9 @@ class TestAlertRegistersAndAcks:
             "If you need a higher limit, reach out to support@premiselabs.co.",
             # an imperative that names the customer, and asks them to reach US
             "If this was not you, contact us.",
+            # the CUSTOMER's own team/settings are not a claim about our staff
+            "Review your security settings.",
+            "Manage your team in Settings.",
             "Suspicious activity flagged on this Organization",
             "Access from a new location: ES",
             "Access from a new location",
