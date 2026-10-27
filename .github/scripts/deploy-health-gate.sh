@@ -101,6 +101,30 @@ DB_SLEEP="${DB_SLEEP:-10}"
 READY_TRIES="${READY_TRIES:-18}"
 READY_SLEEP="${READY_SLEEP:-10}"
 
+# ── per-REQUEST bounds (the phase budgets above are not bounds on their own) ─
+# A phase budget of `N tries × S sleep` is only a bound if each REQUEST is
+# bounded, and curl has no total-transfer timeout by default (its connect
+# timeout defaults to 300 s and a slow-but-progressing response is unbounded).
+# Without these, a SLOW (not dead) endpoint makes the phase budget a lie: the
+# caller's own `timeout-minutes` then becomes the thing that kills the job, and
+# a `timeout-minutes` kill ends the job BEFORE `if: failure()` is evaluated —
+# so the #2240 out-of-band alert never runs and a LIVE, unhealthy release is
+# reported only as a red run with a truncated log. Measured: the caller's
+# 15-minute cap (deploy-hosted.yml `post-deploy-verify`) was justified as 2× a
+# “≤ 6.4 min” worst case that assumed every curl returned INSTANTLY.
+# With these bounds the worst case IS a number:
+#   phase 1  5 × (10 + 5)  = 75 s
+#   phase 2 18 × ( 5 + 10) = 270 s
+#   phase 3 18 × ( 5 + 10) = 270 s
+#                     total = 615 s = 10.25 min  (vs 15 min → 1.46×)
+# The request bounds are generous next to the SERVER's own probes, which are
+# already capped (~1.5 s `_HEALTH_PROBE`, `DB_PROBE_HARD_TIMEOUT`), so these
+# cannot red a healthy release; they only stop a stuck one spending the budget
+# of the whole job and silencing its own alert.
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
+CURL_MAX_TIME_APP="${CURL_MAX_TIME_APP:-10}"
+CURL_MAX_TIME_PROBE="${CURL_MAX_TIME_PROBE:-5}"
+
 # ── guard the knobs ─────────────────────────────────────────────────────────
 # A non-integer override would make `seq` produce nothing and then blow up the
 # `$((...))` inside the failure message — and under `set -u` that aborts the
@@ -117,10 +141,23 @@ for _knob in APP_PROBES APP_PROBE_SLEEP DB_TRIES DB_SLEEP READY_TRIES READY_SLEE
   esac
 done
 
+# The per-REQUEST bounds must be POSITIVE, not merely integral: curl reads
+# `--max-time 0` as "no limit", so allowing 0 here would silently restore the
+# unbounded request this change exists to remove — a guard that permits the
+# hole is worse than none, because the file then claims a bound it does not have.
+for _knob in CURL_CONNECT_TIMEOUT CURL_MAX_TIME_APP CURL_MAX_TIME_PROBE; do
+  case "${!_knob}" in
+    '' | *[!0-9]* | 0)
+      echo "::error::$_knob must be a POSITIVE integer — curl reads 0 as 'no limit', which is the unbounded request this bound exists to remove (got '${!_knob}')"
+      exit 2
+      ;;
+  esac
+done
+
 # ── 1. app reachable (fail fast) ────────────────────────────────────────────
 app_ok=0
 for _ in $(seq 1 "$APP_PROBES"); do
-  if curl -fsS "$GATE_BASE/health" >/dev/null 2>&1; then
+  if curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_APP" "$GATE_BASE/health" >/dev/null 2>&1; then
     app_ok=1
     break
   fi
@@ -135,7 +172,7 @@ echo "app reachable — polling DB data plane"
 # ── 2. data plane: read the db.ok FIELD, never text-match the body ──────────
 db_ok=0
 for _ in $(seq 1 "$DB_TRIES"); do
-  if curl -fsS "$GATE_BASE/health" 2>/dev/null \
+  if curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_PROBE" "$GATE_BASE/health" 2>/dev/null \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("db") or {}).get("ok") else 1)' 2>/dev/null; then
     db_ok=1
     break
@@ -172,7 +209,7 @@ for _ in $(seq 1 "$READY_TRIES"); do
   # line), and overwriting an observed 200 with 000 would report "no response"
   # for an app that answered — the indistinguishable-failure class this file's
   # comment warns about.
-  ready_code=$(curl -sS -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null)
+  ready_code=$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_PROBE" -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null)
   [ -n "$ready_code" ] || ready_code="000"
   if [ "$ready_code" = "200" ]; then
     ready_ok=1

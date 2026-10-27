@@ -198,19 +198,34 @@ on:
 # half-migrated, which no re-run repairs deterministically") and every
 # `publish-*.yml` already carry; this workflow was the one that did not.
 #
-# MEASURED, not asserted (`gh run list --workflow deploy-hosted.yml`, 2026-10-27;
-# runner-minutes are summed from each run's JOB start/end, NOT its wall clock —
-# a queued-then-cancelled run costs the pool nothing and must not be counted as
-# if it did): **19 of the last 30 runs were cancelled** — 16 `push`, 3 operator
-# `workflow_dispatch` — and those 19 spent **225.1 of the 295.5 completed
-# runner-minutes** (6 successful runs 31.0; 4 failures 39.4; the 30th run was in
-# flight at 9.9 min when the sample was taken, and is in neither count). A
-# cancelled deploy is the
-# worst shape available to the pool: it spends the minutes AND publishes
-# nothing, so under a merge flood no deploy ever completes. That is the recorded
-# cause of the stale-production class — #10109: "4 cancelled by its own
-# `cancel-in-progress: true` as later merges landed", production 7 commits behind
-# for 9 hours — and it is the same reading again on #10152. `supabase-deploy.yml`'s
+# MEASURED, not asserted (`gh run list --workflow deploy-hosted.yml`, 2026-10-27,
+# 30 completed runs). ⛔ THE INSTRUMENT MATTERS, and the obvious one is WRONG: a
+# cancelled run's JOB `started_at`→`completed_at` is **NOT** runner time. The API
+# reports a never-scheduled job as `conclusion: cancelled` with `runner_name: ""`
+# and `steps: []`, so that span is RUNNER-QUEUE latency — real wall clock, but it
+# costs the pool nothing (verified: run 40451731878's `deploy-api` spans 55.1 min
+# with an empty runner and zero steps; eight cancelled `packaging-smoke` jobs are
+# the same shape, 55.8 min between them). An earlier revision of this note did
+# exactly that and reported "225.1 of 295.5 completed runner-minutes" — but the
+# runner-attached share of those 19 runs is 21.9 min, so that figure
+# over-attributed pool waste by ~10×, and it also contradicted the 55.1-min
+# example cited further down this file, which is labelled "mostly runner-queue
+# latency". The numbers below are split on `runner_name`, which is the only field
+# that separates a spent runner-minute from a queued one.
+#
+# **19 of the last 30 runs were cancelled** — 16 `push`, 3 operator
+# `workflow_dispatch`. Real runner-minutes across all 30: **96.0 min**, of which
+# the cancelled 19 spent **21.9 min** (7 successful runs 40.6; 4 failures 33.5).
+# So the *pool* cost of cancellation is 23% of runner time — material, but NOT
+# the argument for this change. The argument is the other column: those same 19
+# runs accumulated **101.3 minutes of queue latency across 23 jobs that never
+# attached a runner at all**, and 19 of 30 runs (63%) published nothing. A
+# cancelled deploy is the worst shape available to DELIVERY: it burns wall clock
+# in the queue AND publishes nothing, so under a merge flood no deploy ever
+# completes. That is the recorded cause of the stale-production class — #10109:
+# "4 cancelled by its own `cancel-in-progress: true` as later merges landed",
+# production 7 commits behind for 9 hours — and it is the same reading again on
+# #10152. `supabase-deploy.yml`'s
 # own co-move message named this file's flag as the hazard, in the words this
 # change retired: "A concurrent push to main cancels an in-flight flip
 # (deploy-hosted.yml 'concurrency.cancel-in-progress')" — that text now reads
@@ -1167,10 +1182,22 @@ jobs:
   post-deploy-verify:
     runs-on: ubuntu-latest
     needs: deploy-api
-    # 15 is the floor (measured max 0.4 min, n=6): the ≤6.4 min DB health gate
-    # below is this job's real worst case, so the headroom is 2× THAT rather than
-    # 2× the measurement. See the workflow's `concurrency:` note for why every
-    # job here now carries a bound.
+    # 15 is the floor (measured max 0.4 min, n=6): the DB health gate below is
+    # this job's real worst case, so the headroom is measured against THAT rather
+    # than against the measurement.
+    # ⛔ THAT WORST CASE WAS NOT ACTUALLY BOUNDED UNTIL #10155's review: the gate
+    # is `N tries × S sleep`, which bounds a phase only if each REQUEST is
+    # bounded — and curl has no total-transfer timeout by default, so a SLOW (not
+    # dead) endpoint made this cap the thing that ends the job. That matters more
+    # here than anywhere else in the workflow: a `timeout-minutes` kill ends the
+    # job BEFORE `if: failure()` is evaluated (see the deploy-api RESIDUAL note),
+    # so the #2240 out-of-band alert would never run and a LIVE, unhealthy
+    # release would be reported ONLY as a red run with a truncated log. The gate
+    # now bounds every request, so the worst case is a number:
+    #   5 × (10 + 5) + 18 × (5 + 10) + 18 × (5 + 10) = 615 s = 10.25 min,
+    # i.e. 15 is 1.46× that — and the request bounds are generous next to the
+    # SERVER's own probes (~1.5 s `_HEALTH_PROBE`), so they cannot red a healthy
+    # release.
     timeout-minutes: 15
     if: ${{ needs.deploy-api.result == 'success' }}
     # #2240: `issues: write` is for the failure alert at the end of this job —

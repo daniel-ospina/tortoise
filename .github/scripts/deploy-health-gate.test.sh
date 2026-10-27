@@ -115,6 +115,11 @@ cat > "$STUB_BIN/curl" <<'STUB'
 #!/usr/bin/env bash
 url="${@: -1}"
 state="${STUB_STATE:?}"
+# Record the full argv so the harness can pin that every request is BOUNDED
+# (`--max-time`/`--connect-timeout`). Without this, deleting the bounds leaves
+# every behavioural case green: an unbounded request still succeeds against a
+# stub that answers instantly, so only the ARGV can distinguish them.
+printf '%s\n' "$@" >> "$state/curl-argv.log"
 bump() { # <file> → prints the new count
   local f="$state/$1" n
   n=$(cat "$f" 2>/dev/null || echo 0)
@@ -176,6 +181,7 @@ chmod +x "$STUB_BIN/curl"
 run_gate() {
   local state="$WORK/state-$$-$RANDOM"
   mkdir -p "$state"
+  LAST_STATE="$state"
   local st=0
   OUT=$(PATH="$STUB_BIN:$PATH" \
     STUB_STATE="$state" \
@@ -308,10 +314,34 @@ assert_contains "$OUT" "db.ok was ALSO never true" "records the db.ok observatio
 assert_contains "$OUT" "FalkorDB unreachable" "preserves the specific FalkorDB diagnosis"
 assert_eq "$READY_POLLS" "4" "phase 3 was reached and polled to exhaustion (positive control)"
 
+echo "12. every request is BOUNDED (the phase budgets are not bounds on their own)"
+# A `N tries × S sleep` budget only bounds the phase if each REQUEST is bounded;
+# curl has no total-transfer timeout by default. Deleting the flags leaves every
+# behavioural case in this file GREEN — the stub answers instantly — so the ARGV
+# is the only place the bound is observable. This is the pin for the
+# caller-facing consequence: `post-deploy-verify`'s `timeout-minutes` is the
+# only thing left that can end an unbounded probe, and a `timeout-minutes` kill
+# ends the job BEFORE `if: failure()` runs, silencing the #2240 alert.
+run_gate "yes" 1 1
+assert_eq "$RC" "0" "a healthy run still passes with the bounds in place"
+ARGV=$(cat "$LAST_STATE/curl-argv.log" 2>/dev/null || true)
+assert_contains "$ARGV" "--max-time" "every request carries --max-time"
+assert_contains "$ARGV" "--connect-timeout" "every request carries --connect-timeout"
+
+echo "13. a ZERO request bound → exit 2 (curl reads 0 as 'no limit')"
+# The same fail-open shape as case 8, one level down: a guard that accepted 0
+# would let the file CLAIM a bound it does not have. Distinct from case 8
+# because the numeric loop above deliberately permits 0 for the phase knobs
+# (``DB_SLEEP=0`` is how this harness runs at all).
+zero_bound_rc=0
+OUT=$(GATE_BASE="https://stub.invalid" CURL_MAX_TIME_PROBE=0 bash "$GATE" 2>&1) || zero_bound_rc=$?
+assert_eq "$zero_bound_rc" "2" "a zero request bound exits 2"
+assert_contains "$OUT" "must be a POSITIVE integer" "explains why 0 is refused"
+
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=41
+expected_assertions=46
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

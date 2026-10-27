@@ -164,22 +164,37 @@ forward migration, or `migration repair --linked --status applied <version>`
 when the migration is provably already in prod — because the apply pushes the
 whole pending set in filename order.
 
-Manual fallback — for when the automated co-move has already FAILED. The run
-says which way, and there are **three** verdicts, only the middle one being a
-failure:
+Manual fallback — for when the automated co-move has already FAILED. **The run
+says which way, and the distinction that matters is whether the dispatch was
+ACCEPTED.** Five arms exit 1 (`supabase-deploy.yml`, the co-move step), and only
+TWO of them mean the flip was never started or is known to have failed:
 
-- a **dispatch error** — the flip was never started;
-- `run <id> did not reach success` / **`did NOT flip`** — the flip ran and failed
-  (or a newer push superseded it while it was still pending). This is the case
-  the fallback below is for;
-- `did not FINISH within the … wait` / **`UNKNOWN`** — the watch gave up while the
-  run was still QUEUED or running (runner-queue latency is not ours to bound).
-  The flip is **NOT known to have failed**: do NOT run the fallback and do not
-  re-dispatch — both queue behind that run and supersede its pending slot. Watch
-  it instead (`gh run watch <id> --repo daniel-ospina/tortoise`), and if it is
-  genuinely stuck, cancel the `supabase-deploy` job — it holds the
-  `supabase-deploy-apply` lock for as long as it waits, so every later apply is
-  queued behind it.
+**Safe to fall back — the dispatch did not land, or the flip is known to have
+failed:**
+
+- **`Could not dispatch deploy-hosted`** — the POST itself failed, so the flip
+  was never started. Re-run, or flip by hand.
+- **`did not reach success`** / **`did NOT flip`** — the dispatch WAS accepted and
+  the run reached a terminal non-success state, or a newer push superseded it
+  while it was still PENDING. This is the case the fallback below is for.
+
+⛔ **NOT safe to fall back — the dispatch was accepted and the flip may be
+RUNNING.** All three of these exit 1, so they must not be read as "nothing
+happened":
+
+- **`answered with an unreadable body`** — the app flip is **`UNCONFIRMED`**;
+- **`did not name a run`** — the app flip is **`UNOBSERVED`**;
+- **`did not FINISH within the … wait`** — the flip is **`UNKNOWN`, NOT failed**.
+  The watch gave up while the run was still QUEUED or running (runner-queue
+  latency is not ours to bound).
+
+In those three cases do **NOT** run the fallback and do **NOT** re-dispatch —
+both queue behind that run and supersede its pending slot, which leaves the
+schema applied and the app orphaned: exactly the #3627 window this section
+exists to close. Watch it instead
+(`gh run watch <id> --repo daniel-ospina/tortoise`), and if it is genuinely
+stuck, cancel the `supabase-deploy` job — it holds the `supabase-deploy-apply`
+lock for as long as it waits, so every later apply is queued behind it.
 
 Do not run the last line alongside a healthy co-move — `deploy-hosted.yml`
 serialises every run in ONE constant `concurrency` group, so a manual dispatch
