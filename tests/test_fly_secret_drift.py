@@ -1752,6 +1752,12 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
     # hard-blocking the deploy in CI.
     config_names = {
+        # #10093: the ACL layer's declared posture. It is what keeps every
+        # hosted graph mint working (an undeclared value is invisible to
+        # check-fly-machine-env.py, so a stale machine silently reverts to
+        # `strict` and the 503s come back with nothing red — #4568), so its
+        # REMOVAL must fail here, in review, and not in production.
+        "TORTOISE_ACL_LAYER",
         "TORTOISE_CONTROL_PLANE",
         "TORTOISE_REAUTH_WINDOW_SECONDS",
         "TORTOISE_MANUAL_LINKING_ENABLED",
