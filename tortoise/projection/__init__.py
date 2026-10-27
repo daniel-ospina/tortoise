@@ -8961,6 +8961,19 @@ def journal_object_surviving_keys(
                 nm = id_to_name.pop(rid, None)
                 _drop_carrier(nm, rid)
             elif ev.get("op") in _ENTITY_MUTATION_STATE_OPS:
+                # ⛔ A STATE OP is not id-wide — only `delete` is (#3860).
+                # `_fold_entity_mutation` returns 0 for a label that is not a
+                # canonical label string (`state-op-miss`), so the graph never
+                # applies `state` and the node keeps its OLD name. Moving the
+                # name here for such a record dropped a name the graph still
+                # carries: a later name-only supersede then read as
+                # unaddressable and produced a false `object-superseded-miss`
+                # record in `check_consistency`'s report — the model and the
+                # fold disagreeing about the same op (tortoise#10162, review
+                # 12 P3, measured on a label-less rename).
+                if not (isinstance(label, str)
+                        and label in _CANONICAL_ENTITY_LABELS):
+                    continue
                 # `state` carries the full APPLIED map, so a rename moves the
                 # MERGE key the supersede sweep matches on
                 # (`_fold_entity_mutation`). Ignoring it would leave the OLD

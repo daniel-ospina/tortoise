@@ -2710,6 +2710,40 @@ def test_mention_stub_reid_by_registration_refuses_on_every_engine(env):
         f"registration had replaced: {r['non_folded_events']}")
 
 
+def test_label_less_rename_does_not_move_the_surviving_name(env):
+    """#10162 review round 12, P3: a STATE OP is not id-wide — only `delete` is.
+
+    FAILS IF: `journal_object_surviving_keys` applies a state op's `state`
+    without the canonical-label gate the fold uses. `_fold_entity_mutation`
+    returns 0 for a label that is not a canonical label string
+    (`state-op-miss`), so the graph never applies `state` and the node keeps its
+    OLD name — but the model moved the name, and the reference fold then
+    reported a supersede that HAD folded as `object-superseded-miss`.
+
+    ⛔ Asserts the opposite of the route-(c) test: the supersede must NOT be in
+    the report. The journal is red either way (the label-less state op is
+    itself a `state-op-miss`), so a `refused >= 1` assertion would pin nothing
+    — what is pinned is that no FALSE record is added.
+    """
+    sdk, events = env
+    stub_id = _entity_name_id("Object", "ACME-NL")
+    _raw(events, type="EventRecorded", id="e-nl-1", eventKind="k",
+         object="ACME-NL", event_id="e-nl-rec")
+    _raw(events, type="EntityMutated", op="rename", id=stub_id,
+         state={"name": "ACME-NL-NEW"}, event_id="e-nl-mut")  # ⛔ NO label
+    _raw(events, type="ObjectSuperseded", name="ACME-NL", supersedes_by="y",
+         event_id="e-nl-sup")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError):
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert not any("ObjectSuperseded" in e or "supersede matched no" in e
+                   for e in r["non_folded_events"]), (
+        "the reference fold reported a supersede that the graph folded, because "
+        "a label-less state op moved the surviving name: "
+        f"{r['non_folded_events']}")
+
+
 def test_nested_supersede_of_an_established_name_agrees_on_every_engine(env):
     """#10107 review P2: the reference fold's RESOLUTION must read the same
     spelling the predicate does.
