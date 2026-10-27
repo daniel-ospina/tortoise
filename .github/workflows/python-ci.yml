@@ -115,11 +115,37 @@ on:
 # future caller; nothing in this workflow emits that event.
 
 concurrency:
-  # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
-  # a new commit cancels that PR's stale run (desired). On `push` to main the
-  # ref is shared by ALL pushes — cancel-in-progress there would kill the
-  # in-flight full suite every time another PR merges, so main runs must not
-  # cancel each other (they queue via the shared group instead).
+  # Per-PR cancel only (measured 2026-10-27, docs/ops/ci-wall-clock.md).
+  #
+  # The group key does the work: `github.ref` is `refs/pull/N/merge` on
+  # `pull_request`, so a new commit on PR N cancels PR N's stale run — and only
+  # PR N's (a different PR, or any push, is a different ref, hence a different
+  # group). `github.event_name` in the key keeps the PR and push arms apart, so
+  # no push can cancel a PR run or the reverse.
+  #
+  # ⛔ WHY THE PUSH ARM IS DELIBERATELY NOT `cancel-in-progress: true`. The
+  # obvious reading is "a superseded main run occupies a runner" — the
+  # measurement says it does not, and that killing the one run that DOES occupy
+  # one would cost coverage:
+  #   * superseded PENDING push runs are already dropped by GitHub, which keeps
+  #     one pending run per group even with `cancel-in-progress: false`: of the
+  #     20 push-to-main runs created 2026-10-26T22:40Z..10-27T04:50Z, 15 were
+  #     `cancelled` having executed ZERO jobs (3 ran jobs, 1 still queued, 1
+  #     failed). `Post-merge validation` shows the same 17-of-20 shape.
+  #   * main is pushed in BURSTS, not on a 145-minute drum: measured gaps over
+  #     the same 6.2 h were p50 3 min / p95 55 min / max 152 min, and one burst
+  #     was 9 pushes in 8 minutes. Under `cancel-in-progress: true` nearly every
+  #     main run would be killed within minutes of starting — i.e. the run that
+  #     survived the pending drop is the ONLY full matrix main gets, and it is
+  #     the one that would be cut.
+  #   * the fallback is not equivalent. `post-merge-validation` falls open on a
+  #     cancelled run (#1474) but its `validate` job EXCLUDES `tests/e2e` and
+  #     `config/ci-surfaces.yml: slow_files`, so the `test-slow` legs of a
+  #     superseded tree would be run NOWHERE. That is a coverage loss on main,
+  #     not a capacity win: push runs are ~1 of every 18 queued python-ci runs
+  #     (measured 04:10Z: 17 `pull_request`, 1 `push`).
+  # The wall §1 of docs/ops/ci-wall-clock.md measures is the PR side; the lever
+  # there is capacity and queue governance (tools/ci_queue_health.py, #9115).
   group: python-ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -2371,6 +2397,17 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
+    # #3239 shape: this job is one of `python-ci-gate`'s needs and carried NO
+    # outer cap, so GitHub's 360m default applied — a wedged `pip install -e .`
+    # (network) or a hung pack load withheld the REQUIRED check for six hours.
+    # Measured 2026-10-27 (60 newest completed python-ci.yml runs,
+    # first-step→last-step, completed jobs only): p50 0.60m, p95 0.76m,
+    # max 0.80m over the 19 runs whose job actually executed. 15m is the
+    # runner-stall floor the required-path jobs share, not a thin bound — the
+    # same floor `test-track-b` took in #3239 (measured max 1.15m there).
+    # The figures and the command that produced them live in
+    # docs/ops/ci-wall-clock.md.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -3623,6 +3660,15 @@ jobs:
     if: always()
     needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard]
     runs-on: ubuntu-latest
+    # #3239 shape, and the most expensive instance of it: this IS the required
+    # check (`merge_conditions` in .mergify.yml), and it carried no cap at all.
+    # The step is a shell loop over `needs.*.result` — no network, no `gh` — so
+    # a hang here is pure wedge, and the 360m default would hold the merge queue
+    # on it. Measured 2026-10-27 (60 newest completed runs): p50 0.00m,
+    # p95 0.02m, max 0.02m over the 34 runs whose gate actually executed.
+    # The cap bounds THIS job's step only — a leg that never reports is bounded
+    # by that leg's own cap (the job table in docs/ops/ci-wall-clock.md).
+    timeout-minutes: 15
     steps:
       - name: Aggregate matrix result
         run: |
