@@ -3958,6 +3958,20 @@ surfaces:
   # (#1262) AND runs in no leg (#1349/#2938) — without this row the 16 pins
   # here, including the parity grid, would be green-by-absence.
   - test_5140_pending_extraction.py
+  # #5140 finding 8: the `:Document` → `:Source` relabel migration
+  # (`tortoise/migrate_kinds.py::relabel_legacy_documents`) and the two things
+  # it unblocks — the `document` kind rows can finally SEE the population they
+  # re-type, and the pre-D10 extraction backlog becomes discoverable for the
+  # part of it a relabel can fold (a `_event_plain_merge` document has no clock,
+  # so the pass refuses it as `undated` instead of inventing §4.6's
+  # `ingestedAt`; and the REBUILT-graph backlog stays a product decision on
+  # #5140). Same
+  # surface as its sibling (`tortoise/migrate_kinds.py` and `tortoise/ingest.py`
+  # match no SOURCE_PATTERN, so both fall through to this `core` arm). Docker
+  # lane (`_live_db` skipif, per-test `test_5140_relabel_*` graphs), so NOT in
+  # `carve_out:`. Registered because an unlisted file is a `manifest-integrity`
+  # red (#1262) AND runs in no leg (#1349/#2938) — green by absence.
+  - test_5140_d10_relabel_migration.py
   - test_ingest.py
   - test_ingest_audit.py
   - test_ingest_bundle.py
@@ -8999,6 +9013,16 @@ durations:
   test_5089_operator_status_parity.py: 0.6
   test_5097_capture_source_replay.py: 5.8
   test_5140_pending_extraction.py: 2.1
+  # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
+  # per-test graphs; two of the functions are parametrised, so the collected
+  # count is larger than the function count — deliberately not restated here,
+  # because a hard number in a timing-provenance note goes stale on the next
+  # test added and reads as a stale timing). ADDED BY THIS PR, so the
+  # refresher — which samples push-to-main junit — cannot have measured it; the
+  # flat `DEFAULT_FAST_WEIGHT` is the only honest row, and a local reading is not
+  # a shard-layout input (#3419/#2818). `tools/ci_timing.py --refresh-durations`
+  # replaces it.
+  test_5140_d10_relabel_migration.py: 2.0  # unmeasured — new in #5140
   test_5321_embedder_accessor_liveness.py: 0.1
   test_5346_paged_read_total_order.py: 10.7
   test_5404_entity_type_guard.py: 0.1
