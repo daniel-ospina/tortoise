@@ -1443,45 +1443,47 @@ def _episode_acknowledged(episode: dict, acks,
     beginning. Reproduced before this fix: ack a 300-window bout, let 300 newer
     alert rows arrive, and the same still-firing bout comes back with a new key,
     ``acked: False`` — an acknowledged row reappearing as CURRENT with no way to
-    dismiss it again (the acks that would match it are keyed to a first_at that
-    no longer exists anywhere). At the live org's ~440 ``flag`` rows/day the
-    scan rolls over in about a day, so this was the common case, not the edge.
+    dismiss it again.
 
     So an acknowledgement is matched on what actually identifies the episode —
-    its identity, plus an OVERLAP between the window that was acknowledged and
-    the window now visible:
+    its identity, plus a window test — and then gated by ONE more rule that
+    depends on which register the episode belongs to.
 
-    * OVERLAP ⇒ same bout, still acknowledged.
-    * NO overlap, but the gap between the acknowledged window's END and this
-      episode's START is at most ``EPISODE_GAP_S`` ⇒ still the same bout: the
-      acknowledged stretch has slid out of view while the bout kept firing. An
-      ack must survive that too — without this arm the durability horizon was
-      "≤ `_ALERT_SCAN` alert rows after the ack", i.e. about a day at this
-      branch's own measured ~440 `flag` rows/day, which is precisely the rollover
-      that made key-only matching broken (review finding P2, reproduced by
-      pushing >500 newer alert rows of another identity while the bout kept
-      firing).
-    * a gap LONGER than ``EPISODE_GAP_S`` ⇒ the acknowledged stretch is behind a
-      silence that would have split the episode anyway, so this is a genuinely
-      later bout: NOT acknowledged, renders as current. Contiguity is the same
-      rule grouping uses to decide what one episode IS, so the acknowledgement and
-      the grouping cannot disagree about where a bout ends.
+    The window arms (both directions pinned):
+
+    * OVERLAP ⇒ same bout.
+    * a gap of 0 … ``EPISODE_GAP_S`` between the acknowledged window's END and
+      this episode's START ⇒ same bout, the acknowledged stretch simply slid out
+      of the scan (forward only: an unbounded delta also matched every EARLIER
+      bout, which is how acking the newest bout used to acknowledge older ones).
+    * a gap LONGER than ``EPISODE_GAP_S`` ⇒ a genuinely later bout, not
+      acknowledged, renders as current.
+
+    ⛔ THE INCIDENT GATE — ``register == alert`` AND ``episode.at > ack.at`` ⇒ NOT
+    acknowledged. This is the distinction between the two registers, applied to
+    dismissals: for an OBSERVATION (a velocity row) a newer row is the SAME
+    ongoing measurement re-reported every 5 minutes, so one acknowledgement
+    covering all of it is the whole point of the change. For an INCIDENT each row
+    is a new FACT — a suspension, a re-suspension after an appeal, a second
+    new-country sign-in — and folding it into the dismissed episode hides it. The
+    reproduced failure: suspend at T, acknowledge it, appeal, get re-suspended at
+    T+2h (inside ``EPISODE_GAP_S``, so grouping folds it into the same episode);
+    the panel then printed "Everything shown here is acknowledged." while the org
+    was suspended right now (review finding P1). The dismissal covers what the
+    operator saw; anything that HAPPENS afterwards re-opens the episode.
 
     ⚠️ THE HORIZON, stated because it is bounded and the bound is not obvious:
-    this is all decided from a 500-row newest-first SCAN. A dense burst rolls that
-    window in about a day at the live org's measured ~440 ``flag`` rows/day, and
-    once the acknowledged stretch AND its continuation have both scrolled out,
-    nothing in the data distinguishes "the same bout, still firing" from "a new
-    bout of the same identity" — the rows that would prove it are outside the
+    all of this is decided from a 500-row newest-first SCAN. A dense burst rolls
+    that window in about a day at the live org's measured ~440 ``flag`` rows/day,
+    and once the acknowledged stretch AND its continuation have both scrolled
+    out, nothing in the data distinguishes "the same bout, still firing" from "a
+    new bout of the same identity" — the rows that would prove it are outside the
     window. The choice here is to let the acknowledgement LAPSE: the row returns
     as CURRENT, visible and dismissable again. The other direction (letting an old
     acknowledgement cover whatever turns up next) would silently hide a genuinely
-    new bout behind a week-old dismissal, which is the worse failure for a security
-    panel. Both directions are pinned by test, so a future change has to argue with
-    the one it is not making.
-    * a legacy ack row with no stored window (nothing has shipped that writes
-      one, but a hand-written row could exist) falls back to exact key equality,
-      which is the old behaviour rather than silently un-acknowledging it.
+    new bout behind a week-old dismissal, which is the worse failure for a
+    security panel. Both directions are pinned by test, so a future change has to
+    argue with the one it is not making.
     """
     key = episode.get("episode")
     # `_identity` is set by `group_alert_episodes` and is still present here (the
@@ -1491,39 +1493,29 @@ def _episode_acknowledged(episode: dict, acks,
     flat = episode.get("_identity")
     if flat is None:
         flat = list(_flat_identity(*_episode_identity(episode)))
+    e_first = _parse_ts(episode.get("first_at"))
+    e_last = _parse_ts(episode.get("at"))
+    incident = episode.get("register") == REGISTER_ALERT
     for ack in acks or ():
-        if ack.get("episode") == key:
-            return True
-        ident = ack.get("identity")
-        if ident is None or tuple(ident) != tuple(flat):
+        matched = ack.get("episode") == key
+        if not matched:
+            ident = ack.get("identity")
+            if ident is None or tuple(ident) != tuple(flat):
+                continue
+            first, last = ack.get("first"), ack.get("at")
+            if None in (first, last, e_first, e_last):
+                continue
+            overlap = first <= e_last and e_first <= last
+            delta = (e_first - last).total_seconds()
+            matched = overlap or (0 <= delta <= gap_s)
+        if not matched:
             continue
-        first, last = ack.get("first"), ack.get("at")
-        e_first = _parse_ts(episode.get("first_at"))
-        e_last = _parse_ts(episode.get("at"))
-        if None in (first, last, e_first, e_last):
-            continue
-        if first <= e_last and e_first <= last:
-            return True
-        # Contiguity: the acknowledged stretch slid out of the scan while the
-        # bout never stopped. Measured the same way grouping measures a bout's
-        # gaps, so an acknowledgement cannot outlive what grouping would call a
-        # different episode.
-        #
-        # ⛔ FORWARD ONLY — `0 <= delta <= gap_s`. The first version wrote just
-        # `delta <= gap_s`, and `delta` is NEGATIVE whenever the episode starts
-        # BEFORE the acknowledged window ends … which is always true for the
-        # older, separately-grouped bouts further down a newest-first feed. The
-        # effect: acknowledging the newest bout also marked every EARLIER bout of
-        # the same identity `acked`, so an untouched incident left the current
-        # list with an "acknowledged" chip and the register could then print
-        # "Everything shown here is acknowledged." over it — the exact
-        # hidden-incident failure this panel exists to prevent, on the register
-        # that means "something happened" (review finding P1). The
-        # overlap arm already covers "starts before the window ends", so the
-        # lower bound costs nothing.
-        delta = (e_first - last).total_seconds()
-        if 0 <= delta <= gap_s:
-            return True
+        if incident:
+            acked_through = ack.get("at")
+            if acked_through is None or e_last is None or e_last > acked_through:
+                # Something HAPPENED after the dismissal. Not covered.
+                continue
+        return True
     return False
 
 

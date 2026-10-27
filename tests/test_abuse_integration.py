@@ -861,6 +861,41 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
+    def test_a_CLIENT_SUPPLIED_WINDOW_is_ignored(self, env):
+        """The route's core invariant (round-7 review finding: it was only pinned
+        at the STORE level, so an edit that forwarded `body["first_at"]` would have
+        broken it silently).
+
+        The client sends a key; the server resolves the episode against its OWN
+        feed and records the window IT sees. A client-supplied window would let a
+        caller acknowledge an episode it was never shown — and, worse, forge an
+        overlap that covers a different bout.
+        """
+        self._owner(env)
+        fake = env["fake"]
+        self._seed_velocity(fake)
+        try:
+            with verdict_client(env["app"]) as tc:
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+                episode = feed[0]["episode"]
+                r = tc.post("/v1/team/alerts/ack", json={
+                    "org_id": TEAM, "episode": episode,
+                    # A window from 2019, and one from the future: both must be
+                    # discarded in favour of the resolved episode's own.
+                    "first_at": "2019-01-01T00:00:00+00:00",
+                    "at": "2099-01-01T00:00:00+00:00",
+                    "identity": ["suspend"],
+                })
+                assert r.status_code == 200, r.text
+                ack = [x for x in fake.tables["abuse_events"]
+                       if x["event_type"] == "alert_ack"][-1]
+                assert ack["details"]["first_at"].startswith("2026-09"), ack
+                assert ack["details"]["at"].startswith("2026-09"), ack
+                assert ack["details"]["identity"] == [
+                    "read_velocity", "key", "k-10156"], ack
+        finally:
+            env["app"].dependency_overrides.clear()
+
     def test_a_failed_write_is_reported_not_swallowed(self, env):
         """A dismissal that does not persist must NOT return 200: the row would
         reappear on the next poll and read as a broken control."""

@@ -55,6 +55,7 @@ from tortoise.abuse import (
     EVENT_REVIEW,
     EVENT_SIGNUP_VELOCITY,
     EVENT_SUSPEND,
+    EVENT_UNSUSPEND,
     REGISTER_ACTIVITY,
     REGISTER_ALERT,
     MemoryAbuseStore,
@@ -652,6 +653,75 @@ class TestAcknowledgementPersistence:
             "a 3-day-older flag bout was marked acknowledged by acking the newer "
             "one — and an acked row leaves the current list")
 
+    def test_a_RE_SUSPENSION_after_an_ack_is_not_hidden_by_it(self):
+        """P1 (round-7 review). Grouping-by-gap is right for detector WINDOWS and
+        wrong for discrete EVENTS: a suspension re-fired inside EPISODE_GAP_S is a
+        NEW operator action (or a failed appeal), not "×2 of one".
+
+        Reproduced sequence: suspended at T → the owner acknowledges it (the panel
+        invites exactly that) → the appeal succeeds → re-suspended at T+2h. Same
+        identity `("suspend",)`, silence 2h < 3h, so grouping folds it into the
+        acknowledged episode and only `at` moves — and the panel printed
+        "Everything shown here is acknowledged." while the Organization was
+        suspended right now.
+        """
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)  # noqa: UP017
+        store.record_event(ORG, EVENT_SUSPEND, created_at=base)
+        episode = store.recent_alerts(ORG)[0]
+        store.record_alert_ack(ORG, episode["episode"], by="u1")
+        assert store.recent_alerts(ORG)[0]["acked"] is True
+
+        # Appeal succeeds, then a SECOND suspension two hours later.
+        store.record_event(ORG, EVENT_UNSUSPEND,
+                           created_at=base + timedelta(minutes=60))
+        store.record_event(ORG, EVENT_SUSPEND,
+                           created_at=base + timedelta(minutes=120))
+        live = next(a for a in store.recent_alerts(ORG)
+                    if a["type"] == EVENT_SUSPEND)
+        assert live["count"] == 2, (
+            "fixture: grouping folds the two suspensions into one episode")
+        assert live["acked"] is False, (
+            "the Organization is suspended AGAIN and the row is still marked "
+            "acknowledged — the dismissal hid a live incident")
+
+    def test_a_second_NEW_COUNTRY_sign_in_after_an_ack_is_not_hidden(self):
+        """The same gate for the other incident types: a new-country sign-in is a
+        discrete credential event, so a second one after a dismissal is new."""
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)  # noqa: UP017
+        store.record_event(ORG, EVENT_AUTH_IP, country="BR", created_at=base)
+        episode = store.recent_alerts(ORG)[0]
+        store.record_alert_ack(ORG, episode["episode"], by="u1")
+        store.record_event(ORG, EVENT_AUTH_IP, country="BR",
+                           created_at=base + timedelta(minutes=30))
+        live = store.recent_alerts(ORG)[0]
+        assert live["acked"] is False, (
+            "a SECOND sign-in from the new country was folded into the "
+            "dismissed episode and stayed hidden")
+
+    def test_an_OBSERVATION_episode_MAY_absorb_rows_after_the_ack(self):
+        """The other half of the same gate, so the fix cannot overshoot: for a
+        velocity OBSERVATION a newer row is the same measurement re-reported
+        every window, and one acknowledgement covering the ongoing rate is the
+        whole point of the change (#10156 step 2)."""
+        store = MemoryAbuseStore()
+        for ts in REAL_READ_VELOCITY_TS[3:]:
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=datetime.fromisoformat(ts))
+        store.record_alert_ack(ORG, store.recent_alerts(ORG)[0]["episode"],
+                               by="u1")
+        store.record_event(ORG, EVENT_READ_VELOCITY,
+                           details={"scope": "key", "id": KEY},
+                           created_at=datetime.fromisoformat(
+                               "2026-09-26T00:13:56+00:00"))
+        newest = store.recent_alerts(ORG)[0]
+        assert newest["count"] == 14
+        assert newest["acked"] is True, (
+            "a velocity observation must stay acknowledged while it keeps firing "
+            "— otherwise every poll re-opens the same ongoing rate")
+
     def test_a_LATER_bout_of_the_same_identity_is_not_acknowledged(self):
         """The other half of overlap matching: the acknowledgement must not leak
         forward forever. Once the acknowledged stretch has slid entirely out of
@@ -1042,25 +1112,38 @@ class TestCalibration:
         assert ReadVelocityTracker().threshold == 100
 
     def test_the_calibration_maps_are_bounded_like_the_count_buckets(self):
-        """The calibration added three per-(scope, id) maps, and they grow with
-        every id EVER seen unless pruned.
+        """EVERY per-(scope, id) calibration map is bounded, measured on the maps
+        that actually grow.
 
-        THIS ASSERTION IS ON `_window_started`, NOT `_baseline`, and that is the
-        point (#10156 review finding): a scope read ONCE never completes a
-        window, so it never enters `_baseline` — the earlier version of this test
-        asserted on a value measured at 0 and passed without the prune ever
-        running, while the map that actually leaked grew unbounded.
+        Two earlier versions of this test were green while the leak it names was
+        live (round-3 and round-7 review findings), for two different reasons:
+        the first asserted a value measured at 0; the second drove one read per id,
+        so no window ever COMPLETED and `_baseline` stayed empty — the assertion
+        was on `_window_started` alone while its own docstring admitted
+        `_baseline` was the map that leaked.
+
+        So: every id here completes a window (two reads, one window apart), which
+        is the only way `_baseline` fills, and BOTH maps are asserted before and
+        after the prune. The prune lives in `record_read`; `_window_count` is
+        asserted too because it is the third map in the same block.
         """
         tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
         start = 1_000_000.0
         for i in range(10_050):
             tracker.record_read(f"k{i}", None, now=start)
-        assert len(tracker._window_started) >= 10_000, len(tracker._window_started)
-        # A later window, long after every earlier scope went quiet, must prune.
+            # …and one window later, so the window COMPLETES and the scope enters
+            # `_baseline` (a single read never does).
+            tracker.record_read(f"k{i}", None, now=start + WINDOW)
+        for name in ("_window_started", "_window_count", "_baseline"):
+            size = len(getattr(tracker, name))
+            assert size >= 10_000, (name, size)
+        # A later window, long after every earlier scope went quiet, must prune
+        # ALL THREE: keeping a baseline while discarding the counts would judge a
+        # silent scope against a rate it no longer has.
         late = start + 10 * WINDOW
         tracker.record_read("k-late", None, now=late)
-        assert len(tracker._window_started) < 100, len(tracker._window_started)
-        # The new scope is tracked from this call (its baseline only exists once
-        # a window COMPLETES, which is why the assertion is on the window map).
+        for name in ("_window_started", "_window_count", "_baseline"):
+            size = len(getattr(tracker, name))
+            assert size < 100, (name, size)
         assert ("key", "k-late") in tracker._window_started
 
