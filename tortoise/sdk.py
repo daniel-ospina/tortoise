@@ -16544,10 +16544,21 @@ class TortoiseSDK:
                 # to the `RelationUpsert.attrs` vocabulary (the set the replay
                 # contract understands) — copying `properties(r)` raw would carry
                 # EP-managed / internal fields onto the successor.
+                # ⛔ NOT `source_version`: it is the RECORD column name, and this
+                # file's graph rels carry the anchor as `sourceVersion`
+                # (`projection/edges.py:504`, `_anchor_on_create`) — nothing writes
+                # `r.source_version`, so the entry could never match and only
+                # implied a carry that never happened. It is also the one key the
+                # record contract forbids re-applying on a re-link ("a re-link must
+                # not ADVANCE a recorded version", `record_projection.py:2061-2068`).
+                # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
+                # STILL dropped on transfer. That is the pre-existing loss #10139
+                # owns (the rebuild half is bare there too); stating it here rather
+                # than letting the word "never" above imply otherwise.
                 edge_props = {
                     k: v for k, v in (row[4] or {}).items()
                     if k in ("direction", "confidence", "weight", "label",
-                             "batch_id", "source_version")
+                             "batch_id")
                 }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
@@ -16604,20 +16615,35 @@ class TortoiseSDK:
                         )
                 # Create new edge: new point → same target (MERGE = idempotent,
                 # no dupes).
-                # ⛔ #9417: `SET nr += $attrs` carries the old edge's properties
-                # across. Without it the MERGE recreates the `about*` edge bare and
-                # the binder's `confidence` is DROPPED, not copied — the additive
-                # form is the one this file already uses elsewhere, and it is
-                # emitted only when the old edge actually had properties so the
-                # empty case stays a plain MERGE.
-                # ⛔ #9417: params carry `attrs` ONLY when there is something to
-                # carry — an empty map is not writable by FalkorDB and the
-                # projection degrades it to null with a #7369 warning, so the
-                # empty case must stay a plain MERGE with no `attrs` key at all.
+                # ⛔ #9417: the old edge's properties are carried across, because a
+                # bare MERGE recreates the `about*` edge with NO properties and the
+                # binder's `confidence` is then DROPPED, not copied.
+                # ⛔ `ON CREATE SET`, NOT a bare `SET`. `SET nr += $attrs` overwrites
+                # PER KEY, so an unconditional carry made the RETIRED point's value
+                # win over a confidence the SUCCESSOR already held on the same
+                # target — measured: old 0.42 + successor's own live 0.91 → 0.42,
+                # successor destroyed (target: #9417 review P1). The collision is
+                # the COMMON case: `supersede_point` is the RESTATEMENT path, so a
+                # restated claim about the same subject is bound to the same
+                # Subject by `bind_point_subjects` and both edges exist. In a chain
+                # (X→Y→Z) each transfer would re-stamp the newest successor with the
+                # oldest ancestor's value, and the descriptor below carries no
+                # `attrs`, so the overwritten value is journaled NOWHERE and cannot
+                # be rebuilt.
+                # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
+                # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
+                # untouched), so this preserves it while still refusing to leave a
+                # NEWLY created edge bare. A successor edge that exists but is
+                # partially populated is deliberately NOT topped up — its own state
+                # is authoritative.
+                # ⛔ params carry `attrs` ONLY when there is something to carry — an
+                # empty map is not writable by FalkorDB and the projection degrades
+                # it to null with a #7369 warning, so the empty case must stay a
+                # plain MERGE with no `attrs` key at all.
                 _params = {"new_id": new_id, "tid": target_graph_id}
                 _carry = ""
                 if edge_props:
-                    _carry = "SET nr += $attrs"
+                    _carry = "ON CREATE SET nr += $attrs"
                     _params["attrs"] = edge_props
                 proj.g.query(
                     f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
