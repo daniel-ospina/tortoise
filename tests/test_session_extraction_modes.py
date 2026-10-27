@@ -429,22 +429,24 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
 
     real_query = _GuardedGraph.query
     # ⛔ THE NEEDLE MUST NAME THE ONE READ THIS LEG INJECTS INTO (#10000). It
-    # names the prior-count read, which #10000 rewrote to
-    # `coalesce(s.turn_max_index, s.turn_count, 0), count(t)` (the meter reads the
-    # session's own turn account, not a node walk, or an armed deployment reads 0
-    # for every session and a replay is billed as a write).
+    # names the prior-count read, which #10000 rewrote to read the session's own
+    # turn account beside the node count (an armed deployment writes no turn
+    # node, so a bare walk reads 0 for every session and a replay is billed as a
+    # write). #10021 review P2 split that query's two arms — `turn_max_index` is
+    # an INDEX and `turn_count` a COUNT, so the `coalesce(...)` that made one
+    # value of them could not be converted correctly — and this leg is where
+    # that re-point shows up.
     #
     # ⛔ TWO READS PROJECT THE MARK, SO THE MARK ALONE NAMES NEITHER. A bare
-    # `coalesce(s.turn_max_index, s.turn_count, 0)` also matches
-    # `sdk._write_session_and_turns`' prior-mark read (the #1920 stale-turn
-    # bound), which spans an implicit string-literal concatenation — so a
-    # line-grep misses it, and this leg passed `assert fired` on the WRONG read
-    # while injecting a graph failure into the stale-turn sweep as well. What is
-    # unique to the prior-count read is the pair: the node walk it counts beside
-    # the mark it reads. Re-point the needle when that read's query changes;
-    # never delete the leg, and never widen it back to the mark alone —
-    # `assert len(fired) == 1` below is what says so.
-    needle = "WHERE t.is_episodic = true RETURN coalesce(s.turn_max_index"
+    # `s.turn_max_index` also matches `sdk._write_session_and_turns`' prior-mark
+    # read (the #1920 stale-turn bound), which spans an implicit string-literal
+    # concatenation — so a line-grep misses it, and this leg passed `assert
+    # fired` on the WRONG read while injecting a graph failure into the
+    # stale-turn sweep as well. What is unique to the prior-count read is the
+    # pair: the node walk it counts beside the mark it reads. Re-point the needle
+    # when that read's query changes; never delete the leg, and never widen it
+    # back to the mark alone — `assert len(fired) == 1` below is what says so.
+    needle = "WHERE t.is_episodic = true RETURN s.turn_max_index"
     fired: list[str] = []
 
     def flaky(self, cypher, *a, **kw):

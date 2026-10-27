@@ -36582,22 +36582,39 @@ def _prior_stored_turn_count(proj, session_id: str) -> int:
     * the live node count — the same fact for the graph lane (an unarmed
       deployment, or a capture whose record write was refused).
 
-    `coalesce(..., s.turn_count, 0)` keeps a session captured before the mark
-    existed readable.
+    `s.turn_count` keeps a session captured before the mark existed readable.
+
+    ⛔ THE TWO ARMS ARE CONVERTED SEPARATELY (#10021 review P2). They are not
+    even the same KIND of number: `turn_max_index` is a 0-based INDEX (hence
+    ``+ 1``), `turn_count` is a COUNT. A single `coalesce(mark, count)` followed
+    by one ``+ 1`` — what this function used to do — therefore read a legacy
+    session (mark absent, `turn_count = N`) as ``N + 1`` stored turns, so a
+    capture that added exactly ONE turn (`len(windowed) = N + 1`) satisfied
+    `len(windowed) > prior_turn_count` NOWHERE and a real write went UNMETERED —
+    the #3892 blind spot this meter exists to close, in the direction the
+    docstring promises never to have. `turn_count` is a WINDOW length too, so it
+    is only ever a FLOOR; the mark, when present, is the session's live end and
+    is exact.
     """
     try:
         prior = proj.g.query(
             "MATCH (s:Session {id:$sid}) "
             "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
             "WHERE t.is_episodic = true "
-            "RETURN coalesce(s.turn_max_index, s.turn_count, 0), "
-            "       count(t)",
+            "RETURN s.turn_max_index, s.turn_count, count(t)",
             params={"sid": session_id}).result_set
         if not prior:
             return 0
-        mark = int(prior[0][0] or 0)
-        nodes = int(prior[0][1] or 0)
-        return max(nodes, mark + 1)
+        mark, count, nodes = prior[0]
+        total = int(nodes or 0)
+        if isinstance(mark, int):
+            # The session's live id-space end: an INDEX, so ``+ 1`` is its count.
+            total = max(total, mark + 1)
+        elif isinstance(count, int):
+            # No mark yet (the pre-#10000 population): the window length is a
+            # floor on the total, never a value to add to.
+            total = max(total, count)
+        return total
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(

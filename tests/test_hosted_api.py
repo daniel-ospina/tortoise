@@ -4131,6 +4131,79 @@ class TestSessionList:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class _ScopedRecordConn:
+    """A record connection that can CARRY THE TENANT SCOPE the shared read installs.
+
+    ⛔ WHY THIS EXISTS (#10021 review P1). `get_session_detail` no longer calls
+    `record_read._turns` directly: it calls `record_read.session_turns`, whose
+    FIRST statement is `scope_connection(conn, org_id)` — a `set_config` plus a
+    read-back of the GUC and of the role's RLS posture (`record_projection`).
+    The doubles these legs used had only `close()`, so that line raised
+    `AttributeError`, the door's fail-soft arm read it as "the record did not
+    answer", and both legs stopped testing the rule they name (measured at head
+    `a100a4430`: `2 failed`, both `'_Conn' object has no attribute 'cursor'`).
+
+    The cursor ECHOES the tenant it was handed, so the real `scope_connection`
+    verification passes, and answers NO rows otherwise — these legs supply the
+    record's answer through their own `_turns` stub and assert the door's use of
+    it. The scope INSTALL itself is pinned against an RLS-modelling connection in
+    `tests/test_10000_turns_record_only.py`
+    (`test_the_turn_read_is_scoped_so_rls_cannot_empty_it`), not here; what a leg
+    asserting `statements` buys is that a door which STOPPED scoping reddens
+    instead of passing on a double that never asked.
+    """
+
+    def __init__(self, *, narrative=()):
+        self.tenant = None
+        #: The `session_narrative` rows this connection answers with — the
+        #: record's OWN account of `turn_count`, which the shared read needs to
+        #: tell a COMPLETE answer from a short one.
+        self.narrative = tuple(narrative)
+        self.statements: list[str] = []
+
+    def cursor(self):
+        return _ScopedRecordCursor(self)
+
+    def close(self):
+        pass
+
+
+class _ScopedRecordCursor:
+    """The two `scope_connection` statements, the narrative row, and nothing else."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows: list = []
+
+    def execute(self, sql, params=()):
+        from tortoise.record_projection import TENANT_GUC_SQL, TENANT_SCOPE_SQL
+
+        flat = " ".join(sql.split())
+        self._conn.statements.append(flat)
+        if flat == " ".join(TENANT_GUC_SQL.split()):
+            self._conn.tenant = params[0]
+            self._rows = [("",)]
+        elif flat == " ".join(TENANT_SCOPE_SQL.split()):
+            # `bypassing is False` is the posture the real read-back must
+            # report; the tenant is the one this connection was just scoped to.
+            self._rows = [{"tenant": self._conn.tenant, "bypassing": False}]
+        elif "FROM public.session_narrative" in flat:
+            self._rows = list(self._conn.narrative)
+        else:
+            # No turn row: the legs stub `_turns` themselves.
+            self._rows = []
+        return None
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        return None
+
+
 class TestSessionDetail:
     """GET /v1/sessions/{session_id} — session detail (#714)."""
 
@@ -4243,11 +4316,8 @@ class TestSessionDetail:
         # refusal fires only when the caller would otherwise be told "no turns".
         from tortoise.record_read import Turn
 
-        class _Conn:
-            def close(self):
-                pass
-
-        monkeypatch.setattr(ha, "_open_record", lambda: _Conn())
+        conn = _ScopedRecordConn()
+        monkeypatch.setattr(ha, "_open_record", lambda: conn)
         monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
             Turn(turn_id=f"{sid}_t0", index=0,
                  content="[user] We decided to use FalkorDB.",
@@ -4258,6 +4328,11 @@ class TestSessionDetail:
         ok = client.get(f"/v1/sessions/{sid}")
         assert ok.status_code == 200, ok.text
         assert len(ok.json()["turn_points"]) == 2, ok.json()["turn_points"]
+        assert any("set_config" in s for s in conn.statements), (
+            "the door read the record's turns without installing the tenant "
+            "scope — under the production role that read is EMPTY, not an "
+            "error, so 'the record did not answer' and 'the record holds "
+            "nothing' become the same answer (#10000 review P0-1)")
 
     def test_detail_still_serves_the_graph_copy_when_the_record_cannot_answer(
             self, client, monkeypatch):
@@ -4793,15 +4868,15 @@ class TestSessionDetail:
         Without this, a guard that fired on the success path too would still
         pass every other test in this class: their record answers agree with
         `turn_count`, so the count comparison is silent either way. Here the
-        record returns 2 turns while `turn_count` says 4 — a DISAGREEMENT — and
-        the endpoint must still serve the record's own answer at 200, because
-        reading the record SUCCEEDED and the record is the store of record.
+        record STATES 4 turns (`session_narrative.turn_count`, its own account)
+        while holding 2 — a DISAGREEMENT — and the endpoint must still serve 200
+        with the turns it does have, because reading the record SUCCEEDED.
 
-        This pins "guard only on the fail-soft arm" WITHOUT asserting that the
-        disagreement is correct: a record answer that succeeds but disagrees is
-        #8447's remaining read-side hole, owned by #10021 (its P0-3), where the
-        record's own answer becomes authoritative instead of being compared to a
-        graph count.
+        At this head a short record answer is not authoritative either: the door
+        merges it with the graph copy and serves the UNION
+        (`record_read.merge_turn_payloads`). This session has no turn node, so
+        the union is the record's 2 — and the #8447 refusal stays reserved for a
+        read that FAILED with no complete graph copy to stand in for it.
 
         Mutation: drop the `if _record_read_failed` gate (`if True:`) — this REDs
         on the 503.
@@ -4816,9 +4891,10 @@ class TestSessionDetail:
             "SET s.created_at=$now, s.is_episodic=true, s.turn_count=4",
             params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
 
-        class _Conn:
-            def close(self):
-                pass
+        # The record's OWN account says 4 turns while it holds 2: the partial
+        # shape that must not be served as a complete transcript (and must not
+        # be refused either — the read succeeded).
+        conn = _ScopedRecordConn(narrative=[(None, None, 0, 4)])
 
         # #10021: the shared read predicate also asks the JOURNAL half of the
         # capability question, so an armed read needs both — the DSN alone is
@@ -4829,7 +4905,7 @@ class TestSessionDetail:
         monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
         monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
         assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None
-        monkeypatch.setattr(ha, "_open_record", lambda: _Conn())
+        monkeypatch.setattr(ha, "_open_record", lambda: conn)
         monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
             Turn(turn_id=f"{sid}_t0", index=0, content="[user] from record 0.",
                  speaker="user", created_at="2026-10-25T00:00:00+00:00"),

@@ -520,6 +520,63 @@ def test_the_write_op_meter_counts_the_sessions_turns_not_turn_nodes(sdk):
         "the capture path no longer asks the shared meter read")
 
 
+def test_the_write_op_meter_does_not_add_one_to_a_legacy_turn_count(sdk):
+    """⛔ P2: `turn_max_index` is an INDEX, `turn_count` is a COUNT (#10021).
+
+    A session captured BEFORE the mark existed carries `turn_count = N` and N
+    turn nodes. Reading the two through ONE `coalesce(...)` and a single ``+ 1``
+    reported ``N + 1`` stored turns, so a capture that added exactly ONE turn
+    (`len(windowed) = N + 1`) satisfied `len(windowed) > prior_turn_count`
+    nowhere and was NOT metered — a real write billed as an idempotent replay,
+    i.e. the #3892 blind spot this meter exists to close, in the direction its
+    docstring promises never to have.
+
+    Mutation: restore `coalesce(s.turn_max_index, s.turn_count, 0)` + a single
+    ``mark + 1`` — `prior` becomes 3 and the first two assertions below red.
+    """
+    import tortoise.hosted_api as ha
+
+    proj = sdk._get_proj()
+    # The pre-#10000 shape, ASSERTED rather than assumed: a Session with a COUNT
+    # and no id-space mark, plus the turn nodes the graph used to hold.
+    proj.g.query(
+        "MERGE (s:Session {id:'legacy-meter'}) "
+        "SET s.created_at='2026-01-01T00:00:00+00:00', s.is_episodic=true, "
+        "    s.turn_count=2")
+    for index in (0, 1):
+        proj.g.query(
+            "MATCH (s:Session {id:'legacy-meter'}) "
+            "CREATE (s)-[:CONTAINS]->(:Point {id:$tid, pointKind:'event', "
+            "        is_episodic:true, content:$c})",
+            params={"tid": f"legacy-meter_t{index}", "c": f"[user] {index}"})
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'legacy-meter'}) "
+        "RETURN s.turn_max_index, s.turn_count").result_set
+    node_rows = proj.g.query(
+        "MATCH (s:Session {id:'legacy-meter'})-[:CONTAINS]->(t:Point) "
+        "WHERE t.is_episodic = true RETURN count(t)").result_set
+    mark, count = rows[0]
+    nodes = node_rows[0][0]
+    assert mark is None and count == 2 and nodes == 2, (
+        "the fixture is not the legacy shape (mark, count, nodes) = "
+        f"{(mark, count, nodes)!r}")
+
+    prior = ha._prior_stored_turn_count(proj, "legacy-meter")
+    assert prior == 2, (
+        f"the meter read {prior} stored turns for a 2-turn legacy session — one "
+        "was ADDED to a COUNT, so the NEXT capture (3 turns) is billed as an "
+        "unchanged replay")
+    # The meter's OWN comparison (`len(windowed) > prior_turn_count`), on the two
+    # captures this session will actually see.
+    grown_window, replay_window = 3, 2
+    assert grown_window > prior, (
+        "a capture adding one turn to this 2-turn session is not metered — a "
+        "real write lost off the overage ledger (#3892)")
+    assert not (replay_window > prior), (
+        "an idempotent re-POST of the same 2 turns IS metered — the phantom "
+        "write-op #1827/#3892 this read exists to stop")
+
+
 # ── the read side ──────────────────────────────────────────────────────────
 
 
