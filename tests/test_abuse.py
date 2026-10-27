@@ -923,13 +923,20 @@ class TestAbuseOrderParam:
     def test_abuse_store_sends_the_postgrest_order_dialect(self):
         """Pin the transmitted ``order`` at the store's three descending
         sites. REDs per site when any is reverted to ``-created_at`` — the
-        wire-param assertion a fake-based test could never make."""
+        wire-param assertion a fake-based test could never make.
+
+        #10156 added a FOURTH read to ``recent_alerts`` — the acknowledgement
+        read, which legitimately passes no ``order`` (it is a bounded set of
+        small rows whose order is irrelevant, and asking for a sort would be a
+        wire change with no purpose). Its ``None`` is pinned too, so a future
+        edit cannot add a read at that site without this test noticing.
+        """
         from tortoise.abuse import SupabaseAbuseStore
         cp = self._CapturingCP()
         store = SupabaseAbuseStore(cp)
         store.latest_flag_at("t1", "point_create")  # newest flag + newest clear
         store.recent_alerts("t1")
-        assert cp.orders == ["created_at.desc"] * 3, cp.orders
+        assert cp.orders == ["created_at.desc"] * 3 + [None], cp.orders
         assert not any(o and o.startswith("-") for o in cp.orders)
 
     def test_captured_abuse_order_is_accepted_by_the_fake(self):
@@ -952,10 +959,21 @@ class TestAbuseOrderParam:
              "created_at": "2026-03-01T00:00:00+00:00"},
         ]})
         for order in cp.orders:
+            if order is None:
+                # #10156: the acknowledgement read is UNORDERED on purpose (a
+                # bounded set of small rows, order irrelevant). The newest-first
+                # oracle is about the descending reads, so this entry is excluded
+                # rather than reordered — but the exclusion is pinned by count
+                # below, so it cannot quietly swallow a FUTURE orderless read.
+                continue
             rows = fake.query("abuse_events", select=["created_at"],
                               order=order)
             assert rows, order
             assert rows[0]["created_at"] == "2026-03-01T00:00:00+00:00", order
+        assert cp.orders.count(None) == 1, (
+            "exactly one orderless read (the ack read) is expected; the oracle "
+            "silently skips every None, so an unpinned extra one would hide"
+        )
 
 
 # ── #3631: alert volume is bounded and gated on persistence ─────────────

@@ -112,6 +112,70 @@ ALERT_TYPES = (EVENT_FLAG, EVENT_REVIEW, EVENT_SUSPEND, EVENT_AUTH_IP,
                EVENT_READ_VELOCITY, EVENT_SIGNUP_VELOCITY,
                EVENT_RECOVERY_VELOCITY)
 
+# ── #10156: two REGISTERS, not one list ────────────────────────────────────
+#
+# The dashboard rendered every entry in the list above under one heading —
+# "Security alerts" / "Suspicious activity detected on this Organization.
+# Revoke any key you don't recognize." — including ``read_velocity``, which is
+# notify-only by design (R3 never suspends: nothing is disabled, throttled or
+# locked). A month-old metric blip was therefore presented as an incident, with
+# a destructive remedy for an event the system never acted on.
+#
+# The register is decided by THE FACT, never by how alarming the type sounds:
+#
+#   * ``REGISTER_ALERT``    — something HAPPENED: the account's state changed,
+#                            a human acted, or an authenticated credential
+#                            event (a sign-in from a new country) occurred.
+#   * ``REGISTER_ACTIVITY`` — a detector OBSERVED a rate. It measured; it
+#                            changed nothing. Informational, muted, no verb.
+#
+# A type missing from this map defaults to ACTIVITY (see ``_alert_dict``): an
+# unknown signal must never be presented as an incident, because incident
+# framing is the claim that something happened.
+REGISTER_ALERT = "alert"
+REGISTER_ACTIVITY = "activity"
+ALERT_REGISTER_OF = {
+    EVENT_SUSPEND: REGISTER_ALERT,        # the org's state changed
+    EVENT_FLAG: REGISTER_ALERT,           # the org was marked (flagged_at)
+    EVENT_REVIEW: REGISTER_ALERT,         # a human is reviewing it
+    EVENT_AUTH_IP: REGISTER_ALERT,        # a credential event: new-country auth
+    EVENT_READ_VELOCITY: REGISTER_ACTIVITY,
+    EVENT_SIGNUP_VELOCITY: REGISTER_ACTIVITY,
+    EVENT_RECOVERY_VELOCITY: REGISTER_ACTIVITY,
+}
+
+#: How long a detection BOUT may stay silent before the next row starts a new
+#: episode (#10156). The row writer fires at most once per detector window
+#: (``ReadVelocityTracker``: 5 min), so without a gap the dashboard renders one
+#: row per window: the live dataset holds 13 ``read_velocity`` rows for ONE
+#: continuous bout, and the customer read them as 13 separate alerts.
+#:
+#: 3h is measured against that dataset, not picked: the 2026-09-25/26 bout's
+#: LONGEST internal silence is 2h09m (21:44:04Z → 23:53:55Z), so any threshold
+#: at or below that splits the very bout this issue is about, and 3h is the
+#: smallest round value above it. Read the other way: the bout stays open until
+#: the key has been quiet for 36 consecutive windows — longer than any plausible
+#: pause inside one agent session — so re-opening after it is a genuinely new
+#: bout, not a window boundary.
+EPISODE_GAP_S = 3 * 3600
+
+#: Rows scanned (newest first) to build the episode feed. 500 is the number the
+#: #10156 dataset needs by a wide margin (the busiest org holds 4 428 ``flag``
+#: rows in total, spread over ten days of BOUTS) and it stays well inside
+#: PostgREST's default page. The bound is honest rather than invisible: when the
+#: scan is saturated the OLDEST episode is marked ``truncated`` and the feed
+#: renders its count as ``×N+``, because a count from a cut window is a floor,
+#: not a count.
+_ALERT_SCAN = 500
+
+#: The event type an ACKNOWLEDGEMENT is persisted as (#10156). See
+#: ``record_alert_ack`` on both stores for why an ``abuse_events`` row rather
+#: than a new table: the alert history already lives there, ``abuse_cleanup``
+#: already applies retention to it, and no rule reads it (every rule counts a
+#: narrow ``window_sum`` over ONE event_type), so an ack can neither inflate a
+#: rule nor render as an alert (``ALERT_TYPES`` does not contain it).
+EVENT_ALERT_ACK = "alert_ack"
+
 #: The rules that can produce a stage-1 FLAG episode (#308 R1/R2). Declared
 #: once because it is read by the code that ENDS an episode (``flag_clear`` /
 #: ``unsuspend_org`` walk it) and by the code that REPORTS one (#4874's
@@ -251,6 +315,20 @@ def _window_env(name: str, default: int) -> int:
             "of seconds); using %d so the limiter cannot fail open (#5493)",
             name, raw, fallback)
     return fallback
+
+
+def _id_set_env(name: str) -> set[str]:
+    """A comma-separated id allowlist from the environment (#10156).
+
+    Used for the first-party/test exemptions on the read-velocity tracker.
+    Whitespace is stripped and empty entries are dropped, so a trailing comma
+    or a multi-line value cannot silently exempt the empty key id (which would
+    exempt every org-scope read through the per-key scope's ``if key_id`` arm).
+    Read once, at tracker construction, like every other abuse knob — an ops
+    change needs the same restart a threshold change does.
+    """
+    raw = os.environ.get(name) or ""
+    return {part.strip() for part in raw.split(",") if part.strip()}
 
 
 def abuse_disabled() -> bool:
@@ -729,8 +807,26 @@ class MemoryAbuseStore:
             rows = [r for r in self.rows
                     if r["org_id"] == org_id
                     and r["event_type"] in ALERT_TYPES]
-        rows.sort(key=lambda r: r["created_at"], reverse=True)
-        return [_alert_dict(r) for r in rows[:limit]]
+            # Scan the same bound the Supabase store does, so the two stores
+            # cannot disagree about where an episode starts or when a count is
+            # truncated (see ``_ALERT_SCAN``).
+            rows = sorted(rows, key=lambda r: r["created_at"],
+                          reverse=True)[:_ALERT_SCAN]
+            acks = _acks_from_rows(self.rows, org_id)
+        return _alert_feed(rows, acks=acks, limit=limit,
+                           scan_saturated=len(rows) >= _ALERT_SCAN)
+
+    def alert_acks(self, org_id: str) -> set[str]:
+        with self._lock:
+            return _acks_from_rows(self.rows, org_id)
+
+    def record_alert_ack(self, org_id: str, episode: str,
+                         by: str | None = None,
+                         now: datetime | None = None) -> None:
+        self.record_event(org_id, EVENT_ALERT_ACK,
+                          details={"episode": episode,
+                                   **(({"by": by}) if by else {})},
+                          created_at=now)
 
     def _durable(self, org_id: str, field: str, value) -> None:
         """Field-scoped write-through to the registry Org node when a
@@ -925,12 +1021,85 @@ class SupabaseAbuseStore:
             "abuse_events",
             select=["event_type", "created_at", "country", "key_id",
                     "details"],
-            filters=[("org_id", "eq", org_id)],
-            order="created_at.desc", limit=100,
+            # #10156: exclude the two high-volume NON-alert types at the server.
+            # Without this the scan below is a window over ALL events, and a
+            # busy org's ordinary traffic starves it: the live project holds
+            # 6 450 ``point_create`` + 67 ``key_create`` rows against 16
+            # ``read_velocity`` and 4 428 ``flag`` rows, so a 500-row newest
+            # window can contain no alert at all and the panel would read
+            # "nothing ever happened" — the exact false negative the ageing /
+            # "show older" affordances below exist to prevent. Two ``neq``
+            # filters AND together (they are negations, so composition is
+            # correct where two ``eq`` filters on one column would be
+            # unsatisfiable). The remaining non-alert types are low-volume
+            # (``flag_clear`` / ``unsuspend``), and the client-side
+            # ``ALERT_TYPES`` filter still decides what may RENDER — this only
+            # protects the window's budget, so a future noisy non-alert type
+            # costs scan depth, never correctness.
+            filters=[("org_id", "eq", org_id),
+                     ("event_type", "neq", EVENT_POINT_CREATE),
+                     ("event_type", "neq", EVENT_KEY_CREATE)],
+            order="created_at.desc", limit=_ALERT_SCAN,
         )
-        out = [_alert_dict(r) for r in rows
-               if r.get("event_type") in ALERT_TYPES]
-        return out[:limit]
+        rows = [r for r in rows if r.get("event_type") in ALERT_TYPES]
+        return _alert_feed(rows, acks=self.alert_acks(org_id), limit=limit,
+                           scan_saturated=len(rows) >= _ALERT_SCAN)
+
+    def alert_acks(self, org_id: str) -> set[str]:
+        """The episode keys this org has ACKNOWLEDGED (#10156).
+
+        Its own read, deliberately NOT a fold over ``recent_alerts``' scan: the
+        scan is a 500-row newest-first WINDOW, so an ack written after 500
+        later events would fall out of it and the acknowledgement would
+        silently evaporate — the one failure mode #10156 says a dismissal must
+        not have. Failure is fail-soft (the caller renders every row as
+        un-acknowledged rather than 500ing the appeal flow); an ack that cannot
+        be read is reported as absent, never as present.
+        """
+        rows = self._cp.query(
+            "abuse_events", select=["org_id", "event_type", "details"],
+            filters=[("org_id", "eq", org_id),
+                     ("event_type", "eq", EVENT_ALERT_ACK)],
+        )
+        return _acks_from_rows(rows, org_id)
+
+    def record_alert_ack(self, org_id: str, episode: str,
+                         by: str | None = None,
+                         now: datetime | None = None) -> None:
+        self.record_event(org_id, EVENT_ALERT_ACK,
+                          details={"episode": episode,
+                                   **(({"by": by}) if by else {})},
+                          created_at=now)
+
+
+def _read_velocity_message(details: dict) -> str:
+    """#10156 — the copy for a NOTIFY-ONLY velocity observation.
+
+    The defect this replaces: the panel's heading said "Suspicious activity
+    detected on this Organization. Revoke any key you don't recognize." and
+    every ``read_velocity`` row rendered under it. Two untrue claims and one
+    destructive instruction — the detector is notify-only (R3 never suspends),
+    so nothing happened to the account, and the blanket imperative tells the
+    customer to destroy a working key in response to their own normal agent
+    traffic. The measured population: 16 rows, none after 2026-09-26, and ZERO
+    ``suspend`` rows in the table's entire history.
+
+    The replacement states the FACT first (a read volume crossed a threshold),
+    then the consequence (nothing was changed), and keeps the revoke route
+    CONDITIONAL on the one case where it is right (a key you do not recognise).
+    The three properties are pinned by test — ``test_10156_alert_registers.py``
+    asserts the absence of the blanket imperative and the presence of both
+    honesty clauses, and its own mutation proves the assertion is load-bearing.
+    """
+    ident = details.get("id")
+    scope = details.get("scope")
+    if scope == "key" and ident:
+        return (f"Read volume on API key {ident} crossed our unusual-activity "
+                "threshold. This is informational; nothing was changed. If "
+                "you don't recognise this key, revoke it in Keys.")
+    return ("Total read volume for this Organization crossed our "
+            "unusual-activity threshold. This is informational; nothing was "
+            "changed — a retrieval-heavy agent routinely reads at this rate.")
 
 
 def _alert_dict(row: dict) -> dict:
@@ -948,7 +1117,7 @@ def _alert_dict(row: dict) -> dict:
         EVENT_REVIEW: "Activity under review",
         EVENT_SUSPEND: "Organization suspended",
         EVENT_AUTH_IP: "New location",
-        EVENT_READ_VELOCITY: "Unusual API activity",
+        EVENT_READ_VELOCITY: "Unusual read volume",
         EVENT_SIGNUP_VELOCITY: "Unusual signup activity",
         EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity",
     }
@@ -988,7 +1157,9 @@ def _alert_dict(row: dict) -> dict:
         # test_every_alert_type_has_a_customer_message.
         EVENT_RECOVERY_VELOCITY: "Unusual account-recovery activity detected",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
-        EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
+        # #10156: informational, never incident-grade. See
+        # ``_read_velocity_message`` for the defect this replaces.
+        EVENT_READ_VELOCITY: _read_velocity_message(details),
         EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
     }
     at = row.get("created_at")
@@ -999,7 +1170,143 @@ def _alert_dict(row: dict) -> dict:
         "label": labels.get(etype, etype),
         "at": at.isoformat() if isinstance(at, datetime) else at,
         "message": messages.get(etype, etype),
+        # #10156: which register this belongs in. A type this map does not know
+        # is treated as an OBSERVATION (the quiet register), because incident
+        # framing asserts that something happened and an unknown type cannot
+        # support that claim.
+        "register": ALERT_REGISTER_OF.get(etype, REGISTER_ACTIVITY),
     }
+
+
+# ── #10156: episodes and acknowledgements ──────────────────────────────────
+
+def _episode_identity(alert: dict) -> tuple:
+    """What makes two alerts the SAME ongoing episode.
+
+    Type plus the subject the row is about, and nothing else: a ``flag``
+    episode is per rule (that is how the engine's own ``flag_clear`` ends one),
+    a new-country alert is per country, and a velocity observation is per
+    (scope, id) — the key or org the threshold was crossed on. Two different
+    keys crossing on the same day are two episodes, and joining them would
+    mis-state both.
+    """
+    etype = alert.get("type")
+    subject = alert.get("_subject") or ()
+    return (etype, subject)
+
+
+def _episode_key(alert: dict) -> str:
+    """A STABLE, reason-bearing identifier for an episode (#10156).
+
+    Identity + the episode's FIRST timestamp. Stability is what makes an
+    acknowledgement durable: the key is recomputed on every read, so anything
+    derived from live state (the count, the last-seen time) would re-key an
+    acknowledged episode the moment another window fires and the ack would
+    silently evaporate. Identity + start cannot move while the episode is open.
+    """
+    etype, subject = _episode_identity(alert)
+    parts = [str(etype)] + [str(p) for p in (subject or ())]
+    parts.append(str(alert.get("first_at") or alert.get("at") or ""))
+    return "|".join(parts)
+
+
+def _alert_subject(row: dict) -> tuple:
+    """The per-type subject used for episode identity (see ``_episode_identity``)."""
+    etype = row.get("event_type")
+    details = row.get("details") or {}
+    if etype in (EVENT_FLAG, EVENT_REVIEW):
+        return (row.get("rule") or details.get("rule") or "",)
+    if etype == EVENT_AUTH_IP:
+        return (row.get("country") or "",)
+    if etype in (EVENT_READ_VELOCITY, EVENT_SIGNUP_VELOCITY,
+                 EVENT_RECOVERY_VELOCITY):
+        return (details.get("scope") or "", details.get("id")
+                or details.get("ip") or "")
+    return ()
+
+
+def _acks_from_rows(rows, org_id: str) -> set[str]:
+    """Episode keys the org has acknowledged, from ``EVENT_ALERT_ACK`` rows."""
+    out: set[str] = set()
+    for row in rows or ():
+        if row.get("org_id") != org_id or row.get("event_type") != EVENT_ALERT_ACK:
+            continue
+        details = row.get("details")
+        if isinstance(details, dict) and details.get("episode"):
+            out.add(str(details["episode"]))
+    return out
+
+
+def group_alert_episodes(alerts: list[dict],
+                         gap_s: int = EPISODE_GAP_S) -> list[dict]:
+    """Fold a NEWEST-FIRST alert list into episodes (#10156).
+
+    One row per sustained bout, not per detector window: the newest alert of a
+    bout carries `count` (how many windows fired) and `first_at` (when the bout
+    began), so the panel can say "×13, 12:19 → 19:08" instead of printing the
+    same sentence thirteen times. Consecutive alerts of the same identity join
+    the open episode while the silence between them is at most ``gap_s``; a
+    longer silence starts a new one.
+
+    The folded episode keeps the NEWEST row's label/message/at (so the existing
+    consumers and their pins keep working) and adds `count`, `first_at`,
+    `episode`. Nothing is deleted: the historical rows stay, this is a view.
+    """
+    episodes: list[dict] = []
+    open_by_ident: dict[tuple, dict] = {}
+    #: The OLDEST timestamp already folded into the open episode for an
+    #: identity. The gap is measured between CONSECUTIVE firing windows, not
+    #: from the episode's newest row: the 2026-09-25/26 bout runs 17:19 → 00:08,
+    #: so measuring from its newest row would split it at every row more than
+    #: ``gap_s`` older than 00:08 — the exact fragmentation #10156 removes.
+    open_last: dict[tuple, object] = {}
+    for alert in alerts:
+        ts = _parse_ts(alert.get("at"))
+        ident = _episode_identity(alert)
+        episode = open_by_ident.get(ident)
+        if episode is not None:
+            previous = open_last.get(ident)
+            if ts is not None and previous is not None \
+                    and (previous - ts).total_seconds() <= gap_s:
+                episode["count"] += 1
+                episode["first_at"] = alert.get("at")
+                open_last[ident] = ts
+                continue
+        episode = dict(alert)
+        episode["count"] = 1
+        episode["first_at"] = alert.get("at")
+        open_by_ident[ident] = episode
+        open_last[ident] = ts
+        episodes.append(episode)
+    for episode in episodes:
+        episode["episode"] = _episode_key(episode)
+        # The identity is an INTERNAL grouping field; it must not reach the API
+        # response (a client would see a private convention it cannot rely on).
+        episode.pop("_subject", None)
+    return episodes
+
+
+def _alert_feed(rows, *, acks, limit: int,
+                scan_saturated: bool = False) -> list[dict]:
+    """Rows (newest first) → the episode feed both stores return (#10156)."""
+    alerts = []
+    for row in rows:
+        alert = _alert_dict(row)
+        alert["_subject"] = _alert_subject(row)
+        alerts.append(alert)
+    episodes = group_alert_episodes(alerts)
+    for episode in episodes:
+        episode["acked"] = episode["episode"] in acks
+    # The scan is newest-first, so only the OLDEST episode can have been cut by
+    # it. Saying so is the difference between "×100" and "×100+": a count
+    # measured on a truncated window is a floor, and rendering it as a count
+    # would overstate what we know. Marked AFTER the `limit` slice, so the
+    # marker stays on the last episode actually RETURNED (marking the pre-slice
+    # tail would drop it whenever the caller's limit is smaller than the feed).
+    out = episodes[:limit]
+    if scan_saturated and out:
+        out[-1]["truncated"] = True
+    return out
 
 
 # ── Engine ──────────────────────────────────────────────────────────────────
@@ -1246,23 +1553,79 @@ class AbuseEngine:
 # ── R3: read-velocity tracker (in-memory, notify-only) ─────────────────────
 
 class ReadVelocityTracker:
-    """>100 reads / 5min per-key OR per-org → notify once per window.
+    """>100 reads / 5min per-key OR per-org, AND above that key's OWN baseline.
 
     In-memory by design (the 5-min window bounds deploy-reset damage);
     notify-only per the issue — R3 never suspends. The notification goes to
     the ops Telegram channel (abuse alerts are Telegram-only since #3639, so
     there is no email recipient to resolve); a best-effort read_velocity event
     row surfaces the alert in the dashboard list.
+
+    #10156 CALIBRATION — why a constant alone was wrong. Tortoise is an
+    agent-memory product, so ONE retrieval-heavy agent turn easily exceeds 100
+    reads in five minutes: our own battery/probe traffic certainly does. A
+    fixed number cannot express "unusual" — it fires on the product working as
+    intended, calls it suspicious, and (before #10156) told the customer to
+    revoke a working key over it. The measured population when this was fixed:
+    16 rows, 2026-09-16 → 09-26, all for ONE org and ONE key, and 13 of them in
+    a single 6h49m bout (`read_velocity` dedup is per 5-min window).
+
+    So a breach now needs BOTH:
+
+    * ``count > threshold``            — the absolute floor, unchanged (100/5min);
+    * ``count > factor * baseline``    — the same scope's own recent rate.
+
+    ``baseline`` is an EWMA of the COMPLETED per-window counts, sampled once
+    per window, not once per read: sampling per read would let the baseline
+    track the bucket call-for-call, which makes ``factor * baseline`` always
+    exceed the current count and silently disables the detector. With one
+    sample per window a key whose normal traffic is 500/5min never alerts,
+    while a key that normally does 5 and suddenly does 400 does — and a
+    sustained steady hammer still crosses the floor once, then stops repeating
+    itself every window (the bout shows up as ONE episode with a count, which
+    is what #10156 asks for).
+
+    Two deliberate non-changes:
+
+    * the floor is NOT raised. A detector turned down to silence is not a
+      fixed detector, and crossing 100 reads/5min from a cold start is still a
+      real fact worth one notification.
+    * a NON-POSITIVE threshold keeps its #5493 fail-CLOSED deny-all semantics:
+      when ``threshold <= 0`` the baseline is not consulted at all, because an
+      operator who configured deny-all must not have it silently loosened.
+
+    ``TORTOISE_ABUSE_EXEMPT_KEY_IDS`` / ``TORTOISE_ABUSE_EXEMPT_ORG_IDS``
+    (comma-separated) exempt first-party and test keys. An exempt ORG never
+    alerts at all; an exempt KEY only skips the per-key scope, so a genuinely
+    unusual org total still surfaces.
     """
 
-    def __init__(self, threshold: int | None = None, window_s: int | None = None):
+    def __init__(self, threshold: int | None = None, window_s: int | None = None,
+                 baseline_factor: int | None = None,
+                 baseline_samples: int | None = None,
+                 exempt_keys: set[str] | None = None,
+                 exempt_orgs: set[str] | None = None):
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_READ_THRESHOLD", 100)
         self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_READ_WINDOW_S", 300)
+        self.baseline_factor = baseline_factor if baseline_factor is not None else _int_env(
+            "TORTOISE_ABUSE_READ_BASELINE_FACTOR", 3)
+        self.baseline_samples = baseline_samples if baseline_samples is not None else _int_env(
+            "TORTOISE_ABUSE_READ_BASELINE_SAMPLES", 6)
+        self.exempt_keys = (exempt_keys if exempt_keys is not None
+                            else _id_set_env("TORTOISE_ABUSE_EXEMPT_KEY_IDS"))
+        self.exempt_orgs = (exempt_orgs if exempt_orgs is not None
+                            else _id_set_env("TORTOISE_ABUSE_EXEMPT_ORG_IDS"))
         self._by_key: dict[str, list[float]] = defaultdict(list)
         self._by_org: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[tuple[str, str], float] = {}
+        # #10156 baseline state: per (scope, id) the start of the sampling
+        # window, the reads counted inside it, and the EWMA of COMPLETED
+        # windows. See ``_sample_baseline`` for why there are three.
+        self._window_started: dict[tuple[str, str], float] = {}
+        self._window_count: dict[tuple[str, str], int] = {}
+        self._baseline: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
 
     def record_read(self, key_id: str | None, org_id: str | None,
@@ -1275,25 +1638,56 @@ class ReadVelocityTracker:
         cutoff = now - self.window_s
         breach: tuple[str, str] | None = None
         with self._lock:
+            if org_id and org_id in self.exempt_orgs:
+                return None
             if key_id:
                 kb = self._by_key[key_id]
                 kb[:] = [t for t in kb if t > cutoff]
                 kb.append(now)
-                if len(kb) > self.threshold:
+                count = len(kb)
+                if key_id not in self.exempt_keys and self._over(count, "key", key_id):
                     breach = ("key", key_id)
+                self._sample_baseline("key", key_id, now, count)
             if org_id:
                 tb = self._by_org[org_id]
                 tb[:] = [t for t in tb if t > cutoff]
                 tb.append(now)
-                if breach is None and len(tb) > self.threshold:
+                count = len(tb)
+                if breach is None and self._over(count, "team", org_id):
                     breach = ("team", org_id)
-            # bound memory growth (mirrors _register_buckets hygiene)
+                self._sample_baseline("team", org_id, now, count)
+            # bound memory growth (mirrors _register_buckets hygiene).
+            # #10156: the re-wrap in ``defaultdict`` is NOT cosmetic. A plain
+            # dict comprehension left these as ORDINARY dicts, so the NEXT
+            # unseen key raised KeyError at `self._by_key[key_id]` — swallowed by
+            # the best-effort caller (`maybe_record_mcp_read`), which silently
+            # stopped counting reads for every new key after the first prune.
+            # Found by the calibration test that fills 10k keys.
             if len(self._by_key) > 10_000:
-                self._by_key = {k: v for k, v in self._by_key.items()
-                                if any(t > cutoff for t in v)}
+                self._by_key = defaultdict(list, {
+                    k: v for k, v in self._by_key.items()
+                    if any(t > cutoff for t in v)})
             if len(self._by_org) > 10_000:
-                self._by_org = {k: v for k, v in self._by_org.items()
-                                 if any(t > cutoff for t in v)}
+                self._by_org = defaultdict(list, {
+                    k: v for k, v in self._by_org.items()
+                    if any(t > cutoff for t in v)})
+            # #10156: the calibration maps grow one entry per (scope, id) EVER
+            # seen, so they need the same bound. A scope whose observation
+            # window has expired is dropped with its baseline: keeping the
+            # baseline while discarding the counts would let a scope that went
+            # quiet for hours be judged against a rate it no longer has (and a
+            # dropped entry is the safe direction — it falls back to the
+            # absolute floor, which never suppresses an alert).
+            if len(self._baseline) > 10_000:
+                live = {k for k, ts in self._window_started.items()
+                        if now - ts < self.window_s}
+                self._baseline = {k: v for k, v in self._baseline.items()
+                                  if k in live}
+                self._window_started = {k: v for k, v in
+                                        self._window_started.items()
+                                        if k in live}
+                self._window_count = {k: v for k, v in self._window_count.items()
+                                      if k in live}
             # prune the notify-dedup map too (code-review P3)
             self._notified = {k: t for k, t in self._notified.items()
                               if now - t < self.window_s}
@@ -1305,6 +1699,54 @@ class ReadVelocityTracker:
         if breach is not None:
             self._notify(breach, org_id)
         return breach
+
+    def _over(self, count: int, scope: str, ident: str) -> bool:
+        """The breach decision (#10156): over the FLOOR and over the BASELINE.
+
+        ``threshold <= 0`` is a configured deny-all (#5493) and short-circuits
+        the baseline entirely — an operator's fail-CLOSED setting must never be
+        loosened by a calibration feature.
+
+        A scope with no baseline yet (cold start, or the first window after a
+        deploy, since this tracker is in-memory) is judged on the floor alone:
+        when we know nothing about a key's normal rate, the absolute threshold
+        is the only fact available and suppressing it would be inventing one.
+        """
+        if count <= self.threshold:
+            return False
+        if self.threshold <= 0:
+            return True
+        baseline = self._baseline.get((scope, ident))
+        if baseline is None or baseline <= 0:
+            return True
+        return count > self.baseline_factor * baseline
+
+    def _sample_baseline(self, scope: str, ident: str, now: float,
+                         count: int) -> None:
+        """Feed the per-scope baseline ONE sample per completed window.
+
+        Sampling is gated on the tracker's OWN window, and that gate is the
+        whole point: an EWMA updated on every read converges on the live count
+        within a few calls, which makes ``factor * baseline`` always exceed the
+        count and the detector permanently silent. One sample per window means
+        the baseline describes the scope's normal rate, not its current burst.
+        The sample is taken AFTER the breach decision for this call (the caller
+        decides first), so a burst cannot raise the baseline that would have
+        judged it.
+        """
+        key = (scope, ident)
+        started = self._window_started.get(key)
+        if started is None or now - started >= self.window_s:
+            completed = self._window_count.get(key)
+            if completed is not None:
+                prev = self._baseline.get(key)
+                alpha = 1.0 / max(1, self.baseline_samples)
+                self._baseline[key] = (
+                    float(completed) if prev is None
+                    else prev + (float(completed) - prev) * alpha)
+            self._window_started[key] = now
+            self._window_count[key] = 0
+        self._window_count[key] = self._window_count.get(key, 0) + 1
 
     def _notify(self, breach: tuple[str, str], org_id: str | None) -> None:
         scope, ident = breach

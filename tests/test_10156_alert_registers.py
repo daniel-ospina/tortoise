@@ -1,0 +1,556 @@
+"""#10156 — the /overview alert feed renders two REGISTERS, ages and episodes.
+
+THE DEFECT THIS FILE PINS. `/overview` rendered every ``/v1/team/alerts`` entry
+under one heading:
+
+    Security alerts
+    Suspicious activity detected on this Organization. Revoke any key you
+    don't recognize.
+    * Unusual API activity — Unusual read velocity detected on an API key · 25/09/2026
+
+Every sentence there was wrong about the events behind it, and each was wrong in
+a way this file makes un-repeatable:
+
+1. ``ReadVelocityTracker`` is NOTIFY-ONLY by design (R3 never suspends, throttles
+   or locks anything), so nothing had happened to the account. ``suspend`` rows
+   in the whole table: 0, ever.
+2. The newest ``read_velocity`` row was **2026-09-26** — the panel was showing a
+   month-old trace as current news.
+3. The 13 rows were 13 five-minute windows of ONE continuous bout (dedup is per
+   window), rendered as 13 separate alerts.
+4. "Revoke any key you don't recognize" asks the customer to destroy a working
+   integration over their own normal agent traffic, for an event the system
+   never acted on.
+
+WHAT IS PINNED HERE: the register split (an observation never renders as an
+incident), episode grouping against the REAL dataset, the acknowledgement
+persistence, the copy — including a test whose MUTATION is spelled out so it
+cannot go vacuously green — and the calibration that stops the detector firing on
+a key's own normal rate.
+
+The rendered half lives in the dashboard package
+(``website/apps/dashboard/src/securityAlertsPanel.dom.test.jsx``, vitest+jsdom;
+the dashboard DOES have a test runner and a CI leg for it) and the endpoint tests
+in ``tests/test_abuse_integration.py`` beside the other ``/v1/team/alerts``
+tests.
+"""
+from __future__ import annotations
+
+import itertools
+import re
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from tests.fake_control_plane import FakeControlPlane
+from tortoise import abuse
+from tortoise.abuse import (
+    ALERT_TYPES,
+    EPISODE_GAP_S,
+    EVENT_ALERT_ACK,
+    EVENT_AUTH_IP,
+    EVENT_FLAG,
+    EVENT_READ_VELOCITY,
+    EVENT_RECOVERY_VELOCITY,
+    EVENT_REVIEW,
+    EVENT_SIGNUP_VELOCITY,
+    EVENT_SUSPEND,
+    REGISTER_ACTIVITY,
+    REGISTER_ALERT,
+    MemoryAbuseStore,
+    ReadVelocityTracker,
+    SupabaseAbuseStore,
+    group_alert_episodes,
+)
+
+ORG = "3326a01ea34ae595d84de5d8f9"
+#: The ONE key every ``read_velocity`` row in the live project carries.
+KEY = "989c68e6a35b479b923a28542e"
+
+#: Every ``read_velocity`` timestamp in the live project (2026-09-16 → 09-26),
+#: transcribed from ``abuse_events`` (project ybetwichurajbfswfeqa). Using the
+#: real rows rather than a synthetic shape is the point: the grouping threshold
+#: below is justified by THIS data's actual gaps.
+REAL_READ_VELOCITY_TS = [
+    "2026-09-16T20:02:26.354624+00:00",
+    "2026-09-16T20:38:37.352901+00:00",
+    "2026-09-16T21:51:31.286836+00:00",
+    "2026-09-25T17:19:05.846463+00:00",
+    "2026-09-25T17:24:06.570923+00:00",
+    "2026-09-25T18:57:00.936378+00:00",
+    "2026-09-25T19:35:02.862826+00:00",
+    "2026-09-25T21:05:03.576667+00:00",
+    "2026-09-25T21:10:04.017989+00:00",
+    "2026-09-25T21:34:03.72905+00:00",
+    "2026-09-25T21:39:04.098441+00:00",
+    "2026-09-25T21:44:04.560705+00:00",
+    "2026-09-25T23:53:55.051721+00:00",
+    "2026-09-25T23:58:55.378486+00:00",
+    "2026-09-26T00:03:55.437286+00:00",
+    "2026-09-26T00:08:55.936232+00:00",
+]
+
+
+def _velocity_store(ts_list=None) -> MemoryAbuseStore:
+    store = MemoryAbuseStore()
+    for ts in ts_list or REAL_READ_VELOCITY_TS:
+        store.record_event(
+            ORG, EVENT_READ_VELOCITY,
+            details={"scope": "key", "id": KEY},
+            created_at=datetime.fromisoformat(ts),
+        )
+    return store
+
+
+# ── 1. The register split ───────────────────────────────────────────────────
+
+class TestRegisterSplit:
+    """An observation must never render as an incident (#10156 step 1)."""
+
+    def test_every_alert_type_declares_a_register(self):
+        rows = {t: abuse._alert_dict({"event_type": t, "details": {}})
+                for t in ALERT_TYPES}
+        for etype, row in rows.items():
+            assert row["register"] in (REGISTER_ALERT, REGISTER_ACTIVITY), etype
+
+    def test_only_facts_get_incident_framing(self):
+        """The register is decided by THE FACT, not by how alarming the words
+        sound: incident = something HAPPENED (state changed / a human acted / a
+        credential event), observation = a detector measured a rate."""
+        expected = {
+            EVENT_SUSPEND: REGISTER_ALERT,
+            EVENT_FLAG: REGISTER_ALERT,
+            EVENT_REVIEW: REGISTER_ALERT,
+            EVENT_AUTH_IP: REGISTER_ALERT,
+            EVENT_READ_VELOCITY: REGISTER_ACTIVITY,
+            EVENT_SIGNUP_VELOCITY: REGISTER_ACTIVITY,
+            EVENT_RECOVERY_VELOCITY: REGISTER_ACTIVITY,
+        }
+        for etype, register in expected.items():
+            row = abuse._alert_dict({"event_type": etype, "details": {}})
+            assert row["register"] == register, etype
+
+    def test_read_velocity_never_renders_as_an_incident(self):
+        """The defect, at the seam the dashboard reads."""
+        alerts = _velocity_store().recent_alerts(ORG)
+        assert alerts, "the fixture must produce rows or this test is vacuous"
+        for alert in alerts:
+            assert alert["type"] == EVENT_READ_VELOCITY
+            assert alert["register"] == REGISTER_ACTIVITY, (
+                "a notify-only read-velocity event rendered in the incident "
+                "register — the #10156 defect")
+
+    def test_an_unknown_type_defaults_to_the_quiet_register(self):
+        """Fail-quiet: incident framing asserts something happened, and an
+        unrecognised row cannot support that claim."""
+        row = abuse._alert_dict({"event_type": "something_new", "details": {}})
+        assert row["register"] == REGISTER_ACTIVITY
+
+    def test_the_live_feed_puts_a_suspension_in_the_incident_register(self):
+        store = MemoryAbuseStore()
+        store.record_event(ORG, EVENT_SUSPEND, created_at=datetime.now(timezone.utc))  # noqa: UP017
+        alerts = store.recent_alerts(ORG)
+        assert [a["register"] for a in alerts] == [REGISTER_ALERT]
+
+
+# ── 2. Episode grouping ─────────────────────────────────────────────────────
+
+class TestEpisodeGrouping:
+    """One sustained bout = one row with ×N and a range (#10156 step 3)."""
+
+    def test_the_live_dataset_folds_into_two_bouts(self):
+        """The REAL 16 rows → 2 rows: the 09-16 bout (20:02, 20:38, 21:51 —
+        consecutive silences of 36m and 73m) and the 09-25/26 bout. This is the
+        measurement the EPISODE_GAP_S choice rests on."""
+        alerts = _velocity_store().recent_alerts(ORG)
+        assert len(alerts) == 2, [(a["first_at"], a["count"]) for a in alerts]
+        assert sorted(a["count"] for a in alerts) == [3, 13]
+
+    def test_the_reported_bout_is_one_row_with_its_count_and_range(self):
+        """The 13 rows the customer saw: ONE row, ×13, 17:19 → 00:08."""
+        bout = _velocity_store().recent_alerts(ORG)[0]
+        assert bout["count"] == 13
+        assert bout["first_at"].startswith("2026-09-25T17:19:05")
+        assert bout["at"].startswith("2026-09-26T00:08:55")
+        assert bout["episode"], "the episode key is what an ack is bound to"
+
+    def test_the_gap_threshold_is_above_the_longest_silence_in_that_bout(self):
+        """EPISODE_GAP_S is measured, not picked: the bout's longest internal
+        silence is 2h09m (21:44:04Z → 23:53:55Z), so a smaller gap would split
+        the very bout #10156 is about."""
+        stamps = [datetime.fromisoformat(t) for t in REAL_READ_VELOCITY_TS[3:]]
+        longest = max((b - a).total_seconds()
+                      for a, b in itertools.pairwise(stamps))
+        # 21:44:04.560705Z → 23:53:55.051721Z = 2h09m50s, the longest silence
+        # between two CONSECUTIVE firing windows in the bout.
+        assert round(longest) == 7790, longest
+        assert longest < EPISODE_GAP_S
+
+    def test_a_silence_longer_than_the_gap_starts_a_new_episode(self):
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        alerts = abuse._alert_feed(
+            [{"event_type": EVENT_READ_VELOCITY,
+              "details": {"scope": "key", "id": KEY},
+              "created_at": (base + timedelta(seconds=EPISODE_GAP_S + 61)).isoformat()},
+             {"event_type": EVENT_READ_VELOCITY,
+              "details": {"scope": "key", "id": KEY},
+              "created_at": base.isoformat()}],
+            acks=set(), limit=20)
+        assert [a["count"] for a in alerts] == [1, 1]
+
+    def test_rows_at_the_gap_boundary_stay_in_one_episode(self):
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        alerts = abuse._alert_feed(
+            [{"event_type": EVENT_READ_VELOCITY,
+              "details": {"scope": "key", "id": KEY},
+              "created_at": (base + timedelta(seconds=EPISODE_GAP_S)).isoformat()},
+             {"event_type": EVENT_READ_VELOCITY,
+              "details": {"scope": "key", "id": KEY},
+              "created_at": base.isoformat()}],
+            acks=set(), limit=20)
+        assert [a["count"] for a in alerts] == [2]
+
+    def test_two_different_keys_are_two_episodes(self):
+        """Joining them would mis-state both: they are different subjects."""
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = [
+            {"event_type": EVENT_READ_VELOCITY,
+             "details": {"scope": "key", "id": "k1"},
+             "created_at": (base + timedelta(minutes=5)).isoformat()},
+            {"event_type": EVENT_READ_VELOCITY,
+             "details": {"scope": "key", "id": "k2"},
+             "created_at": base.isoformat()},
+        ]
+        alerts = abuse._alert_feed(rows, acks=set(), limit=20)
+        assert len(alerts) == 2
+        assert {a["count"] for a in alerts} == {1}
+
+    def test_a_saturated_scan_reports_a_floor_not_a_count(self):
+        """A count measured on a cut window is a floor. Rendering "×100" would
+        overstate what we know; the feed must say "×100+" (``truncated``)."""
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = [{"event_type": EVENT_READ_VELOCITY,
+                 "details": {"scope": "key", "id": KEY},
+                 "created_at": (base + timedelta(minutes=5 * i)).isoformat()}
+                for i in range(abuse._ALERT_SCAN)]
+        alerts = abuse._alert_feed(rows, acks=set(), limit=20,
+                                   scan_saturated=True)
+        assert alerts[-1]["truncated"] is True
+        assert alerts[-1]["count"] == len(rows)
+
+    def test_grouping_is_pure_and_keeps_the_newest_row_s_fields(self):
+        """The folded episode answers with the NEWEST row's label/message, so
+        every pre-existing consumer and its pins keep working."""
+        newest = {"type": EVENT_READ_VELOCITY, "label": "Unusual read volume",
+                  "message": "m", "at": "2026-09-26T00:08:55+00:00",
+                  "_subject": ("key", KEY)}
+        # One hour earlier: inside the gap, so the two fold together.
+        older = dict(newest, at="2026-09-25T23:08:55+00:00")
+        out = group_alert_episodes([newest, older])
+        assert len(out) == 1
+        assert out[0]["at"] == newest["at"]
+        assert out[0]["first_at"] == older["at"]
+        assert out[0]["count"] == 2
+        assert "_subject" not in out[0], "the internal identity field must not leak"
+
+
+# ── 3. Acknowledgement persistence ──────────────────────────────────────────
+
+class TestAcknowledgementPersistence:
+    """A dismissal that evaporates is not a dismissal (#10156 step 2)."""
+
+    def test_memory_store_acknowledges_the_episode(self):
+        store = _velocity_store()
+        episode = store.recent_alerts(ORG)[0]["episode"]
+        assert store.recent_alerts(ORG)[0]["acked"] is False
+        store.record_alert_ack(ORG, episode, by="u1")
+        assert store.recent_alerts(ORG)[0]["acked"] is True
+
+    def test_supabase_store_persists_the_ack_as_a_row(self):
+        fake = FakeControlPlane()
+        store = SupabaseAbuseStore(fake)
+        for ts in REAL_READ_VELOCITY_TS:
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=datetime.fromisoformat(ts))
+        episode = store.recent_alerts(ORG)[0]["episode"]
+        store.record_alert_ack(ORG, episode, by="u1")
+        # The ROW is the evidence: a cookie or a process cache would leave no
+        # abuse_events row behind.
+        acks = [r for r in fake.tables["abuse_events"]
+                if r["event_type"] == EVENT_ALERT_ACK]
+        assert len(acks) == 1
+        assert acks[0]["details"]["episode"] == episode
+        assert acks[0]["details"]["by"] == "u1"
+        # …and it is READ back as the acknowledgement, not re-derived in memory.
+        assert store.alert_acks(ORG) == {episode}
+        assert store.recent_alerts(ORG)[0]["acked"] is True
+
+    def test_the_ack_row_never_renders_as_an_alert(self):
+        store = SupabaseAbuseStore(FakeControlPlane())
+        store.record_event(ORG, EVENT_READ_VELOCITY,
+                           details={"scope": "key", "id": KEY})
+        store.record_alert_ack(ORG, "some|episode", by="u1")
+        types = {a["type"] for a in store.recent_alerts(ORG)}
+        assert EVENT_ALERT_ACK not in types
+        assert EVENT_ALERT_ACK not in ALERT_TYPES
+
+    def test_an_ack_survives_the_episode_growing_at_its_newest_end(self):
+        """The key is identity + START. Anything derived from live state (the
+        count, the last-seen time) would re-key the episode when another window
+        fires, and the acknowledgement would silently evaporate."""
+        store = MemoryAbuseStore()
+        for ts in REAL_READ_VELOCITY_TS[3:]:
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=datetime.fromisoformat(ts))
+        episode = store.recent_alerts(ORG)[0]["episode"]
+        store.record_alert_ack(ORG, episode, by="u1")
+        # A NEW window arrives, extending the same bout.
+        store.record_event(ORG, EVENT_READ_VELOCITY,
+                           details={"scope": "key", "id": KEY},
+                           created_at=datetime.fromisoformat(
+                               "2026-09-26T00:13:56+00:00"))
+        newest = store.recent_alerts(ORG)[0]
+        assert newest["count"] == 14, newest
+        assert newest["episode"] == episode, "the key moved — the ack is lost"
+        assert newest["acked"] is True
+
+    def test_an_unreadable_ack_register_reads_as_unacknowledged(self):
+        """Fail-soft in the honest direction: fail to read is ABSENT, never
+        PRESENT (a phantom acknowledgement would hide a live alert)."""
+        class _Broken:
+            def query(self, *a, **kw):
+                raise RuntimeError("control plane down")
+
+        store = SupabaseAbuseStore(_Broken())
+        with pytest.raises(RuntimeError):
+            store.alert_acks(ORG)
+
+    def test_acks_are_org_scoped(self):
+        store = MemoryAbuseStore()
+        store.record_event(ORG, EVENT_READ_VELOCITY,
+                           details={"scope": "key", "id": KEY})
+        episode = store.recent_alerts(ORG)[0]["episode"]
+        store.record_alert_ack(ORG, episode, by="u1")
+        store.record_event("other-org", EVENT_READ_VELOCITY,
+                           details={"scope": "key", "id": KEY})
+        assert store.recent_alerts("other-org")[0]["acked"] is False
+
+
+# ── 4. The copy (the point of the change) ───────────────────────────────────
+
+#: The exact sentence the panel printed above the list. Kept as a literal so the
+#: regression test below is a statement about the DEFECT, not a shape.
+OLD_INCIDENT_LEAD = ("Suspicious activity detected on this Organization. "
+                     "Revoke any key you don't recognize.")
+
+BLANKET_IMPERATIVE = re.compile(r"revoke any key", re.IGNORECASE)
+INCIDENT_CLAIM = re.compile(r"suspicious activity detected", re.IGNORECASE)
+
+
+def _velocity_message(**details) -> str:
+    return abuse._alert_dict({
+        "event_type": EVENT_READ_VELOCITY,
+        "details": {"scope": "key", "id": KEY, **details},
+    })["message"]
+
+
+class TestVelocityCopy:
+    """A notify-only observation must not be described as an incident."""
+
+    def test_the_blanket_imperative_is_gone(self):
+        message = _velocity_message()
+        assert not BLANKET_IMPERATIVE.search(message), message
+        assert not INCIDENT_CLAIM.search(message), message
+
+    def test_the_message_states_the_fact_and_the_consequence(self):
+        message = _velocity_message()
+        assert "informational" in message.lower(), message
+        assert "nothing was changed" in message.lower(), message
+        assert KEY in message, "the row must name the key it is about"
+        assert "read volume" in message.lower(), message
+
+    def test_the_revoke_route_is_conditional_on_not_recognising_the_key(self):
+        message = _velocity_message()
+        assert re.search(r"if you don'?t recognise this key, revoke it",
+                         message, re.IGNORECASE), message
+
+    def test_an_org_scope_message_carries_no_revoke_instruction(self):
+        """There is no single key to recognise, so there is nothing to offer a
+        destructive action about."""
+        message = abuse._alert_dict({
+            "event_type": EVENT_READ_VELOCITY,
+            "details": {"scope": "team", "id": ORG},
+        })["message"]
+        assert not re.search(r"revoke", message, re.IGNORECASE), message
+        assert "nothing was changed" in message.lower(), message
+
+    def test_the_label_is_not_an_incident_word(self):
+        label = abuse._alert_dict({
+            "event_type": EVENT_READ_VELOCITY,
+            "details": {"scope": "key", "id": KEY},
+        })["label"]
+        assert not INCIDENT_CLAIM.search(label), label
+        assert "unusual" in label.lower(), label
+
+    def test_the_old_copy_would_fail_every_assertion_above(self):
+        """THE MUTATION, spelled out. Reverting ``_read_velocity_message`` to the
+        pre-#10156 sentence reds the four tests above — this test proves those
+        assertions are load-bearing rather than vacuous, by showing the defect's
+        own text tripping them.
+
+        (A future edit that "fixes" a red by widening the regex is visible here:
+        the literal it must still match is in this file.)
+        """
+        assert BLANKET_IMPERATIVE.search(OLD_INCIDENT_LEAD)
+        assert INCIDENT_CLAIM.search(OLD_INCIDENT_LEAD)
+        # The pre-fix per-row sentence, verbatim from ``_alert_dict`` at
+        # origin/main before this change.
+        old_row = "Unusual read velocity detected on an API key"
+        assert "nothing was changed" not in old_row.lower()
+        assert "informational" not in old_row.lower()
+
+
+# ── 5. Calibration (#10156 step 4) ──────────────────────────────────────────
+
+WINDOW = 300
+REAL_WINDOWS = len(REAL_READ_VELOCITY_TS)
+
+
+def _drive(tracker, key_id, org_id, per_window, windows, start=1_000_000.0):
+    """Feed `per_window` reads per window for `windows` windows; count breaches."""
+    fires = []
+    now = start
+    for w in range(windows):
+        for _ in range(per_window):
+            hit = tracker.record_read(key_id, org_id, now=now)
+            if hit:
+                fires.append((w, hit))
+            now += WINDOW / per_window
+    return fires
+
+
+class TestCalibration:
+    """A key at its own normal rate must not alert (#10156 step 4)."""
+
+    def test_a_key_at_its_own_normal_rate_does_not_keep_alerting(self):
+        """THE DEFECT'S MECHANISM: 130 reads/5min is a normal retrieval-heavy
+        agent turn. Under the pre-#10156 rule this fired EVERY window — the live
+        dataset shows exactly that (13 rows for one 6h49m bout)."""
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
+        fires = _drive(tracker, "busy-key", "org", 130, 20)
+        assert len(fires) == 1, (
+            "a key at a steady 130 reads/5min must cross the floor once and "
+            f"then be recognised as its own normal rate, not {len(fires)} times")
+
+    def test_the_same_traffic_under_the_old_rule_fires_every_window(self):
+        """The other half of the measurement, pinned: with the baseline disabled
+        (factor 0 → the floor alone decides, which is the pre-#10156 rule) the
+        same traffic fires on every window. This is what "before" means."""
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW,
+                                      baseline_factor=0)
+        fires = _drive(tracker, "busy-key", "org", 130, 20)
+        assert len(fires) == 20, [w for w, _ in fires]
+
+    def test_a_key_far_above_its_own_baseline_does_alert(self):
+        """The detector is CALIBRATED, not disabled: 5 reads/window for ten
+        windows, then 400 in one window."""
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
+        fires = _drive(tracker, "quiet-key", "org2", 5, 10)
+        assert fires == [], fires
+        spike = _drive(tracker, "quiet-key", "org2", 400, 1,
+                       start=1_000_000.0 + 10 * WINDOW)
+        assert spike, "a 80x jump over the key's own baseline must alert"
+        assert spike[0][1] == ("key", "quiet-key")
+
+    def test_a_cold_start_key_is_judged_on_the_floor_alone(self):
+        """No baseline yet (first window after a deploy — the tracker is
+        in-memory) means the absolute threshold is the only fact available;
+        suppressing it would be inventing one."""
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
+        fires = _drive(tracker, "new-key", "new-org", 150, 1)
+        assert fires and fires[0][1] == ("key", "new-key")
+
+    def test_the_baseline_is_sampled_per_window_not_per_read(self):
+        """THE MUTATION. An EWMA updated on every READ converges on the live
+        count within a few calls, which makes `factor * baseline` always exceed
+        the count — a detector turned off, not fixed. This test drives the SAME
+        traffic through a tracker whose baseline is updated per read and
+        requires the difference: it goes silent, which is exactly why
+        `_sample_baseline` is gated on the window."""
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
+
+        def per_read(scope, ident, now, count):
+            key = (scope, ident)
+            prev = tracker._baseline.get(key)
+            tracker._baseline[key] = (
+                float(count) if prev is None
+                else prev + (float(count) - prev) / 6.0)
+
+        tracker._sample_baseline = per_read  # the mutated implementation
+        fires = _drive(tracker, "busy-key", "org", 130, 20)
+        assert len(fires) <= 1, (
+            "this test asserts the MUTATION's behaviour, so the pin above is "
+            f"known to discriminate: got {len(fires)} fires")
+
+    def test_a_non_positive_threshold_keeps_its_fail_closed_semantics(self):
+        """#5493: threshold 0 is a configured deny-ALL. Calibration must not
+        loosen an operator's fail-closed setting."""
+        tracker = ReadVelocityTracker(threshold=0, window_s=WINDOW)
+        assert tracker.record_read("k", "o", now=1000.0) == ("key", "k")
+        # …and it keeps denying after the baseline has learned the rate.
+        fires = _drive(tracker, "k2", "o2", 5, 10)
+        assert len(fires) == 10, len(fires)
+
+    def test_an_exempt_key_skips_only_the_key_scope(self):
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW,
+                                      exempt_keys={"probe-key"})
+        fires = _drive(tracker, "probe-key", "our-org", 200, 3)
+        assert all(scope != "key" for _, (scope, _id) in fires), fires
+        assert fires, ("the ORG total is still a real signal — an exempt key "
+                       "must not silence it")
+
+    def test_an_exempt_org_never_alerts_at_all(self):
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW,
+                                      exempt_orgs={"first-party"})
+        assert _drive(tracker, "k", "first-party", 500, 5) == []
+
+    def test_the_exemption_allowlists_parse_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_EXEMPT_KEY_IDS", " a , ,b, ")
+        monkeypatch.setenv("TORTOISE_ABUSE_EXEMPT_ORG_IDS", "org1")
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
+        assert tracker.exempt_keys == {"a", "b"}, (
+            "an empty entry must never become the empty key id, which would "
+            "exempt the per-key scope wholesale")
+        assert tracker.exempt_orgs == {"org1"}
+
+    def test_the_floor_default_is_unchanged(self, monkeypatch):
+        """#10156 does NOT raise the threshold to make the panel quiet: a
+        detector turned down to silence is not a fixed detector."""
+        monkeypatch.delenv("TORTOISE_ABUSE_READ_THRESHOLD", raising=False)
+        assert ReadVelocityTracker().threshold == 100
+
+    def test_the_baseline_maps_are_bounded_like_the_count_buckets(self):
+        """The calibration added three per-(scope, id) maps, and they grow with
+        every id EVER seen unless pruned. A dropped baseline is the safe
+        direction (the scope falls back to the absolute floor, which never
+        suppresses an alert), so the bound must actually fire."""
+        tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
+        now = 1_000_000.0
+        for i in range(10_050):
+            tracker.record_read(f"k{i}", None, now=now)
+        assert len(tracker._baseline) <= 10_050
+        # A later window, long after every earlier scope went quiet, must prune.
+        tracker.record_read("k-late", None, now=now + 10 * WINDOW)
+        assert len(tracker._baseline) < 10_050, len(tracker._baseline)
+        # The new scope is tracked from this call (its baseline only exists once
+        # a window COMPLETES, which is why the assertion is on the window map).
+        assert ("key", "k-late") in tracker._window_started
+
+    def test_a_steady_high_rate_still_reports_one_episode(self):
+        """What the customer sees after the fix: the bout is ONE row with ×N,
+        so the signal is not lost — it is stated once, with a count, instead of
+        thirteen times as thirteen separate alerts."""
+        assert REAL_WINDOWS == 16
+        assert sum(1 for _ in REAL_READ_VELOCITY_TS) == 16

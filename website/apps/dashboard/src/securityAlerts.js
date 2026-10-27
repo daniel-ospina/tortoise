@@ -1,0 +1,184 @@
+// securityAlerts.js — #10156: two registers, ages, episode counts.
+//
+// WHY THIS MODULE EXISTS. `/overview` rendered every `/v1/team/alerts` entry
+// under ONE heading:
+//
+//   Security alerts
+//   Suspicious activity detected on this Organization. Revoke any key you
+//   don't recognize.
+//   * Unusual API activity — Unusual read velocity detected on an API key · 25/09/2026
+//
+// Every one of those sentences was wrong about the events behind it. The
+// detector that produced them (`ReadVelocityTracker`) is NOTIFY-ONLY by design
+// — R3 never suspends, throttles or locks anything — so nothing had happened to
+// the account, the newest row was a month old, and the thirteen rows were
+// thirteen five-minute windows of ONE continuous bout. The remedy was worse
+// than the claim: "revoke any key you don't recognize" asks the customer to
+// destroy a working integration in response to their own normal agent traffic,
+// for an event the system never acted on.
+//
+// So the split is by REGISTER, and the register is decided by the fact, never
+// by how alarming the words look:
+//
+//   * REGISTER_ALERT    — something HAPPENED. The server puts a row here when
+//                        the account's state changed, a human acted, or an
+//                        authenticated credential event (a new-country sign-in)
+//                        occurred. Only this register carries incident framing.
+//   * REGISTER_ACTIVITY — a detector MEASURED a rate and changed nothing.
+//                        Muted, no verb, no instruction.
+//
+// An entry with no (or an unknown) `register` is treated as ACTIVITY. That
+// default is fail-quiet on purpose: incident framing is a claim that something
+// happened, and an unrecognised row cannot support that claim.
+//
+// Kept as pure derivations so `node --test` can execute the decisions without a
+// React renderer; the panel that renders them is `securityAlertsPanel.jsx`
+// (vitest + jsdom) and the copy lives here, once, so the render and the tests
+// cannot disagree about it.
+
+export const REGISTER_ALERT = 'alert'
+export const REGISTER_ACTIVITY = 'activity'
+
+//: Anything older than this collapses behind "Show older". Two weeks is the
+//: span over which "current" stops being a useful word for a security panel:
+//: the measured dataset's rows are 30+ days old, and a month-old row rendered
+//: identically to a live one is the defect, not the layout.
+export const OLD_AFTER_DAYS = 14
+
+// ── Copy (the point of the change) ─────────────────────────────────────────
+//
+// These strings are the deliverable. The tests assert their ABSENCE as well as
+// their presence: no blanket imperative in the activity register, and no
+// incident register at all when every row is an observation.
+
+export const ACTIVITY_HEADING = 'Recent activity'
+export const ACTIVITY_LEAD =
+  'Rate signals from our abuse detectors. Nothing was changed, disabled or ' +
+  'locked — these are measurements, not actions taken on your account.'
+
+export const ALERTS_HEADING = 'Security alerts'
+export const ALERTS_LEAD =
+  'Something happened on this Organization. Review it, and contact support if ' +
+  'you do not recognise it.'
+
+//: Shown beside an acknowledged episode, in the collapsed group.
+export const ACKED_CHIP = 'acknowledged'
+export const ACK_BUTTON = 'Acknowledge'
+export const ACK_PENDING = 'Saving…'
+export const SHOW_OLDER = (n) => `Show ${n} older`
+export const HIDE_OLDER = 'Hide older'
+export const NOTHING_RECENT = 'Nothing in the last two weeks.'
+
+/** Register for one alert row. Unknown → the quiet register (see module note). */
+export function registerOf(alert) {
+  return alert && alert.register === REGISTER_ALERT
+    ? REGISTER_ALERT
+    : REGISTER_ACTIVITY
+}
+
+/** Milliseconds since `at`, or null when `at` is missing/unparseable. */
+export function ageMs(at, now = new Date()) {
+  if (!at) return null
+  const then = at instanceof Date ? at.getTime() : Date.parse(at)
+  if (Number.isNaN(then)) return null
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now)
+  if (Number.isNaN(nowMs)) return null
+  return Math.max(0, nowMs - then)
+}
+
+/**
+ * A short, human age: "just now", "12 min ago", "5 h ago", "31 days ago".
+ *
+ * Deliberately coarse. The question a security row answers is "is this current
+ * or is it history", and a second-precision timestamp invites the reader to
+ * treat a month-old row as live — which is the defect.
+ */
+export function ageLabel(at, now = new Date()) {
+  const ms = ageMs(at, now)
+  if (ms === null) return ''
+  const mins = Math.floor(ms / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours} h ago`
+  const days = Math.floor(hours / 24)
+  return days === 1 ? '1 day ago' : `${days} days ago`
+}
+
+/** True when a row is older than `days` — i.e. it is history, not current. */
+export function isOld(alert, now = new Date(), days = OLD_AFTER_DAYS) {
+  const ms = ageMs(alert && alert.at, now)
+  if (ms === null) return false // unknown age is not a reason to hide a row
+  return ms > days * 24 * 3600 * 1000
+}
+
+/**
+ * Does this row still render as CURRENT?
+ *
+ * An acknowledged episode is never current, however recent it is — that is the
+ * whole point of acknowledging one, and a dismissal that leaves the row in the
+ * live list is not a dismissal.
+ */
+export function isCurrent(alert, now = new Date(), days = OLD_AFTER_DAYS) {
+  if (alert && alert.acked) return false
+  return !isOld(alert, now, days)
+}
+
+/** `×13` (or `×100+` when the server's scan was truncated), else ''. */
+export function episodeCountLabel(alert) {
+  const count = alert && alert.count
+  if (!Number.isFinite(count) || count < 2) return ''
+  return `×${count}${alert.truncated ? '+' : ''}`
+}
+
+/** The bout's span, "17:19 → 00:08", or '' for a single-window episode. */
+export function episodeRangeLabel(alert) {
+  if (!alert || !alert.count || alert.count < 2 || !alert.first_at) return ''
+  const first = new Date(alert.first_at)
+  const last = new Date(alert.at)
+  if (Number.isNaN(first.getTime()) || Number.isNaN(last.getTime())) return ''
+  const time = (d) =>
+    d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const sameDay = first.toDateString() === last.toDateString()
+  return sameDay
+    ? `${time(first)} → ${time(last)}`
+    : `${first.toLocaleDateString()} ${time(first)} → ${last.toLocaleDateString()} ${time(last)}`
+}
+
+/**
+ * Split the feed into the two registers, each further split into what renders
+ * now and what is behind "Show older".
+ *
+ * Order is the server's (newest first) within every group. Acknowledged rows go
+ * to `older` regardless of age, tagged so the collapsed group can say so.
+ */
+export function groupAlerts(alerts, now = new Date(), days = OLD_AFTER_DAYS) {
+  const incidents = []
+  const activity = []
+  for (const alert of alerts || []) {
+    if (registerOf(alert) === REGISTER_ALERT) incidents.push(alert)
+    else activity.push(alert)
+  }
+  return {
+    alerts: splitByAge(incidents, now, days),
+    activity: splitByAge(activity, now, days),
+  }
+}
+
+function splitByAge(list, now, days) {
+  const current = []
+  const older = []
+  for (const alert of list) {
+    if (isCurrent(alert, now, days)) current.push(alert)
+    else older.push(alert)
+  }
+  return { current, older, total: list.length }
+}
+
+/** True when there is nothing to render at all — the panel stays unmounted. */
+export function isEmptyFeed(grouped) {
+  return (
+    !grouped ||
+    (grouped.alerts.total === 0 && grouped.activity.total === 0)
+  )
+}

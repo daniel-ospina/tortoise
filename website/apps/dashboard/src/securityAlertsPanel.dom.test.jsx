@@ -1,0 +1,218 @@
+// securityAlertsPanel.dom.test.jsx — #10156, the RENDERED half.
+//
+// WHY A DOM TEST AND NOT A SOURCE PIN. The defect is a render (one heading, one
+// lead sentence, one list) and the fix is a render (two registers, aged rows, a
+// collapsed "older" group, an acknowledge control). #4915's settled lesson is
+// that a source pattern cannot see a render: review of PR #4890 walked every
+// hardening of a static pin round by round (a literal in the fragment's place, a
+// prefix-matching binding, a shadowing declaration, a JSX comment holding the
+// same text, a mid-file swallow, and CSS hiding the node, which no source scan
+// sees at all). So `SecurityAlertsPanel` was extracted from `main.jsx` and this
+// file renders it into a real document, with `index.css` loaded (vite.config.js
+// `css: true`) so a rule that HIDES a row reds here.
+//
+// WHAT IT PINS:
+//   1. a notify-only `read_velocity` row NEVER renders under "Security alerts",
+//      and the incident lead sentence appears only when that register is
+//      non-empty — the defect itself, at the level a user sees it;
+//   2. the activity register states that nothing was changed, and the panel
+//      never prints the blanket imperative;
+//   3. an aged row carries its age and collapses behind "Show older";
+//   4. an acknowledged row leaves the current list and is still reachable
+//      (tagged) — a dismissal that evaporates is not a dismissal;
+//   5. an episode renders as ONE row with ×N and its time range;
+//   6. the acknowledge control calls back with the EPISODE (the key the server
+//      persists), not with the row.
+//
+// Assertions read the rendered `container` rather than `screen`: `globals` is
+// off in this package, so testing-library's auto-cleanup never registers and a
+// document-wide query would see the PREVIOUS test's tree. `afterEach(cleanup)` is
+// explicit for the same reason.
+//
+// Runner: vitest + jsdom (`npm run test:dom`), reached through the package's
+// primary command by `src/domSuite.test.js` (a `node:test` file that fails if
+// this file is not collected or does not pass).
+import { afterEach, test } from 'vitest'
+import assert from 'node:assert/strict'
+import React from 'react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+
+import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
+import {
+  ACTIVITY_HEADING,
+  ACTIVITY_LEAD,
+  ALERTS_HEADING,
+  ALERTS_LEAD,
+  ACKED_CHIP,
+} from './securityAlerts.js'
+
+afterEach(cleanup)
+
+const NOW = new Date('2026-10-26T12:00:00Z')
+
+const at = (daysAgo) =>
+  new Date(NOW.getTime() - daysAgo * 24 * 3600 * 1000).toISOString()
+
+//: The LIVE row from `abuse_events` (project ybetwichurajbfswfeqa): 13 windows
+//: of one continuous bout on 2026-09-25/26, rendered by the panel a month later.
+const velocity = {
+  type: 'read_velocity',
+  label: 'Unusual read volume',
+  register: 'activity',
+  at: '2026-09-26T00:08:55.936232+00:00',
+  first_at: '2026-09-25T17:19:05.846463+00:00',
+  count: 13,
+  acked: false,
+  episode: 'read_velocity|key|989c68e6a35b479b923a28542e|2026-09-25T17:19:05',
+  message:
+    'Read volume on API key 989c68e6a35b479b923a28542e crossed our ' +
+    'unusual-activity threshold. This is informational; nothing was changed. ' +
+    "If you don't recognise this key, revoke it in Keys.",
+}
+
+const suspension = {
+  type: 'suspend',
+  label: 'Organization suspended',
+  register: 'alert',
+  at: at(1),
+  count: 1,
+  first_at: at(1),
+  acked: false,
+  episode: 'suspend||2026-10-25T12:00:00Z',
+  message: 'Organization suspended by an operator',
+}
+
+function renderPanel(props) {
+  return render(<SecurityAlertsPanel now={NOW} {...props} />)
+}
+
+const rows = (container) => container.querySelectorAll('li.alert-row')
+const text = (container) => container.textContent
+
+test('#10156: a velocity row renders under Recent activity, never under Security alerts', () => {
+  const { container } = renderPanel({ alerts: [velocity] })
+  assert.ok(text(container).includes(ACTIVITY_HEADING),
+    'the activity register must render')
+  assert.ok(!text(container).includes(ALERTS_HEADING),
+    'no Security-alerts heading for a feed of notify-only observations')
+  assert.ok(!text(container).includes(ALERTS_LEAD),
+    'the incident lead sentence must not appear over observations — that is the defect')
+  assert.ok(text(container).includes(ACTIVITY_LEAD))
+})
+
+test('#10156: the activity register says nothing was changed, and the panel never prints the blanket imperative', () => {
+  const { container } = renderPanel({ alerts: [velocity] })
+  assert.match(text(container), /nothing was changed/i)
+  assert.doesNotMatch(text(container), /revoke any key/i)
+  assert.doesNotMatch(text(container), /suspicious activity detected/i)
+})
+
+test('#10156: the incident register renders only when something HAPPENED', () => {
+  const { container } = renderPanel({ alerts: [suspension] })
+  assert.ok(text(container).includes(ALERTS_HEADING))
+  assert.ok(text(container).includes(ALERTS_LEAD))
+  assert.ok(!text(container).includes(ACTIVITY_HEADING))
+})
+
+test('#10156: both registers can be on screen at once, each with its own lead', () => {
+  const { container } = renderPanel({ alerts: [suspension, velocity] })
+  assert.ok(text(container).includes(ALERTS_HEADING))
+  assert.ok(text(container).includes(ACTIVITY_HEADING))
+  assert.ok(text(container).includes(ALERTS_LEAD))
+  assert.ok(text(container).includes(ACTIVITY_LEAD))
+})
+
+test('#10156: an aged row shows its age and collapses behind Show older', () => {
+  const { container } = renderPanel({ alerts: [velocity] })
+  // 30 days old: not in the current list…
+  assert.equal(rows(container).length, 0,
+    'a month-old row must not render as current')
+  assert.match(text(container), /nothing in the last two weeks/i)
+  // …and reachable.
+  fireEvent.click(screen.getByRole('button', { name: /show 1 older/i }))
+  assert.equal(rows(container).length, 1)
+  assert.match(text(container), /30 days ago/, 'the row must show its AGE')
+  assert.match(text(container), /unusual-activity threshold/)
+})
+
+test('#10156: a recent row renders immediately, in the current list', () => {
+  const fresh = { ...velocity, at: at(0.02), first_at: at(0.02), count: 1 }
+  const { container } = renderPanel({ alerts: [fresh] })
+  assert.equal(rows(container).length, 1)
+  assert.match(text(container), /unusual-activity threshold/)
+  assert.equal(screen.queryByRole('button', { name: /show .* older/i }), null)
+})
+
+test('#10156: an episode renders as ONE row with ×N and its time range', () => {
+  const fresh = { ...velocity, at: at(0.02) }
+  const { container } = renderPanel({ alerts: [fresh] })
+  assert.equal(rows(container).length, 1,
+    'the bout is ONE row, not thirteen')
+  assert.match(text(container), /×13/, 'the bout must render its window count')
+  assert.match(text(container), /→/, 'the bout must render its time range')
+})
+
+test('#10156: an acknowledged row leaves the current list and is tagged', () => {
+  const fresh = { ...velocity, at: at(0.02), acked: true }
+  const { container } = renderPanel({ alerts: [fresh] })
+  assert.equal(rows(container).length, 0,
+    'an acknowledged episode must stop rendering as current')
+  fireEvent.click(screen.getByRole('button', { name: /show 1 older/i }))
+  assert.equal(rows(container).length, 1)
+  assert.match(text(container), new RegExp(ACKED_CHIP))
+  assert.equal(screen.queryByRole('button', { name: /^acknowledge$/i }), null,
+    'an already-acknowledged row must not offer the control again')
+})
+
+test('#10156: the acknowledge control reports the EPISODE key', () => {
+  const fresh = { ...velocity, at: at(0.02) }
+  const seen = []
+  renderPanel({ alerts: [fresh], onAcknowledge: (a) => seen.push(a) })
+  fireEvent.click(screen.getByRole('button', { name: /^acknowledge$/i }))
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].episode, fresh.episode,
+    'the server persists an episode key, so that is what the control must report')
+})
+
+test('#10156: a failed acknowledgement is visible, not silent', () => {
+  const fresh = { ...velocity, at: at(0.02) }
+  const { container } = renderPanel({
+    alerts: [fresh],
+    onAcknowledge: () => {},
+    ackError: { episode: fresh.episode, message: 'could not be saved' },
+  })
+  assert.match(text(container), /could not be saved/)
+})
+
+test('#10156: a register that gains its FIRST row keeps its hook order', () => {
+  // Self-review catch: `Register` bailed out on an empty group BEFORE its
+  // `useState`, so the render that delivered the first row changed the hook
+  // count and React threw ("Rendered more hooks than during the previous
+  // render"). The hook is unconditional now; this pins it.
+  const fresh = { ...velocity, at: at(0.02) }
+  const { rerender } = render(<SecurityAlertsPanel alerts={[]} now={NOW} />)
+  rerender(<SecurityAlertsPanel alerts={[fresh]} now={NOW} />)
+  assert.ok(document.body.textContent.includes(ACTIVITY_HEADING))
+})
+
+test('#10156: an empty feed renders nothing at all', () => {
+  const { container } = renderPanel({ alerts: [] })
+  assert.equal(text(container), '')
+})
+
+test('#10156: a row hidden by a stylesheet reds this file', () => {
+  // index.css is loaded into the jsdom document (`css: true` in
+  // vite.config.js), so a rule that hides the activity register — the evasion
+  // no source scan can see — fails here.
+  const fresh = { ...velocity, at: at(0.02) }
+  const { container } = renderPanel({ alerts: [fresh] })
+  const row = container.querySelector('li.alert-row')
+  assert.ok(row)
+  const style = getComputedStyle(row)
+  assert.notEqual(style.display, 'none', 'an alert row must be VISIBLE')
+  assert.notEqual(style.visibility, 'hidden')
+  const section = container.querySelector('section.activity-register')
+  assert.ok(section)
+  assert.notEqual(getComputedStyle(section).display, 'none',
+    'the activity register must be VISIBLE')
+})

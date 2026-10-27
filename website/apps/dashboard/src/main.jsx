@@ -28,6 +28,7 @@ import { captureClaimForHarness, captureStatusLabelForHarness } from './captureS
 // (harnessDisclosureDom.test.jsx) can render them; main.jsx cannot be imported
 // by a test (it mounts the whole application at module scope).
 import { HarnessStatusCard } from './harnessStatusCard.jsx'
+import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
 // doors — ONE function so the Setup pill, the re-entry card and the Settings
@@ -3170,6 +3171,12 @@ function claimIntentInFlight() {
   // list comes from the session-authed /v1/team/alerts.
   const [suspended, setSuspended] = React.useState(null)
   const [alerts, setAlerts] = React.useState([])
+  // #10156: acknowledgement state for ONE row at a time (a single-flight
+  // control, like the session delete above). `ackError` is per-episode and the
+  // row shows it inline: a dismissal that fails silently teaches the customer
+  // the button is broken.
+  const [ackPending, setAckPending] = React.useState(null)
+  const [ackError, setAckError] = React.useState(null)
 
   function suspendedFromDetail(detail) {
     return detail && typeof detail === 'object' && detail.code === 'SUSPENDED' ? detail : null
@@ -5425,6 +5432,36 @@ function claimIntentInFlight() {
         setAlerts(d.alerts || [])
       }
     } catch { /* best-effort — alert history never blocks the dashboard */ }
+  }
+
+  async function acknowledgeAlert(alert) {
+    // #10156: the acknowledgement is persisted SERVER-side (an abuse_events
+    // row keyed by the episode), never in a cookie or this component's state —
+    // a dismissal that evaporates on the next device, reload or deploy is not
+    // a dismissal. So the local list is only updated from a CONFIRMED write:
+    // the row is re-fetched, not optimistically hidden, because hiding a row
+    // the server did not record would re-show it on the next poll and read as
+    // a broken control.
+    const tid = orgIdRef.current
+    if (!tid || !alert || !alert.episode) return
+    setAckError(null)
+    setAckPending(alert.episode)
+    try {
+      const res = await fetch(`${API_BASE}/v1/team/alerts/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org_id: tid, episode: alert.episode }),
+      })
+      if (!res.ok) {
+        setAckError({ episode: alert.episode, message: 'Could not save that acknowledgement — try again.' })
+        return
+      }
+      await loadAlerts(tid)
+    } catch {
+      setAckError({ episode: alert.episode, message: 'Could not save that acknowledgement — try again.' })
+    } finally {
+      setAckPending(null)
+    }
   }
 
   async function completeLogin(key) {
@@ -11081,20 +11118,19 @@ function claimIntentInFlight() {
         )}
 
         {tab === 'overview' && alerts.length > 0 && (
-          <section className="overview" aria-label="Security alerts">
-            <h2>Security alerts</h2>
-            <p className="dim small">Suspicious activity detected on this Organization. Revoke any key you don't recognize.</p>
-            <ul>
-              {alerts.map((a, i) => (
-                <li key={i}>
-                  {/* #5425/round 7: `type` is our internal enum (recovery_velocity,
-                      flag, read_velocity) — the customer reads the human LABEL. */}
-                  <strong>{a.label || a.type}</strong> — {a.message}{' '}
-                  <span className="dim small">{a.at ? new Date(a.at).toLocaleString() : ''}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
+          // #10156: TWO REGISTERS, never one list. The old block rendered every
+          // entry under "Security alerts / Suspicious activity detected on this
+          // Organization. Revoke any key you don't recognize." — including
+          // notify-only read-velocity observations, which changed nothing, were
+          // a month old, and were one continuous bout counted thirteen times.
+          // The panel owns the split, the ages and the episode counts; the copy
+          // decisions and their tests live in `securityAlerts.js`.
+          <SecurityAlertsPanel
+            alerts={alerts}
+            onAcknowledge={acknowledgeAlert}
+            ackPending={ackPending}
+            ackError={ackError}
+          />
         )}
         {tab === 'overview' && team === null && (
           // #1841: frames-first — the overview grid renders IMMEDIATELY as

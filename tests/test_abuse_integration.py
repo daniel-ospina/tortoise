@@ -649,6 +649,164 @@ class TestMintGateAndAlerts:
         assert r.json()["status"] == "flagged"
 
 
+# ── #10156: registers, episodes, acknowledgement ───────────────────────────
+
+class TestAlertRegistersAndAcks:
+    """#10156: the /v1/team/alerts contract the dashboard's two registers read.
+
+    The customer saw a month-old, never-enforced read-velocity event rendered as
+    "Security alerts — Suspicious activity detected … Revoke any key you don't
+    recognize". The fix splits the feed by register, folds each sustained bout
+    into one row with a count, and lets an owner/admin acknowledge an episode so
+    it stops rendering as current. All of it travels on this endpoint: the panel
+    cannot invent a register, a count or an acknowledgement of its own.
+    """
+
+    def _seed_velocity(self, fake, org_id=TEAM, key="k-10156"):
+        """Seed the table directly, not through ``record_event``.
+
+        ``SupabaseAbuseStore.record_event`` does not transmit ``created_at``
+        (the column's ``DEFAULT now()`` owns it, deliberately — a writer clock
+        must not be able to backdate an abuse row), so a fixture that wants
+        specific timestamps has to write the rows the way the DB produces them.
+        """
+        # The 13 real windows of the 2026-09-25/26 bout: one CONTINUOUS bout,
+        # which is the case #10156 is about (a 3-row sample would leave 6h
+        # silences between rows and legitimately fold into 3 episodes).
+        windows = ("2026-09-25T17:19:05+00:00", "2026-09-25T17:24:06+00:00",
+                   "2026-09-25T18:57:00+00:00", "2026-09-25T19:35:02+00:00",
+                   "2026-09-25T21:05:03+00:00", "2026-09-25T21:10:04+00:00",
+                   "2026-09-25T21:34:03+00:00", "2026-09-25T21:39:04+00:00",
+                   "2026-09-25T21:44:04+00:00", "2026-09-25T23:53:55+00:00",
+                   "2026-09-25T23:58:55+00:00", "2026-09-26T00:03:55+00:00",
+                   "2026-09-26T00:08:55+00:00")
+        store = SupabaseAbuseStore(fake)
+        fake.seed("abuse_events", [
+            {"id": i + 1, "org_id": org_id, "event_type": "read_velocity",
+             "details": {"scope": "key", "id": key}, "created_at": iso}
+            for i, iso in enumerate(windows)])
+        return store
+
+    def _owner(self, env, role="owner"):
+        from tortoise.hosted_api import get_current_user
+        env["fake"].seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": role,
+            "status": "active", "org_name": "abuse-team"}])
+        env["app"].dependency_overrides[get_current_user] = \
+            lambda: {"user_id": _U1}
+
+    def test_the_feed_carries_the_register_and_the_episode(self, env):
+        self._owner(env)
+        self._seed_velocity(env["fake"])
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
+            assert r.status_code == 200
+            alerts = r.json()["alerts"]
+            assert len(alerts) == 1, alerts
+            row = alerts[0]
+            assert row["type"] == "read_velocity"
+            assert row["register"] == "activity", row
+            assert row["count"] == 13, row
+            assert row["first_at"].startswith("2026-09-25T17:19:05")
+            assert row["acked"] is False
+            assert row["episode"], row
+            assert "_subject" not in row, "an internal grouping field leaked"
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_the_acknowledgement_persists_and_the_row_stops_being_current(self, env):
+        self._owner(env)
+        store = self._seed_velocity(env["fake"])
+        try:
+            with verdict_client(env["app"]) as tc:
+                episode = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]["episode"]
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM, "episode": episode})
+                assert r.status_code == 200, r.text
+                assert r.json()["acknowledged"] is True
+                again = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()
+            assert again["alerts"][0]["acked"] is True
+            # The DURABLE evidence: a row, not a cookie or a process cache.
+            ack_rows = [x for x in env["fake"].tables["abuse_events"]
+                        if x["event_type"] == "alert_ack"]
+            assert len(ack_rows) == 1
+            assert ack_rows[0]["details"]["episode"] == episode
+            # …and the ack row is not itself an alert in the feed.
+            assert store.recent_alerts(TEAM)[0]["type"] == "read_velocity"
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_only_owner_or_admin_may_acknowledge(self, env):
+        """An ack hides a security row from the whole org — that is a
+        management act, so a plain member cannot perform it."""
+        self._owner(env, role="member")
+        self._seed_velocity(env["fake"])
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM, "episode": "x"})
+            assert r.status_code == 403
+            assert not [x for x in env["fake"].tables["abuse_events"]
+                        if x["event_type"] == "alert_ack"]
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_ack_requires_the_episode(self, env):
+        self._owner(env)
+        try:
+            with verdict_client(env["app"]) as tc:
+                assert tc.post("/v1/team/alerts/ack",
+                               json={"org_id": TEAM}).status_code == 422
+                assert tc.post("/v1/team/alerts/ack",
+                               json={}).status_code == 422
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_ack_stays_reachable_while_suspended(self, env):
+        """Delta 12 parity: the APPEAL flow must keep working on a suspended
+        org, and that surface is the same one the ack lives on. Acknowledging
+        changes no enforcement state, so it must not acquire a suspension gate
+        just because its neighbours (key management) have one."""
+        self._owner(env)
+        self._seed_velocity(env["fake"])
+        env["fake"].rpc("abuse_suspend", {"p_org_id": TEAM})
+        try:
+            with verdict_client(env["app"]) as tc:
+                episode = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]["episode"]
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM, "episode": episode})
+            assert r.status_code == 200, r.text
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_a_failed_write_is_reported_not_swallowed(self, env):
+        """A dismissal that does not persist must NOT return 200: the row would
+        reappear on the next poll and read as a broken control."""
+        self._owner(env)
+        fake = env["fake"]
+        fake.seed("abuse_events", [])
+        import tortoise.supabase_control as _sc
+        original = _sc.get_abuse_store
+
+        class _Failing:
+            def record_alert_ack(self, *a, **kw):
+                raise RuntimeError("HTTP 500 from the control plane")
+
+        _sc.get_abuse_store = lambda: _Failing()
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM, "episode": "x"})
+            assert r.status_code in (503, 500), r.status_code
+            assert r.status_code != 200
+        finally:
+            _sc.get_abuse_store = original
+            env["app"].dependency_overrides.clear()
+
+
 # ── Operator reason read (#4874) ────────────────────────────────────────────
 
 _INTERNAL_KEY = "internal-test-key-4874"

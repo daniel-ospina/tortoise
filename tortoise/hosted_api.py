@@ -11058,7 +11058,14 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
 
     Session-authed (NOT API-key authed) by design: it must stay reachable
     while the org is suspended so the owner can see what happened and find
-    the appeal path (scoping delta 12)."""
+    the appeal path (scoping delta 12).
+
+    #10156: each entry carries `register` ("alert" = something happened, or
+    "activity" = a detector measured a rate and changed nothing), `count` and
+    `first_at` (one row per sustained BOUT, not per detector window), `acked`,
+    and the opaque `episode` key the acknowledgement route takes. The panel
+    renders the two registers separately and can say "nothing was changed"
+    only because the register travels with the row."""
     membership = await _membership_org(user["user_id"], org_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
@@ -11068,6 +11075,51 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     except Exception:
         alerts = []  # best-effort — an alert-history failure is not a 500
     return {"org_id": org_id, "alerts": alerts}
+
+
+@app.post("/v1/team/alerts/ack")
+async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
+    """#10156 — acknowledge ONE alert episode so it stops rendering as current.
+
+    Persisted as a durable row (``abuse_events`` / ``alert_ack``), never a
+    cookie: a dismissal that evaporates on the next device or the next deploy
+    is not a dismissal, and the customer would be told "acknowledged" by a
+    browser that had remembered it. The response is deliberately NOT optimistic
+    — a failure to store returns 503 rather than 200, because the row would
+    otherwise reappear on the next poll and teach the customer the control is
+    broken.
+
+    GATED BY ROLE, but deliberately NOT by ``_require_owner_admin``: that helper
+    also 403s a SUSPENDED org, and this surface must stay reachable while
+    suspended (the appeal flow reads it — #1853). Acknowledging changes no
+    enforcement state and disables nothing; it records that a human saw a row,
+    so owner/admin is the right gate and the suspension stamp is not.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    org_id = str(body.get("org_id") or "").strip()
+    episode = str(body.get("episode") or "").strip()
+    if not org_id or not episode:
+        raise HTTPException(status_code=422,
+                            detail="org_id and episode are required")
+    role = await _membership_role(user["user_id"], org_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403,
+                            detail="Requires owner or admin role in team")
+    try:
+        from tortoise.supabase_control import get_abuse_store
+        get_abuse_store().record_alert_ack(org_id, episode,
+                                           by=user.get("user_id"))
+    except Exception as exc:
+        _raise_503_if_cp_outage(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="alert acknowledgement could not be stored") from exc
+    return {"org_id": org_id, "episode": episode, "acknowledged": True}
 
 
 @app.get("/v1/internal/abuse/state")
