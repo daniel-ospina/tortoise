@@ -694,3 +694,99 @@ def test_approved_live_forward_renumber_still_allowed():
     r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
     assert r.returncode == 0, r.stdout
     assert "exception" in r.stdout.lower(), r.stdout
+
+
+# ── #7628 class: which base a pull_request MERGE REF is diffed against ────────
+# CI checks out refs/pull/N/merge, so HEAD is GitHub's synthetic merge commit
+# (first parent = the base branch TIP) while DRIFT_BASE_SHA is
+# `pull_request.base.sha` = the PR's MERGE BASE (fork point). Diffed literally,
+# the base branch's own new migrations arrive as this PR's `A` — and an added
+# file at a version prod already applied is a violation, so a PR that touches no
+# migration is failed for one the base added. Measured on tortoise#10110.
+
+
+def _merge_ref_fixture(pr_change: str = "unrelated") -> tuple[Path, str]:
+    """A `pull_request` merge-ref shape: base tip + PR head, merged.
+
+    Layout (all in one fixture repo, returned at the synthetic merge commit):
+
+        B  (fork point)                     <- DRIFT_BASE_SHA in CI
+        ├── M1 on main: a NEW migration     <- the base branch's own work
+        └── P  on the PR branch: `pr_change`
+
+    The merge commit's first parent is M1, exactly as GitHub builds
+    refs/pull/N/merge. Returns (repo, fork_point_sha).
+    """
+    d = _make_repo(["20260813000099_a.sql"])
+    fork_point = _git_sha(d)
+    # The BASE branch gains a migration after the PR forked.
+    (d / MIG / "20261029000001_base_owns_this.sql").write_text("-- base branch\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "base: new migration on main")
+    # The PR branch, forked at the fork point, touches nothing under migrations.
+    _git(d, "checkout", "-q", "-b", "pr", fork_point)
+    if pr_change == "edit-base-migration":
+        # The guard's real subject: the PR EDITS a migration that is in the base
+        # tree. Narrowing the base must not hide this (the base parent is the
+        # tree the PR merges into, and the file differs from it).
+        (d / MIG / "20260813000099_a.sql").write_text("-- edited by the PR\n")
+    else:
+        (d / "unrelated.txt").write_text("pr change\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "pr change")
+    # GitHub's synthetic merge commit: first parent = base tip, second = PR head.
+    _git(d, "checkout", "-q", "main")
+    _git(d, "merge", "--no-ff", "-q", "-m", "Merge pull request", "pr")
+    return d, fork_point
+
+
+def test_merge_ref_does_not_blame_the_pr_for_the_base_branch_migration():
+    # DISCRIMINATING (#7628, tortoise#10110): DRIFT_BASE_SHA is the fork point AND
+    # the base branch added a migration afterwards. The base's migration is
+    # already applied in prod (its version is in the remote set), which is what
+    # turns the spurious `A` into a reported violation. Must be rc 0 — this PR
+    # changed nothing under supabase/migrations/.
+    d, fork_point = _merge_ref_fixture()
+    r = _run_script_with_token(
+        "diff",
+        d,
+        fork_point,
+        versions=["20260813000099", "20261029000001"],
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "20261029000001" not in r.stdout, r.stdout
+
+
+def test_merge_ref_still_reports_an_edit_of_a_base_tree_migration():
+    # Guard against a narrowing that silences the guard: an EDIT of a base-tree
+    # migration is still a violation on a merge-ref checkout whose
+    # DRIFT_BASE_SHA is the fork point.
+    d, fork_point = _merge_ref_fixture(pr_change="edit-base-migration")
+    r = _run_script_with_token(
+        "diff",
+        d,
+        fork_point,
+        versions=["20260813000099", "20261029000001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_plain_commit_checkout_still_diffs_against_drift_base_sha():
+    # No merge commit → DRIFT_BASE_SHA IS the base, and the base-parent derivation
+    # must NOT fire. Pinned BEHAVIOURALLY rather than by a log line: the sensitive
+    # edit sits in the FIRST of two PR commits, so a derivation that (wrongly)
+    # fell back to HEAD^1 would diff only the last commit, miss the edit and pass
+    # — an UNDER-block on a plain-commit checkout.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").write_text("-- edited\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "edit (first PR commit)")
+    (d / "unrelated.txt").write_text("second\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "second PR commit")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000099"])
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
