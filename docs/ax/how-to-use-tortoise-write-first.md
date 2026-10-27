@@ -14,8 +14,10 @@ aboutObjects: tortoise, how-to-use-tortoise
 
 > **What this file is.** The authored text of the rewritten skill, produced from
 > the measured failure list in [`how-to-use-tortoise-step1-eval.md`](how-to-use-tortoise-step1-eval.md)
-> (`#9675` Step 1, landed as `#9695`). Everything from the `---` below onward is
-> the skill body, line for line — the port is a copy, not a second rewrite.
+> (`#9675` Step 1, landed as `#9695`). **The body is the `## Contents` section
+> through the last line — 503 lines**, line for line: the port is a copy, not a
+> second rewrite. The port adds only what `writing-skills` requires around it
+> (see below).
 >
 > **How it is delivered.** The served artifact is a *derived* mirror: authored in
 > `tortoise-skills-and-integrations`, pulled in with
@@ -29,11 +31,28 @@ aboutObjects: tortoise, how-to-use-tortoise
 >
 > ```yaml
 > name: how-to-use-tortoise
-> description: Write to the Tortoise graph — decide the layer (Subject/Object/Point/Event/Source), the kind, state vs occurrence, the edge type, truth vs relevance, supersede, and provenance. Use before ANY graph write; every failure this prevents is silent.
+> description: Write to the Tortoise graph — decide the layer (Subject/Object/Point/Event/Source), the kind, state vs occurrence, the edge type, truth vs relevance, supersede, and provenance. Use before ANY graph write; the failures this prevents are silent, or come back only as an advisory.
 > domain: capability
 > type: Workflow
 > status: live
+> tags: [tortoise, graph, epistemology, knowledge-graph, write, entity-type, pack]
+> summary: "The write pipeline — the seven decisions (layer, kind, state vs occurrence, edge semantics, truth vs relevance, supersede, provenance), the pairwise layer discriminators, and the 20 inventoried traps."
+> created: 2026-10-26
+> updated: 2026-10-27
+> allowed-tools: read write edit bash grep find
 > ```
+>
+> ⛔ **The port is not the body alone — it must also carry the three blocks
+> `writing-skills` makes mandatory.** `skills/writing-skills/SKILL.md` §"Mandatory
+> Blocks" states them as *"no exceptions"*, each validated by a `grep -c` that
+> must be ≥ 1: the `# How to Use Tortoise` H1 above the body; the gate warning
+> `> ⛔ **This skill MUST be read in full — not skimmed.**` immediately after the
+> frontmatter; and the closing `> Continue following the workflow as mandated by
+> this skill. Do not skip steps.` directive. `type: Workflow` additionally
+> requires `allowed-tools`, in Pi tool names rather than Claude's. All of these
+> are in the served mirror today
+> (`website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md`), and a
+> port that drops them fails a contract the artifact it replaces satisfies.
 >
 > **Why this draft names no verb.** `#9675`'s own recorded sequencing — the
 > `owner-decision` line *"Sequenced after #4282 Phase 3 for any tool name"* —
@@ -74,9 +93,11 @@ aboutObjects: tortoise, how-to-use-tortoise
 wired. A wrong structure does not degrade gracefully — it computes something
 wrong that looks authoritative, because the wrong shape is still a shape.
 
-**Every failure in this document is silent.** The call returns, the node lands,
-the response looks successful, and nothing tells you the structure is wrong. That
-is the whole reason for the decisions below and for the checklist at the end.
+**Almost every failure in this document is silent.** The call returns, the node
+lands, the response looks successful, and nothing tells you the structure is
+wrong. The two exceptions — detailed below — arrive as an advisory a caller can
+ignore, and neither refuses the write. That near-universal silence is the whole
+reason for the decisions below and for the checklist at the end.
 
 The layer decision cannot be recovered later. The kind classifier picks a kind
 **inside a partition chosen before it runs** — entities get object+subject kinds,
@@ -88,8 +109,8 @@ And the write path does not refuse. A kind that belongs to **another declared
 layer** is now reported back to you (a `kind_other_layer` advisory); one declared
 only on the sibling entity layer is *routed* to that layer, also with an advisory.
 But a kind the vocabulary **does not declare at all** is silent — no advisory,
-and on the entity doors not even a log line. And a mechanism that contradicts
-your own declared meaning fixes produces a warning and then stores **the
+and on the entity doors not even a log line. And a mechanism that contradicts the
+mechanism your declared meaning fixes produces a warning and then stores **the
 mechanism you passed**. You are the only check in this pipeline.
 
 ## The seven decisions
@@ -459,9 +480,11 @@ structure, not the return value.
   not an operator, or to a node whose state excludes it from the dampener. This
   is the most valuable check, because it is the one thing a
   structurally-correct-looking graph can still get wrong.
-- **Run the graph's structural integrity check.** It finds dangling source
-  references and superseded nodes still propagating — not an orphan
-  contradiction; that one is yours, at write time (§5).
+- **Run the graph's structural integrity check.** What it reports: evidence with
+  no provenance (`missing_sourceKind`), and a superseded claim that still has
+  live `IMPL`/`NAND` edges into it (`superseded_active_edges`). What it does not:
+  an orphan contradiction, or a source edge pointing at a node that is gone.
+  Those are yours, at write time (§5, §7).
 
 ## The checklist
 
