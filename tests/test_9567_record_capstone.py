@@ -380,35 +380,62 @@ def test_D5_D6_the_restore_reproduces_the_record_per_label_and_per_predicate(res
             f"restored cache holds {got.get(label, 0)} — got {got}"
         )
 
-    # Relations: equality per predicate. `relations_not_written` is the
-    # outcome's own accounting of the edges the cache does not hold; it must
-    # agree with the per-predicate measurement rather than hide a shortfall.
+    # Relations: equality per predicate, in BOTH directions.
     rel_rows = restored.project.g.query(
         "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS n"
     ).result_set
     got_rels = {t: int(n) for t, n in rel_rows}
     # Relations are counted over the SAME admissible endpoint set as the nodes
-    # above: a relation whose endpoint the restore reported as `refused` cannot
-    # be written (a `MATCH` on a missing node yields no edge), so counting it
-    # here would red this leg for a "the projection dropped an edge family"
-    # reason that is not the projection's — the bounded-restore contract
-    # (`Outcome.refused_keys`, `record_restore.py`) permits exactly that.
-    # Latent today (D4 asserts `coverage == "complete"` ⇒ `refused` empty on
-    # this capture); this keeps the assertion measuring dropped edges, not
-    # refusals, when that stops being true (#10100 review P2).
+    # above, and "admissible" is BOTH halves of it: an endpoint the restore
+    # reported as `refused` was not written, and an endpoint the record view
+    # does not carry as a node is one no statement can MATCH. Counting either
+    # would red this leg for a "the projection dropped an edge family" reason
+    # that is not the projection's — the bounded-restore contract
+    # (`Outcome.refused_keys`, `record_restore.py`) permits the first, and a
+    # relation statement is a no-op for the second.
+    #
+    # ⛔ The node boundary is what makes the BOTH-DIRECTIONS comparison sound:
+    # D4 pins `nodes_written + refused == len(view.nodes)`, so every admissible
+    # endpoint was written and every edge the cache can hold has both endpoints
+    # in this set — a predicate the cache holds and this set does not is an
+    # edge family the projection INVENTED, which a one-way `.get()` loop cannot
+    # see (#10100 review P2).
+    written_nodes = {(node.label, node.key) for node in view.nodes} - refused
+
     def _admissible(endpoint: tuple[str, str]) -> bool:
-        return endpoint not in refused
+        return endpoint in written_nodes
 
     expected_rels = Counter(
         rel.rel_type
         for rel in view.relations
         if _admissible((rel.src_label, rel.src_key)) and _admissible((rel.tgt_label, rel.tgt_key))
     )
-    for rel_type, count in expected_rels.items():
-        assert got_rels.get(rel_type, 0) == count, (
-            f"relation {rel_type}: the record carries {count} and the "
-            f"restored cache holds {got_rels.get(rel_type, 0)} — got {got_rels}"
-        )
+    # ⛔ NON-VACUITY, stated rather than assumed. A loop over an EMPTY counter
+    # asserts nothing, so a capture/record regression that stops carrying edges
+    # would leave this leg green while its row claims per-predicate equality —
+    # and `coverage == "complete"` (D4) is NOT that guarantee: it is derived
+    # from NODE keys, so "a restore that lands every node and no edge still
+    # declares `complete`. That is not a hypothetical"
+    # (`record_restore.py:243-265`). Measured on this capture: 3 predicates
+    # (`CONTAINS`, `extractedFrom`, `aboutObject`; the artifact's D5 row).
+    assert expected_rels, (
+        "the record view carries no relations at all — the per-predicate "
+        "comparison would assert nothing, so this leg would be green without "
+        "measuring the edge axis (D4's `coverage == complete` does not imply "
+        "otherwise: it is derived from node keys alone)"
+    )
+    assert dict(got_rels) == dict(expected_rels), (
+        "per-predicate relation counts disagree — the record carries "
+        f"{dict(expected_rels)} and the restored cache holds {dict(got_rels)}"
+    )
+    # The outcome's OWN accounting of edges the cache does not hold must agree
+    # with the measurement above rather than hide a shortfall behind
+    # `coverage == "complete"`. `relations_not_written` is
+    # `relations_selected - relations_written` (`record_restore.py:244`), and
+    # `relations_selected` is the projection's own plan size
+    # (`projection/__init__.py:17434`), so 0 means every relation the projection
+    # selected was measured back off the target graph.
+    assert outcome.relations_not_written == 0, outcome.render()
 
 
 # ── D7 — the raw turn text comes back, from the record only ────────────────
