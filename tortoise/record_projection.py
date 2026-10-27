@@ -728,6 +728,17 @@ class OpDispatch:
     `refused_props_names()`, which reads the same CHECKs from disk.
     `Point.status` is NOT in this set: a Point's lifecycle IS journaled
     (`PointRetracted`/`…Superseded`) and `point.status` is a PRIMARY column.
+
+    ⚠️ ``never_store`` is the REFUSAL half of the split and says nothing about
+    who COMPUTES the value — #9974 measured the gap that left: the record stored
+    nothing, the cache derived nothing, and a record-sourced rebuild
+    materialized a superseded entity with NO `status`, which
+    `live._terminal_excluded` reads as LIVE. The computing half is
+    `cache_projection.DERIVED_FROM_RECORD` (from this module's own PRIMARY
+    carrier, `superseded_by`); its docstring names the statuses the record
+    carries NO signal for at all (an explicit `restatus`, whose only carrier is
+    `public.journal_event.payload`) — those stay an ownership decision, not a
+    silent success.
     """
 
     table_for_label: Mapping[str, str]

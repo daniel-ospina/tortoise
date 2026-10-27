@@ -26,6 +26,11 @@ import pytest
 
 from tests._live_utils import _skip_unless_live_uri
 from tortoise import cache_projection as cp
+from tortoise.entity_identity import (
+    all_name_holder_ids,
+    live_name_holder_ids,
+    resolve_entity_id,
+)
 from tortoise.projection import FalkorProjection
 from tortoise.residency import (
     COVERAGE_COMPLETE,
@@ -148,11 +153,11 @@ def test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies():
     builds each node BOTH ways and compares the properties the fold owns.
 
     ⚠️ The comparison is restricted to the fold's `ON CREATE` properties: a
-    record-sourced rebuild deliberately does NOT carry the projection-owned
-    `status` cache (§2.6) nor the `$now`-defaulted `createdAt`, both of which
-    the fold writes and the record does not own — that divergence is declared
-    in `cache_projection.FOLD_ON_CREATE_DEFAULTS`'s docstring, not asserted away
-    here.
+    record-sourced rebuild does NOT carry the projection-owned `status` cache
+    (§2.6) unless the record CARRIES its lifecycle signal — `supersededBy`
+    derives `'superseded'`, `cache_projection.DERIVED_FROM_RECORD`, #9974 — and
+    the `$now`-defaulted `createdAt` stays divergent too; both are declared in
+    their table's docstring, not asserted away here.
     """
     fold_owned = {"subjectKind", "objectKind", "title"}
 
@@ -297,3 +302,71 @@ def test_rebuild_from_record_refuses_without_the_destructive_token():
     view = _view()
     with pytest.raises(RuntimeError, match="Graph guard: rebuild_from_record performs"):
         proj.rebuild_from_record(view, confirm_destructive=False)
+
+
+def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
+    """#9974 — the rebuilt cache must not resurrect a TERMINAL entity as LIVE.
+
+    The measured defect, end to end on a real engine. `Object.status` /
+    `Subject.status` are §2.6's **projection-owned cache**: the record correctly
+    refuses to store the name, and NOTHING computed it, so a record-sourced
+    rebuild materialized every superseded entity with no `status`. `live.
+    _terminal_excluded` reads an ABSENT status as LIVE *by design* (its own rule
+    for legacy nodes), so after the rebuild:
+
+    * `MATCH (o:Object) RETURN o.status` was `null`, not `'superseded'`;
+    * `live_name_holder_ids` counted the superseded Object as a live holder, and
+      `resolve_entity_id` RESOLVED its name — the exact D2 shape
+      `tortoise/entity_identity.py` exists to refuse (*"a TERMINAL-only holder
+      … is never resolved to a terminal id"*), and the twin of #9962 on the
+      record→cache route.
+
+    The carrier is the record's own PRIMARY column: both supersession folds
+    write `status` and `supersededBy` in ONE statement, so the cache derives the
+    lifecycle value from the column it does hold
+    (`cache_projection.DERIVED_FROM_RECORD`). The assertion is on the READ
+    consequence, not just the property: a value written but not honoured by the
+    identity read would leave the defect in place.
+    """
+    proj = _projection()
+    view = cp.RecordView(nodes=(
+        cp.node_from_row("Object", {"id": "o-alpha", "name": "alpha",
+                                    "object_kind": "core:org",
+                                    "superseded_by": "alpha-v2", "props": {}}),
+        cp.node_from_row("Object", {"id": "o-alpha-v2", "name": "alpha-v2",
+                                    "object_kind": "core:org", "props": {}}),
+        cp.node_from_row("Subject", {"id": "s-role", "name": "role",
+                                     "subject_kind": "team",
+                                     "superseded_by": "role-v2", "props": {}}),
+        cp.node_from_row("Subject", {"id": "s-role-v2", "name": "role-v2",
+                                     "subject_kind": "team", "props": {}}),
+    ))
+    proj.rebuild_from_record(view, confirm_destructive=True)
+
+    # ── the property the live fold would have written ──────────────────────
+    assert _props(proj, "Object", "id", "o-alpha").get("status") == "superseded", (
+        "the rebuilt :Object lost its lifecycle status — a superseded entity "
+        "comes back LIVE to every _terminal_excluded reader (#9974)"
+    )
+    assert _props(proj, "Subject", "id", "s-role").get("status") == "superseded", (
+        "the rebuilt :Subject lost its lifecycle status (#1423's half of the "
+        "same §2.6 cache)"
+    )
+    # …and the LIVE successor is untouched by the derivation.
+    assert "status" not in _props(proj, "Object", "id", "o-alpha-v2"), (
+        "the derivation invented a status on a row the record is silent about"
+    )
+
+    # ── the READ consequence the defect is about ───────────────────────────
+    assert live_name_holder_ids(proj.g, "Object", "alpha") == [], (
+        "the superseded Object is counted as a LIVE name holder after the "
+        "rebuild — the rebuild route resurrected it"
+    )
+    assert all_name_holder_ids(proj.g, "Object", "alpha") == ["o-alpha"], (
+        "the terminal holder must still exist as a holder, or 'refused' is "
+        "indistinguishable from 'absent name' (#3633 §B.1)"
+    )
+    assert resolve_entity_id(proj.g, "Object", "alpha") is None, (
+        "resolve_entity_id resolved a name to a SUPERSEDED id — the D2 "
+        "refusal entity_identity.py exists to make"
+    )

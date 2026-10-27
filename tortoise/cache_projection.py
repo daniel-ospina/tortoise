@@ -57,7 +57,11 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    constant the live fold would have written (#9634). Named honestly, including
    its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
    plan against the VIEW, so it cannot see a property the VIEW carries — the
-   bound on the exception is the drift pin, not that test.
+   bound on the exception is the drift pin, not that test. A **second** declared
+   exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half, #9974): a
+   property the record is FORBIDDEN to store and the cache must COMPUTE from a
+   column it does carry — `status` from `supersededBy`. Same bound, same pin
+   shape; the residue it deliberately does NOT derive is named at that table.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -102,6 +106,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "DERIVED_FROM_RECORD",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
@@ -249,9 +254,13 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
 #: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
-#:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
-#:   so nothing a record row carries could contradict this table, and the cache
-#:   seeds it through the fold.
+#:   `record_projection.OpDispatch.never_store`); the schema has no column for it.
+#:   It is NOT a constant this table may fill, because it is not a DEFAULT here:
+#:   it is DERIVED from another column the record does hold, and that derivation
+#:   is :data:`DERIVED_FROM_RECORD`'s job (below). Filling `'live'` from this
+#:   table would *fabricate* a positive claim over a value the record carries —
+#:   the one thing a fold-derived default must never do (#9634's own rule:
+#:   a default stands in where the record is SILENT).
 #: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
 #:   REBUILD INSTANT, so there is nothing for a table to pin.
 #: * `Source.sourceKind` — ONTOLOGY §4.6 REQUIRED, `public.source.source_kind`
@@ -313,6 +322,61 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
     "Subject": {"subjectKind": "other"},
     "Object": {"objectKind": "other", "title": ""},
+}
+
+#: The CACHE-owned lifecycle properties, DERIVED from another record COLUMN —
+#: the *other half* of §2.6's split, and the half that had no owner (#9974).
+#:
+#: WHY THIS TABLE EXISTS. §2.6 (`02-identity-and-placement.md`) classifies
+#: `Object.status` / `Subject.status` as **DERIVED (a cache)** — *"the journal
+#: value is not the record"* — and both schemas refuse the name in `props`
+#: (`chk_object_props_no_derived` #8179, `chk_subject_props_no_derived` #8263),
+#: so the record must not store it. Nothing then COMPUTED it: this projection
+#: projected the record's columns and invoked no fold, so a **record-sourced
+#: rebuild** materialized every `:Object` with no `status` — and
+#: `live._terminal_excluded` reads an ABSENT status as LIVE *by design* (the
+#: legacy-node rule), so a superseded Object came back LIVE and
+#: `entity_identity.resolve_entity_id` resolved a name to it. That is #9974,
+#: measured: superseded live → rebuild → `status` NULL → the name resolves to
+#: the superseded id.
+#:
+#: WHY DERIVATION AND NOT A FILL. `status` is not a constant: the fold derives
+#: it from the event stream (`_fold_object_superseded` → `'superseded'`;
+#: `status_folds` / `_fold_object_status` → the connector and pack-declared
+#: vocabularies; `EntityMutated op=restatus` → a caller's explicit lifecycle
+#: write). `FOLD_ON_CREATE_DEFAULTS` above may NOT fill it, because filling
+#: `'live'` where the record names a supersession would replace a carried value
+#: with a fabricated one.
+#:
+#: WHAT THIS TABLE CAN AND CANNOT DERIVE — stated, because "a cache owns it" is
+#: only true where the record carries the signal, and the residue is a decision
+#: rather than an omission (#9974):
+#:
+#: * **DERIVED — `supersededBy` ⇒ `'superseded'`.** This is exactly the §2.6
+#:   fold target: `_fold_object_superseded` (Object) and the generic
+#:   `EntityMutated op=supersede` fold (Subject, #1423) both write
+#:   `status='superseded'` **together with** `supersededBy`, and §2.6 makes
+#:   `supersededBy` PRIMARY ("journal-carried verbatim"), so the record's own
+#:   column is the carrier. The two properties are written in ONE statement on
+#:   both folds, so `supersededBy` present ⇒ the fold set `'superseded'` — with
+#:   the Object fold's `#2242` CAS, or blind on the replay lane.
+#: * **NOT DERIVED — `deprecated`/`archived`/`retracted` via `restatus`, and the
+#:   event-kind vocabularies.** An explicit `update_entity(status=…)` journals
+#:   `EntityMutated op=restatus`, whose ONLY carrier of the value is
+#:   `public.journal_event.payload` (`state.status`) — `public.object` has no
+#:   row-level trace, and the props tail refuses the name. Those values are
+#:   therefore NOT recoverable from the record's LAYER tables, which is what
+#:   this projection reads. Recovering them means changing what a record-sourced
+#:   rebuild READS (the journal, or a schema column) — an ownership decision on
+#:   #9974, not a silent default here. Naming it is the bound on this table: it
+#:   narrows #9974's window, it does not close it.
+#:
+#: `(property, source property, value)`, applied in :func:`node_from_row` only
+#: where the record is SILENT about the target property — which, for a name the
+#: schema refuses, is always.
+DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, str, Any], ...]] = {
+    "Object": (("status", "supersededBy", "superseded"),),
+    "Subject": (("status", "supersededBy", "superseded"),),
 }
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
@@ -723,6 +787,15 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
         if props.get(prop) is None:
             props[prop] = default
+    # §2.6's DERIVED half (#9974): the cache COMPUTES a projection-owned
+    # property from a column the record does carry. Applied AFTER the defaults
+    # and only where the record is silent about the target, so a record that
+    # ever states the value wins over the derivation. `_props_from_row` cannot
+    # state it for `status` (the schema refuses the name), which is why this is
+    # the only path that can put a lifecycle value on a rebuilt node.
+    for prop, source, value in DERIVED_FROM_RECORD.get(label, ()):
+        if props.get(prop) is None and props.get(source):
+            props[prop] = value
     return RecordNode(label=label, key=raw, props=props)
 
 

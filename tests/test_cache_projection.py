@@ -1020,3 +1020,113 @@ def test_read_record_view_asks_for_the_scope_it_was_given():
         "for)")
     for sql in seen[2:]:
         assert "org_id = %s" in sql and "graph_id = %s" in sql
+
+
+# ── 3c. §2.6's DERIVED half — the cache COMPUTES what the record may not store
+
+
+def test_the_cache_computes_the_lifecycle_status_the_record_may_not_store():
+    """#9974 — `status` is DERIVED (§2.6), so something must DERIVE it.
+
+    The measured defect this pins. §2.6 (`02-identity-and-placement.md`)
+    classifies `Object.status` / `Subject.status` as a **cache** — *"the journal
+    value is not the record"* — and both schemas refuse the name in `props`, so
+    the record correctly stores nothing. Nothing then COMPUTED it: the
+    record-sourced projection wrote the record's columns and invoked no fold, so
+    after `rebuild_from_record` a superseded Object carried NO `status` at all,
+    `live._terminal_excluded` read the absence as LIVE (the legacy-node rule),
+    and `entity_identity.resolve_entity_id` resolved the superseded name.
+
+    The carrier is the record's own PRIMARY column: `_fold_object_superseded`
+    (Object) and `EntityMutated op=supersede`'s generic fold (Subject, #1423)
+    each write `status='superseded'` and `supersededBy` in ONE statement, so
+    `supersededBy` present ⇒ the fold set `'superseded'`.
+    """
+    obj = _node("Object", {"id": "o-1", "name": "alpha",
+                           "superseded_by": "alpha-v2"})
+    assert obj.props["status"] == "superseded", (
+        "a rebuild materialised a superseded Object with no status — the "
+        "record refuses the name and the cache did not derive it (#9974)"
+    )
+    # The record's PRIMARY carrier still rides through unchanged (no over-drop).
+    assert obj.props["supersededBy"] == "alpha-v2"
+
+    subj = _node("Subject", {"id": "s-1", "name": "role",
+                             "subject_kind": "team",
+                             "superseded_by": "role-v2"})
+    assert subj.props["status"] == "superseded", (
+        "the Subject half of #1423's supersession is the same §2.6 cache and "
+        "the same carrier — it must derive identically"
+    )
+    assert subj.props["supersededBy"] == "role-v2"
+
+    # …and it reaches the STATEMENT, not just the model: an assertion over
+    # `RecordNode.props` would pass while `node_statement` dropped the field.
+    stmt = cp.node_statement(obj)
+    assert stmt.params["props"]["status"] == "superseded"
+
+
+def test_the_derivation_fabricates_nothing_where_the_record_is_silent():
+    """The other direction, which a naive `'live'` default would break.
+
+    `status` is NOT a `FOLD_ON_CREATE_DEFAULTS` constant. Filling `'live'` where
+    the record carries no lifecycle signal would replace *"the record did not
+    say"* with a positive claim — and for a row the record holds a NON-default
+    status for by other means (an event-kind fold, `restatus`) that claim would
+    be false. So an Object with no `supersededBy` carries NO `status`: the
+    absent value keeps `_terminal_excluded`'s documented legacy rule
+    (*"nodes without a stored status are LIVE"*) instead of minting a value the
+    record cannot support.
+    """
+    obj = _node("Object", {"id": "o-2", "name": "gamma"})
+    assert "status" not in obj.props, (
+        "the projection invented a lifecycle status the record does not carry "
+        "— #9974's residue (restatus / event-kind folds) is a DECISION, not a "
+        "constant to fabricate"
+    )
+    # An EMPTY carrier is not a supersession either: the fold stores the
+    # successor name verbatim, and a blank one names no successor.
+    blank = _node("Object", {"id": "o-3", "name": "delta", "superseded_by": ""})
+    assert "status" not in blank.props
+
+
+def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
+    """A `status` derivation is only sound while the fold writes the PAIR.
+
+    `DERIVED_FROM_RECORD` infers `status='superseded'` from `supersededBy`. That
+    inference holds only because both folds write the two properties in ONE
+    statement — so this pin reads the fold's clauses and reds if either half
+    moves. Source-parsed for the same reason as the
+    `FOLD_ON_CREATE_DEFAULTS` pin: a live graph cannot guard the DB-free lane.
+    """
+    fold = _fold_source()
+    # Object: the blind (replay) clause writes status AND supersededBy together.
+    assert re.search(r"SET o\.status='superseded', o\.supersededBy=\$sb", fold), (
+        "`_fold_object_superseded` no longer writes status and supersededBy in "
+        "one clause — DERIVED_FROM_RECORD's inference is no longer sound"
+    )
+    # The CAS'd live arm keeps the pair together too (both arms are
+    # `CASE WHEN live`, so a node is never given one without the other).
+    assert re.search(r"SET o\.status = CASE WHEN live THEN 'superseded'", fold), (
+        "`_fold_object_superseded`'s CAS arm changed shape — re-derive the "
+        "status/supersededBy pairing, do not guess"
+    )
+    # Subject: `commit_ops` builds ONE state map carrying both keys, and the
+    # generic `SET s += $s` fold applies it atomically.
+    ops = (REPO_ROOT / "tortoise" / "commit_ops.py").read_text()
+    assert re.search(
+        r'state = \{"status": "superseded", "supersededBy": supersedes_by,', ops
+    ), (
+        "`commit_ops._apply_subject_supersession` no longer journals status and "
+        "supersededBy in ONE state map — the Subject derivation lost its carrier"
+    )
+    # The scope of the table is asserted, so adding a member without this
+    # review is a red rather than a silent widening of what the cache invents.
+    assert {label: tuple(member[0] for member in members)
+            for label, members in cp.DERIVED_FROM_RECORD.items()} == {
+        "Object": ("status",), "Subject": ("status",)
+    }, (
+        "DERIVED_FROM_RECORD gained or lost a derived property — every member "
+        "must be a §2.6 DERIVED name with a PRIMARY carrier, and each needs its "
+        "own pin"
+    )
