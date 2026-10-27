@@ -2502,14 +2502,6 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # over-claim here. Raising the bound to cover the worst case means passing an
 # explicit ``pool_size`` on this leg (or a raised ``TORTOISE_POOL_FLOOR``), which
 # is a retrieval-cost trade-off and is deliberately not made in this change.
-#
-# #10121 note (which prior the bound starves): the fused pool's score tie is now
-# the shared recency-then-id rule (``search_engine.recency_tie_clause``) instead
-# of #3019's ``id ASC``, so the prior that falls outside this window is the
-# OLDEST-ranked row, not the latest-sorting id. The BOUND is unchanged (one
-# leg's ``DEFAULT_POOL_SIZE`` per live leg); only which prior hits it moved, and
-# ``test_prior_bound_4509.py`` seeds its fixture for the new order so the pin
-# still measures the bound rather than a stale tie premise.
 
 
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
