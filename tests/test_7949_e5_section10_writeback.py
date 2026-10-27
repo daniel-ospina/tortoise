@@ -28,7 +28,7 @@ figures the registered falsifier produces when it is run now.
 **FAILS IF** the cells §10 publishes for the replicated run move: each arm's
 pooled loss / absent / flattened, distortion, recall, precision and claims emitted
 (measured: raw's `52.0%` to `53.0%` reds this), the holdout `(decision input)`
-row's n / both losses / Δloss, the `#### ⚠️ REPLICATED 2026-10-18` heading itself
+row's subset label, n / both losses / Δloss, the `#### ⚠️ REPLICATED 2026-10-18` heading itself
 (deleted or renamed reds, named in the failure), a duplicated or deleted table row
 (exactly-one-match), or the scorer's own thresholds (an instrument change with no
 write-back).
@@ -64,6 +64,28 @@ _REPLICATED = "#### ⚠️ REPLICATED 2026-10-18"
 def _pct(rate: float) -> str:
     """The doc's own rendering: one decimal place, always."""
     return f"{rate * 100:.1f}%"
+
+
+#: The doc's `<loss> (<rate>%)` loss cell (`6 (60%)`) — the holdout row's form.
+_LOSS_CELL = re.compile(r"^(\d+)\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)$")
+
+
+def _loss_cell(cell: str, *, row: str) -> tuple[int, float]:
+    """Read a `<loss> (<rate>%)` cell as `(loss, rate-in-percent)`.
+
+    Compared as NUMBERS, never as text. The document renders the holdout row's
+    rates in whole percent (`6 (60%)`), while any formatter here (`:g`) renders
+    two-thirds as `66.6667` — so a TEXT compare would red a re-publication that is
+    CORRECT in the document's own format, and the tempting repair for that red is
+    to edit §10 to fit the test instead of the test to fit the document. The rate
+    is compared on the document's own one-decimal grid (see `_pct`), so `60`,
+    `60.0` and `60.00` all read the same and 66.6667 matches `66.7`.
+    """
+    match = _LOSS_CELL.match(cell.strip())
+    assert match, (
+        f"§10's {row} cell {cell!r} is not `<loss> (<rate>%)` — the row can no "
+        "longer be read, so this pin would be comparing nothing")
+    return int(match.group(1)), float(match.group(2))
 
 
 def _block(doc: str, marker: str) -> str:
@@ -129,19 +151,33 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
 
     # The decision input: the holdout Δloss, which is what the registered rule
     # reads. Published as its own row in the split table below the arms table.
+    #
+    # The subset LABEL is pinned too (`#10108` review): the row's figures are the
+    # POOLED `all qualifiers` ones, while the `bound` row below it carries different
+    # numbers (3/6, 4/6). Comparing the cells from `n` onward left the label free, so
+    # the row could be relabelled `bound` and stay GREEN while publishing the pooled
+    # figures under it — on the one row the decision rule reads.
     holdout = score["decision_input"]["branches"]["holdout"]
-    expected_holdout = [
-        str(score["splits"]["aggregate"]["holdout"]["raw"]["n"]),
-        f"{score['splits']['aggregate']['holdout']['raw']['loss']} "
-        f"({score['splits']['aggregate']['holdout']['raw']['loss_rate'] * 100:g}%)",
-        f"{score['splits']['aggregate']['holdout']['narrative']['loss']} "
-        f"({score['splits']['aggregate']['holdout']['narrative']['loss_rate'] * 100:g}%)",
-        f"+{holdout['delta_loss_pp']:.1f} pp",
-    ]
-    # `_row` drops the label cell; the row's cells are [subset, n, raw,
-    # narrative, delta, ...] — the doc renders a whole-percent loss as `6 (60%)`.
-    got_holdout = _row(block, r"\*\*holdout\*\*\s*\(decision input\)")[1:5]
-    assert got_holdout == expected_holdout, (
+    agg_holdout = score["splits"]["aggregate"]["holdout"]
+    got_holdout = _row(block, r"\*\*holdout\*\*\s*\(decision input\)")
+    assert got_holdout[0] == "all qualifiers", (
+        "§10's holdout decision-input row no longer publishes the POOLED figures: "
+        f"its subset cell reads {got_holdout[0]!r}, expected 'all qualifiers'. The "
+        "`bound` / `unbound` rows carry different numbers, so a relabelled row "
+        "would publish the pooled figures under the wrong subset.")
+    assert got_holdout[1] == str(agg_holdout["raw"]["n"]), (
+        f"§10's holdout row publishes n={got_holdout[1]!r}; the registered "
+        f"falsifier ran n={agg_holdout['raw']['n']}")
+    for cell, branch in ((got_holdout[2], "raw"), (got_holdout[3], "narrative")):
+        loss, rate = _loss_cell(cell, row="holdout")
+        assert loss == agg_holdout[branch]["loss"], (
+            f"§10's holdout {branch} cell {cell!r} publishes loss={loss}; the "
+            f"registered falsifier produced {agg_holdout[branch]['loss']}")
+        assert abs(rate - agg_holdout[branch]["loss_rate"] * 100) <= 0.05, (
+            f"§10's holdout {branch} cell {cell!r} publishes {rate}%; the "
+            f"registered falsifier produced "
+            f"{agg_holdout[branch]['loss_rate'] * 100:.4g}%")
+    assert got_holdout[4] == f"+{holdout['delta_loss_pp']:.1f} pp", (
         "§10's holdout decision-input row no longer publishes the Δloss the "
-        f"registered rule reads.\n  §10:    {got_holdout}\n  scorer: "
-        f"{expected_holdout}")
+        f"registered rule reads.\n  §10:    {got_holdout[4]}\n  scorer: "
+        f"+{holdout['delta_loss_pp']:.1f} pp")

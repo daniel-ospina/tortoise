@@ -75,16 +75,15 @@ It pins **no prose** and not the run-1 block, whose receipts were never retained
   number.** A row moves by re-running the probe and deleting the file it replaces —
   never by editing a number. The new test is a *pin on the write-back*, not a
   verdict change.
-* **No `docs/00_index.md` row of its own.** This file lives inside the
-  already-registered bundle path and is reachable through the bundle's rows.
-  (An earlier draft justified this by `_index_row`'s "exactly one" rule — that
-  was wrong: `_index_row` (`tests/test_e1_e2_measurement.py:1839`) selects rows
-  containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`, so a
-  second row would not collide. **It was also the wrong conclusion**, caught by
-  `#10108` review: the bundle carries one row PER ARTEFACT (`docs/00_index.md`
-  `:139` the gate/probes/logs, `:145` PRE-REGISTRATION, `:146` E1+E2), so a
-  reader routing by the documented entry point could not reach this file at all.
-  The row is now added.)
+* **One `docs/00_index.md` row — added in this PR (`:148`), not "none".** The bundle
+  carries one row PER ARTEFACT (`:139` the gate/probes/logs, `:145`
+  PRE-REGISTRATION, `:146` E1+E2), and the README does not name this file — so
+  "reachable through the bundle's rows" was false and a reader routing by the
+  documented entry point could not reach it. (An earlier draft justified adding
+  nothing by `_index_row`'s "exactly one" rule; that was wrong — `_index_row`
+  (`tests/test_e1_e2_measurement.py:1839`) selects rows containing the literal cell
+  `docs/evidence/7949-capstone/E1-E2.md`, so a second row cannot collide. Both the
+  premise and the conclusion were wrong, caught by the `#10108` review.)
 * **No E1/E2/E4 proof.** Their mechanisms are missing, not their pins (below).
 
 ---
@@ -95,9 +94,15 @@ It pins **no prose** and not the run-1 block, whose receipts were never retained
 "S2.3", "S3", "S5", "S6")`, and `:498` refuses a GREEN row whose run left any step
 out (`missing = [s for s in STEPS if s not in observed]`, message at `:500`).
 
+⚠️ **Those three cites are re-checked BY HAND at the audit head, not by the bundle
+sweep.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
+sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`), so a
+`tools/*.py` cite and the bare `:N` continuation below are invisible to it — stated
+here so "swept" is never read into a number nothing re-checks.
+
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:13217` is the fold (`"stats": out.get("stats") or {}`) — while the
+`tortoise/sdk.py:13282` is the fold (`"stats": out.get("stats") or {}`) — while the
 extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8873`) and
 `result["vet"]` (`:8883`) on a surface the receipt never carries. `#9116` is open and
 still true at this head.
@@ -119,7 +124,7 @@ what would have to move:
 | to make this row closable | what has to land first | state (the audit is at `3fbca18ed`; every row re-read at `6986dcd4d`, 2026-10-27) |
 |---|---|---|
 | **every row** (GREEN is unreachable) | `#9116` — copy `vet` / `classify_later` (at least) onto the capture receipt, so S2.2/S2.3 become observable | **OPEN** |
-| E1 | `#5333` — **its design half is no longer pending; it was DECIDED on 2026-10-26** (`EXTRACTOR-V4-ARCHITECTURE.md:869`, commit `6986dcd4d`, PR `#10069`): a pass may only **add**, a physical delete is **foreclosed to every pass**, and removal-from-recall exists *only* as a journaled `restatus` fold — deferred until recall cost is measured. The same paragraph records the measurement that settles this row's shape: **"E1's share is moved by no non-destructive mechanism"** (the shipped gate drops 0 of 34 `^the <X>`; `value_gate`'s own docstring says a definite description is *"left to the arbiter, and is reported, not dropped"*). So the ruling did not hand E1 a mechanism — it foreclosed the one that would move the number. What stays open in `#5333` is **task 1, the owner's authorisation to ever RUN a relocation**, and even that buys only the deferred fold, never a delete | `#5333` **OPEN** (design half **decided**) |
+| E1 | `#5333` — **its design half is no longer pending; it was DECIDED on 2026-10-26** (`EXTRACTOR-V4-ARCHITECTURE.md:869`, commit `6986dcd4d`, PR `#10069`): a pass may **add**, may execute an authorised `MERGE`, and after COMMIT may not remove a committed row except through **the journaled `restatus` fold where no visible successor exists, or the D7 `ObjectSuperseded` arm where one does** (`ONLY` is scoped to the successorless case and never denies the D7 arm); a physical delete is **foreclosed to every pass**. Removal-from-recall in either form is **deferred until recall cost is measured**. The same paragraph records the measurement that settles this row's shape: **"E1's share is moved by no non-destructive mechanism"** (the shipped gate drops 0 of 34 `^the <X>`; `value_gate`'s own docstring says a definite description is *"left to the arbiter, and is reported, not dropped"*). So the ruling did not hand E1 a mechanism — it foreclosed the one that would move the number. What stays open in `#5333` is **task 1, the owner's authorisation to ever RUN a relocation**, and even that buys only a deferred fold, never a delete | `#5333` **OPEN** (design half **decided**) |
 | E2 | `#9775` — the carve-out is absent on the compact render path; and the surviving-value loss (1 of 14) is upstream of the filter, so the row needs the extraction loss fixed, not the gate | **OPEN** |
 | E3 | `#9736` — the registered denominator counts `:Object` mention links, which carry no anchor **by design** (owner option A, `#5199`). Either the metric is re-registered or the model reopened: an owner decision, not a lane's | **OPEN** |
 | E4 | the planted edges are not formed: 5 of 15 wired-and-persisted on the frozen corpus (`#8503`'s own criterion reports 5/14 with `wp02` excluded as the pre-registered exclusion, `#9873`; the frozen denominator is **15** and every receipt reads `planted=15` — the remaining misses are content-level as well as connect-level), and the receipt's retrievability rate is still unmeasured (`#9596`) | `#8503` CLOSED / `#9596` **OPEN** |
