@@ -972,8 +972,13 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # with it, `…<64 hex>Z` backtracks to the segment-1-only alternative, so the
     # SECOND SEGMENT survives in cleartext while the count still reads 1 (measured;
     # the worse failure, because the record looks redacted).
-    # `\s*` around the separator follows the `jwt` precedent: this token is 108
-    # chars and its separator is the one a terminal wrap is likely to split.
+    # `\s*` sits in TWO positions — after the prefix and around the separator —
+    # because this token is 108 chars and a terminal wrap can land anywhere in it.
+    # The SEPARATOR is the obvious one; the PREFIX-ADJACENT one is the dangerous
+    # one, because a break there defeats the anchor LITERAL itself: with no `\s*`
+    # after `apikey_`, `apikey_\n<36 hex>_<64 hex>` redacted NOTHING and came back
+    # byte-identical with the count at 0 — the whole 100-hex body in cleartext, the
+    # largest surviving span of any wrap shape, and invisible in the counts.
     # The SECOND segment is OPTIONAL, and what that buys is the TAIL-ABSENT form
     # (`apikey_<36 hex>` with no separator at all — a cut at the separator, which a
     # display ellipsis or a compaction summary produces). It is NOT what catches a
@@ -989,11 +994,9 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # stated here: every wrap position has its own threshold, so a narrative of them
     # goes stale the moment one is added. The shape of the residual: a mid-segment
     # split keeps whatever hex run survives the break, and an escaped `\n` (a literal
-    # backslash-n, as raw JSONL holds it) does not match the `\s*` separator at all.
-    # Over the session corpus as of 2026-10-26: no mid-segment split observed
-    # (re-measure; the corpus grows).
+    # backslash-n, as raw JSONL holds it) does not match `\s*` at either position.
     ("typesafe_api_key",
-     re.compile(r"(?<![A-Za-z0-9])(?i:apikey_)[0-9a-fA-F]{24,}"
+     re.compile(r"(?<![A-Za-z0-9])(?i:apikey_)\s*[0-9a-fA-F]{24,}"
                 r"(?:\s*_\s*[0-9a-fA-F]{8,})?"
                 r"(?![0-9a-fA-F])"),
      _REDACTION_VALUE.format(kind="typesafe_api_key")),

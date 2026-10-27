@@ -1212,9 +1212,11 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         the count at 0), while an `APIKEY_<ID>` heading stays prose on the hex BODY
         CLASS (a `T` never starts a body), not on case — the 24-hex floor is what
         spares `apikey_a1b2`. Both halves are asserted, the prose one included;
-    (d) the separator tolerates a WHITESPACE wrap (a literal newline or spaces
-        around the `_` — NOT an escaped `\n`, which is a different residual and is
-        asserted as such in (e)); the tail FLOOR (8) catches a TRUNCATED key
+    (d) `\s*` sits at BOTH wrap positions — around the `_` and after the prefix —
+        for literal whitespace (NOT an escaped `\n`, a different residual asserted
+        in (e)). The prefix-adjacent one is the dangerous one: a break there defeats
+        the anchor literal, and without it the whole key came back byte-identical
+        with the count at 0 (measured). The tail FLOOR (8) catches a TRUNCATED key
         (`apikey_<36 hex>_<16 hex>…`, what a compaction summary or a display
         ellipsis leaves — present in the measured corpus), and the second segment
         being OPTIONAL is what catches the TAIL-ABSENT form (`apikey_<36 hex>`,
@@ -1319,6 +1321,16 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         out, counts = redact_secrets(wrapped)
         assert first not in out and second not in out, (
             "a wrapped key left half of it in cleartext")
+        assert counts.get("typesafe_api_key") == 1, wrapped
+    # …and wrapped right AFTER the prefix, which is the shape that defeated the
+    # anchor literal itself: with no `\s*` at that position the key came back
+    # byte-identical and the count read 0 — total cleartext that looks like a clean
+    # scan, and the widest surviving span of any wrap shape. Both separators.
+    for wrapped in (f"key apikey_\n{first}_{second}",
+                    f"key apikey_ {first}_{second}"):
+        out, counts = redact_secrets(wrapped)
+        assert first not in out and second not in out, (
+            "a prefix-adjacent wrap left the key in cleartext")
         assert counts.get("typesafe_api_key") == 1, wrapped
 
     # (e) a MID-SEGMENT split — the residual the rule's comment points here for,
