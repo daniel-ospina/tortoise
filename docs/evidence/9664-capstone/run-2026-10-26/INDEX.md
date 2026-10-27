@@ -24,16 +24,25 @@ artifact.
 * **Profile:** `chatgpt-acceptance` (persistent).
 * **Account observed on ChatGPT:** *Daniel Ospina — Plus* (not Pro).
 * **Org on Tortoise:** `daniel-ospinabotero`, Solo tier, ⚠ flagged, graph usage 1/2, graph `default`.
-  * **Two `org_…` spellings appear in the artifacts, and they are two different fields — not two
-    workspaces.** `step2e-graph-create-failed-error.txt` carries
+  * **Two `org_…` spellings appear in the artifacts, and they do NOT reconcile — recorded as open, not
+    explained away.** `step2e-graph-create-failed-error.txt` carries
     `org_3326a01ea34ae595d84de5d8f9_g_f0f1139860af41b89ba0675b00`, a **custom**-graph namespace in the
-    shape `org_{org_id}_{gid}` (`tortoise/sdk.py:33927,33932`), so the `org_id` on that side is
-    `3326a01ea34ae595d84de5d8f9`; `step7`/`step12` carry `org_2e34bf114bd077dc819619daaf`, the
-    **default** graph's namespace, which `graph_metadata` sets to `organizations.graph_name` and never
-    to `org_id` (`tortoise/supabase_control.py:3959,3962`). One org produces both by construction —
-    `org_id` and `graph_name` are separate columns — so the two strings differing is **expected**, and
-    nothing in this run is recorded as two workspaces. (Settling the org identity itself would be one
-    read of `GET /v1/graphs` against `tortoise_list_graphs`; no row here depends on it.)
+    shape `org_{org_id}_{gid}`. Its doubled `_g_` identifies the emitter: `tortoise/hosted_api.py:20936-20937`
+    builds `gid = f"g_{_short_id()}"` — 26 hex, `:5010-5013` — into `ns = f"org_{org['id']}_{gid}"`,
+    whereas the same shape in `tortoise/sdk.py` derives its gid from **16** hex (`:33926`, `:33931`) and
+    cannot have produced this string. So the `org_id` on that side is `3326a01ea34ae595d84de5d8f9`.
+    `step7`/`step12` carry `org_2e34bf114bd077dc819619daaf`, the **default** graph's namespace, which
+    `graph_metadata` reads from `organizations.graph_name`, never from `org_id`
+    (`tortoise/supabase_control.py:3959-3962`). **The two columns do not make that difference expected:**
+    `graph_name` is *built from* `org_id` on every provisioning path — `graph_name = f"org_{org_id}"` at
+    `hosted_api.py:4867`, `:11255`, `:20537`, `:27612` and `:32641` (which carries `# stored name ==
+    data-plane namespace`), and `tortoise/pack_state.py:5` calls `graph_name=org_{org_id}` "the LANDED
+    isolation boundary" — and the custom-graph namespace embeds that same column (`hosted_api.py:20937`).
+    Two different `org_…` segments therefore mean two different `org_id`s on the two surfaces of this
+    session, and **this run does not settle which**: settling it is one read of `GET /v1/graphs` against
+    `tortoise_list_graphs`, which the instrument could not make. Row 7's "one entitled namespace" is
+    what the connector's own call returned; it is not a finding that the connector and the dashboard
+    session resolved the same org.
 * **Actions** were clicks / typing / `Enter` through `cmux browser`. `eval` was used to **read** state
   only (text, selectors, box geometry); the read-only selector resolver it used is kept as `sel.js`.
   No described action was performed by script.
@@ -78,7 +87,7 @@ available without the socket.
 | 0 | **PASS** — owner logged in | `step0-logged-out-20261026-125130.png`, `step0-logged-out-pane-visible-…125450.png`, `step0-state-change-…125538.png`, `step0-logged-in-plus-…125551.png` |
 | 1 | **PASS** — `team-named` complete, **as state — no sign-up was performed** | `step1a-tortoise-auth-page-…125614.png`, `step1b-tortoise-login-tab-…125624.png`, `step1-org-overview-…125908.png`, `step1-settings-…125922.png`; `step7-graphs-and-step5-onboarding-state.txt` (`completed_steps` contains `team-named`) |
 | 2a | **FAIL — known bug, fix in flight** — graph creation refused, FalkorDB ACL → **#8617** | pre-submit chain: `step2a-graphs-list-…125947.png` (the `default` graph, *"1/2 graphs used"*), `step2b-graphs-state-…130026.png` (*"Dashboard — Checking your session…"* splash), `step2d-name-typed-…130129.png` (`capstone-9664` typed into *New graph name*); then `step2e-graph-create-FAILED-acl-…130137.png`, `step2f-graph-create-retry-acl-…130154.png`; `step2e-graph-create-failed-error.txt` (*"Per-graph ACL provisioning failed — the FalkorDB ACL layer rejected the graph user"*) |
-| 2b | **PASS** — packs narrow → persist → `configured` pinned. **The PASS rests on `step2g`–`step2l` only** | `step2g-…130201.png`, `step2h-packs-narrowed-unsaved-…130213.png`, `step2i-packs-saved-…130222.png` (**byte-identical to `step2h` — still the pre-save frame, so its name mis-describes it and it contributes no state; the save lands in `step2j`**), `step2j-packs-save-result-…130231.png`, **`step2l-packs-persisted-after-reload-…130248.png`** — after a reload `Marketing` is **Off** and *"This graph has never been configured"* is gone, i.e. `configured` flipped; `step2g-packs-before.txt`, `step2k-packs-after-save.txt` (`Marketing … Off`, *"Saved — new extraction on this graph uses the set above"*). **The four re-opens are NOT one unchanged set.** Measured from the pixels (which pack is Off): `step2l` **marketing** · `step2m` **none** (all five Active) · `step2n` **agent-ops** · `step2o` **none** (all five Active). The alphabetical re-order is already present in `step2m`, not `step2n`; `step2n` was captured over the Overview page (*"Security alerts — Suspicious activity detected on this Organization"*), not the Graphs page. `step2m`/`step2n` carry the "Saved — …" banner and `step2o` — a fresh reload — does not; that is measured, and it shows **at least one save happened between `step2l` and `step2m`**. What the frames do **not** record is the toggle history: `step2n` shows agent-ops Off *with* the banner on screen, which is consistent either with an **unsaved** toggle (the banner stale from `step2m`, and `step2m`'s all-active set restored by `step2o`'s reload) or with a save that was then reversed before `step2o`. **No self-changing set is observed under either reading, and no defect is claimed here** — but the toggles are untraced, so what `step2m`–`step2o` show is that the set which **persists** is all five Active (`step2o`'s fresh reload), not the narrowed set this step asserts. `step2o`'s name ("final-restored-persisted") therefore overstates what it carries. The sort itself is still not adjudicated. |
+| 2b | **PASS** — packs narrow → persist → `configured` pinned. **The PASS rests on `step2g`–`step2l` only** | `step2g-…130201.png`, `step2h-packs-narrowed-unsaved-…130213.png`, `step2i-packs-saved-…130222.png` (**byte-identical to `step2h` — still the pre-save frame, so its name mis-describes it and it contributes no state; the save lands in `step2j`**), `step2j-packs-save-result-…130231.png`, **`step2l-packs-persisted-after-reload-…130248.png`** — `Marketing` is **Off**, the *"This graph has never been configured"* text `step2g` carries is gone, and the *"Saved — …"* banner that `step2j` shows beside its **Reload** control is not on screen, so this re-open re-read a stored `configured` state ("reload" is the filename's word; the basis is the banner's absence plus the never-configured text's absence, per the notes below); `step2g-packs-before.txt`, `step2k-packs-after-save.txt` (`Marketing … Off`, *"Saved — new extraction on this graph uses the set above"*). **The four re-opens are NOT one unchanged set.** Measured from the pixels (which pack is Off): `step2l` **marketing** · `step2m` **none** (all five Active) · `step2n` **agent-ops** · `step2o` **none** (all five Active). The alphabetical re-order is already present in `step2m`, not `step2n`; `step2n` was captured over the Overview page (*"Security alerts — Suspicious activity detected on this Organization"*), not the Graphs page. `step2m`/`step2n` carry the "Saved — …" banner and `step2o` — a fresh reload — does not; that is measured, and it shows **at least one save happened between `step2l` and `step2m`**. What the frames do **not** record is the toggle history: `step2n` shows agent-ops Off *with* the banner on screen, which is consistent either with an **unsaved** toggle (the banner stale from `step2m`, and `step2m`'s all-active set restored by `step2o`'s reload) or with a save that was then reversed before `step2o`. **No self-changing set is observed under either reading, and no defect is claimed here** — but the toggles are untraced. The sequence is temporal, not a contradiction: `step2l` establishes that the **narrowed** set was stored, and `step2o`'s re-open shows a **later** stored set of all five Active, so something was saved again between them; neither frame shows a save that failed to stick. `step2o`'s name ("final-restored-persisted") therefore overstates what it carries. The sort itself is still not adjudicated. |
 | 3 | **PASS as corrected** — in the build this run drove (`81f5594dce`) there is no ChatGPT dashboard card, so the docs page is the door. **`#9660` has since added the `chatgpt` chooser family** (`harnesses.js:880`, 2026-10-23) — which changes what the product offers now, not what the run observed | `step3b-docs-chatgpt-section-…`, `step3c-docs-chatgpt-scrolled-…`, `step3d-docs-chatgpt-section-…` (the docs page — the third host this row rests on); `step3a-settings-setup-guide.txt`. **Not** `step3a-setup-guide-after-run-…131734.png`: a blank capture, see the notes below |
 | 4 | **BLOCKED — `#10088`** (product defect, 3 stacked; the code is delivered to the marketing host) | `step4a-plugins-installed`, `step4b`, `step4c`, `step4d` (**byte-identical to `step4e`, i.e. the consent dialog itself — not an intermediate pre-click state**), `step4e-connect-consent-dialog-…131902.png` (consent renders), `step4f-oauth-authorize-page-asks-signin-…131924.png`, `step4g-plugin-state-unchanged-…131936.png`, `step4h-authorize-page-awaiting-owner-signin-…133950.png`, `step4i-oauth-code-landed-on-marketing-site-…135207.png`, `step4j-authorize-page-old-signin-design-…135207.png` (dashboard: *"No connection observed yet"*); **`step4k-visit-chain-trace.txt`** |
 | 5 | **PASS as corrected** — nothing closes at token issue | `step6e-full-trace.txt` (`connection-written` → *"Not applicable to ChatGPT"*); `step7-graphs-and-step5-onboarding-state.txt` |
@@ -135,7 +144,7 @@ run reached Tortoise and the refusal is ours, not the host's. Cases 1 and 3 are 
 exposes is a served-copy promise, and the docs fix is PR **`#10089`**. Their coverage has to move to a
 non-ChatGPT client.
 
-## Two corrections this publication makes to the run's own earlier summary
+## Three corrections this publication makes to the run's own earlier summary
 
 1. **Step 8's write carried NO `graph` argument.** `step8c-write-probe-full-trace.txt` shows the
    arguments as `{kind, content, props, dedup}`. So "**writes** that carry a graph argument now work" is
@@ -148,6 +157,15 @@ non-ChatGPT client.
    shipped afterwards: a graph IS selectable per call, a foreign id IS refused with
    `INVALID_ARGUMENT`, and what remains unreachable is the **write** shape at the ChatGPT venue
    (`#10084`) — a different blocker, at a different layer, on a different client.
+3. **Step 4's blocker was mis-attributed in the run's own index, which recorded `BLOCKED` (consent
+   render) / connector + token verified.** Consent was never the blocker, and neither a connector nor a
+   token was verified. `step4e` shows the consent dialog rendering; `step4i` shows the authorization
+   **code arriving at `https://tortoise.premiselabs.co/?code=…`**, the marketing host, which ignores it;
+   `step4k` finds the ChatGPT connector callback `https://chatgpt.com/connector/oauth/xf4v1zmjo3-b`
+   **0 times** across the whole store; `step4g` shows the plugin state unchanged and `step4j` the
+   dashboard reading *"No connection observed yet"*. The blocker is the **redirect target** (`#10088`).
+   `INDEX-original.md` is kept verbatim by design (see the notes), so this correction lives here rather
+   than as an in-place banner on its step-4 row.
 
 ## The annex probe, and what it could not measure
 
