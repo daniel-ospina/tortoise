@@ -1649,6 +1649,7 @@ surfaces:
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
+  - test_9567_record_capstone.py
   - test_9583_openapi_read_only_claim.py
   # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
   # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that

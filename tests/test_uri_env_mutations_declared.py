@@ -150,6 +150,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
+    # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
+    # never rides a shared server graph. The delenv IS the point; the
+    # fixture-param monkeypatch auto-restores (no lane leak).
+    "test_9567_record_capstone.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
