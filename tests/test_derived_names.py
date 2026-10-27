@@ -320,6 +320,21 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
+    # #5140 finding 8: the SAME two shapes as its sibling directly above — a
+    # module availability probe over the env URI (construct + close, no DETACH
+    # at import) plus the per-test `graph` fixture. SAFETY IS NOT "the handle is
+    # declared": `_live_uri()` builds a per-run test-prefixed graph
+    # (`test_5140_relabel_<hex>`), and every DETACH in the file targets that
+    # graph, so the shared env-URI handle is never cleared. The declaration was
+    # MISSING when the file shipped (#10135), which reded this census
+    # (`test_from_uri_sites_resolve_test_prefixed`) on `main` for every diff
+    # whose matrix reaches the file. The same omission's sibling defect — the
+    # fixture's SDK resolving to the embedded store while its projection
+    # addressed the live lane — is fixed in the file's own `graph` fixture.
+    "test_5140_d10_relabel_migration.py": [
+        r"from_uri\(_probe_uri\)",
+        r"from_uri\(uri\)",
+    ],
     # CLI routing unit — from_uri is stubbed by the test (never connects)
     "test_pipeline_cli.py": [r"from_uri\("],
     # #3301: module live-FalkorDB availability probe over candidate URIs
