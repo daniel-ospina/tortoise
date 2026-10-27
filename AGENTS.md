@@ -407,9 +407,11 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 
 - **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
-  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0` (the pin
-  survives the move: the fleet's DEPLOYED callers send that same version to `api.typesafe.ai`, and the
-  agent-infra source caught up in #2859), prompt version
+  lane taking ownership of the issue's work?") — model `jev-1.13.0` at the time this was
+  measured; the fleet's deployed callers now send the vendor alias `jev-latest` (owner ruling
+  2026-10-27), so a measurement of that seam would have to name its model rather than assume
+  this one, and the fleet's bars are owed a first calibration on the vendor's API (agent-infra
+  #2918). Prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
   `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
