@@ -504,7 +504,11 @@ def resolve_org_limits(org_id: str) -> dict:
     the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
     that is PRESENT with value ``None`` means UNLIMITED (sessions is always
     this, for every tier — #4010); a MISSING key is fail-closed in
-    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource.
+    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource
+    EXCEPT the derived ``documents`` cap, whose branch reads ``max_points``
+    through ``limits.get`` and therefore SKIPS an absent key (an absent key and
+    an explicit ``None`` are indistinguishable there — this resolver always
+    emits the key, so the case is unreachable from here; #4051).
     A missing ATTRIBUTE on the row/column is resolved to a value here — it
     never leaves the key absent. (The pre-#4010 rule of the same shape was
     "missing attributes → defaults"; sessions has no default any more.)
@@ -1055,10 +1059,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             A value that cannot be READ as a number is fail-closed, names the
             field, and is logged at ERROR (#4051) — a limit nobody can read is
             never a pass. A value that IS readable is COERCED with `int()` and
-            then ENFORCED — a numeric string is honoured and a float truncates
-            — so only an unreadable one is refused, and the coercion direction
-            is stated here because it is the half a future reader would
-            otherwise have to measure (#4051 review round 5).
+            then ENFORCED, so only an unreadable one is refused; the three
+            shapes differ and the difference is stated here because it is the
+            half a future reader would otherwise have to measure (#4051 review
+            rounds 5 and 6): an INTEGER-FORMATTED string is honoured
+            (`"1000"` → 1000), a float VALUE truncates (`10.9` → 10), and a
+            float-FORMATTED string (`"1000.0"`, `"1e3"`) is UNREADABLE -
+            `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.

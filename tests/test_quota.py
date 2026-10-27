@@ -196,6 +196,16 @@ class TestEnforceTeamLimit:
         assert "max_points" in str(exc_info.value), (
             f"the refusal must name the unreadable surface: {exc_info.value}")
         assert "unreadable" in str(exc_info.value)
+        # A float-FORMATTED string is the SAME refusal, not a silent truncation:
+        # `int("1000.0")` raises ValueError, so it never reaches the
+        # comparison. Pinned because the docstring states the three shapes
+        # explicitly, and a later "helpful" widening to `int(float(x))` would
+        # honour it instead — turning a stored "1000.0" from a named refusal
+        # into a cap of 1000 (review round 6 on #4051).
+        with pytest.raises(QuotaCheckError) as dotted_exc:
+            enforce_org_limit({"org_id": "t", "max_points": "1000.0"},
+                               "points")
+        assert "max_points" in str(dotted_exc.value), dotted_exc.value
         # A NON-FINITE value is the same class: `int(float('inf'))` raises
         # OverflowError, which must become this refusal rather than an unmapped
         # 500 that names nothing (review round 1 on #4051). Mutation REDs it:
