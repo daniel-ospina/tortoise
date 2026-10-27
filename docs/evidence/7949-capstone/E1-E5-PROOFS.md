@@ -76,15 +76,19 @@ It pins **no prose** and not the run-1 block, whose receipts were never retained
   number.** A row moves by re-running the probe and deleting the file it replaces —
   never by editing a number. The new test is a *pin on the write-back*, not a
   verdict change.
-* **One `docs/00_index.md` row — added in this PR (`:148`), not "none".** The bundle
-  carries one row PER ARTEFACT (`:140` the gate/probes/logs, `:146`
-  PRE-REGISTRATION, `:147` E1+E2), and the README does not name this file — so
-  "reachable through the bundle's rows" was false and a reader routing by the
-  documented entry point could not reach it. (An earlier draft justified adding
-  nothing by `_index_row`'s "exactly one" rule; that was wrong — `_index_row`
-  (`tests/test_e1_e2_measurement.py:1839`) selects rows containing the literal cell
-  `docs/evidence/7949-capstone/E1-E2.md`, so a second row cannot collide. Both the
-  premise and the conclusion were wrong, caught by the `#10108` review.)
+* **One `docs/00_index.md` row — added in this PR, not "none".** The bundle carries
+  one row PER ARTEFACT (the `#7949` / `#9080` gate/probes/logs row, the
+  PRE-REGISTRATION row, and the E1+E2 row), cited **by title, never by line**: a line
+  number ROTS — these read `:140`/`:146`/`:147`/`:148` when the bullet was written and
+  are `:141`/`:148`/`:149`/`:150` at this head, two of the four having routed a reader
+  to a different epic's row, which is the same failure this audit exists to name. And
+  the README does not name this file — so "reachable through the bundle's rows" was
+  false and a reader routing by the documented entry point could not reach it. (An
+  earlier draft justified adding nothing by `_index_row`'s "exactly one" rule; that was
+  wrong — `_index_row` (`tests/test_e1_e2_measurement.py:1839`) selects rows
+  containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`, so a second row
+  cannot collide. Both the premise and the conclusion were wrong, caught by the
+  `#10108` review.)
 * **No E1/E2/E4 proof.** Their mechanisms are missing, not their pins (below).
 
 ---
