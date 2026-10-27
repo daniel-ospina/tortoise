@@ -130,7 +130,23 @@ CASES: tuple[tuple[str, str, str], ...] = (
     # a `token_hex`/`token_urlsafe` call, so the guard could not see it either.
     ("tortoise_api_key", "tortoise_api_key",
      _synth("tt_", "a1b2c3d4e5f6a7b8" * 2)),
-    ("jev", "jev_api_key", "jv_live_" + _fill(24)),
+    # TypeSafe / Jev — TWO shapes, because both are real credentials. `apikey_<36
+    # hex>_<64 hex>` is the vendor's own key (console.typesafe.ai); `jv_live_…` is the
+    # LOOKALIKE host's key the fleet billed against until 2026-10-26 (tortoise#7864),
+    # and it is still sitting in transcripts captured before the migration.
+    # The segments are the VENDOR'S exact shape (36 hex, then 64): a wider sample
+    # would still redact, but it would let a wrong `{60,}_{48,}` rule pass.
+    ("typesafe", "typesafe_api_key",
+     _synth("apikey_", "a1b2c3d4e5f6a7b8" * 2, "c1d2", "_", "e5f6a7b8c9d0e1f2" * 4)),
+    # …and the UPPERCASE mint of the same shape: the rule must not fail OPEN on the
+    # case it did not happen to observe (a leaked credential cannot be un-leaked).
+    ("typesafe_uppercase", "typesafe_api_key",
+     _synth("apikey_", "A1B2C3D4E5F6A7B8" * 2, "C1D2", "_", "E5F6A7B8C9D0E1F2" * 4)),
+    # 24 chars is the SHAPE, not the floor — the rule's floor is 8, so the second
+    # row sits ON it and pins it (mutation 8 -> 24 survived while this was the only
+    # row; a 10-char body would have pinned only an upper bound of 10).
+    ("jev_legacy", "jev_api_key", "jv_live_" + _fill(24)),
+    ("jev_legacy_short", "jev_api_key", "jv_live_" + _fill(8)),
     ("github_classic", "github_token", "ghp_" + _fill(36)),
     ("github_fine_grained", "github_token", "github_pat_" + _fill(60)),
     ("aws", "aws_access_key_id", "AKIA" + "ABCDEFGHIJKLMNOP"),
@@ -1130,6 +1146,21 @@ def test_anchored_shapes_do_not_redact_prose():
         "task-list-of-long-items, and the disk-usage metrics look fine.",
         "A risk-free task-oriented disk-backed pipeline.",
         "AKIA and AIza are prefixes; so are ghp_, xoxb- and jv_live_.",
+        # The TypeSafe prefix is not a shape on its own: `apikey_` with no hex pair
+        # after it, and a short pair, both stay prose.
+        "Set apikey_ in the console, then copy the key id and secret.",
+        "The apikey_a1b2 field is the id, not a credential.",
+        # …and a SHORT PAIR stays prose too. This row pins the ANCHOR (a body that
+        # is not hex never reaches the rule); the FLOORS are pinned by
+        # `test_the_typesafe_rule_is_pinned_at_its_measured_shape`, which is what
+        # reds a `{1,}` rule — this row alone does not.
+        "The apikey_ids_secret pair is configured in the console.",
+        # An uppercase heading is not a credential. Note WHY: the 24-hex floor, not
+        # the prefix's case — the prefix is case-insensitive, so that a future
+        # uppercase mint cannot leak whole (pinned in the measured-shape test).
+        "APIKEY_THE_FIELD_NAMES_THE_KEY is the heading in the console.",
+        # The legacy host's body floor is 8: a shorter suffix is an id, not a key.
+        "The jv_live_abc field in the old console was the id.",
         "the bearer of bad news in a long-standing dispute",
         # Measured false positive of an earlier revision: at a 20-char body
         # floor the generic `sk-` rule matched this scikit-learn abbreviation.
@@ -1156,6 +1187,147 @@ def test_anchored_shapes_do_not_redact_prose():
         assert redact_secrets(text) == (text, {}), text
     for bare in ("AKIA", "AIza", "ghp_", "xoxb-", "eyJhbGci"):
         assert redact_secrets(bare) == (bare, {})
+
+
+def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
+    """Every way the rule can silently stop covering the real key.
+
+    The shape is MEASURED (console-minted key, 2026-10-26): 36 hex, a separator,
+    64 hex, lowercase. Five things must hold, and each one had a way to fail:
+
+    (a) a value followed by a WORD character still redacts WHOLE. This leg pins the
+        ALNUM lookahead mutant — cast to `(?![A-Za-z0-9])` the match backs off to the
+        segment-1-only alternative, so the second segment survives in cleartext while
+        the count still reads 1 (measured in review). The shipped hex lookahead is
+        INERT by construction (body class == lookahead class, greedy), so DELETING it
+        is behaviourally equivalent and no assertion here distinguishes that — see
+        the rule's comment, which says the same;
+    (b) the first-segment floor is a floor and there is NO ceiling — a decoy
+        `{1,}` reds the `apikey_a1b2` prose row (an `apikey_ids_secret` decoy is
+        inert: `i` is not hex, so the body never starts); a FIRST-segment ceiling
+        (`{24,48}`) matches nothing on a longer body and leaks it WHOLE, while a
+        SECOND-segment ceiling leaks the tail;
+    (c) prefix AND body are case-INSENSITIVE — a future uppercase mint must not
+        leak (an earlier case-sensitive prefix let `APIKEY_<36>_<64>` through with
+        the count at 0), while an `APIKEY_<ID>` heading stays prose on the HEX
+        FLOOR, not on case;
+    (d) the separator tolerates a wrap, and the second segment is OPTIONAL: a
+        TRUNCATED key (`apikey_<36 hex>_<16 hex>…`, what a compaction summary or a
+        display ellipsis leaves — present in the measured corpus) must not survive
+        in full;
+    (e) the SPLIT shapes are recorded here rather than narrated in the rule's
+        comment, so the record cannot drift from the behaviour.
+    """
+    key = _synth("apikey_", "a1b2c3d4e5f6a7b8" * 2, "c1d2", "_",
+                 "e5f6a7b8c9d0e1f2" * 4)
+    first, second = key.split("_")[1], key.split("_")[2]
+    assert (len(first), len(second)) == (36, 64), (len(first), len(second))
+
+    # (a) glued to a word character on the trailing side. The `second not in out`
+    # leg is the one that matters: with an ALNUM lookahead the match backtracks to
+    # the segment-1-only alternative, so the second segment survives in cleartext
+    # while the count reads 1 — a green-looking redaction that is not one.
+    for suffix in ("Z", "Zebra", "0"):
+        out, counts = redact_secrets(f"key {key}{suffix}")
+        assert key not in out, (
+            f"a trailing {suffix!r} un-redacted the whole key — the lookahead is "
+            "not the body class minus its own characters")
+        assert second not in out, (
+            f"a trailing {suffix!r} left the SECOND SEGMENT in cleartext — the "
+            "lookahead is not the body class minus its own characters")
+        assert counts.get("typesafe_api_key") == 1, suffix
+
+    # (b) the first-segment floor is a FLOOR (23 prose, 24 redacts) and there is no
+    # ceiling anywhere: the measured shape is 36/64, so a 60-hex first segment and
+    # a 100-hex second segment are still OURS to redact — a bounded class
+    # (`{24,48}/{48,96}`) matches NOTHING on them (a greedy body with no shorter
+    # alternative), so the whole credential survives. The tail is optional and
+    # floors at 8, so a TRUNCATED key is caught too.
+    hexes = "a1b2c3d4e5f6a7b8" * 8
+    # …and NO upper bound: both rows below are above the measured shape, and a
+    # bounded class (`{24,48}/{48,96}`) matches NOTHING on them — a greedy body
+    # followed by another hex char has no shorter alternative, so the whole
+    # credential survives (the `st_` `{32}` failure mode, measured in review).
+    # `(36, 8)` sits ON the tail floor: without it a narrowing to `{9,}`-`{16,}`
+    # ran green while an 8-11 hex tail survived in cleartext with the count still
+    # 1. `(100, 64)` and `(36, 100)` keep the "no ceiling" claim honest on BOTH
+    # segments (a `{24,64}` first segment would otherwise pass).
+    for seg1, seg2, redacts in ((23, 64, False), (24, 64, True),
+                                (36, 8, True), (36, 16, True), (36, 47, True),
+                                (60, 64, True), (100, 64, True), (36, 100, True)):
+        cand = "apikey_" + hexes[:seg1] + "_" + hexes[:seg2]
+        out, counts = redact_secrets(f"key {cand}")
+        assert (cand not in out) is redacts, (
+            f"{seg1}/{seg2} hex: expected redacted={redacts} — the floor on the "
+            "segment lengths moved")
+        if redacts:
+            # ⛔ `cand not in out` is satisfied by redacting ANY part, so a tail
+            # floor of {16,}/{24,}/{47,} all passed while the second segment
+            # survived in cleartext with the count still 1 — the "record looks
+            # redacted" failure. Pin the SEGMENT, not the string.
+            assert hexes[:seg2] not in out, (
+                f"{seg1}/{seg2} hex: the SECOND SEGMENT survived in cleartext")
+
+    # (c) prefix case-sensitivity, body case-insensitivity — the PREFIX is the
+    # vendor's lowercase literal, the HEX is a mint we do not control
+    upper_key = "apikey_" + (first + "_" + second).upper()
+    out, counts = redact_secrets(f"key {upper_key}")
+    assert upper_key not in out, "an UPPERCASE mint leaked"
+    assert counts.get("typesafe_api_key") == 1
+    heading = "APIKEY_" + (first + "_" + second).upper()
+    heading_out, heading_counts = redact_secrets(f"key {heading}")
+    assert heading not in heading_out, (
+        "an UPPERCASE-PREFIX mint leaked whole — the prefix must be "
+        "case-insensitive, like the body")
+    assert heading_counts.get("typesafe_api_key") == 1, heading_counts
+
+    # (d) wrapped at the separator (terminal width), as `jwt` is
+    for wrapped in (f"key apikey_{first}\n_{second}",
+                    f"key apikey_{first} _ {second}"):
+        out, counts = redact_secrets(wrapped)
+        assert first not in out and second not in out, (
+            "a wrapped key left half of it in cleartext")
+        assert counts.get("typesafe_api_key") == 1, wrapped
+
+    # (e) a MID-SEGMENT split — the residual the rule's comment points here for,
+    # so the record is the assertion rather than a narrative that re-stales:
+    #   · below the floor (12 hex before the break) nothing matches, both halves live
+    #   · at/above it (30 hex) the pre-break run IS redacted, the rest survives
+    #   · in the second segment the leading part is redacted, the tail survives
+    low = redact_secrets(f"key apikey_{first[:12]}\n{first[12:]}_{second}")
+    assert low[1] == {}, "a split below the floor should not match at all"
+    high_out, high_counts = redact_secrets(
+        f"key apikey_{first[:30]}\n{first[30:]}_{second}")
+    assert high_counts.get("typesafe_api_key") == 1, (
+        "a split at/above the floor must still redact the pre-break run")
+    assert first[:30] not in high_out, high_out
+    tail_out, tail_counts = redact_secrets(
+        f"key apikey_{first}_{second[:47]}\n{second[47:]}")
+    assert tail_counts.get("typesafe_api_key") == 1, (
+        "a second-segment split must redact the leading part")
+    assert second[:47] not in tail_out, tail_out
+    # …and BELOW the tail floor (6 hex before the break) the whole remaining tail
+    # survives while the count still reads 1 — the widest surviving span of any
+    # split shape, so it is asserted rather than described.
+    sub8_out, sub8_counts = redact_secrets(
+        f"key apikey_{first}_{second[:6]}\n{second[6:]}")
+    assert sub8_counts.get("typesafe_api_key") == 1, (
+        "the prefix must still be redacted below the tail floor")
+    assert first not in sub8_out, sub8_out
+    assert second[6:] in sub8_out, (
+        "below the tail floor the remaining tail is EXPECTED to survive — if this "
+        "row ever fails the rule got WIDER, so re-derive the residual")
+    # …and the ESCAPED form: raw JSONL on disk holds a wrap as a literal backslash-n,
+    # which `\s*` does not match, so the whole second segment survives with the
+    # count reading 1. Out-of-repo exposure only — the in-repo capture path decodes
+    # and `_normalize()`s before redacting — but the residual is recorded here.
+    escaped_out, escaped_counts = redact_secrets(
+        f"key apikey_{first}" + "\\n_" + second)
+    assert escaped_counts.get("typesafe_api_key") == 1, escaped_counts
+    assert first not in escaped_out, escaped_out
+    assert second in escaped_out, (
+        "the escaped-newline residual changed — if the second segment is now "
+        "redacted too, the rule got WIDER and this row must be re-derived")
 
 
 def test_the_window_bounds_the_text_before_the_scan():
@@ -1239,8 +1411,8 @@ def test_every_rule_scans_linearly_on_adversarial_input():
 
     ``test_the_jwt_rule_scans_linearly_on_adversarial_input`` was the original
     name; it is generalised because TWO rules shipped superlinear the same way
-    and only one of them was covered (#4911 cycles 1 and 2). Three families,
-    each a run whose candidate cannot complete its required delimiter:
+    and only one of them was covered (#4911 cycles 1 and 2). Each family is a
+    run whose candidate cannot complete its required delimiter:
 
       * ``("eyJ" + "A"*10) * n`` — the shipped input. Every ``eyJ`` after the
         first is preceded by ``A``, so the lookbehind rejects it before any body
@@ -1264,6 +1436,14 @@ def test_every_rule_scans_linearly_on_adversarial_input():
         the boundary), and a dense ``://`` run with no scheme at all. Its first
         three sizes are smaller because the families are far denser per
         character than the other two (the ``@`` family is ~1 s/MB).
+      * ``typesafe_api_key`` — two families, because that rule is two greedy
+        quantifiers PLUS an optional group carrying its own whitespace class. One stops
+        one hex short of the body floor (never reaches the quantifier minimum);
+        the other satisfies the body and offers a tail UNDER its floor, so the
+        optional branch is entered and fails — the path a nested quantifier
+        blows up on. Each family carries a ``spared`` flag: the second one
+        legitimately redacts segment 1, so it asserts one marker per unit and
+        the under-floor tail left intact, instead of "nothing was redacted".
 
     Scaling, not just a wall-clock threshold: a generous absolute bound alone
     cannot certify linearity (and did not — the reverted `jwt` rule passed the
@@ -1271,37 +1451,63 @@ def test_every_rule_scans_linearly_on_adversarial_input():
     """
     import time
 
-    #: ``(name, build, units)`` — per-family unit count, because the families
-    #: differ by ~30x in characters per unit (see the docstring).
+    #: ``(name, build, units, spared)`` — per-family unit count, because the
+    #: families differ by up to ~700x in characters per unit (see the docstring).
+    #: ``spared`` = the run holds no complete credential, so nothing may be
+    #: redacted and the text must come back byte-identical (keeping the timing
+    #: about the SCAN, not about replacement work). The one non-spared family
+    #: exists because the alternation that matters cannot be reached otherwise.
     families = (
-        ("shipped eyJ", lambda n: ("eyJ" + "A" * 10) * n, 20_000),
-        ("glued _eyJ", lambda n: ("_eyJ" + "A" * 50 + "_") * n, 20_000),
-        ("PEM label, no suffix", lambda n: "-----BEGIN " * n, 20_000),
+        ("shipped eyJ", lambda n: ("eyJ" + "A" * 10) * n, 20_000, True),
+        ("glued _eyJ", lambda n: ("_eyJ" + "A" * 50 + "_") * n, 20_000, True),
+        ("PEM label, no suffix", lambda n: "-----BEGIN " * n, 20_000, True),
         ("url: no userinfo colon",
-         lambda n: ("postgres://" + "A" * 600 + " ") * n, 4_000),
+         lambda n: ("postgres://" + "A" * 600 + " ") * n, 4_000, True),
         ("url: password run all @",
-         lambda n: ("postgres://u:" + "@" * 200 + " ") * n, 4_000),
+         lambda n: ("postgres://u:" + "@" * 200 + " ") * n, 4_000, True),
         ("url: host run, no @",
-         lambda n: ("postgres://u:p@" + "A" * 600 + " ") * n, 4_000),
-        ("url: dense ://", lambda n: "://" * n, 100_000),
+         lambda n: ("postgres://u:p@" + "A" * 600 + " ") * n, 4_000, True),
+        ("url: dense ://", lambda n: "://" * n, 100_000, True),
+        # The TypeSafe rule is the shape this test exists for: two greedy
+        # quantifiers plus an OPTIONAL group carrying its own `\s*`. Body ONE
+        # SHORT of the floor (23 hex) — a run of 24+ MATCHES, since the tail is
+        # optional — so the quantifier minimum is never reached.
+        # Long runs, ~415 kB per family: at 40 characters per unit both finish
+        # well under the absolute 1 s floor, so the assertion degenerates to
+        # "fast" and cannot certify scaling — and a LONG run behind the anchor is
+        # exactly what makes an unbounded class quadratic.
+        ("apikey_, one short of the floor, long space run",
+         lambda n: (" apikey_" + "a" * 23 + " " * 2048) * n, 200, True),
+        # …and the group itself: body satisfied, tail PRESENT but under its floor,
+        # so the optional branch is entered and fails, which is the path a naive
+        # nested quantifier blows up on. Segment 1 legitimately redacts here.
+        ("apikey_, tail under its floor, long space run",
+         lambda n: (" apikey_" + "a" * 24 + "_" + "b" * 4 + " " * 2048) * n, 200, False),
     )
-    def scan(name: str, build, n: int) -> float:
+
+    def scan(name: str, build, n: int, spared: bool) -> float:
         text = build(n)
         started = time.perf_counter()
         redacted, counts = redact_secrets(text)
         elapsed = time.perf_counter() - started
-        # None of these runs contains a complete credential: nothing may be
-        # redacted and the text must come back byte-identical. That also
-        # keeps the timing about the SCAN, not about replacement work.
-        assert counts == {}, f"{name}: redacted a non-credential"
-        assert redacted == text, f"{name}: text was modified"
+        if spared:
+            assert counts == {}, f"{name}: redacted a non-credential"
+            assert redacted == text, f"{name}: text was modified"
+        else:
+            assert counts.get("typesafe_api_key") == n, (
+                f"{name}: expected one segment-1 marker per unit, got {counts}")
+            # the under-floor tail is KEPT (it is not a match), so every unit now
+            # reads `[REDACTED:typesafe_api_key]_bbbb` — pin that, or the family
+            # could be "not spared" while redacting something else entirely.
+            assert redacted.count("[REDACTED:typesafe_api_key]_bbbb") == n, (
+                f"{name}: the under-floor tail was not left intact")
         return elapsed
 
-    for name, build, units in families:
-        one = scan(name, build, units)
-        two = scan(name, build, units * 2)
+    for name, build, units, spared in families:
+        one = scan(name, build, units, spared)
+        two = scan(name, build, units * 2, spared)
         assert two < max(one * 3.0, 1.0), (
-            f"{name}: scan does not scale linearly — {one:.3f}s for 20k units "
+            f"{name}: scan does not scale linearly — {one:.3f}s for {units} units "
             f"→ {two:.3f}s for 2x input (a rule is re-scanning the tail from "
             "every candidate start)")
 

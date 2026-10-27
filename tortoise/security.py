@@ -952,7 +952,52 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("huggingface_token",
      re.compile(r"(?<![A-Za-z0-9])(?:hf_|api_org_)[A-Za-z0-9]{34,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="huggingface_token")),
-    # Jev / TypeSafe AI (`jv_live_…`, `jv_test_…`).
+    # TypeSafe / Jev — the REAL vendor's key: `apikey_<36 hex>_<64 hex>` (measured
+    # 2026-10-26 against a console-minted key at console.typesafe.ai). It is a
+    # SEPARATE kind from `jev_api_key` below on purpose — see that rule's comment.
+    # The hex class AND the prefix accept BOTH cases: the measured key is lowercase,
+    # but a redaction rule that only matches the case it happened to see fails OPEN
+    # on the next mint, and a leaked credential cannot be un-leaked. The prefix was
+    # case-sensitive in an earlier revision on the theory that widening it would
+    # match prose — measured FALSE: what spares `APIKEY_THE_FIELD…` and
+    # `apikey_a1b2` is the 24-hex FLOOR, not the case, and the only thing the
+    # case-sensitive prefix did was let `APIKEY_<36 hex>_<64 hex>` (a well-formed
+    # uppercase mint) leak whole with the count at 0.
+    # ⛔ THE TRAILING LOOKAHEAD IS THE BODY CLASS MINUS ITS OWN CHARACTERS — the
+    # invariant stated in this table's own header. It is INERT by construction here
+    # (`{24,}` and the optional `{8,}` are greedy over the same class, so the next
+    # character is non-hex by definition). It is kept as the stated invariant and
+    # NOT credited with closing anything; the class that LEAKS is the ALNUM one —
+    # with it, `…<64 hex>Z` backtracks to the segment-1-only alternative, so the
+    # SECOND SEGMENT survives in cleartext while the count still reads 1 (measured;
+    # the worse failure, because the record looks redacted).
+    # `\s*` around the separator follows the `jwt` precedent: this token is 108
+    # chars and its separator is the one a terminal wrap is likely to split.
+    # The SECOND segment is OPTIONAL: a truncated key (`apikey_<36 hex>_<16 hex>…`,
+    # the shape a compaction summary or a display ellipsis leaves) must not survive
+    # in full, and it is present in the measured corpus. The vendor literal
+    # `apikey_` anchors the match tightly enough that a bare segment-1 form cannot
+    # be ordinary prose — the class this module refuses to match is an UNANCHORED
+    # hex run, not this one.
+    # ⚠️ RESIDUALS live in the TEST, not in prose here (`{24,}` and the optional
+    # `{8,}` already make a narrative of every wrap position stale — a mid-segment
+    # split keeps whatever hex run survives the break, and the two segments have
+    # DIFFERENT thresholds: a break inside segment 1 below 24 hex matches NOTHING
+    # (count 0, the whole key survives), at/above 24 the pre-break run is redacted;
+    # a break inside segment 2 below 8 hex leaves the whole remaining tail, at/above
+    # 8 the leading part is redacted). `test_the_typesafe_rule_is_pinned_at_its_measured_shape`
+    # asserts every split shape it records (a count here would re-stale the moment
+    # one is added); 0 mid-segment splits over 1,128 session transcripts measured
+    # 2026-10-26 (the corpus grows — re-measure rather than quoting this).
+    ("typesafe_api_key",
+     re.compile(r"(?<![A-Za-z0-9])(?i:apikey_)[0-9a-fA-F]{24,}"
+                r"(?:\s*_\s*[0-9a-fA-F]{8,})?"
+                r"(?![0-9a-fA-F])"),
+     _REDACTION_VALUE.format(kind="typesafe_api_key")),
+    # The LOOKALIKE HOST's key (`jv_live_…`, `jv_test_…`) — `jevtypesafeai.com`, which
+    # the fleet billed against until 2026-10-26 (tortoise#7864). The vendor moved, the
+    # LEAK did not: these values sit in transcripts and graph nodes captured while that
+    # host was in use, so dropping this rule would un-redact credentials already exposed.
     ("jev_api_key",
      re.compile(r"(?<![A-Za-z0-9])jv_(?:live|test)_[A-Za-z0-9_-]{8,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="jev_api_key")),
