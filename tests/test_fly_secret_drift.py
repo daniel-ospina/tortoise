@@ -1752,11 +1752,19 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
     # hard-blocking the deploy in CI.
     config_names = {
-        # #10093: the ACL layer's declared posture. It is what keeps every
-        # hosted graph mint working (an undeclared value is invisible to
-        # check-fly-machine-env.py, so a stale machine silently reverts to
-        # `strict` and the 503s come back with nothing red — #4568), so its
-        # REMOVAL must fail here, in review, and not in production.
+        # #10093: the ACL layer's declared posture. Undeclared, it is
+        # invisible to check-fly-machine-env.py (which iterates ONLY declared
+        # `fly-toml-env` names and runs after the release — #4568), so a stale
+        # machine can silently revert this lane to `strict` with nothing red.
+        # What that costs is NOT the pre-#8617 503 on its own: a REFUSED
+        # credential is recorded as `denied` and never rolls a mint back
+        # (ruling 3, verified). It costs (a) the boundary itself — the reconcile
+        # then reports `denied` (an escalation signal) instead of
+        # `absent_by_design`, so the declared state is no longer declared — and
+        # (b) on a credential that CAN probe (the Admin-class one the storage
+        # meter needs for +GRAPH.MEMORY), the recipe runs and a NON-permission
+        # ResponseError still raises AclLayerError, restoring the rollback.
+        # Its REMOVAL must therefore fail here, in review, not in production.
         "TORTOISE_ACL_LAYER",
         "TORTOISE_CONTROL_PLANE",
         "TORTOISE_REAUTH_WINDOW_SECONDS",
