@@ -386,10 +386,19 @@ def test_an_unproven_position_refuses_instead_of_filing_unnumbered_rows(
 # ── copy_phase: the loop the P0 lived in ──────────────────────────────────
 
 class _FakeGraph:
-    """Paging-aware: honours `$cursor`/`$batch` and answers the count legs."""
+    """Paging-aware: honours `$cursor`/`$batch` and answers the count legs.
 
-    def __init__(self, sessions, turns) -> None:
-        self._sessions, self._turns = list(sessions), list(turns)
+    The ORPHAN leg is answered from `orphans`, and its aggregate from the same
+    list: the census's `_ORPHANS_PAGE_QUERY`/`_ORPHANS_COUNT_QUERY` are the only
+    queries carrying `NOT (:Session)`, so the leg is unambiguous even though the
+    turn question also starts `MATCH (…)-[:CONTAINS]->` and the count question
+    also says `count(p)`.
+    """
+
+    def __init__(self, sessions, turns, orphans=()) -> None:
+        self._sessions = list(sessions)
+        self._turns = list(turns)
+        self._orphans = list(orphans)
 
     def query(self, cypher: str, params: dict | None = None):
         params = params or {}
@@ -398,11 +407,18 @@ class _FakeGraph:
             def __init__(self, rows) -> None:
                 self.result_set = rows
 
-        if "count(p)" in cypher:
+        orphan_leg = "NOT (:Session)" in cypher
+        # `count(DISTINCT p)` FIRST: the turn aggregate is the only one that has
+        # it, and it also contains `count(p)`.
+        if "count(DISTINCT" in cypher:
             return _R([(len(self._turns), len(self._turns))])
+        if "count(p)" in cypher:
+            return _R([(len(self._orphans) if orphan_leg
+                        else len(self._turns),)])
         if "count(s" in cypher:
             return _R([(len(self._sessions),)])
-        rows = self._turns if "CONTAINS" in cypher else self._sessions
+        rows = (self._orphans if orphan_leg
+                else self._turns if "CONTAINS" in cypher else self._sessions)
         cursor, batch = int(params.get("cursor", 0)), int(params.get("batch", 1000))
         return _R(rows[cursor:cursor + batch])
 
@@ -429,7 +445,10 @@ def test_copy_emits_the_empty_session_too_and_counts_what_landed() -> None:
     assert stats["empty_sessions"] == 1
     assert stats["created_at_absent"] == ["s2"]
     # Every class is reported, zeros included: a subset cannot tell "0" from
-    # "not measured", which is how a silent gap reads as a clean result.
+    # "not measured", which is how a silent gap reads as a clean result. This
+    # zero is now MEASURED (the orphan leg found none), not the unreachable
+    # `classify_copy` branch printed in a measured slot — see
+    # `test_an_orphan_turn_is_MEASURED_and_blocks_the_run`.
     assert stats["anomalies"]["orphan"] == 0
     assert set(stats["anomalies"]) >= {"off_shape", "orphan", "cross_wired"}
 
@@ -740,7 +759,10 @@ def test_an_unwritable_out_artifact_never_replaces_the_verdict(
     artifact is duplicated on stdout, so the report is not lost: the run keeps
     the exit code it earned.
     """
-    _main_harness(monkeypatch, _FakeGraph(sessions=[], turns=[]))
+    # A session, not an empty graph: `copy_phase` now refuses a graph with no
+    # `:Session` nodes (the census's positive control), and this test's subject is
+    # the unwritable `--out`, not the population.
+    _main_harness(monkeypatch, _FakeGraph(sessions=[(1, "s1", {})], turns=[]))
     out = tmp_path / "a-directory"
     out.mkdir()
     code = copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
@@ -1008,12 +1030,15 @@ class _PagedGraph(_FakeGraph):
     `test_a_session_read_that_disagrees_with_the_server_count_refuses`.
     """
 
-    def __init__(self, sessions, turns) -> None:
-        super().__init__(sessions, turns)
+    def __init__(self, sessions, turns, orphans=()) -> None:
+        super().__init__(sessions, turns, orphans)
         #: The `$batch` of every SESSION page served, in order — the page-count pin.
         self.session_pages: list[int] = []
         #: ...and of every TURN page, so both legs are pinned as PAGED.
         self.turn_pages: list[int] = []
+        #: ...and of every ORPHAN page, for the same reason (the leg is a read of
+        #: the delete set, so an unpaged one would under-report it silently).
+        self.orphan_pages: list[int] = []
 
     def query(self, cypher: str, params: dict | None = None):
         if "count(" in cypher:
@@ -1023,6 +1048,11 @@ class _PagedGraph(_FakeGraph):
                 "copy_phase issued a NON-AGGREGATE read with no params — that is "
                 "the shape FalkorDB clips silently at RESULTSET_SIZE (#4515), so "
                 "it must be paged, not faked: " + cypher.strip()[:120])
+        if "NOT (:Session)" in cypher:
+            # The orphan leg: paged like every other read, and it carries no
+            # payload to assert beyond the page it was given.
+            self.orphan_pages.append(int(params.get("batch", 1000)))
+            return super().query(cypher, params)
         if "CONTAINS" not in cypher and "properties(s)" not in cypher:
             raise AssertionError(
                 "the session page does not RETURN properties(s), so every session "
@@ -1087,6 +1117,10 @@ def test_a_paged_session_read_carries_every_sessions_provenance() -> None:
     # this one.
     assert graph.session_pages == [2, 2], graph.session_pages
     assert graph.turn_pages == [2, 2], graph.turn_pages
+    # The ORPHAN leg is issued through the same paged read (one empty page here):
+    # an unpaged read of the delete set would clip it silently, and its zero would
+    # then be a not-measured value in a measured slot.
+    assert graph.orphan_pages == [2], graph.orphan_pages
     assert recorded["s3"]["harness"] == "codex"
     assert recorded["s3"]["created_at"] == "2026-10-01T00:00:00Z"
     assert recorded["s2"]["harness"] == "claude"
@@ -1625,6 +1659,113 @@ def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch, capsys) -> N
                        "--dry-run"])
     assert excinfo.value.code == 2
     assert "off_shape=1" in capsys.readouterr().err
+
+
+def test_an_orphan_turn_is_MEASURED_and_blocks_the_run(
+        monkeypatch, capsys) -> None:
+    """An episodic point with no `CONTAINS` edge is in the DELETE SET and in no
+    session — so it is a node the record can never hold, and it must be COUNTED.
+
+    ⛔ The defect this pins: the class was reported from `classify_copy`'s
+    `if not sids` branch, which the copy's own read can NEVER reach (the query
+    starts `MATCH (s:Session)-[:CONTAINS]->(p:Point)`), so the artifact said
+    `orphan: 0` in the measured slot while the delete sweep —
+    `MATCH (p:Point) WHERE p.is_episodic = true`, no kind filter — carried the
+    nodes, and the run exited 0. The census refuses the same nodes
+    (`_REFUSING_TOTALS`), and so does the parity gate from the delete set, so a
+    false zero here also made `copy && parity-gate` disagree about one graph.
+
+    Mutation: deleting the orphan leg from `copy_phase` makes the report read
+    `orphan: 0` and the run exit 0, which fails both assertions below.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])],
+        orphans=[(99, "s1_t9")]))
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--dry-run"])
+    assert excinfo.value.code == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["anomalies"]["orphan"] == 1
+    assert report["anomaly_ids"]["orphan"] == ["s1_t9"]
+
+
+def test_a_graph_with_no_sessions_refuses_the_positive_control(
+        monkeypatch, tmp_path, capsys) -> None:
+    """A wrong `--graph` and a graph with nothing to migrate produce the SAME
+    all-zero artifact, so the copy refuses it — the census's own control.
+
+    The census refuses this exact shape (`backfill_graph_turns.py`, "every total
+    below is a zero, and a wrong graph looks exactly the same. An artifact that
+    cannot be told apart from 'nothing to migrate' must not be handed to `verify`
+    as evidence"). The copy's artifact is read at step 2 of the same destructive
+    migration, so it must not manufacture the artifact that comment forbids.
+
+    The session-less graph is reached with `main`, because `copy_phase` refuses
+    before it emits anything: no artifact is written, nothing is copied.
+    """
+    _main_harness(monkeypatch, _FakeGraph(sessions=[], turns=[]))
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--dry-run", "--out", str(out)])
+    assert excinfo.value.code == 2
+    assert ":Session" in capsys.readouterr().err
+    # Nothing was copied, so there is nothing to report: a zero-artifact here is
+    # the one hand-off this refusal exists to stop.
+    assert not out.exists()
+
+
+def test_a_zero_turn_graph_that_HAS_sessions_is_still_green(
+        monkeypatch, capsys) -> None:
+    """The positive control must not swallow the legitimate shape it sits beside.
+
+    A post-cutover graph holds every `:Session` and no turns left; refusing that
+    would make the control fire on the one graph the phase is meant to re-run
+    against. Pinned so a later `if not session_rows or not rows:` cannot slip in.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {"harness": "pi"})], turns=[]))
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id",
+                          "gid", "--dry-run"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["sessions"] == 1 and report["turns"] == 0
+
+
+def test_a_dry_run_opens_no_record_connection_at_all(
+        monkeypatch, tmp_path) -> None:
+    """`--dry-run` is the operator's pre-flight: it must not need a record.
+
+    The floor read is the ONE record connection a run opens, and the docstring
+    promises twice that a dry run makes none. Nothing pinned the promise: every
+    main-path dry-run test stubs `_record_floor` unconditionally, so dropping
+    the `args.dry_run` guard kept the whole file green (measured) while the
+    pre-flight refused with exit 2 on any host whose DSN was unset — the run that
+    is SUPPOSED to work against an unarmed record.
+
+    Both directions in one test, because a guard can fail open or fail shut: the
+    dry run must call it ZERO times, the writing run exactly once.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    seen: list = []
+    monkeypatch.setattr(copy_mod, "_record_floor",
+                        lambda *a, **k: seen.append(a) or {})
+
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id",
+                          "gid", "--dry-run"]) == 0
+    assert seen == []
+
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    monkeypatch.setattr(copy_mod, "_journal_emit",
+                        lambda *a, **k: (lambda sid, events: 5))
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id",
+                          "gid", "--journal", str(journal)]) == 0
+    assert len(seen) == 1
 
 
 def test_a_dry_run_measures_no_position_and_says_so(monkeypatch, capsys) -> None:

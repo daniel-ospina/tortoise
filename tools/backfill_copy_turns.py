@@ -34,6 +34,17 @@ reported, because ``tools/turn_parity_census.py`` fails any session that has a
 graph turn and no record row — a node this phase refused to copy would fail that
 gate permanently, with no way to satisfy it.
 
+The ORPHAN class cannot be reached through the turn read at all (it starts at
+``(s:Session)-[:CONTAINS]->``, so an unwired point is not in it), so it is
+MEASURED by its own leg — the census's ``_ORPHANS_PAGE_QUERY`` /
+``_ORPHANS_COUNT_QUERY``, re-used rather than restated. ⛔ Without that read the
+class was structurally always zero and the artifact printed ``orphan: 0`` in the
+measured slot while the delete sweep (``MATCH (p:Point) WHERE p.is_episodic =
+true``, no kind filter) carried those nodes: a not-measured value read as
+"measured: none", from the one tool whose artifact an operator reads before an
+irreversible delete. Both sibling gates already treat these nodes as a refusal,
+so a false zero here also made ``copy && parity-gate`` disagree about one graph.
+
 EXIT CODES — the same contract the two sibling gates keep, so a chain
 (``copy && parity-gate``) is not told "the backfill completed" by a run that
 left nodes the record can never hold:
@@ -49,7 +60,12 @@ left nodes the record can never hold:
   refused to guess, so it is ``2`` (below).
 * ``2``  REFUSED. Either a BLOCKING anomaly class is nonzero (``off_shape``,
   ``orphan``, ``session_mismatch``, ``duplicate_index`` — no key the record can
-  store), or the copy stopped on a write it could not prove: a truncated read, an
+  store), or the graph holds NO ``:Session`` nodes at all (the census's own
+  POSITIVE CONTROL: every total is then a zero, which is what a wrong
+  ``--graph`` — or a label/property shape that no longer matches — looks like
+  too, and an artifact that cannot be told apart from "nothing to migrate" must
+  not reach the delete phase as evidence), or the copy stopped on a write it
+  could not prove: a truncated read, an
   unproven journal position, a non-contiguous segment, an append that throws
   (the journal's own ``OSError`` — ENOSPC/EIO/short write, so no position can be
   proven), a record that was not armed, a record that executed statements nobody
@@ -63,8 +79,9 @@ left nodes the record can never hold:
   what did land), and so is a refusal that lands part of the copy (a write whose
   position could not be proven at session N of M — the artifact carries the
   sessions that completed). A refusal raised before the loop (a duplicate turn
-  key, a truncated read, a ``--journal`` that does not name an existing,
-  non-empty file — a SHAPE check, not an identity one) writes no artifact,
+  key, a truncated read, a graph holding no ``:Session`` nodes, a ``--journal``
+  that does not name an existing, non-empty file — a SHAPE check, not an
+  identity one) writes no artifact,
   because nothing was copied.
 
 Honest bounds, stated rather than implied:
@@ -275,10 +292,14 @@ def classify_copy(rows) -> tuple[dict, dict]:
         "session_mismatch": [], "duplicate_index": [],
         "not_point_kind_event": [], "operator_flagged": [],
     }
-    # `orphan` cannot occur through this phase's read (it starts at
-    # `(s:Session)-[:CONTAINS]->`), but the class is kept and reported with its
-    # zero so the artifact can tell "0 orphans" from "not measured". The
-    # census's own `orphan_turn_ids` is where an unwired turn is counted.
+    # `orphan` is NOT reachable from this function's rows (they start at
+    # `(s:Session)-[:CONTAINS]->`, so a point with no session cannot be in them),
+    # and this dict's zero is therefore NOT the artifact's answer: `copy_phase`
+    # OVERWRITES it with the census's own orphan leg, measured. The branch below
+    # is kept as the SHAPE GUARD it is — `sids` empty would otherwise reach
+    # `sorted(sids)[0]` in the `session_mismatch` case and raise IndexError on a
+    # row-shaped caller. Printing this zero in the artifact was the defect: an
+    # unreachable branch is a not-measured slot, not a measured zero.
     for _internal_id, pid, props, sids in rows:
         props = dict(props or {})
         pid = "" if pid is None else str(pid)
@@ -665,6 +686,21 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id,
                                            page_size))
     census._cross_check(":Session", len(session_rows),
                         census._count(graph, census._SESSIONS_COUNT_QUERY)[0])
+    # ⛔ POSITIVE CONTROL, the census's own (`backfill_graph_turns.main`). With no
+    # `:Session` nodes every total below is a zero, and a mistyped `--graph` (or a
+    # label/property shape that no longer matches) produces the SAME all-zero
+    # artifact as a graph with nothing to migrate. This phase's artifact is what
+    # an operator reads as step 2 of a destructive migration, so it must not be
+    # tellable-apart from "nothing to migrate": refuse, before anything is read
+    # for writing and before anything is emitted. A zero-TURN graph that DOES hold
+    # sessions stays green — that is a legitimate post-cutover shape.
+    if not session_rows:
+        raise CopyRefused(
+            "this graph holds no :Session nodes, so every total this run "
+            "would report is a zero — which is what a wrong --graph, or a "
+            "label/property shape that no longer matches, looks like too. "
+            "Refusing to hand the delete phase an artifact that cannot be told "
+            "apart from 'nothing to migrate' (the census's own positive control)")
     sessions = {str(sid): dict(props or {})
                 for _internal, sid, props in session_rows}
     rows = list(census._paged_rows(graph, _COPY_TURNS_PAGE_QUERY, page_size))
@@ -672,6 +708,20 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id,
                         census._count(graph, census._TURNS_COUNT_QUERY)[1])
 
     by_session, anomalies = classify_copy(rows)
+    # ⛔ THE ORPHAN CLASS IS MEASURED BY ITS OWN LEG. The turn read starts at
+    # `(s:Session)-[:CONTAINS]->p`, so an episodic point with NO session is not in
+    # it and `classify_copy`'s `orphan` branch can never fire — reporting that
+    # branch's zero put a NOT-MEASURED value in the artifact's measured slot.
+    # The delete sweep (`MATCH (p:Point) WHERE p.is_episodic = true`, no kind
+    # filter) does carry those nodes, and both sibling gates refuse them, so a
+    # zero here would be the one number in this artifact an operator could not
+    # act on. `orphan` is in `_BLOCKING_ANOMALIES`, so a nonzero count exits 2
+    # below, naming the ids.
+    orphan_ids = [str(r[1]) for r in census._paged_rows(
+        graph, census._ORPHANS_PAGE_QUERY, page_size)]
+    census._cross_check("orphan", len(orphan_ids),
+                        census._count(graph, census._ORPHANS_COUNT_QUERY)[0])
+    anomalies["orphan"] = orphan_ids
     # ⛔ A TURN WHOSE SESSION THE SESSION LEG DID NOT READ REFUSES THE COPY. The
     # session read is paged and cross-checked BEFORE the turn read runs, so a
     # session a live writer created in between appears only in `by_session` — and
