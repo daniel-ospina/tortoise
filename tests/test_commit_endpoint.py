@@ -2497,14 +2497,19 @@ class TestCommitPointsGate:
 
         Scope, stated precisely: this drives the GATE's input (a dependency-
         overridden limits dict), which is how a non-int reaches
-        `enforce_org_limit` on the lanes that hand it a RAW value —
-        `get_current_org_session` (uncoerced `max_api_keys`) and the
-        `/v1/index/docs` documents gate. It pins the gate's refusal contract —
-        name the field, write nothing — and NOT an end-to-end corrupt-column
-        path on this lane: the commit lane's own dependency
-        (`get_current_org_gated`) coerces `max_points` with `int(mp)` first, so a
-        corrupt STORED value here fails earlier, in auth, as an unnamed 500.
-        That resolver gap is tracked as #10136.
+        `enforce_org_limit` on the one lane that hands it a RAW value —
+        `get_current_org_session` (uncoerced `max_api_keys`, key-mint / rotate).
+        WHICH lanes arrive raw and which die earlier is stated ONCE, in
+        `quota.enforce_org_limit`'s SCOPE note — not restated here (four copies
+        of that inventory drifted apart inside this change; a copy claiming the
+        `/v1/index/docs` documents gate arrives raw survived three review rounds,
+        and it is false: that lane is handled by the DERIVED branch, and
+        `resolve_org_limits` coerces `int(mp)` before any gate). It pins the
+        gate's refusal contract — name the field, write nothing — and NOT an
+        end-to-end corrupt-column path on this lane: the commit lane's own
+        dependency (`get_current_org_gated`) coerces `max_points` with `int(mp)`
+        first, so a corrupt STORED value here fails earlier, in auth, as an
+        unnamed 500. That resolver gap is tracked as #10136.
 
         Before the gate validated its input the same dict escaped as a bare
         `TypeError` — refused by accident, naming nothing, and outside the

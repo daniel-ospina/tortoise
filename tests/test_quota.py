@@ -214,13 +214,19 @@ class TestEnforceTeamLimit:
         # raised BEFORE the count, so it cannot rely on `_count_resource`'s
         # ERROR log — and the pre-change crash did reach `logger.exception` +
         # Sentry, so a silent refusal here would downgrade a money-gate data
-        # fault to an ops-invisible 500 (review round 4 on #4051). Mutation
-        # REDs it: drop the `_logger.error` at the raise site.
+        # fault to an ops-invisible 500 (review round 4 on #4051).
+        # ⛔ PIN THE FIELD, NOT THE SHARED PREFIX: this list also contains the
+        # `documents` branch's log from the call above, so a prefix-only match
+        # is satisfied by the WRONG raise site — verified by mutation, deleting
+        # the GENERIC `_logger.error` left a prefix-only assertion GREEN (review
+        # round 3 on #4051). Naming `resource=points` makes each site pin its
+        # own record. Mutation REDs it: drop the `_logger.error` at the generic
+        # raise site.
         import logging
-        errors = [r.message for r in caplog.records
+        errors = [r.getMessage() for r in caplog.records
                   if r.levelno >= logging.ERROR]
         assert any("quota limit unreadable (fail-closed)" in m
-                   for m in errors), errors
+                   and "resource=points" in m for m in errors), errors
         # The `documents` branch is a SEPARATE raise site and logs separately —
         # pin it on its own, by clearing first. Without this, the generic-path
         # log above satisfies any later assertion and a silent documents
