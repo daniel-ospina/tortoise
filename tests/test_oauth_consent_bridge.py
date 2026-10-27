@@ -1666,6 +1666,62 @@ def bearer_refuses(monkeypatch):
     monkeypatch.setattr("tortoise.hosted_api.verify_session_jwt", _refuse)
 
 
+def test_startup_installs_the_SHARED_register(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§9 step 1's OTHER half: the wiring, not the class.
+
+    `ControlPlaneJtiStore` being correct proves nothing about the deployment if the startup hook
+    never installs it — `consent_jti_store()` falls back to `ProcessLocalJtiStore` SILENTLY, so
+    every machine answers "first use" for a nonce another machine already spent and one consent
+    yields N authorization codes. The cross-machine test installs the store itself, so it proves
+    the class and not the wiring; this test boots the real app and drives a redemption through it.
+
+    MEASURED, two-sided: passes here, and FAILS with "the redemption never reached the control
+    plane" if the `install_shared_consent_jti_store()` call is deleted from `_lifespan`
+    (`tortoise/hosted_api.py`, and note that deleting it leaves every other consent test green —
+    which is exactly why this pin has to exist).
+    """
+    from tortoise.consent_token import ControlPlaneJtiStore, consent_jti_store
+
+    tc, cp = bridge_client                      # entering the client runs the real `_lifespan`
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    assert isinstance(consent_jti_store(), ControlPlaneJtiStore), (
+        "the AS started with a PER-PROCESS register — cross-machine replay is unbounded, and no "
+        "other consent test notices because they install the store themselves")
+
+    assert _post_token(tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=bind),
+                       bind).status_code == 200
+    assert any(fn == "consume_oauth_consent_ticket" for fn, _ in cp.rpc_calls), (
+        "the redemption never reached the control plane — per-process again")
+
+
+def test_the_startup_hook_still_calls_the_installer() -> None:
+    """The AST seam, alongside the behavioural pin above (`tests/test_8098_webhook_retry_sweep.py`
+    is the precedent): the wiring must be a real statement in `_lifespan`, not a comment, and the
+    behavioural test cannot tell a call from an equivalent side effect that a refactor removed.
+    """
+    from pathlib import Path
+
+    import tortoise.hosted_api as ha
+
+    tree = ast.parse(Path(ha.__file__).resolve().read_text(), filename="hosted_api.py")
+    lifespan = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_lifespan")
+    calls = [
+        node for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and ((isinstance(node.func, ast.Name) and node.func.id == "install_shared_consent_jti_store")
+             or (isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "install_shared_consent_jti_store"))
+    ]
+    assert len(calls) == 1, (
+        "expected exactly one `install_shared_consent_jti_store()` call in `_lifespan` — zero "
+        "silently restores per-process single-use across Fly machines (replay), and two is ambiguous")
+
+
 def test_a_bound_token_mints_the_code_with_the_tokens_identity_and_bound_params(
         bridge_client, mint_spy, bearer_refuses) -> None:
     """§9 step 2, the whole deliverable: verify, then `issue_auth_code` with the BOUND params.

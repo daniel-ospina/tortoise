@@ -101,8 +101,12 @@ export function validate(params: URLSearchParams): ValidatedParams | string {
   const method = (params.get("code_challenge_method") ?? "S256").trim().toUpperCase();
   if (method !== "S256") return "code_challenge_method must be S256";
 
-  const state = (params.get("state") ?? "").trim();
-  if (!state) return "state is required";
+  // `state` is OPAQUE and is echoed back to the client, which compares it byte-for-byte; a
+  // validator that only needed a non-empty check must not normalise it. Trimming it here made a
+  // client whose `state` carries padding abandon the callback as a CSRF mismatch AFTER the visitor
+  // consented — the same class `redirect_uri` above is forwarded raw for.
+  const state = params.get("state") ?? "";
+  if (!state.trim()) return "state is required";
   if (state.length > 512) return "state is too long";
 
   const scope = (params.get("scope") ?? "").trim() || null;
