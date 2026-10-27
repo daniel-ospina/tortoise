@@ -256,7 +256,7 @@ def _canonical_approval(path: Path | None = None) -> dict:
     sibling for the generator side; the two are intentionally separate copies, exactly
     as `_read_manifest` already is.
 
-    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.
     """
     fm = _frontmatter(Path(path) if path else CANONICAL_DOC)
     if not fm.get("approval_status"):
@@ -870,7 +870,7 @@ def main(argv: list[str]) -> int:
             )
 
     # --- 6. approval: READ from the canonical doc, never typed here (#4185) ------
-    # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    # OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.
     #
     # The manifest's `approval_status` / `approval_principal` / `approval_pr` /
     # `approval_date` are DERIVED from `docs/product/canonical-mcp-tools.md`, and the
