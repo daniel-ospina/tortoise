@@ -300,36 +300,120 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     this test exists for the one thing behaviour cannot cover: a NEW leg added
     later, or a leg that quietly goes back to a single key.
 
-    It is therefore written as a census over every ``ORDER BY`` in the module
-    rather than as a list of expected strings: #10121 moved the tie into
-    :func:`search_engine.recency_tie_clause`, and any leg that does not call it
-    fails here regardless of how the clause is spelled.
+    #10121 review: the first version of this census scanned source LINES for
+    ``ORDER BY``, which a single-quoted clause or a clause assembled across lines
+    evaded, and which a reformat could break for no reason. It now walks the
+    module's AST and inspects every STRING CONSTANT in it, so quoting and
+    line-splitting cannot hide a clause — and it counts what it found, so a
+    census that sees nothing says so instead of passing.
 
     FAIL VALUE: a leg with a bare primary key (e.g. ``ORDER BY hops ASC``) or a
     hand-written second key (``... , n.id ASC``) — the first leaves the tie to DB
     row order, the second re-introduces the oldest-first truncation #10121 fixed.
     """
-    src = inspect.getsource(search_engine)
-    order_clauses = [
-        line.strip() for line in src.splitlines()
-        if "ORDER BY" in line and not line.strip().startswith("#")
-    ]
-    assert order_clauses, "FIXTURE NOT REACHED: no ORDER BY clauses found at all"
+    import ast
 
-    # One occurrence inside the helper's own docstring is not a clause.
-    clauses = [c for c in order_clauses if 'f"ORDER BY' in c or '"ORDER BY' in c]
+    source = inspect.getsource(search_engine)
+    tree = ast.parse(source)
+
+    def _calls_tie(node: ast.AST) -> bool:
+        return any(
+            isinstance(child, ast.Call)
+            and (
+                (isinstance(child.func, ast.Name)
+                 and child.func.id == "recency_tie_clause")
+                or (isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "recency_tie_clause")
+            )
+            for child in ast.walk(node)
+        )
+
+    clauses: list[str] = []
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.JoinedStr):  # f-strings are the only shape
+            continue                                # these clauses are built in
+        literal = "".join(
+            part.value for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str))
+        if "ORDER BY" not in literal:
+            continue
+        clauses.append(literal.strip())
+        if not _calls_tie(node):
+            offenders.append(literal.strip())
+
     assert len(clauses) >= 6, (
-        "FIXTURE NOT REACHED: expected the census to see every leg's clause, "
-        f"got {clauses}"
-    )
-    offenders = [c for c in clauses if "recency_tie_clause(" not in c]
+        "FIXTURE NOT REACHED: the AST census found fewer ORDER BY f-strings "
+        f"than the six legs define: {clauses}")
     assert not offenders, (
         "every ordering leg must append the SHARED recency tie "
         "(search_engine.recency_tie_clause) — a leg that does not is either "
         "leaving its tie to DB row order or re-inventing the oldest-first key "
         f"#10121 removed: {offenders}"
     )
-    assert any("recency_tie_clause('n', 'id')" in c for c in clauses), (
+    def _tie_args(call: ast.Call) -> tuple[object, ...]:
+        return tuple(
+            arg.value if isinstance(arg, ast.Constant) else None
+            for arg in call.args)
+
+    tie_calls = [
+        _tie_args(n) for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Name) and n.func.id == "recency_tie_clause")
+            or (isinstance(n.func, ast.Attribute)
+                and n.func.attr == "recency_tie_clause")
+        )
+    ]
+    assert len(tie_calls) >= 6, (
+        f"expected one shared-tie call per leg, found {tie_calls}")
+    assert ("n", "id") in tie_calls, (
         "the operator leg's clause must survive: it returns a CONSTANT 1.0 for "
-        "every row, so the tie is its entire ranking"
+        f"every row, so the tie is its entire ranking — calls were {tie_calls}"
+    )
+    # INVERTED CHECK (#10121 review): the f-string scan above cannot see a leg
+    # whose cypher is a plain string, a concatenation or ``.format(...)``. This
+    # walks every ``.query(cypher, ...)`` call site instead and requires that any
+    # cypher containing ORDER BY also calls the shared tie — so a NEW leg is
+    # covered by construction, since it cannot reach the graph without a query.
+    def _literal_text(node: ast.AST) -> str:
+        return "".join(
+            child.value for child in ast.walk(node)
+            if isinstance(child, ast.Constant) and isinstance(child.value, str))
+
+    # These legs build the cypher into a local first (`cypher = (...)` then
+    # `graph.query(cypher, ...)`), so a Name argument must be resolved to its
+    # assignment — otherwise the census sees nothing and passes vacuously.
+    assigned: dict[str, ast.expr] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            assigned.setdefault(node.targets[0].id, node.value)
+
+    checked = 0
+    wandering: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "query"
+                and node.args):
+            continue
+        cypher = node.args[0]
+        if isinstance(cypher, ast.Name):
+            cypher = assigned.get(cypher.id, cypher)
+        text = _literal_text(cypher)
+        if "ORDER BY" not in text:
+            continue
+        checked += 1
+        if not _calls_tie(cypher):
+            wandering.append(text.strip()[:120])
+
+    assert checked >= 6, (
+        "FIXTURE NOT REACHED: the query-site census found fewer ordering sites "
+        f"than the six legs define ({checked})")
+    assert not wandering, (
+        "an ORDER BY reached the graph without the shared recency tie. This is "
+        "the shape the f-string scan cannot see (a plain string, a "
+        "concatenation, ``.format``) — the leg is either leaving its tie to DB "
+        f"row order or re-inventing the oldest-first key #10121 removed: {wandering}"
     )

@@ -672,8 +672,9 @@ def test_integration_conflict_relevant_query_outranks_twin(
     retrieval relevance, so the W4-b boost is the only differentiator.  Only
     the sparse leg guarantees that.  With a dense leg present the SDK FUSES
     (``len(raw_results) > 1``, ``match_source="rrf"``); both legs tie,
-    each leg's own ``ORDER BY score, id ASC`` tie-break ranks the lower-ULID
-    twin first, and that one-rank RRF difference is worth MORE than the
+    each leg's own recency-then-id tie-break (#3019, #10121 — ``DESC`` since
+    #10121) hands ONE twin rank 0, and that one-rank RRF difference is worth
+    MORE than the
     boost — so the ordering claim is false, not flaky (#7704, measured on the
     relevance/final-score basis the boost effect is on: fused gap 0.0189 of
     final score — the 0.0378 similarity gap x the 0.5 similarity weight —
@@ -766,11 +767,12 @@ def test_integration_fused_path_applies_contested_boost(
     SHIPPED hybrid path — had no W4-b coverage at all (#7629, #7704).
 
     The ORDERING claim is deliberately NOT asserted here.  The twins are
-    content-identical, so they TIE on every leg; each leg's own ``ORDER BY
-    score DESC, node.<id> ASC`` tie-break (#3019) hands the lower-ULID twin
-    rank 0, and RRF (rank-based, ``1/(k+rank+1)``) converts that one-rank
-    difference into a post-fusion min-max similarity gap that can EXCEED the
-    boost's final-score contribution.  Measured on this fixture: similarity
+    content-identical, so they TIE on every leg; each leg's own
+    recency-then-id tie-break (#3019; ``id DESC`` since #10121, so the
+    HIGHER-ULID twin takes rank 0) drives a one-rank difference, and RRF
+    (rank-based, ``1/(k+rank+1)``) converts it into a post-fusion min-max
+    similarity gap that can EXCEED the boost's final-score contribution.
+    Measured on this fixture: similarity
     gap 0.0378 => 0.0189 of final score, vs the boost's 0.0175 — so the
     contested twin ranks BELOW its twin on this path and the outcome is
     decided by the id tie-break, not the contested signal (#7704).  That gap's
