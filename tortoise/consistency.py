@@ -1762,7 +1762,16 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # halves of one classification reading two carrier tables is exactly the
     # split the seeding comment below warns about; this is the second half's
     # view of the first half's table.
+    #
+    # ⛔ BOTH limbs are needed. The graph's `_fold_object_superseded` matches
+    # `MATCH (o:Object {id:$id})` FIRST and consults the name only when the id
+    # branch bound 0 rows (entities.py), so a record carrying a stub's id
+    # alongside an unestablished name folds there by ID. Keying the resolution
+    # on the name alone refused exactly that record — the same "counting the
+    # address without teaching the resolver to reach it" defect in the other
+    # limb, found by review at the head this comment was written on.
     mention_stub_carriers: dict[str, set] = {}
+    mention_stub_ids: set = set()
     # #5285 cycle-6: the GRAPH's MERGE key per id — `_upsert_object` /
     # `_upsert_subject` MERGE on `name` ALONE, and an empty name is skipped by
     # `_writable_id` (no node is created), so `title` is NEVER a merge key. The
@@ -1980,6 +1989,20 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 for _stub_label, _stub_name in _event_mentioned_name_stubs(ev):
                     if _stub_label not in _NAME_MERGE_LABELS:
                         continue
+                    _stub_id = entity_name_id(_stub_label, _stub_name)
+                    # #10157 review P2: a mention RE-mints a stub the journal
+                    # deleted earlier — `MERGE (o:Object {name:$name})` with an
+                    # `ON CREATE` id binds no node once the old one is gone, so
+                    # it creates one carrying that same deterministic id. The
+                    # id is therefore live again, exactly as a later creation
+                    # record revives its incarnation (`deleted.discard` in the
+                    # creation branch). Without this the sweep still believed
+                    # the stub deleted and refused a journal all three graph
+                    # engines fold.
+                    # ⛔ BEFORE the `continue` below: a RE-mention finds the
+                    # carrier set already populated (it is never pruned), so
+                    # clearing the mark after that branch would never run.
+                    deleted.discard((_stub_label, _stub_id))
                     _stub_carriers = carriers_by_name.setdefault(
                         (_stub_label, _stub_name), set())
                     if _stub_carriers:
@@ -1987,11 +2010,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                         # the stub id (an `ON CREATE` write) does NOT land and
                         # no carrier moves. Same rule the fold applies.
                         continue
-                    _stub_id = entity_name_id(_stub_label, _stub_name)
                     _stub_carriers.add(_stub_id)
                     if _stub_label == "Object":
                         mention_stub_carriers.setdefault(
                             _stub_name, set()).add(_stub_id)
+                        mention_stub_ids.add(_stub_id)
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name
@@ -2147,8 +2170,12 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # sweep — never apply it here. See the sweep below.
             # #10107 review P2: normalise ONCE here, so the trailing sweep's
             # `_object_target` reads the same name/id the classifying predicate
-            # does (a nested `point`/`event` payload is otherwise invisible to
-            # it while `_norm` sees it).
+            # does. ⚠️ `_norm` splices a nested `point` payload ONLY — it does
+            # NOT unwrap a nested `event` payload (review P2: this comment
+            # previously claimed both, which no surface implements; a producer
+            # emitting a nested `event` for `ObjectSuperseded` gets no
+            # normalisation on any engine, and `_fold_object_superseded` reads
+            # the flat envelope).
             supersede_events.append((seq, _norm(ev)))
     # ── #5285 cycle-4 (FIX 1): the ONE trailing supersede sweep.
     #
@@ -2207,15 +2234,38 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # replay engine accepts, and it is the fail-CLOSED direction this
             # gate must never take when the journal is faithful.
             #
+            # ⛔ BOTH limbs, because the graph's fold has both: it matches
+            # `MATCH (o:Object {id:$id})` FIRST and falls back to the name only
+            # when that bound 0 rows (entities.py). A record carrying a stub's
+            # id alongside an unestablished name therefore folds by ID, so
+            # resolving on the name alone refused it.
+            #
             # The carrier set is the one the seeding above already maintains,
             # filtered to the nodes that still EXIST at the journal's END: a
             # stub the journal hard-deletes is genuinely gone, so its supersede
             # stays a miss (`tests/test_rebuild_parity_fail_loud_3585.py::
-            # test_mention_established_then_deleted_name_still_refuses`).
-            _stub_hit = any(
-                ("Object", _sid) not in deleted
-                and not _object_hard_deleted(_sid)
-                for _sid in mention_stub_carriers.get(oname, ()))
+            # test_mention_established_then_deleted_name_still_refuses`, which
+            # also asserts `check_consistency` refuses — the guard below is
+            # otherwise pinned by nothing).
+            #
+            # ⛔ EXISTENCE is `deleted`, NOT the gated `_object_hard_deleted`
+            # map (review P2). That map's re-creation anchors are seeded only
+            # from `PointAdded` / `OperatorAdded` records, so a stub revived by
+            # a later `EventRecorded` MENTION is not an anchor there: it keeps
+            # reporting the delete and the sweep refused a journal all three
+            # graph engines fold. `deleted` is the fold's own END-state set and
+            # the seeding clears the mark on a re-mint, which is exactly the
+            # "does this node exist now" question this limb asks. (The gated
+            # map remains the right oracle for its own `supersede-target-
+            # deleted` exemption, which must stay anchored — a different
+            # question, asked above.)
+            _surviving_stub_ids = {
+                _sid for _sid in mention_stub_ids
+                if ("Object", _sid) not in deleted}
+            _stub_hit = (
+                (isinstance(oid, str) and oid in _surviving_stub_ids)
+                or any(_sid in _surviving_stub_ids
+                       for _sid in mention_stub_carriers.get(oname, ())))
             if _stub_hit:
                 continue
             # Genuinely unresolvable: an id no journaled registration leaves

@@ -2234,8 +2234,12 @@ def test_classify_object_supersede_unregistered_is_its_own_exempt_shape():
     # A record naming NOTHING is not "never registered" — nothing is
     # addressable, so the flag is unfalsifiable and the caller must not set it
     # (see `_supersede_name_unregistered`).
-    from tortoise.projection import _supersede_name_unregistered
-    _none_established = (frozenset(), frozenset())
+    from tortoise.projection import JournalObjectEstablished, _supersede_name_unregistered
+    # ⛔ The NAMED tuple, not a plain 2-tuple (review P2). `journal_object_
+    # surviving_keys` returns `(ids, names)` — the opposite order — so only the
+    # named type keeps a wrong-oracle call from silently inverting both limbs.
+    # These lines are what exercise that contract.
+    _none_established = JournalObjectEstablished(frozenset(), frozenset())
     assert _supersede_name_unregistered(
         {"name": None}, _none_established) is False
     assert _supersede_name_unregistered(
@@ -2247,10 +2251,10 @@ def test_classify_object_supersede_unregistered_is_its_own_exempt_shape():
     # when the name is one nothing established (review P1).
     assert _supersede_name_unregistered(
         {"name": "GHOST", "id": "o-1"},
-        (frozenset(), frozenset({"o-1"}))) is False
+        JournalObjectEstablished(frozenset(), frozenset({"o-1"}))) is False
     assert _supersede_name_unregistered(
         {"name": "GHOST", "id": "never-seen"},
-        (frozenset(), frozenset({"o-1"}))) is True
+        JournalObjectEstablished(frozenset(), frozenset({"o-1"}))) is True
 
 
 def test_journal_object_established_counts_every_address_and_separates_ids():
@@ -2470,6 +2474,16 @@ def test_mention_established_then_deleted_name_still_refuses(env):
         proj.rebuild_all(str(events), confirm_destructive=True)
     assert "object-superseded-miss" in str(ei.value), str(ei.value)
     assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
+    # #10157 review P2: this test is the ONLY opposite-polarity pin for the
+    # sweep's surviving-stub guard, and it used to stop at `rebuild_all` — so
+    # `_stub_hit`'s `deleted`/`_object_hard_deleted` filter was pinned by
+    # nothing, and dropping it made `check_consistency` report a deleted stub's
+    # supersede as clean (a fail-open) with the whole file still green. The
+    # reference fold must refuse here too, not merely the graph engine.
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, (
+        "the reference fold passed a supersede whose stub the journal "
+        f"hard-deleted: {r['non_folded_events']}")
 
 
 def test_mention_stub_only_carrier_folds_on_every_engine(env):
@@ -2512,6 +2526,83 @@ def test_mention_stub_only_carrier_folds_on_every_engine(env):
     assert r["non_folded_refused_count"] == 0, (
         "the reference fold refused a supersede the graph folded onto a "
         f"mention-stub node: {r['non_folded_events']}")
+    assert r["divergence"] != "non-folded", r["divergence"]
+
+
+def test_mention_stub_carrier_resolves_BY_ID_too(env):
+    """#10157 review P1: the graph's fold tries the record's ID FIRST, so the
+    reference fold's resolution must reach a stub by ID as well as by name.
+
+    FAILS IF: the resolution limb is keyed on the record's NAME alone (the
+    first form of this fix). `_fold_object_superseded` runs
+    `MATCH (o:Object {id:$id})` and consults the name only when that bound 0
+    rows (`projection/entities.py`), so `Sup(id=<stub id>, name=<never
+    established>)` FOLDS onto the stub node — while a name-keyed resolution
+    found no stub under the unestablished name, recorded
+    `object-superseded-miss`, and reported `divergence="non-folded"` on a
+    journal all three graph engines accept. The same defect as the sibling
+    test above, in the other limb.
+
+    REACHABLE: the shape `test_collapsed_away_id_with_an_unestablished_name_
+    still_refuses` calls reachable — a producer carrying a stale/renamed name
+    alongside the id — with a MENTION-STUB id instead of a registered one.
+    """
+    sdk, events = env
+    _raw(events, type="EventRecorded", id="e-ment-a2", eventKind="k",
+         object="ACME-A2", event_id="e-ment-a2-rec")
+    _raw(events, type="ObjectSuperseded",
+         id=_entity_name_id("Object", "ACME-A2"), name="GHOST-A2",
+         supersedes_by="y", event_id="e-ment-a2-sup")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": "ACME-A2"}).result_set
+    assert [r[0] for r in rows] == ["superseded"], (
+        f"the graph did not fold the supersede onto the stub by ID: {rows}")
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, (
+        "the reference fold refused an ID-addressed supersede the graph "
+        f"folded: {r['non_folded_events']}")
+    assert r["divergence"] != "non-folded", r["divergence"]
+
+
+def test_mention_stub_rementioned_after_delete_folds_again(env):
+    """#10157 review P2: deleting a stub and MENTIONING it again revives it, so
+    the later supersede folds — the reference fold must not still call it gone.
+
+    FAILS IF: the stub mint does not clear the `deleted` mark. `deleted` is
+    discarded on a later CREATION record ("a later creation RE-CREATES the
+    incarnation"), but a mention stub is a second carrier source and re-mints
+    the node via `MERGE (o:Object {name:$name})` with an `ON CREATE` id — so
+    after the delete the node exists again at the journal's END, and the graph
+    folds the supersede onto it. A stale `deleted` mark recorded a miss and
+    reported `divergence="non-folded"` on a journal all three engines accept.
+
+    Pairs with `test_mention_established_then_deleted_name_still_refuses`, the
+    polarity where the stub really is gone at the end.
+    """
+    sdk, events = env
+    stub_id = _entity_name_id("Object", "ACME-B2")
+    _raw(events, type="EventRecorded", id="e-ment-b2-1", eventKind="k",
+         object="ACME-B2", event_id="e-ment-b2-rec1")
+    _raw(events, type="EntityMutated", op="delete", label="Object",
+         id=stub_id, event_id="e-ment-b2-del")
+    _raw(events, type="EventRecorded", id="e-ment-b2-2", eventKind="k",
+         object="ACME-B2", event_id="e-ment-b2-rec2")
+    _raw(events, type="ObjectSuperseded", name="ACME-B2", supersedes_by="y",
+         event_id="e-ment-b2-sup")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": "ACME-B2"}).result_set
+    assert [r[0] for r in rows] == ["superseded"], (
+        f"the re-mentioned stub was not folded: {rows}")
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, (
+        "the reference fold treated a re-mentioned stub as still deleted: "
+        f"{r['non_folded_events']}")
     assert r["divergence"] != "non-folded", r["divergence"]
 
 
