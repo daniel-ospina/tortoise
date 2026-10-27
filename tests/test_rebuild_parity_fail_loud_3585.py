@@ -2276,17 +2276,22 @@ def test_journal_object_established_counts_every_address_and_separates_ids():
         {"type": "ObjectRegistered", "id": "o-2", "name": ""},
         {"type": "EntityMutated", "op": "rename", "label": "Object",
          "id": "o-1", "state": {"name": "RENAMED"}},
+        {"type": "EntityMutated", "op": "rename", "label": "Object",
+         "id": "o-3", "state": {"name": "FRESH"}},
         {"type": "EntityMutated", "op": "rename", "label": "Point",
          "id": "p-1", "state": {"name": "POINT-NAME"}},
     ]
     names, ids = journal_object_established(events)
-    assert names == frozenset({"KNOWN", "MENTIONED", "RENAMED"}), names
+    assert names == frozenset({"KNOWN", "MENTIONED", "RENAMED", "FRESH"}), names
     assert "POINT-NAME" not in names, (
         "a Point rename is not an Object name — the label gate is load-bearing")
-    assert ids == frozenset({"o-1", "o-2",
+    assert ids == frozenset({"o-1", "o-2", "o-3",
                              _entity_name_id("Object", "MENTIONED")}), (
         "a mention stub's DETERMINISTIC id is established too, not just its "
-        f"name: {ids}")
+        f"name, and so is a state op's TARGET id: {ids}")
+    assert "p-1" not in ids, (
+        "the label gate governs the id limb too — a Point rename's id is not "
+        "an Object id")
     assert "" not in names, names
 
 
@@ -2375,6 +2380,30 @@ def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
         f"the exemption widened past its bound: {ei.value}")
     r = check_consistency(str(events / "events.jsonl"), proj)
     assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+
+
+def test_state_op_target_id_with_an_unestablished_name_still_refuses(env):
+    """#10107 review round 6: a state op NAMES an id the journal could address.
+
+    FAILS IF: the id limb counts `ObjectRegistered` and mention-stub ids only.
+    `EntityMutated` addresses its target BY ID, so a supersede carrying that id
+    describes a carrier the journal could reach — yet the oracle counted only
+    the state op's NAME, so the record was exempted as "established by nothing
+    at all" and `rebuild()` (which folds it on a graph that holds the carrier)
+    disagreed with `rebuild_all`.
+    """
+    sdk, events = env
+    _raw(events, type="EntityMutated", op="rename", label="Object",
+         id="obj-mut-1", state={"name": "OLD-MUT"}, event_id="e-mut-1")
+    _raw(events, type="ObjectSuperseded", id="obj-mut-1", name="GHOST-MUT",
+         supersedes_by="y", event_id="e-mut-sup")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), (
+        "a state op's target id was treated as established by nothing: "
+        f"{ei.value}")
 
 
 def test_mention_stub_id_with_an_unestablished_name_still_refuses(env):
