@@ -65,10 +65,13 @@ SHAPE_DELETE_MISS = "delete-miss"
 SHAPE_UNIMPLEMENTED_OP = "unimplemented-op"
 #: An ``EntityMutated`` op outside the recorded vocabulary.
 SHAPE_UNKNOWN_OP = "unknown-op"
-#: ``ObjectSuperseded`` matched no Object, and the JOURNAL never registered
-#: the target's name — the record is unaddressable by the journal's own
-#: content (#3590 D2). Distinct from ``SHAPE_OBJECT_SUPERSEDED_MISS``, which
-#: keeps the fail-closed refusal for a target the journal DID register.
+#: ``ObjectSuperseded`` matched no Object, and the JOURNAL cannot ADDRESS the
+#: record — NEITHER limb of its identity was ever established: its name by no
+#: `ObjectRegistered`, no `EntityMutated` state op, no `EventRecorded` mention
+#: stub; and its id (when carried) by nothing at all (#3590 D2). A record must
+#: carry a name to be this shape; an id-only record stays
+#: ``SHAPE_OBJECT_SUPERSEDED_MISS``. Distinct from that shape, which keeps the
+#: fail-closed refusal for a target the journal DID establish.
 SHAPE_OBJECT_SUPERSEDED_UNREGISTERED = "object-superseded-unregistered"
 #: ``ObjectSuperseded`` matched no Object.
 SHAPE_OBJECT_SUPERSEDED_MISS = "object-superseded-miss"
@@ -211,6 +214,10 @@ EXEMPT_SHAPES: dict[str, str] = {
         "the journal established (an ESTABLISHED id is a real target — the "
         "fold missed because the carrier was collapsed away or renamed, not "
         "because it never existed, so it must keep refusing; #10107 review). "
+        "BOTH limbs are required, and the record must carry a NAME: an "
+        "id-only record stays `object-superseded-miss` (the exemption is "
+        "granted on a name the journal never established, so a name is the "
+        "least identity it must carry — #10107 review P2). "
         "Because nothing could have produced the address, live folded nothing "
         "either and live/replay end in the SAME state. This is a weaker claim "
         "than the neighbouring `edge-message-unreplayed` exemption, which "
