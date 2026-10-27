@@ -10,7 +10,7 @@ that are not guessable:
      *path* to a list fail-closes to the FULL matrix (#9109) and answers
      `full: true, test_files: "ALL"` — indistinguishable from "this diff touches
      everything".
-  2. The selection is SURFACE-based (`core` = 737 files), so a big number is the
+  2. The selection is SURFACE-based (`core` = 738 files), so a big number is the
      selector working, not a broken tool.
 
 What these pins establish, each of which can fail:
@@ -192,6 +192,73 @@ def test_a_RELATIVE_path_positional_is_refused_too(tmp_path):
     assert "--files-from" in proc.stderr and "#9109" in proc.stderr, (
         f"a caller-relative path operand must get the TRAP message, not the "
         f"git-fetch advice: {proc.stderr!r}")
+
+    # And the remedy the message prints must actually work from the same directory —
+    # advice that fails verbatim is worse than no advice.
+    followed = _run(["--files-from", "relative-list.txt", "--summary"], tmp_path)
+    assert followed.returncode == 0, (
+        f"the refusal tells the caller to use --files-from relative-list.txt; that "
+        f"must resolve relative to them: {followed.stderr}")
+    assert "test_files:" in followed.stdout, followed.stdout
+
+
+def test_the_same_range_given_twice_is_a_usage_error(tmp_path):
+    """`--range A --range B` used to take the LAST one with no diagnostic."""
+    proc = _run(["--range", "HEAD...HEAD", "--range", "origin/main...HEAD", "--summary"],
+                tmp_path)
+
+    assert proc.returncode == 2, (
+        f"a second --range must be refused, not silently win: {proc.returncode} "
+        f"{proc.stdout[:200]}")
+    assert "two ranges" in proc.stderr, proc.stderr
+
+
+def test_the_changed_list_is_computed_with_no_renames(tmp_path):
+    """A renamed SHARED_MODULE must still count as the module it left.
+
+    With rename detection on, `git mv tortoise/sdk.py tortoise/sdk_impl.py` reports only
+    the new path, and the selection narrows to `core` instead of the full matrix the old
+    path's blast radius needs (`python-ci.yml:272` uses `--no-renames` for this reason).
+    """
+    code = "\n".join(
+        line for line in TOOL.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "git diff --no-renames --name-only" in code, (
+        "the range diff must be computed with --no-renames, like CI: without it a "
+        "moved shared module vanishes from the list and the selection under-selects")
+
+
+def test_a_dirty_worktree_is_warned_about(tmp_path):
+    """A commit range cannot see uncommitted work; silence there is UNDER-selection."""
+    real_git = subprocess.run(["bash", "-lc", "command -v git"], capture_output=True,
+                              text=True, timeout=120).stdout.strip()
+    assert real_git, "`git` must be on PATH for this pin"
+    stub_bin = tmp_path / "stub-git"
+    stub_bin.mkdir()
+    stub = stub_bin / "git"
+    # Only `status --porcelain` is faked; every real git call passes through.
+    stub.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  'status --porcelain'*) printf ' M tortoise/sdk.py\\n?? notes.txt\\n'; exit 0 ;;\n"
+        "esac\n"
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    proc = _run(["--print"], tmp_path,
+                env_extra={"PATH": f"{stub_bin}:{os.environ['PATH']}"})
+
+    assert proc.returncode == 0, proc.stderr
+    warnings = [ln for ln in proc.stderr.splitlines() if "WARNING" in ln]
+    assert len(warnings) == 1, (
+        f"a dirty worktree must produce exactly one warning line: {proc.stderr!r}")
+    assert "2 uncommitted path(s)" in warnings[0], warnings[0]
+    assert "tortoise/sdk.py" in warnings[0], (
+        f"the warning must NAME the paths (a bare count is not actionable): {warnings[0]}")
+    assert "--files-from" in warnings[0], warnings[0]
 
 
 def test_files_from_and_a_range_are_mutually_exclusive(tmp_path):

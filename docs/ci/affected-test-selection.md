@@ -40,7 +40,10 @@ tools/run_affected.sh --allow-full    # accept a `full: true` selection
 ```
 
 The default range is `origin/main...HEAD` — three dots, i.e. `git merge-base`, so commits that landed
-on `main` since your branch forked are not counted as *your* changed files.
+on `main` since your branch forked are not counted as *your* changed files. The name list is computed
+with `git diff --no-renames`, exactly as `python-ci.yml` computes it: with rename detection on, a moved
+`tortoise/sdk.py` is reported only under its new name, so a shared module's blast radius would silently
+narrow to the `core` surface. `$RANGE` given twice is a usage error rather than "last one wins".
 
 `--print` writes the selected files to **stdout** (one `tests/…py` path per line, ready to pipe) and a
 **one-line summary to stderr**: how many files, which surfaces produced them, and what the slow /
@@ -107,7 +110,22 @@ surfaces responsible — that is the diagnostic, not a smaller number.
 The `test-slow` and `test-carve-out` legs are **not** run locally: they need the docker FalkorDB lane
 and the embedded carve-out targeting (see `AGENTS.md` → Testing). The summary names how many slow
 files the matched surfaces own and whether the carve-out leg would trigger, so what you skip is
-visible rather than assumed. `--run` runs the fast set only — the same files the PR's shard legs run.
+visible rather than assumed.
+
+A **third** leg is subtracted as well: `uri_requiring` (12 files at this head — `test_capabilities_endpoint.py`,
+`test_onboarding_state_cas.py`, the `test_onboarding_state_split_*` family, …). Those cannot run in a
+URI-empty leg at all, so `select()` removes them from every tier-2 answer; the summary does not carry
+a count for them (the selection JSON has no key for it), and this tool does not run them. If your diff
+touches the hosted/API state surface those files guard, run the docker lane explicitly:
+
+```bash
+export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
+uv run pytest tests/test_onboarding_state.py -q
+```
+
+`--run` otherwise runs the fast set only — the same files the PR's shard legs run. Without that
+export, a default checkout **refuses** the run outright (epic #1647 P4): the URI gate reds every test
+in the selection at fixture setup, which reads as "my diff broke things" when it is the environment.
 
 ## Exit codes
 
@@ -177,4 +195,7 @@ implementation); a `full: true` selection is refused with exit 3 and the reason 
 accepts it; a path operand — absolute **or** relative to the caller — is refused as the #9109 trap;
 `--files-from` plus a range is a usage error; an unparsable selector payload exits 4 with a named
 message rather than a traceback; `--run` forwards `--`-args to pytest and returns pytest's own exit
-code; the script's only selector invocation is the stdin form; an empty range says so.
+code; the changed list comes from `git diff --no-renames` (a renamed shared module must not narrow the
+selection); a dirty worktree is WARNED about by name without touching the repo; `--range` twice and
+`--files-from` plus a range are usage errors; a caller-relative `--files-from` path resolves; the
+script's only selector invocation is the stdin form; an empty range says so.

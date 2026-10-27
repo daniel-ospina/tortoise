@@ -19,11 +19,20 @@
 #      `--changed-files -` line below — that is the only invocation form this script
 #      may ever use, and `tests/test_run_affected.py` pins it.
 #
-#   2. The selection is SURFACE-based, and `core` is a 737-file surface. A large
+#   2. The selection is SURFACE-based, and `core` is a 738-file surface. A large
 #      number is the selector working as designed (a diff touching a shared module or
 #      a docs-only diff still pulls its surface's smoke set), NOT a broken tool. The
 #      one-line summary this script prints on stderr says how many files and which
 #      surfaces produced them, so the number arrives with its explanation.
+#
+# THE RANGE IS A COMMIT RANGE (`git diff --no-renames --name-only <range>`), which is
+# exactly what `python-ci.yml:272` computes — so uncommitted work is NOT in the answer.
+# That is the one way this tool could UNDER-select, so a dirty worktree is WARNED about
+# by name (never silently added: the caller may be mid-edit, and `--files-from` is the
+# explicit way to include uncommitted paths). `--no-renames` is deliberate, not a
+# default: with rename detection ON a moved `tortoise/sdk.py` disappears from the list
+# and the selection narrows to `core` instead of the full matrix its blast radius needs
+# (CI uses the same flag for the same reason, #4378).
 #
 # WHAT IT DOES NOT DO. It never runs the `test-slow` or `test-carve-out` legs: those
 # need the docker FalkorDB lane / the embedded carve-out targeting (see AGENTS.md →
@@ -100,6 +109,7 @@ while [[ $# -gt 0 ]]; do
       FILES_FROM="$2"; shift 2 ;;
     --range)
       [[ $# -ge 2 ]] || die 2 "--range needs a RANGE operand"
+      [[ "$RANGE_GIVEN" == "0" ]] || die 2 "two ranges given (--range $RANGE and '$2')"
       RANGE="$2"; RANGE_GIVEN=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; PYTEST_ARGS=("$@"); break ;;
@@ -128,8 +138,16 @@ if [[ -n "$FILES_FROM" ]]; then
   # The list ITSELF is read here — never handed to the selector as an argument. This
   # is the seam a caller with a hand-written list uses, and the seam the tests use so
   # they do not need a throwaway branch to exercise a diff shape.
-  [[ -f "$FILES_FROM" ]] || die 2 "--files-from: no such file: $FILES_FROM"
-  cp "$FILES_FROM" "$CHANGED"
+  # The list is the caller's path first (`mylist.txt` beside them), then repo-relative
+  # — the refusal above tells a caller-relative spelling to be used with --files-from,
+  # so following that advice verbatim must work.
+  if [[ -f "$FILES_FROM" ]]; then
+    cp "$FILES_FROM" "$CHANGED"
+  elif [[ -f "$CALLER_PWD/$FILES_FROM" ]]; then
+    cp "$CALLER_PWD/$FILES_FROM" "$CHANGED"
+  else
+    die 2 "--files-from: no such file: $FILES_FROM"
+  fi
 else
   # A RANGE, not a path. `foo...bar` is already a range; a bare revision means
   # `<rev>...HEAD`; anything else that EXISTS on disk is the #9109 trap (a file
@@ -151,7 +169,12 @@ default range is $DEFAULT_RANGE)"
     fi
   fi
 
-  if ! git diff --name-only "$RANGE" > "$CHANGED" 2>"$TMP_DIR/git.err"; then
+  # ⛔ `--no-renames`, like `python-ci.yml:272`: with rename detection ON, a moved
+  # `tortoise/sdk.py` is reported only as `tortoise/sdk_impl.py`, and the old path — the
+  # SHARED_MODULE entry whose blast radius is the whole matrix — vanishes from the list.
+  # The selection then answers a NARROWER set than CI does (measured: core/684 instead of
+  # full, losing every surface-specific guard for the moved code).
+  if ! git diff --no-renames --name-only "$RANGE" > "$CHANGED" 2>"$TMP_DIR/git.err"; then
     cat "$TMP_DIR/git.err" >&2
     die 2 "git diff --name-only $RANGE failed (is 'origin/main' fetched? try: git fetch origin main)"
   fi
@@ -165,8 +188,11 @@ default range is $DEFAULT_RANGE)"
   DIRTY="$(git status --porcelain 2>/dev/null || true)"
   if [[ -n "$DIRTY" ]]; then
     DIRTY_N=$(printf '%s\n' "$DIRTY" | wc -l | tr -d ' ')
-    DIRTY_SAMPLE=$(printf '%s\n' "$DIRTY" | awk '{print $NF}' | head -3 \
-      | paste -sd, - | sed 's/,/, /g')
+    # `awk 'NR<=3'`, not `| head -3`: under `set -o pipefail` a `head` that exits first
+    # SIGPIPEs the writer, the assignment's status goes non-zero and `set -e` kills the
+    # script — in exactly the large-dirty-worktree case this warning exists for.
+    DIRTY_SAMPLE=$(printf '%s\n' "$DIRTY" | awk 'NR<=3 {print $NF}' | paste -sd, - \
+      | sed 's/,/, /g')
     printf '%s\n' "run_affected: WARNING — $DIRTY_N uncommitted path(s) are NOT in this selection \
 ($DIRTY_SAMPLE$( (( DIRTY_N > 3 )) && printf ', …' || true)); commit, or pass a list that \
 includes them with --files-from" >&2
@@ -283,11 +309,16 @@ if mode == "run":
 PY
 
 if [[ "$MODE" == "run" ]]; then
-  mapfile -t SELECTED < "$PATHS"
+  # bash-3.2-safe reading (no `mapfile`, which stock macOS bash does not have) and the
+  # `set -u`-safe expansion of a possibly-empty array.
+  SELECTED=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && SELECTED+=("$line")
+  done < "$PATHS"
   # `uv run pytest` — the same command AGENTS.md → Testing documents, so a lane that
-  # iterates here is running what CI runs (minus the slow/carve-out legs, above).
-  # NOT `exec`: exec replaces this shell, so the EXIT trap that removes $TMP_DIR would
-  # never run and every --run would leave a selection record in /tmp. As the last
-  # statement under `set -e`, pytest's exit status is this script's exit status anyway.
-  uv run pytest "${SELECTED[@]}" ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}
+  # iterates here is running what CI runs (minus the slow / carve-out / URI-requiring
+  # legs, above). NOT `exec`: exec replaces this shell, so the EXIT trap that removes
+  # $TMP_DIR would never run and every --run would leave a selection record in /tmp. As
+  # the last statement under `set -e`, pytest's exit status is this script's exit status.
+  uv run pytest ${SELECTED[@]+"${SELECTED[@]}"} ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}
 fi
