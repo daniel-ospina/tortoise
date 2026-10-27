@@ -1514,3 +1514,57 @@ def test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver(
         f"documentKind-guarded resolver: {calls}")
     assert _counts(proj)["aboutDocument"] == 1, (
         "the journaled document endpoint was not re-wired by key")
+
+
+# ── #10139: the supersede transfer's properties must survive a REBUILD ─────────
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#10139 — the rebuild drops it: `about*` edges are SNAPSHOT-carried "
+        "(entities._upsert_point_edges resurrects them from the endpoint's "
+        "`aboutEntities` prop, which has no per-edge attr slot, so the "
+        "resurrection is a bare MERGE), while the record half (the "
+        "DirectEdgeRepoint descriptor) now carries `attrs` but is not what "
+        "produces the final edge here. Fixing needs a decision on which carrier "
+        "owns a per-edge attribute — not a second carrier."),
+)
+def test_supersede_keeps_about_confidence_across_a_rebuild(wired) -> None:
+    """LIVE == REBUILD for the property the supersede transfer carries.
+
+    #9417 makes the structural transfer write the old edge's properties live.
+    This asserts the same is true after `rebuild_all`, i.e. that the property is
+    replayed rather than only written — the invariant this file exists to police
+    (#9553). It is a strict xfail until #10139 decides the carrier: the live
+    value is 0.83 and the replayed value is absent, which is exactly the
+    divergence being tracked.
+    """
+    sdk, proj, events, _ = wired
+    old = _nid(sdk.create_point("statement", "Old: the subject binding"))
+    new = _nid(sdk.create_point("statement", "New: same claim, restated"))
+    # NAME-bearing target: `stub_key` must resolve it or no descriptor is emitted.
+    subj = _nid(sdk.create_subject("TheBoundSubject"))
+
+    proj.g.query(
+        "MATCH (s:Point {id:$sid}), (t) WHERE t.id = $tid "
+        "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$conf",
+        params={"sid": old, "tid": subj, "conf": 0.83},
+    )
+    sdk.supersede_point(old, new)
+
+    def conf_at_successor():
+        rows = proj.g.query(
+            "MATCH (s:Point {id:$sid})-[r:aboutSubject]->(t) WHERE t.id = $tid "
+            "RETURN properties(r)",
+            params={"sid": new, "tid": subj},
+        ).result_set
+        return rows[0][0].get("confidence") if rows else None
+
+    live = conf_at_successor()
+    assert live == pytest.approx(0.83), f"the LIVE transfer lost it: {live}"
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    replay = conf_at_successor()
+    assert replay == pytest.approx(0.83), (
+        f"live != rebuild (#10139): confidence was {live} live and {replay} after "
+        "rebuild_all — the structural transfer's properties are not replayed")
