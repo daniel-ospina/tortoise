@@ -211,6 +211,44 @@ _PAGE_PROPERTY_NEIGHBOURS = {
     "auto-advance": (OAUTH, "onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh"),
 }
 
+#: The §1 table's SITE anchors — the calls whose line numbers the "Fact | Evidence" rows cite, and
+#: property 4's range start. None of them is a property's OWN anchor, which is exactly why every
+#: existing guard above stayed green while all four cited unrelated code after the #10088 reflow:
+#: `_PAGE_PROPERTIES` recomputes `onAuthStateChange(` (and is satisfied by §7's correct cite while
+#: §1's row-4 range start was 19 lines short), and the §1 rows were not recomputed at all. A row
+#: that names the wrong site is worse than a row with no site: a lane reading §1 as the evidence
+#: record is sent to `showSignin();` and told it is the provider sign-in.
+#:
+#: Each entry is (the token that identifies the site on exactly one line, why the spec cites it).
+_SPEC_SITE_ANCHORS = {
+    "the provider sign-in call": (
+        OAUTH, "await supabaseClient.auth.signInWithOAuth({"),
+    "the email sign-in call": (
+        OAUTH, "await supabaseClient.auth.signInWithPassword("),
+    "the consent POST (the raw bearer)": (
+        OAUTH, 'const doPost = async (accessToken) => fetch("/oauth/consent", {'),
+    "the auto-advance listener (property 4's range start)": (
+        OAUTH, "supabaseClient.auth.onAuthStateChange(async (event) => {"),
+}
+
+
+def test_the_specs_site_anchors_point_at_the_code_they_name() -> None:
+    """Every SITE the spec cites must resolve to the call it names at THIS head.
+
+    The anchors drifted three times (round-2 remap, the #10088 reflow, and the §1 rewrite that
+    followed it) because only the four PRIMARY property tokens were recomputed. Uniformly off by
+    +7 is not a rounding error, it is a rule: `file:line` in a doc is a claim about the source, so
+    it gets the same recompute-or-fail treatment as a behavioural assertion.
+    """
+    spec = SPEC.read_text()
+    for what, (path, token) in _SPEC_SITE_ANCHORS.items():
+        line = _only_line(path, token)
+        assert re.search(rf"oauth\.py:{line}\b", spec), (
+            f"the spec cites the wrong line for {what}: {token.strip()!r} is at oauth.py:{line} "
+            "at this head, and the spec does not say so — a reader (or a lane) following it lands "
+            "on unrelated code while every primary-anchor guard stays green"
+        )
+
 
 def test_the_four_properties_have_live_implementation_sites() -> None:
     """Each of SCOPE §4 W3's four properties must exist somewhere that runs.
@@ -387,10 +425,13 @@ def test_the_retry_affordance_cannot_be_shown_without_a_request() -> None:
         "`showRetrySignin` no longer touches `btn-retry-signin`, so this is not the function that "
         "owns the affordance and the assertion below would be vacuous"
     )
-    assert "REQUEST_MISSING" in body, (
-        "`showRetrySignin` can turn the retry control on in the missing-request state — a control "
-        "whose own copy says retrying cannot work (invariant 21), and one whose click the handler "
-        "then has to defend against (#10088)"
+    assert "if (REQUEST_MISSING) { hideRetrySignin(); return; }" in body, (
+        "`showRetrySignin` must refuse in the missing-request state with THAT literal guard — a "
+        "control whose own copy says retrying cannot work (invariant 21), and one whose click the "
+        "handler then has to defend against (#10088). The literal, not the token: "
+        "`if (REQUEST_MISSING)` can be defused (`&& 1 === 0`) or moved past in the same line count "
+        "while a presence check stays green — measured, the whole page suite stays green on that "
+        "mutation."
     )
 
 def test_the_provider_return_markers_are_one_list_on_both_sides() -> None:
