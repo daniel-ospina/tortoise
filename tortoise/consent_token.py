@@ -72,6 +72,7 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -85,6 +86,7 @@ import re
 import secrets as _secrets
 import threading
 import time
+from datetime import UTC, datetime
 
 from tortoise.oauth import OAuthError, _redirect_uri_matches
 
@@ -518,6 +520,110 @@ class ProcessLocalJtiStore:
             return True
 
 
+#: The ONE description a shared register may publish to the 503 body.
+#:
+#: ⛔ THIS IS A CONTRACT, NOT A STYLE CHOICE. `consume_consent_jti` passes a
+#: `JtiStoreUnavailable`'s message into the `error_description` of an UNAUTHENTICATED
+#: response, and PR #10096's P2-1 deliberately kept that passthrough because the message is
+#: the operator's remedy channel ("the register is full"). The condition that makes the
+#: passthrough safe is that the message carries NO driver internals — no DSN, URL, query
+#: string, request id, or schema detail. The control plane's errors can carry all of those,
+#: so the DETAIL IS LOGGED and this literal is what is raised. `main` rejected the variant
+#: that silenced the channel entirely (commit `d57b5d64e8`, kept as
+#: `archive/consent-token-round2-strict-p2-1-not-adopted`); silencing it is NOT the fix and
+#: would reverse a recorded decision — honouring the contract from the store side is.
+_SHARED_STORE_UNAVAILABLE = "the shared consent-ticket register could not answer"
+
+
+class ControlPlaneJtiStore:
+    """The shared single-use register — §2.3 option (b), on the seam the AS already holds.
+
+    WHY THIS CLASS EXISTS (§2.2/§2.3, §9 step 1)
+    `ProcessLocalJtiStore` enforces single-use PER PROCESS, and the hosted API runs several
+    Fly machines, so a token replayed against a different machine yields a second
+    authorization code — the replay `jti` exists to bound, un-bounded in production. A
+    register only bounds replay if every machine consults the SAME row store.
+
+    WHY THE CONTROL PLANE AND NOT A THIRD MECHANISM
+    §2.3 prefers (a) a D1 table on the session origin redeemed over a server-to-server call;
+    it also allows (b) "a row in the control plane consumed by the AS directly", and calls
+    the choice "the one open mechanism choice in this spec" — recorded, not decided. (b) is
+    what this implements, for one reason: the AS **already holds this seam at the exact call
+    site** (`hosted_api.py` passes its `cp` into `issue_auth_code`, and the whole
+    `oauth_clients`/`oauth_codes`/`oauth_*_tokens` family lives there). (a) would add a new
+    route on the session origin, a new server-to-server authentication for it, and a new
+    failure domain on the consent path — strictly more new boundary for the same guarantee.
+
+    CONSEQUENCE OF (b) THAT IS WORTH STATING: only the AS writes. The minter records
+    nothing, because single-use is bounded at REDEMPTION — which is where a replay
+    arrives. So the minting side needs no service-role credential, no new secret, and no
+    write access (§2.3's "no new secret is needed for the redemption leg").
+
+    ATOMICITY. `consume` is ONE `rpc_value` call to `consume_oauth_consent_ticket`, whose
+    body is a single `INSERT … ON CONFLICT DO NOTHING RETURNING` (migration
+    `20261027120001_oauth_consent_tickets.sql`). A read-then-write would be a TOCTOU that
+    two machines can both win; with the constraint deciding, exactly one caller gets `true`.
+    """
+
+    def __init__(self, control_plane=None) -> None:
+        # Injected for tests; `None` resolves `get_control_plane()` per call, so a store
+        # constructed before the control plane is configured is not silently dead forever.
+        #
+        # NO clock parameter, deliberately: the prune happens in POSTGRES (`now()`), so an
+        # injected clock here could not influence it — offering one would let a test pin a
+        # boundary the code does not actually use, which is the false-confidence seam the
+        # injected clocks elsewhere in this module exist to prevent.
+        self._cp = control_plane
+
+    def _client(self):
+        if self._cp is not None:
+            return self._cp
+        from tortoise.supabase_control import get_control_plane
+
+        return get_control_plane()
+
+    async def consume(self, jti: str, expires_at: float) -> bool:
+        """``True`` on FIRST use; ``False`` on replay; raises when it cannot answer.
+
+        The blocking PostgREST client is run in a worker thread rather than called inline:
+        `consume` is awaited from an async request handler, and a synchronous HTTP call here
+        would block the event loop for every other request on the worker.
+        """
+        try:
+            answer = await asyncio.to_thread(self._consume_blocking, jti, expires_at)
+        except JtiStoreUnavailable:
+            raise
+        except Exception as exc:
+            # ⛔ NO `str(exc)` IN THE RAISED MESSAGE — see `_SHARED_STORE_UNAVAILABLE`.
+            # A control-plane error can carry the upstream URL, a query string or a schema
+            # detail, and this message reaches an unauthenticated 503 body.
+            logger.warning(
+                "the shared consent-ticket register could not answer (%s): %s",
+                type(exc).__name__, exc, exc_info=True)
+            raise JtiStoreUnavailable(_SHARED_STORE_UNAVAILABLE) from exc
+        # ⛔ A NON-BOOLEAN ANSWER IS "CANNOT ANSWER", never a replay and never a pass.
+        # PostgREST returns the function's scalar; a missing row, an RPC that does not
+        # exist, or a `null` are all indistinguishable from `false` once coerced, and
+        # coercing `None` to `False` would answer every FIRST redemption with "already
+        # redeemed" — a fail-closed that reads as a replay and blames the user's token.
+        if not isinstance(answer, bool):
+            logger.warning("the consent-ticket register answered %r, not a boolean", answer)
+            raise JtiStoreUnavailable(_SHARED_STORE_UNAVAILABLE)
+        return answer
+
+    def _consume_blocking(self, jti: str, expires_at: float) -> object:
+        # ⛔ STAMP THE LAST VALID INSTANT, NOT THE RAW `exp`. The verifier refuses only when
+        # `exp + LEEWAY < now`, so a token stays redemable until `exp + LEEWAY`; the RPC prunes
+        # `expires_at < now()` BEFORE it inserts. Stamping the raw `exp` therefore lets a replay
+        # inside the leeway window DELETE the row that fences its own nonce and then insert it
+        # again — a repeatable replay for 30 s, i.e. one consent yielding N codes (measured;
+        # `ProcessLocalJtiStore` adds the leeway for the same reason).
+        stamp = datetime.fromtimestamp(
+            expires_at + CONSENT_TOKEN_LEEWAY_S, tz=UTC).isoformat()
+        return self._client().rpc_value(
+            "consume_oauth_consent_ticket", {"p_jti": jti, "p_expires_at": stamp})
+
+
 _jti_store_lock = threading.Lock()
 _jti_store: ProcessLocalJtiStore | None = None
 
@@ -554,6 +660,21 @@ def configure_consent_jti_store(store) -> None:
 def reset_consent_jti_store() -> None:
     """Drop the register (tests, and a deliberate re-provision)."""
     configure_consent_jti_store(None)
+
+
+def install_shared_consent_jti_store(control_plane=None) -> None:
+    """Install the SHARED register — §2.3 cross-machine single-use (§9 step 1).
+
+    Called once from the hosted app's startup (`hosted_api._lifespan`) rather than at import:
+    the module's own contract is that importing it has no side effect, and a store resolved at
+    import time would capture whatever control plane existed then.
+
+    Installed UNCONDITIONALLY, including on a deployment with no control plane: the failure
+    then surfaces as a typed `503 temporarily_unavailable` on the consent-token arm (§2.3's
+    fail-closed posture) instead of silently degrading to a PER-PROCESS register — which is
+    the one state this class exists to leave behind. The bearer path is untouched either way.
+    """
+    configure_consent_jti_store(ControlPlaneJtiStore(control_plane))
 
 
 async def consume_consent_jti(jti: str, expires_at: float) -> None:

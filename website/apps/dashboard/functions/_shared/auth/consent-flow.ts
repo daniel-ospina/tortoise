@@ -24,13 +24,18 @@
  * is the guarantee itself rather than a wrapper around a route, and it is
  * unit-testable without a store, a network, or a browser.
  *
- * ⚠️ NOT YET WIRED. `docs/engineering/auth/consent-identity-bridge.md` §9 orders
- * the bridge's build so that the AS half (accepting a bound consent token) lands
- * BEFORE any page change, because a page that half-reads a token and half-reads
- * the old cookie is strictly worse than not starting (#3559). This module is
- * property 4's decision; the route that calls it (`/api/consent/start`) is step 3
- * of that ordering and is deliberately not built here. Recorded rather than
- * implied, so the gap is readable from the code.
+ * ⛔ PURITY IS LOAD-BEARING AND GUARDED. `tests/test_oauth_session_flow_properties.py`
+ * fails if this file's CODE contains `fetch(`, `D1Database` or `async` — property 4's
+ * decision must be testable as the guarantee, not as a wrapper around I/O. So the
+ * bridge's minting and attempt-recording helpers deliberately live in the SIBLING
+ * module `consent-bridge.ts`, not here.
+ *
+ * ✅ WIRED (#3524 §9 step 3). The spec's step ordering (AS half before any page change,
+ * #3559) is satisfied: the AS half is DELIVERED (PR #10096). `decideConsentAdvance` is now
+ * the decision `functions/api/consent/start.ts` emits; the mint route is
+ * `functions/api/consent/token.ts`; both build on `consent-bridge.ts`. The PAGE that
+ * consumes them is §9 step 4 and lands last — it deletes the inline supabase-js client,
+ * which is why this module can be wired without touching the page.
  */
 
 /**
