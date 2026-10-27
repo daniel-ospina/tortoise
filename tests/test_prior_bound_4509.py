@@ -126,11 +126,14 @@ def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     real prior. The echoes contain the query tokens; the prior does too, so it
     is a genuine candidate of the fused pool.
 
-    ``prior_id`` must sort AFTER the echo ids (``<session_id>_t<i>``): every row
-    in this fixture scores alike, so the fused order is the ``id`` tie-break
-    (#3019), and only a late-sorting prior sits outside a window the echoes
-    fill. An earlier revision relied on the prior being seeded after the hot
-    echoes, i.e. on the opaque DB row order this tie-break replaces."""
+    Every row here scores alike, so the fused order is the shared recency-then-id
+    tie (#10121) — recency now decides, so seed ORDER is what places the prior.
+    The prior is seeded BETWEEN the two bands: the ``_COLD`` echoes written after
+    it hold newer stamps and fill the over-fetch window ahead of it (that is the
+    starvation the test reproduces), while the ``_HOT`` band written before it is
+    older. Before #10121 this fixture got the same property from the ``id``
+    tie-break (``prior_id`` sorts after ``<session_id>_t<i>``); that spelling is
+    no longer what orders these rows — the recency key is."""
     for i in range(_HOT):
         _seed_echo(s, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
     s.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
@@ -235,16 +238,25 @@ def test_limit_applies_to_the_already_filtered_candidate_set(sdk):
 
     FALSIFIER — (1) *what value makes this test fail?* The identity of the two
     returned rows: pre-truncation they are the two REAL priors; a filter applied
-    after the cut returns two echoes (or nothing after a drop). (2) *reachable?*
-    Yes: the three echoes sort ahead of the two priors and the window is 2, so
-    the ordering is forced. The priors are named ``zz_pt_*`` precisely so they
-    sort after the ``s1_t*`` echoes — with earlier-sorting priors the window
-    would hold the priors either way and the test would not discriminate.
+    after the cut finds the window full of echoes, drops them, and returns
+    nothing. (2) *reachable?* Yes — the two priors are seeded FIRST and the three
+    echoes LAST, so under the shared recency tie (#10121) the echoes hold the
+    three newest stamps, the three rows of the pool are all echoes, and
+    ``result_ids[:2]`` is entirely echoes: only a pre-truncation filter can put
+    the priors inside the page.
+
+    ⚠️ That seeding order is load-bearing and was REVERSED by #10121's tie
+    direction. An earlier revision seeded the echoes first and named the priors
+    ``zz_pt_*`` so they sorted after the ``s1_t*`` echoes under #3019's
+    ``id ASC``; with recency-first ordering that made the priors the NEWEST rows,
+    i.e. ``result_ids[:2]`` — so the pre-#4509 after-the-cut drop returned both
+    priors and this test passed on the very code it exists to fail. Seeding the
+    priors first restores the discrimination under the shipped direction.
     """
-    for i in range(3):
-        _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
     sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_a")
     sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_b")
+    for i in range(3):
+        _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
 
     rows = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=2, exclude_turn_echo_session="s1"))
