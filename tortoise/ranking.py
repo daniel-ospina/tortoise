@@ -87,8 +87,13 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # tail.  Strictly > 0 so a boost never lowers a score.
 #
 # THAT CONDITION IS NOT GUARANTEED ON A FUSED READ (#7704).  Content-identical
-# twins tie on EVERY leg, and each leg's own ``ORDER BY score DESC,
-# node.<id> ASC`` tie-break (#3019) hands the lower-ULID twin rank 0.  RRF is
+# twins tie on EVERY leg, and each leg's own tie-break hands ONE of them rank 0,
+# so the twins' fused relevance differs by exactly one rank.  (#3019 chose
+# ``node.<id> ASC`` — oldest-first — which made it the LOWER-ULID twin; since
+# #10121 the tie is ``coalesce(updatedAt, createdAt, '') DESC, <id> DESC``, so it
+# is the HIGHER-ULID twin.  Which twin it is does not change this derivation:
+# the gap is a ONE-rank difference either way, and both twins are content-
+# identical.)  RRF is
 # rank-based (``1/(k + rank + 1)``), so the post-fusion min-max normalization
 # converts that ONE-rank difference into a relevance gap that grows as the
 # pool shrinks — measured on the shipped hybrid path, as the RELEVANCE gap the

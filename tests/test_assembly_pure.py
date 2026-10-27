@@ -2476,13 +2476,22 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
     live_name = "widget variant zz"
     variant_ids = [_entity_name_id("Object", f"widget variant {i}")
                    for i in range(10)]
-    # Non-vacuity premise: with the live Object sorting BEHIND the crowd
-    # under the ``id ASC`` tie-break, a post-truncation filter (the pre-#4061
-    # shape) would return nothing — so this test cannot pass against the
-    # regression it guards.
-    assert _entity_name_id("Object", live_name) > max(variant_ids), (
+    # Non-vacuity premise: the live Object must sort BEHIND the crowd, so that a
+    # post-truncation filter (the pre-#4061 shape) would return nothing —
+    # otherwise this test cannot pass against the regression it guards.
+    # #10121 made the tie ``recency-then-id DESC``, so "behind the crowd" means
+    # the SMALLEST id now, not the largest: the name is SEARCHED for rather than
+    # fixed, and the assertion below states which direction is required.
+    live_name = next(
+        candidate
+        for i in range(4096)
+        for candidate in (f"widget variant live{i}",)
+        if _entity_name_id("Object", candidate) < min(variant_ids)
+    )
+    assert _entity_name_id("Object", live_name) < min(variant_ids), (
         "the fixture's premise: the live Object must sort BEHIND the crowd "
-        "under the id tie-break, or the crowd no longer fills the bound")
+        "under the #10121 tie-break (recency-then-id DESC, so the SMALLEST id "
+        "goes last), or the crowd no longer fills the bound")
     for i in range(10):
         name = f"widget variant {i}"
         _docker_sdk.create_entity("object", name, objectKind="core:other",

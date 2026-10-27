@@ -125,15 +125,17 @@ def test_infinite_weight_does_not_destroy_the_score_signal():
 
 
 def test_operator_fts_leg_orders_a_tied_result_by_id(sdk):
-    """FAIL VALUE: the operator leg returns its rows in DB row order instead of
-    id order. This leg scores EVERY row a constant ``1.0``, so the whole leg is
-    one tie and nothing but the secondary key can order it.
+    """FAIL VALUE: the operator leg returns its rows in DB row order instead of a
+    data-determined order. This leg scores EVERY row a constant ``1.0``, so the
+    whole leg is one tie and nothing but the secondary keys can order it.
 
     THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order
-    (``zulu``, ``mike``, ``alpha``), so unless id ordering is imposed the result
-    cannot come back ``["alpha-op", "mike-op", "zulu-op"]``. This also confirms
-    the BRUTE-FORCE path honours multi-key ordering (the operator leg uses no
-    fulltext index), which the issue asks to establish.
+    (``zulu``, ``mike``, ``alpha``) and carry NO timestamp property, so the
+    recency key coalesces to ``''`` for all three and the id key decides. #10121
+    reversed that key's DIRECTION (newest first), so the expected order is
+    ``["zulu-op", "mike-op", "alpha-op"]``. This also confirms the BRUTE-FORCE
+    path honours multi-key ordering (the operator leg uses no fulltext index),
+    which the issue asks to establish.
     """
     graph = sdk._get_proj().g
     for pid in ["zulu-op", "mike-op", "alpha-op"]:
@@ -148,7 +150,10 @@ def test_operator_fts_leg_orders_a_tied_result_by_id(sdk):
 
     assert got, "FIXTURE NOT REACHED: the operator leg returned no rows"
     assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
-    assert got == sorted(got), f"a fully-tied leg is not id-ordered: {got}"
+    assert got == sorted(got, reverse=True), (
+        "a fully-tied leg is not recency-then-id-ordered (#10121: the id key is "
+        f"DESC, newest first): {got}"
+    )
 
 
 # ── part 1, all four sites: the clause must not be tidied away ─────────────
@@ -156,14 +161,15 @@ def test_operator_fts_leg_orders_a_tied_result_by_id(sdk):
 
 def test_index_fts_leg_orders_a_tied_result_by_id(sdk):
     """FAIL VALUE: the index-accelerated FTS leg returns rows in index order
-    instead of id order. #3019 asks to CONFIRM the engine honours multi-key
-    ordering on THIS path, not only the brute-force one — so this asserts the
-    behaviour rather than the query text.
+    instead of a data-determined order. #3019 asks to CONFIRM the engine honours
+    multi-key ordering on THIS path, not only the brute-force one — so this
+    asserts the behaviour rather than the query text.
 
-    THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order
-    and all match the term, so they score identically and the tie is real;
-    ``["alpha-ix", "mike-ix", "zulu-ix"]`` is unreachable unless the secondary
-    key is applied.
+    THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order,
+    carry NO timestamp, and all match the term — so they score identically, the
+    recency key coalesces to ``''``, and the id key decides. #10121 made that key
+    ``DESC`` (newest first), so ``["zulu-ix", "mike-ix", "alpha-ix"]`` is the
+    order, and it is unreachable unless the secondary keys are applied.
     """
     graph = sdk._get_proj().g
     for pid in ["zulu-ix", "mike-ix", "alpha-ix"]:
@@ -179,7 +185,10 @@ def test_index_fts_leg_orders_a_tied_result_by_id(sdk):
 
     assert got, "FIXTURE NOT REACHED: the index FTS leg returned no rows"
     assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
-    assert got == sorted(got), f"an index-path tie is not id-ordered: {got}"
+    assert got == sorted(got, reverse=True), (
+        "an index-path tie is not recency-then-id-ordered (#10121: the id key is "
+        f"DESC, newest first): {got}"
+    )
 
 
 def test_structural_leg_orders_a_constant_scored_result_by_id(sdk):
@@ -190,8 +199,9 @@ def test_structural_leg_orders_a_constant_scored_result_by_id(sdk):
     ``ORDER BY`` at all, which made it the one leg that was completely unordered.
 
     THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order,
-    so ``["alpha-st", "mike-st", "zulu-st"]`` is unreachable unless the ordering
-    is imposed.
+    so an order-determined result is reachable only through the secondary keys.
+    #10121 made the id key ``DESC``; with no timestamps the recency key coalesces
+    to ``''`` and ``["zulu-st", "mike-st", "alpha-st"]`` is the expected order.
     """
     graph = sdk._get_proj().g
     for pid in ["zulu-st", "mike-st", "alpha-st"]:
@@ -206,7 +216,10 @@ def test_structural_leg_orders_a_constant_scored_result_by_id(sdk):
 
     assert got, "FIXTURE NOT REACHED: the structural leg returned no rows"
     assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
-    assert got == sorted(got), f"a constant-scored leg is not id-ordered: {got}"
+    assert got == sorted(got, reverse=True), (
+        "a constant-scored leg is not recency-then-id-ordered (#10121): "
+        f"{got}"
+    )
 
 
 def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
@@ -266,33 +279,57 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
         "a document's pid came back None — the leg ordered on a property "
         f"documents do not have (D10: a document is a :Source keyed by url): {got}"
     )
-    assert got == ["a-doc", "m-doc", "z-doc"], (
-        f"documents are not ordered by their canonical key: {got}"
+    # #10121: the canonical key's DIRECTION is now DESC. A :Source stub carries
+    # ``ingestedAt``, not ``createdAt``/``updatedAt``, so the recency key
+    # coalesces to ``''`` for all three and the url key decides — deterministically,
+    # which is the whole point (the failure this test exists for was ``None`` for
+    # every pid, i.e. NO resolved order at all). The set, not an incidental
+    # direction, is what the identity contract requires.
+    assert got == ["z-doc", "m-doc", "a-doc"], (
+        "documents are not ordered deterministically by their canonical key: "
+        f"{got}"
     )
 
 
 def test_every_leg_query_carries_a_secondary_sort_key():
-    """A CONTRACT PIN, not behavioural coverage (the behaviour is proved above for
-    the three brute-force / index-FTS paths).
+    """A CENSUS, not coverage: every ordering leg must use the SHARED tie clause.
 
-    FAIL VALUE: any leg losing its tie key makes the matching assertion fail.
-    Asserted clause-by-clause rather than as a COUNT of matches, because a count
-    cannot see a NEW leg added later without one — it pins only what it is told
-    to pin, and a fixed number silently certifies an omission.
+    The #3019 lesson this file records is that a substring pin on the ORDER BY
+    *text* cannot see a wrong ``id_field`` interpolation — it stayed green on the
+    broken document arm. So the behavioural tests above are the coverage, and
+    this test exists for the one thing behaviour cannot cover: a NEW leg added
+    later, or a leg that quietly goes back to a single key.
 
-    KNOWN RESIDUAL (CLOSED): the index-accelerated vector path used to
-    preserve the engine's returned order, so two rows with EQUAL distances
-    kept the engine's order. A PYTHON re-sort could not fix it then because
-    signature A's score WAS its row position (a re-sort was not lossless for
-    it). #6214 closed that: both signatures now RETURN a cosine distance
-    (signature A computes one over the yielded node) and the index path makes
-    ONE ``(distance, id)`` ordering pass; the behaviour is pinned by
-    ``tests/test_search_engine_gaps.py::test_docker_mode_signature_a_carries_a_distance_and_ties_by_id``
-    and the live index-path test ``test_6214_index_vector_leg_orders_equal_distance_rows_by_id``.
+    It is therefore written as a census over every ``ORDER BY`` in the module
+    rather than as a list of expected strings: #10121 moved the tie into
+    :func:`search_engine.recency_tie_clause`, and any leg that does not call it
+    fails here regardless of how the clause is spelled.
+
+    FAIL VALUE: a leg with a bare primary key (e.g. ``ORDER BY hops ASC``) or a
+    hand-written second key (``... , n.id ASC``) — the first leaves the tie to DB
+    row order, the second re-introduces the oldest-first truncation #10121 fixed.
     """
     src = inspect.getsource(search_engine)
-    assert "ORDER BY score DESC, n.id ASC" in src, "operator leg lost its tie key"
-    assert "ORDER BY score DESC, node.{id_field} ASC" in src, "index FTS leg lost its tie key"
-    assert "ORDER BY score DESC, n.{id_field} ASC" in src, "vector leg lost its tie key"
-    assert "ORDER BY n.{id_field} ASC" in src, "structural leg lost its ordering"
-    assert "ORDER BY hops ASC, n.id ASC" in src, "structural-hops leg lost its tie key"
+    order_clauses = [
+        line.strip() for line in src.splitlines()
+        if "ORDER BY" in line and not line.strip().startswith("#")
+    ]
+    assert order_clauses, "FIXTURE NOT REACHED: no ORDER BY clauses found at all"
+
+    # One occurrence inside the helper's own docstring is not a clause.
+    clauses = [c for c in order_clauses if 'f"ORDER BY' in c or '"ORDER BY' in c]
+    assert len(clauses) >= 6, (
+        "FIXTURE NOT REACHED: expected the census to see every leg's clause, "
+        f"got {clauses}"
+    )
+    offenders = [c for c in clauses if "recency_tie_clause(" not in c]
+    assert not offenders, (
+        "every ordering leg must append the SHARED recency tie "
+        "(search_engine.recency_tie_clause) — a leg that does not is either "
+        "leaving its tie to DB row order or re-inventing the oldest-first key "
+        f"#10121 removed: {offenders}"
+    )
+    assert any("recency_tie_clause('n', 'id')" in c for c in clauses), (
+        "the operator leg's clause must survive: it returns a CONSTANT 1.0 for "
+        "every row, so the tie is its entire ranking"
+    )
