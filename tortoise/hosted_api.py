@@ -214,6 +214,7 @@ from tortoise.sdk import (
     UnapprovedKindNamespace,  # #5475: the named pack-approved refusal, mapped to 422 too
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
+    _capture_enriched_texts,  # #8488 scope 1: the enriched embeddingText (gate OFF → None)
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
@@ -15470,7 +15471,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
-            texts, proj.required_embedding_dim))
+            texts, proj.required_embedding_dim),
+        # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932),
+        # kept in parity with ``sdk.capture_session`` (the ONE shared writer).
+        enrich_fn=_capture_enriched_texts)
     _turn_texts = _capture_write["turn_texts"]
     _capture_redactions = _capture_write["redacted_total"]
 

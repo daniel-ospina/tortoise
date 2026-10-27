@@ -443,6 +443,12 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # ``test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems``
     # catches.
     "test_10122_point_name_not_indexed",
+    # #8488 scope 1: the context-enriched turn-embedding write path — module-level
+    # ``pytest.mark.embedded_only`` (its subject is the embedded lane and the
+    # dense leg's on/off behaviour), so it is exempt from the docker redirect
+    # and routed to the URI-unset carve-out job, exactly like its lexical
+    # sibling above.
+    "test_context_enrich_8488",
     # #5140: the behavioural `ingestedAt` file constructs its own embedded
     # `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`), so the
     # construction IS the under-test input — a URI-set run would discard the

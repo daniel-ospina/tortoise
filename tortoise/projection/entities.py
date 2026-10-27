@@ -961,7 +961,12 @@ def _record_embedding_identity(p: dict, warned: set) -> None:
                 "deliberately to change it (#5004)",
                 j_model, j_rev, cur_model, cur_rev)
     j_text = p.get("embedding_text_hash")
-    content = p.get("content")
+    # #8488 scope 1: the hash attests the text the VECTOR describes — which is
+    # ``embeddingText`` on an enriched turn and ``content`` otherwise, exactly
+    # as `stamp_journal_embedding` mints it. Comparing against ``content`` on
+    # an enriched Point reported a false divergence on every faithful rebuild
+    # (#4194 is satisfied there: the node HOLDS the text the vector describes).
+    content = p.get("embeddingText") or p.get("content")
     if not (isinstance(j_text, str) and isinstance(content, str)):
         return
     # #5004 round-3: `_content_hash` is `text.encode("utf-8")`, which RAISES
@@ -2014,6 +2019,11 @@ class _EntityHandlers:
     _POINT_HANDLED: frozenset = frozenset({
         "id",  # MERGE key (n:Point {id:$id}) — not a SET clause
         "content", "is_operator", "op_type", "pointKind", "status",
+        # #8488 scope 1 (schema A′): the enriched text a captured turn's vector
+        # describes, stored on the node beside ``content`` (which stays raw and
+        # keyword-searchable). Own clause in ``_upsert_point_props``, so the
+        # open-set passthrough must not also write it.
+        "embeddingText",
         "authoredBy", "confidence", "createdAt", "created_at",
         "validFrom", "validTo", "updatedAt", "embedding",
         # #5004: the embedding's IDENTITY travels with the vector in the journal
@@ -2513,6 +2523,12 @@ class _EntityHandlers:
         # Build SET clauses + params; context is optional (Phase 1 stop-writes, #49)
         set_clauses = [
             "n.content=$content",
+            # #8488 scope 1: ABSOLUTE, not coalesce — ``$et`` is None when the
+            # record carries no enriched text, and ``SET …=NULL`` REMOVES it, so
+            # a rebuild of an ON→OFF re-capture reverts to the raw-only node
+            # exactly as the live `_TURN_WRITE_CYPHER` does (a stale enriched
+            # text a vector no longer describes would be the #4194 lie).
+            "n.embeddingText=$et",
             "n.is_operator=$isop",
             "n.op_type=$opt",
             "n.pointKind=coalesce($pk, n.pointKind)",
@@ -2556,6 +2572,9 @@ class _EntityHandlers:
         _mitigation_record = is_non_operator_payload(p) and bool(op)
         params = {
             "id": p["id"], "content": p.get("content", ""),
+            # #8488 scope 1: the enriched text (None for a non-enriched Point —
+            # the absolute clause above then leaves/clears the property).
+            "et": p.get("embeddingText"),
             "isop": bool(op) and not _mitigation_record,
             "opt": None if _mitigation_record else (op.get("op_type") if op else None),
             "pk": p.get("pointKind"),

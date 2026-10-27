@@ -2385,6 +2385,39 @@ def _capture_turn_embeddings(
         return [None] * len(turn_texts)
 
 
+def _capture_enriched_texts(turn_texts: list[str]) -> list[str] | None:
+    """#8488 scope 1: the enriched ``embeddingText`` per turn, or ``None`` when off.
+
+    The gate is ``TORTOISE_CONTEXT_ENRICH`` (fail-safe OFF, the same posture as
+    ``TORTOISE_BM25_LEXICAL``). OFF → ``None``: the writer embeds the raw stored
+    text and stores no ``embeddingText``, byte-identical to pre-#8488. ON → the
+    per-turn rewrite the owner approved on #8932 (a self-contained segment built
+    from the neighbour window, NOT a fixed session blurb — the declined variant
+    collapses turn discrimination, ``NEAR_DUPLICATE_THRESHOLD = 0.89``).
+
+    Fail-soft: a model that cannot be built, or a rewrite that fails/returns
+    blank, degrades that turn to its raw text inside ``enrich_turn_texts``; a
+    model that cannot be built AT ALL returns ``None`` here, so the caller embeds
+    the raw stored text — never a half-enriched batch (#4194: the encoded text,
+    the stored text and the hash must be one string).
+    """
+    from .context_enrich import enrich_enabled, enrich_turn_texts
+    if not enrich_enabled():
+        return None
+    try:
+        from .model_adapters import build_extractor_model
+        # Bounded and deterministic: the rewrite is a single-turn transcription,
+        # not a reasoning task; temperature 0 keeps two captures of the same
+        # window stable.
+        model = build_extractor_model(max_tokens=2048, temperature=0.0)
+    except Exception:  # noqa: BLE001, RUF100 — enrichment is optional, never fatal
+        _logger.warning(
+            "context enrichment: extractor model unavailable — embedding the "
+            "raw stored turn text (#8488)", exc_info=True)
+        return None
+    return enrich_turn_texts(turn_texts, complete_fn=model.complete)
+
+
 # ── #3086: ONE turn-stream writer, shared by both capture lanes ────────────
 # The per-turn store used to be a loop duplicated between
 # `TortoiseSDK.capture_session` and hosted `_capture_session_impl` (kept in
@@ -2414,23 +2447,39 @@ _TURN_WRITE_CYPHER = (
     # `prior_ch` is read per row BEFORE the SET reassigns it, so the
     # stale-vector decision (#4194) is sound on a matched node and on a
     # just-created one (prior_ch NULL => nothing to preserve).
-    "WITH t, turn, t.content_hash AS prior_ch "
+    "WITH t, turn, t.content_hash AS prior_ch, t.embeddingText AS prior_et "
     # #4524/#4520: the shared clear-then-set seam clears t.embedding in the
     # SAME statement (and only when a new vector is written), so the rotation
     # self-heal this statement exists to provide is not defeated by the embedded
     # engine's silent no-op on a `vecf32` overwrite. See `tortoise/vector_write.py`.
     + clear_then_set_prefix("t", "turn.emb")
-    + "SET t.content=turn.c, t.pointKind=turn.k, t.is_operator=false, "
+    + "SET t.content=turn.c, "
+    # #8488 scope 1: ``embeddingText`` is the text the turn's vector describes
+    # (schema A′ on #8932). ``turn.et`` is NULL when the flag is off, and
+    # ``SET …=NULL`` REMOVES the property — so an ON→OFF re-capture reverts to
+    # the raw-only node, never leaving an enriched text a vector no longer
+    # describes (#4194).
+    "    t.embeddingText=turn.et, "
+    "    t.pointKind=turn.k, t.is_operator=false, "
     "    t.speaker=turn.speaker, t.is_episodic=true, "
     "    t.status=coalesce(t.status, turn.s), "
     "    t.createdAt=coalesce(t.createdAt, $now), "
     "    t.updatedAt=$now, t.content_hash=turn.ch, "
     # Three-way guard: new vector if we encoded one; else PRESERVE the stored
-    # vector only when the content is UNCHANGED; else CLEAR it — a preserved
-    # vector for changed text would rank the turn by text no longer on the
-    # node (the dense-leg lie).
+    # vector only when the text it describes is UNCHANGED; else CLEAR it — a
+    # preserved vector for changed text would rank the turn by text no longer
+    # on the node (the dense-leg lie). #8488 scope 1 (schema A′): the vector is
+    # a function of ``embeddingText`` when the node holds one, so the preserve
+    # arm compares ``prior_et`` (read BEFORE this statement's SET) as well as
+    # ``prior_ch``. Comparing ``content`` alone left the ON→OFF re-capture and
+    # an ON→ON re-capture with a different rewrite keeping a vector computed
+    # from text the node no longer holds (#4194). ``coalesce`` gives the
+    # null-safe spelling: an empty enrichment is never produced, so '' is
+    # unambiguous for "no enriched text".
     "    t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) "
-    "        WHEN prior_ch = turn.ch THEN t.embedding ELSE NULL END "
+    "        WHEN prior_ch = turn.ch "
+    "             AND coalesce(prior_et, '') = coalesce(turn.et, '') "
+    "             THEN t.embedding ELSE NULL END "
     "WITH t, turn "
     "MATCH (s:Session {id:$sid}) "
     "MERGE (s)-[:CONTAINS]->(t) "
@@ -2770,6 +2819,7 @@ def _write_capture_turns(
     turn_offset: int = 0,
     prior_turn_max_index: int = -1,
     prior_graph_turns: list[tuple[str, int | None]] | None = None,
+    embedding_texts: list[str] | None = None,
 ) -> int:
     """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
@@ -2891,6 +2941,20 @@ def _write_capture_turns(
             "turn(s) with no vector (the dense leg degrades to keyword-only)",
             len(turn_embs), len(turn_texts), len(turn_texts))
         turn_embs = [None] * len(turn_texts)
+    # #8488 scope 1: ``embeddingText`` is the text the turn's vector describes.
+    # ``None`` (the default, and the flag OFF) means no enriched text — the
+    # node keeps only ``content`` and the vector is computed from it, which is
+    # byte-identical to pre-#8488. A list of the SAME length (the flag ON)
+    # writes it to the node and journals it; a length mismatch is dropped
+    # (never misaligned — a vector must not describe a text the node lacks).
+    enrich_on = embedding_texts is not None
+    if enrich_on and len(embedding_texts) != len(turn_texts):
+        _logger.error(
+            "enriched turn text has %d rows for %d turns — storing the raw "
+            "text instead (the enriched vector would describe text the node "
+            "does not hold)", len(embedding_texts), len(turn_texts))
+        embedding_texts = None
+        enrich_on = False
     turn_rows: list[dict] = []
     turn_hashes: list[str] = []
     for i, _turn in enumerate(windowed):
@@ -2900,6 +2964,9 @@ def _write_capture_turns(
         turn_rows.append({
             "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
+            # ``None`` when off: ``SET t.embeddingText=NULL`` REMOVES a stale
+            # value (an ON→OFF re-capture reverts to the raw-only node).
+            "et": embedding_texts[i] if enrich_on else None,
             "k": "event",
             # #5445: derived from the SCRUBBED stored text, not from the raw
             # ``turn["role"]`` — the role is caller-controlled and the `role`
@@ -3339,6 +3406,12 @@ def _write_capture_turns(
             _turn_snapshot["createdAt"] = created_at if created_at is not None else now
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
+        # #8488 scope 1: the enriched text rides the SAME snapshot as the
+        # vector it describes, so the #4194 identity survives a rebuild —
+        # `stamp_journal_embedding` attests `embeddingText` when it is present.
+        # Absent (flag OFF) the record is byte-identical to pre-#8488.
+        if enrich_on:
+            _turn_snapshot["embeddingText"] = embedding_texts[i]
         # #5004 round-3: when THIS capture encoded nothing, what rides the
         # record is the vector the write PRESERVED — computed by whatever model
         # was active at the ORIGINAL capture. Attesting the active model here
@@ -3529,6 +3602,7 @@ def _write_session_and_turns(
     model: str | None = None,
     turn_offset: int = 0,
     embed_fn: Callable[[list[str]], list[list[float] | None]] | None = None,
+    enrich_fn: Callable[[list[str]], list[str] | None] | None = None,
     turn_embs: list[list[float] | None] | None = None,
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
     session_existed: bool = True,
@@ -3866,15 +3940,44 @@ def _write_session_and_turns(
         turn_texts, redaction_counts = _capture_turn_texts_with_redactions(turns)
     else:
         turn_texts, redaction_counts = texts_and_counts
+    # #8488 scope 1: the text the vector describes. ``None`` (flag OFF, or an
+    # enrichment that returned nothing) means embed the raw stored text —
+    # byte-identical to pre-#8488. A list of the SAME length (flag ON) is the
+    # ``embeddingText``: embedded here, stored + journalled by
+    # ``_write_capture_turns``, and attested by ``stamp_journal_embedding``.
+    embedding_texts: list[str] | None = None
+    if enrich_fn is not None:
+        # Fail-soft at the SEAM too (review P2): this runs AFTER the caller's
+        # :Session MERGE, so an exception here would leave a committed Session
+        # with zero turns — the same after-the-write class `_write_capture_turns`
+        # guards its length check against. ``enrich_fn`` is caller-supplied and
+        # the module's stated posture is that enrichment is never fatal.
+        try:
+            _enriched = enrich_fn(turn_texts)
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "context enrichment failed — embedding the raw stored turn "
+                "text (#8488)", exc_info=True)
+            _enriched = None
+        if _enriched is not None and len(_enriched) == len(turn_texts):
+            embedding_texts = list(_enriched)
+        else:
+            _logger.warning(
+                "context enrichment returned %s for %d turns — embedding the "
+                "raw stored text instead (#8488)",
+                type(_enriched).__name__ if _enriched is not None else "None",
+                len(turn_texts))
+    texts_to_embed = embedding_texts if embedding_texts is not None else turn_texts
     if embed_fn is not None:
-        turn_embs = embed_fn(turn_texts)
+        turn_embs = embed_fn(texts_to_embed)
     elif turn_embs is None:
-        turn_embs = [None] * len(turn_texts)
+        turn_embs = [None] * len(texts_to_embed)
     redacted_total = _write_capture_turns(
         proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
         session_existed=session_existed, turn_offset=turn_offset,
         prior_turn_max_index=prior_turn_max_index,
         prior_graph_turns=prior_graph_turns,
+        embedding_texts=embedding_texts,
         texts_and_counts=(turn_texts, redaction_counts))
     return {
         "turn_count": turn_count,
@@ -5780,6 +5883,14 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # this closes the only route by which they could become node properties.
     _embed_identity_keys = set(props) & {
         "embedding_model", "embedding_revision", "embedding_text_hash",
+        # #8488 scope 1: the enriched text a turn's vector describes is
+        # WRITER-minted (only the capture path stores it, beside the vector it
+        # was encoded from). A caller-supplied value would persist live through
+        # `update_point`'s bare `SET n += $props`, and no `PointRevised` arm
+        # replays it — a live-only write a rebuild drops. It is also the input
+        # to the #4194 comparison, so a caller-set value would let a node claim
+        # a vector describes text it was never computed from.
+        "embeddingText",
         # #5004 round-3/4: the verbatim marker is server-owned too. It is a
         # declared node property (so a re-emit carries it), which means a
         # tenant-supplied value WOULD persist live — and it both flips the
@@ -13226,6 +13337,10 @@ class TortoiseSDK:
             session_existed=session_existed,
             embed_fn=lambda texts: _capture_turn_embeddings(
                 texts, proj.required_embedding_dim),
+            # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932).
+            # ``None`` when the flag is off — the writer then embeds the raw
+            # stored text, byte-identical to pre-#8488.
+            enrich_fn=_capture_enriched_texts,
         )
         _capture_redactions = _capture_write["redacted_total"]
 

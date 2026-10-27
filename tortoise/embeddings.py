@@ -195,7 +195,12 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
         model, revision = embedding_identity()
         payload["embedding_model"] = model
         payload["embedding_revision"] = revision
-        content = payload.get("content")
+        # #8488 scope 1 (schema A′, owner ruling #8932): the vector is computed
+        # from ``embeddingText`` (the enriched text) when the node carries one,
+        # so the hash attests THAT text — the text the vector describes — not
+        # the raw ``content``. Absent (flag OFF, or a non-enriched Point) the
+        # hash keeps its pre-#8488 meaning: ``content_hash(content)``.
+        content = payload.get("embeddingText") or payload.get("content")
         if isinstance(content, str) and content:
             payload["embedding_text_hash"] = content_hash(content)
     else:
