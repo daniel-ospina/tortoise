@@ -810,38 +810,31 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
-    #: A human ROLE or a first-person actor. Round 14 (review finding): every
-    #: previous version enumerated the AUXILIARY/VERB instead, which is an
-    #: open set — "An operator reviewed this." is past tense, matched nothing,
-    #: and shipped green. The ACTOR is the small, closed thing the pin forbids;
-    #: the verb beside it is irrelevant.
-    _ACTOR = (r"(?:(?:an?|the|our)\s+)?"
-              r"(?:operators?|humans?|engineers?|responders?|developers?|"
-              r"analysts?|sres?|staff)"
-              r"|\bwe\b|\bus\b|on-?call"
-              r"|(?:our|the)\s+(?:[\w-]+\s+){0,2}(?:team|engineers?|staff)")
-    #: Anything that commits its subject to an act: every auxiliary, every
-    #: contraction, and ANY past-tense verb (`\w+ed`), which is what the
-    #: enumeration missed.
-    _VERB = (r"(?:has|have|had|is|are|was|were|am|will|would|can|should|must|"
-             r"do|does|did|been|being|\w+ed|'re|'ve|'d|'m|'ll|'s)")
-    _GAP = r"[\s,;:—-]+(?:\S+[\s,;:—-]+){0,6}"
-    #: THREE arms. Round 16 (review finding) caught two defects in the two-arm
-    #: version this replaces:
+    #: A HUMAN ACTOR — the one closed thing a customer string may not name,
+    #: because delivery of any operator signal is BEST-EFFORT: the row cannot know
+    #: that anyone was asked, let alone what they did. Rounds 14-17 walked to this
+    #: from the wrong end, enumerating VERBS beside the actor, and a verb set is
+    #: open: "An operator reviewed this." (past tense), "Our team may review this."
+    #: (a modal nobody listed) and "An operator took a look at it." (an irregular
+    #: past `\w+ed` cannot match) each shipped green. The role noun is a small
+    #: closed vocabulary — and it is OUR vocabulary for OUR staff, so a string
+    #: naming one of these words is making a claim about us, whatever grammar
+    #: follows it.
     #:
-    #: 1. `_ACTOR` is itself a top-level ALTERNATION and was interpolated WITHOUT
-    #:    a group, so its `|`s bound at the pattern's top level and each arm
-    #:    collapsed into standalone alternatives — `\bwe\b` matched on its own,
-    #:    with no verb at all. The pin LOOKED like "an actor beside a verb" and was
-    #:    really "the word we appears somewhere". Every interpolation is wrapped
-    #:    in `(?:…)` now.
-    #: 2. `_GAP` requires a separator, and a CONTRACTION has none — "We're" is an
-    #:    actor and its auxiliary glued together. It matched before only by
-    #:    accident (defect 1); with the grouping fixed it needs its own arm.
+    #: Deliberately NOT here: `us`. "contact us" / "reach out to us" is the
+    #: customer's own action, and "us" cannot be the subject of a claim
+    #: ("us will review" is not English) — the elided-actor promise list below
+    #: covers "hear from us".
+    _ROLE = (r"(?:an?|the|our|your)?\s*"
+             r"(?:operators?|humans?|engineers?|responders?|developers?|"
+             r"analysts?|sres?|staff|support(?:ers?)?|desks?|security|teams?)")
+    #: First person is a special case: `we` is a claim in any tense, and the only
+    #: legitimate first-person string this panel ships is an imperative that names
+    #: the customer ("contact support@…"), not us. Contractions are listed because
+    #: they glue the auxiliary on with no separator.
     _HUMAN = re.compile(
-        rf"(?:\b(?:{_ACTOR})\b{_GAP}{_VERB}\b"
-        rf"|\b{_VERB}\b{_GAP}(?:{_ACTOR})\b"
-        rf"|\b(?:{_ACTOR})['\u2019](?:re|ve|ll|d|m|s)\b)", re.I)
+        rf"(?:\b(?:{_ROLE})\b|\bwe\b|\bwe['\u2019](?:re|ve|ll|d|m|s)\b)",
+        re.I)
     #: A promise of contact/timing where the actor is ELIDED ("…, and will reach
     #: out"), which the actor arms cannot see.
     _PROMISE = re.compile(
@@ -875,113 +868,133 @@ class TestAlertRegistersAndAcks:
         return ({}, {"country": "ES"}, {"country": None})
 
     @staticmethod
-    def _claims(text: str) -> bool:
+    def _claims(text: str, etype: str | None = None) -> bool:
         stripped = re.sub(r"\S+@\S+", "", text)
-        # CLAUSE-FINAL only. `suspend_org()` writing the row proves an operator
-        # suspended the org — not what an operator did next. Round 16 (review
-        # finding): the unanchored version deleted the phrase ANYWHERE, so
-        # "…by an operator after reviewing your request" lost its actor and
-        # laundered the review claim straight through the exemption.
-        stripped = re.sub(r"\bby an operator\b(?=\s*[.;!?]|\s*$)", "",
-                          stripped, flags=re.I)
+        # The `suspend` exemption, and ONLY for that row type. `suspend_org()`
+        # writing the row proves an operator suspended the org — not what an
+        # operator did next, and not anything about any OTHER event type.
+        # Round 16: the unanchored version deleted the phrase ANYWHERE and
+        # laundered a continued predicate; round 17: keyed on the text alone it
+        # would also bless "Key revoked by an operator." on any other row, so it
+        # is now (a) clause-final and (b) scoped to `suspend`.
+        if etype == "suspend":
+            stripped = re.sub(r"\bby an operator\b(?=\s*[.;!?]|\s*$)", "",
+                              stripped, flags=re.I)
         return bool(TestAlertRegistersAndAcks._HUMAN.search(stripped)
                     or TestAlertRegistersAndAcks._PROMISE.search(stripped))
 
     def test_the_human_claim_predicate_actually_REJECTS_known_bad_strings(self):
         """The discriminating-power fixture (round 12 review finding).
 
-        Four rounds of this test failed the same way: the stated guarantee was
+        Six rounds of this test failed the same way: the stated guarantee was
         wider than the assertion, so it could not fail for the reason it exists —
         round 9 pinned a phrase, round 10 enumerated phrasings, round 11 fixed the
-        word ORDER but not the direction, and a passive rewrite ("was escalated
-        to an operator") or a contraction ("We're") defeated it. So the predicate
-        is now tested against the strings it MUST reject, and the next round has
-        to demonstrate that rather than assert it."""
-        #: Caught by the ACTOR arms. Round 14 (review finding) added the shapes
-        #: an AUXILIARY enumeration could not see: plain past tense
-        #: ("reviewed", "looked") and a role introduced by an article.
+        word ORDER but not the direction, round 14 enumerated VERBS while claiming
+        the verb was irrelevant, round 15 enumerated AUXILIARIES (a past tense and
+        an irregular past escaped), and round 16 found the arms were not arms at
+        all: an unparenthesised `_ACTOR` alternation made `\bwe\b` a standalone
+        alternative. The root cause each time was enumerating an OPEN set. The pin
+        now names a CLOSED one — the product's own vocabulary for its staff, which
+        no customer string may reference — and this fixture holds strings across
+        present, past, passive, modal, irregular-past and contraction grammar,
+        plus every shipped label and message, so the next round has to demonstrate
+        discriminating power rather than assert it. (No counts in this docstring:
+        a number here re-stales the moment a fixture entry is added, which is the
+        same defect as a comment that asserts an invariant nothing checks.)
+
+        STATED RESIDUAL RISK — read this before trusting the pin further than it
+        goes. It is a FLOOR, not a proof. Two shapes still pass, by construction:
+        an ACTOR-ELIDED passive ("Your keys have been reviewed.") and a noun
+        outside our vocabulary ("A specialist reviewed your account."). Both are
+        false claims the row cannot know. The pin cannot be made exhaustive
+        without a grammar, so the rule for a future copy change is: if you add a
+        new word for our staff, add it to `_ROLE` in the same commit. The error
+        direction is deliberate — an unlisted benign phrase that NAMES our staff
+        (e.g. a bare "contact support.") is REJECTED and reddens the shipped-copy
+        assertion loudly, while an unlisted false claim passes quietly. Loud
+        beats quiet, which is why the vocabulary is enumerated rather than the
+        claims being allowed."""
+        #: Any string naming a member of OUR staff (or claiming first-person
+        #: action) is a claim we cannot back. The list below is deliberately
+        #: diverse in GRAMMAR — present, past, passive, modal, irregular past,
+        #: contraction, actor-last — because the point of the round-17 rewrite is
+        #: that grammar no longer decides: the NOUN does. Each entry names a role.
         must_reject_human = [
-            # the three historical wordings, verbatim
             "Nothing has been disabled, and our team is reviewing it.",
             "…and an operator has been asked to look at it.",
             "This alert was escalated to an operator for review.",
-            # CONTRACTION — `\bwe\b` + `\s+` never matches "We're"
             "We're investigating this now.",
             "We\u2019re investigating this now.",  # typographic apostrophe
-            # the round-11 bypasses, kept so they cannot come back
             "An operator is looking into it.",
             "An operator will review this.",
             "Our on-call engineer was paged.",
-            # ONE-WORD ROLES
             "Our engineers have been notified.",
             "Our SRE will take a look.",
             "Our staff is aware.",
             "This alert has already been escalated to our team.",
-            # the actor as OBJECT of the auxiliary
-            "You will hear from us within 24 hours.",
-            # PAST TENSE — the auxiliary enumeration could not see these
+            # PAST TENSE — an auxiliary enumeration could not see these
             "An operator reviewed this.",
             "Our team looked into it.",
-            # A ROLE INTRODUCED BY AN ARTICLE, not in any earlier noun list
             "The security team is investigating.",
             "An incident responder has been paged.",
+            # A MODAL nobody enumerated, and an IRREGULAR past `\w+ed` misses
+            "Our team may review this.",
+            "An operator took a look at it.",
+            # OUR OWN STAFF WORD — the vocabulary this panel uses for support
+            "Support has been notified.",
+            "The support desk has been notified.",
+            "Team will review this.",
         ]
         #: Caught by the PROMISE list where the actor is ELIDED, which no actor
-        #: arm can see. Each must NOT match the actor arms, or it proves nothing
-        #: about the promise list.
+        #: arm can see. Each must NOT match the actor pattern, or it proves
+        #: nothing about the promise list.
         must_reject_promise = [
             "Nothing has been disabled, and will be in touch.",
             "Expect a response within 24 hours.",
-            # elided actor with the auxiliary retained — the shape no actor arm
-            # can see. (A bare "…and reach out shortly." is NOT here on purpose:
-            # with no auxiliary it is indistinguishable from the accepted
-            # imperative, and banning it would forbid legitimate copy.)
             "…and will reach out shortly.",
+            # "us" is allowed as an OBJECT (it cannot be the subject of a claim),
+            # so a timeline promise built on it is the promise list's job.
+            "You will hear from us within 24 hours.",
         ]
-        # The `{0,6}` width is now PROVEN. Round 16 (review finding): the entry
-        # it was meant to justify ("…already been escalated to our team") also
-        # matches on a ONE-filler path, so narrowing _GAP back to {0,3} left every
-        # test green — the width was asserted in a comment and guarded by nothing.
-        narrow = re.compile(self._HUMAN.pattern.replace(r"{0,6}", r"{0,3}"),
-                            re.I)
-        # A CONSTRUCTED probe whose shortest matching path is four fillers, so
-        # `{0,3}` cannot reach it and narrowing the gap reds this assertion. The
-        # natural-looking "…already been escalated to our team" does NOT work for
-        # this purpose: "been" is itself a verb token, so it matches within three.
-        wide_only = ("Our team, after a great deal of deliberation, has "
-                     "decided to escalate this.")
-        assert self._HUMAN.search(wide_only), wide_only
-        assert not narrow.search(wide_only), (
-            "no fixture entry proves the 6-token gap: this one still matches "
-            "with {0,3}, so narrowing _GAP would go unnoticed")
         for text in must_reject_human:
             assert self._HUMAN.search(text), (
-                f"the ACTOR arms miss a false human claim: {text!r} — a pin "
-                "that cannot reject this cannot guard the real copy either")
+                f"the actor pattern misses a false human claim: {text!r} — a "
+                "pin that cannot reject this cannot guard the real copy either")
         for text in must_reject_promise:
             assert self._PROMISE.search(text), (
                 f"the PROMISE list misses an elided-actor promise: {text!r}")
             assert not self._HUMAN.search(text), (
                 f"{text!r} is supposed to prove the PROMISE list (actor "
-                "elided) but the actor arms catch it too, so the promise arm "
-                "stays unproven for this shape")
-        # …and it must NOT reject legitimate copy, or every future iteration
-        # would fight the test instead of the bug. The SHIPPED strings are
-        # quoted verbatim (round-14 finding: a paraphrase proved only that the
-        # predicate tolerates a paraphrase).
+                "elided) but the actor pattern catches it too, so the promise "
+                "arm stays unproven for this shape")
+        # The two documented EXCLUSIONS, each proven in the direction that makes
+        # it safe: a clause-final "by an operator" on a `suspend` row is backed by
+        # the row's existence, while the SAME phrase on any other row is not.
+        assert not self._claims("Organization suspended by an operator",
+                                "suspend"), (
+            "the exemption stopped covering the one string it exists for")
+        assert self._claims("Key revoked by an operator.", "flag"), (
+            "the suspend exemption leaked onto another event type")
+        assert self._claims(
+            "Organization suspended by an operator after reviewing your "
+            "request.", "suspend"), (
+            "the exemption laundered a continued predicate")
+        # …and legitimate copy must still pass, including every SHIPPED string.
+        #: (text, etype) pairs, because the `suspend` exemption is per-ROW: the
+        #: same sentence on another type is a claim, so the type must travel with
+        #: the text through the check.
         must_accept = [
-            # backed by the ROW'S EXISTENCE: suspend_org() is the only writer
-            "Organization suspended by an operator",
-            # an IMPERATIVE addresses the customer, not us
             "review your API keys in Keys — an unrecognised key should be "
             "revoked there",
             "If you need a higher limit, contact support@premiselabs.co.",
             "If you need a higher limit, reach out to support@premiselabs.co.",
-            # the shipped descriptions of this panel's own subjects/limits
+            # an imperative that names the customer, and asks them to reach US
+            "If this was not you, contact us.",
             "Suspicious activity flagged on this Organization",
             "Access from a new location: ES",
             "Access from a new location",
         ]
+        accept_pairs = [(t, None) for t in must_accept]
         # Add every SHIPPED message + label for every type and detail variant,
         # so the accept half can never drift from the product.
         for etype in ALERT_TYPES:
@@ -990,13 +1003,14 @@ class TestAlertRegistersAndAcks:
                     row = _alert_dict({"event_type": etype, "details": details,
                                        "created_at": "2026-09-25T17:19:05+00:00",
                                        **extra})
-                    must_accept.append(str(row.get("label") or ""))
-                    must_accept.append(str(row.get("message") or ""))
-        for text in must_accept:
+                    accept_pairs.append((str(row.get("label") or ""), etype))
+                    accept_pairs.append((str(row.get("message") or ""), etype))
+        for text, etype in accept_pairs:
             if not text:
                 continue
-            assert not self._claims(text), (
-                f"the predicate rejects SHIPPED/accepted copy: {text!r}")
+            assert not self._claims(text, etype), (
+                f"the predicate rejects SHIPPED/accepted copy: {text!r} "
+                f"(type {etype})")
 
     def test_no_customer_string_claims_what_a_HUMAN_is_doing(self):
         """Rounds 6 / 9 / 10 / 11 / 12 (review findings). The same promise was
@@ -1026,7 +1040,7 @@ class TestAlertRegistersAndAcks:
                     # `_claims` applies the two documented exclusions (the
                     # support ADDRESS, and `suspend`'s "by an operator") and
                     # then runs BOTH mechanisms.
-                    assert not self._claims(text), (
+                    assert not self._claims(text, etype), (
                         f"{etype}.{field} asserts a human or a follow-up: "
                         f"{text!r} — the operator signal is best-effort, so we "
                         "cannot know")
@@ -1034,7 +1048,7 @@ class TestAlertRegistersAndAcks:
         suspended = _alert_dict({"event_type": "suspend", "details": {},
                                  "created_at": "2026-09-25T17:19:05+00:00"})
         assert "by an operator" in suspended["message"], suspended["message"]
-        assert not self._claims(suspended["message"])
+        assert not self._claims(suspended["message"], "suspend")
         velocity = _alert_dict({"event_type": "read_velocity",
                                 "details": {"scope": "key"},
                                 "created_at": "2026-09-25T17:19:05+00:00"})
