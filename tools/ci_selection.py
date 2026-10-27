@@ -1639,6 +1639,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change
              # and ……::test_the_semantic_id_key_migration_selects_every_reader_of_the_contract.
              "supabase/migrations/20261027000001_record_semantic_id_key.sql",
+             # #10017 R2 — the cache-tier migration is a FORWARD RE-DECLARATION
+             # of `chk_point_props_no_derived`, which replaces the constraint at
+             # the SQL level while the parser UNIONS. So this is the one file
+             # that can silently SHRINK `point`'s refusal set with the parser
+             # still reporting every name refused. A migration-only diff must
+             # run `test_record_projection.py` / `test_cache_projection.py` /
+             # `test_10017_cache_tier.py`, and a `core` registration alone
+             # cannot do it (#1349/#3332/#3616).
+             "supabase/migrations/20261029000001_record_point_cache_tier.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a

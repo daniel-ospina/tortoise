@@ -192,6 +192,41 @@ for (const f of files) {
     if (f === '20260813000002_metering_nodes_written.sql') {
       await db.exec('DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);');
     }
+    if (f === '20261029000001_record_point_cache_tier.sql') {
+      // #10017 R2 — seed the POISONED row this migration has to clean before its
+      // constraint can validate existing rows. Before this file `cache_tier` was
+      // not a column, not in `_META_KEYS` and not refused, so a caller-supplied
+      // prop of that name went into the props tail. Without this seed the file is
+      // applied to empty tables and its data path is exercised by nothing — while
+      // on a real tenant ONE such row aborts the whole migration
+      // (`check constraint … is violated by some row`), taking the column and the
+      // index with it and leaving step 7 unable to deploy.
+      await db.exec(`
+        -- Its OWN tenant, not the #9881 block's: a future edit there must not be
+        -- able to break this data path, and the errors would name the wrong file.
+        INSERT INTO public.organizations (id, name, graph_name)
+          VALUES ('10017-cache-tier-org', '10017-cache-tier-org',
+                  'org_10017-cache-tier-org')
+          ON CONFLICT DO NOTHING;
+        INSERT INTO public.graphs (id, org_id, name, namespace)
+          VALUES ('10017-cache-tier-graph', '10017-cache-tier-org',
+                  '10017-cache-tier-graph',
+                  'org_10017-cache-tier-org_10017-cache-tier-graph')
+          ON CONFLICT DO NOTHING;
+        INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key)
+          VALUES ('10017-cache-tier-org','10017-cache-tier-graph','Point',
+                  'cache-tier-poison')
+          ON CONFLICT DO NOTHING;
+        -- chk_point_node_key_is_contract_key requires node_key = id, and id is a
+        -- COLUMN: the props tail cannot satisfy it. kept is the CONTROL: it is
+        -- not the reserved name, so a backfill that wipes the tail must be seen.
+        INSERT INTO public.point (org_id, graph_id, node_key, node_label, id, props)
+          VALUES ('10017-cache-tier-org','10017-cache-tier-graph',
+                  'cache-tier-poison','Point','cache-tier-poison',
+                  '{"cache_tier": "record_only", "kept": "yes"}'::jsonb)
+          ON CONFLICT DO NOTHING;
+      `);
+    }
     if (f === '20261027000001_record_semantic_id_key.sql') {
       // #9881 — seed the PRE-MOVE shape so this migration's RE-KEY runs on real
       // rows. Without it the file is applied to empty tables, and its whole data
@@ -718,6 +753,40 @@ if (missingSuites.length > 0) {
   for (const s of missingSuites) console.error(`    ${s}`);
   console.error('  (the list is EXPLICIT, not a glob — one stale name disables this suite AND every later one)');
   process.exit(1);
+}
+
+// ── #10017: the cache-tier backfill is SURGICAL, and the column defaults ──
+// The seed above carries `cache_tier` (the reserved name, which this migration
+// must remove from the tail) AND `kept` (a property it must NOT touch). Asserting
+// only "the migration applied" would pass for `SET props = '{}'` — which wipes
+// every other property of every affected row on every tenant.
+//
+// ⛔ And it runs BEFORE the suites, like the #4216 and #9881 legs: it seeds a
+// half-built tenant (org + graph + one point, no default graph, no memberships),
+// so a future suite that scans organizations would pick it up and report the
+// failure against the wrong file.
+{
+  const t = await db.query(`SELECT props, cache_tier FROM public.point
+     WHERE org_id = '10017-cache-tier-org' AND node_key = 'cache-tier-poison'`);
+  const row = t.rows[0];
+  if (!row) {
+    console.error('✗ #10017: the seeded row is gone — this check verified nothing');
+    process.exit(1);
+  }
+  if (JSON.stringify(row.props) !== JSON.stringify({ kept: 'yes' })) {
+    console.error('✗ #10017: the backfill removed more than the reserved name '
+      + `(props = ${JSON.stringify(row.props)}) — it destroys real properties`);
+    process.exit(1);
+  }
+  if (row.cache_tier !== 'graph') {
+    console.error('✗ #10017: the stripped row did not land the DEFAULT graph tier '
+      + `(got ${JSON.stringify(row.cache_tier)}) — a tail value was promoted`);
+    process.exit(1);
+  }
+  await db.exec(`DELETE FROM public.organizations
+                  WHERE id = '10017-cache-tier-org'`);
+  console.log('✓ #10017: the tier backfill strips ONLY the reserved name (its '
+    + 'control property survives) and the column lands the default graph tier');
 }
 
 for (const suite of suites) {
