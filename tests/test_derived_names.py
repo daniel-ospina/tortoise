@@ -320,6 +320,13 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
+    # #10135 review (post-rebase): `test_5140_d10_relabel_migration.py` is
+    # deliberately ABSENT here. Main's #10164 gave both of that file's
+    # `from_uri(` sites an explicit `graph_name=` (`:50` the module probe,
+    # `:104` the fixture), which is the outcome this map exists to demand —
+    # `test_from_uri_sites_resolve_test_prefixed` skips a site whose block
+    # carries `graph_name=`, so a declaration for that file would be inert and
+    # would assert about call shapes the file no longer has.
     # CLI routing unit — from_uri is stubbed by the test (never connects)
     "test_pipeline_cli.py": [r"from_uri\("],
     # #3301: module live-FalkorDB availability probe over candidate URIs
@@ -460,6 +467,10 @@ _ENV_URI_PIN_FILES = (
     # #5140: declares the same `from_uri(uri)` / probe shapes above, so the
     # same loose-net hazard applies and the same invariant must hold.
     "test_5140_pending_extraction.py",
+    # #10135 review (post-rebase): NOT `test_5140_d10_relabel_migration.py` —
+    # main's #10164 gave its `from_uri(` sites an explicit `graph_name=`, so
+    # the loose-net hazard this tuple guards (a declared, un-named site) no
+    # longer exists in that file.
 )
 
 
