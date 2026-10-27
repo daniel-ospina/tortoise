@@ -74,15 +74,24 @@ export function validate(params: URLSearchParams): ValidatedParams | string {
   const client_id = (params.get("client_id") ?? "").trim();
   if (!client_id) return "client_id is required";
 
-  const redirect_uri = (params.get("redirect_uri") ?? "").trim();
-  if (!redirect_uri) return "redirect_uri is required";
+  // ⛔ VALIDATE A TRIMMED COPY, FORWARD THE RAW VALUE. The AS matches the presented
+  // `redirect_uri` against the registered one BYTE-EXACTLY for every non-loopback redirect
+  // (`oauth.py::_redirect_uri_matches`, exact-string arm), and `_valid_redirect_uri` accepts a
+  // registered value that carries whitespace. So forwarding a trimmed value turns an ACCEPTED
+  // registration into `400 redirect_uri is not registered for this client` at the AS — the same
+  // "registered-and-navigable redirect dies" class, moved one hop later and out of reach of the
+  // predicate comparison. The raw value is what is recorded, bound into the token and sent on.
+  const rawRedirectUri = params.get("redirect_uri") ?? "";
+  if (!rawRedirectUri.trim()) return "redirect_uri is required";
   // Delegated to the MIRROR of the AS's own predicate (consent-bridge.ts::redirectUriProblem).
   // A local approximation of it refused `cursor://` (the beta's only native-scheme harness) and
   // every IPv6 loopback (WHATWG keeps the brackets, so `=== "::1"` was dead code), which killed a
   // flow AFTER the visitor had consented — the same silent failure as the reverse direction, and
-  // the cross-half table test pins the two apart from drifting again.
-  const redirectProblem = redirectUriProblem(redirect_uri);
+  // the cross-half table test pins the two apart from drifting again. It trims ASCII spaces
+  // itself, exactly as `urlsplit` does.
+  const redirectProblem = redirectUriProblem(rawRedirectUri);
   if (redirectProblem) return redirectProblem;
+  const redirect_uri = rawRedirectUri;
 
   const code_challenge = (params.get("code_challenge") ?? "").trim();
   // RFC 7636 §4.2: base64url of a 32-byte SHA-256 digest = 43 chars; the spec allows 43..128.
