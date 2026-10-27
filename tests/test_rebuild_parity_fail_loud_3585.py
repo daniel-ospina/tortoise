@@ -2486,7 +2486,7 @@ def test_mention_established_then_deleted_name_still_refuses(env):
         f"hard-deleted: {r['non_folded_events']}")
 
 
-def test_mention_stub_only_carrier_folds_on_every_engine(env):
+def test_mention_stub_only_carrier_folds_in_graph_and_reference_fold(env):
     """#10157: a mention stub IS an Object node, so a supersede that names it
     FOLDS — the reference fold must agree, not refuse.
 
@@ -2669,6 +2669,13 @@ def test_id_wide_delete_of_a_mention_stub_refuses_on_every_engine(env):
          object="WIDE", event_id="e-w-rec")
     _raw(events, type="EntityMutated", op="delete", id=stub_id,
          event_id="e-w-del")  # ⛔ NO label: the id-wide fallback
+    # ⛔ The supersede is NAME-ONLY on purpose (review 13, P3): carrying the
+    # stub id would route the record to the anchored `supersede-target-deleted`
+    # bound instead, and it would stop being this shape. Consequence stated
+    # rather than papered over: this test pins the NAME limb and the report
+    # naming; the `& surviving_ids` filter is pinned by
+    # `test_mention_stub_reid_by_registration_refuses_on_every_engine`, whose
+    # supersede IS id-carrying.
     _raw(events, type="ObjectSuperseded", name="WIDE", supersedes_by="y",
          event_id="e-w-sup")
     proj = sdk._get_proj()
