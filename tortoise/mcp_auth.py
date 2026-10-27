@@ -1232,7 +1232,23 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
                 if is_supabase_enabled():
                     if is_oauth:
                         from tortoise.oauth import resolve_oauth_access_token
-                        org = resolve_oauth_access_token(
+                        # #10046 review P2: this resolution is no longer read-only.
+                        # It stamps the org's default-graph row id for the
+                        # record tenant, and on a MISS that means
+                        # `default_graph_id_for_credential` MINTS the row (up to
+                        # three graph reads, an org read, an insert and an
+                        # adopt-read, each with its own per-phase timeout on the
+                        # sync PostgREST client). Since #3773/#3718 that class of
+                        # sync control-plane I/O must ride a worker, not the
+                        # event loop — on the loop one degraded control plane
+                        # stalls EVERY concurrent request on the process, auth
+                        # included. Same seam as `_abuse.check_new_country`
+                        # below. Safe to thread: the resolver writes no
+                        # ContextVar (it returns the dict; the #9192 ScopeVars
+                        # are applied back on the loop by the caller), so the
+                        # thread's context copy loses nothing.
+                        org = await asyncio.to_thread(
+                            resolve_oauth_access_token,
                             get_control_plane(), token)
                     else:
                         org = resolve_api_key(get_control_plane(), token)

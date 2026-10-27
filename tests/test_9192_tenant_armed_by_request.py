@@ -44,7 +44,8 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 * The REST/hosted lane's installer is `hosted_api._data_sdk` →
   `_bind_record_tenant` (#9188 / #10025), not this file. It cannot be a
   one-line wrap on THIS lane: an org-wide/session-authenticated request carries
-  no `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only).
+  no `graph_id` — it names the org's DEFAULT tenant through `default_graph_id`
+  (see the next sentence), not through a per-graph id.
   `hosted_api._session_user_org` carries the org's `default_graph_id` through
   the same `supabase_control.default_graph_id_for_credential` home the key lane
   uses: #10025 named it for an org-wide `tt_`/`tk_` **API KEY**, #10046 for a
