@@ -89,11 +89,16 @@ class _Result:
 class _FakeGraph:
     """Records every Cypher and answers by matching the (normalized) query."""
 
-    def __init__(self, draft_ids, op_map, total, with_ep):
+    def __init__(self, draft_ids, op_map, total, with_ep, operators=0,
+                 ep_rows=None):
         self.draft_ids = list(draft_ids)
         self.op_map = dict(op_map)
         self.total = total
         self.with_ep = with_ep
+        # #10137: graph operator census + the persisted EP state of every
+        # claim that carries any (the off-neutral census's input).
+        self.operators = operators
+        self.ep_rows = list(ep_rows or [])
         self.queries: list[tuple[str, dict]] = []
 
     def query(self, cypher, params=None):
@@ -110,6 +115,10 @@ class _FakeGraph:
                 for oid in self.op_map.get(cid, []):
                     out.append([oid])
             return _Result(out)
+        if "RETURN count(o)" in c:            # #10137 COUNT_OPERATORS
+            return _Result([[self.operators]])
+        if "n.posterior_alpha, n.posterior_beta" in c:   # #10137 states
+            return _Result(self.ep_rows)
         if "count(n)" in c and "posterior_alpha IS NOT NULL" in c:
             return _Result([[self.with_ep]])
         if "count(n)" in c:
@@ -152,10 +161,12 @@ class _FakeSDK:
         return {"mode": "full"}
 
 
-def _make(draft_ids, op_map=None, total=None, with_ep=0, namespace="eval-ns"):
+def _make(draft_ids, op_map=None, total=None, with_ep=0, namespace="eval-ns",
+          operators=0, ep_rows=None):
     graph = _FakeGraph(draft_ids, op_map or {},
                        total=len(draft_ids) if total is None else total,
-                       with_ep=with_ep)
+                       with_ep=with_ep, operators=operators,
+                       ep_rows=ep_rows)
     return _FakeSDK(graph, namespace=namespace), graph
 
 
@@ -253,3 +264,160 @@ def test_activate_rejects_bad_batch_size():
     sdk, _ = _make(["c1"])
     with pytest.raises(ValueError, match="batch_size"):
         epa.activate_beliefs(sdk, batch_size=0)
+
+
+# ── #10137: the CONTRIBUTION census (coverage is not contribution) ─────────
+#
+# Coverage (``points_with_ep``) answers "does this claim carry EP state". It
+# cannot answer "did EP MOVE it": an IMPL-only graph over the unmeasured
+# Beta(1,1) prior is a fixed point at exactly 0.50, so ``points_with_ep ==
+# points`` while the belief layer contributed nothing. These four cells are
+# that second half, and they are what makes the population measurable rather
+# than assertable.
+
+@pytest.mark.parametrize("row, off", [
+    # a genuine move (the #10137 reproduction's baseline'd source)
+    ((("c1"), 6.0, 2.0, None, None), True),
+    # the neutral fixed point of IMPL over Beta(1,1) — 0.5 exactly
+    (("c2", 1.5, 1.5, None, None), False),
+    # floating-point noise around the fixed point is still neutral
+    (("c3", 1.2627, 1.2627, None, None), False),
+    # NAND over uniform priors moves OFF 0.5 (a real measurement of conflict)
+    (("c4", 0.4923, 1.0077, None, None), True),
+    # ep_* only (a baseline'd point with no posterior yet) — the canonical
+    # read uses it, so the census must too
+    (("c5", None, None, 1.0, 3.0), True),
+    # no usable state at all is UNMEASURED, not a contribution
+    (("c6", None, None, None, None), False),
+    # a lone/degenerate parameter is malformed state, not a measurement
+    (("c7", 2.0, None, None, None), False),
+    (("c8", 0.0, 0.0, None, None), False),
+])
+def test_off_neutral_counts_by_the_canonical_read(row, off):
+    assert epa.points_off_neutral([list(row)]) == (1 if off else 0)
+
+
+def test_off_neutral_agrees_with_read_confidence_over_a_population():
+    """The census is derived FROM ``read_confidence``, not re-implemented in
+    Cypher — so the two can never disagree on the per-field coalesce, the
+    malformed pair, or the degenerate (alpha+beta<=0) refusal."""
+    rows = [
+        ["c1", 6.0, 2.0, None, None],
+        ["c2", 1.2627, 1.2627, None, None],
+        ["c3", None, None, 3.0, 1.0],
+        ["c4", 2.0, None, 9.0, 1.0],
+        ["c5", 0.0, 0.0, None, None],
+        ["c6", None, None, None, None],
+        ["c7", "n/a", 1.0, None, None],
+    ]
+    expected = sum(
+        1 for r in rows
+        if (m := epa.read_confidence(
+            {"posterior_alpha": r[1], "posterior_beta": r[2],
+             "ep_alpha": r[3], "ep_beta": r[4]})) is not None
+        and abs(m - epa.NEUTRAL_MEAN) > epa.NEUTRAL_EPS)
+    assert epa.points_off_neutral(rows) == expected
+    # sanity: the population really does contain both sides (c1 0.75, c3 0.75,
+    # c4's per-field coalesce 2/3 — and c2 stays neutral)
+    assert epa.points_off_neutral(rows) == 3
+
+
+def test_manifest_carries_the_contribution_cells():
+    """A COVERED graph that moved nothing: every claim has EP state and every
+    posterior is the neutral mean — the exact shape that could otherwise be
+    published as belief-activated."""
+    sdk, _ = _make(["c1", "c2", "c3"], operators=2, with_ep=3,
+                   ep_rows=[["c1", 1.2627, 1.2627, None, None],
+                            ["c2", 1.2627, 1.2627, None, None],
+                            ["c3", 1.2627, 1.2627, None, None]])
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["points_with_ep"] == 3      # covered
+    assert manifest["points_off_neutral"] == 0  # ...and inert
+    assert manifest["operators"] == 2           # the factors EXIST
+
+
+def test_manifest_carries_the_moving_population():
+    sdk, _ = _make(["c1", "c2"], operators=2, with_ep=2,
+                   ep_rows=[["c1", 6.0, 2.0, None, None],
+                            ["c2", 1.2627, 1.2627, None, None]])
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["points_off_neutral"] == 1
+
+
+def test_operatorless_graph_reads_zero_operators_not_unknown():
+    """``operators == 0`` is a MEASUREMENT ("the extraction minted no
+    IMPL/NAND"), and it is the structural cause of an EP-inert question — so
+    the SDK must report it as 0 rather than omit it."""
+    sdk, graph = _make([], total=5, with_ep=0)
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["operators"] == 0
+    assert manifest["points_off_neutral"] == 0
+    # the census query really was issued (a silent skip would also read 0)
+    assert graph.matching("RETURN count(o)")
+
+
+def test_factors_come_from_the_pass_not_the_health_surface():
+    """``factors`` is what THIS pass selected, read from the dream result's
+    ``budget_used``. The health surface's ``operator_counts`` is the
+    Dreamer's ``_last_operator_count``, written PER BATCH by a full pass — so
+    on a multi-batch pass it holds the LAST batch's selection, not the
+    pass's."""
+    sdk, _ = _make(["c1"], operators=40, with_ep=1,
+                   ep_rows=[["c1", 6.0, 2.0, None, None]])
+    sdk.dream = lambda **kw: {"mode": "full", "budget_used": 40,
+                              "operator_counts": 3}   # last batch only
+    sdk.dream_health_check = lambda: {"operator_counts": 3,
+                                      "no_op_reason": None}
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["factors"] == 40
+    assert manifest["operators"] == 40
+
+
+def test_factors_unknown_when_the_sdk_does_not_report_it():
+    """A stub/older SDK must degrade to UNKNOWN — never a fabricated 0."""
+    sdk, _ = _make(["c1"])
+    manifest = epa.activate_beliefs(sdk)   # stub dream returns {"mode": "full"}
+    assert manifest["factors"] is None
+
+
+def test_no_op_reason_is_read_from_the_health_surface():
+    sdk, _ = _make([], total=4, with_ep=0)
+    sdk.dream_health_check = lambda: {"no_op_reason": "no_ep_factors"}
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["no_op_reason"] == "no_ep_factors"
+
+
+def test_no_op_reason_unknown_when_the_sdk_has_no_health_surface():
+    sdk, _ = _make(["c1"])
+    assert not hasattr(sdk, "dream_health_check")
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["no_op_reason"] is None
+
+
+def test_no_op_reason_unknown_when_the_health_surface_raises():
+    sdk, _ = _make(["c1"])
+
+    def boom():
+        raise RuntimeError("health surface exploded")
+
+    sdk.dream_health_check = boom
+    manifest = epa.activate_beliefs(sdk)
+    # fail-open on the diagnosis, never on the census
+    assert manifest["no_op_reason"] is None
+    assert manifest["ep_ran"] is True
+
+
+def test_no_op_reason_is_not_read_after_a_failed_pass():
+    """A raised pass has no reason: reading the health cell then would report
+    a STALE reason from an earlier pass as if it described this one."""
+    sdk, _ = _make(["c1"])
+
+    def dream_boom(**kwargs):
+        raise RuntimeError("EP exploded")
+
+    sdk.dream = dream_boom
+    sdk.dream_health_check = lambda: {"no_op_reason": "no_ep_factors"}
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["ep_ran"] is False
+    assert manifest["factors"] is None
+    assert manifest["no_op_reason"] is None

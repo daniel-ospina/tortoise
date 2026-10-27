@@ -200,6 +200,36 @@ every question (`questions_with_ep == questions`) — an EP pass that
 returned without writing posteriors (no EP factors in the window, a
 stale-run stand-down) reads `partial`, never `activated`.
 
+**Contribution, not just coverage (#10137).** Arming the beliefs is
+necessary and **not sufficient**: a question whose extraction mints no
+IMPL/NAND is EP-inert for ever, and a graph of IMPL-only operators over the
+no-source `Beta(1,1)` prior is a **fixed point** — every posterior is exactly
+`0.50`, so coverage reads complete while the belief layer moved nothing.
+Each per-question manifest therefore carries four more cells, and the run
+summary publishes the **populations** built from them:
+
+| cell (per question) | reads | why it exists |
+|---|---|---|
+| `operators` | graph census of operator nodes | `0` ⇒ the extraction minted no IMPL/NAND, so nothing EP does can ever reach a claim (STRUCTURAL) |
+| `points_off_neutral` | claims whose persisted posterior mean is not `0.50` (ε `1e-6`; the census is computed from `read_confidence`, never re-implemented in Cypher) | the CONTRIBUTION census — an IMPL-only graph over uniform priors reads `0` while `points_with_ep` covers every claim |
+| `factors` | the operators THIS pass selected, from dream's `budget_used` (full mode) | the health surface's `operator_counts` is the Dreamer's `_last_operator_count`, written PER BATCH by a full pass — it holds the last batch, not the pass |
+| `no_op_reason` | the SDK's own diagnosis (#3139): `no_ep_factors`, `stale_run_guard`, … | distinguishes a pass that wrote nothing from one that was never possible; `None` when the SDK cannot say (UNKNOWN, never invented) |
+
+`methodology.measurement_posture.activation` then carries
+`questions_off_neutral` / `points_off_neutral`, the enumerated
+`inert_questions` (`question_id`, `question_type`, `reason` ∈
+`no_operators` / `no_ep_factors` / `stale_run_guard` / `activation_failed` /
+`no_manifest` / `unmeasured`), the enumerated `neutral_questions` (measured,
+and every posterior is the neutral mean), and `by_question_type` — the same
+populations split by the benchmark's own question type, so *"single-session
+questions are the common case"* is a measurement rather than an assertion.
+
+⚠️ **Residual, deliberately not fixed here:** `belief_layer_state`'s bar is
+unchanged — `activated` means COVERED, so a fully covered run that
+contributed nothing still reads `activated`. Re-cutting that bar is #8486's
+recorded disclosure rule and an open owner decision, not a lane's call; the
+contribution cells beside it are what make the shape visible.
+
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
 `--rerank-pool N`, `--rerank-cap N`, `--rerank-lambda F`, `--rerank-model

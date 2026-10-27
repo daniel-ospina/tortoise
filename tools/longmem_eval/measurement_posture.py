@@ -64,12 +64,50 @@ BELIEF_LAYER_VALUES: frozenset[str] = frozenset({
 })
 
 #: Manifest keys summed over the run by :func:`summarize_belief_activation`.
+#: ``operators`` / ``points_off_neutral`` (#10137) join them so ``build()``
+#: carries the contribution census onto the report beside the coverage cells.
 _SUMMED_KEYS = (
     "points_promoted",
     "operators_promoted",
     "points_with_ep",
     "points_unmeasured",
+    # #10137 contribution census: summed over the per-question graphs.
+    "operators",
+    "points_off_neutral",
 )
+
+# ── #10137: WHY a question has no measured contribution ──────────────────
+# The state (``activated``/``partial``/``inert``/``unknown``) says HOW MUCH of
+# the run is covered. These reasons say WHY the rest is not — enumerated, per
+# question, never inferred from a green run. Three of them are structural
+# (nothing EP can do), which is exactly the distinction a fix needs.
+
+#: The extraction minted no IMPL/NAND for this question's graph, so no factor
+#: reaches a claim: EP-inert for ever, whatever the arm does (#10137).
+INERT_NO_OPERATORS = "no_operators"
+#: The pass ran, the graph HAS operators, and none reached the window — the
+#: SDK's own ``no_op_reason`` (#3139).
+INERT_NO_EP_FACTORS = "no_ep_factors"
+#: The pass was stood down because a concurrent run held the graph (#1163).
+INERT_STALE_RUN_GUARD = "stale_run_guard"
+#: Activation raised, or the runner recorded its fail-open shape.
+INERT_ACTIVATION_FAILED = "activation_failed"
+#: A RESUMED outcome with no activation manifest (a checkpoint written before
+#: the arm existed, or under another arm) — an EP-inert question inside the
+#: same number.
+INERT_NO_MANIFEST = "no_manifest"
+#: The pass ran and wrote nothing this census can see: no claim carries
+#: persisted EP state (``points_with_ep == 0``).
+INERT_UNMEASURED = "unmeasured"
+
+#: Every reason :func:`classify_question` can return for an EP-inert question.
+INERT_REASONS: frozenset[str] = frozenset({
+    INERT_NO_OPERATORS, INERT_NO_EP_FACTORS, INERT_STALE_RUN_GUARD,
+    INERT_ACTIVATION_FAILED, INERT_NO_MANIFEST, INERT_UNMEASURED,
+})
+#: The subset that is STRUCTURAL: no change to the arm, the promotion or the
+#: pass can ever help, because there is no factor graph to run on.
+INERT_REASONS_STRUCTURAL: frozenset[str] = frozenset({INERT_NO_OPERATORS})
 
 
 def _as_int(value: Any) -> int:
@@ -78,6 +116,61 @@ def _as_int(value: Any) -> int:
         return max(int(value), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_int(value: Any) -> int | None:
+    """A manifest cell that can be genuinely UNKNOWN (``None``).
+
+    #10137: ``operators == 0`` is a MEASUREMENT ("this graph mints no
+    operators") and drives a structural verdict, so an ABSENT cell must not
+    collapse into the same value — unknown stays unknown.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _classify_question(
+    manifest: dict[str, Any] | None,
+) -> tuple[str | None, bool, int]:
+    """``(inert_reason, measured, points_off_neutral)`` for ONE question.
+
+    ``inert_reason`` is ``None`` for a question whose claims carry a measured
+    posterior; otherwise it is one of :data:`INERT_REASONS`.
+
+    Order matters, and it is causal rather than cosmetic: an activation that
+    FAILED is named before its census (a partial graph would mislead), then
+    the structural cause (no operator exists — nothing downstream can ever
+    help), then the pass's own no-op reason, then the numeric census.
+
+    Cells an older SDK/stub never reported are UNKNOWN, and unknown never
+    produces a reason: ``operators`` absent must not read as ``no_operators``
+    (a fabricated structural cause is worse than an unclassified one), so the
+    classification falls through to the cells that ARE present.
+    """
+    if not isinstance(manifest, dict):
+        return INERT_NO_MANIFEST, False, 0
+    if manifest.get("error") or manifest.get("ep_ran") is not True:
+        return INERT_ACTIVATION_FAILED, False, 0
+    with_ep = _as_int(manifest.get("points_with_ep"))
+    off_neutral = _as_int(manifest.get("points_off_neutral"))
+    if with_ep > 0:
+        # Measured — whatever the cause cell says. A posterior is a posterior;
+        # the census is the fact (it also keeps an operator-LESS graph with
+        # direct IMPL/NAND edges, #888 W5, from being called structural).
+        return None, True, off_neutral
+    operators = _optional_int(manifest.get("operators"))
+    if operators == 0:
+        # Structural cause: no operator node exists, so no factor can reach
+        # a claim and nothing the arm does can ever help.
+        return INERT_NO_OPERATORS, False, 0
+    reason = manifest.get("no_op_reason")
+    if reason in (INERT_NO_EP_FACTORS, INERT_STALE_RUN_GUARD):
+        return reason, False, 0
+    return INERT_UNMEASURED, False, 0
 
 
 def summarize_belief_activation(
@@ -114,6 +207,29 @@ def summarize_belief_activation(
     factors (``no_op_reason = "no_ep_factors"``) and on the #1163 stale-run
     stand-down, so a run whose every question's EP pass measured nothing
     would otherwise read ``activated`` (fresh-context review, P1).
+
+    #10137 — coverage is not contribution, so the POPULATIONS are published
+    next to the ratio, never left to be inferred from a green run:
+
+    * ``inert_questions`` — the enumerated EP-inert population, per question
+      (``question_id``, ``question_type``, ``reason`` ∈ :data:`INERT_REASONS`),
+      and ``inert_by_reason`` for the counts. This is the input any fix needs;
+      ``no_operators`` is STRUCTURAL (nothing EP can do will help), the rest
+      are arm/pass causes.
+    * ``neutral_questions`` — the measured-but-NEUTRAL population: EP state
+      exists on every claim, yet every posterior is the uniform ``Beta(1,1)``
+      mean ``0.50``, i.e. the belief layer ran and moved nothing (an IMPL-only
+      graph with no source prior is a fixed point). Coverage alone reports
+      these as measured; they are the reason ``questions_off_neutral`` exists.
+    * ``questions_off_neutral`` / ``points_off_neutral`` — the CONTRIBUTION
+      population: questions (and claims) whose posterior is not the neutral
+      mean.
+    * ``by_question_type`` — the same populations split by the benchmark's own
+      ``question_type``, so "single-session questions are the common case" is
+      a measurement rather than an assertion.
+
+    Every added key is ADDITIVE and sorted deterministically: an older reader
+    ignores them, and a re-run over the same outcomes produces the same block.
     """
     rows = [o for o in (outcomes or ()) if isinstance(o, dict)]
     manifests = [o["belief_activation"] for o in rows
@@ -140,6 +256,58 @@ def summarize_belief_activation(
     }
     for key in _SUMMED_KEYS:
         summary[key] = sum(_as_int(m.get(key, 0)) for m in manifests)
+
+    # ── #10137: the POPULATIONS, enumerated per question ──────────────
+    inert: list[dict[str, Any]] = []
+    neutral: list[dict[str, Any]] = []
+    by_reason: dict[str, int] = {}
+    questions_off_neutral = 0
+    by_type: dict[str, dict[str, Any]] = {}
+    for outcome in rows:
+        manifest = outcome.get("belief_activation")
+        if not isinstance(manifest, dict):
+            manifest = None
+        reason, measured, off_neutral = _classify_question(manifest)
+        qid = outcome.get("question_id")
+        qtype = str(outcome.get("question_type") or "")
+        entry = {"question_id": qid, "question_type": qtype}
+        # Per-type buckets count every outcome, so the split's total always
+        # reconciles with ``questions`` (the ratio's own denominator).
+        bucket = by_type.setdefault(qtype, {
+            "questions": 0, "measured": 0, "questions_with_ep": 0,
+            "questions_off_neutral": 0, "questions_inert": 0,
+            "questions_neutral": 0, "operators": 0,
+            "points_off_neutral": 0,
+        })
+        bucket["questions"] += 1
+        if manifest is not None:  # only manifests carry these cells
+            bucket["operators"] += _as_int(manifest.get("operators"))
+        if measured:
+            bucket["measured"] += 1
+            bucket["questions_with_ep"] += 1
+            bucket["points_off_neutral"] += off_neutral
+            if off_neutral > 0:
+                questions_off_neutral += 1
+                bucket["questions_off_neutral"] += 1
+            else:
+                # covered, and the belief layer moved nothing in it
+                neutral.append(entry)
+                bucket["questions_neutral"] += 1
+        else:
+            inert.append({**entry, "reason": reason})
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            bucket["questions_inert"] += 1
+
+    def _sorted(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(entries, key=lambda e: str(e.get("question_id")))
+
+    summary["questions_inert"] = len(inert)
+    summary["inert_questions"] = _sorted(inert)
+    summary["inert_by_reason"] = dict(sorted(by_reason.items()))
+    summary["questions_neutral"] = len(neutral)
+    summary["neutral_questions"] = _sorted(neutral)
+    summary["questions_off_neutral"] = questions_off_neutral
+    summary["by_question_type"] = dict(sorted(by_type.items()))
     return summary
 
 
@@ -172,6 +340,19 @@ def belief_layer_state(*, requested: bool,
     claim with no posterior still reads ``unmeasured`` through
     ``ep_activation.read_confidence`` (#2598) — the per-point truth does not
     depend on this summary's policy.
+
+    ⚠️ #10137 RESIDUAL — this bar measures COVERAGE, not CONTRIBUTION, and it
+    is deliberately NOT re-cut here: ``activated`` still means "every question
+    carries a measured posterior", so a run that is fully covered and moved
+    NOTHING (an IMPL-only graph over the unmeasured ``Beta(1,1)`` prior, whose
+    fixed point is exactly ``0.50``) still reads ``activated``. That bar is
+    #8486's recorded disclosure rule and tightening it is an OPEN OWNER
+    DECISION, not a lane's call. What this module does instead is publish the
+    contribution population BESIDE the state
+    (``summarize_belief_activation`` → ``questions_off_neutral``,
+    ``neutral_questions``, ``inert_questions``, ``by_question_type``), so a
+    covered-but-inert run is visible on the same surface that reports
+    ``activated``, and no reader has to infer it from a green run.
     """
     if not requested:
         return BELIEF_LAYER_INERT

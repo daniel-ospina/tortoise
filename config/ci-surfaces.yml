@@ -6235,6 +6235,15 @@ surfaces:
   - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_measurement_posture.py  # #8486: the run's measurement posture — ingest mode + belief-layer activation; the completed-receipt disclosure gate (hermetic, no DB/network)
+  # #10137: the CONTRIBUTION census against a REAL graph — `operators` /
+  # `points_off_neutral` / `factors` / `no_op_reason` are new Cypher reads, and a
+  # broken read FAILS SILENTLY (`_scalar` maps an absent result set to 0, which
+  # is indistinguishable from "this graph has no operators"). Registering it
+  # against `tools/longmem_eval/` means a change to the census query must run
+  # the file that can tell a real zero from a broken query. Not embedded-only:
+  # a URI lane redirects the by-path SDK construction to the server and the
+  # assertions hold either way.
+  - longmem_eval/test_ep_census_10137.py
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`); opt-in `disable` applies the incident mitigation + read-back and FAILS CLOSED when it cannot read the value or open the probe (the one exception to UNKNOWN-and-proceed, which stays soft for `require-off`/`allow`); a readable value that is neither `yes` nor `no` is UNKNOWN, never `off`; wiring aborts before BOTH model loads (R6 cross-encoder pre-warm + `--model` injection), the embedder pre-flight and the dataset download (hermetic: a fake connection records commands AND a loopback RESP2 server drives the REAL `_connection_from_uri` builder — the anti-inert leg)
@@ -8226,6 +8235,17 @@ durations:
   eval/why_suite/test_why_suite_grading.py: 0.1
   eval/why_suite/test_why_suite_schema.py: 0.1
   longmem_eval/test_ep_activation.py: 0.1
+  # #10137: a file ADDED BY A PR can never carry a CI junit measurement (the
+  # refresher samples push-to-main runs only), so it takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as
+  # a SHARD-LAYOUT input (#2818/#3419). What the weight covers, measured here
+  # for the record only: 4 cases, each building ONE throwaway embedded
+  # `TortoiseSDK`, ~8s of graph work once the embedder is warm (a cold
+  # HuggingFace reach-out dominated the first read on this box, and the CI
+  # runner's own junit reading is what replaces this row).
+  # `tools/ci_timing.py --refresh-durations` re-bases it after the next
+  # push-to-main sweep.
+  longmem_eval/test_ep_census_10137.py: 2.0
   longmem_eval/test_probe_v2.py: 0.1
   test_alert_store.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_analytics.py: 0.1
