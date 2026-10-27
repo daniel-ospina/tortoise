@@ -175,29 +175,38 @@ owner's own post; treat the relay comment as the source of record for the quotat
 **(a) The surplus SDK methods that nothing calls may be DELETED — not merely made private — with the
 code archived.** Owner: *"1 yes (archive the code so we cna re-use it later if needed)"*. Measured on
 `origin/main` @ `17f604b054`: of the 138 public `TortoiseSDK` methods off the approved 40, **111 are
-referenced somewhere under `tortoise/**`** (a deliberately conservative superset — see the archive
-doc's rule) and **27 are referenced by no code under `tortoise/**` at all**. The 111 become
-**private** (`_name`) with their call sites re-pointed — the `graph_count` → `_graph_count`
-precedent of 2026-10-25 — and keep their capability. The **27** are deleted, and their code is
-archived at tag **`archive/4282-surplus-sdk-methods`** (points at `17f604b054`; **pushed**, verified
-with `git ls-remote --tags origin`) with a per-method index and restore recipe in
+referenced somewhere under `tortoise/**`**, **27 have no caller anywhere** under `tortoise/**`, and
+of those **1 is `RELOCATED`, not deleted** — leaving **26 deletable**. The 111 become **private**
+(`_name`) with their call sites re-pointed — the `graph_count` → `_graph_count` precedent of
+2026-10-25 — and keep their capability. The **26** are deleted, and their code is archived at tag
+**`archive/4282-surplus-sdk-methods`** (points at `17f604b054`; **pushed**, verified with
+`git ls-remote --tags origin`) with a per-method index, the recorded disposition of each, the work
+order for the deleting PR, and a restore recipe in
 [`archived-sdk-methods-2026-10.md`](archived-sdk-methods-2026-10.md). Deleting them is *not* a
 licence to re-add them: a restored method returning to the public surface is a new surface change
 and needs this document amended again.
 
-> **The 111 include seven methods that look unreferenced to any scan that skips `sdk.py`** —
-> `delete_point`, `create_direct_edge`, `create_derivation`, `compute_reputation`,
-> `dream_health_state`, `membership_get`, `resolve_id` — because the only caller is the class itself
-> (`self.<name>(...)`). They are load-bearing: deleting them breaks live tools (`tortoise_delete`,
-> `tortoise_delete_point`, `tortoise_ingest`, `tortoise_assess_source`, `tortoise_dream_health`) and
-> the approved target method **`link_entities`**. The selection rule therefore reads `sdk.py` as
-> well; see the archive doc's correction table for the three wrong counts that preceded **27**.
+> ⛔ **`test_guard` is the one the scan finds dead and a ruling forbids deleting.**
+> `beta-sdk-surface.md:390` (owner-approved) says it is *"Kept and relocated … it guards the
+> production-wipe incident, so the code must survive"*, and `tools/sdk_rename_table.py:709` records
+> `RELOCATED`. It leaves the public surface; it stays in the tree. A scan that finds no caller is
+> not licence to delete code a ruling says must survive — which is why the count is **26, not 27**.
 
-> **Callers outside the scanned population.** `tools/purge_test_residue.py:133` calls
+> **The 111 include six methods that look unreferenced to any scan that skips `sdk.py`** —
+> `delete_point`, `create_direct_edge`, `create_derivation`, `compute_reputation`,
+> `dream_health_state`, `resolve_id` — because the only caller is the class itself
+> (`self.<name>(...)`). They are load-bearing: deleting them breaks live tools (`tortoise_delete`,
+> `tortoise_delete_point`, `tortoise_ingest`, `tortoise_assess_source`, `tortoise_dream_health`,
+> `tortoise_review_connections`) and the approved target method **`link_entities`**. The selection
+> rule therefore reads `sdk.py` as well; see the archive doc's correction table for the three wrong
+> counts that preceded **26**.
+
+> **Callers and artifacts outside the scanned population.** `tools/purge_test_residue.py:133` calls
 > `store.delete_point(...)` — that method is in the **111**, so the call site re-points to the private
-> name in the deleting PR. And **all 27 are referenced from `tests/`**, so the deletion is a
-> test-churn change. The deletion lane must re-run the search across the whole repo (`tests/`,
-> `tools/`, `graph-scripts/`), not trust `tortoise/**` as a safe list of unreferenced names.
+> name. And **all 26 are referenced from `tests/`**, while 18 are keys in `tools/sdk_rename_table.py`
+> and 26 are members of the canonical partition in `docs/product/canonical-sdk-methods.md` — leaving
+> those stale reds `tests/test_sdk_rename_table.py::test_check_mode_is_clean`. The deletion lane
+> follows the archive doc's work order; `tortoise/**` is not a safe list of unreferenced names.
 
 **(b) A retiring tool does not need a no-replacement warning.** Owner: *"2 we dont have customers
 other than 2 guys using it self-hosted so let's not worry about migration and rather focus on
@@ -231,13 +240,14 @@ methods on their own.
 > (#3540, #9660), and it does **not** touch the SDK half (`2.5`, the #3836 (c) ruling), which already
 > ships a clean hard failure that names the replacement. The 18 keep answering exactly as recorded.
 
-**Correction carried by this amendment — the count was wrong twice, and each error is a different
-trap.** The number first published on #4282 was **26** (a non-recursive **regex** over
+**Correction carried by this amendment — the count was wrong three times, and each error is a
+different trap.** The number first published on #4282 was **26** (a non-recursive **regex** over
 `tortoise/*.py` — it never read the subpackages, and a regex counts prose like
 `` `sdk.capture_session` `` in a docstring as usage). It then read **34** (AST, but with **`sdk.py`
-excluded** from the readers, which hid the seven methods the class calls on itself). **27 is the
-governing number**, and the archive doc carries the four-row table of how each reading was produced
-plus the single command that reproduces 27. Any deletion PR must use **27 / 111**.
+excluded** from the readers, which hid the six methods the class calls on itself). It then read
+**27** (AST, `sdk.py` included) — and the owner-approved `RELOCATED` disposition of `test_guard`
+brings it to **26**. The archive doc carries the four-row table of how each reading was produced
+plus the single command that reproduces 27→26. Any deletion PR must use **26 / 111**.
 
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
