@@ -14,6 +14,24 @@ import pytest
 import tortoise.sdk as sdk_mod
 
 
+def arm_record(monkeypatch, *, org: str = "org-10000",
+               graph: str = "graph-10000") -> None:
+    """Arm the record the way a real single-tenant deployment does.
+
+    THREE facts, not one (#10067): the DSN, the declaration that this process
+    serves one graph, and that graph's id pair. `TORTOISE_RECORD_DSN` alone is
+    NOT the capability — `write_live_record` refuses an armed write it cannot
+    attribute (`no_tenant`, #9188 F4) — so a test that set the DSN alone was
+    asserting a path on which the turn reached NEITHER store.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setenv(record_writer.RECORD_SINGLE_TENANT_ENV, "1")
+    monkeypatch.setenv(record_writer.RECORD_ORG_ENV, org)
+    monkeypatch.setenv(record_writer.RECORD_GRAPH_ENV, graph)
+
+
 @pytest.fixture()
 def sdk(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
@@ -52,12 +70,13 @@ def test_unarmed_record_keeps_turns_in_the_graph(sdk, monkeypatch):
 def test_armed_record_writes_no_turn_nodes_but_keeps_the_session(sdk, monkeypatch):
     """Record armed -> the graph holds the Session only.
 
-    The transcript lives in the record (the per-turn `PointAdded` records), so the
-    thing that must be true of the GRAPH is the absence of turn nodes — and the
+    The transcript lives in the record (the `TurnsRecorded` carrier, #10067,
+    which projects the turn rows at `cache_tier = 'record_only'`), so the thing
+    that must be true of the GRAPH is the absence of turn nodes — and the
     Session's counters must still be written, or the quota/metering reads that
     depend on `turn_count`/`capture_redactions` would silently see nothing.
     """
-    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    arm_record(monkeypatch)
     monkeypatch.setattr(
         "tortoise.record_writer.write_live_record",
         lambda *a, **k: None, raising=False)
@@ -111,8 +130,24 @@ class _RecordingSeam:
         return None
 
     def point_contents(self) -> list[str]:
-        return [r["point"]["content"] for r in self.records
-                if r.get("type") == "PointAdded"]
+        """Every turn TEXT the capture handed the record, in either shape.
+
+        Both are real: `PointAdded` carries one snapshot under `point` and is the
+        record's carrier where the GRAPH holds the turn; `TurnsRecorded` (#10067)
+        carries the whole capture's snapshots under `turns` and is its carrier on
+        the record-only lane. A helper that knew only one shape would read the
+        other as "the capture handed the record nothing" — the vacuity this class
+        exists to prevent.
+        """
+        contents: list[str] = []
+        for record in self.records:
+            if record.get("type") == "PointAdded" and isinstance(
+                    record.get("point"), dict):
+                contents.append(record["point"]["content"])
+            elif record.get("type") == "TurnsRecorded":
+                contents.extend(snap["content"]
+                                for snap in record.get("turns") or [])
+        return contents
 
 
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
@@ -148,7 +183,7 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     the transcript nowhere at all (the vacuity #10011's pin had and #10021 fixes
     on its own axis — recorded there, not duplicated here).
     """
-    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    arm_record(monkeypatch)
     seam = _RecordingSeam()
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     needle = "the transcript line that must never reach the graph"
@@ -160,3 +195,45 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     proj = sdk._get_proj()
     assert _graph_text_hits(proj, needle) == [], (
         "a turn's text is in the graph while the record was armed")
+
+
+def test_an_armed_record_that_cannot_name_a_tenant_keeps_the_turns_in_the_graph(
+        sdk, monkeypatch):
+    """#10067 — the third conjunct of the capability, and the one that lost data.
+
+    `TORTOISE_RECORD_DSN` + a journal is NOT "the record holds the turns": the
+    seam refuses an armed write it cannot attribute (`no_tenant`, #9188 F4), and
+    on a multi-tenant process with no request scope that is every write. Before
+    this pin the capture read the capability as true, skipped the graph write,
+    and journalled per-turn `PointAdded` records the record never materialised —
+    the transcript in NEITHER store, the capture reporting success.
+
+    The assertion is on the STORE the read path serves, not on a flag: the turn
+    nodes are in the graph and the record seam was handed no turn record.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    # Deliberately NOT declared single-tenant, and no request scope: the process
+    # cannot say whose rows these would be, which is the production shape
+    # `record_tenant()` refuses (`.` -> `None`).
+    monkeypatch.delenv(record_writer.RECORD_SINGLE_TENANT_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_ORG_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_GRAPH_ENV, raising=False)
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    proj = sdk._get_proj()
+    _capture(sdk, "no-tenant-session", [{"role": "user", "content": "a"},
+                                        {"role": "assistant", "content": "b"}])
+    assert sorted(sdk_mod._capture_turn_ids(proj, "no-tenant-session")) == [
+        "no-tenant-session_t0", "no-tenant-session_t1"], (
+        "the record could not be told whose turn these are, so the graph is the "
+        "only store that can hold them — and it did not get them either")
+    assert [r for r in seam.records
+            if r.get("type") == "TurnsRecorded"] == [], (
+        "a record-only carrier was journalled for a record write that cannot "
+        "land — its rows would never exist, so the journal would name a home "
+        "that is not there")
+    assert seam.point_contents() == ["[user] a", "[assistant] b"], (
+        "the fallback must journal the NODE-CREATING record, because the graph "
+        "is the store that holds these turns")

@@ -241,7 +241,8 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     # that producer will emit: the capture writer's own per-turn snapshots
     # (`record_projection.TURNS_SNAPSHOT_KEYS`) under `turns`, with the
     # `contains_session` link on the ENVELOPE (#3947) — not an invented shape.
-    # It declares `NoRecordEffect`, so it must produce NO statement at all.
+    # It declares `NoRecordEffect` because it materialises no NODE; its ROWS come
+    # from the §9.1 raw-turn home (`_turns_statements`, #10067).
     "TurnsRecorded": {"id": "e1", "sessionId": "sess1",
                       "contains_session": "sess1",
                       "turns": [{"id": "sess1_t0", "content": "hi",
@@ -289,6 +290,23 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
                 "statement — the shape-keyed secondary projection did not fire")
             assert any(rp.NARRATIVE_TABLE in s.sql for s in statements), (
                 f"{record_type}'s statements do not touch {rp.NARRATIVE_TABLE}")
+        elif record.get("turns"):
+            # #10067: the §9.1 raw-turn home is the SECOND secondary projection
+            # declared against a no-NODE-effect carrier, and it is TYPE-keyed
+            # rather than shape-keyed (the key decides placement authority, so
+            # it may not be something any payload can claim). "No declared node"
+            # and "no rows" are different statements here: without these rows
+            # the switchover would move the transcript out of the graph and into
+            # no store at all.
+            assert statements, (
+                f"{record_type} carries a capture's turns and produced no "
+                "statement — the raw-turn home did not fire")
+            assert any("INSERT INTO public.point " in s.sql for s in statements), (
+                f"{record_type}'s statements write no turn row")
+            assert all(rp.RECORD_ONLY_TIER in s.params for s in statements
+                       if "INSERT INTO public.point " in s.sql), (
+                f"{record_type}'s turn rows landed without the record-only "
+                "tier, so a record-sourced rebuild would re-create turn nodes")
         else:
             assert statements == []
         # A declared no-op must say WHY. "No reason" is the silent skip.

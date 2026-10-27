@@ -18388,8 +18388,9 @@ def _record_unavailable() -> HTTPException:
     served in its place.
 
     On an armed **journaling** deployment the turns are RECORD rows (the
-    per-turn `PointAdded` records, #10000/#10011) and the graph keeps only the
-    Session's counters — so when the record read FAILS, the fail-soft fallback
+    turn records of #10000/#10011 — ONE `TurnsRecorded` carrier per capture
+    since #10067) and the graph keeps only the Session's counters — so when the
+    record read FAILS, the fail-soft fallback
     below answers zero turn nodes, which is byte-identical to a session that has
     no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
     forbids — a refusal rendered as a legitimate empty answer, with the only
@@ -18397,9 +18398,10 @@ def _record_unavailable() -> HTTPException:
 
     ⚠️ "JOURNALING" is load-bearing, and `_record_holds_turns` does NOT test it:
     that predicate asks only whether the DSN is set (``return _dsn() is not
-    None``), while the WRITE side asks the same capability question with both
-    conjuncts — ``sdk._get_event_log() is not None and _record_dsn() is not
-    None`` (`tortoise/sdk.py:2652`), because a per-turn `PointAdded` record is
+    None``), while the WRITE side asks the same capability question with THREE
+    conjuncts — a configured journal, the DSN, and a tenant it can NAME for the
+    write (`tortoise/sdk.py` `_write_capture_turns`, #10067) — because a turn
+    record is
     gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
     write door declines `no_durable_journal` and the GRAPH keeps the turns, so
     "the graph keeps only the counters" is a property of armed+journaling, not
@@ -18462,7 +18464,9 @@ def _record_holds_turns() -> bool:
     """#10000: does the RECORD hold captured turns (rather than the graph)?
 
     ⛔ IT DOES NOT ASK THE QUESTION THE CAPTURE WRITER ASKS, and the difference is
-    live. Turns reach the record only through the per-turn `PointAdded` records,
+    live. Turns reach the record only through the capture's turn records (ONE
+    `TurnsRecorded` carrier per capture since #10067; the per-turn `PointAdded`
+    records before it),
     which need a configured journal AND the DSN — `sdk.py:2652`'s two conjuncts —
     while this predicate tests the DSN ONLY. So on an armed-but-NOT-journaling
     deployment the writer puts the turns in the GRAPH while this read still asks
@@ -18577,7 +18581,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
 
     # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
     # capture writer asks. With the record armed, the turns are RECORD rows (the
-    # per-turn `PointAdded` records) and the graph holds none, so this read must
+    # capture's turn records, one `TurnsRecorded` carrier per capture since #10067)
+    # and the graph holds none, so this read must
     # come from the record; unarmed, it reads the graph exactly as before, which
     # makes the pre-arming deployment byte-identical.
     turns = []

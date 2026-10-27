@@ -28,13 +28,20 @@ WHAT IS PINNED HERE, AND WHY EACH PIN CAN FAIL
 §5 the STALE SWEEP: a shorter re-capture removes a turn on BOTH routes — the
    rebuild never had it as a node, and the record's hard-delete record removes
    its row — so neither route resurrects it.
+§6 the ROW WRITE is the carrier's own (`_turns_statements`): one `public.point`
+   row per turn at `cache_tier = 'record_only'`, taken from the TYPE's
+   declaration rather than from a payload, with no relation row and no empty
+   carrier.
+§7 the PRODUCER (#10067): a record-armed capture journals ONE carrier and no
+   per-turn `PointAdded`, its plan writes the turn rows, and a replay of that
+   very journal materialises no turn node.
 
-⛔ WHAT THIS FILE DOES NOT CLAIM. Nothing emits `TurnsRecorded` yet: step 7 turns
-the producer over in its own change (this one is deliberately INERT, so the
-capture writer's per-turn `PointAdded` path is untouched). The journal replayed
-in §3/§5 is therefore built from a REAL capture whose turn records are moved onto
-the carrier by this file — the snapshots are the producer's, the carriage is the
-thing under test.
+⛔ STEP 7 HAS LANDED (#10067): `sdk._write_capture_turns` emits
+`TURNS_RECORD_TYPE` on the record-only lane, so §1–§6 pin the contract the
+producer now meets and §7 pins the producer itself. §3/§5 still build their
+journals by moving a REAL capture's records onto the carrier
+(`_record_carried`), which keeps them about the REPLAY ENGINES; §7 covers the
+writer, from its own output.
 """
 from __future__ import annotations
 
@@ -217,20 +224,163 @@ def test_the_carrier_is_declared_wherever_a_journal_type_is():
 
 
 def test_the_carrier_declares_no_record_statement_at_all():
-    """`NoRecordEffect` is a decision with a reason, and it produces NOTHING.
+    """`NoRecordEffect` is a decision with a reason — and since step 7 it is
+    about the NODE, not about the rows.
 
-    A "no node effect" that still emitted a row would be a second home invented
-    without a decision — §9.1's record home for the turns is `public.point`,
-    which step 7 writes as its own column statement, not a payload path.
+    The declared effect stays a deliberate no-op because §9.1's record home for
+    the turns is `public.point`, reached by the carrier's OWN column statement
+    (`record_projection._turns_statements`, #10067) and never by a
+    one-node-snapshot-per-record path: the carrier holds a LIST of turns, so a
+    declared `NodeSnapshot` could only ever project ONE row of it. What must
+    remain true is the node half — the declared mutation materialises nothing.
     """
     carrier = _carrier([{"id": f"{SESSION}_t0", "content": "c",
                          "pointKind": "event", "speaker": "user",
                          "is_episodic": True, "status": "draft",
                          "createdAt": NOW, "embedding": None}])
-    assert rp.mutations_for(carrier, org_id="o", graph_id="g") == []
+    assert rp._declared_mutations(carrier, org_id="o", graph_id="g") == [], (
+        "the carrier's DECLARED effect must stay empty — the node half — because "
+        "its rows come from `_turns_statements`, not from a node snapshot")
+    # `replay_plan` is the same statement set PLUS the journal-position row, so
+    # a `node_identity` occurrence there would be the node half reappearing.
     plan = rp.replay_plan([carrier], org_id="o", graph_id="g")
-    assert not any("node_identity" in st.sql for st in plan), (
-        "the carrier materialised a node in the record's own plan")
+    assert plan, "the carrier planned nothing at all: its rows are missing"
+
+
+# ── §6 step 7 (#10067): the carrier WRITES the rows — the tier is its own ──
+
+
+def _turn_snapshot(turn_id: str, text: str = "c", **extra) -> dict:
+    return {"id": turn_id, "content": text, "pointKind": "event",
+            "speaker": "user", "is_episodic": True, "status": "draft",
+            "createdAt": NOW, "embedding": None, **extra}
+
+
+def _point_row_statements(carrier: dict) -> list:
+    return [st for st in rp.mutations_for(carrier, org_id="o", graph_id="g")
+            if st.sql.startswith("INSERT INTO public.point ")]
+
+
+def test_the_carrier_writes_one_point_row_per_turn_at_the_record_only_tier():
+    """§6 — the row WRITE that `_record_rows` above could only MODEL.
+
+    The carrier replaced one `PointAdded` PER TURN, and those records were also
+    the record's turn-row write — so a switchover that swapped the emission
+    without teaching the carrier to write its rows would have moved the
+    transcript out of the graph and into NO store (measured: the record then
+    projects zero turn rows). This is the pin for that half, and the tier is
+    what keeps `rebuild_from_record` from re-creating the nodes the journal
+    route correctly omits.
+    """
+    turns = [_turn_snapshot(f"{SESSION}_t0", "[user] one"),
+             _turn_snapshot(f"{SESSION}_t1", "[assistant] two")]
+    rows = _point_row_statements(_carrier(turns))
+    assert len(rows) == len(turns), (
+        f"the carrier planned {len(rows)} row(s) for {len(turns)} turn(s)")
+    assert [r.params[3] for r in rows] == [t["id"] for t in turns], (
+        "each turn row must key on its OWN snapshot's id — the envelope id is "
+        "the SESSION, so reading it files a whole capture under one key")
+    for row, turn in zip(rows, turns, strict=True):
+        columns = row.sql.split("(", 1)[1].split(")", 1)[0].replace(" ", "")
+        assert "cache_tier" in columns.split(","), (
+            "the tier must be a COLUMN write: `_RECORD_ONLY_KEYS` strips a "
+            "payload `cache_tier`, so a payload path lands the DEFAULT 'graph'")
+        assert "record_only" in row.params, row.params
+        assert turn["content"] in row.params, (
+            "the row does not carry the turn's text — the record would hold a "
+            "key and no transcript")
+
+
+def test_the_tier_is_the_types_declaration_and_never_a_payload_value():
+    """§6 — placement authority stays on the record TYPE.
+
+    A snapshot that names its own tier must not be believed: `graph` is the
+    schema DEFAULT, so a payload could silently put a turn back in the cache —
+    and `record_projection._RECORD_ONLY_KEYS` strips the key before the insert,
+    which is why the strip alone is not enough and the column is written from
+    the declaration instead.
+    """
+    spoofed = _turn_snapshot(f"{SESSION}_t0", cache_tier="graph")
+    row, = _point_row_statements(_carrier([spoofed]))
+    assert row.params.count("record_only") == 1, row.params
+    assert "graph" not in row.params, (
+        f"a payload-supplied tier reached the row: {row.params}")
+
+
+def test_the_carrier_writes_no_relation_row_for_a_turn():
+    """§6 — a turn is not a graph node, so it is not an EDGE endpoint either.
+
+    The per-turn `PointAdded` records carried `contains_session` on the envelope
+    and `_ENVELOPE_RELATIONS` turned that into a `session→turn CONTAINS` row.
+    Keeping it on the carrier would make the record richer than the graph — the
+    one direction Interface A forbids — and nothing reads it: `record_read`
+    serves a session's turns by `node_key` range, never through `public.relation`.
+    """
+    carrier = _carrier([_turn_snapshot(f"{SESSION}_t0")])
+    assert carrier["contains_session"] == SESSION
+    statements = rp.mutations_for(carrier, org_id="o", graph_id="g")
+    assert not any("public.relation" in st.sql for st in statements), (
+        "the carrier planned a relation row for a turn that is not a node")
+
+
+def test_a_carrier_with_no_turn_set_is_REFUSED_not_a_silent_no_op():
+    """§6 — the carrier IS the transcript, so an empty one records nothing.
+
+    The producer's own gate returns before it emits (`if not turn_texts`), so
+    this shape has no producer — and a silent `[]` here would make the NEXT
+    producer's broken carrier, the one that drops a capture's whole turn set,
+    indistinguishable from a healthy one.
+    """
+    for empty in ({}, {"turns": []}, {"turns": "not-a-list"}):
+        carrier = {"event_id": "e", "ts": NOW,
+                   "type": rp.TURNS_RECORD_TYPE, "sessionId": SESSION, **empty}
+        with pytest.raises(rp.RecordProjectionError):
+            rp.mutations_for(carrier, org_id="o", graph_id="g")
+
+
+def test_the_stale_sweep_records_the_removal_once_on_the_record_only_lane(
+        tmp_path, monkeypatch):
+    """§6 — a shorter re-capture removes the ROW, and stops there.
+
+    The graph holds no turn node, so `PointRetracted` ("the node is gone") is a
+    false statement on that lane; the honest record is the `EntityMutated`
+    op=delete, whose fold is the hard delete of the row. Emitting both would be
+    two records for one removal (#3300), and dropping both would let a replay
+    resurrect the orphan the sweep removed (#1920).
+    """
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10067")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10067")
+    from tortoise.sdk import TortoiseSDK
+
+    path = tmp_path / "cap" / "events.jsonl"
+    path.parent.mkdir(parents=True)
+    sdk = TortoiseSDK(db_path=str(tmp_path / "cap.db"),
+                      event_log_path=str(path))
+    try:
+        _capture(sdk, TURNS)
+        _capture(sdk, TURNS[0:1])          # shorter: `_t1` is now surplus
+        proj = sdk._get_proj()
+        turn_node_ids = [i for i in _node_ids(proj)
+                         if i.startswith(f"{SESSION}_t")]
+    finally:
+        sdk.close()
+    journal = _journal(path)
+    swept = [r for r in journal
+             if r.get("type") == "EntityMutated" and r.get("op") == "delete"
+             and r.get("id") == f"{SESSION}_t1"]
+    assert swept, "the swept turn's row removal was not journalled"
+    assert not [r for r in journal
+                if r.get("type") == "PointRetracted"
+                and str(r.get("id") or "").startswith(f"{SESSION}_t")], (
+        "a node-lifecycle retraction was journalled for a turn that was never "
+        "a graph node")
+    # Non-vacuity: the graph really does hold no turn node on this lane, so the
+    # `PointRetracted` above would have retracted nothing.
+    assert not turn_node_ids, turn_node_ids
 
 
 def test_a_torn_carrier_line_is_REFUSED_and_so_is_the_stale_sweep_delete():
@@ -424,19 +574,13 @@ def test_neither_replay_engine_creates_a_turn_node(
 
 
 def _record_rows(snaps, tier: str = "record_only") -> list[dict]:
-    """The `public.point` row step 7's writer must write for one carrier turn.
+    """The `public.point` row a carrier turn is READ as — the reader's input.
 
-    ⛔ THIS IS A MODEL OF THE ROW, and the disclosure matters: the declared effect
-    for this type is `NoRecordEffect` (`record_projection.RECORD_MUTATIONS`), so
-    nothing projects rows from a carrier TODAY. What §4/§5 below pin is the ROW
-    CONTRACT and the READER's decision on it — not the row WRITE. A step-7
-    producer that emitted the carrier and forgot the `cache_tier = 'record_only'`
-    column statement would still store and serve the turns (the row lands at the
-    schema DEFAULT 'graph'), and no assertion here would see it — the damage is
-    the SILENT one this file exists to prevent: `read_record_view` would
-    node-ify the turns the journal route creates none of, i.e. the two rebuild
-    routes diverge with no error anywhere. That pin belongs to the change that
-    writes the rows.
+    ⚠️ This is the READER's shape, not a model of a writer. Since #10067 the rows
+    are really written, from the carrier's type declaration
+    (`record_projection._turns_statements`); §6 pins that statement set — the
+    `cache_tier` column included — against this reader, and §4/§5 pin the
+    READER's decision on such a row.
 
     Only what `read_record_view` reads is built: identity, `is_episodic`, the tier
     as the row's own COLUMN (#10070: it cannot ride the payload — the strip
@@ -522,3 +666,77 @@ def test_a_shorter_recapture_removes_the_turn_on_both_routes(
     # The graph half: the rebuild does not resurrect it either.
     ids = _replay_both(tmp_path, monkeypatch, journal)
     assert stale not in ids
+
+
+# ── §7 the PRODUCER (#10067): a real capture, both rebuild routes ──────────
+
+
+def test_a_record_armed_capture_journals_the_carrier_and_replays_to_no_turn_node(
+        tmp_path, monkeypatch):
+    """§7 — the defect itself, measured on the writer rather than on a fixture.
+
+    #10067: the capture skipped the graph write (`_record_holds_turns`) and still
+    journalled one `PointAdded` per turn, so `rebuild()` re-created every turn the
+    running graph deliberately does not hold — after #10017's purge, undoing the
+    migration within a day. Three assertions, and each one alone has been true
+    while the defect stood:
+
+      1. the journal carries ONE `TurnsRecorded` per capture and NO per-turn
+         `PointAdded` (the record-shape half);
+      2. the record's own plan writes every turn as a `public.point` row at
+         `cache_tier = 'record_only'`, so the transcript still has a home (the
+         non-vacuity half — without it the switchover stores the turns nowhere);
+      3. a replay of that very journal materialises NO turn node (the defect).
+    """
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10067")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10067")
+    from tortoise.sdk import TortoiseSDK
+
+    path = tmp_path / "cap" / "events.jsonl"
+    path.parent.mkdir(parents=True)
+    sdk = TortoiseSDK(db_path=str(tmp_path / "cap.db"),
+                      event_log_path=str(path))
+    try:
+        _capture(sdk, TURNS)
+    finally:
+        sdk.close()
+    journal = _journal(path)
+
+    # (1) the record SHAPE: one carrier, and not one node-creating turn record.
+    carriers = [r for r in journal if r.get("type") == rp.TURNS_RECORD_TYPE]
+    assert len(carriers) == 1, (
+        f"the capture journalled {len(carriers)} carrier(s) for one capture")
+    assert not [r for r in journal if _is_turn(r)], (
+        "a per-turn `PointAdded`/`PointRetracted` record survived the switchover")
+    assert [t["id"] for t in carriers[0]["turns"]] == [f"{SESSION}_t0",
+                                                      f"{SESSION}_t1"]
+
+    # (2) the record ROUTE still holds the transcript, at the record-only tier.
+    rows = [st for st in rp.mutations_for(carriers[0], org_id="org-10067",
+                                          graph_id="graph-10067")
+            if st.sql.startswith("INSERT INTO public.point ")]
+    assert [r.params[3] for r in rows] == [f"{SESSION}_t0", f"{SESSION}_t1"]
+    assert all("record_only" in r.params for r in rows), (
+        "a turn row landed without the tier, so `rebuild_from_record` would "
+        "re-create the very node this carrier keeps out of the graph")
+
+    # (3) the GRAPH route: replay THIS journal into an empty graph.
+    client, proj = _fresh_projection(tmp_path, monkeypatch)
+    from tortoise.consistency import recover_from_log
+
+    try:
+        report = recover_from_log(str(path.parent), proj)
+        assert report["recovered"] is True, report
+        ids = _node_ids(proj)
+        assert SESSION in ids, (
+            f"the replay produced no Session node, so 'no turn node' is vacuous "
+            f"(ids={sorted(ids)})")
+        assert not [i for i in ids if i.startswith(f"{SESSION}_t")], (
+            "a rebuild of the record-armed capture resurrected turn nodes — "
+            "the #10067 defect")
+    finally:
+        client.close()

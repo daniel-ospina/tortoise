@@ -2422,11 +2422,14 @@ _TURN_WRITE_CYPHER = (
 
 
 # #10000: §9.1/D1 places the raw transcript in Postgres — "not in the graph, not
-# a `Document`, not a `Point`". The per-turn `PointAdded` records this writer
-# emits ARE that Postgres write (the projection folds them into `public.point`
-# with `is_episodic = true`), so when the record can hold the turns the graph
-# keeps only the Session's redaction count: one node write, no rows, no
-# `CONTAINS` edges.
+# a `Document`, not a `Point`". The turn records this writer journals ARE that
+# Postgres write: until #10067 one `PointAdded` per turn (folded into
+# `public.point` with `is_episodic = true`), and since #10067 ONE `TurnsRecorded`
+# carrier per capture whose own column statement writes the same rows at
+# `cache_tier = 'record_only'` — and whose GRAPH fold is nothing, which is what
+# stops a rebuild re-creating turns the deployment deliberately does not hold.
+# So when the record can hold the turns the graph keeps only the Session's
+# redaction count: one node write, no turn rows, no `CONTAINS` edges.
 _SESSION_REDACTIONS_CYPHER = (
     "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"
 )
@@ -2641,16 +2644,37 @@ def _write_capture_turns(
     # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
     # can neither duplicate a turn nor demote or re-stamp a stored one.
     # #10000: WHICH STORE holds the turns is a CAPABILITY question, never a
-    # policy flag. The per-turn `PointAdded` records below are gated on a
-    # configured journal (`sdk._get_event_log()`), and the record is armed only
-    # with `TORTOISE_RECORD_DSN`; if either is absent the graph is the only store
+    # policy flag. The turn records below are gated on a configured journal
+    # (`sdk._get_event_log()`), and the record is armed only with
+    # `TORTOISE_RECORD_DSN`; if either is absent the graph is the only store
     # that can hold the turns, so this writer keeps both paths and selects by
     # what is actually available. Removing the graph write unconditionally would
     # write the transcript to NO store on an unarmed deployment — silent loss of
     # the capture's whole point.
+    #
+    # #10067 ("capture records dropped"): the third conjunct is the TENANT, and
+    # it is the difference between a capability and a guess. `write_live_record`
+    # refuses an ARMED write it cannot attribute (`no_tenant`, #9188 F4 — an
+    # ambient scope or the declared single-tenant pair), so on a deployment that
+    # is `armed` but cannot NAME a tenant for this write, the first two
+    # conjuncts said "the record has it" while the record took nothing: the
+    # turn then lived in neither store and the capture still reported success.
+    # `record_tenant()` is the SAME resolution the seam itself uses and is
+    # decidable without a socket, so the decision and the write cannot disagree
+    # about who this write belongs to. A refusal that only the SOCKET can
+    # discover (unreachable, breaker open) is deliberately NOT tested here —
+    # that half is #10021's ("the store is decided by what the write did"), and
+    # the journal carrier it leaves behind is what heals it on replay.
     from tortoise.record_writer import record_dsn as _record_dsn
+    from tortoise.record_writer import record_tenant as _record_tenant
     _record_holds_turns = (sdk._get_event_log() is not None
-                           and _record_dsn() is not None)
+                           and _record_dsn() is not None
+                           and _record_tenant() is not None)
+    # The JOURNALLED shape follows the WRITE that actually happened, not the
+    # capability read above: the carrier below is emitted only when the graph
+    # keeps no node, so a `PointAdded` and a turn node are never out of step in
+    # either direction.
+    _journal_turn_carrier = False
     if _record_holds_turns:
         sdk._graph_write_with_retry(
             lambda: proj.g.query(
@@ -2664,6 +2688,7 @@ def _write_capture_turns(
         # preserved-vector branch cannot be reached from here — there is no node
         # whose prior vector could have been preserved.
         stored: dict[str, tuple] = {}
+        _journal_turn_carrier = True
     else:
         _rows = sdk._graph_write_with_retry(
             lambda: proj.g.query(
@@ -2703,13 +2728,36 @@ def _write_capture_turns(
                 what="capture stale-turn sweep",
             )
 
-    # #3947: journal the turn writes so a rebuild can recreate them.
-    # `contains_session` rides the EVENT ENVELOPE, not the point payload —
-    # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
-    # restored by the projection's edge fold without inventing a node
-    # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (a hosted SDK when
-    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
+    # #3947/#10067: journal the turn writes so a rebuild recreates EXACTLY the
+    # turns the live write stored — and WHICH record does that is decided by the
+    # SAME capability that decided the write above (`_record_holds_turns`), not
+    # by the journal's presence alone.
+    #
+    # `PointAdded` is a NODE-CREATING record, so it is the truthful record only
+    # when the graph is the store that holds the turn. On the record-only lane
+    # the graph write above was skipped, and journalling `PointAdded` anyway made
+    # `rebuild()` re-create every turn the running graph deliberately does not
+    # have: a rebuild that is a regression, not a recovery (§9.1/D1 — raw turns
+    # live outside the graph; the RESURRECTION class `tortoise/log.py` names,
+    # #3316). After #10017's purge that replay re-creates the legacy turns within
+    # a day, undoing the migration — #10067.
+    #
+    # `TurnsRecorded` is that record: ONE per capture instead of one per turn,
+    # carrying this writer's own per-turn snapshots, with the record effect of
+    # `PointAdded` (the same `public.point` row, the same `record_read` turn
+    # read) at `cache_tier = 'record_only'` — written by
+    # `record_projection._turns_statements`, its OWN column statement — and NO
+    # graph fold (`projection._NO_PROJECTION_FOLD`). Both rebuild routes then
+    # agree.
+    # `contains_session` rides the EVENT ENVELOPE either way, not the point
+    # payload — the CONTAINS link is a capture-write structural fact
+    # (ONTOLOGY §4.5), restored by the projection's edge fold without inventing a
+    # node property the live write never sets. On the carrier it is carried for
+    # the reader and materialises NOTHING in either store: a record-sourced
+    # `relation` row for an edge the graph deliberately does not hold would be
+    # the record richer than the graph, the one direction Interface A forbids.
+    # Gated on a configured journal: on a lane with no `event_log_path` (a hosted
+    # SDK when `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
     # no-op and the `:GraphEvent` half is not a rebuild source —
     # `ensure_event_schema` + `next_seq` + `append_event` per turn
     # there buys no durability on the very lane #3086 measures.
@@ -2729,8 +2777,20 @@ def _write_capture_turns(
         # subscriber surface. The JSONL half is the ``EntityMutated``
         # op=delete record the replay folds — NOT ``PointRetracted``, whose
         # fold tombstones (the wrong meaning for a removal).
-        sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
+        #
+        # #10067: `PointRetracted` is a NODE-CREATING-LIFECYCLE record and the
+        # turn it names was never a graph node here, so on the record-only lane
+        # it retracts nothing in the graph while its RECORD effect deletes the
+        # `public.point` row — the end state the sweep wants, but reached by a
+        # record whose stated meaning (`the graph node is gone`) is false. The
+        # honest record for this lane is the `EntityMutated` op=delete below: its
+        # fold is the hard delete of the ROW, and the graph has no node to
+        # remove. Emitting both would also double-delete, i.e. two records for
+        # one removal (#3300).
+        if not _journal_turn_carrier:
+            sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")
+    _turn_snapshots: list[dict] = []
     for i, _turn in enumerate(windowed):
         turn_id = _capture_turn_id(session_id, i, turn_offset)
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
@@ -2767,18 +2827,71 @@ def _write_capture_turns(
         # `stamp_journal_embedding` stamps no identity.
         if turn_embs[i] is None and stored_emb is not None:
             _turn_snapshot["embedding_preserved"] = True
+        _turn_snapshots.append(_turn_snapshot)
+
+    if _journal_turn_carrier:
+        # #10067: ONE record for the whole capture, in place of one
+        # `PointAdded` per turn — the same per-turn snapshots, verbatim
+        # (`record_projection.TURNS_SNAPSHOT_KEYS` is pinned to this dict), and
+        # the session link on the envelope. The record's own effect is the turn
+        # ROWS (never a node); the graph fold is declared nowhere
+        # (`projection._NO_PROJECTION_FOLD`), so a replay stops re-creating the
+        # nodes this deployment deliberately does not hold.
+        #
+        # ⚠️ BUT THE `:GraphEvent` STREAM IS A THIRD STORE, and it is NOT dropped
+        # by accident. `PointAdded` is in `_GRAPH_EVENT_TYPES`, so each of these
+        # turns also fed `poll_events` / the claim-transition feed
+        # (`docs/event-catalog.md`: "one per `{session_id}_t{i}` turn Point") —
+        # and that leg is GRAPH-only, so it is unaffected by which store holds the
+        # turn. Removing it would silently drop one subscriber row per turn with
+        # nothing gating it (the catalog is prose and no test pins it). This is
+        # the store-only split the stale-turn sweep above already performs
+        # (`PointRetracted` store-only + `EntityMutated` for the JSONL): the
+        # payload-only call reaches the event store and, because it carries
+        # neither `point` nor `id`, journals NOTHING — so the journal keeps ONE
+        # carrier and the feed keeps every row it had.
+        #
+        # `id` is the SESSION, not a point: it names what this record is ABOUT
+        # (it is what makes the line attributable in the journal), and every
+        # turn row takes its key from its own snapshot — `_turns_statements`
+        # reads `snapshot["id"]` and never the envelope, so one id cannot
+        # file a whole capture's rows under one key. It is also what makes the
+        # line loggable at all: `_emit_event` skips an event with neither
+        # `point` nor `id` ("nothing meaningful to log").
+        from tortoise.record_projection import TURNS_RECORD_TYPE
+
+        for i, _turn_snapshot in enumerate(_turn_snapshots):
+            sdk._emit_event(
+                "PointAdded",
+                {"id": _turn_snapshot["id"], "kind": "event",
+                 "content_hash": turn_hashes[i]},
+            )
         sdk._emit_event(
-            # Parity with `create_point`'s emission (#3947 review F5): the
-            # PAYLOAD carries `content_hash`. It belongs here and NOT in the
-            # `point` snapshot, which `_emit_event` strips it from
-            # (`content_hash` is derived, and the replay recomputes it in
-            # `_upsert_point_props`).
-            "PointAdded",
-            {"id": turn_id, "kind": "event",
-             "content_hash": turn_hashes[i]},
-            point=_turn_snapshot,
+            TURNS_RECORD_TYPE,
+            # ⚠️ These ride `**extra` / the named `id`, NOT the `payload`
+            # argument: `payload` is the GRAPH-event store's domain object
+            # (#432) and is never written to the JSONL record — a carrier built
+            # that way journals a line with no `turns` at all (measured).
+            # `SessionNarrated` reaches the record the same way.
+            id=session_id,
+            sessionId=session_id,
+            turns=_turn_snapshots,
             contains_session=session_id,
         )
+    else:
+        for i, _turn_snapshot in enumerate(_turn_snapshots):
+            sdk._emit_event(
+                # Parity with `create_point`'s emission (#3947 review F5): the
+                # PAYLOAD carries `content_hash`. It belongs here and NOT in the
+                # `point` snapshot, which `_emit_event` strips it from
+                # (`content_hash` is derived, and the replay recomputes it in
+                # `_upsert_point_props`).
+                "PointAdded",
+                {"id": _turn_snapshot["id"], "kind": "event",
+                 "content_hash": turn_hashes[i]},
+                point=_turn_snapshot,
+                contains_session=session_id,
+            )
 
     # #4911: the live `SET s.capture_redactions` above has no journal carrier
     # without this record — a journal-only ``rebuild()`` / ``recover_from_log``
