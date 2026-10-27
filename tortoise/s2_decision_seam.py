@@ -19,10 +19,11 @@ which the caller may override. The model cannot invent a kind, because
 where it could not be, it says so.** ``questions`` is a **map** (name →
 question), not an array, and every question carries ``instructions``; a
 ``score`` question also carries a 2–10 entry ``criteria`` array, low→high. Those
-are the three shapes that 400 if you copy the documentation instead of a caller
-(``#7866``: the array form returns ``questions must be a map``; a question
-without ``instructions`` returns ``needs instructions``), and the ``noul`` /
-``score`` shapes are the ones that caller exercised live. The response is
+are the three shapes that 400 if you copy the PRE-migration page instead of a
+caller (``#7866``; those 400s were measured on ``jevtypesafeai.com``, which this
+repo has left — the vendor's own docs already show the map form and the
+``instructions`` / ``criteria`` fields), and the ``noul`` / ``score`` shapes are
+the ones that caller exercised live. The response is
 ``{model, answers, usage}`` with one entry per question name, each echoing its
 own ``type`` — which is what :func:`_noul` / :func:`_score` / :func:`_choice`
 validate against, so an answer of the wrong primitive fails closed rather than
@@ -209,8 +210,8 @@ NARRATIVE_MAX = 6000
 
 #: The atomicity scale — a ``score`` question needs 2–10 concrete levels,
 #: low→high, so a 4-level scale returns 0–3 (a FRACTIONAL value is normal: the
-#: docs' own example returns 2.97, which is why the band compares against a
-#: threshold rather than requiring an integer).
+#: vendor's worked example reports 1.43 on a three-level scale, which is why the
+#: band compares against a threshold rather than requiring an integer).
 ATOMICITY_LEVELS: tuple[str, ...] = (
     "a bundle of distinct claims fused together",
     "mostly one claim with a second claim embedded in it",

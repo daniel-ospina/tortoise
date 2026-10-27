@@ -35,18 +35,27 @@ already existed and had no production caller.
 | **prompt** | two versioned question sets, `vet-v1` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v1` (a `choice` per candidate over the kinds the kNN just offered). The version rides in every result — `stats["seam"]["prompt"]`, on both the VET gate's stats and the classifier's — and `vet-v1` is stamped into every **degraded** record's line in `stats["seam"]["degraded"]`, so an artifact names the exact question wording behind a step that produced no verdict. It is deliberately not in a verdict's `reason`: that is band arithmetic over an already-validated answer pair, and a rejected answer produces no verdict for a version to ride on. On the classify side the rejected answer is recorded as the failing question name in `stats["seam"]["rejected"]`, with the version beside it under `stats["seam"]["prompt"]`. |
 | **parser** | `_noul` / `_score` / `_choice` validate the answer *against the question that was asked*: the echoed `type`, a finite probability in `[0, 1]`, a score on the declared scale, a choice inside the offered set. A violation raises `SchemaViolation` **carrying the question name**; nothing downstream coerces a bad answer into a label. |
 
-## 2. The request shape is copied from a caller, not from the documentation
+## 2. The request shape is copied from a caller, not only from the documentation
 
-Three shapes 400 if you write them from the docs' prose (issue `#7866`):
+Three shapes 400 if you write them from the **pre-migration** page's prose (issue
+`#7866`; those 400s were measured against `jevtypesafeai.com`, whose host this repo
+has since left — `tortoise#7864`/`#10095`. The VENDOR's documentation already shows
+the forms below, so it is not the page that misleads):
 
-- `questions` must be a **map** (name → question). The documented array form returns
-  ``400 `questions` must be a map of at least one question.``
+- `questions` must be a **map** (name → question). The pre-migration page's array form
+  returns ``400 `questions` must be a map of at least one question.`` (the vendor's docs
+  use a map in every example, 0 array examples, `llms-full.txt`);
 - every question needs **`instructions`** (``400 'Question "t" needs instructions.'``);
 - a **`score`** question must carry `criteria`: an **ordered array of 2–10 level
   descriptions, low → high**. `vet-v1` sends four levels
   (`ATOMICITY_LEVELS`), so a score is on `0..3` — and it is **fractional in
-  practice** (the vendor's own example returns `2.97`), which is why the band
-  compares against a threshold instead of demanding an integer.
+  practice**: the vendor's own worked example reports `1.43` on a three-level
+  scale (`primitives/score.md`: "a score of 1.43 means the model is split between
+  levels 1 and 2"), which is why the band compares against a threshold instead of
+  demanding an integer. (This paragraph previously quoted `2.97` as "the vendor's
+  own example": that number appears **nowhere** in the vendor's corpus and twice on
+  the lookalike's page — a residual of the same pre-migration source the endpoint
+  fix removed.)
 
 The envelope is validated before any answer is read: `model` must equal the pin
 (`jev-1.13.0`) and `answers` must be a map. An answer attributed to an unverified
@@ -289,33 +298,42 @@ price applied to that count, not a charge the service reported back. An invented
 `0.0` cost would be a false measurement, which is why the seam adds `cost_usd`
 only when the response carries one and always records the tokens.
 
-| shape | request (measured, this module) | tokens (cl100k proxy) | cost |
+| shape | request (measured, this module) | tokens (cl100k proxy) | cost at the vendor's rate |
 |---|---|---|---|
-| `vet-v1`, **40 items** / 80 questions, 500-word narrative | 39,484 B | 9,265 | **\$0.0039** → **\$0.000097/item** |
-| `classify-v1`, **40 tail items** / 40 questions, top-5 kinds offered | 23,292 B | 6,112 | **\$0.0026** → **\$0.000064/item** |
+| `vet-v1`, **40 items** / 80 questions, 500-word narrative | 39,484 B | 9,265 | **\$0.00039** → **\$0.0000097/item** |
+| `classify-v1`, **40 tail items** / 40 questions, top-5 kinds offered | 23,292 B | 6,112 | **\$0.00026** → **\$0.0000064/item** |
 
 Derivation, so it can be re-checked rather than believed:
 
-- **The price.** The vendor's documented example bills **\$0.000026 for 62 input
-  tokens** ⇒ `4.19e-7 $/token`. Independently, a 100-row usage ledger retained
-  from this machine's 2026-09-24 consolidation pass fits
-  `cost = 4.20e-7 · input_tokens` with a **maximum absolute error of \$0.000001**
-  across all 100 rows (output tokens contribute ≈ 0 — the fit's coefficient is
-  `-2.6e-10`, i.e. within noise). Both agree at **≈ \$0.42 per 1M input tokens**,
-  input-only.
+- **The price.** The vendor's models page documents **`\$42 / \$0.042` per Btok / per
+  Mtok for `jev-1.13.0`** — i.e. **`4.2e-8 \$` per input token, `\$0.042` per 1M** —
+  and states plainly that *"you pay per input token; output tokens are free"*
+  (`docs.typesafe.ai/models`, read 2026-10-27). Prices here are that rate applied to
+  the token counts, input-only.
 
-  The `\$` escapes are load-bearing, not decoration: two unescaped dollar signs in
-  one paragraph — `\$0.000026` above and the `$` inside the `$/token` code span —
-  form a math delimiter pair, which re-pairs the backticks around them and makes
-  the REQUIRED `docs` check red (`MD038`: one space inside a "code span" that was
-  never intended as one).
+  ⚠️ **This section previously said `4.19e-7 \$/token` — ten times the vendor's rate —
+  and cited "the vendor's documented example: `\$0.000026` for 62 input tokens". That
+  example does not exist in the vendor's documentation (`llms-full.txt`: zero
+  occurrences of `0.000026`), and `4.19e-7` is exactly 10× `4.2e-8`.** The second leg
+  the old derivation leaned on — a 100-row usage ledger from this machine fitting
+  `4.20e-7 × input_tokens` with a maximum absolute error of `\$0.000001` — is
+  therefore not an independent confirmation of the vendor's price: it is a
+  **measurement of what the lookalike host charged**, which is the 10× the fleet was
+  paying until 2026-10-26. It corroborates the migration, not the rate. Two artifacts
+  quoted the old figure and are corrected with this one: the `#5087` entry in
+  `EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md` and the `docs/00_index.md` row.
 - **The tokens.** `cl100k_base` over the exact serialized payload. The upstream
   tokenizer is not published, so read the token counts as **±15%**, and the
   dollars as an estimate of the same order — not a receipt. The first real call is
-  what produces a receipt, and the seam records it: `usage.cost_usd` accumulates
-  into `stats["seam"]["cost_usd"]` on both sides (the VET gate's `stats` and the
-  classify stats), so the number becomes measured rather than derived the moment
-  it is armed. ⚠️ It reaches `result["vet"][*]["stats"]`, **not**
+  what produces a receipt, and on the VENDOR endpoint that receipt is a **token
+  count**: `usage.input_tokens` accumulates into `stats["seam"]["input_tokens"]` on
+  BOTH halves (the VET gate folds the seam's whole stats dict; the classify half
+  folds it explicitly, which it did NOT before review round 14 — it kept the seeded
+  number and dropped the receipt). `stats["seam"]["cost_usd"]` stays **0.0** on
+  this endpoint, because no response carries one: read it as "nothing was
+  reported", never as "this call was free". The dollars above are the documented
+  rate applied to the measured token count — derived, and labelled as such.
+  ⚠️ It reaches `result["vet"][*]["stats"]`, **not**
   `stats["llm"]`, so the A/B cost gate (`stats["llm"]["cost_usd"]`) does not add
   it to the LLM tail's spend: the two providers are counted separately, on
   purpose, and an armed run's true tail cost is their sum.
@@ -332,8 +350,11 @@ Derivation, so it can be re-checked rather than believed:
   request, and it is why this row costs more per item than the architecture doc's
   recorded `$0.000144/item at 1 question`.
 - **A month, by arithmetic** (§4.2's own projection: 25k items, ~20% tail):
-  classify's 5,000 tail items = 125 round trips ≈ **\$0.32/month** — against the
-  doc's `$0.72/month` estimate for the same tail, on the same order.
+  classify's 5,000 tail items = 125 round trips ≈ **\$0.032/month** at the vendor's
+  rate. The architecture doc's `$0.72/month` estimate for the same tail is a
+  PRE-migration figure (lookalike-priced, ≈10× the vendor's rate) that main already
+  flags as directional; the two are not comparable until both are re-measured on
+  `api.typesafe.ai`.
 
 ## 8. The tests, and the mutants that redden them
 

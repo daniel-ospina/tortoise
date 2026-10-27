@@ -1011,11 +1011,14 @@ ladder, and §16.4's different evidence bar), nothing at S3 or S5 (S3 is the sol
 new-vs-existing), no retry ladder and no cache.
 
 **Cost, measured rather than quoted.** The seam's own `vet-v1` batch of 40 items / 80 questions
-serializes to 39,484 B ≈ 9,265 input tokens ⇒ **$0.0039 per round trip (~$0.000097/item)**;
-`classify-v1` at 40 tail items ⇒ 23,292 B ≈ 6,112 tokens ⇒ **$0.0026 (~$0.000064/item)**. The price
-per token is the vendor's documented example (`$0.000026 / 62 tokens`, ⇒ `4.19e-7 $/token`)
-cross-checked against a 100-row usage ledger from this machine, whose fit is `4.20e-7 × input_tokens`
-with a maximum absolute error of `$0.000001`. ⚠️ **No live call was made**: the box that wrote this
+serializes to 39,484 B ≈ 9,265 input tokens ⇒ **$0.00039 per round trip (~$0.0000097/item)**;
+`classify-v1` at 40 tail items ⇒ 23,292 B ≈ 6,112 tokens ⇒ **$0.00026 (~$0.0000064/item)**. The price
+per token is the **vendor's** documented rate — `$42 / $0.042` per Btok / Mtok for `jev-1.13.0`,
+input-only (output tokens are free), i.e. `4.2e-8 $/token` — read from `docs.typesafe.ai/models` on
+2026-10-27. ⚠️ An earlier version of this entry used `4.19e-7 $/token` (10× the vendor's rate)
+derived from "the vendor's documented example: `$0.000026 / 62 tokens`", which does not exist in the
+vendor's documentation; the 100-row usage ledger it was cross-checked against fits `4.20e-7` because
+it was billed by the LOOKALIKE host, and it is evidence of that overcharge, not of the vendor's price. ⚠️ **No live call was made**: the box that wrote this
 had only a `jv_live_…` key — the LOOKALIKE host's shape, refused by the vendor (`403`, measured
 2026-10-27) — so the token counts are a `cl100k` proxy (read them ±15%). The seam posts to the
 VENDOR endpoint (`https://api.typesafe.ai/v1/systemone`; `tortoise#7864` / `#10095`), whose `usage`
