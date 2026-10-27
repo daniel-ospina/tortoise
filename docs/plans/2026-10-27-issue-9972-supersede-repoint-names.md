@@ -95,13 +95,37 @@ adopted over a decision.
 3. `_structural_target_resolution` + the name/ambiguity/`props->>'name'`/document tests.
 4. `_structural_repoint_statements` + the dispatch branch + the two acceptance tests (this issue's
    and #9973's, adapted: the move is two statements in one plan).
-5. The PGlite leg: 5 measured cases, including the no-supersede no-op.
+5. The PGlite leg: 6 measured cases, including the no-supersede no-op and a CYCLIC chain
+   (no destination ⇒ nothing moves).
 6. Mutation proof: neuter the routing branch → the two acceptance tests go red (measured).
 
 ## 8. Rounds
 
 **Rounds:** 0 pre-code verifier rounds (this lane has no `task` tool; the harness reviewer at the
 exact PR head is the review gate, and self-review is not a review).
+
+**Review round 2** (fresh-context reviewer at `baddcd57f`): 3 findings, all verified against the
+primary source before being applied, all fixed here:
+
+- **the DELETE and the INSERT were gated on different conditions.** `moved` required "terminal src +
+  HAS a successor", which a CYCLIC (or >`_SUPERSEDE_CHAIN_DEPTH`) chain satisfies while the walk
+  reaches no `next_id IS NULL` row — so the DELETE ran and the INSERT wrote nothing, contradicting
+  this module's own "a cycle ⇒ no destination ⇒ nothing moves". Fixed by making the destination a
+  third conjunct of `moved`; mutation-proved (drop it → PGlite case 6 measures `rows = []`).
+- **two PGlite negative cases asserted only `!rows.some(<wrong row>)`**, which `[]` satisfies, so a
+  delete-without-insert passed them. Both now assert the EXACT surviving row, as case 5 already did.
+- **the terminal predicate's flag leg was dead.** It read `props ->> 'outdated'`, but the record
+  writes `outdated` as a COLUMN (`PointSuperseded`/`PointInvalidated` literals; `_split_properties`
+  routes a payload key to the column when the table has one — measured:
+  `INSERT … (…, status, outdated, props) VALUES (…, 'live', true, '{}')`), so a `PointInvalidated`
+  point read as LIVE here and terminal in the fold. The set was also pinned to
+  `TERMINAL_STATUS_VALUES`, one member narrower than the graph's `_terminal_excluded`
+  (`| {deprecated}`), so the pin certified the drift it existed to catch. Both fixed; the pin now
+  compares against `TERMINAL_EXCLUDED_STATUSES` and asserts the column form AND the absence of the
+  dead `props` form.
+
+Also fixed while touching `tests/test_record_projection.py`: the import block ruff flagged (`I001`,
+pre-existing on this branch).
 
 ## Review Scope Contract
 
@@ -112,17 +136,20 @@ exact PR head is the review gate, and self-review is not a review).
 - R1 **an un-moved edge is churned** (delete + re-insert on a point that has no successor, erasing
   `confidence` — the measured failure of the rejected target-only fix) → PGlite case 5 asserts the
   row is byte-identical (`confidence = 0.9`) and the plan-seam test asserts BOTH statements carry
-  the terminal + successor gate; deleting that gate reds
+  the terminal + successor + destination gate; deleting that gate reds
   `test_a_structural_repoint_moves_its_edge_to_the_final_successor`.
 - R2 **a move lands on an arbitrary carrier** when a name is held twice (#5509) → `HAVING count(*) =
-  1` in every arm; PGlite case 3 measures 0 rows moved; `test_a_name_held_by_two_carriers_resolves_to_nothing`.
+  1` in every arm; PGlite case 3 asserts the ONE row survives untouched at the superseded point;
+  `test_a_name_held_by_two_carriers_resolves_to_nothing`.
 - R3 **the 2a direct family regresses** (its `src` is the successor; a delete there removes the edge
   the descriptor exists to re-create) → `test_a_direct_edge_repoint_is_still_a_plain_upsert` +
   PGlite cases 1–2 exercising the structural route only.
 - R4 **the record is looser than the fold** on the Source arms (`aboutDocument` on a provenance
   `:Source`; an `extractedFrom` fan-out) → `test_aboutdocument_stays_resolve_only_and_document_only` +
-  PGlite case 4.
-- R5 **the restated constants drift** from `live.py` / `projection/edges.py` → the two pin tests.
+  PGlite case 4 (the exact surviving row, not merely the absence of a row at the successor).
+- R5 **the restated constants drift** from `live.py` / `projection/edges.py` → the two pin tests,
+  against `TERMINAL_EXCLUDED_STATUSES` (not `TERMINAL_STATUS_VALUES`: the graph's gate is
+  `_terminal_excluded`, which also excludes the legacy `deprecated`).
 - R6 **an id-reuse point loses its own edges** (`_src_is_terminal`) → the terminal gate is asserted
   present in both statements; the #2488 survivor-filter asymmetry is NAMED in the code and in §Gaps
   of the research block rather than silently assumed.

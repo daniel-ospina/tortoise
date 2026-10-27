@@ -2436,11 +2436,13 @@ try {
   // delete-leg runs only after a target resolved), so the row legitimately STAYS
   // at the superseded point: nobody is moved anywhere, and nothing is filed
   // against an arbitrary carrier.
-  if (ambiguous.some((r) => r.src_key !== 'p1' || r.tgt_key !== 'obj-amb-1')) {
-    throw new Error('#5509: a NAME held by two carriers resolved to '
-      + `${JSON.stringify(ambiguous)} — the record guessed a holder where the `
-      + 'graph refuses the descriptor (and would have moved the edge onto a '
-      + 'carrier live never addressed)');
+  if (ambiguous.length !== 1 || ambiguous[0].src_key !== 'p1'
+      || ambiguous[0].tgt_key !== 'obj-amb-1') {
+    throw new Error('#5509: a NAME held by two carriers must leave the ONE row '
+      + 'untouched at the superseded point — rows = '
+      + `${JSON.stringify(ambiguous)}. [] means the delete-leg ran and dropped an `
+      + 'edge the graph keeps; a row elsewhere means the record guessed a holder '
+      + 'where the graph refuses the descriptor');
   }
 
   // (4) `aboutDocument` is RESOLVE-ONLY and DOCUMENT-ONLY: a provenance
@@ -2464,11 +2466,13 @@ try {
   // the ambiguous case, the graph skips the delete-leg with it. The EntityLinked
   // row at p1 is the PRECONDITION, not the move; what must be absent is any row
   // at the successor.
-  if (documents.some((r) => r.src_key === 'p2')) {
+  if (documents.length !== 1 || documents[0].src_key !== 'p1'
+      || documents[0].tgt_key !== 'https://example.test/raw') {
     throw new Error('aboutDocument resolved onto a PROVENANCE Source (no '
-      + `document_kind): rows = ${JSON.stringify(documents)} — the fold's kind `
-      + 'test is load-bearing on the descriptor route and the record must not '
-      + 'be looser than the fold');
+      + `document_kind): rows = ${JSON.stringify(documents)} — neither an empty `
+      + 'set (the delete-leg ran on a row the graph keeps) nor a row at the '
+      + 'successor is acceptable: the fold\'s kind test is load-bearing on the '
+      + 'descriptor route and the record must not be looser than the fold');
   }
 
   // (5) NO SUPERSEDE ⇒ NO MOVE. A descriptor whose `src` never got a supersede
@@ -2502,6 +2506,46 @@ try {
     throw new Error('the un-moved row lost its `confidence` ('
       + `${JSON.stringify(kept.rows[0])}) — a delete-then-reinsert on a row that `
       + 'did not move is the churn the gate exists to prevent');
+  }
+
+  // (6) A CYCLIC chain has NO destination (x→y, y→z, z→y — path-guarded), so the
+  //     whole descriptor is a no-op: the graph's `_final(x)` is the first
+  //     REPEATED node, and the record — whose walk is depth-bounded — must not
+  //     delete what it cannot re-create. This is the discriminator for the gate's
+  //     THIRD conjunct: "src is terminal" and "src HAS a successor" are BOTH
+  //     TRUE here, so a DELETE gated on those two alone ran while the INSERT's
+  //     `dest` subquery (the `next_id IS NULL` row) yielded none — and the row
+  //     vanished with no error on `record_write_failures`.
+  const cycle = await run('9972-cycle', [
+    { type: 'ObjectRegistered', ts: '2026-10-25T00:05:00Z', id: 'obj-cyc',
+      name: 'Cycle Target', objectKind: 'org' },
+    { type: 'PointAdded', ts: '2026-10-25T00:05:01Z', id: 'x',
+      point: { id: 'x', content: 'X', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:05:02Z', id: 'y',
+      point: { id: 'y', content: 'Y', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:05:03Z', id: 'z',
+      point: { id: 'z', content: 'Z', status: 'live' } },
+    { type: 'EntityLinked', ts: '2026-10-25T00:05:04Z', id: 'x',
+      source_label: 'Point', source_id: 'x', target_label: 'Object',
+      target_id: 'obj-cyc', edge_type: 'aboutObject', confidence: 0.7 },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:05:05Z', id: 'x',
+      new_id: 'y', valid_from: '2026-10-25T00:05:05Z',
+      valid_to: '2026-10-25T00:05:06Z', expired_at: '2026-10-25T00:05:06Z' },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:05:06Z', id: 'y',
+      new_id: 'z', valid_from: '2026-10-25T00:05:06Z',
+      valid_to: '2026-10-25T00:05:07Z', expired_at: '2026-10-25T00:05:07Z' },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:05:07Z', id: 'z',
+      new_id: 'y', valid_from: '2026-10-25T00:05:07Z',
+      valid_to: '2026-10-25T00:05:08Z', expired_at: '2026-10-25T00:05:08Z' },
+    { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:05:08Z',
+      id: 'x->y:aboutObject:Cycle Target', src: 'x', tgt: 'Cycle Target',
+      target_label: 'Object', edge_type: 'aboutObject' },
+  ]);
+  if (cycle.length !== 1 || cycle[0].src_key !== 'x') {
+    throw new Error('a CYCLIC supersede chain has no destination, so NOTHING '
+      + `must move — rows = ${JSON.stringify(cycle)}. [] is the delete-without-`
+      + 'insert: the DELETE was gated on "src is terminal and has a successor", '
+      + 'which a cycle satisfies, while the INSERT found no `next_id IS NULL` row');
   }
 
   console.log('✓ #9972: a structural repoint resolves its NAME-keyed target to the '

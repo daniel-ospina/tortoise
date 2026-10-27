@@ -2201,8 +2201,7 @@ def test_the_structural_repoint_map_is_the_folds_own():
     derivable would route a descriptor through the move path that the graph
     never re-creates (`DERIVABLE_STRUCTURAL_RELS`).
     """
-    from tortoise.projection.edges import (
-        DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS)
+    from tortoise.projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS
 
     assert rp._STRUCTURAL_REL_LABELS == STRUCTURAL_REL_LABELS, (
         rp._STRUCTURAL_REL_LABELS, STRUCTURAL_REL_LABELS)
@@ -2217,16 +2216,32 @@ def test_the_terminal_status_set_is_the_canonical_ones():
     file path, so `tortoise.live` is not importable there), and pinned here: a
     status added to the vocabulary without being classified in `live.py` would
     otherwise silently make the record's gate looser than the fold's.
-    """
-    from tortoise.live import TERMINAL_STATUS_VALUES
 
-    assert frozenset(rp._TERMINAL_POINT_STATUSES) == TERMINAL_STATUS_VALUES, (
-        rp._TERMINAL_POINT_STATUSES, TERMINAL_STATUS_VALUES)
+    The pin is `TERMINAL_EXCLUDED_STATUSES`, NOT `TERMINAL_STATUS_VALUES`: the
+    graph's gate is `_terminal_excluded`, whose vocabulary is the point set PLUS
+    the legacy `deprecated` member (`live.py` — no writer emits it, legacy graphs
+    carry it, and it must never be served as current). Pinning to
+    `TERMINAL_STATUS_VALUES` alone let the record's gate be narrower than the
+    fold's by exactly that member, so the test certified a drift it existed to
+    catch.
+    """
+    from tortoise.live import TERMINAL_EXCLUDED_STATUSES
+
+    assert frozenset(rp._TERMINAL_POINT_STATUSES) == TERMINAL_EXCLUDED_STATUSES, (
+        rp._TERMINAL_POINT_STATUSES, TERMINAL_EXCLUDED_STATUSES)
     predicate = rp._terminal_point_sql("p")
-    for status in TERMINAL_STATUS_VALUES:
+    for status in TERMINAL_EXCLUDED_STATUSES:
         assert f"'{status}'" in predicate, (status, predicate)
-    # The legacy flag is the partition's second leg (`live.is_terminal_status`).
-    assert "props ->> 'outdated'" in predicate, predicate
+    assert "'deprecated'" in predicate, predicate
+    # The legacy flag is the partition's second leg (`live._terminal_excluded`)
+    # and it lives in the `outdated` COLUMN — the record writes it there (a
+    # `NodePatch` literal / a `point` payload key routed to the column by
+    # `_split_properties`), so the old `props ->> 'outdated'` form was always
+    # NULL and `PointInvalidated` (flag set, status untouched) read as LIVE here
+    # while the fold read it as terminal. Assert BOTH directions so a regression
+    # to the dead form reds instead of passing quietly.
+    assert "coalesce(p.outdated, false) = true" in predicate, predicate
+    assert "props ->> 'outdated'" not in predicate, predicate
 
 
 def test_a_structural_repoint_descriptor_resolves_its_name_keyed_target():
@@ -2282,6 +2297,12 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
     for sql in (delete, insert):
         assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
         assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL)" in sql, sql
+        # ⛔ The DESTINATION conjunct, on BOTH halves. Without it the pair is not
+        # one mutation: a cyclic or >32-hop chain satisfies the two conjuncts
+        # above (src is terminal and HAS a successor) while the INSERT's `dest`
+        # subquery is empty, so the DELETE ran and wrote no replacement — the row
+        # left the superseded point and landed nowhere.
+        assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NULL)" in sql, sql
     # NO SELF-EDGE (E2E-11.6): a chain that collapses the endpoints onto one node
     # must not mint `(X)-[:aboutPoint]->(X)`.
     assert "dest.node_key <> tgt.node_key" in insert, insert

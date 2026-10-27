@@ -2313,40 +2313,63 @@ _STRUCTURAL_REL_LABELS: dict[str, str] = {
     "extractedFrom": "Source",
 }
 
-#: The TERMINAL half of the Point-status partition, restated from
-#: `live.TERMINAL_STATUS_VALUES` (same STANDALONE reason; pinned by
+#: The statuses the graph's terminal gate EXCLUDES, restated from
+#: `live.TERMINAL_EXCLUDED_STATUSES` (same STANDALONE reason; pinned by
 #: `test_the_terminal_status_set_is_the_canonical_ones`).
 #:
 #: It is here because the graph's structural delete-leg is guarded by
-#: `projection/__init__.py::_src_is_terminal` (a code-review P1: under id-reuse
-#: `src` may be a RE-CREATED **live** incarnation whose edges are legitimately its
-#: own, and moving them clobbers a live point). `live.is_terminal_status` is the
-#: canonical predicate: a status in this set, OR the legacy `outdated=true` flag
-#: (a `props` key on the record — `point` has no `outdated` column).
+#: `projection/__init__.py::_src_is_terminal`, which asks
+#: `live._terminal_excluded` (a code-review P1: under id-reuse `src` may be a
+#: RE-CREATED **live** incarnation whose edges are legitimately its own, and
+#: moving them clobbers a live point). `_terminal_excluded`'s vocabulary is
+#: `TERMINAL_EXCLUDED_STATUSES` — `TERMINAL_STATUS_VALUES` **plus `deprecated`**,
+#: which is not a legal create-time status (`live.py`) but IS present in legacy
+#: graphs and must never be served as current. Pinning this set to
+#: `TERMINAL_STATUS_VALUES` alone made the record's gate NARROWER than the fold's
+#: by exactly that member, so a legacy `deprecated` point was moved by the graph
+#: and skipped by the record.
 _TERMINAL_POINT_STATUSES: tuple[str, ...] = (
-    "retracted", "superseded", "outdated", "archived",
+    "archived", "deprecated", "outdated", "retracted", "superseded",
 )
 
 #: The bound on the `superseded_by` chase. The graph's `_final` walks its fold
 #: map, which cannot cycle; the record's is a table walk, so the recursion is
-#: both depth-bounded and `path`-guarded and a cycle simply yields no terminal
-#: row (⇒ no destination ⇒ nothing moves, which is the honest answer for a
-#: supersede chain that has no end).
+#: both depth-bounded and `path`-guarded, and a cyclic or >32-hop chain reaches
+#: no `next_id IS NULL` row — i.e. it has NO destination.
+#:
+#: ⚠️ NO DESTINATION ⇒ NOTHING MOVES, and that promise is only kept because the
+#: DELETE carries the same "a destination exists" conjunct as the INSERT: gating
+#: the delete on `_src_is_terminal(src)` + "src HAS a successor" alone fired the
+#: DELETE while the INSERT's `dest` subquery was empty, so a cyclic chain DELETED
+#: the row and wrote no replacement. NAMED RESIDUAL: on such a chain the graph's
+#: `_final` returns the first REPEATED node, so the fold moves the edge there
+#: while the record leaves it at `src` — a divergence on a state no producer
+#: emits, chosen over silently losing the row.
 _SUPERSEDE_CHAIN_DEPTH = 32
 
 
 def _terminal_point_sql(alias: str) -> str:
-    """`live.is_terminal_status` over one `public.point` alias, as SQL.
+    """The TERMINAL half of `live._terminal_excluded` over one `public.point`
+    alias, as SQL.
 
     The statuses are INLINED rather than bound: they are a fixed vocabulary this
     module declares (never caller input), and keeping them out of the parameter
     list is what lets the two statements below reuse one parameter block. They
     are pinned to the canonical set by the test named on
     :data:`_TERMINAL_POINT_STATUSES`, so an inlined literal cannot drift silently.
+
+    The legacy flag is read from the `outdated` COLUMN, not from `props`: the
+    record writes it as a column (`PointSuperseded`/`PointInvalidated` declare it
+    as a `NodePatch` literal, and `_split_properties` routes a payload key to the
+    column whenever the table has one — measured: `PointAdded{point:{…,
+    outdated:true}}` emits `(…, status, outdated, props) VALUES (…, 'live', true,
+    '{}')`). A `props ->> 'outdated'` leg is therefore DEAD — it was always NULL,
+    so a `PointInvalidated` point (flag set, status untouched) read as LIVE here
+    while the fold read it as terminal.
     """
     literals = ", ".join(f"'{status}'" for status in _TERMINAL_POINT_STATUSES)
     return (f"({alias}.status IN ({literals}) "
-            f"OR ({alias}.props ->> 'outdated') = 'true')")
+            f"OR coalesce({alias}.outdated, false) = true)")
 
 
 def _supersede_chain_cte(org_id: str, graph_id: str,
@@ -2505,7 +2528,11 @@ def _structural_repoint_statements(
     survivor-filtered `succ` map has no record-side expression, so an id-reuse
     journal (a point re-created live under a used id) is resolved here as
     `point.status` says at the moment the record runs — which is the LIVE order,
-    not the rebuild's post-filter one.
+    not the rebuild's post-filter one; (c) the graph's `_final` returns the first
+    REPEATED node on a CYCLIC chain, so the fold moves the edge there while this
+    record (path-guarded, depth-bounded) reaches no destination and moves
+    nothing — a divergence, named rather than papered over, on a state no
+    producer emits, chosen so a chain with no end loses no row.
     """
     etype = record.get("edge_type")
     label = _STRUCTURAL_REL_LABELS.get(etype) if isinstance(etype, str) else None
@@ -2524,9 +2551,15 @@ def _structural_repoint_statements(
         org_id, graph_id, label, rel_type, tgt, "")
     tgt_select, tgt_params = _structural_target_resolution(
         org_id, graph_id, label, rel_type, tgt, "tgt")
-    # The move exists only for a TERMINAL src with a surviving successor.
+    # The move exists only for a TERMINAL src with a surviving successor AND a
+    # reachable DESTINATION. The third conjunct is what makes the pair atomic: a
+    # cyclic/path-guarded or >`_SUPERSEDE_CHAIN_DEPTH` chain satisfies the first
+    # two (src is terminal and HAS a successor) while `dest` — the `next_id IS
+    # NULL` row — is empty, so without it the DELETE ran and the INSERT wrote
+    # nothing: the row left the superseded point and never landed anywhere.
     moved = ("(SELECT terminal FROM succ WHERE depth = 1) "
-             "AND EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL)")
+             "AND EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL) "
+             "AND EXISTS (SELECT 1 FROM succ WHERE next_id IS NULL)")
     delete = Statement(
         f"{cte}DELETE FROM public.relation "
         "WHERE org_id = %s AND graph_id = %s AND rel_type = %s "
