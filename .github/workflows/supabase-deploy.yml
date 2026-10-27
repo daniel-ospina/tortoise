@@ -347,21 +347,33 @@ jobs:
               ;;
           esac
           # The dispatch is not the flip. `deploy-hosted.yml` triggers on
-          # `push: branches: [main]` for `tortoise/**` and friends, and its
-          # `concurrency` group is `cancel-in-progress: true` — so an ordinary
-          # merge to main can CANCEL the in-flight co-move flip AFTER the POST
-          # above returned 2xx, leaving the schema applied and the app stale
-          # while this run reported success. Only waiting on the run
-          # distinguishes "the app flipped" from "the POST was accepted".
+          # `push: branches: [main]` for `tortoise/**` and friends, and every
+          # run shares ONE constant `concurrency` group — so an ordinary merge
+          # to main landing while the co-move flip is still PENDING supersedes
+          # it AFTER the POST above returned 2xx, leaving the schema applied and
+          # the app stale while this run reported success. `cancel-in-progress:
+          # false` (#10155) removed the worse half: a RUNNING flip is no longer
+          # killed mid-deploy. It cannot save a pending one — a shared group
+          # holds one pending run and the newest push takes it. Only waiting on
+          # the run distinguishes "the app flipped" from "the POST was
+          # accepted".
           echo "✅ deploy-hosted dispatched (run ${run_id}) — waiting for the flip to complete (#3627)"
           echo "   https://github.com/${REPO_SLUG}/actions/runs/${run_id}"
           watch=(gh run watch "${run_id}" --repo "${REPO_SLUG}" --exit-status)
           # `timeout` is GNU coreutils — the ubuntu runner has it, macOS does not.
+          # ⛔ 275m, not the pre-#10155 45m. With `cancel-in-progress: false` the
+          # flip QUEUES behind a running deploy-hosted run instead of pre-empting
+          # it, so the bound must span a predecessor holding the group for its
+          # own full job caps (55 + 60 + 15 = 130 min) PLUS this run's own caps —
+          # 2 × 130 = 260, + 15 slack. At most ONE run can be ahead: a pending
+          # predecessor is superseded by this (newest) run. A 45-minute bound
+          # killed a HEALTHY queued flip and reported it as "the app did NOT
+          # flip", which is the false red this arithmetic removes.
           if command -v timeout >/dev/null 2>&1; then
-            watch=(timeout 45m "${watch[@]}")
+            watch=(timeout 275m "${watch[@]}")
           fi
           if ! "${watch[@]}" >/dev/null; then
-            echo "::error::deploy-hosted run ${run_id} did not reach success — the app did NOT flip. The schema IS applied, so tenant-scoped reads return 0 rows and provisioning fails until the app is flipped (#3627). A concurrent push to main cancels an in-flight flip (deploy-hosted.yml 'concurrency.cancel-in-progress'); re-run this workflow, or flip by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
+            echo "::error::deploy-hosted run ${run_id} did not reach success — the app did NOT flip. The schema IS applied, so tenant-scoped reads return 0 rows and provisioning fails until the app is flipped (#3627). A merge to main landing while this flip was still PENDING supersedes it (deploy-hosted.yml's shared `concurrency` group holds one pending run; `cancel-in-progress: false` stops a RUNNING deploy being cancelled but cannot save a pending one); re-run this workflow, or flip by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
             exit 1
           fi
           echo "✅ app flip completed (run ${run_id}) — this schema's window is closed (#3627)"

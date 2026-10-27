@@ -82,8 +82,8 @@ on:
       # here would add no coverage and cost a RED push run per migrations-only
       # merge: `supabase-deploy` deploys on `workflow_dispatch` only, so this
       # file's fail-closed `Check migration drift` exits 1 for every repo-ahead
-      # BLOCKING migration until an operator applies it — and the run's
-      # `cancel-in-progress` can cancel an in-flight co-move flip. The
+      # BLOCKING migration until an operator applies it — and a run landing on a
+      # constant group supersedes a co-move flip that is still PENDING. The
       # schema→app coupling is already handled by `supabase-deploy`'s own
       # `Dispatch deploy-hosted (the app flip)` step. Both halves are pinned by
       # `tests/test_9231_record_migrations_trigger.py`, which also measures the
@@ -232,10 +232,15 @@ on:
 # jobs), measured on completed runs 2026-10-27: `packaging-smoke` max 28.2 min
 # (n=27) → 55; `post-deploy-verify` max 0.4 min (n=6) → 15 (the floor).
 # `deploy-api` is the exception, for arithmetic rather than padding: its own
-# retry loop is bounded at 5 × (`--wait-timeout 420` + 45 s) ≈ 39 min and the
-# health gate inside it adds ≤6.4 min, so a 2× cap over its measured 3.5 min
-# would red the fail-safe retry path it exists to allow — 60 bounds the job
-# without ever being the thing that fails it.
+# retry loop is bounded at 5 × (`--wait-timeout 420` + 45 s) ≈ 39 min, so a 2×
+# cap over its measured 3.5 min would red the fail-safe retry path it exists to
+# allow — 60 bounds the job without ever being the thing that fails it.
+#
+# ⚠️ NOTHING OUTSIDE THIS WORKFLOW IS BOUNDED BY THESE CAPS ALONE: the sum
+# (55 + 60 + 15 = 130 min) is now the worst case a run can HOLD this group for,
+# which is what `supabase-deploy.yml`'s flip watcher has to out-wait (it queues
+# behind a running run instead of pre-empting it) — that watcher's own bound is
+# derived from this 130.
 concurrency:
   group: deploy-hosted
   cancel-in-progress: false
@@ -372,9 +377,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: packaging-smoke
     # Bounded ABOVE this job's own arithmetic, not at a multiple of its 3.5 min
-    # measured maximum: the retry loop (5 × 465 s ≈ 39 min) + the health gate
-    # (≤6.4 min) are legitimate worst cases, and a cap under them would fail the
-    # fail-safe path. See the workflow's `concurrency:` note.
+    # measured maximum: the retry loop (5 × 465 s ≈ 39 min) is a legitimate
+    # worst case, and a cap under it would fail the fail-safe path. The ≤6.4 min
+    # DB health gate is NOT in this job (it moved to `post-deploy-verify` in
+    # #4538, which is where its budget is counted). See the workflow's
+    # `concurrency:` note.
     timeout-minutes: 60
     # #2240: the failure alert files/updates a GitHub issue through the shared
     # substrate, which asserts the writer is `github-actions[bot]` — so this job
@@ -1133,8 +1140,10 @@ jobs:
   post-deploy-verify:
     runs-on: ubuntu-latest
     needs: deploy-api
-    # 15 is the floor (measured max 0.4 min, n=6): see the workflow's
-    # `concurrency:` note for why every job here now carries a bound.
+    # 15 is the floor (measured max 0.4 min, n=6): the ≤6.4 min DB health gate
+    # below is this job's real worst case, so the headroom is 2× THAT rather than
+    # 2× the measurement. See the workflow's `concurrency:` note for why every
+    # job here now carries a bound.
     timeout-minutes: 15
     if: ${{ needs.deploy-api.result == 'success' }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
