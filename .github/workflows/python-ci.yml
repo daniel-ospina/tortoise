@@ -129,9 +129,13 @@ concurrency:
   # one would cost coverage:
   #   * superseded PENDING push runs are already dropped by GitHub, which keeps
   #     one pending run per group even with `cancel-in-progress: false`: of the
-  #     20 push-to-main runs created 2026-10-26T22:40Z..10-27T04:50Z, 15 were
-  #     `cancelled` having executed ZERO jobs (3 ran jobs, 1 still queued, 1
-  #     failed). `Post-merge validation` shows the same 17-of-20 shape.
+  #     20 push-to-main runs created 2026-10-26T22:40Z..10-27T04:50Z, 17 never
+  #     started a single job (18 ended `cancelled`, 1 failed, 1 still queued) and
+  #     only 3 ever started one -- and one of those 3 was cancelled mid-flight,
+  #     which is exactly the shape this arm would give every run. The cancelled
+  #     subtotal DRIFTS as pending runs age out, so "never started a job" is the
+  #     figure to quote. `Post-merge validation` shows the same shape (16 of the
+  #     last 20 cancelled).
   #   * main is pushed in BURSTS, not on a 145-minute drum: measured gaps over
   #     the same 6.2 h were p50 3 min / p95 55 min / max 152 min, and one burst
   #     was 9 pushes in 8 minutes. Under `cancel-in-progress: true` nearly every

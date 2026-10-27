@@ -64,10 +64,17 @@ closes.
 - 9 self-hosted runners registered, 8 online, 4 busy at read time. `ubuntu-latest` also matches
   the self-hosted ARM64 pool (#7867), so "hosted" legs contend for the same slots.
 - **Superseded `push` runs never reach a runner.** Over the 20 `Python CI` push-to-main runs
-  created 2026-10-26T22:40Z → 10-27T04:50Z, **15 were cancelled and 14 of those had started zero
-  jobs** — GitHub keeps one *pending* run per concurrency group, so a newer push replaces a
-  waiting one even with `cancel-in-progress: false`. Only 3 runs ever started a job. `Post-merge
-  validation` has the same shape (**17 of 20 cancelled**), which
+  created 2026-10-26T22:40Z → 10-27T04:50Z, **17 of the 20 never started a single job**
+  (18 ended `cancelled`, 1 `failure`, 1 still queued) — GitHub keeps one *pending* run per
+  concurrency group, so a newer push replaces a waiting one even with
+  `cancel-in-progress: false`. Only 3 runs ever started a job, and **one of those 3 was cancelled
+  mid-flight** after all 28 slots had been handed out — which is the shape the `push` arm would
+  produce for every run if it cancelled in progress. ⚠️ The cancelled subtotal DRIFTS as pending
+  runs age into `cancelled`: the same fixed window read 15-cancelled / 14-zero-start at the 04:00Z
+  cut and 18-cancelled / 17-zero-start at 06:05Z. **"Never started a job" is the load-bearing
+  figure, not the cancelled count** — re-read rather than quote a subtotal. `Post-merge
+  validation` has the same shape (**17 of 20 never ran at the 04:00Z cut; 16 of the last 20
+  cancelled, 2 `failure`, 2 in flight when re-read at 06:05Z**), which
   `.github/workflows/post-merge-validation.yml` already documents and
   `tests/test_reporting_workflow_concurrency.py` already pins.
 - Push-to-main cadence is **bursty**, not periodic: over that 6.2 h the gaps were p50 3 min /
@@ -206,8 +213,8 @@ The tempting reading is "a superseded `main` run occupies a runner". Measured, i
 cancelling in progress would cost more than it saves:
 
 1. **The pending case is already handled.** GitHub keeps one pending run per group even with
-   `cancel-in-progress: false`: 15 of 20 push runs were cancelled, 14 of them having never
-   started a job (§1). A superseded *waiting* head already costs nothing.
+   `cancel-in-progress: false`: 17 of the 20 push runs never started a single job and only 3 ever
+   started one (§1). A superseded *waiting* head already costs nothing.
 2. **The alternative kills the only full matrix `main` gets.** Pushes arrive in bursts — 9 in 8
    minutes in the measured window — and with `cancel-in-progress: true` nearly every main run
    would be cut within minutes of starting. The run that survived the pending drop is exactly
