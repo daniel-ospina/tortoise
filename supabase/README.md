@@ -168,11 +168,11 @@ Manual fallback — for when the automated co-move has already FAILED. The run
 says which way, and there are **three** verdicts, only the middle one being a
 failure:
 
-* a **dispatch error** — the flip was never started;
-* `run <id> did not reach success` / **`did NOT flip`** — the flip ran and failed
+- a **dispatch error** — the flip was never started;
+- `run <id> did not reach success` / **`did NOT flip`** — the flip ran and failed
   (or a newer push superseded it while it was still pending). This is the case
   the fallback below is for;
-* `did not FINISH within the … wait` / **`UNKNOWN`** — the watch gave up while the
+- `did not FINISH within the … wait` / **`UNKNOWN`** — the watch gave up while the
   run was still QUEUED or running (runner-queue latency is not ours to bound).
   The flip is **NOT known to have failed**: do NOT run the fallback and do not
   re-dispatch — both queue behind that run and supersede its pending slot. Watch
