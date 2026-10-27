@@ -402,6 +402,22 @@ WHAT IS PINNED (one entry per test, in file order)
    `tortoise/sdk.py::_record_structural_edge` — the recorder the projection's
    edge mints call — NOT `sdk.create_edge`, whose door-level emission `#9827`
    added and this change replaced with the mint-level one.
+33. `test_every_census_writer_carries_its_class_verdict_where_it_is_named` — the
+   CLASS the tables put a writer in, stated in a sentence that actually names
+   it. Every earlier leg compared the documents' NUMERALS to the tables, so a
+   sentence could say the opposite of the table it sat next to and stay green;
+   measured on one five-line behavioural fix, five review cycles were green
+   while §13 called a counted writer an exemption.
+34. `test_no_corrected_passage_denies_a_verdict_the_census_counts` — the
+   contradiction half: a passage may not call a counted writer an exemption or
+   say it drops / carries no property, unless the sentence is explicitly about
+   HISTORY (`before`/`until #9417`), which is true and must stay writable.
+   This is the leg that reds on §13.8 q2's pre-`#9417` sentence, live on `main`.
+35. `test_the_population_numerals_are_derived_from_the_census_tables` — the two
+   statements that were TYPED rather than derived: the declared-false-positive
+   count in every spelling, and the invisible site's ORDINAL (`total + 1`).
+   "A sixth site is in the code today" outlived the 5 -> 6 move on a green
+   suite, which is what a typed ordinal is worth.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -2274,6 +2290,41 @@ def _unqualified_line_citations(text: str) -> list[str]:
     return out
 
 
+#: Cardinal and ordinal spellings, 1..12 — ONE table per spelling family, because
+#: the documents state these counts in WORDS as well as digits (`#9403` review:
+#: §13 wrote "ORIGINATED by two sites" and "written by three in the named form",
+#: which the digit pins could not see). `#10149` extends the members so numerals
+#: that are DERIVED from the tables — the invisible site's ordinal is `total + 1`
+#: — can be stated at the population's own width instead of stopping at six.
+NUMBER_WORDS: dict[int, str] = {
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+    11: "eleven",
+    12: "twelve",
+}
+ORDINAL_WORDS: dict[int, str] = {
+    2: "second",
+    3: "third",
+    4: "fourth",
+    5: "fifth",
+    6: "sixth",
+    7: "seventh",
+    8: "eighth",
+    9: "ninth",
+    10: "tenth",
+    11: "eleventh",
+    12: "twelfth",
+}
+
+
 def test_the_document_population_counts_match_the_census():
     """§13's population numbers must equal what this file's tables actually hold.
 
@@ -2326,7 +2377,7 @@ def test_the_document_population_counts_match_the_census():
     # measured at `#9403` review, editing it to "three sites" left the suite green
     # while the paragraph above contradicted it. Words, not digits, so both spellings
     # are checked against the tables.
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    words = NUMBER_WORDS
     assert f"ORIGINATED by {words[originating]} sites" in storage, (
         f"the document no longer states 'ORIGINATED by {words[originating]} sites', which is the "
         f"ORIGINATING count {originating} the census split implies"
@@ -3909,4 +3960,443 @@ def test_every_direct_edge_created_producer_is_safe_for_an_about_edge():
         "`DIRECT_EDGE_CREATED_ATTR_GUARDS` WITH a restriction on the relation, "
         "and the `NOT_AN_ABOUT_WRITER` row plus the documents' 'carries no "
         "property on an about edge' would have to be re-derived"
+    )
+
+
+# ── #10149: pin the CLAIMS, not only the numerals ────────────────────────────
+#: What a sentence must SAY about a writer, keyed by the table the writer is in.
+#: Every leg above compares the documents' NUMERALS to these tables, and a
+#: numeral is satisfied by the right token anywhere in the section — so a
+#: sentence could state the opposite of the table sitting next to it and stay
+#: green. That is not hypothetical: four review cycles on a five-line fix
+#: (`#9417`) found §13 calling a counted writer an exemption, twice, with the
+#: suite green both times. These markers are the documents' OWN vocabulary for
+#: each class, and they are derived from the classes the tables already encode —
+#: a `MAP_WRITERS` row carries the edge's whole attribute set by property map, a
+#: `RECORDED_WRITERS` row writes `SET r.<prop>`, and a `NOT_AN_ABOUT_WRITER` row
+#: is an exemption that writes NOTHING. `_flat` is applied to the sentence and
+#: the marker alike, so these are written in their FLATTENED spelling.
+CLASS_VERDICT_MARKERS: dict[str, tuple[str, ...]] = {
+    "MAP": (
+        "property MAP",
+        "MAP-form",
+        "MAP form",
+        "re-materializ",
+        "SET r +=",
+        "SET r = $p",
+        "SET nr +=",
+    ),
+    "NAMED": (
+        "NAMED form",
+        "NAMED-form",
+        "SET r.<prop>",
+        "SET r.confidence",
+        "originating",
+        "originates",
+    ),
+    "EXEMPT": ("false positive", "writes no property", "carries no property"),
+}
+
+#: Present-tense DENIALS. Every entry is the core of a sentence MEASURED false at
+#: some head while this suite was green — `#10149`'s cycle 3 (*"`sdk.
+#: supersede_point` is NOT one of them … it **drops** the binder's
+#: `confidence`"*, 130 words before counting it as a writer) and the SAME
+#: sentence still live in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 q2 (*"neither
+#: carries a property on an about edge … the guard declares both census FALSE
+#: POSITIVES"*) — so this set is measured, not invented. A denial about HISTORY
+#: is TRUE and must stay writable; that is the whole difference between "it
+#: drops the property" and "it was a declared false positive before `#9417`",
+#: and `HISTORY_MARKERS` is what tells the two apart.
+DENIAL_MARKERS: tuple[str, ...] = (
+    "false positive",
+    "drops the",
+    "is not one of them",
+    "neither carries",
+    "transferred bare",
+    "carries no property",
+)
+
+#: What makes a denial a statement about HISTORY rather than about HEAD.
+HISTORY_MARKERS: tuple[str, ...] = (
+    "before #9417",
+    "until #9417",
+    "pre-#9417",
+    "was a declared",
+    "#10139",
+)
+
+#: A declared false positive described as COUNTED — the same contradiction from
+#: the other side: an exemption the census counts is a writer described as
+#: writing nothing. No history escape: this row has NEVER been counted, so a "it
+#: was counted" claim about it has no true instance to allow.
+EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
+    "counted",
+    "is one of them",
+    "MAP-form writer",
+)
+
+#: A DECLARED FALSE POSITIVE COUNT, in the spellings the documents use. The `^`
+#: is the numeral, and it must equal `len(NOT_AN_ABOUT_WRITER)`: the count moved
+#: from two to one when `#9417` made `supersede_point` carry the property, and a
+#: stale "both … FALSE POSITIVES" survived in §13.8 q2 because nothing compared
+#: that SPELLING to the table (`#10149` cycle 4).
+_DECLARED_FALSE_POSITIVE_COUNT = re.compile(
+    r"\b(one|two|three|four|five|six|both)\b[^.]{0,60}?(?:false positives?|positives)\b",
+    re.I,
+)
+#: "both" IS a count of two — the exact spelling the stale header used.
+_COUNT_WORD_VALUES: dict[str, int] = {"both": 2}
+
+#: The invisible site's ORDINAL — the population's width plus one. TYPED rather
+#: than derived, it outlived the 5 -> 6 move by a whole review cycle ("A sixth
+#: site is in the code today" while the census saw six, so the site outside it
+#: was the seventh) and every other leg stayed green.
+_INVISIBLE_SITE_ORDINAL = re.compile(
+    r"\bA (second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh"
+    r"|twelfth) site is in the code today\b"
+)
+
+
+def _census_classes() -> tuple[tuple[str, dict[tuple[str, str], object]], ...]:
+    """The three tables, each with the class name its verdict vocabulary keys on."""
+    return (
+        ("MAP", MAP_WRITERS),
+        ("NAMED", RECORDED_WRITERS),
+        ("EXEMPT", NOT_AN_ABOUT_WRITER),
+    )
+
+
+def _census_sections() -> list[tuple[str, str]]:
+    """The passages that make the population claim, labelled, in document order.
+
+    The SAME `CORRECTED_SECTIONS` the presence leg scopes to — the passages
+    that assert which writers exist, which is where a denial of a table's
+    verdict does its damage. A sentence elsewhere in either document is out of
+    this leg's scope on purpose: the census's claim is scoped to these passages,
+    and a leg that scanned the whole tree would match other instruments' prose.
+    """
+    texts = {"STORAGE": _doc(STORAGE), "EXTRACTOR": _doc(EXTRACTOR)}
+    return [
+        (label, _section(texts[which], start, end))
+        for label, start, end, which in CORRECTED_SECTIONS
+    ]
+
+
+def _claim_sentences(text: str) -> list[str]:
+    """The sentences of a passage, flattened, in document order.
+
+    A SENTENCE is the unit a reader acts on, and it is the window the retracted
+    sentences of `#10149` lived and died in. ⚠️ Known looseness, stated rather
+    than assumed: a markdown TABLE row ends in no full stop, so a run of rows
+    arrives as one long "sentence". That weakens the AFFIRMATIVE half where the
+    documents are tabular (a verdict stated in one row satisfies the run) and
+    does not weaken the DENIAL half, which is the half that caught cycles 3 and
+    4 — a denial anywhere in the run still reds it.
+    """
+    flat = _flat(text)
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", flat) if part.strip()]
+
+
+def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
+    """Writers a passage names without ever stating which class they are in.
+
+    Split out of the leg so the anti-vacuity probes below run the SAME rule: a
+    probe that re-implemented it could pass while the rule it is supposed to
+    prove was broken (the shape `_unstated_scoped_facts` already uses here).
+    """
+    stated: set[str] = set()
+    for _label, text in sections:
+        for sentence in _claim_sentences(text):
+            low = sentence.lower()
+            for role, table in _census_classes():
+                for _module, symbol in table:
+                    if symbol in sentence and any(
+                        marker.lower() in low
+                        for marker in CLASS_VERDICT_MARKERS[role]
+                    ):
+                        stated.add(symbol)
+    return [
+        f"{role} `{symbol}`"
+        for role, table in _census_classes()
+        for _module, symbol in table
+        if symbol not in stated
+    ]
+
+
+def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
+    """Sentences that contradict the table their named writer lives in.
+
+    Two directions, because the defect has been measured in both: a counted
+    writer described as an exemption (a DENIAL marker), and a declared false
+    positive described as counted (`EXEMPT_COUNTED_MARKERS`). A denial is
+    excused only when the same sentence is about HISTORY — see
+    `HISTORY_MARKERS`; the exemption row gets no such escape.
+    """
+    offenders: list[str] = []
+    for label, text in sections:
+        for sentence in _claim_sentences(text):
+            low = sentence.lower()
+            history = any(marker.lower() in low for marker in HISTORY_MARKERS)
+            for role, table in _census_classes():
+                for _module, symbol in table:
+                    if symbol not in sentence:
+                        continue
+                    if role == "EXEMPT":
+                        hits = [
+                            marker
+                            for marker in EXEMPT_COUNTED_MARKERS
+                            if marker.lower() in low
+                        ]
+                    else:
+                        hits = (
+                            [
+                                marker
+                                for marker in DENIAL_MARKERS
+                                if marker.lower() in low
+                            ]
+                            if not history
+                            else []
+                        )
+                    if hits:
+                        offenders.append(
+                            f"{label}: `{symbol}` is a {role} row, and this "
+                            f"sentence describes it as {hits[0]!r}: "
+                            f"{sentence[:180]!r}"
+                        )
+    return offenders
+
+
+def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
+    """The class a writer is in must be STATED in a sentence that names it.
+
+    `#10149`: every population leg in this file compares a NUMERAL to a table,
+    and a numeral is satisfied by the right token anywhere in the section — so
+    the sentence around it is unconstrained. Four review cycles on the five-line
+    `#9417` fix were green while `STORAGE-ARCHITECTURE.md` §13 said
+    `sdk.supersede_point` *"**drops** the binder's `confidence`"* 130 words
+    before counting it as the fourth re-materializing writer. The tables already
+    hold the exact keys and the exact class, so the claim is cheap to pin: a
+    writer the census counts must be named in a sentence that says HOW it writes
+    the property, and an exemption must be named in one that says it writes
+    nothing. Probes below run the same rule, so a matcher that stopped matching
+    reds here instead of quietly pinning nothing.
+    """
+    sections = _census_sections()
+    for role, table in _census_classes():
+        assert table, (
+            f"the {role} table is EMPTY — this leg would pass vacuously, and a "
+            "population of zero is a measured absence, not a green"
+        )
+    # Probe 1: a sentence that NAMES the site and says nothing about its class
+    # must be a violation …
+    silent = (("probe", "`hosted_backup.restore_graph` is mentioned here."),)
+    assert any(
+        "restore_graph" in item for item in _unstated_verdicts(list(silent))
+    ), (
+        "the rule cannot see a MAP-form writer named with no verdict, so the "
+        "affirmative half pins nothing"
+    )
+    # … and Probe 2: the same site with its own write form is NOT a violation.
+    stated = (
+        (
+            "probe",
+            "*Re-materializing* writers carry the whole attribute set by property "
+            "MAP: `hosted_backup.restore_graph` (`SET r = $p`).",
+        ),
+    )
+    assert not any(
+        "restore_graph" in item for item in _unstated_verdicts(list(stated))
+    ), (
+        "the rule fires on a sentence that DOES state the verdict, so it would "
+        "red on a corrected document"
+    )
+    unstated = _unstated_verdicts(sections)
+    assert not unstated, (
+        "these census rows are named in a corrected passage that never states "
+        f"their class: {unstated} — write the sentence that says how the site "
+        "writes the property (or that it writes none), derived from the table"
+    )
+
+
+def test_no_corrected_passage_denies_a_verdict_the_census_counts():
+    """The contradiction half, and the one that caught `#10149` cycle 3.
+
+    A sentence that names a COUNTED writer may not call it an exemption or say
+    it drops / carries no property, and a sentence that names the EXEMPTION may
+    not call it counted. Both were measured green: cycle 3's §13 sentence
+    (`sdk.supersede_point` *"is NOT one of them … it **drops** the binder's
+    `confidence`"*) and cycle 4's (*"the guard declares that row a FALSE
+    POSITIVE rather than counting it"*). The escape hatch is deliberate and
+    narrow: a sentence about HISTORY — *"it was a declared false positive before
+    `#9417`; it is a counted MAP-form writer now"* — is TRUE, and a leg that
+    banned the words outright would force the documents to delete their own
+    correction record.
+
+    Measured at the `#10149` head, this leg's FIRST red is on `main`:
+    `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 q2 still carried the pre-`#9417`
+    sentence — *"**not** `supersede_point` … so neither carries a property on an
+    about edge, and the guard declares both census FALSE POSITIVES (`supersede_point`
+    even DROPS the property)"* — which the numeral pins never saw, because the
+    numerals it states are arithmetically consistent with the tables.
+    """
+    # Probe 1: the MEASURED cycle-3 sentence must red.
+    cycle_3 = (
+        (
+            "probe",
+            "`sdk.supersede_point` is NOT one of them: it **drops** the "
+            "binder's `confidence` on the `about*` edge.",
+        ),
+    )
+    assert any(
+        "supersede_point" in item for item in _denied_verdicts(list(cycle_3))
+    ), (
+        "the rule cannot see the cycle-3 sentence, which is the sentence this "
+        "leg exists for"
+    )
+    # Probe 2: the same writer described with HISTORY must NOT red, or the leg
+    # forces the documents to delete a true record of what changed.
+    history = (
+        (
+            "probe",
+            "`sdk.supersede_point` was a declared FALSE POSITIVE before `#9417`; "
+            "it is a counted MAP-form writer now.",
+        ),
+    )
+    assert not any(
+        "supersede_point" in item for item in _denied_verdicts(list(history))
+    ), (
+        "the rule fires on a HISTORY-marked denial, which is true — it would "
+        "make the correction record unwritable"
+    )
+    # Probe 3: the other direction — an exemption described as counted.
+    exemption = (
+        ("probe", "`projection._rebuild_all_replay` is a counted writer."),
+    )
+    assert any(
+        "_rebuild_all_replay" in item
+        for item in _denied_verdicts(list(exemption))
+    ), (
+        "the rule cannot see an exemption described as counted, so the "
+        "contradiction is pinned in one direction only"
+    )
+    offenders = _denied_verdicts(_census_sections())
+    assert not offenders, (
+        "a corrected passage contradicts a census table:\n  "
+        + "\n  ".join(offenders)
+        + "\nFix the SENTENCE to match the table (or, if the table is wrong, "
+        "re-derive the table and every numeral derived from it) — a denial "
+        "about history must say so (`before`/`until #9417`)"
+    )
+
+
+def _declared_false_positive_counts(
+    sections: list[tuple[str, str]],
+) -> list[tuple[str, int]]:
+    """Every place a passage STATES how many declared false positives there are.
+
+    Split out of the leg so the probe can run the same rule on a synthetic
+    passage (see `_unstated_scoped_facts` for why).
+    """
+    numbers = {word: number for number, word in NUMBER_WORDS.items()}
+    numbers.update(_COUNT_WORD_VALUES)
+    found: list[tuple[str, int]] = []
+    for label, text in sections:
+        for match in _DECLARED_FALSE_POSITIVE_COUNT.finditer(_flat(text)):
+            found.append(
+                (f"{label}: {match.group(0)[:120]!r}", numbers[match.group(1).lower()])
+            )
+    return found
+
+
+def _invisible_site_ordinals(
+    sections: list[tuple[str, str]],
+) -> list[tuple[str, int]]:
+    """Every place a passage states the ORDINAL of the site outside the census."""
+    numbers = {word: number for number, word in ORDINAL_WORDS.items()}
+    return [
+        (f"{label}: {match.group(0)!r}", numbers[match.group(1).lower()])
+        for label, text in sections
+        for match in _INVISIBLE_SITE_ORDINAL.finditer(_flat(text))
+    ]
+
+
+def test_the_population_numerals_are_derived_from_the_census_tables():
+    """The numerals that were TYPED rather than derived, now derived.
+
+    `#10149` cycle 4 found two of these on a green suite. The declared
+    false-positive count moved from two to one when `#9417` made
+    `supersede_point` a counted writer, and a header still said *"two MORE … are
+    the declared false positives"*; the invisible site's ordinal stayed at
+    *"A sixth site is in the code today"* after the population BECAME six, so
+    the site outside the census was the seventh. Neither was invisible to a
+    human reader, only to CI — the digits elsewhere were right.
+
+    Both are cheap to derive, so they are derived: the count from
+    `NOT_AN_ABOUT_WRITER`, the ordinal from the population's width plus one.
+    Covered spellings are stated rather than implied — the count as a cardinal
+    word (or "both") within 60 characters of "false positive(s)", and the
+    ordinal only in the *"A <ordinal> site is in the code today"* sentence. A
+    different spelling is outside this rule, which is why the rule says which
+    one it reads.
+    """
+    sections = _census_sections()
+    exemptions = len(NOT_AN_ABOUT_WRITER)
+    population = len(RECORDED_WRITERS) + len(MAP_WRITERS)
+    invisible = population + 1
+    if invisible not in ORDINAL_WORDS or exemptions not in NUMBER_WORDS:
+        pytest.fail(
+            f"the population is {population} with {exemptions} declared false "
+            "positive(s), and this leg's word tables stop at "
+            f"{max(NUMBER_WORDS)}/{max(ORDINAL_WORDS)} — extend "
+            "`NUMBER_WORDS`/`ORDINAL_WORDS` rather than dropping the derivation"
+        )
+
+    # Non-vacuity for the count rule: the stale spelling must be seen as TWO.
+    probe = (("probe", "the guard declares both census FALSE POSITIVES"),)
+    assert _declared_false_positive_counts(list(probe)) == [
+        ("probe: 'both census FALSE POSITIVES'", 2)
+    ], (
+        "the count rule cannot read 'both census FALSE POSITIVES', so it would "
+        "not have red on the stale header it exists for"
+    )
+    counts = _declared_false_positive_counts(sections)
+    assert counts, (
+        "no corrected passage states how many declared false positives there "
+        "are — the count is a claim about `NOT_AN_ABOUT_WRITER`, and silence is "
+        "not a match"
+    )
+    wrong_counts = [
+        (where, stated) for where, stated in counts if stated != exemptions
+    ]
+    assert not wrong_counts, (
+        f"a corrected passage states the declared false-positive count as "
+        f"{wrong_counts}, but `NOT_AN_ABOUT_WRITER` holds {exemptions} — the "
+        "count is derived, so write it that way"
+    )
+
+    # Non-vacuity for the ordinal rule: the MEASURED stale ordinal (six, at a
+    # population of six) must be seen and must be the WRONG one.
+    probe = (("probe", "A sixth site is in the code today and outside it"),)
+    seen = _invisible_site_ordinals(list(probe))
+    assert len(seen) == 1, (
+        "the ordinal rule does not read 'A sixth site is in the code today' as "
+        f"exactly one statement ({seen}) — the probe below would prove nothing"
+    )
+    stale = seen[0][1]
+    assert stale != invisible, (
+        "the ordinal rule reads the measured stale sentence as the CORRECT "
+        f"ordinal ({stale}), so the leg below pins nothing"
+    )
+    ordinals = _invisible_site_ordinals(sections)
+    assert len(ordinals) == 1, (
+        "the invisible site's ordinal is stated "
+        f"{len(ordinals)} times in the corrected passages ({ordinals}) — the "
+        "sentence is how the census bounds itself, so it must appear exactly "
+        "once, derived"
+    )
+    (where, stated), = ordinals
+    assert stated == invisible, (
+        f"{where} states the ordinal for a population of {stated - 1}, but the "
+        f"census holds {population} writers, so the site OUTSIDE it is the "
+        f"{ORDINAL_WORDS[invisible]} — derive the ordinal from the tables"
     )

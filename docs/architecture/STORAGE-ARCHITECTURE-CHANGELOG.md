@@ -1607,3 +1607,23 @@ which is the same GUARD (the same test) whose other arm moved §13's issue map o
 `CORRECTED 20xx-xx-xx` stamps (`_CHANGE_NARRATION`, a different regex) on 2026-10-15.
 
 **2026-10-27 — `#9417`.** `sdk.supersede_point` stopped being a declared false positive: its structural transfer now carries the old edge's properties (`ON CREATE SET nr += $attrs`), so an `about*` edge keeps the binder's `confidence`. **Review round 2 corrected the form:** a bare `SET nr += $attrs` overwrites per key, so on the COMMON restatement path — where the successor already holds its own binding to the same subject — the RETIRED point's value replaced the successor's live one (measured 0.91 -> 0.42, unrecoverable: the repoint descriptor carries no `attrs`). `ON CREATE` states the precedence the pre-`#9417` bare `MERGE` already had: the successor's own value wins. The dead `source_version` whitelist entry went with it — the graph writes the anchor as `sourceVersion` (`projection/edges.py:504`), so the entry could never match and only implied a carry that never happened. The census composition is therefore **2 originating + 4 re-materializing** (6 writers: 3 NAMED + 3 MAP) with **one** declared false positive (`projection._rebuild_all_replay`). The REBUILD half is still bare — `#10139`.
+
+**2026-10-27 — `#10149`: the census pins CLAIMS, and §13.8 q2's pre-`#9417` sentence went with it.** The
+`aboutObject` census compared the documents' NUMERALS to its tables (`"6 writers"`, `"2 ORIGINATING"`,
+`"one declared false positive"`) and never the sentences around them, so a section could state the
+opposite of the table it sat beside and stay green — measured four times on the five-line `#9417` fix.
+Three legs now pin the claims: every table key must be named in a sentence that states its CLASS
+(`MAP-form` / `NAMED form` / exemption), no passage may call a counted writer an exemption or say it
+drops / carries no property (history-marked statements — *"was a declared false positive before
+`#9417`"* — remain writable, because that record is true), and the two numerals that were TYPED rather
+than derived — the declared-false-positive count in every spelling, and the invisible site's ordinal
+(`total + 1`) — are now derived from the tables.
+
+**That third class of sentence was still live in a design document.** `EXTRACTOR-V4-ARCHITECTURE.md`
+§13.8 q2 carried the pre-`#9417` world: *"**not** `supersede_point` … so neither carries a property on an
+about edge, and the guard declares both census FALSE POSITIVES (`supersede_point` even DROPS the
+property, `#9417`)"*. Every numeral in it is arithmetically consistent with the tables, which is why
+nothing saw it. It now states the measured population — six writers, the supersede transfer counted as
+property-MAP since `#9417` (`ON CREATE SET nr += $attrs`, successor's live value winning), and ONE
+declared false positive, the rebuild replay `projection._rebuild_all_replay`, whose about/structural
+transfer is a separate bare `MERGE`. The REBUILD half of the supersede transfer stays bare (`#10139`).
