@@ -146,16 +146,27 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
       if (token.ok) {
         // The OWNER is recorded from the session row, never from the request (see the mint
         // route: it is what lets a mint refuse a flow another identity began).
-        const row = await env.SESSIONS.prepare(
-          "SELECT user_id,expires_at FROM sessions WHERE handle = ?1 AND revoked = 0",
-        )
-          .bind(handle)
-          .first<{ user_id: string; expires_at: number }>();
-        if (row && row.expires_at > Date.now()) {
-          outcome = "usable";
-          userId = row.user_id;
-        } else {
-          outcome = "none";
+        //
+        // Wrapped, because this file's contract is that a STORE fault is a 503 and never a
+        // redirect (property 3): an unwrapped D1 throw here escapes `onRequestGet` as an
+        // untyped 500, which the page cannot tell apart from a bug in itself. `unavailable`
+        // is also the right outcome rather than `none` — an unreadable store says nothing
+        // about whether the visitor is signed in, and calling that "no session" would bounce
+        // a signed-in user to a sign-in page over an infrastructure blip.
+        try {
+          const row = await env.SESSIONS.prepare(
+            "SELECT user_id,expires_at FROM sessions WHERE handle = ?1 AND revoked = 0",
+          )
+            .bind(handle)
+            .first<{ user_id: string; expires_at: number }>();
+          if (row && row.expires_at > Date.now()) {
+            outcome = "usable";
+            userId = row.user_id;
+          } else {
+            outcome = "none";
+          }
+        } catch {
+          outcome = "unavailable";
         }
       } else {
         outcome = token.reason === "no_session" ? "none" : "unavailable";
