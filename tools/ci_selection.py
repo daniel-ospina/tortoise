@@ -1064,6 +1064,24 @@ SOURCE_PATTERNS = {
             # repo's deliberate docs-PR policy; the required `docs` job runs
             # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
+            # #10044 review F1: `tools/sdk_surface_declaration.py` is the APPROVED-surface
+            # gate (the owner's 40 in `tortoise/__all__.py` vs the owner's document, and
+            # vs the live `TortoiseSDK`). Its proofs are the 17 in
+            # `test_sdk_surface_declaration.py` — registered in `api` AND `core` but
+            # unreachable, because `tools/` is in NON_PYTHON_PREFIXES: a gate-only diff
+            # selected NO surface (`surfaces: []`, `full: false`) and the required job
+            # then executed the PR's own edited gate with zero of its tests having run.
+            # What that file pins is the GATE's contract (`check(contract_only=True)` reds a
+            # doctored or padded declaration) — enough on its own: a neutered `check()`
+            # cannot pass them. The WIRING proof (that the required lint still CALLS the
+            # gate) lives in `tests/test_surface_manifest.py`, which is `core`-registered and
+            # selected by the `tools/surface_manifest.py` diff that could break it — so this
+            # entry does not carry it, and saying it did was wrong (round-6 F3).
+            # Same silent-drop class (#1349/#3332/#3616) as the generators above, and the
+            # one bypass the residual-bypass paragraph in `tools/surface_manifest.py`
+            # does not cover. `test_sdk_surface_declaration.py` is already in `api`, so
+            # this entry is what makes the registration bite.
+            "tools/sdk_surface_declaration.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
             # `test_registry_integrity.py` (dual-registered in `api` AND `core`)

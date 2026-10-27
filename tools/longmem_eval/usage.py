@@ -78,6 +78,8 @@ import logging
 import math
 import threading
 
+from . import spend_guard
+
 logger = logging.getLogger(__name__)
 
 # Sentinel qid for keyless rows (preflight pings / stray keyless calls).
@@ -119,10 +121,15 @@ def get_collector() -> UsageCollector:
 
 
 def reset_collector() -> None:
-    """Reset the singleton (in-process double-run guard, Am 19)."""
+    """Reset the singleton (in-process double-run guard, Am 19).
+
+    #8486 F1: the hard spend stop's accumulator is keyed to the same run
+    lifecycle — resetting one without the other would leave a ceiling armed
+    against a token total nobody is collecting any more."""
     global _collector
     with _collector_lock:
         _collector = None
+    spend_guard.reset()
 
 
 def set_question_key(qid: str) -> None:
@@ -272,6 +279,15 @@ class UsageCollector:
                 bucket["usage_present"] and usage_present)
             for k, v in sanitized.items():
                 bucket[k] = bucket.get(k, 0) + v
+        # #8486 F1: the SAME row feeds the hard-stop ceiling's run total. It
+        # is fed here (not by a snapshot read) because a drained question's
+        # rows leave this collector for its outcome — a snapshot would forget
+        # spend the run already paid for, and the ceiling would creep upward
+        # with every completed question. ``observe`` re-prices from these raw
+        # tokens through PRICING_MAP; it never reads the ``cost.usd`` meter.
+        spend_guard.observe(stage=stage, provider=provider,
+                            model_id=model_id, tokens=sanitized,
+                            usage_present=usage_present)
 
     # ── attach (A6: wires usage_sink on walked members) ───────────────────
 
@@ -574,3 +590,24 @@ def _walk_members(model) -> list:
             seen.add(id(m))
             out.append(m)
     return out
+
+
+def declared_lanes(model, *, stage: str,
+                   provider: str | None = None) -> list[tuple]:
+    """``(stage, provider, model_id)`` for every meter-visible lane of a model.
+
+    #8486 F1: the hard spend stop's eager check. It walks the SAME members
+    ``attach`` wires sinks onto, so "a lane that will emit meter rows" and "a
+    lane the ceiling must be able to price" are one set by construction — a
+    wrapper whose ``complete()`` delegates (RoutingModel/RotatingModel) is
+    descended into, and its members carry the per-call serving identity.
+    Returns [] for a mock/None (nothing meters, nothing to price).
+    """
+    lanes = []
+    for member in _walk_members(model):
+        lane_provider = (provider if provider is not None
+                         else getattr(member, "provider", None))
+        model_id = (getattr(member, "id", None)
+                    or getattr(member, "model_id", None) or "")
+        lanes.append((stage, lane_provider, str(model_id)))
+    return lanes

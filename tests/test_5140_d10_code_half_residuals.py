@@ -105,10 +105,11 @@ def test_document_created_then_source_still_one_node(sdk_factory):
 def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
     """Non-over-reach: the resolver is IDENTITY for the two non-URL document-id
     shapes the INDEX and CLI paths emit — `doc_<rel-path>` from
-    `derive_document_id` (the underscore form: `doc_notes/5140.md`, not
-    `doc/notes/…`) and a BARE FILENAME, which is what the CLI passes
-    (`ingest.py` uses `args.transcript.name`; `corpus://…` is the index path's
-    SOURCE URL, not a document id). Their node keys must not move.
+    `derive_document_id` (the underscore form; the literal below is the
+    MIXED-CASE `doc_Notes/5140.md`, not `doc/notes/…`) and a BARE FILENAME,
+    which is what the CLI passes (`ingest.py` uses `args.transcript.name`;
+    `corpus://…` is the index path's SOURCE URL, not a document id). Their node
+    keys must not move.
 
     ⚠️ It asserts the identity PROPERTY as well as the key, and one literal is
     MIXED CASE, because the key alone cannot see the defect this guards: on a
@@ -136,9 +137,20 @@ def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
 
 def test_document_created_replays_to_the_same_node(sdk_factory):
     """Durability: the resolved key and the identity props are written by the
-    FOLD, so a rebuild of the same record is a no-op — the node count must not
-    grow on replay, which is what a resolver applied only on the live path
-    would have produced."""
+    FOLD, so re-applying the SAME record must be a no-op — the node count must
+    not grow and the alias set must not accumulate the raw spelling again.
+
+    The alias half is the assertion that DISCRIMINATES; the node count does not
+    on its own, and this docstring no longer claims it does: a `MERGE` on a
+    constant key is one node however many times it runs, so a resolver applied
+    only on the live path would leave this count at 1 as well (#5140 review of
+    PR #9952 — the earlier "which is what a resolver applied only on the live
+    path would have produced" claimed a discrimination a constant `MERGE`
+    cannot have, and the case was green pre-fix by that PR's own base
+    measurement). What IS fold-owned is the `urlAliases` clause's dedup:
+    measured, dropping its `CASE WHEN $raw_url IN …` guard (leaving a bare
+    `coalesce(s.urlAliases, []) + [$raw_url]`) fails this test with the raw
+    spelling repeated three times."""
     sdk = sdk_factory()
     proj = sdk._get_proj()
     rec = {
@@ -152,9 +164,9 @@ def test_document_created_replays_to_the_same_node(sdk_factory):
     proj.apply(rec)
     rows = proj.g.query(
         "MATCH (s:Source) WHERE toLower(s.url) CONTAINS 'example.com/a/b' "
-        "RETURN count(s), collect(s.documentKind)"
+        "RETURN count(s), collect(s.documentKind), collect(s.urlAliases)"
     ).result_set
-    assert rows[0] == [1, ["report"]], rows
+    assert rows[0] == [1, ["report"], [[rec["id"]]]], rows
 
 
 def test_document_created_fragment_variants_collapse_to_one_node(sdk_factory):

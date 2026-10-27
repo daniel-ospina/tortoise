@@ -2,19 +2,23 @@
 
 The W3 harness (tests/eval/harness/) grades the reflex DECISION via per-turn
 ``injected: {turn_index: [pointer ids]}`` against sealed gold
-(``grading.grade_kta`` / ``grade_push``).  The harness itself is NOT modified
-here (its no-reflex baseline stays the orchestrator's); this file exposes the
-graded seam (tortoise/volunteer.decide) and replays the REAL committed kta
-fixtures through the REAL write seam + the reflex, reporting the numbers
-EXACTLY in the harness's grading vocabulary.  The numbers are honest first
-measurements of this reflex over the frozen corpus — no baseline is blessed.
+(``grading.grade_kta`` / ``grade_push``).  This file exposes the graded seam
+(``tortoise.volunteer.decide``) and replays the REAL committed kta fixtures
+through the REAL write seam + the reflex, reporting the numbers EXACTLY in
+the harness's grading vocabulary.
 
-The corpus write path (m2 echo lane) leaves cell points UNMEASURED (no
-posterior α/β — capture does not run the dream EP pass), so the EP gate
-(0.7 default on the canonical posterior mean, unmeasured = neutral 0.5) is
-expected to under-fire on the frozen corpus: that is the named failure class
-of the first graded run (fix-wave protocol — the fix is an EP warm-start on
-the graded cells, owned by the W3 orchestrator, not this issue).
+#8125 closed the two gaps this file originally reported:
+
+1. **the under-fire class is fixed, and pinned here.**  The corpus write path
+   leaves cell points unmeasured (no posterior α/β — the echo lane's capture
+   mints no claim/operator, so ``_promote_and_dream`` no-ops and the EP gate
+   reads the Beta(1,1) neutral 0.5 under its 0.7 floor).  The fix is the
+   harness's ``runner.ep_warm_start`` (#2199 system-default starting belief +
+   the REAL EP pass), which this file exercises through the SAME primitives
+   the runner uses — the cold replay still under-fires, the warmed replay does
+   not.  A drift in either the reflex or the warm-start fails here.
+2. **the numbers are graded, not merely reported.**  ``config.reflex=graded``
+   in the committed baselines makes the standing kta / false-fire bars live.
 """
 from __future__ import annotations
 
@@ -52,29 +56,14 @@ def _load_fixture_gold(session_id: str):
 
 
 def _replay_turns(sdk, fixture_turns, *, min_confidence, max_pointers):
-    """Per-turn reflex replay: for each user turn, decide with the window so
-    far + the prior injected block as prior_context (cross-turn dedupe)."""
-    from tortoise.volunteer import decide
+    """Per-turn reflex replay — the HARNESS's own primitive (#8125): the
+    seam test must exercise the exact call shape the runner grades under, or
+    it stops being a seam test."""
+    from eval.harness import runner as harness_runner
 
-    proj = sdk._get_proj()
-    window: list[dict] = []
-    prior = None
-    injected: dict[int, list[str]] = {}
-    for i, turn in enumerate(fixture_turns, start=1):
-        window.append(turn)
-        if turn.get("role") != "user":
-            continue
-        d = decide(proj, window, prior_context=prior,
-                   min_confidence=min_confidence, max_pointers=max_pointers,
-                   _search_fn=sdk.tortoise_fts_query)
-        if d["fire"]:
-            injected[i] = d["pointer_ids"]
-            # Canonical prior-context grammar for the next turn.
-            from tortoise.volunteer import build_block
-            prior = build_block(d["pointers"],
-                                [{"label": p["label"], "band": "medium"}
-                                 for p in d["pointers"]])
-    return injected
+    assert min_confidence == harness_runner.REFLEX_MIN_CONFIDENCE
+    assert max_pointers == harness_runner.REFLEX_MAX_POINTERS
+    return harness_runner.replay_reflex(sdk, fixture_turns)
 
 
 # ── Seam mechanics over the REAL corpus (honest first numbers) ─────────────
@@ -84,23 +73,36 @@ KTA_CORPUS = ("kta01_reminder_turns", "kta02_aurora_status")
 
 def test_reflex_replays_kta_corpus_with_honest_numbers(monkeypatch):
     """Replay the committed W3 know-to-ask fixtures through the REAL write
-    seam (m2 capture) + the reflex; grade in the harness vocabulary. The
-    numbers are reported, not blessed: this is the first graded measurement
-    (expected bad per the fix-wave protocol — corpus cells are unmeasured
-    by the write path the reflex reads)."""
+    seam (m2 capture) + the reflex, COLD and EP-WARMED (#8125).
+
+    The cold replay is the named under-fire class this file first reported
+    (4 of 4 know-to-ask turns missed: the echo-lane cell carries no persisted
+    prior, so the 0.7 EP gate reads the neutral 0.5).  The warmed replay —
+    the harness's own ``runner.ep_warm_start`` — must meet the epic target
+    (kta failure 0.00, false fires 0).  Both halves are asserted: the pass is
+    not allowed to drift, and the mechanism that produces it is not allowed
+    to become a no-op."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")  # offline MockModel extractor (the #822 seam — capture never calls an LLM)
     import json
     import sys
     sys.path.insert(0, str(HARNESS_ROOT.parent.parent))
     from eval.harness import grading
+    from eval.harness import runner as harness_runner
     from eval.write_path import runner as wp
 
-    sdk = _fresh_sdk()
-    results = []
+    sdk = None
+    cold: list[dict] = []
+    warm: list[dict] = []
+    warm_starts: list[dict] = []
     workdir = Path(tempfile.mkdtemp(prefix="vc_harness_wd_"))
     log: list[str] = []
     for session_id in KTA_CORPUS:
         fx, gold = _load_fixture_gold(session_id)
+        # A FRESH cell per session (the runner's own cell routing): a shared
+        # graph would let session 1's warmed points answer session 2's
+        # questions, and the cold/warm contrast below would be measuring the
+        # leak instead of the warm-start.
+        sdk = _fresh_sdk()
         # Real write seam: parser round-trip + capture_session (the runner's
         # exact cell shape — m2 echo lane via the mock seam).
         parsed = wp.parse_roundtrip(
@@ -108,39 +110,36 @@ def test_reflex_replays_kta_corpus_with_honest_numbers(monkeypatch):
         capture = sdk.capture_session(
             parsed, session_id=session_id, harness="pi")
         assert capture.get("ok") is True, capture.get("errors")
-        injected = _replay_turns(sdk, fx["turns"],
-                                 min_confidence=0.7, max_pointers=3)
-        result = grading.grade_kta(session_id, gold, injected)
-        results.append(result)
-        # The session emits honest numbers in the grader's own vocabulary.
-        kta = result["kta"]
-        ff = result["false_fire"]
-        assert isinstance(kta["missed"], int) and isinstance(ff["fires"], int)
-    # Both sessions graded; no exceptions — the seam is wired. The EXPECTED
-    # first-run outcome is documented (not asserted as a pass): the m2 write
-    # lane leaves points unmeasured, so the EP gate under-fires. We assert
-    # the *seam shape* only: results exist in the harness vocabulary and the
-    # reflex never crashes a replay.
-    assert len(results) == len(KTA_CORPUS)
+        # 1. COLD: the untouched cell — the honest under-fire class.
+        cold.append(grading.grade_kta(
+            session_id, gold,
+            _replay_turns(sdk, fx["turns"], min_confidence=0.7,
+                          max_pointers=3)))
+        # 2. WARM: the harness's EP warm-start, then the same replay.
+        warm_starts.append(harness_runner.ep_warm_start(sdk, log=log))
+        warm.append(grading.grade_kta(
+            session_id, gold,
+            _replay_turns(sdk, fx["turns"], min_confidence=0.7,
+                          max_pointers=3)))
+    assert len(warm) == len(KTA_CORPUS)
     summary = {
-        r["session_id"]: {
-            "missed": r["kta"]["missed"],
-            "should": r["kta"]["should"],
-            "false_fires": r["false_fire"]["fires"],
-            "silent_required": r["false_fire"]["silent_required"],
-        }
-        for r in results
+        "cold": {r["session_id"]: r["kta"] for r in cold},
+        "warm": {r["session_id"]: r["kta"] for r in warm},
+        "warm_start": warm_starts,
     }
     # Printed for the PR body (anti-gaming: real numbers from this run).
-    print(f"HONEST KTA FIRST-NUMBERS: {json.dumps(summary)}")
-    # Bounded, non-tautological assertions: the reflex may never FALSE-FIRE
-    # on this corpus (courtesy / below-notability turns — a fire here is a
-    # seam regression regardless of the EP-gate under-fire class), and the
-    # grader's own bounds hold.  The expected first-run UNDER-fire (missed)
-    # is reported, not gated (the fix-wave owner re-blesses).
-    for r in results:
+    print(f"KTA REFLEX COLD/WARM: {json.dumps(summary)}")
+    for start in warm_starts:
+        assert start["seeded"] > 0, start
+    for r in warm:
+        # THE FIX: every should-retrieve turn retrieves, nothing false-fires.
+        assert r["kta"]["missed"] == 0, r
         assert r["false_fire"]["fires"] == 0, r
-        assert 0 <= r["kta"]["missed"] <= r["kta"]["should"], r
+    # ...and the warm-start is what does it: cold, the same cell under-fires
+    # (this is the failure class #8125 names, kept as a live guard).
+    for r in cold:
+        assert r["kta"]["missed"] > 0, r
+        assert r["false_fire"]["fires"] == 0, r
 
 
 def test_reflex_fires_on_measured_graph_mirroring_kta_gold():

@@ -111,6 +111,13 @@ continues — one transient error never aborts the 500-Q run),
 `--evidence-boost-verbatim F` `--evidence-boost-source F` (C2 #1745)
 (R1/R1C knobs — env-first, CLI overrides, all validated ≥ 1; the C2 boost
 is OFF by default in code, ON only for the re-validation run),
+`--retrieval-only` (retrieval WITHOUT reader/judge: `accuracy: n/a
+(retrieval-only)`, the official `recall_all@5` surface; needs **no
+reader/judge provider key** since #8486 F3 — those calls are not made. It is
+NOT a blanket "no credential" flag: with `--ingest-mode v2` the run still pays
+for extraction, so the extractor key IS still required and IS still
+pre-flighted),
+`--hard-stop-usd USD` (#8486 F1 — see the section below),
 `--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
 #1747 census-class-aware: override the `integrity.valid` RATE criterion —
 max allowed `invalid_rate` over questions with recoverable-class signals
@@ -133,6 +140,42 @@ with an `--integrity-justification` for those runs (the #1747 failure
 mode — `valid=true` unreachable at scale because any recoverable-class
 blip pushes `invalid_rate > 0` — would otherwise silently recur on the
 follow-up's ~24k session extractions; the step-5 pattern applies).
+
+## Hard spend stop (`--hard-stop-usd`) — #8486 F1
+
+`HARD_STOP_USD = 10.00` is pre-registered in
+`docs/benchmarks/longmemeval-500q/run-report.md`. Until #8486 F1 it existed in
+**no code path** — the report read as though a stop existed over a harness with
+no ceiling at all. Now:
+
++ **Armed by default** at `spend_guard.HARD_STOP_USD` (10.00). `run_protocol`
+  passes the same value into every run step, so the command it prints is the
+  command that was capped.
++ **Checked BEFORE every paid call** (reader, judge, extractor session) and
+  evaluated against spend **re-derived from raw token counts** through the
+  versioned `costing.PRICING_MAP` — never against `usage.cost.usd`. That
+  distinction is measured: on the 2026-10-25 pilot the meter reported
+  `$0.008456` for a `$0.0620` run (87% blind) because `deepseek-flash` had no
+  price entry. (That entry now exists — see `costing.py` — so today's meter and
+  the ceiling agree.)
++ **An unpriced model REFUSES to run under an armed ceiling** instead of
+  metering $0.00: at arm time for every lane the run declares (a
+  `PRICING_MAP`-less model exits before the first call), and mid-run for any
+  lane that becomes unpriced or returns no usage block. The residual is
+  deliberate: unknown spend is never treated as zero.
++ **On abort it leaves a resumable artifact**: the completed questions plus a
+  `spend_hard_stop` marker on `--checkpoint` (no report — a partial run is not
+  a report). Raise the ceiling (`--hard-stop-usd N`) and re-run the SAME
+  command to resume; the ceiling is deliberately not fingerprinted so raising
+  it is the recovery path, and the resumed run's total includes what the
+  abandoned process already spent.
++ `--hard-stop-usd 0` **disarms** it explicitly. That is recorded, not silent:
+  `report["hard_stop"]` carries `armed`, `ceiling_usd`, the re-derived
+  `spend_usd`, `calls` and any `unpriced_lanes`.
+
+Scope: the ceiling covers the `run.py` lanes (reader, judge, v2 extractor).
+`full_context.py` and `context_assembly_arms.py` are separate commands with
+their own cost shape and are NOT capped by this flag.
 
 **Belief layer (`--activate-beliefs`, #8486) — OFF by default, REQUIRED for
 the official v2 configuration:**
