@@ -383,10 +383,10 @@ every audit eventually asks.
 
 - **Supersede**, do not edit, when the content changes. The old node stays,
   marked superseded; the new one takes over its connections. **Transfer the
-  edges as part of the supersede** — a superseded node whose edges still
-  propagate is a belief the graph still prices but no longer holds. Never move
-  edges by hand afterwards. ⚠️ **Blanket today; `docs/ONTOLOGY.md` §3.1 says:**
-  disposition is restatement-scoped — a rebuttal motivating a correction stays off.
+  edges as part of the supersede.** Never move edges by hand afterwards — except
+  one. ⚠️ **The transfer is blanket; `docs/ONTOLOGY.md` §3.1 scopes it to
+  restatement:** a rebuttal that *motivated* a correction must come off the
+  successor explicitly.
 - **Retract** when it stops being true with no replacement. Retraction is
   terminal: a re-assertion creates a new node, it does not revive the old one.
 - **Superseded operators still propagate.** An operator is a node with its own
@@ -459,9 +459,9 @@ structure, not the return value.
   not an operator, or to a node whose state excludes it from the dampener. This
   is the most valuable check, because it is the one thing a
   structurally-correct-looking graph can still get wrong.
-- **Run the graph's structural integrity check.** It finds orphaned
-  contradictions, dangling references and superseded nodes still propagating —
-  the failures invisible in any individual write.
+- **Run the graph's structural integrity check.** It finds dangling source
+  references and superseded nodes still propagating — not an orphan
+  contradiction; that one is yours, at write time (§5).
 
 ## The checklist
 
@@ -491,7 +491,7 @@ Copy this, tick it, and do not skip a line because the write "looks simple".
 - [ ] Nothing I contradicted is an **option or a criterion**.
 - [ ] Annotation dimensions are set only **deliberately** — unrated means neutral.
 - [ ] Edge rationale is a **sentence**, not a label.
-- [ ] Changes are **supersessions** — edges dispositioned per the restatement-vs-correction policy, not edits.
+- [ ] Changes are **supersessions**, not edits — and a refutation that *motivated* one is off the successor.
 - [ ] Every belief carries its **Source**, stamped by the same write.
 - [ ] Bundled writes are **promoted** (or I know they are drafts).
 - [ ] I confirmed the **graph** before writing and did not construct any **id**.
