@@ -137,7 +137,12 @@ REGISTER_ACTIVITY = "activity"
 ALERT_REGISTER_OF = {
     EVENT_SUSPEND: REGISTER_ALERT,        # the org's state changed
     EVENT_FLAG: REGISTER_ALERT,           # the org was marked (flagged_at)
-    EVENT_REVIEW: REGISTER_ALERT,         # a human is reviewing it
+    # NOT "a human is reviewing it" (an earlier comment said so, and it was
+    # wrong): the ENGINE writes this when a rule wants an operator to look, and
+    # no human has acted yet. It is still an incident rather than an observation
+    # — it is the stage-2 escalation of a flag (a recorded state change and a
+    # request for a human), not a rate we merely measured.
+    EVENT_REVIEW: REGISTER_ALERT,
     EVENT_AUTH_IP: REGISTER_ALERT,        # a credential event: new-country auth
     EVENT_READ_VELOCITY: REGISTER_ACTIVITY,
     EVENT_SIGNUP_VELOCITY: REGISTER_ACTIVITY,
@@ -855,10 +860,15 @@ class MemoryAbuseStore:
         quietly persist something that will evaporate.
         """
         resolved = ack_of or self._resolve_episode(org_id, episode)
-        if not isinstance(resolved, dict):
+        # A plain `isinstance(dict)` check was not enough (review finding P3):
+        # `recent_alerts()`'s DEFAULT return is a dict WITHOUT `_identity`, and
+        # writing it produces an ack that can only match by the exact key — the
+        # evaporating shape. Every field the match needs is required here.
+        if not isinstance(resolved, dict) or not resolved.get("_identity") \
+                or not resolved.get("first_at") or not resolved.get("at"):
             raise ValueError(
-                f"cannot acknowledge {episode!r}: no such episode in {org_id} "
-                "(a key-only acknowledgement would evaporate)")
+                f"cannot acknowledge {episode!r}: no resolvable episode with a "
+                f"window in {org_id} (a key-only acknowledgement would evaporate)")
         return resolved
 
     def _resolve_episode(self, org_id: str, episode: str) -> dict | None:
@@ -1162,10 +1172,15 @@ class SupabaseAbuseStore:
         persist something that will evaporate.
         """
         resolved = ack_of or self._resolve_episode(org_id, episode)
-        if not isinstance(resolved, dict):
+        # A plain `isinstance(dict)` check was not enough (review finding P3):
+        # `recent_alerts()`'s DEFAULT return is a dict WITHOUT `_identity`, and
+        # writing it produces an ack that can only match by the exact key — the
+        # evaporating shape. Every field the match needs is required here.
+        if not isinstance(resolved, dict) or not resolved.get("_identity") \
+                or not resolved.get("first_at") or not resolved.get("at"):
             raise ValueError(
-                f"cannot acknowledge {episode!r}: no such episode in {org_id} "
-                "(a key-only acknowledgement would evaporate)")
+                f"cannot acknowledge {episode!r}: no resolvable episode with a "
+                f"window in {org_id} (a key-only acknowledgement would evaporate)")
         return resolved
 
     def _resolve_episode(self, org_id: str, episode: str) -> dict | None:
@@ -1417,7 +1432,8 @@ def _acks_from_rows(rows, org_id: str) -> list[dict]:
     return out
 
 
-def _episode_acknowledged(episode: dict, acks) -> bool:
+def _episode_acknowledged(episode: dict, acks,
+                          gap_s: float = EPISODE_GAP_S) -> bool:
     """Is this episode covered by one of the org's acknowledgements (#10156)?
 
     NOT ``episode["episode"] in acks``. That was the first implementation and it
@@ -1435,13 +1451,34 @@ def _episode_acknowledged(episode: dict, acks) -> bool:
     its identity, plus an OVERLAP between the window that was acknowledged and
     the window now visible:
 
-    * overlap ⇒ same bout, still acknowledged. A bout that only loses its oldest
-      rows keeps its acknowledgement, and so does one that grows at its newest
-      end (the direction the previous version already handled).
-    * no overlap ⇒ the acknowledged stretch has slid entirely out of view and
-      this is a genuinely later bout, so it is NOT acknowledged and renders as
-      current. That is the property the key was trying to express, and it holds
-      without depending on a moving anchor.
+    * OVERLAP ⇒ same bout, still acknowledged.
+    * NO overlap, but the gap between the acknowledged window's END and this
+      episode's START is at most ``EPISODE_GAP_S`` ⇒ still the same bout: the
+      acknowledged stretch has slid out of view while the bout kept firing. An
+      ack must survive that too — without this arm the durability horizon was
+      "≤ `_ALERT_SCAN` alert rows after the ack", i.e. about a day at this
+      branch's own measured ~440 `flag` rows/day, which is precisely the rollover
+      that made key-only matching broken (review finding P2, reproduced by
+      pushing >500 newer alert rows of another identity while the bout kept
+      firing).
+    * a gap LONGER than ``EPISODE_GAP_S`` ⇒ the acknowledged stretch is behind a
+      silence that would have split the episode anyway, so this is a genuinely
+      later bout: NOT acknowledged, renders as current. Contiguity is the same
+      rule grouping uses to decide what one episode IS, so the acknowledgement and
+      the grouping cannot disagree about where a bout ends.
+
+    ⚠️ THE HORIZON, stated because it is bounded and the bound is not obvious:
+    this is all decided from a 500-row newest-first SCAN. A dense burst rolls that
+    window in about a day at the live org's measured ~440 ``flag`` rows/day, and
+    once the acknowledged stretch AND its continuation have both scrolled out,
+    nothing in the data distinguishes "the same bout, still firing" from "a new
+    bout of the same identity" — the rows that would prove it are outside the
+    window. The choice here is to let the acknowledgement LAPSE: the row returns
+    as CURRENT, visible and dismissable again. The other direction (letting an old
+    acknowledgement cover whatever turns up next) would silently hide a genuinely
+    new bout behind a week-old dismissal, which is the worse failure for a security
+    panel. Both directions are pinned by test, so a future change has to argue with
+    the one it is not making.
     * a legacy ack row with no stored window (nothing has shipped that writes
       one, but a hand-written row could exist) falls back to exact key equality,
       which is the old behaviour rather than silently un-acknowledging it.
@@ -1466,6 +1503,12 @@ def _episode_acknowledged(episode: dict, acks) -> bool:
         if None in (first, last, e_first, e_last):
             continue
         if first <= e_last and e_first <= last:
+            return True
+        # Contiguity: the acknowledged stretch slid out of the scan while the
+        # bout never stopped. Measured the same way grouping measures a bout's
+        # gaps, so an acknowledgement cannot outlive what grouping would call a
+        # different episode.
+        if (e_first - last).total_seconds() <= gap_s:
             return True
     return False
 

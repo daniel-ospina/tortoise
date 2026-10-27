@@ -243,6 +243,27 @@ test('#10156: an ALL-acknowledged register does not print a lead over an empty l
     + 'exists at all')
 })
 
+test('#10156: "everything shown here is acknowledged" needs EVERY visible row acked', () => {
+  // Review finding: the predicate looked only at `recentHidden`, so an
+  // unacknowledged 30-day-old `flag` incident could sit behind "Show older" under
+  // a line claiming everything was acknowledged. Same over-claim class as the
+  // wording fix; here it was the predicate that was too wide.
+  const ackedRecent = { ...suspension, at: at(0.02), acked: true }
+  const oldUnacked = {
+    ...suspension, at: at(30), first_at: at(30), acked: false,
+    episode: 'flag|point_create|2026-09-26T12:00:00Z',
+    type: 'flag', label: 'Flagged', message: 'Organization flagged',
+  }
+  const { container } = renderPanel({ alerts: [ackedRecent, oldUnacked] })
+  assert.equal(rows(container).length, 0, 'nothing current')
+  assert.ok(!text(container).includes(ALL_RECENT_ACKED),
+    'an unacknowledged row is still outstanding — the line must not claim otherwise')
+  assert.ok(text(container).includes(ALERTS_LEAD),
+    'the lead IS warranted: there is a row left to review')
+  fireEvent.click(screen.getByRole('button', { name: /show 2 older/i }))
+  assert.equal(rows(container).length, 2)
+})
+
 test('#10156: a register that gains its FIRST row renders it', () => {
   // Scope, stated honestly (review finding): this proves the BEHAVIOUR — a mounted
   // register that receives its first row renders it rather than staying blank or

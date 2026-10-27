@@ -71,7 +71,16 @@ test('#10156: an unknown or missing register defaults to the QUIET one', () => {
   // and a row we do not recognise cannot support that claim.
   assert.equal(registerOf({ type: 'something_new' }), REGISTER_ACTIVITY)
   assert.equal(registerOf(null), REGISTER_ACTIVITY)
-  assert.equal(registerOf({ register: 'nonsense' }), REGISTER_ACTIVITY)
+  // An EXPLICIT activity stamp is honoured even for an incident-by-definition
+  // type: the server said so, and the client must not overrule it.
+  assert.equal(registerOf({ type: 'suspend', register: 'activity' }),
+    REGISTER_ACTIVITY)
+  // …but a row with NO `register` (an older API deploy — the two deploy
+  // pipelines are independent) is rescued for the types whose incident reading is
+  // certain, so a suspension is never rendered as "nothing was changed".
+  assert.equal(registerOf({ type: 'suspend' }), REGISTER_ALERT)
+  assert.equal(registerOf({ type: 'flag' }), REGISTER_ALERT)
+  assert.equal(registerOf({ type: 'read_velocity' }), REGISTER_ACTIVITY)
   // …and a declared incident still lands in the incident register.
   assert.equal(registerOf({ register: REGISTER_ALERT }), REGISTER_ALERT)
   assert.equal(

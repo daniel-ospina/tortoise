@@ -131,24 +131,32 @@ function Register({ heading, lead, className, group, now, onAcknowledge,
   const [showOlder, setShowOlder] = React.useState(false)
   if (!group || group.total === 0) return null
   const olderHidden = group.older.length > 0 && !showOlder
+  //: An aged row that has NOT been dismissed is still something to review, even
+  //: though it sits behind "Show older" (review finding).
+  const olderUnacked = group.older.some((a) => !a.acked)
   return (
     <section className={`overview ${className}`} aria-label={heading}>
       <h2>{heading}</h2>
-      {/* The lead is a claim about what is BELOW it ("Something happened…",
-          "these are measurements"), so it renders only when there is a row for
-          it to be about. The case that forced this: every recent row
-          acknowledged — the list is empty, and the previous version printed the
-          incident imperative over nothing. The fix must REPLACE that sentence
-          with the collapsed-state line, not append after it (review finding).
-          An aged, un-acknowledged row still gets the lead: it is behind "Show
-          older", but it is still something to review. */}
-      {group.current.length > 0
-        || (group.older.length > 0 && group.recentHidden === 0) ? (
-          <p className="dim small">{lead}</p>
-        ) : null}
-      {group.current.length === 0 && group.recentHidden > 0 ? (
+      {/* Three mutually exclusive states, each claiming only what the data
+          supports (two review findings shaped this):
+
+          * rows to review ⇒ the lead. "To review" means a CURRENT row, or an aged
+            row that is NOT acknowledged — the earlier predicate looked only at
+            `recentHidden`, so an unacknowledged 30-day-old `flag` incident could
+            sit behind "Show older" under a line saying everything was
+            acknowledged.
+          * everything visible is acknowledged ⇒ say so, and no lead.
+          * nothing current, and the only rows are old ⇒ "nothing in the last two
+            weeks", not the lead. */}
+      {group.current.length > 0 || olderUnacked ? (
+        <p className="dim small">{lead}</p>
+      ) : null}
+      {group.current.length === 0 && group.recentHidden > 0 && !olderUnacked ? (
         <p className="dim small">{ALL_RECENT_ACKED}</p>
       ) : null}
+      {/* Coexists with the lead on purpose: the lead describes the register,
+          this describes the CURRENT window ("the last two weeks are quiet, and
+          there is one older row behind the button" is the true reading). */}
       {group.current.length === 0 && olderHidden && group.recentHidden === 0 ? (
         <p className="dim small">{NOTHING_RECENT}</p>
       ) : null}

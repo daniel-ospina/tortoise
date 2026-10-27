@@ -82,8 +82,33 @@ export const NOTHING_RECENT = 'Nothing in the last two weeks.'
 export const ALL_RECENT_ACKED = 'Everything shown here is acknowledged.'
 
 /** Register for one alert row. Unknown → the quiet register (see module note). */
+//: Types that are an incident BY DEFINITION, used as a fallback when a row
+//: arrives with no `register` field at all — i.e. from an API deploy that predates
+//: this change. The dashboard (Cloudflare Pages, `website/**`) and the API (Fly,
+//: `tortoise/**`) ship from two independent workflows on the same merge, so for
+//: the minutes between them the new panel can read the old API, whose
+//: `_alert_dict` emits no `register`. Without this, EVERY row — including a real
+//: `suspend` — fell to the activity register and printed "Nothing was changed,
+//: disabled or locked … these are measurements, not actions taken on your
+//: account" over a suspension (review finding).
+//:
+//: Deliberately not the exact inverse of the server's map: a type absent from
+//: BOTH lands in the quiet register, so a type added later is never
+//: incident-framed by accident. This list only rescues the types where the
+//: incident reading is certain.
+const INCIDENT_BY_DEFINITION = new Set([
+  'suspend',
+  'flag',
+  'review_needed',
+  'auth_ip',
+])
+
 export function registerOf(alert) {
-  return alert && alert.register === REGISTER_ALERT
+  if (!alert) return REGISTER_ACTIVITY
+  if (alert.register === REGISTER_ALERT) return REGISTER_ALERT
+  if (alert.register === REGISTER_ACTIVITY) return REGISTER_ACTIVITY
+  // No `register` at all (an older API): fall back to what the type means.
+  return INCIDENT_BY_DEFINITION.has(alert.type)
     ? REGISTER_ALERT
     : REGISTER_ACTIVITY
 }

@@ -396,6 +396,20 @@ class TestAcknowledgementPersistence:
         assert [a["episode"] for a in store.alert_acks(ORG)] == [episode]
         assert store.recent_alerts(ORG)[0]["acked"] is True
 
+    def test_acknowledging_a_WINDOWLESS_episode_raises(self):
+        """The guard must refuse the shape that actually evaporates, not just
+        `None` (review finding P3): `recent_alerts()`'s DEFAULT return is a dict
+        WITHOUT `_identity`, and writing it produces an ack that can only match by
+        the exact key — i.e. one that dies on the next slide. The route happens to
+        pass `include_identity=True`, so this is the store's own contract."""
+        store = SupabaseAbuseStore(FakeControlPlane())
+        store.record_event(ORG, EVENT_READ_VELOCITY,
+                           details={"scope": "key", "id": KEY})
+        windowless = store.recent_alerts(ORG)[0]
+        assert "_identity" not in windowless
+        with pytest.raises(ValueError, match="would evaporate"):
+            store.record_alert_ack(ORG, windowless["episode"], ack_of=windowless)
+
     def test_acknowledging_an_EPISODE_THAT_IS_NOT_THERE_raises(self):
         """A key-only ack is the shape that cannot survive the scan sliding, so
         the store refuses to write one (review nit): the route 404s first, and
@@ -477,6 +491,93 @@ class TestAcknowledgementPersistence:
         assert slid["acked"] is True, (
             "the acknowledgement evaporated when the scan slid past the "
             "episode's start — the row is current again and undismissable")
+
+    def test_an_ack_survives_the_WHOLE_acked_window_sliding_out(self):
+        """P2 (round-5 review), the CONTIGUITY arm.
+
+        The previous fix survived a batch of newer rows SMALLER than the scan.
+        Push more than `_ALERT_SCAN` newer alert rows and the visible episode's
+        `first_at` moves past the acked window's END, so overlap alone fails and
+        the still-firing bout came back un-acknowledged.
+
+        Contiguity is the fix: a gap of at most ``EPISODE_GAP_S`` between the
+        acknowledged stretch and the visible one means the same bout — the same
+        rule grouping uses to decide what one episode IS, so the acknowledgement
+        and the grouping cannot disagree about where a bout ends. The fixture
+        keeps the rollover inside that gap by making the newer rows DENSE (600
+        rows over ~100 minutes: a burst, which is when the scan rolls fastest).
+        """
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
+        for i in range(300):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=base + timedelta(minutes=5 * i))
+        store.record_alert_ack(ORG, store.recent_alerts(ORG)[0]["episode"],
+                               by="u1")
+        acked = store.alert_acks(ORG)[0]
+
+        # 600 newer alert rows of ANOTHER identity, in ~100 minutes, while the
+        # acknowledged bout keeps firing in the same gap chain.
+        for i in range(600):
+            at = base + timedelta(minutes=5 * 300, seconds=10 * i)
+            store.record_event(ORG, EVENT_FLAG, rule="disjoint_rate",
+                               details={"rule": "disjoint_rate"}, created_at=at)
+            if i % 6 == 0:
+                store.record_event(ORG, EVENT_READ_VELOCITY,
+                                   details={"scope": "key", "id": KEY},
+                                   created_at=at + timedelta(seconds=1))
+        visible = [a for a in store.recent_alerts(ORG, limit=abuse._ALERT_SCAN)
+                   if a["type"] == EVENT_READ_VELOCITY]
+        assert visible, "the bout fell out of the feed entirely"
+        episode = visible[0]
+        assert episode["first_at"] > acked["at"].isoformat(), (
+            "fixture error: the visible episode must START AFTER the acked "
+            "window ends, or overlap alone would carry the ack and this test "
+            "would not exercise the contiguity arm")
+        assert episode["acked"] is True, (
+            "the acknowledgement died although the bout never stopped and its "
+            "continuation is inside EPISODE_GAP_S of the acked window")
+
+    def test_an_ack_LAPSES_when_the_continuation_is_beyond_the_gap(self):
+        """The deliberate OTHER direction, stated rather than discovered.
+
+        Once the acknowledged stretch AND its continuation have scrolled out of
+        the 500-row scan, the data held cannot distinguish "the same bout, still
+        firing" from "a new bout of the same identity" — the rows that would prove
+        it are outside the window. The choice made here is to let the
+        acknowledgement LAPSE: the row returns as CURRENT, visible and dismissable
+        again. The alternative (letting the old acknowledgement cover whatever
+        turns up next) would silently hide a genuinely new bout behind a dismissal
+        from last week, which is the worse failure for a security panel.
+
+        Both directions are pinned so a later change has to argue with the other.
+        """
+        store = MemoryAbuseStore()
+        base = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
+        for i in range(300):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=base + timedelta(minutes=5 * i))
+        store.record_alert_ack(ORG, store.recent_alerts(ORG)[0]["episode"],
+                               by="u1")
+        # 700 newer rows for another identity spread over ~2.5 days, with the
+        # acknowledged bout resuming far beyond EPISODE_GAP_S of its own window.
+        for i in range(700):
+            at = base + timedelta(minutes=5 * (i + 300))
+            store.record_event(ORG, EVENT_FLAG, rule="disjoint_rate",
+                               details={"rule": "disjoint_rate"}, created_at=at)
+            if i >= 690:
+                store.record_event(ORG, EVENT_READ_VELOCITY,
+                                   details={"scope": "key", "id": KEY},
+                                   created_at=at + timedelta(seconds=1))
+        visible = [a for a in store.recent_alerts(ORG, limit=abuse._ALERT_SCAN)
+                   if a["type"] == EVENT_READ_VELOCITY]
+        assert visible
+        assert visible[0]["acked"] is False, (
+            "a dismissal from beyond the window must not silence activity whose "
+            "continuity nothing in the scan can prove")
+        assert visible[0]["at"], "the row is still returned — it is not hidden"
 
     def test_a_LATER_bout_of_the_same_identity_is_not_acknowledged(self):
         """The other half of overlap matching: the acknowledgement must not leak

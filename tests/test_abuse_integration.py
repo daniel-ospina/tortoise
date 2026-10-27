@@ -834,8 +834,11 @@ class TestAlertRegistersAndAcks:
                 assert tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
                     "alerts"][-1]["acked"] is True
 
-                # Now the scan slides past the bout's start: 500 newer alerts of
-                # a DIFFERENT key. Same bout, moved anchor, still acknowledged.
+                # Now the scan slides past the bout's start: 300 newer alerts of a
+                # DIFFERENT key — 300, not `_ALERT_SCAN`, so enough of the bout
+                # stays visible to exercise the SLIDE (a full scan's worth would
+                # push it out of the feed entirely). Same bout, moved anchor,
+                # still acknowledged.
                 # 300, not `_ALERT_SCAN`: enough to push the bout's first 200
                 # rows out of the scan while leaving 200 of it visible. Seeding a
                 # full scan's worth of newer rows would empty the window and the
