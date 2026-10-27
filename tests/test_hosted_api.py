@@ -13141,6 +13141,12 @@ class TestOverLimitSurfacesOfferTheHumanPath:
     NO_CONTACT_NEEDED = (
         "Quota check failed", "unknown quota resource", "team limits missing",
         "quota count failed", "team limits max_points invalid",
+        # #4051: a limit that cannot be READ from the org's own source is the
+        # SAME fail-closed SERVER-fault category as "team limits missing" /
+        # "quota count failed" above — corrupt state on our side, not a
+        # customer ceiling. Offering the upgrade path here would promise a
+        # plan that cannot lift a data fault.
+        "unreadable for resource",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
