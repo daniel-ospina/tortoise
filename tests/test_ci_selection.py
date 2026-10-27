@@ -708,6 +708,51 @@ def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
         )
 
 
+def test_the_4282_durability_suite_is_selected_on_the_modules_it_guards():
+    """#10053 review P2: a durability invariant must run on the modules it pins.
+
+    `tests/test_4282_dated_retraction_durability.py` was registered on `sdk`
+    ONLY, and it pins three replay/reference arms that live in modules NO
+    `SOURCE_PATTERNS` row claims — `tortoise/consistency.py`'s reference fold,
+    `tortoise/record_projection.py`'s carrier, and
+    `tortoise/projection/entities.py`'s `_retract`. None of the three is in
+    `CORE_ALSO` either, so each falls through to the plain `tortoise/` arm and
+    selects `core` ALONE; a file registered only on `sdk` is then in neither
+    `tier1` nor `surface_members(matched)`. Measured before the `core` row:
+    all three answered `surfaces=['core']` with the suite ABSENT from
+    `test_files`, while `test_5048_retract_instant_recorded.py` — the sibling
+    invariant, registered `core` — was present on the same diffs.
+
+    That is the #1349/#2938 silent-drop class in its harmful direction: a
+    follow-up that reverts one arm of the invariant (e.g. dropping
+    `_storable_bound`'s END_UNKNOWN half) would run `core` and never the suite
+    that pins it.
+
+    Asserted on the FILE, not on non-emptiness: all three diffs select `core`
+    with or without this row, so a `surfaces` check alone can only pass. The
+    SIBLING assertion is the control — it proves the `core` block itself still
+    works, so a red here is this row and not a moved manifest.
+    """
+    guard = "test_4282_dated_retraction_durability.py"
+    sibling = "test_5048_retract_instant_recorded.py"
+    for changed in (
+            "tortoise/consistency.py",
+            "tortoise/record_projection.py",
+            "tortoise/projection/entities.py"):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["core"], (
+            f"{changed} selects {r['surfaces']}, not ['core'] — the premise of "
+            "this pin changed; re-derive it")
+        assert sibling in r["test_files"], (
+            f"{changed} does not select {sibling} — the `core` block itself "
+            "moved; re-derive this pin")
+        assert guard in r["test_files"], (
+            f"{changed} does not select {guard} — the durability suite sleeps "
+            "on the one diff that can break the invariant it pins "
+            f"(selected: {r['test_files']})")
+
+
 def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
     """#9524 review I1/I3: a dependency-manifest diff must run the override guard.
 
@@ -2659,6 +2704,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # Measured on the pre-fix head: `_sel([<this path>])` -> surfaces=[],
         # full=False, so editing the very file the pin parses ran no guard.
         "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
+        # #10017 R2: the FORWARD migration that re-declares
+        # `chk_point_props_no_derived` to refuse `cache_tier` — and the one file
+        # that can silently SHRINK `point`'s refusal set, because the SQL CHECK
+        # REPLACES while `refused_props_names()` UNIONS (so the parser keeps
+        # reporting every name refused after the database stopped refusing it).
+        "supabase/migrations/20261029000001_record_point_cache_tier.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
         # docs-only edit must select `core` too. Measured on the pre-fix head:

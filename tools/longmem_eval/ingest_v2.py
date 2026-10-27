@@ -55,21 +55,30 @@ from tortoise.sdk import TortoiseSDK
 
 logger = logging.getLogger(__name__)
 
-from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # noqa: E402, I001
-                       mark_for)
-from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
+from . import spend_guard  # noqa: E402
 from .errors import (  # noqa: E402
     INGEST_WRITE_RETRIES,
     call_with_predicate,
     retryable_transient,
 )
+from .evidence import (  # noqa: E402
+    EVIDENCE_QUOTE_CAP,
+    _overlap,  # noqa: F401 — back-compat re-export
+    anchor_quote,
+    evidence_sessions,
+    mark_for,
+)
+from .ingest import (  # noqa: E402
+    EXTRACTION_POINT_KIND,
+    SESSION_TRANSCRIPT_KIND,
+    UNDATED_SENTINEL,
+    _existing_point_ids,
+    _session_chunks,
+)
 from .stall_guard import (  # noqa: E402
     Heartbeat,
     resolve_stall_timeout_s,
 )
-from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
-                     UNDATED_SENTINEL,
-                     _existing_point_ids, _session_chunks)
 
 # #2873: how many DISTINCT extractor warnings the per-question stats keep as a
 # sample. The count stays exact; only the sample is bounded, so a session that
@@ -1012,6 +1021,12 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             _attach_ingest_usage(worker_model, qid)
         else:
             worker_model = model
+        # #8486 F1: the extractor is the v2 run's largest paid lane — the
+        # ceiling is checked BEFORE each session's extraction call. Deliberately
+        # OUTSIDE the try below: that handler converts a non-transient failure
+        # into a per-question `{"exc": ex}` result, and a hard stop must abort
+        # the RUN, not invalidate one question and keep spending.
+        spend_guard.check(f"ingest session s{ctx['si']} (qid {qid})")
         try:
             return {"si": ctx["si"],
                     "out": extract_session_v2(

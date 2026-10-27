@@ -20,9 +20,9 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 147
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 150
 methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and an
-alongside that, an **earlier target sketch** (32 groups over 146 names).
+alongside that, an **earlier target sketch** (32 groups over 149 names).
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
 > Where the two disagree, that doc governs. They really do disagree: this sketch says
@@ -42,12 +42,15 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **147** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **147** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **150** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **150** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
-unscoped tenant list `org_list` was deleted), and the arithmetic is
+unscoped tenant list `org_list` was deleted), then 147 → **150** in phase 2.2 (#10053,
+the four surface merges: `link_entities`, `update_knowledge` and `delete_knowledge` were
+approved rows of `tortoise/__all__.py` that had no `def` yet — implementing an approved
+name is not a surface addition, and the declaration stays at 40). The arithmetic is
 the migration's own shape rather than drift: four legacy names retired
 (`graph_list`, `graph_restore`, `graph_set_name`, `graph_set_recording`) for three
 canonical targets (`list_memory_graphs`, `restore_memory_graph`, `update_memory_graph`),
@@ -135,10 +138,10 @@ Three rules, each of which caught a real error in this document.
 | W6 | `capture_session_local` | — | `capture_session` | keep — **SDK-only name.** Writes the session into your own graph |
 | W7 | `capture_session_hosted` | — | `commit_session` | keep — **SDK-only name.** Extracts locally, validates, then POSTs to `/v1/sessions/commit`; needs a hosted endpoint and an API key |
 | W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
-| W9 | `link_entities` | #15 | `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
+| W9 | `link_entities` | #15 | `link_entities`, `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
 | W10 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
-| W11 | `revise_knowledge` | #17 | `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
-| W12 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
+| W11 | `revise_knowledge` | #17 | `update_knowledge`, `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
+| W12 | `delete_knowledge` | #18 | `delete_knowledge`, `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
 | W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
 | W14 | `approve_merge` | #20 | `approve_merge` | keep |
 | W15 | `adjust_relationship` | #21 | `operator_action`, `mitigate_operator`, `annotate_operator` | keep, collapse |
@@ -336,10 +339,10 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 7. **Every retirement observed involved a warning or a parallel surface — never a silent rename.**
 8. **A raw escape hatch exists in the majority — 9/14**.
 
-**Where this lands for us.** 147 public methods on one flat class is ~5.4× the largest flat
+**Where this lands for us.** 150 public methods on one flat class is ~5.6× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The sketch above does exactly that: **32 groups over 146
+**collapse the aliases**. The sketch above does exactly that: **32 groups over 149
 names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging; the retired primitives stop resolving — a call raises with the
 hint naming its replacement (#3836 (c)) — and `backfill_v25` is archived. The

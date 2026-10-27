@@ -2777,10 +2777,11 @@ def rrf_fusion(
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
-    # #7704 (MEASURED; the ruling is OPEN — this is a description, not a
-    # contract): the rank consumed above is POSITIONAL, so a leg's own tie
-    # order becomes a fusion RELEVANCE difference between documents whose
-    # evidence is identical. Two rows tied on every leg —
+    # #7704 (MEASURED MECHANISM — a description, not a contract; read THE
+    # RULING at the end of this note before changing anything above): the rank
+    # consumed above is POSITIONAL, so a leg's own tie order becomes a fusion
+    # RELEVANCE difference between documents whose evidence is identical. Two
+    # rows tied on every leg —
     #
     #     rrf_fusion([[("b", 1.0), ("a", 1.0)], [("b", 1.0), ("a", 1.0)]],
     #                strategy_names=["fts", "vector"], weights={"vector": 1.5})
@@ -2812,18 +2813,34 @@ def rrf_fusion(
     # re-derive it here, and do not read a single page's outcome as the
     # mechanism's promise.
     #
-    # Whether fusion MAY spread identical evidence by an id — and which remedy is
-    # permitted — is an OPEN owner ruling on #7704. The recorded option set is
-    # the rationale on ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py``: read it
-    # there, not as a re-list here, because two of its members decide OTHER
-    # questions and are NOT #7704 choices — replacing rank-based fusion with
-    # score-based fusion is the OPEN OWNER RULING on #4210, and tie-breaking on
-    # the contested signal reverses #3019's id tie-break, which ``temporal_leg``
-    # consumes positionally (#2976). The equal-evidence invariant itself is
-    # pinned by ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until
-    # that ruling lands — it reds when a remedy lands so the marker comes off
-    # deliberately); the measured magnitudes live on #7704. Do not read this
-    # comment as a decision either way.
+    # ⛔ THE RULING (owner, 2026-10-25 — comment 6402104535 on #7704): the twin
+    # case is a DUPLICATION defect, not a ranking one, and "Options A / B / C / D
+    # are CLOSED as answers to this issue — none is authorised here … tie-averaged
+    # ranks are not required once duplicate entries do not exist", with the armed
+    # pin "must not be used to justify tie-averaging (option D)". So do NOT
+    # implement tie-averaged ranks (RANK.AVG) on the strength of this note: that
+    # IS option D, and it silently re-weights a production leg that carries no
+    # score signal — ``structural`` scores every row a CONSTANT (1.0 / 0.5, above),
+    # so on any hybrid text query its whole list becomes one tie group. The
+    # fusion FORM is #4210's own open ruling; the measured defect closes with
+    # dedup identity + provenance accumulation (#9998, #9437, #9879), not here.
+    #
+    # If you conclude tie-averaging is the right answer, the route is a REOPEN in
+    # #7704's own home — evidence in front of the owner, argued — never a quiet
+    # adoption. The recorded option set is the rationale on
+    # ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py``: read it there, not as a
+    # re-list here, because two of its members decide OTHER questions and are NOT
+    # #7704 choices — replacing rank-based fusion with score-based fusion is
+    # #4210's ruling, and tie-breaking on the contested signal reverses #3019's id
+    # tie-break, which ``temporal_leg`` consumes positionally (#2976).
+    #
+    # The equal-evidence invariant itself is pinned by
+    # ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)``, ARMED: a
+    # FUSION-side remedy XPASSes and reds the suite — option D first, which is
+    # the point. Dedup never reaches that pin, which calls ``rrf_fusion``
+    # directly on two DISTINCT ids with equal scores, so the marker comes off
+    # deliberately: in the change that lands dedup, where the pin is replaced by
+    # one asserting the intended state); the measured magnitudes live on #7704.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.

@@ -2537,6 +2537,30 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section gives no way to make the capture's own `no_tenant` "
         "impossible — a graph-bound credential is the discriminator"
     )
+    # ⛔ `graph-bound` alone is NOT the discriminator, and the assertion above is
+    # satisfied by the FALSE claim. The control plane is. A graph-bound SELF-HOST
+    # registry credential carries a Falkor `g_<hex>` node id, `record_tenant_for`
+    # returns None for it by design (`control_plane_ids` is False for the
+    # self-host resolver — record_writer.py:648-649), and no `public.graphs` row
+    # exists to file it under — so "a graph-bound credential
+    # cannot land in `no_tenant`" is false, and the paragraph above it lists that
+    # very lane as a designed `no_tenant` producer. Measured (#10071 review P2):
+    # restoring that absolute wording — and separately deleting the counter-example
+    # — left the suite at `99 passed`. The qualifier and the lane that proves it
+    # are the claim, so pin both.
+    assert re.search(
+        r"graph-bound \*\*control-plane\*\* credential cannot land in\s+`no_tenant`\s+"
+        r"\(the self-host registry lane above is a graph-bound key that\s+resolves "
+        r"through no control plane",
+        section,
+    ), (
+        "the `no_tenant` bound is stated as an absolute again — a graph-bound "
+        "self-host registry credential is REFUSED and counted `no_tenant` by design "
+        "(`record_tenant_for` returns None for it, and it can never satisfy the "
+        "`public.graphs` FK), so the section tells an operator to read a designed "
+        "outcome as a fault; the counter-example that makes the qualifier "
+        "checkable is missing or unravelled"
+    )
     assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
         "the bounded arm names no counting site, so a reader cannot check the "
         "claim that `no_tenant` is designed on those lanes"
@@ -2557,7 +2581,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # carry what), so pin the evidence too — otherwise the parenthetical can be
     # deleted and the claim stands on an assertion that no longer measures it
     # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
-    # record_writer.py:1184; `malformed_dsn` and `write_failed` log the exception).
+    # record_writer.py:1218; `malformed_dsn` and `write_failed` log the exception.
+    # NOT :1184 — that is the `no_durable_journal` DEBUG skip, a different site
+    # that would have made this comment claim the opposite of what it means).
     assert re.search(r"`circuit_open` is the\s+only one that carries the record type", section), (
         "the section gives no evidence for why the log cannot attribute growth — "
         "only `circuit_open` carries the record type, so a reader cannot check "

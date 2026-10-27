@@ -3470,7 +3470,27 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
     assert live["mcp"] == manifest["counts"]["tools"] == 81
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 147
+    # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
+    # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
+    # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
+    # rationale beside it.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 150
+
+
+def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():
+    """That sentence's typed count has drifted once per rename: 150 → 149 → 147 → 150.
+
+    #10053 review (P3): at that head it read 147 while the class and the manifest both
+    said 150, so the doc that tells a reader where the canonical SDK list lives named a
+    surface that no longer existed. The number is a DERIVATION here — the same
+    `live_surface()` instrument `sdk_surface.py --check` uses — so the sentence cannot
+    go stale again without a red.
+    """
+    text = (ROOT / "docs" / "product" / "canonical-mcp-tools.md").read_text(encoding="utf-8")
+    typed = re.findall(r"declares \*\*(\d+)\*\* public\s+methods", text)
+    assert len(typed) == 1, f"expected the one sequencing-step count, found {typed}"
+    live = _load_target_check().live_surface()
+    assert int(typed[0]) == live["sdk"] == _manifest()["counts"]["sdk_public_methods"]
 
 
 def test_the_compliance_check_is_RED_on_todays_gap(capsys):
