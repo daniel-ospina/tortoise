@@ -18547,14 +18547,91 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
+def _record_unavailable() -> HTTPException:
+    """#8447: fail-CLOSED 503 when the RECORD did not answer and nothing could be
+    served in its place.
+
+    On an armed **journaling** deployment the turns are RECORD rows (the
+    per-turn `PointAdded` records, #10000/#10011) and the graph keeps only the
+    Session's counters — so when the record read FAILS, the fail-soft fallback
+    below answers zero turn nodes, which is byte-identical to a session that has
+    no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
+    forbids — a refusal rendered as a legitimate empty answer, with the only
+    signal in a WARNING the caller never reads.
+
+    ⚠️ "JOURNALING" is load-bearing, and `_record_holds_turns` does NOT test it:
+    that predicate asks only whether the DSN is set (``return _dsn() is not
+    None``), while the WRITE side asks the same capability question with both
+    conjuncts — ``sdk._get_event_log() is not None and _record_dsn() is not
+    None`` (`tortoise/sdk.py:2652`), because a per-turn `PointAdded` record is
+    gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
+    write door declines `no_durable_journal` and the GRAPH keeps the turns, so
+    "the graph keeps only the counters" is a property of armed+journaling, not
+    of arming alone. This refusal's own behaviour is unaffected there: the guard
+    at the bottom of the read measures the fallback against the Session's own
+    ``turn_count``, and on that config the graph holds all of them, so a
+    complete copy is still served 200.
+
+    The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
+    repealed: a graph copy that is COMPLETE against the Session's own
+    ``turn_count`` is still served byte-identically, because it protects a
+    transcript that is really there. A copy that is only a stale PREFIX of that
+    transcript — or a stale SUPERSET of it — is NOT protected; serving it would be
+    the same silent truncation in a less obvious shape. `sess[2]` is the count this
+    endpoint already publishes, and it is what makes the copy checkable at all.
+    This body is for the cases that arm cannot cover: the Session carries no
+    ``turn_count`` to check the copy against, or the copy disagrees with the count
+    it would report alongside.
+
+    Same envelope as :func:`_graph_unavailable` on this route (``503`` +
+    ``error_code``) rather than a new one, because on this route that body is
+    already the shape for "the data plane could not answer": it is body-only
+    today — **no client maps it yet** (that function's own docstring says so),
+    and the agents/SDKs that consume this lane treat any 5xx as retryable. The
+    ENVELOPE is borrowed from there; its TRANSIENCE argument is NOT.
+
+    ⛔ The two doors fail in different units. ``_graph_unavailable``'s unit is an
+    offloaded SDK construction that may never have run ("a submission that never
+    ran did NO work"); the unit here is a synchronous record connect plus SQL
+    read on a worker thread, which DID run and did fail. What makes a retry safe
+    here is only that this is a ``GET`` — a SAFE method (RFC 9110 §9.2.1) — so a
+    retry can never re-apply work, whatever the cause was.
+
+    ⚠️ And the cause is NOT always transient. The ``except Exception`` above
+    cannot tell an outage from a PERMANENT record failure — an RLS denial, a
+    missing migration, a query defect — so those surface to the caller as this
+    same retryable body. That is a known limit of the arm, stated rather than
+    papered over; the distinction IS recoverable from the log, where the
+    fail-soft arm records the exception class and its traceback
+    (``exc_info=True``).
+
+    ⚠️ Deliberately NOT a response field. A new key on the session-detail
+    projection (`SESSION_DETAIL_FIELDS`) would widen a public wire surface, which
+    is an owner approval and not a lane decision; an explicit error is the
+    narrowest visible shape available (#8447: "an explicit error, or a reply
+    field that says so").
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": "The record could not answer for this session, and no "
+                       "complete copy could be served in its place — retry; if "
+                       "it persists the record needs an operator.",
+        },
+    )
+
+
 def _record_holds_turns() -> bool:
     """#10000: does the RECORD hold captured turns (rather than the graph)?
 
-    The same capability question the capture writer asks, asked from the read
-    side: turns reach the record only through the per-turn `PointAdded` records,
-    which require a configured journal, and the record must be ARMED
-    (`TORTOISE_RECORD_DSN`). When either is absent the graph is what holds them
-    and every read stays exactly as it was before #10000.
+    ⛔ IT DOES NOT ASK THE QUESTION THE CAPTURE WRITER ASKS, and the difference is
+    live. Turns reach the record only through the per-turn `PointAdded` records,
+    which need a configured journal AND the DSN — `sdk.py:2652`'s two conjuncts —
+    while this predicate tests the DSN ONLY. So on an armed-but-NOT-journaling
+    deployment the writer puts the turns in the GRAPH while this read still asks
+    the record, and the record's empty answer then stands for turns the graph
+    holds. The previous text claimed both sides asked one question; they do not.
     """
     from tortoise.record_writer import record_dsn as _dsn
 
@@ -18669,6 +18746,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # makes the pre-arming deployment byte-identical.
     turns = []
     _record_turns = None
+    _record_read_failed = False
     if _record_holds_turns():
         try:
             def _read_record_turns():
@@ -18685,9 +18763,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # transcript the cache still holds. This fallback is the transitional
             # half of #10000 and disappears with the graph-side purge step.
             _record_turns = None
+            _record_read_failed = True
             _logger.warning(
-                "session %s turns read from the record failed — serving the graph "
-                "copy for this request", session_id, exc_info=True)
+                "session %s turns read from the record failed — falling back to "
+                "the graph copy for this request", session_id, exc_info=True)
     if _record_turns is not None:
         for _t in _record_turns:
             turns.append({
@@ -18723,6 +18802,70 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 "content": body,
                 "created_at": created_at,
             })
+
+    # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. On an
+    # armed JOURNALING deployment the record was the store holding these turns and
+    # it did not answer, so the graph fallback may stand in for it only when it
+    # AGREES with the Session's own `turn_count` (`sess[2]`, written on every
+    # capture — `sdk.py`'s `merge_sets`), which is the count this endpoint
+    # publishes as `turns` below.
+    #
+    # `!=`, not `<`: the stale-turn sweep is gated on the write predicate
+    # (`sdk.py:2696`), so a re-capture after arming leaves the OLDER node set in
+    # place, and that superset is as much "not this transcript" as a prefix is.
+    #
+    # `turn_count` is NOT collapsed to 0 when absent (`or 0`): KNOWN ZERO (a
+    # capture that stored no turns) makes an empty copy the COMPLETE answer, while
+    # ABSENT — no capture ever wrote a count: the commit path's `MERGE (s:Session)`
+    # at `hosted_api.py:16928`, the held path at `:18036` — cannot be told from a
+    # legacy capture whose count went missing.
+    #
+    # ⛔ AN ABSENT COUNT IS REFUSED WHATEVER THE COPY'S SIZE, not only when the
+    # copy is empty. The bound is what makes a copy verifiable: absent means no
+    # `turn_count` was ever written, so NEITHER a prefix NOR a superset can be
+    # ruled out — and a non-empty copy served on that evidence is exactly the
+    # `#8447` shape ("never a silently truncated result indistinguishable from a
+    # complete one"), which the `!=` arm above closes only where a count exists.
+    # Serving the non-empty sub-case was the hole: it made "absent is
+    # fail-closed" true only for the empty copy, and no test read it.
+    #
+    # ⚠️ NAMED LIMITS. Equality here proves only that the COUNTS agree — the same
+    # arithmetic `tools/backfill_graph_turns.py:522-528` refuses to attribute a
+    # CAUSE to ("a MEASUREMENT … a correct state that looks identical to a loss"),
+    # so this guard reads a disagreement as "not proven complete", never as "the
+    # copy is stale":
+    #   * a same-length pre-arming copy is served and is indistinguishable from a
+    #     post-arming re-capture on this route — count agreement is necessary,
+    #     not sufficient;
+    #   * the guard runs only when the record read FAILS. A record read that
+    #     SUCCEEDS with a short or empty answer is served as the LIST while `turns`
+    #     still reports `sess[2]` — the same self-contradicting body — and this
+    #     route cannot see it. That half belongs to #10021 (recorded there with
+    #     code evidence); doing it here would be a second store-decision rewrite
+    #     against that open branch;
+    #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so this `!=` assumes
+    #     the offset-0 single-capture shape that is the only one wired today. A
+    #     non-zero `turn_offset` append leaves `offset + turn_count` nodes and
+    #     would make a COMPLETE copy refuse — revisit this line when an append
+    #     caller is wired (`tools/backfill_graph_turns.py:503-520` already treats
+    #     that shape as correct);
+    #   * over-block: `_record_holds_turns` tests only the DSN, so a record outage
+    #     on a session with no turns — including any session created without a
+    #     capture — turns a truthful `200 {"turn_points": []}` into a 503. It needs
+    #     the read to fail, and the message is worded not to claim the record held
+    #     the transcript. #10021's shared predicate closes it. The ABSENT-count
+    #     refusal widens this deliberately: a legacy session whose `turn_count`
+    #     went missing but whose graph still holds its turns is also refused on a
+    #     record outage, though the graph copy may in fact be complete. That is
+    #     the fail-closed direction on evidence that cannot distinguish it from a
+    #     partial copy (`tools/backfill_graph_turns.py:522-528` calls the same
+    #     comparison a MEASUREMENT, never a cause).
+    _expected_turns = sess[2]
+    if _record_read_failed:
+        if _expected_turns is None:
+            raise _record_unavailable()
+        if len(turns) != _expected_turns:
+            raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
