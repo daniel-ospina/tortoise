@@ -467,6 +467,45 @@ def test_a_dispatch_whose_flip_fails_is_refused(tmp_path: Path) -> None:
     assert "did NOT flip" in proc.stdout, proc.stdout
 
 
+def test_a_watch_that_exhausts_its_bound_reports_unknown(tmp_path: Path) -> None:
+    """Exhausting the wait is NOT evidence the flip failed (#10155).
+
+    The wait is runner-QUEUE-dominated and queue latency is not ours to bound —
+    measured on a SUCCESSFUL deploy-hosted run (40458809781): 167.3 min wall
+    clock against 16.8 min of job execution. So the step has TWO non-zero arms,
+    and only one of them may claim a failure:
+
+      * `timeout` expired (124) → the run may still be queued or mid-deploy.
+        Saying "did NOT flip" here is a false claim, and its remediation
+        (re-dispatch / flip by hand) is now actively wrong: both queue behind
+        the run being given up on and supersede its pending slot.
+      * any other non-zero → a terminal run that did not succeed.
+
+    This test exists because deleting the 124 arm — the whole distinction — kept
+    every other test green: the sibling above asserts only a non-zero exit.
+    """
+    proc = _run_step(
+        _DISPATCH_STEP, tmp_path,
+        gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=124,
+    )
+    assert proc.returncode != 0, (
+        "an exhausted watch exited 0 — that claims a closed window the RUN has "
+        f"not closed (#3627)\n{proc.stdout}"
+    )
+    assert "UNKNOWN" in proc.stdout, (
+        "an exhausted wait did not say the outcome is UNKNOWN — the operator is "
+        f"left to infer a failure that was never observed\n{proc.stdout}"
+    )
+    assert "did not reach success" not in proc.stdout, (
+        "an exhausted wait claimed the run 'did not reach success' — it never "
+        f"reached a terminal state, so nothing about the flip is known\n{proc.stdout}"
+    )
+    assert "Do NOT re-dispatch" in proc.stdout, (
+        "the exhaustion message must forbid the remediations that are wrong for "
+        f"a merely-queued run\n{proc.stdout}"
+    )
+
+
 def test_the_flip_is_awaited_and_the_request_asks_for_the_run_id(
     tmp_path: Path,
 ) -> None:

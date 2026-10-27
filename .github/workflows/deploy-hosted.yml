@@ -203,14 +203,18 @@ on:
 # a queued-then-cancelled run costs the pool nothing and must not be counted as
 # if it did): **19 of the last 30 runs were cancelled** — 16 `push`, 3 operator
 # `workflow_dispatch` — and those 19 spent **225.1 of the 295.5 completed
-# runner-minutes** (the 6 successful runs spent 31.0). A cancelled deploy is the
+# runner-minutes** (6 successful runs 31.0; 4 failures 39.4; the 30th run was in
+# flight at 9.9 min when the sample was taken, and is in neither count). A
+# cancelled deploy is the
 # worst shape available to the pool: it spends the minutes AND publishes
 # nothing, so under a merge flood no deploy ever completes. That is the recorded
 # cause of the stale-production class — #10109: "4 cancelled by its own
 # `cancel-in-progress: true` as later merges landed", production 7 commits behind
-# for 9 hours — and it is the same reading again on #10152. `supabase-deploy.yml`'s own co-move message names this file's
-# flag as the hazard: "A concurrent push to main cancels an in-flight flip
-# (deploy-hosted.yml 'concurrency.cancel-in-progress')".
+# for 9 hours — and it is the same reading again on #10152. `supabase-deploy.yml`'s
+# own co-move message named this file's flag as the hazard, in the words this
+# change retired: "A concurrent push to main cancels an in-flight flip
+# (deploy-hosted.yml 'concurrency.cancel-in-progress')" — that text now reads
+# "supersedes it while it is still PENDING", which is what remains true.
 #
 # What `false` does and does NOT buy — be precise, because the difference IS the
 # bound: it stops cancelling a RUNNING deploy. A shared group still supersedes a
@@ -232,7 +236,7 @@ on:
 # jobs), measured on completed runs 2026-10-27: `packaging-smoke` max 28.2 min
 # (n=27) → 55; `post-deploy-verify` max 0.4 min (n=6) → 15 (the floor).
 # `deploy-api` is the exception, for arithmetic rather than padding: its own
-# retry loop is 5 `timeout`-bounded attempts (11 min each, + 4 × 45 s) ≈ 58 min —
+# retry loop is 5 `timeout`-bounded attempts (11 min each, + 4 × 45 s) = 58.0 min —
 # the per-attempt bound is what makes that a number, because `--wait-timeout 420`
 # bounds only the release wait and not `flyctl deploy`'s remote build — so a 2×
 # cap over its measured maximum would red the fail-safe retry path it exists to
@@ -380,7 +384,7 @@ jobs:
     needs: packaging-smoke
     # Bounded ABOVE this job's own arithmetic, not at a multiple of its 3.5 min
     # measured maximum: the retry loop is now 5 × 11-minute attempts + 4 × 45 s
-    # ≈ 58 min (each attempt is `timeout`-bounded — `--wait-timeout 420` bounds
+    # = 58.0 min (each attempt is `timeout`-bounded — `--wait-timeout 420` bounds
     # only the release wait, not the remote build), so 60 leaves the fail-safe
     # path room without ever being the thing that fails it. The ≤6.4 min DB
     # health gate is NOT in this job (it moved to `post-deploy-verify` in
@@ -1005,20 +1009,29 @@ jobs:
         run: |
           # ⛔ Each ATTEMPT is bounded, because `--wait-timeout 420` bounds only
           # the RELEASE wait — NOT `flyctl deploy`'s remote build — so without
-          # this the loop is 5 × (unbounded build + 420 s), the loop's worst case
-          # is not a number, and `timeout-minutes: 60` can kill attempt 5 of a
-          # deploy that was making progress: that fails the very fail-safe path
-          # the retry exists to rescue (observed: a `deploy-api` job at 55.1 min
-          # without completing, five minutes under the cap). 11 min per attempt
-          # covers a ~4-minute remote build plus the 7-minute release wait, so
-          # the loop is 5 × 11 + 4 × 45 s ≈ 58 min — a DERIVED bound under the
-          # job's 60, not a guess that happens to be above the measurements.
+          # this the loop is 5 × (unbounded build + 420 s): its worst case is not
+          # a number, and `timeout-minutes: 60` can kill attempt 5 of a deploy
+          # that was making progress, failing the very fail-safe path the retry
+          # exists to rescue. The per-attempt bound is the largest the job's 60
+          # allows: (60 − 4 × 45 s) / 5 = 11.4 → 11 min, so the loop is
+          # 5 × 11 + 4 × 45 s = 58.0 min.
+          # MEASURED for THIS STEP, not the job — a `deploy-api` JOB duration
+          # here is mostly runner-queue latency and says nothing about attempt
+          # length (the tempting 55.1-min example, run 40451731878, was
+          # `cancelled` with `steps=0`: the step never started). The step's own
+          # completed durations: max 6.27 min (run 40458809781, 08:02:06→08:08:22),
+          # then 3.03, 2.78, 2.43, 1.63. 11 min is 1.75× that max, and the retry
+          # loop is what absorbs an attempt that really is slow.
           for attempt in 1 2 3 4 5; do
             if timeout 11m flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
               exit 0
             fi
-            echo "::warning::deploy attempt $attempt failed or hit its 11-minute bound — waiting 45s before retry (Fly lease/API race)"
-            sleep 45
+            # No sleep after the LAST attempt: it is dead time charged against
+            # the job's 60 and buys nothing (the loop exits immediately after).
+            if [ "${attempt}" -lt 5 ]; then
+              echo "::warning::deploy attempt $attempt failed or hit its 11-minute bound — waiting 45s before retry (Fly lease/API race)"
+              sleep 45
+            fi
           done
           exit 1
         env:

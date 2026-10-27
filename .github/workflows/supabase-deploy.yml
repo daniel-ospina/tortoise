@@ -373,6 +373,15 @@ jobs:
           #     330 is the largest wait that fits inside the `deploy` job's
           #     ceiling (GitHub's 360-minute default, which this job does not
           #     override) with room for the apply steps that run before it.
+          # ⛔ COST OF THAT BOUND, stated because it is not paid here: this step
+          # runs INSIDE the `deploy` job, which holds the constant
+          # `supabase-deploy-apply` lock for the job's whole life
+          # (`cancel-in-progress: false`). So an exhausted watch does not just
+          # end one run — every later migration apply QUEUES behind this job for
+          # up to the bound. That is the intended serialisation (schema and app
+          # must land in one window) rather than a bug, but the remediation for a
+          # flip that is genuinely stuck is to CANCEL this job, not to wait it
+          # out and not to dispatch another apply.
           # ⛔ So 330 is a POLICY choice against an unbounded term, and the thing
           # that must be CORRECT is the verdict below, not the constant: only a
           # non-zero exit from a run that reached a terminal state is evidence

@@ -165,12 +165,27 @@ when the migration is provably already in prod — because the apply pushes the
 whole pending set in filename order.
 
 Manual fallback — for when the automated co-move has already FAILED. The run
-says which way: a dispatch error, or `run <id> did not reach success`. Do not
-run the last line alongside a healthy co-move — `deploy-hosted.yml` serialises
-every run in ONE constant `concurrency` group, so a manual dispatch QUEUES and
-supersedes the still-PENDING automated flip (it no longer cancels a running one
-since `cancel-in-progress: false`, #10155), and the automated run then reports
-that its flip was superseded.
+says which way, and there are **three** verdicts, only the middle one being a
+failure:
+
+* a **dispatch error** — the flip was never started;
+* `run <id> did not reach success` / **`did NOT flip`** — the flip ran and failed
+  (or a newer push superseded it while it was still pending). This is the case
+  the fallback below is for;
+* `did not FINISH within the … wait` / **`UNKNOWN`** — the watch gave up while the
+  run was still QUEUED or running (runner-queue latency is not ours to bound).
+  The flip is **NOT known to have failed**: do NOT run the fallback and do not
+  re-dispatch — both queue behind that run and supersede its pending slot. Watch
+  it instead (`gh run watch <id> --repo daniel-ospina/tortoise`), and if it is
+  genuinely stuck, cancel the `supabase-deploy` job — it holds the
+  `supabase-deploy-apply` lock for as long as it waits, so every later apply is
+  queued behind it.
+
+Do not run the last line alongside a healthy co-move — `deploy-hosted.yml`
+serialises every run in ONE constant `concurrency` group, so a manual dispatch
+QUEUES and supersedes the still-PENDING automated flip (it no longer cancels a
+running one since `cancel-in-progress: false`, #10155), and the automated run
+then reports that its flip was superseded.
 
 ```bash
 supabase db push --project-ref ybetwichurajbfswfeqa
