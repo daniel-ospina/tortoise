@@ -9120,7 +9120,15 @@ def _supersede_name_unregistered(ev: dict, established) -> bool:
     """
     if established is None:
         return False
-    names, ids = established
+    # ⛔ ATTRIBUTE access, never a positional unpack (review P2). The sibling
+    # oracle `journal_object_surviving_keys` returns ``(ids, names)`` — the
+    # OPPOSITE order — so `names, ids = established` silently inverts BOTH
+    # limbs the moment a caller passes the wrong oracle: the exemption would
+    # narrow to unestablished IDS while widening to unestablished NAMES, an
+    # unguarded fail-open. `JournalObjectEstablished` is a NamedTuple precisely
+    # so the two halves cannot be mixed, and that guarantee only exists if
+    # every consumer reads it by name.
+    names, ids = established.names, established.ids
     ev = _norm(ev) if isinstance(ev, dict) else {}
     name = ev.get("name")
     if not (isinstance(name, str) and name) or name in names:
