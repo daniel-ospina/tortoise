@@ -1675,10 +1675,13 @@ def test_startup_installs_the_SHARED_register(bridge_client, mint_spy, bearer_re
     yields N authorization codes. The cross-machine test installs the store itself, so it proves
     the class and not the wiring; this test boots the real app and drives a redemption through it.
 
-    MEASURED, two-sided: passes here, and FAILS with "the redemption never reached the control
-    plane" if the `install_shared_consent_jti_store()` call is deleted from `_lifespan`
-    (`tortoise/hosted_api.py`, and note that deleting it leaves every other consent test green —
-    which is exactly why this pin has to exist).
+    MEASURED, two-sided: passes here, and FAILS at the `isinstance` below with "the AS started
+    with a PER-PROCESS register — cross-machine replay is unbounded" if the
+    `install_shared_consent_jti_store()` call is deleted from `_lifespan` (`tortoise/hosted_api.py`).
+    The RPC assertion further down is a SECOND, independent arm and is NOT the one that fires for
+    that mutation — it fires if the store is installed but the redemption never reaches the
+    control plane (e.g. a store that short-circuits locally). Note that deleting the call leaves
+    every other consent test green, which is exactly why this pin has to exist.
     """
     from tortoise.consent_token import ControlPlaneJtiStore, consent_jti_store
 
