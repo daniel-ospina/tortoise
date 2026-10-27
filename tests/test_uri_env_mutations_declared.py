@@ -324,6 +324,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # subdirectory twin is not authorized).
     "e2e/test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
+    # #10164: the per-test `graph` fixture has TWO handles on one database — it
+    # seeds a `:Document` through `proj` and then runs the migration through a
+    # `TortoiseSDK`. `TortoiseSDK` resolves its target from TORTOISE_DB_URI
+    # (`tortoise/sdk.py:7481`) and falls back to the EMBEDDED path (`:7502`),
+    # while the fixture's `_live_uri()` fell back to the provisioned legacy
+    # service — so on a URI-less lane (every tier-2 leg) the seed and the
+    # migration landed in two DIFFERENT databases and 19 cases reported "0
+    # node(s) relabelled" on a migration that is green. The setenv IS the fix:
+    # it makes the SDK FOLLOW the graph the fixture seeds (the `test_ingest.py`
+    # shape), so the cases still RUN on both lanes instead of skipping. The
+    # fixture-param monkeypatch auto-restores at teardown — no lane leaks.
+    "test_5140_d10_relabel_migration.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #3065 (bounded-socket resolver): the indexer case FORCES the docker lane
