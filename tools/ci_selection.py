@@ -1064,6 +1064,24 @@ SOURCE_PATTERNS = {
             # repo's deliberate docs-PR policy; the required `docs` job runs
             # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
+            # #10044 review F1: `tools/sdk_surface_declaration.py` is the APPROVED-surface
+            # gate (the owner's 40 in `tortoise/__all__.py` vs the owner's document, and
+            # vs the live `TortoiseSDK`). Its proofs are the 17 in
+            # `test_sdk_surface_declaration.py` — registered in `api` AND `core` but
+            # unreachable, because `tools/` is in NON_PYTHON_PREFIXES: a gate-only diff
+            # selected NO surface (`surfaces: []`, `full: false`) and the required job
+            # then executed the PR's own edited gate with zero of its tests having run.
+            # What that file pins is the GATE's contract (`check(contract_only=True)` reds a
+            # doctored or padded declaration) — enough on its own: a neutered `check()`
+            # cannot pass them. The WIRING proof (that the required lint still CALLS the
+            # gate) lives in `tests/test_surface_manifest.py`, which is `core`-registered and
+            # selected by the `tools/surface_manifest.py` diff that could break it — so this
+            # entry does not carry it, and saying it did was wrong (round-6 F3).
+            # Same silent-drop class (#1349/#3332/#3616) as the generators above, and the
+            # one bypass the residual-bypass paragraph in `tools/surface_manifest.py`
+            # does not cover. `test_sdk_surface_declaration.py` is already in `api`, so
+            # this entry is what makes the registration bite.
+            "tools/sdk_surface_declaration.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
             # `test_registry_integrity.py` (dual-registered in `api` AND `core`)
@@ -1621,6 +1639,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change
              # and ……::test_the_semantic_id_key_migration_selects_every_reader_of_the_contract.
              "supabase/migrations/20261027000001_record_semantic_id_key.sql",
+             # #10017 R2 — the cache-tier migration is a FORWARD RE-DECLARATION
+             # of `chk_point_props_no_derived`, which replaces the constraint at
+             # the SQL level while the parser UNIONS. So this is the one file
+             # that can silently SHRINK `point`'s refusal set with the parser
+             # still reporting every name refused. A migration-only diff must
+             # run `test_record_projection.py` / `test_cache_projection.py` /
+             # `test_10017_cache_tier.py`, and a `core` registration alone
+             # cannot do it (#1349/#3332/#3616).
+             "supabase/migrations/20261029000001_record_point_cache_tier.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
