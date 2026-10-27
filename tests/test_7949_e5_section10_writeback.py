@@ -61,11 +61,6 @@ SESSIONS = (*sq.TUNING_SESSIONS, *sq.HOLDOUT_SESSIONS)
 _REPLICATED = "#### ⚠️ REPLICATED 2026-10-18"
 
 
-def _pct(rate: float) -> str:
-    """The doc's own rendering: one decimal place, always."""
-    return f"{rate * 100:.1f}%"
-
-
 #: The doc's `<loss> (<rate>%)` loss cell (`6 (60%)`) — the holdout row's form.
 _LOSS_CELL = re.compile(r"^(\d+)\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)$")
 
@@ -78,14 +73,75 @@ def _loss_cell(cell: str, *, row: str) -> tuple[int, float]:
     two-thirds as `66.6667` — so a TEXT compare would red a re-publication that is
     CORRECT in the document's own format, and the tempting repair for that red is
     to edit §10 to fit the test instead of the test to fit the document. The rate
-    is compared on the document's own one-decimal grid (see `_pct`), so `60`,
-    `60.0` and `60.00` all read the same and 66.6667 matches `66.7`.
+    is compared on the document's own one-decimal grid, so `60`, `60.0` and
+    `60.00` all read the same and 66.6667 matches `66.7`.
     """
     match = _LOSS_CELL.match(cell.strip())
     assert match, (
         f"§10's {row} cell {cell!r} is not `<loss> (<rate>%)` — the row can no "
         "longer be read, so this pin would be comparing nothing")
     return int(match.group(1)), float(match.group(2))
+
+
+#: A bare rate cell (`20.0%`, `52%`) — the unit the document prints on its own
+#: one-decimal grid.
+_RATE_CELL = re.compile(r"^(\d+(?:\.\d+)?)\s*%$")
+
+
+def _rate(cell: str, *, row: str) -> float:
+    """Read a `<rate>%` cell as a percentage number.
+
+    Compared as a NUMBER, never as text — the same reason `_loss_cell` is (`#10108`
+    review P3). The document renders `52.0%`; a re-publication that writes `52%` or
+    `52.00%` is numerically the SAME figure and must not red. What must red is a
+    figure that MOVED. The accepted forms are the document's own grid (a plain
+    decimal percentage); an exponent form such as `5.2e+01%` is REJECTED on
+    purpose, because this document never renders one and accepting it would
+    tolerate a format nothing produces.
+    """
+    match = _RATE_CELL.match(cell.strip())
+    assert match, (
+        f"§10's {row} cell {cell!r} is not `<rate>%` — the row can no longer be "
+        "read, so this pin would be comparing nothing")
+    return float(match.group(1))
+
+
+#: A loss cell with its breakdown: `52.0% (13/25; 10 absent, 3 flattened)`. The
+#: separators are the document's, and `13 of 25` is accepted for the same reason
+#: `_rate` accepts `52%`: a correct re-rendering is not a moved number.
+_LOSS_DETAIL = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*%\s*"
+    r"\(\s*(\d+)\s*(?:/|of)\s*(\d+)\s*;\s*"
+    r"(\d+)\s*absent\s*,\s*(\d+)\s*flattened\s*\)$")
+
+
+def _loss_detail(cell: str, *, row: str) -> tuple[float, int, int, int, int]:
+    """Read `<rate>% (<loss>/<n>; <absent> absent, <flattened> flattened)`.
+
+    Returns `(rate-in-percent, loss, n, absent, flattened)` — every figure the
+    document publishes for the arm, as numbers.
+    """
+    match = _LOSS_DETAIL.match(cell.strip())
+    assert match, (
+        f"§10's {row} cell {cell!r} is not "
+        "`<rate>% (<loss>/<n>; <absent> absent, <flattened> flattened)` — the row "
+        "can no longer be read, so this pin would be comparing nothing")
+    return (float(match.group(1)), int(match.group(2)), int(match.group(3)),
+            int(match.group(4)), int(match.group(5)))
+
+
+#: A rate-with-ratio cell: `78.9% (71/90)`, or the document's `71 of 90`.
+_RATIO_CELL = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*%\s*\(\s*(\d+)\s*(?:/|of)\s*(\d+)\s*\)$")
+
+
+def _ratio_cell(cell: str, *, row: str) -> tuple[float, int, int]:
+    """Read `<rate>% (<hit>/<total>)` as `(rate-in-percent, hit, total)`."""
+    match = _RATIO_CELL.match(cell.strip())
+    assert match, (
+        f"§10's {row} cell {cell!r} is not `<rate>% (<hit>/<total>)` — the row can "
+        "no longer be read, so this pin would be comparing nothing")
+    return float(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
 def _block(doc: str, marker: str) -> str:
@@ -128,26 +184,58 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
 
     block = _block(DOC.read_text(), _REPLICATED)
 
+    # The arms' cells are compared as NUMBERS on the document's own grid, not as
+    # text (`#10108` review P3 — the same class the holdout row's `_loss_cell`
+    # already fixes). A TEXT compare reds when a factually-correct re-publication
+    # is formatted differently (`52%` for `52.0%`, `13 of 25` for `13/25`), and
+    # the tempting repair for that red is to edit §10 to fit the test instead of
+    # the test to fit the document. Every figure the document publishes is still
+    # pinned: a cell that MOVES is a different number, and reds.
     for arm in ("raw", "narrative"):
         agg = score["aggregate"][arm]
         pr = _pooled(score, arm)
-        expected = [
-            f"{_pct(agg['loss_rate'])} ({agg['loss']}/{agg['n']}; "
-            f"{agg['absent']} absent, {agg['flattened']} flattened)",
-            _pct(agg["distortion_rate"]),
-            f"{_pct(pr['recalled'] / pr['planted_units'])} "
-            f"({pr['recalled']}/{pr['planted_units']})",
-            f"{_pct(pr['claims_hit'] / pr['claims_emitted'])} "
-            f"({pr['claims_hit']}/{pr['claims_emitted']})",
-            str(pr["claims_emitted"]),
-        ]
         got = _row(block, rf"\*\*{arm}\*\*")
-        assert got == expected, (
-            f"§10's {arm} row no longer publishes what the falsifier produces — "
-            "the epic's E5 write-back and every figure quoted from it are now "
-            f"unsourced.\n  §10:    {got}\n  scorer: {expected}\n"
-            "Re-derive the table from a fresh run (and say so in the row's "
-            "note); do not edit the pin")
+        assert len(got) == 5, (
+            f"§10's {arm} row publishes {len(got)} cells; the registered table "
+            "has 5 (loss, distortion, recall, precision, claims emitted)")
+
+        rate, loss, n, absent, flattened = _loss_detail(got[0], row=f"{arm} loss")
+        for label, published, produced in (
+                ("loss", loss, agg["loss"]),
+                ("n", n, agg["n"]),
+                ("absent", absent, agg["absent"]),
+                ("flattened", flattened, agg["flattened"])):
+            assert published == produced, (
+                f"§10's {arm} row publishes {label}={published} (cell {got[0]!r}); "
+                f"the registered falsifier produced {label}={produced}. The "
+                "epic's E5 write-back and every figure quoted from it are now "
+                "unsourced — re-derive the table from a fresh run (and say so in "
+                "the row's note); do not edit the pin")
+        assert abs(rate - agg["loss_rate"] * 100) <= 0.05, (
+            f"§10's {arm} row publishes {rate}% loss; the registered falsifier "
+            f"produced {agg['loss_rate'] * 100:.4g}% (cell {got[0]!r})")
+
+        distortion = _rate(got[1], row=f"{arm} distortion")
+        assert abs(distortion - agg["distortion_rate"] * 100) <= 0.05, (
+            f"§10's {arm} row publishes {distortion}% distortion; the "
+            f"registered falsifier produced "
+            f"{agg['distortion_rate'] * 100:.4g}% (cell {got[1]!r})")
+
+        for cell, hit_key, total_key, label in (
+                (got[2], "recalled", "planted_units", "recall"),
+                (got[3], "claims_hit", "claims_emitted", "precision")):
+            pct, hit, total = _ratio_cell(cell, row=f"{arm} {label}")
+            assert (hit, total) == (pr[hit_key], pr[total_key]), (
+                f"§10's {arm} row publishes {label} {hit}/{total} (cell {cell!r}); "
+                f"the registered falsifier produced {pr[hit_key]}/{pr[total_key]}")
+            assert abs(pct - (pr[hit_key] / pr[total_key]) * 100) <= 0.05, (
+                f"§10's {arm} row publishes {label} {pct}%; the registered "
+                f"falsifier produced "
+                f"{pr[hit_key] / pr[total_key] * 100:.4g}% (cell {cell!r})")
+
+        assert got[4] == str(pr["claims_emitted"]), (
+            f"§10's {arm} row publishes claims emitted {got[4]!r}; the registered "
+            f"falsifier produced {pr['claims_emitted']}")
 
     # The decision input: the holdout Δloss, which is what the registered rule
     # reads. Published as its own row in the split table below the arms table.
