@@ -361,12 +361,18 @@ jobs:
           echo "   https://github.com/${REPO_SLUG}/actions/runs/${run_id}"
           watch=(gh run watch "${run_id}" --repo "${REPO_SLUG}" --exit-status)
           # `timeout` is GNU coreutils — the ubuntu runner has it, macOS does not.
-          # ⛔ NO `-k`/`--kill-after` HERE, unlike `deploy-hosted.yml`'s retry
-          # loop: a KILL makes `timeout` exit **137**, not 124, so adding the
-          # grace would silently disable the bound-expiry arm below (which keys
-          # on 124) and turn a still-queued run into a false "did NOT flip".
-          # The overrun this leaves is bounded: `gh` respects TERM, and the
-          # `deploy` job's own 360-minute default ends the job anyway.
+          # `-k 30s` makes the bound UNCONDITIONAL, for the same reason
+          # `deploy-hosted.yml`'s retry loop carries it: `timeout` sends SIGTERM
+          # and then WAITS, so without the grace a `gh` that traps TERM would
+          # overrun the bound entirely and the `deploy` job's 360-minute default
+          # would become the only bound (`docs/ops/ci-wall-clock.md` §1). The
+          # `124` arm below keys on the expiry path, which is what a child that
+          # honours TERM still produces WITH the grace (measured: `timeout -k 30s
+          # 1s sleep 5` -> 124). Only a child that IGNORES TERM is SIGKILLed, and
+          # that exits **137** — a non-zero, non-124 exit, which lands in the
+          # state-read arm below and is therefore reported as UNKNOWN rather than
+          # as a failed flip. Both paths fail closed; neither can assert "did NOT
+          # flip" without a terminal conclusion.
           # ⛔ 330m, not the pre-#10155 45m, and the DERIVATION is honest about
           # what a `timeout-minutes` can and cannot bound:
           #   • what the caps CAN bound is EXECUTION — `timeout-minutes` is
@@ -404,7 +410,7 @@ jobs:
           # non-zero exit for a transport/API error, so the arm below reads the
           # run's own `status`/`conclusion` before it claims anything.
           if command -v timeout >/dev/null 2>&1; then
-            watch=(timeout 330m "${watch[@]}")
+            watch=(timeout -k 30s 330m "${watch[@]}")
           fi
           watch_rc=0
           "${watch[@]}" >/dev/null || watch_rc=$?

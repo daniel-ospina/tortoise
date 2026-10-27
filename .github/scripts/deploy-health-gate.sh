@@ -214,7 +214,7 @@ done
 # fail-closed as this poll and strictly more complete. Exiting here is what let
 # the weaker observation decide a healthy release (see the header CONTRACT).
 if [ "$db_ok" != "1" ]; then
-  echo "::warning::db.ok stayed false for $((DB_TRIES * DB_SLEEP))s — the FalkorDB data-plane probe (liveness-refresher budget) never reported ok; this is the WEAKER predicate, so the run proceeds to /health/ready, which ANDs both planes and decides"
+  echo "::warning::db.ok stayed false for $((DB_TRIES * (DB_SLEEP + CURL_MAX_TIME_HEALTH)))s — the FalkorDB data-plane probe (liveness-refresher budget) never reported ok; this is the WEAKER predicate, so the run proceeds to /health/ready, which ANDs both planes and decides"
 else
   echo "db.ok true"
 fi
@@ -252,13 +252,13 @@ if [ "$ready_ok" != "1" ]; then
   # that fails the deploy, and naming the data plane explicitly keeps the
   # diagnosis as specific as phase 2's own error used to be.
   db_clause=""
-  [ "$db_ok" = "1" ] || db_clause="; db.ok was ALSO never true for $((DB_TRIES * DB_SLEEP))s — FalkorDB unreachable"
+  [ "$db_ok" = "1" ] || db_clause="; db.ok was ALSO never true for $((DB_TRIES * (DB_SLEEP + CURL_MAX_TIME_HEALTH)))s — FalkorDB unreachable"
   # Distinguish a DEAD APP from an UNREADY one: 000 is curl's no-response
   # sentinel (connection refused/reset/DNS), while a real status means the app
   # answered and this is a genuine readiness failure. Reporting both as
   # "unreachable" would be the indistinguishable-failure class this gate exists
   # to avoid.
-  echo "::error::/health/ready not 200 for $((READY_TRIES * READY_SLEEP))s — last status $ready_code (000 = no response from the app; other = answered but not ready)$db_clause"
+  echo "::error::/health/ready not 200 for $((READY_TRIES * (READY_SLEEP + CURL_MAX_TIME_READY)))s — last status $ready_code (000 = no response from the app; other = answered but not ready)$db_clause"
   exit 1
 fi
 echo "health/ready 200 (observed HTTP 200)"
