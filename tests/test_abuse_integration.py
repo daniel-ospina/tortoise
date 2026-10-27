@@ -826,10 +826,22 @@ class TestAlertRegistersAndAcks:
     _VERB = (r"(?:has|have|had|is|are|was|were|am|will|would|can|should|must|"
              r"do|does|did|been|being|\w+ed|'re|'ve|'d|'m|'ll|'s)")
     _GAP = r"[\s,;:—-]+(?:\S+[\s,;:—-]+){0,6}"
-    #: TWO order-agnostic arms (actor→verb for active, verb→actor for passive).
+    #: THREE arms. Round 16 (review finding) caught two defects in the two-arm
+    #: version this replaces:
+    #:
+    #: 1. `_ACTOR` is itself a top-level ALTERNATION and was interpolated WITHOUT
+    #:    a group, so its `|`s bound at the pattern's top level and each arm
+    #:    collapsed into standalone alternatives — `\bwe\b` matched on its own,
+    #:    with no verb at all. The pin LOOKED like "an actor beside a verb" and was
+    #:    really "the word we appears somewhere". Every interpolation is wrapped
+    #:    in `(?:…)` now.
+    #: 2. `_GAP` requires a separator, and a CONTRACTION has none — "We're" is an
+    #:    actor and its auxiliary glued together. It matched before only by
+    #:    accident (defect 1); with the grouping fixed it needs its own arm.
     _HUMAN = re.compile(
-        rf"(?:\b{_ACTOR}\b{_GAP}{_VERB}\b|\b{_VERB}\b{_GAP}{_ACTOR}\b)",
-        re.I)
+        rf"(?:\b(?:{_ACTOR})\b{_GAP}{_VERB}\b"
+        rf"|\b{_VERB}\b{_GAP}(?:{_ACTOR})\b"
+        rf"|\b(?:{_ACTOR})['\u2019](?:re|ve|ll|d|m|s)\b)", re.I)
     #: A promise of contact/timing where the actor is ELIDED ("…, and will reach
     #: out"), which the actor arms cannot see.
     _PROMISE = re.compile(
@@ -865,7 +877,13 @@ class TestAlertRegistersAndAcks:
     @staticmethod
     def _claims(text: str) -> bool:
         stripped = re.sub(r"\S+@\S+", "", text)
-        stripped = re.sub(r"\bby an operator\b", "", stripped, flags=re.I)
+        # CLAUSE-FINAL only. `suspend_org()` writing the row proves an operator
+        # suspended the org — not what an operator did next. Round 16 (review
+        # finding): the unanchored version deleted the phrase ANYWHERE, so
+        # "…by an operator after reviewing your request" lost its actor and
+        # laundered the review claim straight through the exemption.
+        stripped = re.sub(r"\bby an operator\b(?=\s*[.;!?]|\s*$)", "",
+                          stripped, flags=re.I)
         return bool(TestAlertRegistersAndAcks._HUMAN.search(stripped)
                     or TestAlertRegistersAndAcks._PROMISE.search(stripped))
 
@@ -889,6 +907,7 @@ class TestAlertRegistersAndAcks:
             "This alert was escalated to an operator for review.",
             # CONTRACTION — `\bwe\b` + `\s+` never matches "We're"
             "We're investigating this now.",
+            "We\u2019re investigating this now.",  # typographic apostrophe
             # the round-11 bypasses, kept so they cannot come back
             "An operator is looking into it.",
             "An operator will review this.",
@@ -897,7 +916,6 @@ class TestAlertRegistersAndAcks:
             "Our engineers have been notified.",
             "Our SRE will take a look.",
             "Our staff is aware.",
-            # ONE filler word past the old {0,3} gap
             "This alert has already been escalated to our team.",
             # the actor as OBJECT of the auxiliary
             "You will hear from us within 24 hours.",
@@ -920,9 +938,24 @@ class TestAlertRegistersAndAcks:
             # imperative, and banning it would forbid legitimate copy.)
             "…and will reach out shortly.",
         ]
+        # The `{0,6}` width is now PROVEN. Round 16 (review finding): the entry
+        # it was meant to justify ("…already been escalated to our team") also
+        # matches on a ONE-filler path, so narrowing _GAP back to {0,3} left every
+        # test green — the width was asserted in a comment and guarded by nothing.
+        narrow = re.compile(self._HUMAN.pattern.replace(r"{0,6}", r"{0,3}"),
+                            re.I)
+        # A CONSTRUCTED probe whose shortest matching path is four fillers, so
+        # `{0,3}` cannot reach it and narrowing the gap reds this assertion. The
+        # natural-looking "…already been escalated to our team" does NOT work for
+        # this purpose: "been" is itself a verb token, so it matches within three.
+        wide_only = ("Our team, after a great deal of deliberation, has "
+                     "decided to escalate this.")
+        assert self._HUMAN.search(wide_only), wide_only
+        assert not narrow.search(wide_only), (
+            "no fixture entry proves the 6-token gap: this one still matches "
+            "with {0,3}, so narrowing _GAP would go unnoticed")
         for text in must_reject_human:
-            assert self._HUMAN.search(
-                re.sub(r"\bby an operator\b", "", text)), (
+            assert self._HUMAN.search(text), (
                 f"the ACTOR arms miss a false human claim: {text!r} — a pin "
                 "that cannot reject this cannot guard the real copy either")
         for text in must_reject_promise:
