@@ -1752,6 +1752,17 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # disagreement with the graph fold in the fail-CLOSED direction, the one
     # error this guard must never make.
     carriers_by_name: dict[tuple[str, str], set] = {}
+    # #10157: the mention-stub carrier ids, per Object NAME — the SAME ids the
+    # seeding below lands in `carriers_by_name`, kept under their own name
+    # because the trailing supersede sweep has to ask "does an Object NODE
+    # carry this name?". A stub is a node the GRAPH has and the ENTITY model
+    # deliberately does not (#3590 D1: a mention creates no entity), so
+    # `_object_target` — which resolves from `entities` — cannot see it and
+    # recorded `object-superseded-miss` for a journal `rebuild_all` folds. Two
+    # halves of one classification reading two carrier tables is exactly the
+    # split the seeding comment below warns about; this is the second half's
+    # view of the first half's table.
+    mention_stub_carriers: dict[str, set] = {}
     # #5285 cycle-6: the GRAPH's MERGE key per id — `_upsert_object` /
     # `_upsert_subject` MERGE on `name` ALONE, and an empty name is skipped by
     # `_writable_id` (no node is created), so `title` is NEVER a merge key. The
@@ -1976,7 +1987,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                         # the stub id (an `ON CREATE` write) does NOT land and
                         # no carrier moves. Same rule the fold applies.
                         continue
-                    _stub_carriers.add(entity_name_id(_stub_label, _stub_name))
+                    _stub_id = entity_name_id(_stub_label, _stub_name)
+                    _stub_carriers.add(_stub_id)
+                    if _stub_label == "Object":
+                        mention_stub_carriers.setdefault(
+                            _stub_name, set()).add(_stub_id)
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name
@@ -2182,6 +2197,27 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # (`supersede-target-deleted`), never a miss.
             pass
         else:
+            # #10157: the graph's deferred sweep MERGEs an Object by NAME, and
+            # an `EventRecorded` mention stub is a real Object node carrying
+            # that name (`_event_plain_merge` mints it, `ON CREATE`). The
+            # reference ENTITY model does not carry it (#3590 D1: a mention
+            # creates no entity), so `_object_target` cannot resolve it from
+            # `entities` — yet the journal DID fold that supersede onto that
+            # node. Recording a miss here is a false refusal of a journal every
+            # replay engine accepts, and it is the fail-CLOSED direction this
+            # gate must never take when the journal is faithful.
+            #
+            # The carrier set is the one the seeding above already maintains,
+            # filtered to the nodes that still EXIST at the journal's END: a
+            # stub the journal hard-deletes is genuinely gone, so its supersede
+            # stays a miss (`tests/test_rebuild_parity_fail_loud_3585.py::
+            # test_mention_established_then_deleted_name_still_refuses`).
+            _stub_hit = any(
+                ("Object", _sid) not in deleted
+                and not _object_hard_deleted(_sid)
+                for _sid in mention_stub_carriers.get(oname, ()))
+            if _stub_hit:
+                continue
             # Genuinely unresolvable: an id no journaled registration leaves
             # in place (and no usable name) matched nothing in the graph fold
             # either, which records `object-superseded-miss` and fails — so
