@@ -212,10 +212,18 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
-    Three guards in `tests/test_definite_description_backfill_5059.py` assert
-    only against `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's
-    destructive half*: the load-bearing share, the `archived`-has-a-writer
-    claim, and the `_ALLOWED_TRANSITIONS` production-reader scan. The file was
+    Four guards in `tests/test_definite_description_backfill_5059.py` bind
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's destructive
+    half*, and **three** of them read the document: the load-bearing share
+    (which also reads its own module for the measurement), the
+    `archived`-has-a-writer claim (which rejects the set of no-writer spellings
+    it enumerates, rather than one literal — the literal form was evaded
+    twice), and the recorded design decision itself. The fourth, the
+    `_ALLOWED_TRANSITIONS` production-reader scan, reads **no line of the
+    document**: it AST-scans `tortoise/` for a consumer of the map the passage
+    cites, so a docs-only edit cannot red it (#10069 review, P3 — this
+    docstring said all four read only the document, which was false for it).
+    The file was
     registered in `core` alone — which is right for its module-level guards, and
     useless for these: `docs/` is in NON_PYTHON_PREFIXES and the document
     matches no SOURCE_PATTERNS entry, so a docs-only diff filters to
@@ -1933,6 +1941,30 @@ def test_token_ts_change_selects_the_consent_bridge_guard():
     assert "test_oauth_consent_bridge.py" in r["test_files"], (
         "a token.ts-only diff does not run tests/test_oauth_consent_bridge.py, "
         "so its task-3 guard cannot fire on the change it pins (#3524)"
+    )
+
+
+def test_a_consent_token_only_diff_runs_the_bridge_guard():
+    """#3524 review (P1): the verifier's own diff must select the guard that pins it.
+
+    `tests/test_oauth_consent_bridge.py` is registered `api` + `onboarding` and
+    NOT `core`; a named-surface match REPLACES the `core` fallback. So before
+    `tortoise/consent_token.py` was a `SOURCE_PATTERNS["api"]` entry, a diff that
+    touched the verifier and nothing else selected `core`, where that guard does
+    not exist — a regression in the signature/`alg`/`bind`/`jti` logic (the
+    security half of the bridge) red nowhere and merged green. Asserts the
+    SELECTION, not the registration, so it reds on the pre-fix patterns.
+    """
+    r = _sel(["tortoise/consent_token.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a consent_token.py-only diff selects {r['surfaces']} — the bridge "
+        "guard is registered on `api`, and `core` does not run it"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a consent_token.py-only diff does not run "
+        "tests/test_oauth_consent_bridge.py, so its verifier guards cannot fire "
+        "on the change they pin (#3524)"
     )
 
 

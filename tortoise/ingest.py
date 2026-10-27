@@ -250,15 +250,18 @@ def _document_is_pending(needs_extraction, doc_status, *,
        at #5140 review round 3, and it is narrower than it looks): pre-D10 EVERY
        document writer MERGEd a ``:Document {id}`` node (``_upsert_document``,
        ``_event_plain_merge``, ``hosted_api``'s transcript MERGE), so the
-       historical backlog carries ``doc_status`` on a node **both readers here
-       exclude** (they MATCH ``:Source {url}``, and the labels are what they
-       are — ``migrate_kinds.py`` only SETs kind properties, it never relocates
-       a node between labels, and D10 shipped no relabel). This arm therefore
-       matches a ``:Source`` document whose retired marker SURVIVED — an
-       operator/graph that was relabelled — and nothing this product writes
-       today (the post-D10 fold REMOVEs ``doc_status``). Reaching the un-migrated
-       population is the relabel migration #5140 finding 8 asks for, NOT a
-       precedence choice, and it is deliberately not attempted here.
+       historical backlog carried ``doc_status`` on a node **both readers here
+       exclude** (``_do_upgrade`` MATCHes ``:Source {url}``;
+       ``_discover_pending_documents`` MATCHes a bare ``:Source`` and only
+       *returns* ``s.url`` — which is why it can select a url-less node at all).
+       This arm therefore matches a ``:Source`` document whose retired marker SURVIVED the move, and nothing
+       this product writes today (the post-D10 fold REMOVEs ``doc_status``).
+       ⛔ THE RELABEL IS A PRECONDITION, NOT A PRECEDENCE CHOICE — run
+       ``tortoise/migrate_kinds.py``, whose ``relabel_legacy_documents`` folds
+       ``:Document`` into ``:Source {url}`` (#5140 finding 8) FIRST; that is what
+       puts the marker on a label this arm can read. Running ``--upgrade-all`` on
+       a pre-D10 graph without it reports "no document Sources are awaiting
+       extraction" while the backlog sits untouched.
     2. ``doc_status='extracted'`` → done. It is a completion record, and it
        outranks a stale ``needs_extraction=true``; without that precedence a
        sweep would re-discover a document the per-document path always skips.
@@ -566,9 +569,10 @@ def _do_upgrade_all(proj, api, args):
     signal is ``needs_extraction``, set true by the ``--capture-metadata`` path
     and cleared here after a successful extraction. A SURVIVING
     ``doc_status='captured'`` marker is still honoured as a PENDING claim (a
-    relabelled/legacy graph; the un-migrated ``:Document`` population is #5140
-    finding 8's relabel, not this sweep's); the rule lives in
-    ``_discover_pending_documents`` / ``_document_is_pending``, never inline.
+    graph ``migrate_kinds.relabel_legacy_documents`` has folded ``:Document``
+    into ``:Source`` — #5140 finding 8; the sweep itself never relabels); the
+    rule lives in ``_discover_pending_documents`` / ``_document_is_pending``,
+    never inline.
 
     Uses inline Cypher via proj.g.query (no SDK method needed — plan §Task 2).
 
@@ -870,8 +874,15 @@ def main(argv=None):
                          "needs_extraction=false came from a REPLAYED pre-D10 record "
                          "(that value is indistinguishable from a real completion "
                          "without extraction evidence — see #5140), and it does NOT "
-                         "see un-migrated :Document-labelled nodes at all (no relabel "
-                         "migration exists yet — #5140 finding 8). The WIDENING is a "
+                         "see an un-migrated :Document-labelled node — fold it into "
+                         "the :Source label first with tortoise/migrate_kinds.py "
+                         "(#5140 finding 8). ⛔ One population needs a step before "
+                         "it: _event_plain_merge's Document branch stamped NO clock "
+                         "(unlike hosted_api's transcript MERGE), so the relabel "
+                         "REFUSES those nodes rather than invent an ingestedAt, "
+                         "and leaves them :Document. Assert the instant first "
+                         "(SET d.ingestedAt='<iso>') and re-run the migration. "
+                         "The WIDENING is a "
                          "read (no stamping, unlike the deleted backfill) — but the "
                          "sweep then upgrades what it selects, so this is not a dry "
                          "run.")

@@ -413,6 +413,11 @@ jobs:
                   # the record cannot silently lose the cadence factor that
                   # qualifies every availability figure.
                   startswith(".github/scripts/availability-record"),
+                  # #10109: the deploy-staleness detector — its harness pins the
+                  # positive reading (deployed sha vs origin/main), the
+                  # fail-closed unreadable-revision red, the behind-bound
+                  # verdict, and the divergence-vs-lag distinction.
+                  startswith(".github/scripts/check-deploy-staleness"),
                   # #4545: the post-deploy health gate's harness — extracted from
                   # deploy-hosted.yml so the gate that decides whether a deploy
                   # SUCCEEDED is testable. It pins the regression where the gate
@@ -436,6 +441,7 @@ jobs:
                   isfile(".github/workflows/availability-liveness.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
+                  isfile(".github/workflows/deploy-staleness.yml"),
                   isfile(".github/workflows/deploy-hosted.yml"),
                   # #3907: the auto-file adopters — a change to the monitor that
                   # calls the substrate re-runs its harness.
@@ -1360,6 +1366,23 @@ jobs:
         # that a low figure never fails the run (record-only, not a gate).
         if: ${{ !cancelled() }}
         run: bash .github/scripts/availability-record.test.sh
+
+      # ── deploy-staleness (#10109) ─────────────────────────────────────
+      - name: Deploy staleness detector (#10109)
+        # The POSITIVE staleness reading: builds a synthetic repo, pins the
+        # deployed commit, and proves the detector reds on a behind-bound lag
+        # (the mutation), a divergent commit, a sha not in the repo, and an
+        # unreadable revision — and that a current commit passes and states the
+        # distance. Also pins the fail-closed read side (curl failure, missing
+        # token/jq) and the dedupe (one alert, PATCHed not duplicated).
+        # The two bounds are pinned as MUTATIONS: a docs-only lag (raw distance
+        # over the bound, zero deployable commits) stays GREEN — the false alarm
+        # that makes a pager inert — while a single deployable commit older than
+        # the age bound REDS even though the count is within bound; and an
+        # unreadable `on.push.paths` filter is a RED, never a pass. The real
+        # `deploy-hosted.yml` filter is pinned in both directions.
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/check-deploy-staleness.test.sh
 
       # ── deploy-health-gate (#4545) ────────────────────────────────────────
       - name: Deploy health gate poll (#4545)

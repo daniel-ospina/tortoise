@@ -74,6 +74,7 @@ from .projection import (
     _object_hard_deleted_ids,
     _promotion_point_with_operator,
     _replay_write_scope,  # #7951 §17.1: replay folds are authorized, live ones are not
+    _supersede_name_unregistered,  # #3590 D2: the ONE predicate (see _record_supersede_miss)
     _writable_id,
     entities,
     fold_with_entities,
@@ -81,6 +82,7 @@ from .projection import (
     journal_epistemic_existence,
     journal_first_materialization,
     journal_hard_delete_seqs,
+    journal_object_registered_names,
     journal_object_surviving_keys,
     journal_recreate_seqs,
     plan_point_restamp_folds,
@@ -1719,6 +1721,10 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # divergence on a correct journal). Deferring EVERY supersede subsumes the
     # forward-reference case and removes the second path that kept drifting.
     surviving_ids, _surviving_names = journal_object_surviving_keys(events)
+    # #3590 D2: the journal's OWN addressability oracle — the sibling of the
+    # surviving-keys pair, and the third surface `classify_terminalizer_miss`
+    # must agree with (`rebuild_all` and `apply()` are the other two).
+    journal_registered_names = journal_object_registered_names(events)
     # #7719: the anchor-gated MEMBERSHIP map — the named
     # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries. The
     # ungated `journal_object_hard_deleted_ids` used here before exempted an
@@ -1837,9 +1843,17 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     def _record_supersede_miss(seq: int, ev: dict) -> None:
         candidate = ev.get("name") if isinstance(ev.get("name"), str) \
             and ev.get("name") else ev.get("id")
+        # #3590 D2: exempt ONLY a target NAME the journal never established, so
+        # this fold agrees with `rebuild_all`'s sweep. A established name (or a
+        # record carrying none) stays `object-superseded-miss` and refuses.
+        # #10107 review P2: the SAME predicate the two graph engines use, so
+        # the two halves of one classification cannot read different spellings
+        # (this fold iterates the RAW journal; they normalise).
         record_non_folded(
-            classify_terminalizer_miss("ObjectSuperseded",
-                                       target_deleted=False),
+            classify_terminalizer_miss(
+                "ObjectSuperseded", target_deleted=False,
+                name_unregistered=_supersede_name_unregistered(
+                    ev, journal_registered_names)),
             event_id=ev.get("event_id"), event_type="ObjectSuperseded",
             seq=seq,
             id=ev.get("id") if isinstance(ev.get("id"), str) else None,
@@ -3580,6 +3594,10 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # injected backends used in tests take ``apply(ev)`` alone, and a kwarg
     # they do not accept would be miscounted as a TORN record.
     journal_object_surviving = journal_object_surviving_keys(events)
+    # #3590 D2: the journal's own addressability oracle — passed alongside the
+    # pair above so `apply()`'s supersede gate reaches the same verdict as
+    # `rebuild_all`'s sweep and this module's reference fold.
+    registered_object_names = journal_object_registered_names(events)
     # #7719: derived from the GATED map via `_hard_deleted_any`, so an
     # anchor-suppressed delete no longer exempts the supersede.
     journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
@@ -3605,6 +3623,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
         _pass_seq = "journal_seq" in _apply_params
     if "journal_existence" in _apply_params:
         apply_kwargs["journal_existence"] = epistemic_existence
+    if "journal_object_registered_names" in _apply_params:
+        apply_kwargs["journal_object_registered_names"] = registered_object_names
     # #3585 (R8/R9): this apply-based engine folds inside the non-folded
     # collector too. A refused event means the recovery REPLAYED an incomplete
     # journal — reporting `recovered: True` there is the false PASS #3947's
