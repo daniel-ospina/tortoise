@@ -45,7 +45,14 @@ on `main` since your branch forked are not counted as *your* changed files.
 `--print` writes the selected files to **stdout** (one `tests/…py` path per line, ready to pipe) and a
 **one-line summary to stderr**: how many files, which surfaces produced them, and what the slow /
 carve-out legs would have run. A lane that only looks at stdout gets a clean list; a lane that reads
-the terminal gets the number *with its explanation*.
+the terminal gets the number *with its explanation*. (With `--allow-full` the single stdout line is
+`tests` — the directory — not a `.py` path.)
+
+**The range is a COMMIT range, so uncommitted work is not in the selection.** When the worktree has
+uncommitted or untracked paths the tool says so on stderr by name and count, because the failure mode
+it must not have is a silent *under*-selection: a lane edits a shared module, gets the last commit's
+answer, and never computes the edit's blast radius. Commit, or pass a list that includes the dirty
+paths with `--files-from` (`--files-from` and a range are mutually exclusive — one source of truth).
 
 ## Trap 1 — `--changed-files` takes the LIST on stdin, not a path to it
 
@@ -79,19 +86,21 @@ git diff --name-only origin/main...HEAD | uv run python tools/ci_selection.py --
 
 ## Trap 2 — a big number is the selector working
 
-The selection is **surface**-based, not import-graph based. `core` alone is **737 test files** out of
-**1,218** in the tree, and a docs-prose diff still pulls its surface's smoke set. Measured at this
-head:
+The selection is **surface**-based, not import-graph based. `core` alone is **738 test files** out of
+**1,219** in the tree (737 / 1,218 before this lane registered its own test file), and a docs-prose
+diff still pulls its surface's smoke set. Measured at this head:
 
 | Changed path | Selection | Files |
 |---|---|---|
 | `docs/blog-authoring.md` (prose) | surfaces `onboarding`, not full | 137 |
 | `tools/run_affected.sh` (non-python tool) | tier-1 smoke, surfaces `[]` | 64 |
 | `tortoise/sdk.py` (SHARED_MODULE) | `full: true` — blast radius | all |
+| `config/ci-surfaces.yml` (falls to `core`) | surfaces `core`, not full | 684 |
 | `HEAD...HEAD` (nothing) | nothing, and it says so | 0 |
 
-So 60–260 files for one small diff is expected. If a number really looks wrong, the summary line
-names the surfaces responsible — that is the diagnostic, not a smaller number.
+So a few hundred files for one small diff is expected — a `config/` edit pulls the whole `core`
+surface (that 684 is this lane's own diff). If a number really looks wrong, the summary line names the
+surfaces responsible — that is the diagnostic, not a smaller number.
 
 ## What it does NOT run
 
@@ -105,7 +114,7 @@ visible rather than assumed. `--run` runs the fast set only — the same files t
 | Code | Meaning |
 |---|---|
 | `0` | selection printed / ran; also "the range has no changed files" (said explicitly) |
-| `2` | usage error — unknown option, two modes at once, bad range, missing `--files-from`, or a **path** passed where a range belongs (trap 1) |
+| `2` | usage error — unknown option, two modes at once, two ranges, `--files-from` together with a range, bad range, missing `--files-from`, or a **path** passed where a range belongs (trap 1) |
 | `3` | **refused**: the selector answered `full: true` and `--allow-full` was not given |
 | `4` | the selector itself failed (non-zero, or unparsable JSON) |
 | other | with `--run`: pytest's own exit code, unchanged |
@@ -157,12 +166,15 @@ is not the size — it is an answer whose *reason* is invisible. That is the one
 
 ```bash
 uv run python tools/ci_selection.py --integrity      # the manifest gate this tool reads
-uv run pytest tests/test_run_affected.py -q          # the wrapper's pins
+# the wrapper's pins; DB-free, but pytest's default lane refuses a URI-less run (#1647 P4):
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_run_affected.py -q
 tools/run_affected.sh --print                        # this branch's own diff
 ```
 
-The pins (`tests/test_run_affected.py`) cover: `--print` emits pytest-pathable `tests/…` entries; the
-printed set **is** the selector's own answer for the same list (no second implementation); a
-`full: true` selection is refused with exit 3 and the reason named; `--allow-full` accepts it; a path
-operand is refused as the #9109 trap; the script's only selector invocation is the stdin form; an empty
-range says so.
+The pins (`tests/test_run_affected.py`) cover: `--print` emits pytest-pathable `tests/…` entries that
+exist on disk; the printed set **is** the selector's own answer for the same list (no second
+implementation); a `full: true` selection is refused with exit 3 and the reason named; `--allow-full`
+accepts it; a path operand — absolute **or** relative to the caller — is refused as the #9109 trap;
+`--files-from` plus a range is a usage error; an unparsable selector payload exits 4 with a named
+message rather than a traceback; `--run` forwards `--`-args to pytest and returns pytest's own exit
+code; the script's only selector invocation is the stdin form; an empty range says so.

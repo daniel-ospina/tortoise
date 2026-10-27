@@ -57,11 +57,13 @@ SHARED_MODULE = """tortoise/sdk.py
 """
 
 
-def _run(args: list[str], tmp_path: Path, stdin: str = "") -> subprocess.CompletedProcess:
+def _run(args: list[str], tmp_path: Path, stdin: str = "",
+         env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     # Inherit the ambient env (PATH must keep `uv`, and the interpreter's site must
     # keep `yaml` — see #10012 for the stripped-env failure this avoids) and point
     # the selector's audit artifact at the test's tmp dir so the checkout stays clean.
-    env = {**os.environ, "CI_SELECTION_ARTIFACT_DIR": str(tmp_path / ".ci-selection")}
+    env = {**os.environ, "CI_SELECTION_ARTIFACT_DIR": str(tmp_path / ".ci-selection"),
+           **(env_extra or {})}
     return subprocess.run(
         ["bash", str(TOOL), *args],
         input=stdin, capture_output=True, text=True, cwd=str(tmp_path),
@@ -90,6 +92,11 @@ def test_print_emits_the_selected_files_as_pytest_paths(docs_only_print):
     assert printed, f"expected a selected set, got nothing: {proc.stderr}"
     assert all(ln.startswith("tests/") and ln.endswith(".py") for ln in printed), (
         f"--print must emit pytest-pathable `tests/…py` entries: {printed[:5]}")
+    # Every path must EXIST: a surface may register a subdir file
+    # (`longmem_eval/test_x.py`) whose pytest path is `tests/longmem_eval/test_x.py`,
+    # and a prefixing bug there prints 137 plausible lines pytest cannot collect.
+    missing = [ln for ln in printed if not (ROOT / ln).is_file()]
+    assert not missing, f"--print emitted paths that do not exist: {missing[:5]}"
     # Trap 2: the size arrives WITH its explanation — one summary line naming the
     # count and the surfaces, on stderr so stdout stays a clean list.
     summary = [ln for ln in proc.stderr.splitlines() if ln.startswith("run_affected:")]
@@ -169,6 +176,95 @@ def test_a_path_positional_is_refused_as_the_9109_trap(tmp_path):
     assert "#9109" in proc.stderr, (
         "the refusal must name the trap — a bare 'not a git range' would send the "
         "caller to the very invocation that fail-closes")
+
+
+def test_a_RELATIVE_path_positional_is_refused_too(tmp_path):
+    """The trap's realistic shape: `mylist.txt` beside a caller in another directory.
+
+    The tool `cd`s to the repo root, so an existence test against the CURRENT dir
+    misses this and reports "neither a git revision nor a range" — advice that sends
+    the caller to a range (and a selection that omits their list).
+    """
+    _write_list(tmp_path, "relative-list.txt", DOCS_ONLY)
+    proc = _run(["relative-list.txt"], tmp_path)
+
+    assert proc.returncode == 2, proc.stderr
+    assert "--files-from" in proc.stderr and "#9109" in proc.stderr, (
+        f"a caller-relative path operand must get the TRAP message, not the "
+        f"git-fetch advice: {proc.stderr!r}")
+
+
+def test_files_from_and_a_range_are_mutually_exclusive(tmp_path):
+    """Two sources of truth must not be silently reconciled into one answer."""
+    lst = _write_list(tmp_path, "both.txt", DOCS_ONLY)
+    proc = _run(["--files-from", str(lst), "origin/main...HEAD"], tmp_path)
+
+    assert proc.returncode == 2, (
+        f"a list plus a range must be a usage error, not a selection: {proc.returncode}"
+        f" {proc.stdout[:200]}")
+    assert proc.stdout.strip() == "", f"nothing runnable should be printed: {proc.stdout!r}"
+    assert "pick one" in proc.stderr, proc.stderr
+
+
+def test_an_unparsable_selection_exits_4_with_a_named_message(tmp_path):
+    """A broken selector payload is exit 4, not a Python traceback with exit 1."""
+    real_uv = subprocess.run(["bash", "-lc", "command -v uv"], capture_output=True,
+                             text=True, timeout=120)
+    assert real_uv.returncode == 0 and real_uv.stdout.strip(), (
+        f"`uv` must be on PATH for this pin: {real_uv.stderr}")
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    stub = stub_bin / "uv"
+    # Garbage ONLY for the selector call; the JSON-reporting call gets the real uv so
+    # the failure lands in the parse path this test is about.
+    stub.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *ci_selection.py*) printf 'not json {{{'; exit 0 ;;\n"
+        "esac\n"
+        f'exec "{real_uv.stdout.strip()}" "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    proc = _run(["--files-from", str(_write_list(tmp_path, "junk.txt", DOCS_ONLY))],
+                tmp_path, env_extra={"PATH": f"{stub_bin}:{os.environ['PATH']}"})
+
+    assert proc.returncode == 4, (
+        f"unparsable JSON is the documented exit 4; got {proc.returncode}: {proc.stderr}")
+    assert "unparsable" in proc.stderr or "unreadable" in proc.stderr, proc.stderr
+    assert "Traceback" not in proc.stderr, (
+        f"a broken payload must be NAMED, not raised: {proc.stderr}")
+
+
+def test_run_forwards_extra_args_and_returns_pytests_own_exit_code(tmp_path):
+    """`--run` is half the tool's purpose and used to have no pin at all."""
+    lst = _write_list(tmp_path, "run.txt", DOCS_ONLY)
+    # The tool mints its temp dir under $TMPDIR; point that at our own scratch dir so
+    # the cleanup assertion is hermetic (scanning /tmp is forbidden in tests, #3752).
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    env_extra = {"TMPDIR": str(scratch)}
+
+    forwarded = _run(["--files-from", str(lst), "--run", "--", "--version"], tmp_path,
+                     env_extra=env_extra)
+    assert forwarded.returncode == 0, forwarded.stderr
+    assert "pytest" in forwarded.stdout, (
+        f"args after `--` must reach pytest (`--version` prints its banner): "
+        f"{forwarded.stdout[-400:]}")
+    # The EXIT trap must still run on the --run path: `exec` replaces the shell and
+    # would leave a selection record behind on every iteration.
+    assert not list(scratch.glob("run-affected.*")), (
+        "--run leaked its temp directory (an `exec` that skips the EXIT trap)")
+
+    # A pytest USAGE error is pytest's exit 4, passed through unchanged. The tool's
+    # own exit 4 prints its own message, so its ABSENCE is what makes this unambiguous.
+    failed = _run(["--files-from", str(lst), "--run", "--", "--definitely-not-an-option"],
+                  tmp_path, env_extra=env_extra)
+    assert failed.returncode == pytest.ExitCode.USAGE_ERROR, (
+        f"pytest's exit code must survive `--run`; got {failed.returncode}: {failed.stderr}")
+    assert "run_affected: the selector" not in failed.stderr, (
+        f"this 4 is pytest's, not the selector's: {failed.stderr}")
 
 
 def test_the_selector_is_only_ever_invoked_with_the_stdin_list(tmp_path):

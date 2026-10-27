@@ -62,6 +62,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A range operand is a SHELL argument, so a relative one is relative to where the caller
+# invoked the tool. Keep that directory: after `cd` below, `[[ -e "$RANGE" ]]` would only
+# ever match a path that happens to exist at the repo root — and the trap shape
+# (`mylist.txt` beside the caller) would then be reported as "not a git range".
+CALLER_PWD="$PWD"
 cd "$REPO_ROOT"
 
 DEFAULT_RANGE="origin/main...HEAD"
@@ -70,6 +75,7 @@ MODE_SET=""
 ALLOW_FULL=0
 FILES_FROM=""
 RANGE="$DEFAULT_RANGE"
+RANGE_GIVEN=0
 PYTEST_ARGS=()
 
 usage() {
@@ -94,18 +100,22 @@ while [[ $# -gt 0 ]]; do
       FILES_FROM="$2"; shift 2 ;;
     --range)
       [[ $# -ge 2 ]] || die 2 "--range needs a RANGE operand"
-      RANGE="$2"; shift 2 ;;
+      RANGE="$2"; RANGE_GIVEN=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; PYTEST_ARGS=("$@"); break ;;
     -*) die 2 "unknown option '$1' (try --help)" ;;
     *)
       [[ "$RANGE" == "$DEFAULT_RANGE" ]] || die 2 "two ranges given (--range $RANGE and '$1')"
-      RANGE="$1"; shift ;;
+      RANGE="$1"; RANGE_GIVEN=1; shift ;;
   esac
 done
 
 [[ "$MODE" == "run" || ${#PYTEST_ARGS[@]} -eq 0 ]] \
   || die 2 "extra pytest arguments need --run (got them with --$MODE)"
+if [[ -n "$FILES_FROM" && "$RANGE_GIVEN" == "1" ]]; then
+  die 2 "--files-from and a range are two different sources of truth — pick one \
+(got list '$FILES_FROM' and range '$RANGE')"
+fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/run-affected.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -123,11 +133,14 @@ if [[ -n "$FILES_FROM" ]]; then
 else
   # A RANGE, not a path. `foo...bar` is already a range; a bare revision means
   # `<rev>...HEAD`; anything else that EXISTS on disk is the #9109 trap (a file
-  # holding the list), which this tool refuses rather than reproducing.
+  # holding the list), which this tool refuses rather than reproducing. The existence
+  # test is made against the CALLER's directory as well as the repo root, because a
+  # relative operand is caller-relative — `mylist.txt` beside a caller in another
+  # directory is the shape the trap actually takes.
   if [[ "$RANGE" != *".."* ]]; then
     if git rev-parse --verify --quiet "${RANGE}^{commit}" >/dev/null 2>&1; then
       RANGE="${RANGE}...HEAD"
-    elif [[ -e "$RANGE" ]]; then
+    elif [[ -e "$RANGE" || -e "$CALLER_PWD/$RANGE" ]]; then
       die 2 "'$RANGE' is a path, not a git range. Tools that pass a PATH to \
 \`--changed-files\` make the path itself a changed file, which fail-closes to the FULL \
 matrix (#9109) — the false 'your diff touches everything' answer. This script reads the \
@@ -141,6 +154,22 @@ default range is $DEFAULT_RANGE)"
   if ! git diff --name-only "$RANGE" > "$CHANGED" 2>"$TMP_DIR/git.err"; then
     cat "$TMP_DIR/git.err" >&2
     die 2 "git diff --name-only $RANGE failed (is 'origin/main' fetched? try: git fetch origin main)"
+  fi
+
+  # A commit-range diff does NOT see the working tree, and silence about that is the one
+  # way this tool can UNDER-select: a lane with uncommitted edits gets the last committed
+  # answer, runs it, and the edit's blast radius was never computed (this is the harm the
+  # doc names — "a subset that misses a test is worse than a subset that runs one
+  # unnecessarily"). Warn, never silently add: the caller may be mid-edit on purpose, and
+  # `--files-from` is the explicit way to include uncommitted work.
+  DIRTY="$(git status --porcelain 2>/dev/null || true)"
+  if [[ -n "$DIRTY" ]]; then
+    DIRTY_N=$(printf '%s\n' "$DIRTY" | wc -l | tr -d ' ')
+    DIRTY_SAMPLE=$(printf '%s\n' "$DIRTY" | awk '{print $NF}' | head -3 \
+      | paste -sd, - | sed 's/,/, /g')
+    printf '%s\n' "run_affected: WARNING — $DIRTY_N uncommitted path(s) are NOT in this selection \
+($DIRTY_SAMPLE$( (( DIRTY_N > 3 )) && printf ', …' || true)); commit, or pass a list that \
+includes them with --files-from" >&2
   fi
 fi
 
@@ -168,7 +197,19 @@ import json
 import sys
 
 selection_path, mode, allow_full, paths_out = sys.argv[1:5]
-data = json.load(open(selection_path, encoding="utf-8"))
+try:
+    with open(selection_path, encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, json.JSONDecodeError) as exc:
+    # Exit 4 is the documented "the selector itself failed" code — an unparsable
+    # payload must land on it, not on a Python traceback with exit 1.
+    print(f"run_affected: the selector returned unreadable/unparsable JSON: {exc}",
+          file=sys.stderr)
+    raise SystemExit(4)
+if not isinstance(data, dict):
+    print(f"run_affected: the selector returned {type(data).__name__}, not a selection",
+          file=sys.stderr)
+    raise SystemExit(4)
 
 full = bool(data.get("full"))
 files = data.get("test_files")
@@ -245,5 +286,8 @@ if [[ "$MODE" == "run" ]]; then
   mapfile -t SELECTED < "$PATHS"
   # `uv run pytest` — the same command AGENTS.md → Testing documents, so a lane that
   # iterates here is running what CI runs (minus the slow/carve-out legs, above).
-  exec uv run pytest "${SELECTED[@]}" ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}
+  # NOT `exec`: exec replaces this shell, so the EXIT trap that removes $TMP_DIR would
+  # never run and every --run would leave a selection record in /tmp. As the last
+  # statement under `set -e`, pytest's exit status is this script's exit status anyway.
+  uv run pytest "${SELECTED[@]}" ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}
 fi
