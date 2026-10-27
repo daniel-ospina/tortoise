@@ -819,7 +819,7 @@ def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
 
     ⛔ The arm64 spelling `ubuntu-24.04-arm` is the same class, not a near-miss: GitHub publishes
     it as a hosted label (`github/docs` `data/reusables/actions/supported-github-runners.md`), and
-    THIS pool is the ARM64 one (`docs/ops/ci-runner-x64.md:30`), so it is the variant most likely
+    THIS pool is the ARM64 one (`docs/ops/ci-runner-x64.md:34`), so it is the variant most likely
     to be attached out of band. A narrower match preserved it forever while the docstring and
     `docs/ops/ci-runner-x64.md` promised the whole `ubuntu-<version>` family — this arm is what
     fails when the two disagree again. `ubuntu-2204-tools` is the opposite boundary: a CUSTOM
@@ -832,13 +832,13 @@ def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
     )
     e.record()
     cfg = e.config()
-    for pinned in ("ubuntu-24.04", "ubuntu-24.04-arm"):
-        assert pinned not in cfg, (
-            f"the pool kept a VERSION-PINNED hosted label ({pinned}) on re-registration — every job "
-            f"pinned to it would be served by the pool it pinned to escape: {cfg}"
-        )
-    assert "--labels self-hosted-x64,ubuntu-latest,gpu,ubuntu-2204-tools" in cfg, (
-        f"dropping the version pins must not cost the custom/fallback labels: {cfg}"
+    # The argv's OWN label list, read back exactly: a substring test cannot tell `ubuntu-24.04` from
+    # `ubuntu-24.04-arm`, and the pair is the whole point of this arm.
+    kept = set(cfg.split("--labels ")[1].split(" ")[0].split(","))
+    assert kept == {"self-hosted-x64", "ubuntu-latest", "gpu", "ubuntu-2204-tools"}, (
+        "a re-registered runner keeps exactly the non-VERSION-pinned labels — a hosted version pin "
+        "(`ubuntu-24.04`, or GitHub's arm64 `ubuntu-24.04-arm`) means every job pinned to it is "
+        f"served by the pool it pinned to escape, and a lost custom label starves its own jobs: {cfg}"
     )
 
 
