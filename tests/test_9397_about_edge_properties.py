@@ -152,8 +152,8 @@ THE SAME BLINDNESS, ONE LEVEL DOWN (review cycle on this file's first version)
 A census that reads only `SET r.<prop>` repeats the error: the property-MAP
 form `SET r += $props` / `SET r = $p` is structurally invisible to it, and two
 shipped sites already use that form on an allowlisted `aboutObject` predicate
-(listed above) — two MORE use it on an `IMPL|NAND` leg and are the declared
-false positives below, which is why the population it must NOT count is the
+(listed above) — one MORE uses it on an `IMPL|NAND` leg and is the
+    declared false positive below, which is why the population it must NOT count is the
 exemptions rather than the census rows (the pinned numbers are in
 `test_the_document_population_counts_match_the_census`). So the census reads all three write forms **where `_PATTERN`
 recognises the spelling** (the gap list above names the spellings it does not),
