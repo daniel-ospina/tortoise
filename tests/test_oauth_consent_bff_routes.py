@@ -233,6 +233,12 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     const result = startRoute.validate(params);
     return { uri, accepted: typeof result !== "string", reason: typeof result === "string" ? result : null };
   });
+} else if (scenario === "native_schemes") {
+  // The AS's private-use-scheme allowlist has a MIRROR here, and a one-sided extension is what
+  // would re-enable the `cursor://` incident: the AS registers and authorizes the redirect, then
+  // `/api/consent/start` answers 400 AFTER the visitor consented. So the two sets are compared.
+  const bridge = await import(CONSENT + "/../../_shared/auth/consent-bridge.ts");
+  out.schemes = [...bridge.NATIVE_REDIRECT_SCHEMES];
 } else if (scenario === "allowlist_check") {
   // THE PAGE'S OWN ALLOWLIST, read out of the page — not a copy of it. `signup.html` is what
   // `/auth` serves, and its return-to block DROPS a `next` that its literals do not admit, so
@@ -533,6 +539,13 @@ _CROSS_HALF_URIS = [
     "http://[0000::1]:6277/cb",
     "http://[0:0:0:0:0:0:0:01]:6277/cb",
     "http://[0:0:0:0:0:ffff:127.0.0.1]:6277/cb",
+    # `fill = 1` — the maximally compressed spelling, which is the boundary of the `::` expansion
+    "http://[::0:0:0:0:0:0:1]:6277/cb",
+    # the mapped rule's REFUSAL half: without these, `return isV6Loopback || mapped` keeps the suite
+    # green while accepting `http://[::ffff:126.0.0.1]/cb` — an http redirect to a NON-loopback host
+    # that the AS refuses.
+    "http://[::ffff:126.0.0.1]/cb",
+    "http://[::ffff:10.0.0.1]/cb",
     # the IPv4 guards: leading-zero octets are ambiguous to `ipaddress` (it REFUSES them) while
     # WHATWG reads them as decimal, and an octet above 255 makes WHATWG refuse the parse entirely.
     "http://127.000.000.001/cb",
@@ -663,6 +676,32 @@ def test_the_return_leg_never_nulls_a_recorded_owner() -> None:
         f"the return leg nulled the owner ({rows[0]['user_id']!r}) — a different identity could "
         "then mint into this flow, which is what the mint's foreign-owner refusal prevents"
     )
+
+
+def test_the_native_scheme_allowlist_is_the_same_set_on_both_halves() -> None:
+    """A one-sided extension of `_NATIVE_REDIRECT_SCHEMES` must red HERE, not in production.
+
+    The table below cannot catch it: it only covers the schemes already in it, so adding `vscode`
+    to one half alone left every test green — and the incident that shape re-enables is `cursor://`:
+    the AS registers and authorizes the native-scheme redirect, then `/api/consent/start` answers
+    400 "must use https" AFTER the visitor has consented. `oauth.py`'s own note invites the one-line
+    extension ("Extending it is a reviewed one-line change with a test"), so the test has to exist.
+    """
+    from tortoise.oauth import _NATIVE_REDIRECT_SCHEMES
+
+    out = _run("native_schemes")
+    ts_schemes = set(out["schemes"])
+    as_schemes = set(_NATIVE_REDIRECT_SCHEMES)
+    assert ts_schemes == as_schemes, (
+        "the private-use scheme allowlist drifted between the halves: "
+        f"BFF-only={sorted(ts_schemes - as_schemes)}, AS-only={sorted(as_schemes - ts_schemes)}. "
+        "An AS-only scheme means /api/consent/start refuses a redirect the AS just authorized."
+    )
+    # ...and each one must actually be ACCEPTED by the BFF, so the set equality cannot hold over a
+    # rule that refuses natives outright.
+    uris = [f"{scheme}://client.example/cb" for scheme in sorted(as_schemes)]
+    for row in _run("redirect_uri_table", uris=uris)["verdicts"]:
+        assert row["accepted"], f"the BFF refuses the AS's own native scheme: {row}"
 
 
 @pytest.mark.parametrize("broken,needle", [

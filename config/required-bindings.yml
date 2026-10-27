@@ -347,11 +347,18 @@ projects:
       # `required`, per `docs/engineering/auth/consent-identity-bridge.md` §2.3 ("declared
       # in `config/required-bindings.yml` so the deploy preflight fails closed until it
       # exists") and §8's operator checklist. This deliberately takes the `required` route
-      # rather than CONTACT_INTAKE_URL's `recommended` one: a consent token signed with A
-      # KEY THAT IS NOT THE AS'S is worse than an unavailable route — it is a forgery
-      # oracle for `sub`, and `sub` is the only identity input on the token arm (§2.2). The
-      # whole point of the bridge is that the AS trusts the assertion, so "signed with
-      # whatever was lying around" must never be reachable.
+      # rather than CONTACT_INTAKE_URL's `recommended` one, and the reason is AVAILABILITY:
+      # an unset key makes every mint answer a typed 503, which is a route that silently
+      # cannot work — and the BFF mints, so the whole consent arm is dead until it is set.
+      #
+      # ⛔ THIS GATE IS NOT THE ANTI-FORGERY CONTROL, and reading it as one is how the real
+      # one gets loosened. A token signed with a key the AS does not hold is simply refused
+      # (`401 invalid_token` on every redemption) — an outage, not an oracle: it cannot
+      # assert a `sub` the AS accepts. The control that stops a key being reused from the
+      # ANON key (public — the consent page embeds it in HTML) or the service-role key is
+      # `consent_token_secret_problem()` in `tortoise/consent_token.py`, which refuses a
+      # blank, padded, too-short or reused value; that function is what the operator note
+      # below points at, and it is where a "just set something" shortcut must be stopped.
       #
       # ⚠️ ORDERING CONSEQUENCE, stated because `required` reds a deploy: the operator sets
       # this in the Pages project BEFORE (or with) the deploy that ships
