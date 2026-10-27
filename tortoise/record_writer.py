@@ -1172,6 +1172,14 @@ def write_live_record(record: Mapping[str, Any], *,
     from "refused, nothing stored", and the only signal was a counter the
     producer does not read. `None` now means exactly one thing on this door.
 
+    ⚠️ RETURNED, NOT YET CONSUMED (#10021): the three production call sites —
+    ``api.EventAPI._emit``, ``mining._emit_event`` and
+    ``sdk.TortoiseSDK._write_record_projection`` — still DISCARD the value, so
+    what this closes today is the seam's capability (a producer that holds the
+    return can branch on it), not the store-selection decision itself.
+    Consuming ``refusal`` is #10021's work; until then the runtime signal for a
+    refused ARMED write remains the counter and the WARNING.
+
     The RETURNED WATERMARK describes journal POSITIONS, so a write with no
     proven ordinal consumed none: it reports ``last_seq == first_seq - 1``, this
     class's own "nothing consumed" spelling (see :attr:`RecordWrite.last_seq`),
