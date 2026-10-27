@@ -2386,11 +2386,17 @@ def test_state_op_target_id_with_an_unestablished_name_still_refuses(env):
     """#10107 review round 6: a state op NAMES an id the journal could address.
 
     FAILS IF: the id limb counts `ObjectRegistered` and mention-stub ids only.
-    `EntityMutated` addresses its target BY ID, so a supersede carrying that id
-    describes a carrier the journal could reach — yet the oracle counted only
-    the state op's NAME, so the record was exempted as "established by nothing
-    at all" and `rebuild()` (which folds it on a graph that holds the carrier)
-    disagreed with `rebuild_all`.
+    `EntityMutated` addresses its target BY ID, so the journal DID produce that
+    address — the exemption's premise ("nothing could have produced it") is
+    false for such a record, and the oracle consulted only the state op's NAME
+    and exempted it as "addressed by nothing at all".
+
+    The divergence that limb prevents is on the LIVING path: `apply()` against
+    a graph that already holds the carrier matches by that id and lands the
+    supersede, while `rebuild_all` (wipe, no carrier) would have skipped it.
+    In THIS fixture the rename itself misses, so the run is red either way and
+    what is pinned is the record's CLASSIFICATION — the value all three
+    surfaces key the exemption on.
     """
     sdk, events = env
     _raw(events, type="EntityMutated", op="rename", label="Object",
@@ -2412,10 +2418,13 @@ def test_mention_stub_id_with_an_unestablished_name_still_refuses(env):
 
     FAILS IF: the id limb is populated from `ObjectRegistered` alone. A
     mention mints the stub with `id = entity_name_id("Object", name)` written
-    `ON CREATE`, and a later registration can re-id that node — so at sweep
-    time `Sup(id=<stub id>, name=<nothing established>)` misses BOTH ways, yet
-    `rebuild()` folded it at the record's own seq when the stub still carried
-    that id. One journal, two graphs, opposite verdicts; `main` refused.
+    `ON CREATE`, and a later registration re-ids that node — so at sweep time
+    `Sup(id=<stub id>, name=<nothing established>)` misses BOTH ways, while at
+    the record's own seq the stub still carried that id and the fold lands.
+    One journal, two end states. `main` had no id limb, so it exempted this
+    record as well and the two graphs ENDED differently (the run's own status
+    left unset by the sweep, marked `superseded` by the chronological fold);
+    the limb makes both REFUSE instead of diverging silently.
     """
     sdk, events = env
     _raw(events, type="EventRecorded", id="e-ms-1", eventKind="k",
@@ -2440,9 +2449,11 @@ def test_mention_established_then_deleted_name_still_refuses(env):
 
     FAILS IF: the oracle ignores `EventRecorded` mention stubs, which
     `_event_plain_merge` MERGEs as an Object by name. Once the stub is deleted,
-    a name-only supersede of it folds 0 rows and would be exempted as "never
-    established" — while `main` refused, and while `EXEMPT_SHAPES` promises
-    that a name the journal established still refuses.
+    a name-only supersede of it folds 0 rows — and with registrations and
+    rename state ops alone as the oracle (`main`'s shape, which has no mention
+    source) the name looked "never established", so the record was EXEMPTED
+    and the supersede silently dropped. `EXEMPT_SHAPES` promises the opposite:
+    a name the journal established still refuses.
 
     REACHABLE: mention a name, hard-delete the stub by its deterministic id,
     then supersede by name.
