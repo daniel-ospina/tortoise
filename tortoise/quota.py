@@ -1128,15 +1128,21 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # invisible to every caller that handles the documented `QuotaCheckError`.
     # ⚠️ SCOPE — this validates the dict the GATE IS GIVEN. It cannot fix a
     # corrupt value that dies EARLIER or is coerced ELSEWHERE (both tracked as
-    # #10136): the commit/capture lanes' auth resolvers coerce first (`int(mp)`),
-    # so a corrupt stored `max_points` there fails in auth as an UNNAMED 500; and
-    # create-graph / key-mint / invite do their OWN `int(...)` without calling
-    # this helper, so they raise the same unnamed error. What DOES arrive here raw:
-    # `get_current_org_session` carries `_org_limits_from_node`'s uncoerced
-    # `max_api_keys` into `_check_org_limit(org, "api_keys")`, and the
-    # `/v1/index/docs` documents gate hands over a resolver-produced dict — so the
-    # gate must not assume its input is an int. OverflowError is the same class
-    # as TypeError/ValueError (`int(float('inf'))`).
+    # #10136). THE LANE INVENTORY LIVES HERE, ONCE — do not restate it at a
+    # caller; two copies drifted apart inside #4051's own commit.
+    #   • ARRIVES RAW (this refusal owns it): `get_current_org_session` →
+    #     `_session_user_org` takes the Org node's `max_api_keys` UNCOERCED
+    #     (`_org_limits_from_node` passes `mak` straight through) into
+    #     `_check_org_limit(org, "api_keys")` at the key-mint / rotate sites; and
+    #     the `/v1/index/docs` documents gate hands over a resolver-produced
+    #     `max_points`. So the gate must not assume its input is an int.
+    #   • DOES NOT ARRIVE (fails as an unnamed 500 elsewhere — #10136, NOT
+    #     closed here): the commit/capture lanes' auth resolvers coerce
+    #     `max_points` with `int(mp)` first, so a corrupt stored value dies in
+    #     AUTH; and create_graph / invite_to_org take `_org_limits_from_node` but
+    #     do their own `int(max_graphs)` / capacity count WITHOUT calling this
+    #     helper.
+    # OverflowError is the same class as TypeError/ValueError (`int(float('inf'))`).
     try:
         limit = int(limit)
     except (TypeError, ValueError, OverflowError):

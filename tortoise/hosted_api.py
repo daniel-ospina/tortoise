@@ -17891,9 +17891,14 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # (`get_current_org_gated`) coerces `max_points` with `int(mp)` before
         # the handler ever runs — so a corrupt STORED value fails earlier, in
         # auth, as an unnamed 500 (`"Auth error"` on the Supabase lane). That is
-        # the resolver's gap, tracked as #10136; it is NOT closed by this gate,
-        # and the gate still owns the case where a raw value reaches it (the
-        # `_org_limits_from_node` lanes: create_graph / invite / key-mint).
+        # the resolver's gap, tracked as #10136; it is NOT closed by this gate.
+        # WHICH lanes hand the gate a raw value — and which do their own
+        # `int(...)` and so stay unnamed — is stated ONCE, in
+        # `quota.enforce_org_limit`'s SCOPE note. Do not restate the inventory
+        # here: two copies of it drifted apart inside this very change (this one
+        # claimed create_graph / invite reached the gate, which they never do —
+        # they call their own `int(max_graphs)` — while `quota`'s copy denied it
+        # for key-mint, the one lane that really does arrive raw).
         #
         # #4051 — the org points gate. It enforces the org's OWN `max_points`:
         # the value this handler's sole dependency (`get_current_org_gated`)

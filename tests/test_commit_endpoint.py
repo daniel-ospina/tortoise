@@ -2521,6 +2521,35 @@ class TestCommitPointsGate:
             f"the refusal must NAME the unreadable surface, got: {detail}")
         assert self._chain_counts("sUnreadable") == (0, 0, 0)
 
+    def test_missing_max_points_refuses_and_mints_nothing(self, client):
+        """#4051: the presence contract RIDES on `max_points` now, so a limits
+        dict that OMITS the key must still refuse — and name it.
+
+        Removing `_check_org_limit(org, "sessions")` removed this lane's OTHER
+        presence check: it 500'd a limits dict with no `max_sessions` key
+        (#310 GAP-B). The removal is only honest while the surviving check is
+        pinned HERE — otherwise a later edit that made the points gate skip a
+        MISSING `max_points` ("a miss is never a pass") would leave this lane
+        with no fail-closed org gate at all, and every other test on the lane
+        would stay green (they all supply the key). Mutation REDs this: make
+        the missing-key branch in `quota.enforce_org_limit` `return` instead of
+        raise — the commit then 200s and mints the chain.
+        """
+        limits = dict(TEST_TEAM)
+        del limits["max_points"]
+        app.dependency_overrides[get_current_org] = lambda: limits
+        r = _commit(client, _raw_payload(0, session_id="sMissingMaxPoints",
+                                         points=[], entities=[],
+                                         provenance_refs=[]))
+        assert r.status_code == 500, (
+            "a limits dict with no max_points key passed the gate: "
+            f"{r.status_code} {r.text}")
+        detail = str(r.json()["detail"])
+        assert "max_points" in detail, (
+            f"the refusal must NAME the missing field, got: {detail}")
+        assert self._chain_counts("sMissingMaxPoints") == (0, 0, 0), (
+            "the refused commit minted nodes")
+
     def test_at_max_points_refused_and_mints_nothing(self, client):
         """#4051: with the org AT max_points, a `points: []` commit — the
         cheapest possible loop iteration — 402s and mints no
