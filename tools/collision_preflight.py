@@ -2984,8 +2984,23 @@ def _branch_terminal_state_from_prs(
     return None
 
 
+class RemoteBranch(NamedTuple):
+    """What the branch API said about a demoted ref's REMOTE counterpart (#10174).
+
+    `sha` is the remote tip the same response carried, or "" when it carried none. It
+    exists so the note can compare it with the demoted LOCAL tip: `present` at the same
+    tip is the leftover and can be deleted; `present` at another tip means the NAME was
+    reused and a lane may be live under it — advice to delete there would destroy the
+    only holder of unlanded work (review finding on #10205).
+    """
+
+    kind: str
+    why: str
+    sha: str = ""
+
+
 def _remote_branch_state(gh_bin: str, slug: str | None, cwd: str, timeout: float,
-                        ref: str) -> tuple[str, str]:
+                        ref: str) -> RemoteBranch:
     """("gone" | "present" | "unreadable", a one-line reason) for a LOCAL branch.
 
     #10174: the question is *does the remote still hold this branch?* — and only
@@ -3005,47 +3020,81 @@ def _remote_branch_state(gh_bin: str, slug: str | None, cwd: str, timeout: float
     are different sentences with different remedies, the module's oldest defect).
 
     Bounded like every other optional surface: ONE request, paid only for a ref that
-    the merge-history test has ALREADY demoted (normally zero or one per run), never
-    per local branch. The branch name is percent-encoded into the path for the same
-    reason `_branch_terminal_state_from_prs` encodes it into the query — a ref name is
+    the merge-history test has ALREADY demoted (zero-or-one per DEMOTED REF — several
+    demoted refs in one run cost several reads; never one per local branch). The branch
+    name is percent-encoded into the path for the same reason
+    `_branch_terminal_state_from_prs` encodes it into the query — a ref name is
     writer-influenced and `/` is the only character left intact.
+
+    ⛔ IT ALSO RETURNS THE REMOTE TIP, and that is NOT a convenience (review finding on
+    #10205). A branch NAME is reused: a lane can take a name whose old incarnation was
+    squash-merged and push NEW work to it from another machine or a cell, and this clone
+    never fetches, so `origin/<branch>` can be AHEAD of the demoted local ref holding
+    commits that landed nowhere. `name` alone cannot tell that apart from the leftover,
+    and the first cut of this clause used it to advise "delete the remote one too" —
+    advice that would have deleted the only holder of a live lane's unlanded work. The
+    tip is on the SAME response, so the comparison is free and the advice can be made
+    SAFE BY CONSTRUCTION instead of by the reader's caution. `sha` is "" when the payload
+    carried no tip; a caller must then treat the comparison as UNVERIFIED, never as a
+    match.
     """
     if not slug:
-        return "unreadable", "no owner/name for the target repo"
+        return RemoteBranch("unreadable", "no owner/name for the target repo")
     branch = _short_branch(ref) if ref and ref != "(detached)" else ""
     if not branch:
-        return "unreadable", f"{ref!r} names no branch"
+        return RemoteBranch("unreadable", f"{ref!r} names no branch")
     path = f"repos/{slug}/branches/{quote(branch, safe='/')}"
     try:
-        payload = _gh_json(gh_bin, ["api", path, "--jq", "{name: .name}"], cwd, timeout)
+        payload = _gh_json(
+            gh_bin,
+            ["api", path, "--jq", "{name: .name, sha: (.commit.sha // \"\")}"],
+            cwd, timeout,
+        )
     except SurfaceError as exc:
         blob = str(exc).lower()
         # `gh` renders a non-2xx as `HTTP <code>: <status> (<url>)`, so the 404 is
         # matched on the CODE as well as on the prose — a bare "not found" test
         # would miss the documented form on a response with no body prose.
         if "http 404" in blob or "not found" in blob:
-            return "gone", f"the branch API returned 404 for `{branch}`"
-        return "unreadable", _one_line(str(exc))
-    name = payload.get("name") if isinstance(payload, dict) else None
-    if isinstance(name, str) and name:
-        return "present", f"the branch API still returns `{name}`"
-    return "unreadable", (
-        f"the branch API answered {type(payload).__name__} without a name"
+            return RemoteBranch("gone", f"the branch API returned 404 for `{branch}`")
+        return RemoteBranch("unreadable", _one_line(str(exc)))
+    if not isinstance(payload, dict):
+        return RemoteBranch("unreadable", (
+            f"the branch API answered {type(payload).__name__}, not an object"
+        ))
+    name = payload.get("name")
+    if not (isinstance(name, str) and name):
+        return RemoteBranch("unreadable", (
+            f"the branch API answered without a name ({_one_line(repr(payload))})"
+        ))
+    remote_sha = payload.get("sha")
+    return RemoteBranch(
+        "present",
+        f"the branch API still returns `{name}`",
+        remote_sha if isinstance(remote_sha, str) else "",
     )
 
 
-def _remote_counterpart_clause(state: tuple[str, str] | None, ref: str) -> str:
+def _remote_counterpart_clause(state: RemoteBranch | None, ref: str,
+                              tip: str | None) -> str:
     """The note fragment for `_remote_branch_state`'s answer, or "" when unasked.
 
-    ⛔ EACH OF THE THREE ANSWERS SAYS A DIFFERENT THING, and the difference is the
-    point: `gone` is corroboration a lane is dead and the ref can be deleted; `present`
-    is a second cleanup target (a local delete alone leaves `origin` holding it);
-    `unreadable` is UNKNOWN — stated as such, and stated not to be load-bearing, so a
-    reader cannot mistake a failed read for either of the other two.
+    ⛔ EVERY ANSWER SAYS A DIFFERENT THING, and the differences are the point:
+
+      * `gone` — corroboration a lane is dead: nothing on the remote can still be held
+        under a deleted name, so the local ref is safe to delete;
+      * `present` at the MERGED tip — the remote still holds exactly the artifact this
+        demotion proved landed, so it is a second cleanup target (a local delete alone
+        leaves `origin` holding it);
+      * `present` at ANOTHER tip — the name was REUSED and the remote holds work this
+        local ref never had. Then a lane may be live under that name: say so, and NEVER
+        advise a delete (review finding on #10205 — see `_remote_branch_state`);
+      * `present` with no comparable tip, or `unreadable` — UNKNOWN, stated as such, and
+        stated not to be load-bearing, so neither can be mistaken for the other.
     """
     if state is None:
         return ""
-    kind, why = state
+    kind, why = state.kind, state.why
     branch = _short_branch(ref)
     if kind == "gone":
         return (
@@ -3054,10 +3103,25 @@ def _remote_counterpart_clause(state: tuple[str, str] | None, ref: str) -> str:
             "nothing on the remote can still be held under a deleted name"
         )
     if kind == "present":
+        if state.sha and tip and state.sha == tip:
+            return (
+                f"; its remote counterpart `origin/{branch}` STILL EXISTS {why} at the "
+                f"SAME tip {tip[:9]} this demotion proves landed — that remote ref is "
+                "the leftover too, so delete both (a local delete alone re-dresses the "
+                "name on the next fetch)"
+            )
+        if state.sha and tip:
+            return (
+                f"; its remote counterpart `origin/{branch}` STILL EXISTS {why} but at "
+                f"ANOTHER tip ({state.sha[:9]}, not this ref's {tip[:9]}) — the NAME WAS "
+                "REUSED and the remote holds work this local ref never had, so a lane "
+                "may be LIVE under it: do NOT delete the remote ref, and do not read "
+                "this row as free. Only the local leftover is proven"
+            )
         return (
-            f"; its remote counterpart `origin/{branch}` STILL EXISTS ({why}) — the "
-            "local ref is still a merged leftover, but delete the remote one too or a "
-            "later fetch re-dresses the name"
+            f"; its remote counterpart `origin/{branch}` STILL EXISTS {why}, but its "
+            "tip could not be compared with this ref — treat it as UNVERIFIED: a "
+            "reused name can hold live work, so do NOT delete the remote ref"
         )
     return (
         f"; whether the remote still holds `origin/{branch}` could not be read ({why}) "
@@ -3066,7 +3130,7 @@ def _remote_counterpart_clause(state: tuple[str, str] | None, ref: str) -> str:
     )
 
 
-def _ask_remote_state(remote_state: object, ref: str) -> tuple[str, str] | None:
+def _ask_remote_state(remote_state: object, ref: str) -> RemoteBranch | None:
     """Call the injected remote-state reader, folding a failed READ into `unreadable`.
 
     The reader is injected (like `counts` / `tip_age` / `stale`) so the gh binary,
@@ -3083,9 +3147,9 @@ def _ask_remote_state(remote_state: object, ref: str) -> tuple[str, str] | None:
     try:
         return remote_state(ref)  # type: ignore[operator]
     except SurfaceError as exc:
-        return "unreadable", _one_line(str(exc))
+        return RemoteBranch("unreadable", _one_line(str(exc)))
     except Exception as exc:  # a NOTE read can never break the scan
-        return "unreadable", _one_line(f"{type(exc).__name__}: {exc}")
+        return RemoteBranch("unreadable", _one_line(f"{type(exc).__name__}: {exc}"))
 
 
 def _tip_is_ancestor_of(
@@ -3988,7 +4052,7 @@ def scan_branch_surface(
             extra = ""
             if terminal.tip_is_a_merged_head:
                 extra = _remote_counterpart_clause(
-                    _ask_remote_state(remote_state, ref), ref)
+                    _ask_remote_state(remote_state, ref), ref, sha)
             surface.add(
                 ref,
                 f"branch is {terminal.reason}{extra} — immutable history, not "
@@ -4011,7 +4075,7 @@ def scan_branch_surface(
             # predicate 1 — so the same corroboration applies, and it is asked the
             # same bounded way (this ref was about to BLOCK).
             extra = _remote_counterpart_clause(
-                _ask_remote_state(remote_state, ref), ref)
+                _ask_remote_state(remote_state, ref), ref, sha)
             surface.add(
                 ref,
                 f"branch is terminal — {targeted}{extra}; immutable history, not "
@@ -7238,8 +7302,9 @@ def run_preflight(
     #     whole lookup and is COUNTED, so the ref keeps blocking (fail-closed).
     #   * #10174 — ONE `repos/<slug>/branches/<name>` request, paid only for a ref the
     #     merge history has ALREADY demoted, to say whether the remote counterpart is
-    #     gone. Zero-or-one per run, never per branch, and note-only: a failure
-    #     neither demotes nor un-demotes (see `_remote_branch_state`).
+    #     gone, still there, and AT WHICH TIP. One per DEMOTED REF (several demoted
+    #     refs cost several reads; never one per local branch), and note-only: a
+    #     failure neither demotes nor un-demotes (see `_remote_branch_state`).
     merged_heads: dict[str, int | None] = {}
     #: Did the harvest actually RUN? `false` means the closed-PR sample could not be
     #: read, so predicate 1 had no witness at all — which the branch surface's note
@@ -7566,10 +7631,11 @@ def run_preflight(
     def _ref_tip_age(_ref: str) -> float | None:
         return _ref_tip_age_days(git_bin, cwd, _ref, timeout)
 
-    # #10174: does the REMOTE still hold this branch? Paid only for a ref the merge
-    # history already demoted (see `_remote_branch_state`), and note-only — a failure
-    # may not demote, un-demote, or turn the surface INCOMPLETE.
-    def _remote_state(_ref: str) -> tuple[str, str]:
+    # #10174: does the REMOTE still hold this branch, and at which tip? Paid only for
+    # a ref the merge history already demoted — one read per DEMOTED REF, never one per
+    # local branch (see `_remote_branch_state`) — and note-only: a failure may not
+    # demote, un-demote, or turn the surface INCOMPLETE.
+    def _remote_state(_ref: str) -> RemoteBranch:
         return _remote_branch_state(gh_bin, slug, cwd, timeout, _ref)
 
     # ⛔ THE WORKTREE LISTING IS READ HERE, BEFORE THE BRANCH SURFACES, because the

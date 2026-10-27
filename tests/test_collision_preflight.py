@@ -5843,22 +5843,75 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
         self.assertIn(f"branches/feat/{ISSUE}-consent-token-as-half", calls[0])
 
+    def _remote_branch_fixture(self, ref: str, sha: str) -> None:
+        """The POST-`--jq` shape the branch API read actually returns.
+
+        ⛔ BOTH KEYS, and `sha` is not decoration: the reader compares the remote tip
+        with the demoted local tip, so a fixture carrying only `name` models a payload
+        the projection cannot produce AND would leave the comparison permanently
+        unverifiable — hiding the reused-name case below behind a passing test.
+        """
+        (self.gh_dir / "remote_branch.json").write_text(
+            json.dumps({"name": ref, "sha": sha}))
+
     def test_merged_leftover_whose_remote_branch_still_exists_says_so(self):
         # The OTHER remote state, and the reason the note must read the remote
-        # rather than assume: a leftover whose branch is still on `origin` needs
-        # a remote delete as well, and a note that printed "GONE" unconditionally
-        # would send the reader looking for nothing.
+        # rather than assume: a leftover whose branch is still on `origin` AT THE
+        # MERGED TIP needs a remote delete as well, and a note that printed "GONE"
+        # unconditionally would send the reader looking for nothing.
         ref = f"feat/{ISSUE}-still-on-the-remote"
-        self._diverged_squash_merged_ref(ref)
-        (self.gh_dir / "remote_branch.json").write_text(
-            json.dumps({"name": ref}))
+        tip = self._diverged_squash_merged_ref(ref)
+        self._remote_branch_fixture(ref, tip)
         rc, out = self.run_tool(issue=ISSUE)
         self.assertEqual(rc, 0, out)
         row = self._branch_rows(out, ref)[0]
         self.assertIn("MERGED LEFTOVER", row)
         self.assertIn("remote counterpart", row)
         self.assertIn("STILL EXISTS", row)
+        self.assertIn("SAME tip", row)
         self.assertNotIn("GONE", row)
+        # The delete advice is EARNED here: the remote tip IS the merged tip.
+        self.assertIn("delete both", row)
+
+    def test_a_reused_branch_name_on_the_remote_is_never_advised_for_deletion(self):
+        # ⛔ THE REVIEW FINDING ON #10205, and it is the dangerous direction. The
+        # demotion proves the LOCAL tip is a merged PR's head. It says NOTHING about
+        # what `origin/<branch>` holds: a lane can reuse the name and push NEW work
+        # from another machine or a cell, and this clone never fetches. A note built
+        # from the name alone ("STILL EXISTS → delete the remote one too") would tell
+        # a reader to delete the only remaining holder of that lane's unlanded work.
+        # The remote tip is on the same response, so the comparison is free — and the
+        # advice must flip on it.
+        ref = f"feat/{ISSUE}-name-reused-on-the-remote"
+        tip = self._diverged_squash_merged_ref(ref)
+        self._remote_branch_fixture(ref, "b" * 40)  # a DIFFERENT tip
+        self.assertNotEqual("b" * 40, tip)
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("NAME WAS REUSED", row)
+        self.assertIn("do NOT delete the remote ref", row)
+        self.assertNotIn("delete both", row)
+        self.assertNotIn("GONE", row)
+        # The LOCAL demotion is unchanged — only the advice about the REMOTE flips.
+        self.assertIn("(weak)", row)
+
+    def test_a_remote_branch_with_no_comparable_tip_is_unverified_not_a_delete(self):
+        # The third state of the same comparison: the remote branch exists but the
+        # payload carried no tip. UNVERIFIED is its own answer — it may not inherit
+        # the same-tip arm's "delete both" (which would be advice from an absent
+        # measurement) nor the gone arm's corroboration.
+        ref = f"feat/{ISSUE}-remote-tip-unknown"
+        self._diverged_squash_merged_ref(ref)
+        self._remote_branch_fixture(ref, "")
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("UNVERIFIED", row)
+        self.assertIn("do NOT delete the remote ref", row)
+        self.assertNotIn("delete both", row)
 
     def test_merged_leftover_with_an_unreadable_remote_read_is_still_advisory(self):
         # ⛔ THE DEMOTION DOES NOT DEPEND ON THIS READ. Tip equality is the
