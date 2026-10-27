@@ -403,6 +403,36 @@ class TestCompare:
             resolved_config=graded_cfg, run_fixtures_hash=HASH_A,
         ) == VERDICT_REGRESSION
 
+    def test_push_floor_only_applies_when_the_gold_can_name_a_point(self):
+        """#8125: the push precision floor grades POINTER IDENTITY, so it can
+        only apply when the gold can resolve a pointer to a point in the cell.
+        The committed push gold carries symbolic ids (``pt_lumen_boundary``)
+        that no cell can mint ⇒ every precision the graded reflex can produce
+        is 0.000 by construction.  Such a run must not read as a quality
+        regression (a floor whose signal does not exist), and a
+        graph-grounded gold re-activates the floor with no flag to flip."""
+        baseline = _baseline({"push_precision": 0.0}, reflex="graded")
+        graded_cfg = _config(reflex="graded")
+        # Ungradeable gold ⇒ the floor is not applied (the kta/false-fire
+        # bars still are — they grade the decision, which the gold expresses).
+        assert schema.compare_run(
+            {"push_precision": 0.0}, baseline,
+            resolved_config=graded_cfg, run_fixtures_hash=HASH_A,
+            push_grounded=False,
+        ) == VERDICT_PASS
+        # Graph-grounded gold ⇒ back on, and a zero precision is a regression.
+        assert schema.compare_run(
+            {"push_precision": 0.0}, baseline,
+            resolved_config=graded_cfg, run_fixtures_hash=HASH_A,
+            push_grounded=True,
+        ) == VERDICT_REGRESSION
+        # The kta bar is NOT affected by the push grounding flag.
+        assert schema.compare_run(
+            {"push_precision": 0.0, "know_to_ask_failure_rate": 1.0}, baseline,
+            resolved_config=graded_cfg, run_fixtures_hash=HASH_A,
+            push_grounded=False,
+        ) == VERDICT_REGRESSION
+
 
 class TestBless:
     FULL_METRICS = schema.aggregate_metrics([])

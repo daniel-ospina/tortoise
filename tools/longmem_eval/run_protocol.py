@@ -72,6 +72,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import spend_guard
+
 #: Repo root (three parents up from tools/longmem_eval/).
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -100,6 +102,14 @@ DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 #: must pair their own ``--integrity-justification`` or the applied
 #: threshold carries no recorded reason (documented silent case).
 JUSTIFIED_BASELINE_THRESHOLD = 0.02
+
+#: #8486 F1: the pre-registered hard spend stop, injected into EVERY run step
+#: below. It was "pre-registered" in ``run-report.md`` and existed in NO code
+#: path (``grep -c HARD_STOP_USD`` → 2, both markdown), so a protocol-launched
+#: run had no ceiling at all. Named once, in ``spend_guard`` (the enforcer),
+#: and passed explicitly here so the command line a step prints is the command
+#: that was capped — the value is the owner's recorded decision, not ours.
+HARD_STOP_USD = spend_guard.HARD_STOP_USD
 
 #: #2516 (C1): the TYPE-STRATIFIED slice mandate. The pilot (step 3) and the
 #: confirmation (step 7) must measure a slice that spans the question types,
@@ -398,7 +408,13 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
     # arm is valid on all five; the runner records the resulting posture in the
     # report methodology and the sealed receipt refuses a completed run
     # without it.
-    common = [*extra, "--activate-beliefs",
+    # #8486 F1: every run step carries the pre-registered spend ceiling. It is
+    # placed BEFORE ``*extra`` because the runner's argparse keeps the LAST
+    # occurrence — so an operator override in ``extra`` always wins, while a
+    # step with no override is capped at the recorded value rather than at
+    # nothing. The run records what was enforced in ``methodology.hard_stop``.
+    common = ["--hard-stop-usd", f"{HARD_STOP_USD}", *extra,
+              "--activate-beliefs",
               "--checkpoint", str(cp), "--output", str(out)]
 
     if step.runner == "pilot":          # step 3: type-stratified pilot

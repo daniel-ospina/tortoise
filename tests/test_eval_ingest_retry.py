@@ -27,6 +27,8 @@ import redis.exceptions as redis_exc
 
 import tortoise.extractor_v2 as ev2
 from tools.longmem_eval import run as runner
+from tools.longmem_eval import spend_guard
+from tools.longmem_eval import usage as lme_usage
 from tools.longmem_eval.errors import (
     INGEST_QUESTION_RETRIES,
     INGEST_WRITE_RETRIES,
@@ -970,3 +972,36 @@ def test_provider_transient_no_write_retry_no_r2(tmp_path, monkeypatch):
     # exactly one pipeline pass — no R2 (the marker is only armed by the
     # write-stage loop, which this transient never entered)
     assert sdk_creations["n"] == 1
+
+
+def test_hard_stop_aborts_the_v2_extractor_instead_of_a_question(tmp_path):
+    """#8486 F1: the extractor is the v2 run's largest paid lane, so the
+    ceiling is checked before EACH session's extraction call — and that check
+    sits OUTSIDE ``ingest_haystack_v2``'s per-session ``except`` (which turns a
+    non-transient failure into a per-question ``{"exc": ex}`` result). Inside
+    it, a hard stop would invalidate one question and keep spending past the
+    ceiling it just enforced.
+
+    RED if the check is moved inside that try: the call RETURNS a stats dict
+    with ``errors`` populated instead of raising.
+    """
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        spend_guard.reset()
+        lme_usage.get_collector().reset()
+        try:
+            spend_guard.arm(0.01)
+            # $0.056 of reader spend already on the clock (> the ceiling)
+            lme_usage.get_collector().record(
+                stage="reader", provider="deepseek",
+                model_id="deepseek-flash",
+                usage={"prompt_tokens": 400_000, "completion_tokens": 2_000},
+                usage_present=True)
+            with pytest.raises(spend_guard.HardStopExceeded) as ei:
+                ingest_haystack_v2(sdk, _v2_question(), object())
+            assert ei.value.reason == "ceiling_reached"
+        finally:
+            spend_guard.reset()
+            lme_usage.get_collector().reset()
+    finally:
+        sdk.close()
