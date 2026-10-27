@@ -306,7 +306,14 @@ export async function ensureConsentAttemptTable(db: D1Database): Promise<void> {
  * return leg re-records the same row (`state` is the key) with the resolved owner.
  *
  * Idempotent on `state`: a re-entry must not create a second row for one flow, and must never
- * overwrite a known owner with `null` (`COALESCE`).
+ * overwrite a known owner — neither with `null` nor with a DIFFERENT identity. Hence the COALESCE
+ * prefers the EXISTING value: `COALESCE(consent_attempts.user_id, excluded.user_id)` fills the
+ * ownerless cold-browser row on the return leg (nothing is lost — it was NULL) while a second
+ * identity that re-ENTERS this route for someone else's `state` cannot take the flow over. The
+ * other order (`excluded` first) is last-writer-wins, which makes the mint's foreign-owner refusal
+ * unreachable by one GET: B re-enters A's flow, the row becomes B's, and B then mints an assertion
+ * asserting B bound to A's redirect_uri/code_challenge/state — identity injection into a flow A
+ * began.
  */
 export async function recordConsentAttempt(
   db: D1Database,
@@ -325,7 +332,7 @@ export async function recordConsentAttempt(
         "(state,client_id,redirect_uri,code_challenge,scope,resource,user_id,created_at,expires_at) " +
         "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) " +
         "ON CONFLICT(state) DO UPDATE SET " +
-        "user_id=COALESCE(excluded.user_id, consent_attempts.user_id), " +
+        "user_id=COALESCE(consent_attempts.user_id, excluded.user_id), " +
         "expires_at=excluded.expires_at",
     )
     .bind(

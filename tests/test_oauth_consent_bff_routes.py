@@ -123,7 +123,12 @@ class FakeD1 {
         // a double that hardcoded "only overwrite with non-null" would keep the suite green if that
         // COALESCE were deleted, and the nulling is exactly what lets a SECOND identity pass the
         // mint's `attempt.user_id !== row.user_id` check for a flow someone else began.
-        if (/user_id\s*=\s*COALESCE/i.test(sql)) {
+        if (/COALESCE\(\s*consent_attempts\.user_id\s*,\s*excluded\.user_id\s*\)/i.test(sql)) {
+          // FIRST known owner wins: fills an ownerless row, never re-assigns a known one.
+          if (existing.user_id == null) existing.user_id = user_id;
+        } else if (/user_id\s*=\s*COALESCE/i.test(sql)) {
+          // the other order is last-writer-wins — the double must model WHICH order, or the
+          // difference is invisible to every test that goes through it.
           if (user_id != null) existing.user_id = user_id;
         } else {
           existing.user_id = user_id;
@@ -201,7 +206,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.body = await res.json();
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
-    ? [] : [sessionRow()];
+    ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
   const seeded = opts.seededAttempts || [];
   const e = env({ SESSIONS: new FakeD1({ sessions, consent_attempts: seeded }) });
   const source = opts.params || {
@@ -756,6 +761,35 @@ def test_the_redirect_uri_is_forwarded_BYTE_FOR_BYTE_to_the_AS() -> None:
             "`redirect_uri is not registered for this client`")
         assert _redirect_uri_matches(raw, forwarded), (
             f"the forwarded value does not match its own registration: {raw!r} vs {forwarded!r}")
+
+
+def test_a_second_identity_cannot_take_over_a_flow_by_re_entering_it() -> None:
+    """THE bypass the previous test could not see: ``COALESCE(excluded, existing)`` is last-writer-wins.
+
+    That order preserves a known owner against `null` (which is all the signed-out return-leg test
+    exercised) and does NOT preserve it against a DIFFERENT identity. So one GET from B —
+    `/api/consent/start?<A's params>&state=<A's state>` — rewrote the row to B, and B's mint then
+    passed the foreign-owner refusal: an assertion asserting B, bound to A's redirect_uri /
+    code_challenge / state, redeemed into a code delivered to A's client carrying B's identity.
+    A's own mint started answering 403 on A's own flow.
+
+    The owner is now the FIRST one recorded. This test drives that with a SESSION for a second
+    identity — not a signed-out leg, which both orders satisfy.
+    """
+    seeded = [{
+        "state": "state-xyz", "client_id": "client-abc",
+        "redirect_uri": "https://client.example/cb",
+        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "scope": "mcp", "resource": None, "user_id": "user-1",
+        "created_at": 0, "expires_at": 0,
+    }]
+    out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-2")
+    rows = [r for r in out["attempts"] if r["state"] == "state-xyz"]
+    assert len(rows) == 1, rows
+    assert rows[0]["user_id"] == "user-1", (
+        f"a second identity (user-2) TOOK OVER a flow user-1 began — the row now says "
+        f"{rows[0]['user_id']!r}, so user-2 can mint an assertion into user-1's consent "
+        "(identity injection: the foreign-owner refusal at token.ts becomes unreachable by one GET)")
 
 
 @pytest.mark.parametrize("broken,needle", [
