@@ -46,7 +46,7 @@ unknown". The blockers are named with the artefact that has to move first.
 | **E3** `:Object` included | `tests/test_graph_census_7949.py::test_an_object_reached_only_by_aboutObject_has_no_derivation_link` | green (as a **reported gap**) | the capture's `:Object` carries **no derivation link at all** (`with_derivation_link == 0`), so E3's literal "every derived node" bar is unreachable **as registered** — an owner metric decision (`#9736`), not a defect a lane may repair | n/a — the pin exists so a change in this fact is noticed, not to green the row |
 | **E4** planted operator edges wired + persisted | **none on the unpatched leg.** `tests/eval/write_path/test_write_path_operator_lane.py` monkeypatches `extract_session_v2` and says so in its own docstring | red (5 of 15) | nothing about the product: a patched extractor cannot say whether the extractor *forms* the operators | — (the criterion is not implemented; no proof is possible) |
 | **E5** the falsifier is run on OUR corpus | `tests/eval/write_path/test_score_qualifiers.py::test_the_committed_score_artifact_regenerates_byte_identically` | green | a fresh run of the registered scorer over the committed arm receipts reproduces the committed score artefact **byte for byte** | (pre-existing; its own docstring names the mutation class — an edit to `MARKERS`, the 0.6 threshold or `classify()`) |
-| **E5** …and **written back into §10** | **ADDED HERE** — `tests/test_7949_e5_section10_writeback.py::test_section10_publishes_the_numbers_the_registered_falsifier_produces` | green | §10's replicated-run table publishes exactly the figures a fresh falsifier run produces — the write-back half of E5's criterion, which nothing in the tree checked | ✔ measured ×5: `52.0%` → `53.0%` in §10 reds; deleting the replicated subsection reds (heading named); moving the scorer's claim threshold `0.6 → 0.9` reds (instrument drift with no write-back); swapping the arms table's `recall` / `precision` HEADER labels reds (the cells are read by position, so without this the table could publish the wrong figure green); `Δloss +10.0 pp` → `+11.0 pp` reds while `+10 pp` and `+10.00 pp` stay green (the Δ cells are parsed, not text-compared) |
+| **E5** …and **written back into §10** | **ADDED HERE** — `tests/test_7949_e5_section10_writeback.py::test_section10_publishes_the_numbers_the_registered_falsifier_produces` | green | §10's replicated-run table publishes exactly the figures a fresh falsifier run produces — the write-back half of E5's criterion, which nothing in the tree checked | ✔ measured ×8: `52.0%` → `53.0%` in §10 reds; deleting the replicated subsection reds (heading named); moving the scorer's claim threshold `0.6 → 0.9` reds (instrument drift with no write-back); swapping the arms table's `recall` / `precision` HEADER labels reds (the cells are read by position, so without this the table could publish the wrong figure green); swapping the SPLIT table's `raw loss` / `narrative loss` header labels reds (before the fix it left the decision input published inverted, GREEN); `holdout | bound` `Δ +16.7 pp` → `+99.9 pp` reds (the figure §10 calls *past branch 1's trigger*); a `tuning` split row's rate or loss count moved reds; `Δloss +10.0 pp` → `+11.0 pp` reds while `+10 pp`, `+10.00 pp`, `+16.67 pp` and `0.0 pp` stay green (the Δ cells are parsed on the document's printed precision, not text-compared) |
 
 ### Why the E5 write-back was the one hole that could be closed now
 
@@ -61,9 +61,13 @@ failure the epic's closing rule exists to catch, and it was unpinned.
 One test, one behaviour. It re-runs the registered scorer (stdlib only, no DB, no
 network, no model, ~2.4 s) and compares §10's published cells against what that run
 produced: the two pooled arm rows (loss/absent/flattened, distortion, recall,
-precision, claims emitted) and the holdout decision-input row (n, both losses, Δloss,
-and the Δprecision/Δrecall legs the registered rule also reads). It pins **no prose**
-and not the run-1 block, whose receipts were never retained (`#9738`).
+precision, claims emitted), both table HEADERS (the cells are compared by position,
+so a relabelled column would otherwise publish the wrong figure green), all six rows
+of the split table (n, both loss counts, both published rates, and Δ — `holdout` /
+`tuning` × `all qualifiers` / `bound` / `unbound`), and the holdout decision-input
+row's Δprecision/Δrecall legs, which the registered rule also reads. It pins **no
+prose**, not the split table's `other` column, and not the run-1 block, whose
+receipts were never retained (`#9738`).
 
 ⚠️ **The Δprecision/Δrecall legs were unpinned in the first draft of this pin**, and
 the gap is worth recording because it is this document's own failure mode: the pin
@@ -77,9 +81,9 @@ hold["delta_recall_pp"], …)`), so an unpinned leg was an unpinned verdict. Fou
 the `#10108` review, measured both ways (`+8.0` and `Δrecall +9.0` now red); the cell
 is pinned by `_DELTA_CELL`.
 
-⚠️ **Two more gaps of the same shape were found by the review of the fix**, and both
-were measured before being closed — recorded because each one is a *pin that stops one
-step short*, which is exactly what this file exists to name:
+⚠️ **Three more gaps of the same shape were found by the two review rounds that
+followed**, and each was measured before being closed — recorded because every one is
+a *pin that stops one step short*, which is exactly what this file exists to name:
 
 1. **The arms table's column HEADER was unpinned.** Every arm cell is compared by
    POSITION (`got[2]` is recall, `got[3]` is precision), so a header edit that swaps
@@ -93,6 +97,18 @@ step short*, which is exactly what this file exists to name:
    renders `0 pp`, not `0.0 pp`), and renders a negative Δ as `+-12.3 pp`, which can
    never match. Now parsed by `_pp`; measured: `+10 pp` and `+10.00 pp` are GREEN,
    `+11.0 pp` reds.
+3. **The SPLIT table — the decision input's own table — was read only on its
+   `all qualifiers` row, and its HEADER was unpinned.** Measured GREEN before the
+   fix: swapping `raw loss` / `narrative loss` in the header (after which §10
+   publishes the holdout decision input INVERTED — narrative `6 (60%)` vs raw
+   `7 (70%)`, a Δ of −10 pp — next to its own unchanged `**+10.0 pp**` cell); and
+   `holdout | bound`'s `**+16.7 pp**` → `**+99.9 pp**`, which is the one figure §10
+   names as *"past branch 1's trigger"*, i.e. the single place the registered
+   falsifier's trigger is crossed. Now pinned wholesale by `_SPLIT_HEADER` /
+   `_split_table` / `_assert_split_table` — all six rows, every numeric cell — with
+   a row-length check so a cell added or dropped cannot silently shift the columns.
+   Measured after: each of those reds, while a correct re-rendering (`+16.67 pp` for
+   `+16.7 pp`, `0.0 pp` for `0 pp`) stays GREEN.
 
 ---
 
@@ -216,7 +232,12 @@ uv run pytest tests/test_e1_e2_measurement.py::test_the_shipped_arm_moves_the_sh
               tests/eval/write_path/test_score_qualifiers.py -q -p no:cacheprovider
 ```
 
-Measured at `3fbca18ed`: the four pre-existing capstone/measurement files
+Measured on two heads, because the new pin does not exist on the first: at
+`3fbca18ed` (the pre-PR baseline) the four pre-existing capstone/measurement files
 (`tests/test_7949_capstone_verdict_check.py`, `tests/test_7949_capstone_measure.py`,
 `tests/test_e1_e2_measurement.py`, `tests/eval/write_path/test_score_qualifiers.py`)
-→ **308 passed** in 575 s; the new file → **1 passed** in 2.4 s.
+→ **308 passed** in 575 s; the new file, run in this PR's worktree at a head that
+carries it → **1 passed** in 2.4 s (the harness calls the test body directly, since
+`pytest` is not installed in that worktree — `git cat-file -e
+3fbca18ed:tests/test_7949_e5_section10_writeback.py` fails, the file is *added* by
+this PR, so the pin's own run cannot be attributed to that head).

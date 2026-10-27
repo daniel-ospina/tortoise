@@ -30,20 +30,31 @@ pooled loss / absent / flattened, distortion, recall, precision and claims emitt
 (measured: raw's `52.0%` to `53.0%` reds this), the arms table's column HEADER
 (measured: swapping the `recall` / `precision` labels reds — without it every cell
 below is read by POSITION, so a relabelled column would publish the wrong figure
-green), the holdout `(decision input)`
+green), the SPLIT table's column HEADER and every one of its six numeric rows
+(`#10108` review round 6: with only the holdout decision-input row pinned, swapping
+`raw loss` / `narrative loss` left this pin GREEN while §10 published the decision
+input INVERTED beside its own `**+10.0 pp**` cell, and `holdout | bound`'s
+`**+16.7 pp**` — the one figure §10 names as *"past branch 1's trigger"* — could be
+retyped `**+99.9 pp**` and stay GREEN), the holdout `(decision input)`
 row's subset label, n / both losses / **Δloss and its Δprecision / Δrecall legs**
 (the `#10108` review measured the leg gap: `+0.8` retyped to `+8.0` stayed GREEN
 while publishing a branch-1 firing the run does not have), the
 `#### ⚠️ REPLICATED 2026-10-18` heading itself
-(deleted or renamed reds, named in the failure), a duplicated or deleted table row
-(exactly-one-match), or the scorer's own thresholds (an instrument change with no
-write-back).
+(deleted or renamed reds, named in the failure), a duplicated, deleted or
+column-misaligned table row, or the scorer's own thresholds (an instrument change
+with no write-back).
 
-It does NOT pin the split table's `tuning` / `bound` / `unbound` rows, the prose
-beside the tables, or the run-1 block — run 1's receipts were never retained, so
-its numbers are a record and not re-derivable (`#9738`). The unpinned split cells
-are a known gap, stated as one: measured, editing the `tuning` row's `5 (33%)` to
-`99%` leaves this test GREEN.
+It does NOT pin the prose beside the tables, the split table's `other` column
+(except the decision-input row's Δ legs, which the registered rule reads), or the
+run-1 block — run 1's receipts were never retained, so its numbers are a record and
+not re-derivable (`#9738`). That gap is stated, not hidden: measured, editing the
+`tuning` row's `other` cell leaves this test GREEN, and so does editing the prose
+sentence that reads the holdout's `(+0.8)`.
+
+Every figure is compared as a NUMBER on the precision the document printed
+(`_lup_tol`: half a unit in the last place), so a correct re-rendering (`52%` for
+`52.0%`, `+16.67 pp` for `+16.7 pp`, `0.0 pp` for `0 pp`) is GREEN while a MOVED
+figure reds.
 
 Deterministic and hermetic: the scorer is stdlib-only over the committed arm
 receipts and this tree's gold. No DB, no network, no model.
@@ -214,6 +225,144 @@ def _pp(cell: str, *, row: str) -> float:
     return float(match.group(1).replace("\u2212", "-").replace(" ", ""))
 
 
+#: The first number in a published cell, with its decimal digits — the precision the
+#: document chose to print. A figure is correct if it rounds to the printed digits,
+#: so the tolerance is half a unit in the last place: `67%` tolerates ±0.5, `+16.7 pp`
+#: tolerates ±0.05. A fixed tolerance would either pass a moved figure or red a
+#: correct rounding (4 of 6 prints as `67%`, not `66.7%`).
+_FIRST_NUMBER = re.compile(r"[+\-\u2212]?\s*(\d+)(?:\.(\d+))?")
+
+
+def _lup_tol(published: str) -> float:
+    """Half a unit in the last place the document printed, plus float slop."""
+    match = _FIRST_NUMBER.search(published)
+    assert match, (
+        f"{published!r} carries no number — the tolerance cannot be derived from "
+        "a cell that prints no figure")
+    return 0.5 * 10 ** (-len(match.group(2) or "")) + 1e-9
+
+
+#: §10's SPLIT table header — pinned for the same reason as the arms header, and
+#: measured the hard way (`#10108` review round 6): the rows below are compared by
+#: POSITION, so swapping these two labels left this pin GREEN while §10 then
+#: published the holdout decision input INVERTED (narrative 60% vs raw 70%, i.e. a
+#: Δ of −10 pp) beside its own unchanged `**+10.0 pp**` cell — the document stating
+#: the opposite of the run about the one metric the pre-registered rule reads.
+_SPLIT_HEADER = ("split", "subset", "n", "raw loss", "narrative loss", "Δ",
+                 "other")
+
+
+def _split_table(block: str) -> list[list[str]]:
+    """Every row of §10's split table, header first, `**` stripped.
+
+    A dedicated reader rather than `_row()` because six rows share two first cells
+    (`holdout`, `tuning`) — `_row()`'s exactly-one-match invariant is the right
+    guard for the arms table and the wrong one here.
+    """
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^\|\s*split\s*\|", line):
+            break
+    else:
+        raise AssertionError(
+            "§10 no longer carries the `| split | ... |` table under "
+            f"{_REPLICATED!r} — the table the decision input is published in is "
+            "gone, so this pin would be comparing nothing")
+    rows = []
+    for line in lines[index:]:
+        if not line.lstrip().startswith("|"):
+            break
+        cells = [c.strip().replace("*", "")
+                 for c in line.strip().strip("|").split("|")]
+        if all(c and set(c) <= set("-: ") for c in cells):
+            continue  # the `|---|---|…` separator
+        rows.append(cells)
+    return rows
+
+
+def _split_loss_cell(cell: str, *, row: str) -> tuple[int, float | None, float | None]:
+    """Read a split-table loss cell: `3`, or `3 (50%)`.
+
+    Returns `(loss, rate-percent-or-None, rate-tolerance-or-None)`. The rate is
+    OPTIONAL because the document prints it on some rows and not others (`holdout |
+    bound` carries `4 (67%)`, `tuning | bound` carries a bare `2`) — a parser that
+    demanded it would red a table the document publishes as-is, and one that
+    required its ABSENCE would be just as wrong. When it is printed, it is compared
+    on the precision it is printed at.
+    """
+    match = re.match(r"^(\d+)(?:\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\))?$",
+                     cell.strip())
+    assert match, (
+        f"§10's {row} cell {cell!r} is not `<loss>` or `<loss> (<rate>%)` — the "
+        "row can no longer be read, so this pin would be comparing nothing")
+    if match.group(2) is None:
+        return int(match.group(1)), None, None
+    return (int(match.group(1)), float(match.group(2)),
+            _lup_tol(match.group(2)))
+
+
+def _assert_split_table(block: str, score: dict) -> None:
+    """Pin every NUMERIC cell of §10's split table against the fresh run.
+
+    Six rows — `holdout` / `tuning` × `all qualifiers` / `bound` / `unbound` — whose
+    n, both loss counts, both published rates and the Δ all come straight out of
+    `score`. Pinned wholesale because the gap this closes was measured, not
+    suspected (`#10108` review round 6): with only the holdout decision-input row
+    pinned, `holdout | bound`'s `**+16.7 pp**` could be retyped `**+99.9 pp**` and
+    stay GREEN — and `+16.7 pp` is the one figure §10 names as *"past branch 1's
+    trigger"*, i.e. the single place the registered falsifier's trigger is crossed.
+
+    The `other` column is NOT read here (it mixes a Δ-legs sentence with prose like
+    *"past branch 1's trigger"*); the decision-input row's legs are pinned by
+    `_DELTA_CELL` in the caller, and the rest is a stated gap, not a silent one.
+    """
+    rows = _split_table(block)
+    assert rows and rows[0] == list(_SPLIT_HEADER), (
+        f"§10's split table header is {rows[0] if rows else None!r}; the registered "
+        f"table is {list(_SPLIT_HEADER)!r}. The cells below are read by POSITION, "
+        "so a relabelled column publishes a different figure as green")
+    got = {(r[0].split(" ")[0], r[1].split(" ")[0]): r for r in rows[1:]}
+    assert len(got) == 6, (
+        f"§10's split table publishes {len(got)} rows, expected 6 (holdout and "
+        f"tuning × all qualifiers / bound / unbound): {sorted(got)}")
+
+    for split in ("holdout", "tuning"):
+        aggregate = score["splits"]["aggregate"][split]
+        anchors = score["splits"]["anchor_subset"][split]
+        for key in ("all", "bound", "unbound"):
+            row = got[(split, key)]
+            label = f"{split} {key}"
+            assert len(row) == len(_SPLIT_HEADER), (
+                f"§10's {label} row publishes {len(row)} cells against a "
+                f"{len(_SPLIT_HEADER)}-column header — the row no longer lines up "
+                "with the table it sits in, so its cells are being read under the "
+                f"wrong columns: {row!r}")
+            if key == "all":
+                raw, narrative = aggregate["raw"], aggregate["narrative"]
+            else:
+                raw, narrative = anchors["raw"][key], anchors["narrative"][key]
+
+            assert row[2] == str(raw["n"]), (
+                f"§10's {label} row publishes n={row[2]!r}; the registered "
+                f"falsifier ran n={raw['n']}")
+            for cell, branch in ((row[3], raw), (row[4], narrative)):
+                loss, rate, tol = _split_loss_cell(cell, row=f"{label} {branch}")
+                assert loss == branch["loss"], (
+                    f"§10's {label} row publishes loss={loss} (cell {cell!r}); the "
+                    f"registered falsifier produced {branch['loss']}")
+                if rate is not None:
+                    produced = branch["loss_rate"] * 100
+                    assert abs(rate - produced) <= tol, (
+                        f"§10's {label} row publishes {rate}% (cell {cell!r}); "
+                        f"the registered falsifier produced {produced:.4g}%")
+
+            delta = _pp(row[5], row=f"{label} Δ")
+            produced = (narrative["loss_rate"] - raw["loss_rate"]) * 100
+            assert abs(delta - produced) <= _lup_tol(row[5]), (
+                f"§10's {label} row publishes Δ {row[5]!r}; the registered "
+                f"falsifier produced {produced:+.4g} pp")
+
+
 def _pooled(score: dict, arm: str) -> dict:
     """The arm's pooled precision/recall, summed over the per-session rows."""
     rows = [r for r in score["precision_recall"] if r["arm"] == arm]
@@ -300,54 +449,18 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
             f"§10's {arm} row publishes claims emitted {got[4]!r}; the registered "
             f"falsifier produced {pr['claims_emitted']}")
 
-    # The decision input: the holdout Δloss, which is what the registered rule
-    # reads. Published as its own row in the split table below the arms table.
-    #
-    # The subset LABEL is pinned too (`#10108` review): the row's figures are the
-    # POOLED `all qualifiers` ones, while the `bound` row below it carries different
-    # numbers (3/6, 4/6). Comparing the cells from `n` onward left the label free, so
-    # the row could be relabelled `bound` and stay GREEN while publishing the pooled
-    # figures under it — on the one row the decision rule reads.
-    holdout = score["decision_input"]["branches"]["holdout"]
-    agg_holdout = score["splits"]["aggregate"]["holdout"]
-    got_holdout = _row(block, r"\*\*holdout\*\*\s*\(decision input\)")
-    assert got_holdout[0] == "all qualifiers", (
-        "§10's holdout decision-input row no longer publishes the POOLED figures: "
-        f"its subset cell reads {got_holdout[0]!r}, expected 'all qualifiers'. The "
-        "`bound` / `unbound` rows carry different numbers, so a relabelled row "
-        "would publish the pooled figures under the wrong subset.")
-    assert got_holdout[1] == str(agg_holdout["raw"]["n"]), (
-        f"§10's holdout row publishes n={got_holdout[1]!r}; the registered "
-        f"falsifier ran n={agg_holdout['raw']['n']}")
-    for cell, branch in ((got_holdout[2], "raw"), (got_holdout[3], "narrative")):
-        loss, rate = _loss_cell(cell, row="holdout")
-        assert loss == agg_holdout[branch]["loss"], (
-            f"§10's holdout {branch} cell {cell!r} publishes loss={loss}; the "
-            f"registered falsifier produced {agg_holdout[branch]['loss']}")
-        assert abs(rate - agg_holdout[branch]["loss_rate"] * 100) <= 0.05, (
-            f"§10's holdout {branch} cell {cell!r} publishes {rate}%; the "
-            f"registered falsifier produced "
-            f"{agg_holdout[branch]['loss_rate'] * 100:.4g}%")
-    # Δloss: PARSED, never compared as text (`#10108` review P2). The document
-    # renders this column both ways (`+10.0 pp` here, `0 pp` on the `unbound` row
-    # at `EXTRACTOR-V4-ARCHITECTURE.md:1332`), so a text compare reds a
-    # re-publication that is CORRECT in the document's own format — the same trap
-    # the comment above names — and `f"+{...:.1f} pp"` additionally renders a
-    # negative Δ as `+-12.3 pp`, which can never match.
-    delta_loss = _pp(got_holdout[4], row="holdout Δloss")
-    assert abs(delta_loss - holdout["delta_loss_pp"]) <= 0.05, (
-        "§10's holdout decision-input row no longer publishes the Δloss the "
-        f"registered rule reads.\n  §10:    {got_holdout[4]}\n  scorer: "
-        f"{holdout['delta_loss_pp']:+.1f} pp")
+    # The SPLIT table — every numeric cell, both splits, all three subsets.
+    _assert_split_table(block, score)
 
-    # …and its LAST cell, which was UNPINNED until the `#10108` review (P2). The pin
-    # stopped at `[4]` (Δloss), so `Δprecision +0.8` could be retyped `+8.0` and stay
-    # GREEN — publishing a branch-1 FIRING the run does not have, in the one cell
-    # §10's own prose reads (`EXTRACTOR-V4-ARCHITECTURE.md:1338-1340`: *"the holdout's
-    # (+0.8) is inside it"*, sc. the registered ±5 tolerance; `+8.0` is outside it).
-    # The registered rule consumes all three legs (`score_qualifiers.py:760-761`
-    # `evaluate_branches(hold["delta_loss_pp"], hold["delta_precision_pp"],
-    # hold["delta_recall_pp"], …)`), so an unpinned leg is an unpinned verdict.
+    # …and the ONE cell the sweep does not read: the holdout decision-input row's
+    # `other` column, which carries the two precision/recall legs `evaluate_branches`
+    # also consumes (`score_qualifiers.py:760-761`). It was UNPINNED until the
+    # `#10108` review: `Δprecision +0.8` could be retyped `+8.0` and stay GREEN —
+    # publishing a branch-1 FIRING the run does not have, in the cell §10's own
+    # prose reads (`EXTRACTOR-V4-ARCHITECTURE.md:1338-1340`: *"the holdout's (+0.8)
+    # is inside it"*, sc. the registered ±5 tolerance; `+8.0` is outside it).
+    holdout = score["decision_input"]["branches"]["holdout"]
+    got_holdout = _row(block, r"\*\*holdout\*\*\s*\(decision input\)")
     m = _DELTA_CELL.match(got_holdout[5])
     assert m, (
         "§10's holdout decision-input 'other' cell is no longer "
