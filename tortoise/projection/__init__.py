@@ -7512,6 +7512,23 @@ _NO_PROJECTION_FOLD = frozenset({
     # (tests/test_record_projection.py) the only thing standing between a new
     # producer and a warning storm.
     "SessionNarrated",
+    # #10017: §9.1's raw-TURN carrier, the sibling of the narrative above and
+    # folded nowhere for the same reason — §9.1's D1 places the raw transcript
+    # "not in the graph" (owner, 2026-09-23: *"the same rule applies to raw
+    # turns"*), so a capture's turn set reaches the record
+    # (`public.point` at `cache_tier = 'record_only'`) and NOT the cache. Listing
+    # it here is what keeps a replay of a journal holding one from reaching the
+    # `else` arm: that arm calls `record_non_folded`, which fails a whole
+    # `rebuild`/`recover_from_log` run — so the carrier would make a lost graph
+    # unrecoverable, not merely noisy. ⚠️ Its torn tail is NOT tolerated (see
+    # `log.TORN_TAIL_HARMLESS_EVENT_TYPES`): the turns ARE the transcript, so a
+    # dropped one loses a capture's turn set, unlike the narrative's summary.
+    # ⚠️ The measured consequence, so nobody reads this entry as "replayed
+    # elsewhere": with a carrier present a replay completes and reports success
+    # having folded NO turn state — which is the ruling (the record is the home),
+    # not a gap. Nothing emits the type yet, so no journal can hold one before
+    # step 7 turns the producer over.
+    "TurnsRecorded",
 })
 
 # #3305: the Point-lifecycle terminalizers whose replay fold is a per-event

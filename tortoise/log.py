@@ -250,6 +250,18 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                     reports success. Same root cause as #5921 (a payload-only
 #                     lifecycle property), but its harmful payload is COMMON and
 #                     it is a trailing record, so it is refused outright.
+#   TurnsRecorded — #10017's raw-turn carrier, and the tempting symmetry ("its
+#                  `SessionNarrated` sibling is harmless, so this must be") is
+#                  exactly wrong. The narrative carrier folds nowhere and its
+#                  record home is one row of SUMMARY text, so a torn line costs
+#                  a summary. The turn carrier IS the transcript: a torn
+#                  `TurnsRecorded` line drops an entire capture's turn set, and
+#                  once step 7 turns the producer over, that line is the only
+#                  journal carrier of those turns — the per-turn `PointAdded`
+#                  records this type replaces would not be there to lose.
+#                  So the set's default polarity (a NEW type is REFUSED) stands,
+#                  and this is the one §9.1 carrier that is NOT harmless: the
+#                  two are classified separately, never by family.
 #
 # ⛔ ``EventRecorded`` IS NOT IN THE SET, although its loss is the data-LOSS
 # direction for most records. ``_upsert_event`` →
