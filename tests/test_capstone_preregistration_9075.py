@@ -1537,6 +1537,14 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           BEFORE the gate sentinel, and its whole definition is pinned here precisely because of
 #:           that position: it cannot be rewritten into a tree edit without reding this allow-list.
 #:           The gate step itself is unchanged (sentinel) and keeps its position.
+#:   #9984 — `python-ci-gate` → `Aggregate matrix result`: ONE row appended to the LEGS heredoc
+#:           (`ci-introduced-failure|…|-`) plus a `failure|timed_out` case that DELEGATES a failed
+#:           test arm to that job instead of reddening on it alone. The job still has exactly ONE
+#:           step — no checkout, no `uses:`, no `env:`, no `$GITHUB_ENV`/`$GITHUB_PATH` write, no
+#:           exit-code swallowing, no early return; the sweep's marker words are unchanged and its
+#:           reachability is preserved (it is gated on `RED_LEGS` being empty, i.e. it still fires
+#:           for a need no row claimed). The predicate itself lives in a SEPARATE job precisely so
+#:           this pin's allow-list never has to widen.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1563,7 +1571,7 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     # deletes the whole failure sweep. Both leave every other check in this pin clean.
     "python-ci-gate": (
         ("Aggregate matrix result",
-         "3109139f187cee52e5a3b56192743f25ab7f44d691a7979176acf8f351b3f9ac"),
+         "96fa9ecfae5ce15c8b51023a78609f9e1a6b2d5dcc89dfef0427df8786a1d71d"),
     ),
 }
 

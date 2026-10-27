@@ -2847,6 +2847,14 @@ surfaces:
   # default surface — is where it runs when nothing else matched. Registered here
   # because `integrity()` requires every `tests/**/test_*.py` to be classified.
   - test_pytest_attribution.py
+  # #9984: the required check's introduced-failure predicate
+  # (`.github/scripts/new-failure-gate.py`, called from `python-ci-gate`). It reads the
+  # workflow, the gate script and the rail's decision module
+  # (`scripts/ci_exemption.py` + `scripts/ci-failure-set.sh`, reached through the
+  # machine-local pointer), and needs no DB — so `core`, the default surface, is where
+  # it runs when nothing else matched. Registered here because `integrity()` requires
+  # every `tests/**/test_*.py` to be classified.
+  - test_ci_new_failure_gate.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;

@@ -5369,8 +5369,17 @@ def test_no_required_check_names_a_fast_leg():
     # leg — so adding a leg cannot orphan anything it requires
     assert "test" in gate["needs"]
     assert not [n for n in gate["needs"] if str(n).startswith("test (")], gate["needs"]
-    # the rollup is job-id keyed, not leg-name keyed
-    assert "join(needs.*.result, ' ')" in gate["steps"][0]["run"]
+    # the rollup is job-id keyed, not leg-name keyed. ONE step does the rollup and it
+    # is the sole author of the verdict: the aggregate is no longer `steps[0]` since
+    # #9984 put the two checkouts (this repo, and the pinned agent-infra holding the
+    # shared predicate) ahead of it, so the pin names the property that matters —
+    # exactly one step reads the join — instead of a positional index a prerequisite
+    # step would silently invalidate.
+    rollup_steps = [s for s in gate.get("steps", [])
+                    if "join(needs.*.result, ' ')" in (s.get("run") or "")]
+    assert len(rollup_steps) == 1, (
+        "exactly one step must own the `needs.*.result` rollup — two readers means "
+        f"two verdicts; got {len(rollup_steps)}")
     # the merge queue's only merge condition is the aggregate. Comments MAY
     # name a leg as history (several do, deliberately) — the ENFORCED lines
     # must not.
@@ -8186,7 +8195,18 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         # a given leg is a check that does not observe it (#5219). And every red
         # must NAME its leg — that is #9240's deliverable, and the reason these
         # assertions inspect `out` rather than only the exit code.
-        for red in ("failure", "cancelled"):
+        #
+        # ⛔ SPLIT BY CLASS SINCE #9984, and the split is the contract, not a
+        # concession. `cancelled` (below) still reds on the aggregate's own authority:
+        # a leg that never ran produced NO failure set, so there is nothing to compare
+        # against main and nothing that could make it pre-existing. `failure` does reach
+        # the introduced-failure predicate, which asks the RAIL's question about the
+        # same tree — so its exit code now comes from the predicate, and the assertion
+        # that matters is the FAIL-CLOSED one: with no measurable baseline (the
+        # harness's env renders neither `PR_HEAD` nor `EVENT_NAME`) the predicate
+        # refuses and the check still exits 1. Deleting the delegation would make this
+        # vector exit 0 — which is exactly what the assertion catches.
+        for red in ("cancelled",):
             for leg in job_names:
                 bad = dict(green)
                 bad[leg] = red
@@ -8207,6 +8227,93 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 assert "❌ 1 leg(s) did not pass" in out, (
                     f"the summary must count exactly one red leg, unpadded; got "
                     f"{out!r}")
+
+        # ── THE INTRODUCED-FAILURE PREDICATE (#9984) ──────────────────────
+        # A failed SHARD is now delegated to `ci-introduced-failure` (a separate job,
+        # see the workflow): the aggregate asks whether that verdict job SUCCEEDED.
+        # Everything else about a red leg is unchanged — it is still named, and the
+        # check still cannot go green on a red tree without that verdict.
+        PREDICATE = "ci-introduced-failure"
+        assert PREDICATE in job_names, (
+            "the aggregate must consume the introduced-failure verdict as a need — "
+            "otherwise a failed shard has no adjudicator and #9984's predicate is "
+            "either missing or asked by nothing")
+
+        #: The arms a failed TEST can be excused on. Declared in the aggregate's own
+        #: script (`DEFERRABLE_LEGS`) and pinned against the verdict job's `needs:` by
+        #: tests/test_ci_new_failure_gate.py, so this harness reads it from the script
+        #: instead of restating it.
+        deferrable = re.search(r'^\s*DEFERRABLE_LEGS="([^"]+)"', script, re.M)
+        assert deferrable, (
+            "the aggregate must declare `DEFERRABLE_LEGS` — the arms a failed test can "
+            "be excused on (#9984); without it every failed leg is excusable or none is")
+        DEFERRABLE = set(deferrable.group(1).split())
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 0, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` certified must PASS the "
+                "required check — an exit 1 here means the delegation was deleted and "
+                f"the old \"does anything fail?\" predicate is back (#9984); got {out!r}")
+            assert "certified every failing id" in out and leg in out, (
+                f"the excused leg must be NAMED, or the operator cannot tell why a red "
+                f"shard merged (#9240/#9984); got {out!r}")
+
+        # (b) the SAME red shard with the verdict job RED: the aggregate fails, and the
+        #     verdict job is the leg it names. This is the case the old predicate got
+        #     right, and it must stay right — a real PR-caused failure still blocks.
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            bad[PREDICATE] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` did NOT certify must FAIL "
+                f"the required check; got {out!r}")
+            assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, (
+                f"the verdict job must be NAMED as the refusing leg; got {out!r}")
+
+        # (c) the verdict job is the ONE failure that can never be deferred: deferring
+        #     it would make the verdict ask itself (a red verdict, excused by itself).
+        bad = dict(green)
+        bad[PREDICATE] = "failure"
+        rc, out = _verdict(bad)
+        assert rc == 1, (
+            "a red `ci-introduced-failure` must red the required check even when no "
+            f"other leg failed — it is the refusal itself; got {out!r}")
+        assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, out
+        assert "certified every failing id" not in out, (
+            f"a red verdict must never be reported as a certification; got {out!r}")
+
+        # (c2) a NON-test arm is never delegable: `surface-guard` red is a surface
+        #      expansion, not a trunk red, and a verdict about test ids says nothing
+        #      about it. (This is also what keeps a drift-gate failure a hard block.)
+        assert set(job_names) - DEFERRABLE, "there must be a non-deferrable arm to assert on"
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{leg}` failure must NEVER be excused by the test-failure verdict — "
+                f"it is not a test arm (#9984); got {out!r}")
+            assert f"::error::leg '{leg}'" in out and "not a test arm" in out, out
+
+        # (d) and it must be fail-closed about its own absence: a verdict job that was
+        #     CANCELLED or SKIPPED certifies nothing, so a red shard cannot be excused.
+        for verdict_result in ("cancelled", "skipped"):
+            bad = dict(green)
+            bad["test"] = "failure"
+            bad[PREDICATE] = verdict_result
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{verdict_result}` `{PREDICATE}` must not excuse a red shard — an "
+                f"absent verdict is not a clean one (#9984 constraint 1); got {out!r}")
+            assert f"::error::leg '{PREDICATE}'" in out, out
 
         # An always-run leg has NO selector that can decline it, so a `skipped`
         # one is a lost shard. This is the half of "`skipped` is not a pass"
@@ -8270,11 +8377,20 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         two["test-slow"] = "cancelled"
         rc, out = _verdict(two)
         assert rc == 1
-        assert "::error::leg 'test' reported 'failure'" in out, out
+        assert "test: reported 'failure'" in out, out
         assert "::error::leg 'test-slow' was CANCELLED" in out, out
-        assert out.count("::error::leg ") == 2, (
-            f"each red leg gets its own line; got {out!r}")
-        assert "❌ 2 leg(s) did not pass" in out, out
+        assert out.count("::error::leg ") == 1, (
+            "each HARD-red leg gets its own error line, and a delegated one gets a "
+            f"plain line; got {out!r}")
+        # `test` is DELEGATED (#9984) and `test-slow` is a lost shard: the aggregate
+        # names both and refuses on its own authority, because a cancelled leg
+        # certifies nothing and no verdict could excuse it. The delegation is a
+        # plain line, not an `::error::` — an error annotation would claim a refusal
+        # the gate is not making.
+        assert "❌ 1 leg(s) did not pass" in out, out
+        assert "::error::leg 'test-slow'" in out, out
+        assert "test: reported 'failure'" in out and "delegated" in out, (
+            f"a delegated failure must say so plainly; got {out!r}")
 
         # A duplicate row inspected twice is ONE red leg and must be counted
         # once — a copy-paste must not inflate the operator's summary.
@@ -8286,13 +8402,16 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             "could not find the `test` row to duplicate — the fixture is stale")
         dup_src = script.replace(row_line, f"{row_line}\n{row_line}", 1)
         one_red = dict(green)
-        one_red["test"] = "failure"
+        # `cancelled`, not `failure`: a delegated failure is excused by a green
+        # verdict (#9984), so a HARD-red class is what proves the count de-duplicates.
+        one_red["test"] = "cancelled"
         rc, out = _verdict(one_red, src=dup_src)
         assert rc == 1, (
             "a duplicated row must not hide its own red; got "
             f"rc={rc} {out!r}")
         assert "❌ 1 leg(s) did not pass" in out, (
-            f"the summary must count LEGS, not rows; got {out!r}")
+            "the summary must count LEGS, not rows — a duplicated row inspected "
+            f"twice is ONE red leg; got {out!r}")
 
         # The `failure|cancelled` sweep must stay REACHABLE (#9240 review: it
         # was dead code behind the deleted distinct-count guard). A red result
