@@ -17909,17 +17909,24 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # #4051 — the org points gate. It enforces the org's OWN `max_points`:
         # the value this handler's sole dependency (`get_current_org_gated`)
         # resolved from the org's row + pricing.json, read by
-        # `enforce_org_limit` with `.get(limit_key)` — which is what keeps the
-        # missing-key branch reachable. No MCP bridge reaches this handler (the
-        # only MCP session tool proxies the capture impl), so that resolver is
-        # the one producer.
+        # `enforce_org_limit`. No MCP bridge reaches this handler (the only MCP
+        # session tool proxies the capture impl), so that resolver is the one
+        # producer.
+        # ⚠️ `.get(limit_key)` is why a dict built WITHOUT the key is refused as
+        # a `QuotaCheckError` naming the field instead of raising `KeyError` —
+        # but it does NOT make the missing-key branch a live path on THIS lane:
+        # the resolver above always emits the key (`hosted_api.py:6234`,
+        # `supabase_control.py:1158-1159`). Here that branch is reached only
+        # through the test seam
+        # (`tests/test_commit_endpoint.py::test_missing_max_points_refuses_and_mints_nothing`).
+        # Do not read it as a production branch on this lane.
         #
         # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
         # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
         # :Object/:Subject nodes entities mint), because `_count_resource("points")`
         # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
         # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
-        # n.is_episodic = false))` (tortoise/quota.py:734-736).
+        # n.is_episodic = false))` (tortoise/quota.py:1024-1030).
         # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
         # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
         # lane's own commit can leave behind — the lane writes in bulk and carries
