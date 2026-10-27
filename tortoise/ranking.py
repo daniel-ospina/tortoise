@@ -90,8 +90,12 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # twins tie on EVERY leg, and each leg's own tie-break hands ONE of them rank 0,
 # so the twins' fused relevance differs by exactly one rank.  (#3019 chose
 # ``node.<id> ASC`` — oldest-first — which made it the LOWER-ULID twin; since
-# #10121 the tie is ``coalesce(updatedAt, createdAt, '') DESC, <id> DESC``, so it
-# is the HIGHER-ULID twin.  Which twin it is does not change this derivation:
+# #10121 the key is RECENCY first (``search_engine.recency_key_expr``): a CASE
+# that takes ``updatedAt``, else ``createdAt``, else ``''``, then
+# ``coalesce(<id>, '') DESC``.  The CASE is not tidiable to a plain ``coalesce``
+# — that stops at the first NON-NULL, so ``updatedAt: ''`` would suppress a
+# valid ``createdAt`` (#10121's review) — and with it the ranked twin is the
+# HIGHER-ULID one.  Which twin it is does not change this derivation:
 # the gap is a ONE-rank difference either way, and both twins are content-
 # identical.)  RRF is
 # rank-based (``1/(k + rank + 1)``), so the post-fusion min-max normalization
