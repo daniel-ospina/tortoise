@@ -61,11 +61,12 @@ plain statement that there is nothing to do.
   a marker there is judged not to be a window at all. Do not "fix" the start door to match the end's
   rule — that would reverse #6140 and can leave a legacy point unrepairable.
 - **Never normalize a *meaning*.** Rule 1 licenses normalizing spelling, not choosing the convenient
-  interpretation. The rule that settles §2's first bullet is the value-presence cue; where a field has
-  **no** such cue — a free-text `status` whose `n/a` could mean "not set" or "explicitly not
-  applicable" — the surface must establish which is true before normalizing. **If it cannot, the intent
-  is not legible**: refuse — a third part *is* writable here, and it names the choice ("resubmit as
-  `not set` or `not applicable`"). Never pick.
+  interpretation. The concept the two bullets above turn on is the **value-presence cue**: a value
+  present in the column is an *asserted* value **and** the field's vocabulary has a state that can
+  express "asserted but un-datable". A free-text `status` has the first and not the second, so presence
+  alone cannot decide it; there the surface must establish which meaning is true before normalizing.
+  **If it cannot, the intent is not legible**: refuse — a third part *is* writable here, and it names
+  the choice ("resubmit as `not set` or `not applicable`"). Never pick.
 - **The reported state must not flatten different failures into one label.** "Could never be
   addressed" and "was addressable and got dropped" are different facts with different consequences
   (one has nothing to fix, the other must be repaired). If the reply reports them identically, it fails
@@ -80,7 +81,7 @@ OPEN on the residuals its own row lists. The rest are cited from their own issue
 
 | Surface | What it was | Which rule |
 |---|---|---|
-| **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **Read half FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` shapes or refuses on the guarded caller doors (`create_point`, `update_point`) **only**. Two distinct residuals keep the issue OPEN, and they are not the same thing: `update_entity`'s Point arms are the **unguarded** route (#9649); `supersede_point`'s numeric `valid_from` kwarg is a **deliberate** exemption recorded in `docs/ONTOLOGY.md` §4.7 / #5360, not a gap | the reported-state analogue of rule 2's second part — and the reason §4 exists |
+| **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **Read half FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` shapes or refuses on the guarded caller doors (`create_point`, `update_point`) **only**. What keeps the issue OPEN are distinct residuals, and they are not interchangeable: `update_entity`'s Point arms are the **unguarded** route (#9649); `supersede_point`'s numeric `valid_from` kwarg is a **deliberate** exemption recorded in `docs/ONTOLOGY.md` §4.7 / #5360; and how an **epoch** bound *renders* stays reserved to **#9741** (open) | the reported-state analogue of rule 2's second part — and the reason §4 exists |
 | **#10158** — the rebuild abort | prescribes *"Reconcile the journal (a missing creation event, an out-of-order append, or an unjournaled producer)"* — verbatim from `NonFoldedEventsError` at `tortoise/projection/nonfolded.py:386` — for a record nothing can ever address: no missing creation exists, nothing is out of order, there is no producer to journal, and retrying reproduces it | the admission test — **the prescribed repair is not performable for this record.** Whether the shape must therefore stop refusing is #10158's own question, **not decided here** (see §6) |
 | `daniel-ospina/agent-infra` #1418 | a checkpoint whose *"remedy (rebase) is the tool it blocks"* | admission test |
 | #9365 · #7541 | a red *"no agent can clear"*; a terminal verdict with no follow-on stage | admission test |
@@ -115,9 +116,16 @@ for exactly this reason is recorded on #9202. Propose the verbatim edit and wait
    - **Merely a different spelling of the same value** (`5:02`, `2024-3-1`) → re-spell and proceed,
      silently (§1).
    - **Already a value that names an instant** → accept it; nothing to do.
-   - **Declares no date** (a blank, or a marker such as `TBD` / `n/a` / `-`, in a field whose
-     vocabulary has an undatable state) → store the canonical undatable form and **echo it in the
-     reply** (§1, §2). Never refuse it, and never read it as absent.
+   - **Declares no date** (a blank, or a marker such as `TBD` / `n/a` / `-`) in a field whose
+     vocabulary has an undatable state → store the canonical undatable form and **echo it in the
+     reply** (§1, §2). Never read it as absent.
+   - **The same, but beside a declared concrete precision** (`validTo="TBD"` with
+     `validToPrecision="day"`) → question 3. That pair states two different things about one bound;
+     shaping it silently would overwrite the caller's declared granularity, so it is refused and the
+     caller picks one.
+   - **Declares no date in a field whose vocabulary has NO undatable state** (the window START) →
+     accept it **with a warning**, read as *no start was recorded* (#6140). Never refuse, and never mint
+     an undatable state the vocabulary does not have.
    - **Is absent** (`None`, or omitted on create) → accept it; the bound is open and there is nothing
      to do.
    - **Well-formed but names no instant** (`2026-02-30`, month 13, an epoch rendered as a string) →
