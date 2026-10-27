@@ -123,6 +123,12 @@ Invariants pinned here:
    the retry control NOR the two provider buttons, whose bound handlers are
    driven to prove a click cannot spend a provider code and land back on the
    same screen
+27 the LAST gate before the browser leaves — the stash refusal — is reachable
+   and pinned: a store that passes the 160-byte capability probe and refuses
+   the real request (the accepted-size band the A5 probe exists for) leaves the
+   page with no navigation, the storage cause named, and no entry behind. It is
+   the only gate whose failure would spend a code and then report the WRONG
+   cause (inv 26's screen, for a request that was never stored)
 
 Every field the tests assert on is produced by the page's own code running in the
 context, never read back from a shim.
@@ -994,6 +1000,55 @@ def test_10088_a_return_with_no_request_fails_closed() -> None:
         f"a provider click in the missing-request state stashed a request with no "
         f"client, which the return leg can only reject: {r['flowEntriesAfterClick']}"
     )
+
+
+def test_10088_a_refused_stash_never_spends_the_round_trip() -> None:
+    """Invariant 27 (#10088): the stash refusal is the LAST fail-closed gate
+    before the browser leaves for the provider, and it is the one no other
+    scenario reaches.
+
+    Reaching it needs a store in the band the A5 write-time probe exists for: it
+    PASSES the capability probe (a fixed 160-byte payload, `pkceIncapable`) and
+    REFUSES the real request (~300 bytes), so `pkceIncapable()` answers "ok" and
+    `stashAuthorizeFlow()` is the gate that refuses. `storeQuota=200` is exactly
+    that band.
+
+    Without the guard the click still navigates: a provider code is spent and the
+    return leg can only fail closed at `REQUEST_MISSING` — reporting a MISSING
+    request for one that was never stored, which is the wrong-cause screen inv 26
+    exists to prevent. Every observable is the page's own: no navigation, the
+    storage cause named, and no `-authorize-flow` entry left anywhere.
+    """
+    r = _run("click", storeQuota=200)
+    assert r["navs"] == [], (
+        f"the page left for the provider although the request could not be stored "
+        f"— the round trip is spent and its only outcome is inv 26's wrong-cause "
+        f"screen: {r['navs']}"
+    )
+    assert r["errorVisible"] is True, r
+    assert "connection request" in r["errorText"], (
+        f"the refusal does not name what could not be kept: {r['errorText']!r}"
+    )
+    assert "site storage" in r["errorText"], (
+        f"the refusal does not name the cause it established (the store): "
+        f"{r['errorText']!r}"
+    )
+    assert r["retrySigninVisible"] == "block", (
+        f"the refusal's own copy says \"retry\", so the affordance has to be "
+        f"there — it is retryable, unlike a lost request: {r}"
+    )
+    assert not [e for e in r["auxRawEntries"] if "-authorize-flow" in e["key"]], (
+        f"a refused stash left an entry behind: {r['auxRawEntries']}"
+    )
+
+
+def test_10088_the_round_trip_proceeds_when_the_stash_is_accepted() -> None:
+    """The paired control for invariant 27: with default (usable) stores the same
+    click DOES navigate, so the assertions above cannot pass on a page that simply
+    never signs in."""
+    r = _run("click")
+    assert r["navs"], f"the control click did not navigate, so inv 27 is vacuous: {r}"
+    assert "site storage" not in r["errorText"], r["errorText"]
 
 
 # ── #3443: the navigation target is the SERVER's rebuild ────────────────────
@@ -2174,6 +2229,8 @@ function innerTarget(assignUrl) {
     out.capabilityText = els['signin-capability'] ? String(els['signin-capability'].textContent) : '';
     out.capabilityVisible = els['signin-capability']
       ? String(els['signin-capability'].style.display) : null;
+    out.retrySigninVisible = els['btn-retry-signin']
+      ? String(els['btn-retry-signin'].style.display) : null;
     out.attempts = storeAttempts.slice();
     // RAW entries, unfiltered by key shape. The A5 probe writes a throwaway
     // `__tt_wprobe-*` key, so a verifier-shaped filter cannot see whether the

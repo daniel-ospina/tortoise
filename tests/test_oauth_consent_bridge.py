@@ -198,6 +198,20 @@ _BFF_PROPERTIES = {
 }
 
 
+#: The SAME four properties' SECONDARY anchors — the tokens the §1/§3-style rows cite as a range
+#: start or a sibling site, not as the property's own anchor. These went stale twice (the round-2
+#: remap cited the PR BASE's numbers, and the #10088 reflow moved them again) because only the
+#: PRIMARY anchor above was recomputed: the primary was right and CI was green while three
+#: neighbours named unrelated code. Tokens carry the leading whitespace that makes them unique on
+#: one line, and each must still be found by `_only_line`.
+_PAGE_PROPERTY_NEIGHBOURS = {
+    "single-flight": (OAUTH, "    return previewInFlight;"),
+    "refresh-once": (OAUTH, 'if (result === "stale" && staleRefreshes < 1) {'),
+    "never-sign-out": (OAUTH, 'if (result === "stale") showExpiredSignin();'),
+    "auto-advance": (OAUTH, "onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh"),
+}
+
+
 def test_the_four_properties_have_live_implementation_sites() -> None:
     """Each of SCOPE §4 W3's four properties must exist somewhere that runs.
 
@@ -210,6 +224,18 @@ def test_the_four_properties_have_live_implementation_sites() -> None:
         assert f"oauth.py:{line}" in SPEC.read_text(), (
             f"the spec's {prop!r} row no longer cites oauth.py:{line} — the confirmed anchor and "
             "the guard have drifted apart"
+        )
+
+    # The NEIGHBOURS of the same rows, recomputed the same way: the §1/§3 rows cite range starts
+    # and sibling sites alongside the property's own anchor, and those are what went stale while
+    # the primary anchor stayed correct. Either citation form the spec uses (`oauth.py:<n>` or the
+    # bare `:<n>`) satisfies this — the bare form is what rows 2-4 use for their neighbours.
+    for prop, (path, token) in _PAGE_PROPERTY_NEIGHBOURS.items():
+        line = _only_line(path, token)
+        assert re.search(rf"(?:oauth\.py)?:{line}\b", SPEC.read_text()), (
+            f"the spec's {prop!r} row no longer cites :{line} — {token.strip()!r} is the site that "
+            "line names at this head, so the row is citing a stale number while the property's "
+            "primary anchor still passes"
         )
 
     for prop, (path, token) in _BFF_PROPERTIES.items():
