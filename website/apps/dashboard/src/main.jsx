@@ -5460,19 +5460,30 @@ function claimIntentInFlight() {
       const res = await fetch(`${API_BASE}/v1/team/alerts/ack`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ org_id: tid, episode: alert.episode }),
+        // `rendered_at` is what this render actually showed, sent as an
+        // ASSERTION (the server derives the window itself). If the episode has
+        // moved past it on the incident register, the server refuses with 409
+        // instead of writing a dismissal that would also cover the newer row —
+        // e.g. a second suspension that arrived after the render.
+        body: JSON.stringify({
+          org_id: tid,
+          episode: alert.episode,
+          rendered_at: alert.at || undefined,
+        }),
       })
       if (!res.ok) {
         // A REFUSAL is not a transient failure, and telling the reader to "try
         // again" on one is the same unactionable-remedy defect this change
         // exists to remove (review nit). The statuses below are the ones the
         // route actually returns: 403 (role), 404 (episode no longer in our
-        // feed), 422 (missing org_id/episode), 503 (store failure — that one IS
-        // retryable). There is deliberately no 409: an earlier version refused
-        // truncated episodes, and that refusal is gone.
+        // feed), 409 (the episode moved on since this render), 422 (missing
+        // org_id/episode), 503 (store failure — that one IS retryable).
+        // The 409 is deliberately NOT a retry: what the reader saw is no longer
+        // current, so the honest next step is to look at what is.
         const refusal = {
           403: 'Only an owner or admin can acknowledge an alert.',
           404: 'That alert is no longer in the feed — reload to refresh.',
+          409: 'This alert changed since it was shown — reload to see what is current.',
           422: 'That alert could not be identified — reload to refresh.',
         }[res.status]
         setAckError({

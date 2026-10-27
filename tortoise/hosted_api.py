@@ -11125,6 +11125,13 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
       client-supplied window would let a caller acknowledge an episode it was
       never shown.
 
+    ``rendered_at`` is OPTIONAL and is only an ASSERTION, not input to the
+    window (#10156 round 9): it is the ``at`` the caller had on screen, and if
+    our feed has moved past it on the INCIDENT register we refuse with 409 so
+    the dashboard reloads — because the acknowledgement we would otherwise write
+    covers the newer row too, and a re-suspension inside the same episode gap
+    would then be dismissed by a click that never saw it.
+
     A ``truncated`` episode IS acknowledgeable. An intermediate version refused
     it with 409 on the reasoning that its key is anchored to the oldest row we
     can see, so it moves as the window slides — which was true of the KEY. It is
@@ -11166,6 +11173,32 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
         raise HTTPException(
             status_code=404,
             detail="no such alert episode on this Organization")
+    # ROUND 9 (review finding) — a dismissal must not cover an incident it was
+    # not shown. The window written with the ack is the episode's newest row AT
+    # WRITE TIME, and `_episode_acknowledged`'s incident gate only refuses rows
+    # NEWER than that — so anything that arrived between the render and the click
+    # is folded into the dismissal and can never re-open it. A re-suspension
+    # immediately after a suspension is exactly that case, and a suspension
+    # writes no follow-up row, so nothing else would ever surface it.
+    #
+    # The client therefore sends the `at` it RENDERED, and we use it only as an
+    # ASSERTION about what was on screen — never as the window (that stays
+    # server-derived, see above): if our feed has moved past it, the click is
+    # answering a row that is no longer current, so we refuse and the dashboard
+    # reloads. Applied to the INCIDENT register only: absorbing a newer
+    # observation is the deliberate choice for a rate (`_episode_acknowledged`),
+    # and refusing there would live-lock dismissal of an ongoing rate, where a
+    # new window can arrive every 5 minutes.
+    from tortoise import abuse as _abuse  # the timestamp + register vocabulary
+    rendered_at = str(body.get("rendered_at") or "").strip()
+    if rendered_at and match.get("register") == _abuse.REGISTER_ALERT:
+        newer = _abuse._parse_ts(match.get("at"))
+        seen = _abuse._parse_ts(rendered_at)
+        if newer is not None and seen is not None and newer > seen:
+            raise HTTPException(
+                status_code=409,
+                detail="this alert changed since it was shown — reload to "
+                       "see what is current")
     # The WINDOW is taken from OUR feed, never from the request: the client
     # sends only the key it rendered, and a client-supplied window would let a
     # caller acknowledge an episode it was never shown (review finding).

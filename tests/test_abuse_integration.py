@@ -738,6 +738,91 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
+    def test_a_second_INCIDENT_behind_a_stale_render_is_refused_not_absorbed(self, env):
+        """P2 (round 9 review). The ack's window is the episode's newest row AT
+        WRITE TIME, and the incident gate only refuses rows newer than THAT — so
+        anything arriving between the render and the click was folded into the
+        dismissal and could never re-open it. A re-suspension inside the episode
+        gap is exactly that case, and a suspension writes no follow-up row, so
+        nothing else would ever surface it: the panel would print "Everything
+        shown here is acknowledged." over a live second suspension.
+
+        The client now sends the `at` it rendered, as an ASSERTION only (the
+        window stays server-derived). If our feed has moved past it, refuse."""
+        self._owner(env)
+        env["fake"].seed("abuse_events", [
+            {"id": 1, "org_id": TEAM, "event_type": "suspend", "details": {},
+             "created_at": "2026-09-25T17:19:05+00:00"}])
+        try:
+            with verdict_client(env["app"]) as tc:
+                rendered = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]
+                # …and then the org is suspended AGAIN, inside the episode gap,
+                # before the owner clicks. A second row of the same identity.
+                env["fake"].seed("abuse_events", [
+                    {"id": 2, "org_id": TEAM, "event_type": "suspend",
+                     "details": {},
+                     "created_at": "2026-09-25T17:41:05+00:00"}])
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM,
+                                  "episode": rendered["episode"],
+                                  "rendered_at": rendered["at"]})
+                assert r.status_code == 409, (r.status_code, r.text)
+                assert not [x for x in env["fake"].tables["abuse_events"]
+                            if x["event_type"] == "alert_ack"], (
+                    "the stale click wrote a dismissal that covers the second "
+                    "suspension")
+                # The CURRENT render acknowledges fine — the control still works,
+                # it just has to answer what is on screen now.
+                fresh = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"][0]
+                assert fresh["count"] == 2, fresh
+                r2 = tc.post("/v1/team/alerts/ack",
+                             json={"org_id": TEAM, "episode": fresh["episode"],
+                                   "rendered_at": fresh["at"]})
+                assert r2.status_code == 200, r2.text
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_an_OBSERVATION_does_not_livelock_its_own_dismissal(self, env):
+        """The refusal above is INCIDENT-only, deliberately. Dismissing an ongoing
+        RATE must keep working while new windows arrive — that is the whole point
+        of `_episode_acknowledged` absorbing post-ack observations, and refusing
+        them would mean a click during a burst bounces until the burst stops."""
+        self._owner(env)
+        env["fake"].seed("abuse_events", [
+            {"id": 1, "org_id": TEAM, "event_type": "read_velocity",
+             "details": {"scope": "key", "id": "k-1"},
+             "created_at": "2026-09-25T17:19:05+00:00"}])
+        try:
+            with verdict_client(env["app"]) as tc:
+                rendered = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()[
+                    "alerts"][0]
+                env["fake"].seed("abuse_events", [
+                    {"id": 2, "org_id": TEAM, "event_type": "read_velocity",
+                     "details": {"scope": "key", "id": "k-1"},
+                     "created_at": "2026-09-25T17:24:06+00:00"}])
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM,
+                                  "episode": rendered["episode"],
+                                  "rendered_at": rendered["at"]})
+                assert r.status_code == 200, (r.status_code, r.text)
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_the_review_message_promises_a_REQUEST_not_an_act(self):
+        """P2 (round 9 review). "our team is reviewing it" was the deleted
+        future-tense promise ("and will be in touch") in the present tense, and
+        the module states plainly that no human has acted when the row is
+        written. The endpoint renders this string verbatim to the customer."""
+        import re
+
+        from tortoise.abuse import _alert_dict
+        msg = _alert_dict({"event_type": "review_needed", "details": {},
+                           "created_at": "2026-09-25T17:19:05+00:00"})["message"]
+        assert "our team is reviewing" not in msg, msg
+        assert not re.search(r"\b(is|are) reviewing\b", msg), msg
+        assert "an operator has been asked" in msg, msg
+
     def test_only_owner_or_admin_may_acknowledge(self, env):
         """An ack hides a security row from the whole org — that is a
         management act, so a plain member cannot perform it."""

@@ -1318,9 +1318,18 @@ def _alert_dict(row: dict) -> dict:
         # string must not promise a human follow-up the plumbing cannot
         # guarantee; it now states what IS true (nothing was disabled) and
         # leaves the route where the customer can reach us.
+        # Round 9 (review finding): "our team is reviewing it" was the SAME
+        # promise as the deleted "and will be in touch", in the present tense and
+        # therefore strictly stronger — and it is false whenever the operator
+        # signal was dropped AND whenever nobody has read the row yet, which this
+        # module states plainly a few hundred lines up ("the ENGINE writes this
+        # when a rule wants an operator to look, and no human has acted yet").
+        # The string says what the plumbing guarantees: the REQUEST exists. It
+        # deliberately does not say when, or that anyone has started.
         EVENT_REVIEW: ("Unusually high activity on this team. Nothing has been "
-                       "disabled, and our team is reviewing it. If you need a "
-                       "higher limit, contact support@premiselabs.co."),
+                       "disabled, and an operator has been asked to look at it. "
+                       "If you need a higher limit, contact "
+                       "support@premiselabs.co."),
         EVENT_SUSPEND: "Organization suspended by an operator",
         # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
         # really returned by `recent_alerts`, so without a message here the
