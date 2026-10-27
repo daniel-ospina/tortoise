@@ -855,13 +855,6 @@ class TestAlertRegistersAndAcks:
         r"(will be in touch|(?:will|'ll)\s+reach(?:ing)?\s+out|"
         r"get back to you|follow(?:ing)? up with you|hear from us|"
         r"within \d+\s*(?:hours?|days?|business days?))", re.I)
-    #: Two things a customer string may legitimately contain that look like a
-    #: human claim, removed BEFORE the match:
-    #:   * an email address ("contact support@…" addresses the support DESK, it
-    #:     does not report what support did);
-    #:   * `suspend`'s "by an operator", which is backed by the row's EXISTENCE —
-    #:     `suspend_org()` is the only writer of EVENT_SUSPEND and the engine no
-    #:     longer suspends, so the row IS the proof.
     #: BOTH `scope` branches (the org-total string was outside the loop until
     #: round 12), plus the empty-details case. Also fed to the accept fixture so
     #: it cannot drift from what actually ships.
@@ -883,6 +876,26 @@ class TestAlertRegistersAndAcks:
 
     @staticmethod
     def _claims(text: str, etype: str | None = None) -> bool:
+        """The shipped predicate: three REMOVALS, then the actor and promise arms.
+
+        Everything a customer string legitimately contains that LOOKS like a human
+        claim is removed before the match — and this list is the whole suppression
+        surface, so read it before widening any of the three (round 20 finding: it
+        lived above `_detail_variants` and said "two", so the enumeration of what
+        can HIDE a match was both miscounted and filed on the wrong method):
+
+          * an email address in OBJECT position ("contact support@…" addresses the
+            support DESK; it does not report what support did);
+          * the CUSTOMER's own staff/settings ("your security team"), which are not
+            a claim about ours — with the window forbidden to cross one of OUR
+            words, so the strip cannot erase an actor;
+          * `suspend`'s "by an operator", backed by the row's EXISTENCE:
+            `suspend_org()` is the only writer of EVENT_SUSPEND and the engine no
+            longer suspends, so the row IS the proof.
+
+        A removal is where a pin hides a hole, so each is pinned in both
+        directions below.
+        """
         # Round 18 (review finding): stripping EVERY address deleted the SUBJECT
         # of a sentence too ("You'll hear from support@…", "Support@… has been
         # notified"), so an actor named by address sailed through. Only an
@@ -895,8 +908,15 @@ class TestAlertRegistersAndAcks:
         # The CUSTOMER's own staff/settings are not a claim about ours, and the
         # phrase can be several words long ("your security team", "your own
         # desk"), which a fixed-width lookbehind cannot express.
+        # Round 20 (review finding): an UNCONSTRAINED window let the strip span a
+        # FIRST-GROUP word and complete on a trailing ambiguous noun, so
+        # "Your support team has been notified." was reduced to " has been
+        # notified." and shipped green — our own staff, named, deleted by a strip
+        # meant to protect the customer's. The window now refuses to cross one.
         stripped = re.sub(
-            r"(?i)\byour(?:\s+own)?(?:\s+\w+){0,2}\s+"
+            r"(?i)\byour(?:\s+own)?"
+            r"(?:\s+(?!(?:operators?|humans?|engineers?|responders?|"
+            r"developers?|analysts?|sres?|support(?:ers?)?)\b)\w+){0,2}\s+"
             r"(?:staff|desks?|security|teams?|settings)\b", "", stripped)
         # The `suspend` exemption, and ONLY for that row type. `suspend_org()`
         # writing the row proves an operator suspended the org — not what an
@@ -990,6 +1010,16 @@ class TestAlertRegistersAndAcks:
             "Support@premiselabs.co has been notified.",
             # round 18: the passive by-agent form of the first person
             "Your keys will be reviewed by us.",
+            # round 20: the customer-determined strip must not CROSS one of OUR
+            # words to reach an ambiguous noun — "your" cannot launder an actor
+            # that is in the staff vocabulary. Deliberately the LOUD direction:
+            # "your support team" may well be the customer's own, and it is
+            # rejected anyway, because the vocabulary is what the row can prove.
+            "Your support team has been notified.",
+            "Your support desk has been notified.",
+            "Your responders team reviewed this.",
+            "Your analysts desk replied.",
+            "Your SRE desk was paged.",
         ]
         #: Caught by the PROMISE list where the actor is ELIDED, which no actor
         #: arm can see. Each must NOT match the actor pattern, or it proves
@@ -1006,9 +1036,20 @@ class TestAlertRegistersAndAcks:
             assert self._HUMAN.search(text), (
                 f"the actor pattern misses a false human claim: {text!r} — a "
                 "pin that cannot reject this cannot guard the real copy either")
+            # …AND the shipped PREDICATE, which the arms alone cannot prove.
+            # Round 20 (review finding): these loops only ever exercised
+            # `_HUMAN`/`_PROMISE`, so a stripping step that DELETED a named actor
+            # could widen freely without reddening the "discriminating power"
+            # fixture — which is how the customer-determined strip came to erase
+            # "Your support team". A fixture for the predicate has to call it.
+            assert self._claims(text), (
+                f"the PREDICATE accepts a false human claim: {text!r} — an arm "
+                "matched it, so a pre-strip is deleting the actor")
         for text in must_reject_promise:
             assert self._PROMISE.search(text), (
                 f"the PROMISE list misses an elided-actor promise: {text!r}")
+            assert self._claims(text), (
+                f"the PREDICATE accepts an elided-actor promise: {text!r}")
             assert not self._HUMAN.search(text), (
                 f"{text!r} is supposed to prove the PROMISE list (actor "
                 "elided) but the actor pattern catches it too, so the promise "
@@ -1048,6 +1089,11 @@ class TestAlertRegistersAndAcks:
             "Manage your team in Settings.",
             "Ask your security team to revoke the key.",
             "Ask your own security desk to revoke the key.",
+            # …and the same phrase form where the noun is NOT our vocabulary:
+            # the strip is what makes both of these pass, and it is pinned in
+            # both directions above.
+            "Your engineering team reviewed this.",
+            "Your security team reviewed this.",
             "Suspicious activity flagged on this Organization",
             "Access from a new location: ES",
             "Access from a new location",
