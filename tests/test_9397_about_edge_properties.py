@@ -2306,7 +2306,7 @@ def test_the_document_population_counts_match_the_census():
     # The causal axis must PARTITION the same population, not exceed it.
     # the two counts are stated with their parenthetical explanations between them,
     # so the window has to allow prose: "2 ORIGINATING (the two writers that write it
-    # first) and 3 RE-MATERIALIZING (the replay fold, …)"
+    # first) and 4 RE-MATERIALIZING (the replay fold, …)"
     # `_flat` normalises the hyphen out, so match the space form too
     split = re.search(
         r"(\d+) ORIGINATING.{0,200}?(\d+) RE[ -]MATERIALIZING", storage, re.S
