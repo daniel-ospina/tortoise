@@ -200,8 +200,9 @@ on them would be recording a capability we did not ship.
 3. Steps 4/6/7/8/9 **through ChatGPT** — the tool-call trace as the model actually emits it,
    the OAuth consent as ChatGPT renders it. Needs a ChatGPT Plus/Pro account and a human to
    complete the sign-in/authorize (`#9664` step 4 says so explicitly). → **6/7/8/9 DONE**
-   (`step6*`, `step7*`, `step8*`, `step9*`); **step 4 BLOCKED** on `#10088` — the consent renders,
-   but the authorize page's sign-in returns the code to the marketing host, so no token is issued.
+   (`step6*`, `step7*`, `step8*`, `step9*`); **step 4 BLOCKED** on `#10088` — ChatGPT's **connect
+   dialog** renders, but the authorize page's sign-in returns the code to the marketing host, so the
+   authorize page's **consent view** is never reached and no token is issued.
    It needs a product fix, not a human keystroke.
 4. Step 10 — the card **as rendered** (the copy is pinned by test; the rendering is not). → **DONE**
    — `step10-capture-disclosure-tall-…130452.png` is the frame that carries the ChatGPT row

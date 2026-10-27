@@ -460,6 +460,13 @@ _ENV_URI_PIN_FILES = (
     # #5140: declares the same `from_uri(uri)` / probe shapes above, so the
     # same loose-net hazard applies and the same invariant must hold.
     "test_5140_pending_extraction.py",
+    # #10164: the relabel migration's file declares the same two shapes, so the
+    # same loose-net hazard applies here too — a future `uri = os.environ...`
+    # plus a no-graph_name `from_uri(uri)` would match its declaration and red
+    # nothing. Today the env read is `env = …` (`:70`), which this pin's
+    # `uri\s*=` regex does not flag, so the pin holds without an edit to the
+    # file it guards.
+    "test_5140_d10_relabel_migration.py",
 )
 
 
