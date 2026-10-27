@@ -40,7 +40,12 @@ row's subset label, n / both losses / **Δloss and its Δprecision / Δrecall le
 (the `#10108` review measured the leg gap: `+0.8` retyped to `+8.0` stayed GREEN
 while publishing a branch-1 firing the run does not have), the
 `#### ⚠️ REPLICATED 2026-10-18` heading itself
-(deleted or renamed reds, named in the failure), a DUPLICATED, deleted,
+(deleted or renamed reds, named in the failure), a SECOND
+`#### ⚠️ REPLICATED 2026-10-18` subsection above or below the real one
+(`_block()` reads the FIRST occurrence, so a duplicate is invisible without an
+explicit count — measured: a copy placed BELOW the original with its
+`holdout | bound` Δ retyped `+99.9 pp` stayed GREEN until the count was added),
+a DUPLICATED, deleted,
 column-misaligned or fork-ordered table row, a second `| split |` table placed
 above the real one, a printed rate dropped from one of the four split rows that
 carry one, or the scorer's own thresholds (an instrument change with no
@@ -156,6 +161,21 @@ def _block(doc: str, marker: str) -> str:
         f"§10 no longer carries the {marker!r} subsection — E5's write-back is "
         "gone. Re-publish the replicated run (and its table) before closing "
         "#7949; do not delete this pin")
+    # …and it must be the ONLY one. `split(marker, 1)` reads the FIRST occurrence,
+    # so a duplicated subsection placed BELOW the real one is never looked at:
+    # a conflict resolution that keeps both sides of a whole subsection (the exact
+    # shape `_split_table()` pins one level down) leaves §10 rendering TWO
+    # replicated-run tables, the second free to publish a contradicting figure
+    # while this pin validates the first. Nothing else in the tree reads §10 for a
+    # number, and a duplicated table is not malformed — it is two valid tables
+    # that both render — so no linter or renderer notices either (`#10108` review
+    # P3, measured: the copy's `holdout | bound` Δ retyped `+99.9 pp` below the
+    # original stayed GREEN before this assertion).
+    assert doc.count(marker) == 1, (
+        f"§10 carries {doc.count(marker)} {marker!r} subsections — only the "
+        "FIRST would be read, so a second (or a forked) replicated-run table "
+        "could publish different figures while this pin validated the other "
+        "one. Exactly one is required")
     tail = doc.split(marker, 1)[1]
     return tail.split("\n####", 1)[0]
 
@@ -255,14 +275,20 @@ def _split_table(block: str) -> list[list[str]]:
         f"{_REPLICATED!r} — only the FIRST would be read, so a second (or a "
         "forked) table could publish different figures while this pin validated "
         "the other one. Exactly one is required")
-    for index, line in enumerate(lines):
-        if re.match(r"^\|\s*split\s*\|", line):
-            break
-    else:  # pragma: no cover — the count above already proved it exists
+    # `next()` rather than an `enumerate` loop: the index is needed AFTER the loop
+    # (`lines[index:]` below), and a loop variable read only past the body is what
+    # ruff's B007 refuses — it reddened the REQUIRED `agent-infra-ci / lint` check
+    # on this very function (`819e0585f3`: "Loop control variable `index` not used
+    # within loop body", `ruff check .`, 2026-10-27T18:28:43Z). Behaviour is
+    # identical: the first line matching the split-table header.
+    try:
+        index = next(i for i, line in enumerate(lines)
+                     if re.match(r"^\|\s*split\s*\|", line))
+    except StopIteration:  # pragma: no cover — the count above already proved it
         raise AssertionError(
             "§10 no longer carries the `| split | ... |` table under "
             f"{_REPLICATED!r} — the table the decision input is published in is "
-            "gone, so this pin would be comparing nothing")
+            "gone, so this pin would be comparing nothing") from None
     rows = []
     for line in lines[index:]:
         stripped = line.strip()
@@ -475,7 +501,7 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
     # also consumes (`score_qualifiers.py:760-761`). It was UNPINNED until the
     # `#10108` review: `Δprecision +0.8` could be retyped `+8.0` and stay GREEN —
     # publishing a branch-1 FIRING the run does not have, in the cell §10's own
-    # prose reads (`EXTRACTOR-V4-ARCHITECTURE.md:1338-1340`: *"the holdout's (+0.8)
+    # prose reads (`EXTRACTOR-V4-ARCHITECTURE.md:1340-1341`: *"the holdout's (+0.8)
     # is inside it"*, sc. the registered ±5 tolerance; `+8.0` is outside it).
     holdout = score["decision_input"]["branches"]["holdout"]
     got_holdout = _row(block, r"\*\*holdout\*\*\s*\(decision input\)")
