@@ -365,7 +365,44 @@ class TestBlastRadius:
         assert preview["edges_transferred_from_old"] == 2
         assert preview["edges_created_at_new"] == 1
         real = sdk.supersede(old, new)
-        assert preview["edges_created_at_new"] == real["edges_transferred"]
+        # ⛔ The field that mirrors the writer is `edges_transferred_from_old`,
+        # NOT `edges_created_at_new`. The writer's `edges_transferred` is its
+        # OLD-SIDE row count — it books the second parallel edge even though the
+        # successor's MERGE collapses it — and `_preview_supersede`'s contract
+        # says so outright (`tortoise/mcp_server.py`: "It is therefore NOT 'the
+        # edges that arrive at the successor': those are `edges_created_at_new`
+        # + `edges_already_present_at_new`"). Pairing the deduped successor
+        # count with the writer's row count here is the "source-row count as if
+        # each became a distinct edge" error this case's own docstring warns
+        # against, and this was the only place in the file that paired them —
+        # the five other differential cases pin `edges_transferred_from_old`.
+        assert preview["edges_transferred_from_old"] == real["edges_transferred"]
+        # The collapse is the product fact this case exists for, so pin it on
+        # the graph: TWO parallel edges leave `old`, ONE arrives at `new`
+        # (the writer MERGEs; raw Cypher is the only way to mint these).
+        # ⛔ `count(r)` with the relationship BOUND, not `count(*)`: on this
+        # engine an unbound relationship pattern counts distinct (start,end)
+        # paths, so `count(*)` reads 1 for two parallel edges and cannot tell
+        # one successor edge from two — measured here. The bound form is the
+        # one that can see multiplicity at all.
+        assert sdk._get_proj().g.query(
+            "MATCH (:Point {id:$n})-[r:aboutSubject]->(:Subject {id:$t}) "
+            "RETURN count(r)",
+            params={"n": new, "t": subj},
+        ).result_set[0][0] == 1
+        # …and the retired point keeps NOTHING. The 2b delete is target-based
+        # (`MATCH (old)-[r:rel]->(t) WHERE id(t) = $tid DELETE r`), so if it
+        # regressed the successor count above would STILL read 1 while `old`
+        # kept both parallel edges — a retired point holding a live edge to a
+        # subject is the exact state supersede promises it no longer has.
+        # ⛔ `count(r)` with a BOUND relationship, not `count(*)`: with the
+        # relationship unbound FalkorDB counts distinct (start,end) paths and
+        # reports 1 for two parallel edges — measured on this engine. The bound
+        # form is the one that can see multiplicity at all.
+        assert sdk._get_proj().g.query(
+            "MATCH (:Point {id:$o})-[r:aboutSubject]->() RETURN count(r)",
+            params={"o": old},
+        ).result_set[0][0] == 0
 
     def test_supersede_preview_keeps_parallel_operator_edges(self, sdk):
         """The 2a operator leg MERGEs idx-keyed: `create_operator(op, old,
