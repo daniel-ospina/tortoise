@@ -1089,7 +1089,7 @@ def derived_core_selection(
       (c) `keep_empty_closures` and its closure is EMPTY.
 
     (c) is not a fudge, it is the one class the closure provably cannot answer:
-    112 of the 737 core files import nothing from the package — they assert
+    113 of the 738 core files import nothing from the package — they assert
     invariants of a CONFIG, WORKFLOW or DOC file, which is exactly why they were
     hand-registered in `SOURCE_PATTERNS`/`CORE_ALSO` in the first place. An
     import closure has no edge to carry that dependency, so a mapping that drops

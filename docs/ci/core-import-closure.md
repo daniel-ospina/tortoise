@@ -47,8 +47,9 @@ transitive set of `tortoise/**` modules it imports. Modules under analysis are n
 
 The same derivation restricted to **module-level** imports only — the naive reader — reports a
 median core closure of **5 modules** and a `tortoise/__init__.py` closure of **2**. That looks like
-a triumphant 99 % reduction and it is exactly the false green: `tortoise/sdk.py` carries **89**
-in-repo modules, of which **74 arrive through function-local imports** and 16 at import time, and
+a triumphant 99 % reduction and it is exactly the false green: `tortoise/sdk.py` reaches **89**
+in-repo module targets, of which **74 arrive through function-local imports** and 16 at module level
+(one target is reached both ways), and
 `tortoise/config.py`'s cycle-breaking `from tortoise.sdk import _derive_graph_name` is itself
 deferred. Measured both ways on the same tree:
 
@@ -57,9 +58,11 @@ deferred. Measured both ways on the same tree:
 | `closure(tortoise/__init__.py)` | **2** | **185** |
 | core closure median / max | **5** / 65 | **185** / 206 |
 
-A closure that reads only top-level imports would have selected five files for a change that 326
-core files can observe. This is the reason the tool walks the whole tree and tags every edge
-`in_function`.
+A closure that reads only top-level imports would have selected **200** of 738 files for a change to
+`tortoise/sdk.py`, against **625** with every nesting walked — and its median closure is 5 modules
+where this tool's is 185. The gap is the **153** core files that reach `tortoise.sdk` only from a
+function body (326 carry a direct edge, 173 of them at module level). This is the reason the tool
+walks the whole tree and tags every edge `in_function`.
 
 **59 distinct sets sounds like granularity. It is not.** 424 + 113 = **537 of 738 (73 %)** core
 files sit in one of two degenerate buckets — "the entire 185-module block" or "nothing at all" —
