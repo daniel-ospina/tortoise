@@ -29,7 +29,7 @@ artifact.
     `org_3326a01ea34ae595d84de5d8f9_g_f0f1139860af41b89ba0675b00`, a **custom**-graph namespace in the
     shape `org_{org_id}_{gid}`. Its doubled `_g_` identifies the emitter: `tortoise/hosted_api.py:20936-20937`
     builds `gid = f"g_{_short_id()}"` — 26 hex, `:5010-5013` — into `ns = f"org_{org['id']}_{gid}"`,
-    whereas the same shape in `tortoise/sdk.py` derives its gid from **16** hex (`:33926`, `:33931`) and
+    whereas the same shape in `tortoise/sdk.py` derives its gid from **16** hex (`:33986`, `:33991`) and
     cannot have produced this string. So the `org_id` on that side is `3326a01ea34ae595d84de5d8f9`.
     `step7`/`step12` carry `org_2e34bf114bd077dc819619daaf`, the **default** graph's namespace, which
     `graph_metadata` reads from `organizations.graph_name`, never from `org_id`
