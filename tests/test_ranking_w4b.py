@@ -595,24 +595,30 @@ def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:
     silent fixture accident):
 
     * ``ulid()`` is ``<ms-hex>-<random>``, so the twins' id order — and with
-      it which twin #3019's ``ORDER BY score DESC, node.<id> ASC`` tie-break
-      hands rank 0 — is decided by the millisecond each was minted in.  The
-      mint below steps across a millisecond boundary (2 ms) so a same-ms
-      collision cannot hand the tie-break to 48 bits of randomness.
+      it which twin the tie-break hands rank 0 — is decided by the millisecond
+      each was minted in.  The mint below steps across a millisecond boundary
+      (2 ms) so a same-ms collision cannot hand the tie-break to 48 bits of
+      randomness.  Since #10121 the tie is ``recency-then-id DESC``, i.e. the
+      HIGHER ulid takes rank 0, so the CONTESTED twin is minted FIRST (lowest
+      ulid → last on the page → the low end of the span, which is the end the
+      boost has to lift).
     * the STAND-IN embedder's vectors are hash-seeded
       (``force_embedder_on``: "assertions must never depend on the vectors'
       VALUES"), so WHICH filler row lands between the twins on a small fused
       page is a property of this fixture's texts, not of the mechanism.  A
       test that quotes a number depending on that span names it as a premise.
     """
-    calm = sdk.create_point("statement", _TWIN_CONTENT)
-    time.sleep(0.002)  # cross an ulid() millisecond boundary — see docstring
+    # #10121: the CONTESTED twin holds the LOWER ulid, so the recency/id DESC
+    # tie-break puts it LAST on the page — the end the boost must lift.
     hot = sdk.create_point("statement", _TWIN_CONTENT)
-    assert calm["id"] < hot["id"], (
-        f"the calm twin must hold the LOWER ULID (#3019's id tie-break is "
-        f"what hands it rank 0, and every span assertion reads that way "
-        f"round): calm {calm['id']} vs hot {hot['id']} — regenerate the "
-        f"fixture rather than re-deriving the numbers")
+    time.sleep(0.002)  # cross an ulid() millisecond boundary — see docstring
+    calm = sdk.create_point("statement", _TWIN_CONTENT)
+    assert hot["id"] < calm["id"], (
+        f"the contested twin must hold the LOWER ULID (#10121's tie is "
+        f"recency-then-id DESC, so the LOWEST id lands last — the 0 end of "
+        f"every span assertion reads that way round): hot {hot['id']} vs calm "
+        f"{calm['id']} — regenerate the fixture rather than re-deriving the "
+        f"numbers")
     cc = sdk.create_point("statement", counter_content)
     cc_parity = sdk.create_point(
         "statement", "regional weather fronts shift whole bird populations")
@@ -970,18 +976,18 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
     # The whole normalization span is consumed (order-free: that is the bound).
     assert {two_hot["similarity"], two_calm["similarity"]} == {0.0, 1.0}
     # …and the CONTESTED twin must be the 0 end — the end the boost has to lift.
-    # That is a FIXTURE premise, not a claim about the ranker: #3019's per-leg
-    # ``ORDER BY score, id ASC`` hands rank 0 to the lower-ULID twin, so the
-    # mint order in ``_seed_twin_conflict`` decides which twin lands at 0.  A
-    # same-millisecond ULID collision can flip it; if this fires, regenerate
-    # the fixture rather than re-deriving the comment's 1.4286.
+    # That is a FIXTURE premise, not a claim about the ranker: the tie-break is
+    # ``recency-then-id DESC`` (#10121), so the LOWEST id lands last, and
+    # ``_seed_twin_conflict`` mints the contested twin first for exactly that
+    # reason.  A same-millisecond ULID collision can flip it; if this fires,
+    # regenerate the fixture rather than re-deriving the comment's 1.4286.
     assert two_hot["similarity"] == 0.0, (
         f"FIXTURE PREMISE BROKEN: the contested twin must sit at the 0 end of "
         f"the normalization span (it has {two_hot['similarity']}, calm has "
-        f"{two_calm['similarity']}). #3019's tie-break mints the lower-ULID "
-        f"twin at rank 0, so the twins' mint order flipped — the page still "
-        f"spans {{0,1}}, but this fixture no longer measures the comment's "
-        f"1.4286 requirement")
+        f"{two_calm['similarity']}). The tie-break is recency-then-id DESC "
+        f"(#10121), so the mask order in ``_seed_twin_conflict`` decides which "
+        f"twin lands at 0 — the page still spans {{0,1}}, but this fixture no "
+        f"longer measures the comment's 1.4286 requirement")
 
     # ── The PREMISE the quoted 1.4286 rests on, asserted BY NAME ──────────
     # ``ceiling`` below bounds the ``graph_w * Δgb`` term with ``|Δgb|``, which

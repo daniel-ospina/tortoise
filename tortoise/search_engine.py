@@ -1356,6 +1356,47 @@ def require_hybrid_read(leg_trace: list[dict] | None,
     raise HybridReadUnavailableError(marker, lane=lane)
 
 
+# ── #10121: the tie-break every ranking leg shares ─────────────────
+def recency_tie_clause(alias: str, id_field: str) -> str:
+    """The secondary sort every ranking leg appends after its own primary key.
+
+    Three keys, three jobs: the leg's score orders, **recency** breaks the tie
+    toward the most recently written row, and the id makes the order TOTAL
+    (#3019's requirement — a rank-based fusion downstream cannot tolerate an
+    unstable tie: it would pick a different pool every call).
+
+    ``coalesce(..., '')`` is load-bearing, not defensive. The engine sorts NULL
+    as the LARGEST value, so a bare ``updatedAt DESC`` puts every UNDATED row at
+    the HEAD of the window — measured: an id-less ``:Object`` outranks every
+    dated one, and the leg's ``LIMIT`` then spends the whole pool on rows the
+    caller discards. ``''`` is the smallest string, so an undated row sorts as
+    OLDEST — which is what "no timestamp" means — and a dated match keeps its
+    slot.
+
+    **Why recency, and not the id direction** (#10121's measured defect): the
+    graph-side lexical scorer returns ONE score for a whole corpus of look-alike
+    documents (2.0 across 131 documents, both engines), so the tie IS the
+    ranking. #3019's ``id ASC`` resolved it oldest-first, and because ``id`` is
+    minted from a millisecond timestamp (``ids.ulid()`` -> ``<ts-hex>-<uuid>``)
+    the row created LAST took the last pool slot and was truncated out of the
+    leg entirely — past the pool depth it carried no score at all, so no fusion
+    weight, reranker or MMR could recover it. ``updatedAt`` before
+    ``createdAt``: a tie should surface the LATEST REVISION (a dedup hit or
+    ``update_point`` bumps ``updatedAt``; a fresh row stamps both), and one
+    expression then covers episodic and semantic rows alike. Live operators
+    carry NEITHER property (``projection/__init__.py``: "probe: None"), so they
+    fall through to the id key — which for minted ids is creation order.
+
+    The id key is ``DESC`` on EVERY label. It is only the determinism key, so
+    its direction carries no meaning; branching it per label is precisely how
+    the first attempt at this fix got the id-less ``:Object`` case wrong.
+    """
+    return (
+        f"coalesce({alias}.updatedAt, {alias}.createdAt, '') DESC, "
+        f"{alias}.{id_field} DESC"
+    )
+
+
 def run_fts_query(
     graph, query: str, entity_type: str = "point", limit: int = 20,
     timeout_ms: int = 500, excluded_statuses: tuple | None = None,
@@ -1434,7 +1475,8 @@ def run_fts_query(
                 # #3019: every row scores a constant 1.0, so this leg is ONE giant
                 # tie and DB row order would otherwise decide each operator's RRF
                 # rank. The secondary key makes the order a function of the data.
-                "ORDER BY score DESC, n.id ASC "
+                # #10121: the shared recency tie — the newest operator first.
+                f"ORDER BY score DESC, {recency_tie_clause('n', 'id')} "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -1528,8 +1570,9 @@ def run_fts_query(
             + status_filter +
             f"RETURN node.{id_field}, score "
             # #3019: rank alone does not order a tie, and RRF is rank-based — see
-            # the operator path above.
-            f"ORDER BY score DESC, node.{id_field} ASC "
+            # the operator path above. #10121: shared recency tie (the newest
+            # match keeps its slot instead of being truncated oldest-last).
+            f"ORDER BY score DESC, {recency_tie_clause('node', id_field)} "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1875,7 +1918,7 @@ def run_bm25_query(
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
             "n.search_keys, "
             "coalesce(n.updatedAt, n.createdAt, '') "
-            f"ORDER BY n.{id_field} ASC LIMIT $cap"
+            f"ORDER BY {recency_tie_clause('n', id_field)} LIMIT $cap"
         )
         rows = graph.query(
             cypher, params={"cap": int(corpus_cap) + 1}, timeout=timeout_ms
@@ -2397,8 +2440,8 @@ def run_vector_query(
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             # #3019: a distance tie (equal values, or repeated rows) must not fall
-            # through to DB row order.
-            f"ORDER BY score DESC, n.{id_field} ASC "
+            # through to DB row order. #10121: shared recency tie.
+            f"ORDER BY score DESC, {recency_tie_clause('n', id_field)} "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -2599,7 +2642,9 @@ def run_structural_query(
             # #3019: this leg scores every row a CONSTANT (1.0 / 0.5, below), so
             # with no secondary key the WHOLE leg is an unordered tie and the
             # caller's rank — hence the fused top-k — is DB row order.
-            f"ORDER BY n.{id_field} ASC "
+            # #10121: shared recency tie — on a constant-scored leg the tie does
+            # all the work, so "newest first" is the whole ranking here.
+            f"ORDER BY {recency_tie_clause('n', id_field)} "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -2671,8 +2716,9 @@ def expand_structural_hops(
             "RETURN n.id AS id, hops "
             # #3019: `hops ASC` alone leaves equal-hop candidates in engine row
             # order, so with more candidates than `limit` both MEMBERSHIP and
-            # rank are DB-order dependent.
-            "ORDER BY hops ASC, n.id ASC "
+            # rank are DB-order dependent. #10121: hops stays primary (a real
+            # ranking signal), recency breaks the equal-hop tie.
+            f"ORDER BY hops ASC, {recency_tie_clause('n', 'id')} "
             "LIMIT $limit"
         )
         rows = graph.query(

@@ -448,8 +448,26 @@ class TestReadPath:
         asserts a strict rank IMPROVEMENT, not rank 1.
 
         Mutation: drop the ``raw_results["fts"] = _bm25_hits`` assignment (the
-        lexical arm disabled) → both reads rank the record identically and this
-        reds.
+        lexical arm disabled) → the lexical score assertions below go red.
+
+        #10121 (2026-10-27) changed what "climbs" can mean HERE, and the
+        measurement is recorded rather than papered over. The shipped leg used
+        to resolve a score tie OLDEST-first, so on this fixture it put the
+        target last on the lexical leg and the arm's re-scoring moved the FUSED
+        rank from 5/5 to 3/5. The tie is now recency-then-id DESC, i.e. the
+        target is no longer last on the lexical leg for an ordering reason — and
+        on this fixture the fused order does not move at all, because the four
+        topic documents sit in a DENSE tie cluster (vector 0.9496 ×4 vs the
+        target's 0.4142) that the bounded lexical weight cannot cross (measured
+        gate-off rrf 0.0410/0.0403/0.0397/0.0391/0.0385, gate-on
+        0.0400/0.0398/0.0397/0.0396/0.0395 — the target is last in both). The
+        arm's MECHANISM still lands where it always did: the target carries the
+        strongest lexical score with the gate on (1.3863 vs 0.5754 for every
+        topic doc — the assertion below), which is what the arm is for. So the
+        fused-rank claim becomes "does not regress", and the score claim stays
+        strict. This is the "a lexical rank gain is worth roughly half a dense
+        place" bound this module already documents, now visible on a fixture
+        whose ordering no longer supplies a free lift.
         """
         sdk, target = _e2e_sdk()
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
@@ -492,7 +510,8 @@ class TestReadPath:
         assert _lexical_rank(on) < _lexical_rank(off), (
             "the arm must strictly improve the target's LEXICAL rank; "
             f"off={_lexical_rank(off)}, on={_lexical_rank(on)}")
-        # The lexical SCORE the fusion consumed, not just the order.
+        # The lexical SCORE the fusion consumed, not just the order. This is the
+        # arm's mechanism and the assertion that must stay strict (#10121).
         on_target = next(h for h in on if h["id"] == target)
         assert on_target["scores"]["fts"] > max(
             h["scores"]["fts"] for h in on if h["id"] != target), (
