@@ -96,8 +96,10 @@ INERT_ACTIVATION_FAILED = "activation_failed"
 #: the arm existed, or under another arm) — an EP-inert question inside the
 #: same number.
 INERT_NO_MANIFEST = "no_manifest"
-#: The pass ran and wrote nothing this census can see: no claim carries
-#: persisted EP state (``points_with_ep == 0``).
+#: The pass ran but no POSITIVE measurement could be established: either no
+#: claim carries persisted EP state (``points_with_ep == 0``) or the coverage
+#: census could not be read at all (``points_with_ep`` is UNKNOWN). The two are
+#: different facts and the manifest's raw cells say which.
 INERT_UNMEASURED = "unmeasured"
 
 #: Every reason :func:`classify_question` can return for an EP-inert question.
@@ -137,7 +139,7 @@ def _optional_int(value: Any) -> int | None:
 
 def _classify_question(
     manifest: dict[str, Any] | None,
-) -> tuple[str | None, bool, int, int]:
+) -> tuple[str | None, bool, int | None, int | None]:
     """``(inert_reason, measured, points_off_neutral, points_moved)`` for ONE.
 
     ``inert_reason`` is ``None`` for a question whose claims carry a measured
@@ -152,19 +154,32 @@ def _classify_question(
     produces a reason: ``operators`` absent must not read as ``no_operators``
     (a fabricated structural cause is worse than an unclassified one), so the
     classification falls through to the cells that ARE present.
+
+    ⚠️ The two contribution cells are ``int | None`` and ``None`` is carried
+    through, NOT collapsed to ``0`` (#10137 review 2, P0). A RESUMED outcome
+    carrying a pre-#10137 manifest reaches here with ``points_with_ep > 0`` and
+    no contribution cells — reachable without any exception, because the
+    checkpoint fingerprint records only the ``activate_beliefs`` flag. Turning
+    that ``None`` into ``0`` published ``neutral_questions`` — "the belief
+    layer ran and moved nothing" — for a census that was never read.
     """
     if not isinstance(manifest, dict):
-        return INERT_NO_MANIFEST, False, 0, 0
+        return INERT_NO_MANIFEST, False, None, None
     if manifest.get("error") or manifest.get("ep_ran") is not True:
-        return INERT_ACTIVATION_FAILED, False, 0, 0
-    with_ep = _as_int(manifest.get("points_with_ep"))
-    off_neutral = _as_int(manifest.get("points_off_neutral"))
-    moved = _as_int(manifest.get("points_moved_off_neutral"))
-    if with_ep > 0:
+        return INERT_ACTIVATION_FAILED, False, None, None
+    with_ep = _optional_int(manifest.get("points_with_ep"))
+    off_neutral = _optional_int(manifest.get("points_off_neutral"))
+    moved = _optional_int(manifest.get("points_moved_off_neutral"))
+    if with_ep is not None and with_ep > 0:
         # Measured — whatever the cause cell says. A posterior is a posterior;
         # the census is the fact (it also keeps an operator-LESS graph with
         # direct IMPL/NAND edges, #888 W5, from being called structural).
         return None, True, off_neutral, moved
+    # An UNREADABLE coverage census is not "measured nothing": publish it as
+    # the unclassified shape rather than letting a failed read decide the run's
+    # posture (#10137 review 2, P1).
+    if with_ep is None:
+        return INERT_UNMEASURED, False, None, None
     operators = _optional_int(manifest.get("operators"))
     factor_edges = _optional_int(manifest.get("factor_edges"))
     if operators == 0 and factor_edges == 0:
@@ -174,11 +189,11 @@ def _classify_question(
         # straight between two claims is a factor with no operator node (#888
         # W5), so `operators == 0` alone does not make the graph inert — and
         # either census being UNKNOWN must never fabricate a structural cause.
-        return INERT_NO_OPERATORS, False, 0, 0
+        return INERT_NO_OPERATORS, False, None, None
     reason = manifest.get("no_op_reason")
     if reason in (INERT_NO_EP_FACTORS, INERT_STALE_RUN_GUARD):
-        return reason, False, 0, 0
-    return INERT_UNMEASURED, False, 0, 0
+        return reason, False, None, None
+    return INERT_UNMEASURED, False, None, None
 
 
 def summarize_belief_activation(
@@ -274,14 +289,16 @@ def summarize_belief_activation(
     for key in _SUMMED_KEYS:
         summary[key] = sum(_as_int(m.get(key, 0)) for m in manifests)
     # #10137: the GRAPH CENSUS is the one summed family that can be UNKNOWN per
-    # manifest, and an unknown cell must not sum as a 0 — that is how a run
-    # publishes "this graph has no operators" without having read a census.
-    # Sum the MEASURED cells and publish UNKNOWN only when NO manifest reported
-    # one at all (#10137 review, P1).
+    # manifest. An unknown cell must not sum as a 0 — that is how a run
+    # publishes "this graph has no operators" without having read a census — so
+    # the sum covers the MEASURED cells only and the unread count is published
+    # beside it. A partial sum that does not say how partial it is would be
+    # indistinguishable from a complete measurement (#10137 review 2, P1).
     for census_key in ("operators", "factor_edges"):
-        known = [v for v in (_optional_int(m.get(census_key))
-                             for m in manifests) if v is not None]
+        values = [_optional_int(m.get(census_key)) for m in manifests]
+        known = [v for v in values if v is not None]
         summary[census_key] = sum(known) if known else None
+        summary[f"{census_key}_unread"] = len(values) - len(known)
 
     # ── #10137: the POPULATIONS, enumerated per question ──────────────
     inert: list[dict[str, Any]] = []
@@ -303,26 +320,45 @@ def summarize_belief_activation(
             "questions": 0, "questions_measured": 0,
             "questions_with_ep": 0,
             "questions_off_neutral": 0, "questions_inert": 0,
-            "questions_neutral": 0, "operators": 0,
-            "factor_edges": 0, "points_off_neutral": 0,
+            "questions_neutral": 0, "questions_contribution_unknown": 0,
+            "operators": None, "operators_unread": 0,
+            "factor_edges": None, "factor_edges_unread": 0,
+            "points_off_neutral": 0, "points_off_neutral_unread": 0,
             "points_moved_off_neutral": 0,
+            "points_moved_off_neutral_unread": 0,
         })
         bucket["questions"] += 1
         if manifest is not None:  # only manifests carry these cells
-            bucket["operators"] += _as_int(manifest.get("operators"))
-            bucket["factor_edges"] += _as_int(manifest.get("factor_edges"))
+            for k in ("operators", "factor_edges"):
+                v = _optional_int(manifest.get(k))
+                if v is None:
+                    bucket[f"{k}_unread"] += 1
+                else:
+                    bucket[k] = (bucket[k] or 0) + v
         if measured:
             bucket["questions_measured"] += 1
             bucket["questions_with_ep"] += 1
-            bucket["points_off_neutral"] += off_neutral
-            bucket["points_moved_off_neutral"] += moved
-            if off_neutral > 0:
-                questions_off_neutral += 1
-                bucket["questions_off_neutral"] += 1
+            # The contribution cells are UNKNOWN-preserving end to end: a
+            # question whose census was never read is counted as unknown, NEVER
+            # as "moved nothing" (#10137 review 2, P0).
+            if off_neutral is None:
+                bucket["questions_contribution_unknown"] += 1
+                bucket["points_off_neutral_unread"] += 1
+                bucket["points_moved_off_neutral_unread"] += 1
             else:
-                # covered, and the belief layer moved nothing in it
-                neutral.append(entry)
-                bucket["questions_neutral"] += 1
+                bucket["points_off_neutral"] += off_neutral
+                if moved is None:
+                    bucket["points_moved_off_neutral_unread"] += 1
+                else:
+                    bucket["points_moved_off_neutral"] += moved
+                if off_neutral > 0:
+                    questions_off_neutral += 1
+                    bucket["questions_off_neutral"] += 1
+                else:
+                    # covered, and every posterior IS the neutral mean — a
+                    # MEASURED zero, which is the only thing allowed here
+                    neutral.append(entry)
+                    bucket["questions_neutral"] += 1
         else:
             # #10137 review (P2): the closed ``reason`` vocabulary is what a
             # lane routes a fix on, but the SDK's own diagnosis must not be
@@ -353,11 +389,27 @@ def summarize_belief_activation(
     # belief layer FAILED while every enumerated view excluded it (measured:
     # summary 11 vs buckets 4), so two derivations of one number disagreed
     # inside one report. Deriving from the buckets makes the reconciliation a
-    # structural property rather than a hope.
-    summary["points_off_neutral"] = sum(
-        b["points_off_neutral"] for b in by_type.values())
-    summary["points_moved_off_neutral"] = sum(
-        b["points_moved_off_neutral"] for b in by_type.values())
+    # structural property rather than a hope — and `None` (UNKNOWN) when the
+    # population measured none of it, with the unread counts beside it
+    # (#10137 review 2, P1).
+    measured_off = [b for b in by_type.values()
+                    if b["points_off_neutral"] or not b[
+                        "points_off_neutral_unread"]]
+    summary["points_off_neutral"] = (
+        sum(b["points_off_neutral"] for b in by_type.values())
+        if measured_off else None)
+    summary["points_off_neutral_unread"] = sum(
+        b["points_off_neutral_unread"] for b in by_type.values())
+    measured_moved = [b for b in by_type.values()
+                      if b["points_moved_off_neutral"] or not b[
+                          "points_moved_off_neutral_unread"]]
+    summary["points_moved_off_neutral"] = (
+        sum(b["points_moved_off_neutral"] for b in by_type.values())
+        if measured_moved else None)
+    summary["points_moved_off_neutral_unread"] = sum(
+        b["points_moved_off_neutral_unread"] for b in by_type.values())
+    summary["questions_contribution_unknown"] = sum(
+        b["questions_contribution_unknown"] for b in by_type.values())
     summary["by_question_type"] = dict(sorted(by_type.items()))
     return summary
 

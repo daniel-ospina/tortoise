@@ -120,9 +120,12 @@ def test_covered_graph_over_uniform_priors_reads_zero_off_neutral(sdk):
     manifest = _manifest_of(sdk)
 
     assert manifest["operators"] == 2          # the factors EXIST
-    # Only zero-vs-nonzero carries the verdict (each IMPL operator mints two
-    # edges — premise→op and op→conclusion — so the census reads 4 here).
-    assert manifest["factor_edges"] > 0         # factors DO exist
+    # The factors here are OPERATOR-MEDIATED (premise→op→conclusion), and the
+    # census counts only CLAIM→CLAIM edges — so it reads 0 even though factors
+    # exist. That is the #888 W5 distinction the cell exists for: a 0 here plus
+    # operators==0 is what makes a graph structural, and an operator-mediated
+    # edge must not be mistaken for a direct one.
+    assert manifest["factor_edges"] == 0
     assert manifest["factors"] == 2            # ...and this pass used them
     assert manifest["points_with_ep"] == 3     # full coverage
     assert manifest["points_off_neutral"] == 0  # zero contribution
@@ -154,7 +157,7 @@ def test_a_real_source_baseline_moves_the_census(sdk):
     manifest = _manifest_of(sdk)
 
     assert manifest["operators"] == 2
-    assert manifest["factor_edges"] > 0          # factors DO exist
+    assert manifest["factor_edges"] == 0         # operator-mediated, not direct
     assert manifest["points_with_ep"] == 3
     assert manifest["points_off_neutral"] == 3
     # `b`'s baseline was set BEFORE the pass, so only the two claims the pass

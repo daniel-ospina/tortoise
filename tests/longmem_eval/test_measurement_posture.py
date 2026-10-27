@@ -865,9 +865,11 @@ def test_unknown_operator_cell_never_fabricates_a_structural_cause():
           "belief_activation": _unmeasured_manifest()}],   # no `operators`
         requested=True)
     assert summary["inert_questions"][0]["reason"] == mp.INERT_UNMEASURED
-    # the bucket's operator total stays 0 (no cell to sum) without the reason
-    # following it
-    assert summary["by_question_type"][""]["operators"] == 0
+    # the bucket publishes UNKNOWN for the census (no cell to sum), never a
+    # fabricated 0 — and the reason does not follow the absent cell either
+    assert summary["by_question_type"][""]["operators"] is None
+    assert summary["by_question_type"][""]["operators_unread"] == 1
+    assert summary["operators"] is None
 
 
 def test_a_measured_question_is_measured_whatever_the_cause_cell_says():
@@ -1065,3 +1067,51 @@ def test_a_diagnosis_outside_the_closed_vocabulary_is_carried_not_dropped():
     entry = summary["inert_questions"][0]
     assert entry["reason"] == mp.INERT_UNMEASURED
     assert entry["no_op_reason"] == "budget_zero"
+
+
+# ── #10137 review round 2: UNKNOWN must not leak back into 0 ──────────────
+
+def test_a_resumed_manifest_without_contribution_cells_is_never_neutral():
+    """P0 regression. A checkpoint written BEFORE #10137 re-runs the arm and
+    yields ``points_with_ep > 0`` with NO contribution cells — reachable
+    without any exception, because the checkpoint fingerprint records only the
+    ``activate_beliefs`` flag. Collapsing that UNKNOWN to 0 published the
+    question in ``neutral_questions``, i.e. "the belief layer ran and moved
+    nothing", for a census that was never read."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1",
+          "belief_activation": {"ep_ran": True, "points_with_ep": 4}}],
+        requested=True)
+    assert summary["neutral_questions"] == []
+    assert summary["questions_neutral"] == 0
+    assert summary["points_off_neutral"] is None
+    assert summary["points_moved_off_neutral"] is None
+    assert summary["questions_contribution_unknown"] == 1
+    assert summary["questions_with_ep"] == 1        # coverage IS measured
+
+
+def test_an_unread_coverage_census_does_not_decide_the_posture():
+    """A coverage census that could not be read is UNKNOWN — it must not be
+    published as ``points_with_ep == 0``, which drives the per-question verdict
+    and the run's ``partial`` posture."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": {"ep_ran": True}}],
+        requested=True)
+    assert summary["inert_questions"][0]["reason"] == mp.INERT_UNMEASURED
+    assert summary["neutral_questions"] == []
+
+
+def test_a_partial_census_sum_says_how_partial_it_is():
+    """A sum over the MEASURED cells is published, but never without the count
+    of cells that were unread — otherwise a partial sum reads as a complete
+    measurement."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _unmeasured_manifest(
+            operators=0, factor_edges=0)},
+         {"question_id": "q2", "belief_activation": _unmeasured_manifest(
+            no_op_reason="no_ep_factors")}],      # no census cells at all
+        requested=True)
+    assert summary["operators"] == 0
+    assert summary["operators_unread"] == 1
+    assert summary["factor_edges"] == 0
+    assert summary["factor_edges_unread"] == 1

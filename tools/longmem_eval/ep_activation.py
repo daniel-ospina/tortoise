@@ -137,14 +137,25 @@ _COUNT_OPERATORS = (
     "RETURN count(o)"
 )
 
-#: Direct factor edges between claims. An IMPL/NAND with NO operator node
-#: between its endpoints is still a factor (#888 W5), so ``operators == 0``
-#: alone does NOT prove the graph is structurally EP-inert. The STRUCTURAL
-#: ``no_operators`` verdict therefore requires THIS census to be ``0`` as well
-#: (#10137 review, P1) — otherwise the module publishes "no factor can ever
-#: reach a claim" over a graph that carries direct factors.
+#: Direct factor edges: an ``IMPL``/``NAND`` whose BOTH endpoints are claims.
+#:
+#: An IMPL/NAND with NO operator node between its endpoints is still a factor
+#: (#888 W5), so ``operators == 0`` alone does NOT prove the graph is
+#: structurally EP-inert. The STRUCTURAL ``no_operators`` verdict therefore
+#: requires THIS census to be ``0`` as well (#10137 review, P1).
+#:
+#: Deliberately restricted to CLAIM → CLAIM: an operator-mediated factor mints
+#: premise→op and op→conclusion edges, and counting those would make the cell
+#: include every ordinary factor while its name promises only the operator-less
+#: ones (#10137 review 2, P2). The endpoint predicate mirrors `ep.py`'s direct-
+#: edge arms (a non-operator claim is ``is_operator`` false/absent AND
+#: ``op_type IS NULL``).
 _COUNT_FACTOR_EDGES = (
-    "MATCH ()-[r:IMPL|NAND]->() "
+    "MATCH (a)-[r:IMPL|NAND]->(b) "
+    "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+    "AND a.op_type IS NULL "
+    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+    "AND b.op_type IS NULL "
     "RETURN count(r)"
 )
 
@@ -485,9 +496,16 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
             points_promoted, operators_promoted, exc, exc_info=True)
 
     # ── 3. EP-state census (post-pass) ────────────────────────────────
-    total = _scalar(g.query(_COUNT_POINTS_TOTAL).result_set)
-    with_ep = _scalar(g.query(_COUNT_POINTS_WITH_EP).result_set)
-    points_unmeasured = max(total - with_ep, 0)
+    # The coverage cells were `_scalar` (0 on an absent result set) while the
+    # contribution cells were already UNKNOWN-aware — the same defect one layer
+    # down, and worse: `points_with_ep == 0` DRIVES the per-question verdict and
+    # the run's posture, so a failed read was published as "nothing was
+    # measured" (#10137 review 2, P1). Every census read degrades to UNKNOWN.
+    total = _census(g, _COUNT_POINTS_TOTAL)
+    with_ep = _census(g, _COUNT_POINTS_WITH_EP)
+    points_unmeasured = (max(total - with_ep, 0)
+                         if total is not None and with_ep is not None
+                         else None)
     # #10137: coverage is not contribution. Both are measured, every run.
     #
     # The GRAPH SHAPE (`operators`, `factor_edges`) is a property of the graph,
