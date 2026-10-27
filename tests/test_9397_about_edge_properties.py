@@ -3981,7 +3981,11 @@ CLASS_VERDICT_MARKERS: dict[str, tuple[str, ...]] = {
         "property MAP",
         "MAP-form",
         "MAP form",
-        "re-materializ",
+        # ⛔ FLATTENED spelling: `_flat` turns `RE-MATERIALIZING` into
+        # `RE MATERIALIZING`, so the hyphenated form of this marker matched ZERO
+        # occurrences in either document (`#10200` review: measured 0 hyphenated
+        # vs 8 flattened). A marker that matches nothing pins nothing.
+        "re materializ",
         "SET r +=",
         "SET r = $p",
         "SET nr +=",
@@ -4016,14 +4020,38 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "carries no property",
 )
 
-#: What makes a denial a statement about HISTORY rather than about HEAD.
+#: What makes a denial a statement about HISTORY rather than about HEAD — read in
+#: the CLAUSE that carries the denial, never across the whole sentence (see
+#: `_history_in_denial_clause`). ⛔ `#10139` is deliberately NOT a member: it is an
+#: OPEN defect reference (*"The REBUILD half is still bare"*), not a statement that
+#: the state changed, and it ends the very paragraph this leg guards — so an
+#: editor restoring the retracted sentence in the same breath as the rebuild note
+#: walked straight through the gate (`#10200` review, measured: the cycle-3
+#: sentence + ` (\`#10139\`)` was green). Nothing true is lost: the one sentence
+#: that may need an escape names no census key today.
 HISTORY_MARKERS: tuple[str, ...] = (
     "before #9417",
     "until #9417",
     "pre-#9417",
     "was a declared",
-    "#10139",
 )
+
+#: NEGATORS. A class marker under one of these does not STATE the class, it DENIES
+#: it — and a negation of the class is precisely the claim `#10149` exists to
+#: forbid. Measured on `#10200`'s review: leg 1 counted *"`sdk.supersede_point` is
+#: not a re-materializing writer"* as a stated verdict (it contains
+#: `re-materializ`) while leg 2 had no marker for it, so the ONE-WORD paraphrase of
+#: the retracted cycle-3 sentence was green on BOTH legs. Polarity is therefore
+#: read rather than assumed: token existence is not a claim.
+_NEGATOR_RE = re.compile(
+    r"\b(?:not|never|neither|nor|cannot|no\s+longer|fails\s+to|stops)\b|n't\b",
+    re.I,
+)
+
+#: Where a CLAUSE ends. A negator or a history marker outside the denial's own
+#: clause says nothing about that denial — the sentence-wide reading is what let a
+#: trailing open-defect reference excuse the retracted sentence above it.
+_CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|")
 
 #: A declared false positive described as COUNTED — the same contradiction from
 #: the other side: an exemption the census counts is a writer described as
@@ -4097,6 +4125,74 @@ def _claim_sentences(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", flat) if part.strip()]
 
 
+def _clause_before(sentence: str, index: int) -> str:
+    """The text of the clause that ENDS at `index` — a negator's neighbourhood."""
+    head = sentence[:index]
+    cut = max((head.rfind(brk) for brk in _CLAUSE_BREAKS), default=-1)
+    return head[cut + 1:]
+
+
+def _clause_at(sentence: str, index: int) -> str:
+    """The whole clause CONTAINING `index`, both sides, up to the breaks."""
+    lo = max((sentence.rfind(brk, 0, index) for brk in _CLAUSE_BREAKS), default=-1)
+    hi = min(
+        (pos for pos in (sentence.find(brk, index) for brk in _CLAUSE_BREAKS) if pos != -1),
+        default=len(sentence),
+    )
+    return sentence[lo + 1:hi]
+
+
+def _stated_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
+    """Markers that POSITIVELY state something in this sentence.
+
+    An occurrence under a negator in its own clause does not count: *"is not a
+    re-materializing writer"* names the vocabulary and says the OPPOSITE of it,
+    so accepting it as a stated verdict pins nothing (and, on a counted row,
+    hides the very denial the second leg exists to catch).
+    """
+    low = sentence.lower()
+    found: list[str] = []
+    for marker in markers:
+        pattern = re.compile(re.escape(marker.lower()))
+        if any(
+            not _NEGATOR_RE.search(_clause_before(low, match.start()))
+            for match in pattern.finditer(low)
+        ):
+            found.append(marker)
+    return found
+
+
+def _denied_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
+    """Markers under a NEGATOR in their own clause — the classes they DENY."""
+    low = sentence.lower()
+    found: list[str] = []
+    for marker in markers:
+        pattern = re.compile(re.escape(marker.lower()))
+        if any(
+            _NEGATOR_RE.search(_clause_before(low, match.start()))
+            for match in pattern.finditer(low)
+        ):
+            found.append(marker)
+    return found
+
+
+def _history_in_denial_clause(low: str, marker: str) -> bool:
+    """Is THIS denial — in the clause that carries it — about HISTORY?
+
+    A sentence-wide test excused EVERY denial in the sentence, so one trailing
+    reference to an open defect made the retracted cycle-3 sentence green again
+    (`#10200` review). A history marker says the state CHANGED, and the clause
+    that carries the denial is the clause that says so.
+    """
+    return any(
+        any(
+            history.lower() in _clause_at(low, match.start())
+            for history in HISTORY_MARKERS
+        )
+        for match in re.finditer(re.escape(marker.lower()), low)
+    )
+
+
 def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     """Writers a passage names without ever stating which class they are in.
 
@@ -4107,12 +4203,10 @@ def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     stated: set[str] = set()
     for _label, text in sections:
         for sentence in _claim_sentences(text):
-            low = sentence.lower()
             for role, table in _census_classes():
                 for _module, symbol in table:
-                    if symbol in sentence and any(
-                        marker.lower() in low
-                        for marker in CLASS_VERDICT_MARKERS[role]
+                    if symbol in sentence and _stated_markers(
+                        sentence, CLASS_VERDICT_MARKERS[role]
                     ):
                         stated.add(symbol)
     return [
@@ -4126,17 +4220,18 @@ def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
 def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     """Sentences that contradict the table their named writer lives in.
 
-    Two directions, because the defect has been measured in both: a counted
-    writer described as an exemption (a DENIAL marker), and a declared false
-    positive described as counted (`EXEMPT_COUNTED_MARKERS`). A denial is
-    excused only when the same sentence is about HISTORY — see
+    Three directions, because the defect has been measured in all three: a
+    counted writer described as an exemption (a DENIAL marker), a counted
+    writer whose OWN class is NEGATED (*"is not a re-materializing writer"* —
+    the paraphrase that was green on both legs at `#10200`'s head), and a
+    declared false positive described as counted (`EXEMPT_COUNTED_MARKERS`).
+    A denial is excused only when the CLAUSE carrying it is about HISTORY — see
     `HISTORY_MARKERS`; the exemption row gets no such escape.
     """
     offenders: list[str] = []
     for label, text in sections:
         for sentence in _claim_sentences(text):
             low = sentence.lower()
-            history = any(marker.lower() in low for marker in HISTORY_MARKERS)
             for role, table in _census_classes():
                 for _module, symbol in table:
                     if symbol not in sentence:
@@ -4146,17 +4241,25 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                             marker
                             for marker in EXEMPT_COUNTED_MARKERS
                             if marker.lower() in low
+                            and not _denied_markers(sentence, (marker,))
                         ]
                     else:
-                        hits = (
-                            [
-                                marker
-                                for marker in DENIAL_MARKERS
-                                if marker.lower() in low
-                            ]
-                            if not history
-                            else []
-                        )
+                        hits = [
+                            marker
+                            for marker in DENIAL_MARKERS
+                            if marker.lower() in low
+                            and not _history_in_denial_clause(low, marker)
+                        ]
+                        # ⛔ POLARITY: a NEGATED class marker denies the very
+                        # class it names, and no `DENIAL_MARKERS` entry spells
+                        # that form — `#10149`'s claim stated with the class's
+                        # own vocabulary.
+                        hits += [
+                            f"not {marker}"
+                            for marker in _denied_markers(
+                                sentence, CLASS_VERDICT_MARKERS[role]
+                            )
+                        ]
                     if hits:
                         offenders.append(
                             f"{label}: `{symbol}` is a {role} row, and this "
@@ -4209,6 +4312,18 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     ), (
         "the rule fires on a sentence that DOES state the verdict, so it would "
         "red on a corrected document"
+    )
+    # … and Probe 3: a NEGATED class statement names the vocabulary and says the
+    # OPPOSITE of it, so it must not count as stated (`#10200` review: this exact
+    # sentence was green on leg 1 through its own marker).
+    negated = (
+        ("probe", "`sdk.supersede_point` is not a re-materializing writer."),
+    )
+    assert any(
+        "supersede_point" in item for item in _unstated_verdicts(list(negated))
+    ), (
+        "a sentence that NEGATES the class counts as stating it, so the one-word "
+        "paraphrase of the retracted `#10149` cycle-3 sentence stays green"
     )
     unstated = _unstated_verdicts(sections)
     assert not unstated, (
@@ -4278,6 +4393,40 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     ), (
         "the rule cannot see an exemption described as counted, so the "
         "contradiction is pinned in one direction only"
+    )
+    # Probe 4: the NEGATED form of the class — the one-word paraphrase that was
+    # green on BOTH legs at `#10200`'s head — must red here. It names no
+    # `DENIAL_MARKERS` entry, which is exactly why leg 1's polarity fix alone
+    # would not be enough: this is the backstop.
+    negated = (
+        ("probe", "`sdk.supersede_point` is not a re-materializing writer."),
+    )
+    assert any(
+        "supersede_point" in item for item in _denied_verdicts(list(negated))
+    ), (
+        "a NEGATED class statement about a counted writer is not seen as a "
+        "denial, so `#10149`'s claim restated in the class's own vocabulary "
+        "is green"
+    )
+    # Probe 5: the MEASURED cycle-3 sentence with a bare open-defect reference
+    # appended. `#10139` is NOT a history marker (`#10200` review): it excused
+    # every denial in the sentence, and it is the reference the corrected
+    # paragraph already ends with — so restoring the retracted sentence beside
+    # the rebuild note walked through the gate that exists for it.
+    retracted_with_10139 = (
+        (
+            "probe",
+            "`sdk.supersede_point` is NOT one of them: it **drops** the "
+            "binder's `confidence` on the `about*` edge (`#10139`).",
+        ),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(retracted_with_10139))
+    ), (
+        "a bare `#10139` excuses the retracted sentence, so the escape is wider "
+        "than the recorded `before`/`until #9417` and the leg loses its grip on "
+        "the sentence class it was opened for"
     )
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
