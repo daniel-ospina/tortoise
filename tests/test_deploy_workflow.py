@@ -2415,10 +2415,15 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     # The presence LIST must be the five qualifying readings, in one clause — not
     # merely a lead-in that some other, always-true reading could be appended to.
+    # ⛔ Read the FLAT copy, like its siblings above: this pin used to read `section`,
+    # and its pattern spells the sentence out with literal single spaces, so a
+    # wording-identical refill at widths 76/78/82 broke that clause across a line
+    # boundary and reded it — measured here after the F3 fix, i.e. the file still
+    # reds a reflow F3 exists to make harmless (#10083 review P2). Normalizing is
+    # NOT a relaxation: the five readings are still required verbatim below.
     presence = re.search(
         r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
-        section,
-        re.S,
+        flat,
     )
     assert presence, "the presence requirement does not enumerate its readings"
     for reading in ("record_write_failures", "record_non_journal_skips",
@@ -2545,14 +2550,17 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "can find (wrong password / paused project)"
     )
     # `no_tenant` is also the DESIGNED outcome for a credential that names no
-    # graph (`record_tenant_for` returns None for a SESSION/PAT or OAuth `oat_` key
-    # — neither carries a `default_graph_id` — and `hosted_api._bind_record_tenant`
-    # documents the seed and background-indexing runners as deliberately unbound,
-    # #9188/#9192/#10047), and these counters are process-global — so an absolute
+    # graph the record can key on (`record_tenant_for` returns None for a
+    # SESSION/PAT or OAuth `oat_` key — neither carries a `default_graph_id`, a
+    # RESOLUTION gap at the credential, #10046 — and for the self-host registry
+    # lane, #9188/#9192), and these counters are process-global — so an absolute
     # "none at all for `no_tenant`" reds a healthy armed deployment on ordinary
     # traffic and offers no legitimate remedy. The bar must bound that arm to the
     # CAPTURE and **rule the per-request attribution out** (`record_writer` logs no
     # request identity), keeping it a fail-and-fix for the capture's own writes.
+    # (The SESSION/OAuth resolution gap is #10046, not #10047 — `hosted_api.py`
+    # `_bind_record_tenant`'s SCOPE BOUND names #10046 for that class and #10047
+    # for the runners below, and `mcp_auth.py` says the same. #10083 review P2.)
     assert re.search(r"BOUND to the proving capture, not to the process", flat), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
@@ -2637,9 +2645,51 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section still tells the operator to attribute `no_tenant` growth per "
         "request — the step the ⛔ ruling below rules out"
     )
-    assert re.search(r"record_tenant_for|_bind_record_tenant", flat), (
-        "the bounded arm names no counting site, so a reader cannot check the "
-        "claim that `no_tenant` is designed on those lanes"
+    # ⛔ `only` is not exhaustive without the fault arm: `_resolve_record_tenant`
+    # is fail-soft (#5148) and returns `None` on ANY exception, so an org-wide key
+    # whose resolution faults also lands in `no_tenant`. Dropping that clause
+    # restored the absolute this PR exists to remove, with every other pin green
+    # (#10083 review P2, measured) — so it is pinned here.
+    assert re.search(
+        r"such row \(absent, or the `default` sentinel\) — \*\*or\*\* when the\s+"
+        r"resolution itself faults, since the fail-soft resolver below turns any\s+"
+        r"exception into `None`",
+        flat,
+    ), (
+        "the org-wide-key sentence reads `only` when the control plane could name "
+        "no row — but the fail-soft resolver turns any exception into `None`, so "
+        "an org-wide key can also land in `no_tenant` by fault"
+    )
+    # Each COUNTING SITE the arm names, pinned individually. `record_tenant_for|
+    # _bind_record_tenant` was one alternation, and the bare `_bind_record_tenant`
+    # token is satisfied by this section's own seed/indexing sentence — so the
+    # self-host clause could be deleted with the pin still green (#10083 review,
+    # measured). Both halves are now anchored on their own clause.
+    assert re.search(r"`record_writer\.record_tenant_for` returns `None` by design", flat), (
+        "the bounded arm no longer names the self-host lane's counting site, so a "
+        "reader cannot check the claim that `no_tenant` is designed there"
+    )
+    # ⛔ The seed and background-indexing runners are NOT designed `no_tenant`
+    # sources: #10087 bound them to the org's DEFAULT-graph tenant at their own
+    # construction site (`hosted_api._bind_default_graph_record_tenant`, called
+    # from `_run_onboarding_seed` / `_run_starter_seed` / the indexing jobs), and
+    # `tests/test_10047_record_every_lane.py::test_the_onboarding_seed_runner_binds_
+    # the_default_graph_tenant` proves it. Filing them under "designed residue" is
+    # the same fail-open the org-wide-key correction above removes — it excuses
+    # real growth — and nothing pinned the list's MEMBERS, only its header
+    # (#10083 review P1).
+    assert re.search(
+        r"The \*\*onboarding-seed and background-indexing runners are NOT one of\s+"
+        r"those sources either\*\*, since #10087",
+        flat,
+    ), (
+        "the ⚠️ list files the seed / background-indexing runners as DESIGNED "
+        "`no_tenant` sources, which #10087 made false: they are bound to the org's "
+        "default-graph tenant, so a `no_tenant` there is a control-plane fault"
+    )
+    assert not re.search(r"deliberately NOT bound", flat), (
+        "the pre-#10087 'deliberately NOT bound' claim is back — revert-detector for "
+        "the sentence this PR corrected"
     )
     # The ⚠️ list files the self-host registry lane under "a credential that names
     # no graph", while the sentence below calls that same lane "the one graph-bound
@@ -2703,9 +2753,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "resolution is the third"
     )
     # The third disjunct must name a command that actually FINDS the fault. Recipe 1
-    # greps `the record write did not happen`, and this fault is emitted by
-    # `tortoise.hosted_api`'s own logger as "could not resolve the record tenant for
-    # this request" (`hosted_api.py`, `_resolve_record_tenant`), so it never matches:
+    # greps `the record write did not happen`, and this fault is logged under a
+    # DIFFERENT MESSAGE — "could not resolve the record tenant for this request"
+    # (`hosted_api.py`, `_resolve_record_tenant`) — so that grep never matches it:
     # an operator who greps recipe 1, sees nothing and clears the capture passes a
     # capture-own `no_tenant` growth as other traffic — a fail-open in the very
     # verification this section exists to provide (#10083 review P1).
@@ -2713,10 +2763,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the fault disjunct names no command that surfaces the fault, so the "
         "operator is sent to a grep that cannot match it"
     )
+    # REVERT-DETECTOR, not a claim pin: this reds only if one draft's exact wording
+    # ("recipe 1 logs …") comes back — the phrase exists nowhere else in the tree,
+    # so the assertion is green by construction and its message describes a class it
+    # cannot see (#10083 review P2). It is kept because it is exact and free; the
+    # CLAIM is measured by the `does NOT match` pin below, which a rewording of the
+    # false instruction would have to delete.
     assert not re.search(r"recipe\s+1\s+logs", flat), (
-        "the section claims recipe 1's grep shows the tenant-resolution fault — "
-        "it greps `the record write did not happen`, and the fault is a "
-        "`tortoise.hosted_api` WARN under a different message"
+        "the pre-fix 'recipe 1 logs the fault' sentence is back"
     )
     # ⛔ The ⚠️ list's count is EXHAUSTIVE and it now has three members: (a)
     # `no_durable_journal`, (b) `position_unproven`, (c) the hosted_api
@@ -2735,10 +2789,20 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the exclusion list does not name the hosted_api fault among its members, "
         "so the count and the members disagree"
     )
-    assert re.search(r"is emitted by a \*\*different\s+module's\*\* logger", flat), (
+    # The reason the fault escapes the grep is the MESSAGE, not the logger: the
+    # section's own ⛔ paragraph names `tortoise/sdk.py` — a different module — as
+    # emitting the identical prefix, so "a different module's logger" is refuted by
+    # the sentence five lines below it (#10083 review P2). Pin the MESSAGE reason,
+    # and pin that the logger claim is gone.
+    assert re.search(r"carries a \*\*different MESSAGE\*\*,\s+so this grep does not match it", flat), (
         "the list does not say WHY the fault escapes the grep (a different "
-        "module's logger), which is the fact that stops a reader from checking "
+        "MESSAGE), which is the fact that stops a reader from checking "
         "recipe 1 and concluding 'no fault'"
+    )
+    assert not re.search(r"different\s+module's\*\* logger, so it does not match", flat), (
+        "the list attributes the escape to the LOGGER again — the section's own ⛔ "
+        "paragraph says `tortoise/sdk.py` (another module) IS in the grep, so the "
+        "stated reason contradicts it"
     )
     # The evidence half of the third-disjunct fix: naming the working command is
     # only half of it — the sentence must also say recipe 1 CANNOT show this, or an

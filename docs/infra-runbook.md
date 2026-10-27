@@ -3233,8 +3233,10 @@ text, so do not grep the 9090 listener for a counter name.
    `did not happen` prefix for it returns nothing.
    (c) The `tortoise.hosted_api` tenant-resolution fault —
    `could not resolve the record tenant for this request` (#5148's fail-soft
-   path, `hosted_api._resolve_record_tenant`) — is emitted by a **different
-   module's** logger, so it does not match this grep either. The refusal that
+   path, `hosted_api._resolve_record_tenant`) — carries a **different MESSAGE**,
+   so this grep does not match it. (The discriminator is the message text, not
+   the logger: the SDK's `no_journal` line, from a *different module*, IS in the
+   grep — see the ⛔ paragraph below.) The refusal that
    fault then produces (`the record write did not happen (no_tenant)`) IS in the
    grep, but that is the growth, not the fault; read the fault itself with the
    command in the ⚠️ `no_tenant` bound below.
@@ -3353,18 +3355,26 @@ why the two recipes above are the verification and the deploy status is not.
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
    `no_tenant` is ALSO the designed outcome for a credential that names no graph
    **the record can key on**: a SESSION / PAT or OAuth `oat_` key (it carries no
-   `default_graph_id` at all, #10047's scope), the self-host registry lane
-   (`record_writer.record_tenant_for` returns `None` by design), and the
-   onboarding-seed and background-indexing runners (deliberately NOT bound — they
-   build their own SDK and never see the request's credential,
-   `hosted_api._bind_record_tenant`, #10047's scope) — all documented as the
-   fail-closed direction (#9188/#9192), not a regression.
+   `default_graph_id` at all — a RESOLUTION gap at the credential, #10046), and
+   the self-host registry lane (`record_writer.record_tenant_for` returns `None`
+   by design) — both documented as the fail-closed direction (#9188/#9192), not
+   a regression.
    ⚠️ An **org-wide API KEY is NOT one of those sources** since #10025:
    `resolve_api_key` puts the org's active `kind='default'` row id on the
    credential as `default_graph_id` and `record_tenant_for` names it, so an
    org-wide key reaches `no_tenant` **only** when the control plane could name no
-   such row (absent, or the `default` sentinel). Counting org-wide keys as
-   designed residue would excuse real growth.
+   such row (absent, or the `default` sentinel) — **or** when the resolution
+   itself faults, since the fail-soft resolver below turns any exception into
+   `None`. Counting org-wide keys as designed residue would excuse real growth.
+   ⚠️ The **onboarding-seed and background-indexing runners are NOT one of
+   those sources either**, since #10087: they build their own SDK and never see
+   the request's credential, so they carry the org's DEFAULT-graph tenant from
+   their own construction site — bound by
+   `hosted_api._bind_default_graph_record_tenant` (#10047) from the SAME
+   `kind='default'` `public.graphs` row an org-wide key is named from. A
+   `no_tenant` from one of those lanes is therefore a control-plane fault (no
+   nameable default row), i.e. the same fail-and-fix as an org-wide key; listing
+   them as designed residue is the fail-open read this bound exists to close.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
