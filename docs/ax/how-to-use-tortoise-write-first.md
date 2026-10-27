@@ -15,7 +15,7 @@ aboutObjects: tortoise, how-to-use-tortoise
 > **What this file is.** The authored text of the rewritten skill, produced from
 > the measured failure list in [`how-to-use-tortoise-step1-eval.md`](how-to-use-tortoise-step1-eval.md)
 > (`#9675` Step 1, landed as `#9695`). **The body is the `## Contents` section
-> through the last line — 518 lines**, line for line: the port is a copy, not a
+> through the last line — 520 lines**, line for line: the port is a copy, not a
 > second rewrite. The port adds only what `writing-skills` requires around it
 > (see below).
 >
@@ -98,9 +98,9 @@ wrong that looks authoritative, because the wrong shape is still a shape.
 
 **Almost every failure in this document is silent.** The call returns, the node
 lands, the response looks successful, and nothing tells you the structure is
-wrong. The two exceptions — detailed below — arrive as an advisory a caller can
-ignore, and neither refuses the write. That near-universal silence is the whole
-reason for the decisions below and for the checklist at the end.
+wrong. The exceptions — detailed below — arrive as an advisory a caller can
+ignore, and none of them refuses the write. That near-universal silence is the
+whole reason for the decisions below and for the checklist at the end.
 
 The layer decision cannot be recovered later. The kind classifier picks a kind
 **inside a partition chosen before it runs** — entities get object+subject kinds,
@@ -420,10 +420,11 @@ every audit eventually asks.
   unconditionally (`retracted` / `superseded` / `archived` / `outdated` /
   `deprecated`, plus the legacy outdated flag), so an operator still pointing at
   it contributes **nothing**, and if the stripping leaves fewer than two
-  participating inputs the operator's whole factor is skipped, with only a log
-  line to say so. The edge does not price a ghost; it makes the operator's target
-  set wrong and the reader's picture wrong — so check the operators that pointed
-  at the claim you superseded, and unwire or supersede them.
+  participating inputs the operator's whole factor is skipped — disclosed as
+  `skipped_factors` on the confidence result rather than in the graph. The edge
+  does not price a ghost; it makes the operator's target set wrong and the
+  reader's picture wrong — so check the operators that pointed at the claim you
+  superseded, and unwire or supersede them.
 - **Delete** is for a node that should never have existed — a mis-write, a
   duplicate. It destroys content, leaving a journal record of the destruction —
   not how you express a change of mind.
@@ -453,7 +454,8 @@ every audit eventually asks.
 
 > **Measured:** the input that mattered most — a claim under direct contradiction
 > — wrote **no Source at all** *and* dampened an operator instead of contradicting
-> the belief. Two failures in one write, both silent.
+> the belief. Two failures in one write: the second is silent, and the first
+> returns only an advisory.
 
 ## Before the write
 
