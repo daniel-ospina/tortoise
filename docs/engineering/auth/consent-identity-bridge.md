@@ -131,7 +131,10 @@ spec, and it is deliberately recorded rather than assumed.
 declared in `config/required-bindings.yml` so the deploy preflight fails closed until it exists. It must
 **not** be the service-role key (key reuse across purposes) and must **not** be the anon key (the consent
 page embeds it in HTML, so it is public). Rotation is `kid`-scoped; two `kid`s are accepted during a
-rotation window.
+rotation window. ⚠️ **That window is NOT BUILT yet** — it is the goal this paragraph states, and §9 step 1
+records the accepted-`kid` allowlist as deliberately unbuilt (one key is configured, so an allowlist of one
+is vacuous). Until it lands, a rotation is a VALUE SWAP that must land on both halves together and kills
+in-flight assertions for their ≤120 s TTL.
 
 ### 2.4 Consent fixation — the attack this contract **adds**, and which half defeats it
 

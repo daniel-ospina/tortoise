@@ -546,6 +546,10 @@ _CROSS_HALF_URIS = [
     # that the AS refuses.
     "http://[::ffff:126.0.0.1]/cb",
     "http://[::ffff:10.0.0.1]/cb",
+    # leading/trailing SPACES are stripped by BOTH parsers, so these must be ACCEPTED (refusing
+    # them was a real divergence: the AS registers and accepts the uri, and a browser navigates it).
+    " https://client.example/cb",
+    "http://127.0.0.1:1234/cb ",
     # the IPv4 guards: leading-zero octets are ambiguous to `ipaddress` (it REFUSES them) while
     # WHATWG reads them as decimal, and an octet above 255 makes WHATWG refuse the parse entirely.
     "http://127.000.000.001/cb",

@@ -195,9 +195,11 @@ function rawAuthorityHost(uri: string): string | null {
  *   native scheme  — allowlisted, and must name a destination.
  *
  * ⛔ THE ONE PLACE THIS IS STRICTER THAN THE AS is a uri WHATWG cannot PARSE at all (a port past
- * 65535, `:abc`). `urlsplit` never validates a port, so the AS accepts those; a browser would
- * never navigate one, so handing it out is worse than a 400 at start. That divergence is named in
- * the cross-half table so it cannot quietly grow into a class.
+ * 65535, a non-numeric port). `urlsplit` never validates a port, so the AS accepts those; a browser
+ * would never navigate one, so handing it out is worse than a 400 at start. That divergence is
+ * named in the cross-half table so it cannot quietly grow into a class. (Leading/trailing SPACES are
+ * NOT a divergence: they are stripped before the authority is matched, because both parsers strip
+ * them.)
  */
 export function redirectUriProblem(uri: string): string | null {
   // Bytes we refuse to reason about: a raw backslash is a real parser differential between the
@@ -207,9 +209,15 @@ export function redirectUriProblem(uri: string): string | null {
       return "redirect_uri must not carry control characters or a backslash";
     }
   }
+  // Leading/trailing SPACES are stripped by BOTH parsers before they see the uri (`urlsplit` in
+  // 3.12 does, and WHATWG does), so they are not part of the authority — but `rawAuthorityHost` is
+  // anchored at index 0, so an untrimmed `" https://client.example/cb"` looked authority-less here
+  // and was refused while the AS accepted it. A registered-and-navigable redirect (registrable
+  // because the AS accepts it) then died at `/api/consent/start` with a message blaming itself.
+  const trimmed = uri.replace(/^ +/, "").replace(/ +$/, "");
   let parsed: URL;
   try {
-    parsed = new URL(uri);
+    parsed = new URL(trimmed);
   } catch {
     // Includes the `:99999`-style port: WHATWG refuses to parse it (the documented divergence).
     return "redirect_uri must be an absolute URI";
@@ -217,7 +225,7 @@ export function redirectUriProblem(uri: string): string | null {
   // A fragment is never a valid redirect component (RFC 6749 §3.1.2): the code would land where
   // the browser never sends it. Tested as the literal delimiter, because a bare trailing `#`
   // parses to an EMPTY fragment which `parsed.hash` reports as "".
-  if (uri.includes("#")) return "redirect_uri must not carry a fragment";
+  if (trimmed.includes("#")) return "redirect_uri must not carry a fragment";
   const scheme = parsed.protocol.replace(/:$/, "");
   if ((NATIVE_REDIRECT_SCHEMES as readonly string[]).includes(scheme)) {
     // Not a network location, so "https or loopback" does not describe it. It must still name
@@ -225,7 +233,7 @@ export function redirectUriProblem(uri: string): string | null {
     return parsed.host || parsed.pathname ? null : "redirect_uri must name a destination";
   }
 
-  const rawHost = rawAuthorityHost(uri);
+  const rawHost = rawAuthorityHost(trimmed);
   if (rawHost === null || rawHost === "") {
     // No `//authority`: `urlsplit` sees no hostname and the AS refuses, whatever WHATWG invented.
     return "redirect_uri must be an absolute URI with an explicit authority";
