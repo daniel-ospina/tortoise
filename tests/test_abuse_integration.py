@@ -876,11 +876,11 @@ class TestAlertRegistersAndAcks:
 
     @staticmethod
     def _claims(text: str, etype: str | None = None) -> bool:
-        """The shipped predicate: three REMOVALS, then the actor and promise arms.
+        """The shipped predicate: the REMOVALS below, then the actor and promise arms.
 
         Everything a customer string legitimately contains that LOOKS like a human
         claim is removed before the match — and this list is the whole suppression
-        surface, so read it before widening any of the three (round 20 finding: it
+        surface, so read it before widening any of them (round 20 finding: it
         lived above `_detail_variants` and said "two", so the enumeration of what
         can HIDE a match was both miscounted and filed on the wrong method):
 
@@ -962,19 +962,21 @@ class TestAlertRegistersAndAcks:
         an ACTOR-ELIDED passive ("Your keys have been reviewed."), a noun outside
         the staff vocabulary ("A specialist reviewed your account."), and an
         ELIDED-ACTOR promise phrased outside `_PROMISE` ("Expect a reply
-        shortly."). All three are claims the row cannot know. The rule is
-        therefore: if you introduce a new word for our staff, extend `_ROLE`; if
-        you introduce a new way of promising contact or timing, extend `_PROMISE`;
-        do it in the same commit. Round 18 closed three shapes that had been
-        hiding INSIDE the exemptions — an address in subject position, a second
-        clause after "by an operator", and "by us" as a passive agent. The pin cannot be made exhaustive
-        without a grammar, so the rule for a future copy change is: if you add a
-        new word for our staff, add it to `_ROLE` in the same commit. The error
-        direction is deliberate — an unlisted benign phrase that NAMES our staff
-        (e.g. a bare "contact support.") is REJECTED and reddens the shipped-copy
-        assertion loudly, while an unlisted false claim passes quietly. Loud
-        beats quiet, which is why the vocabulary is enumerated rather than the
-        claims being allowed."""
+        shortly."). Each is a claim the row cannot know.
+
+        There is no grammar here that could catch them, so the ONE rule for a
+        future copy change is: extend `_ROLE` for a new word naming our staff,
+        extend `_PROMISE` for a new way of promising contact or timing — in the
+        same commit. (Round 18 closed shapes that had been hiding INSIDE the
+        exemptions — an address in subject position, a second clause after "by an
+        operator", "by us" as a passive agent — which is why each exemption is
+        pinned in both directions rather than trusted.)
+
+        The error direction is deliberate: an unlisted benign phrase that NAMES our
+        staff (a bare "contact support.") is REJECTED and reddens the shipped-copy
+        assertion loudly, while an unlisted false claim passes quietly. Loud beats
+        quiet, which is why the vocabulary is enumerated rather than the claims
+        being allowed."""
         #: Any string naming a member of OUR staff (or claiming first-person
         #: action) is a claim we cannot back. The list below is deliberately
         #: diverse in GRAMMAR — present, past, passive, modal, irregular past,
@@ -1054,9 +1056,10 @@ class TestAlertRegistersAndAcks:
                 f"{text!r} is supposed to prove the PROMISE list (actor "
                 "elided) but the actor pattern catches it too, so the promise "
                 "arm stays unproven for this shape")
-        # The two documented EXCLUSIONS, each proven in the direction that makes
-        # it safe: a clause-final "by an operator" on a `suspend` row is backed by
-        # the row's existence, while the SAME phrase on any other row is not.
+        # ``suspend``'s exemption, proven in BOTH directions rather than asserted:
+        # a clause-final "by an operator" on a `suspend` row is backed by the row's
+        # existence, while the SAME phrase on any other row, or in a second
+        # clause, is not. (No count here: the surface is `_claims`' docstring.)
         assert not self._claims("Organization suspended by an operator",
                                 "suspend"), (
             "the exemption stopped covering the one string it exists for")
@@ -1089,9 +1092,12 @@ class TestAlertRegistersAndAcks:
             "Manage your team in Settings.",
             "Ask your security team to revoke the key.",
             "Ask your own security desk to revoke the key.",
-            # …and the same phrase form where the noun is NOT our vocabulary:
-            # the strip is what makes both of these pass, and it is pinned in
-            # both directions above.
+            # …and the same phrase form where the whole phrase is
+            # CUSTOMER-DETERMINED. Note the reason carefully: `engineering` is
+            # outside the staff vocabulary but `team` and `security` are INSIDE
+            # its second group, so what keeps these green is the `your` strip,
+            # NOT the vocabulary — narrowing the strip's final-noun group would
+            # reject them.
             "Your engineering team reviewed this.",
             "Your security team reviewed this.",
             "Suspicious activity flagged on this Organization",
@@ -1128,10 +1134,17 @@ class TestAlertRegistersAndAcks:
         This asserts the PROPERTY over every rendered field of every alert type,
         and BOTH branches of ``_read_velocity_message`` — the org-total branch is
         a separate string and was outside the loop until round 12, i.e. one of the
-        two strings of the type this issue is about was unasserted. The two
-        documented exclusions hold BY CONSTRUCTION and need no exception list:
-        ``suspend``'s "by an operator" binds no auxiliary (the row's existence is
-        the proof), and an imperative addresses the customer."""
+        two strings of the type this issue is about was unasserted. The removals
+        `_claims` performs are listed in ITS docstring and nowhere else, because a
+        suppression surface described in two places drifts — which is what
+        happened here (round 21 review finding: this paragraph named a COUNT of
+        documented exclusions that was already wrong, and described an
+        "imperative addresses the customer" rule the code does not implement: a
+        bare "contact support." naming our desk IS rejected, and "contact us"
+        passes only because `us` is not an actor arm). What makes
+        ``suspend``'s "by an operator" safe is that it binds no auxiliary and the
+        row's existence is the proof; ``suspend``'s exemption, being the one with
+        a condition attached, is pinned in both directions below."""
         detail_variants = self._detail_variants()
         for etype in ALERT_TYPES:
             for details in detail_variants:
@@ -1141,14 +1154,15 @@ class TestAlertRegistersAndAcks:
                                    **extra})
                 for field in ("label", "message"):
                     text = str(row.get(field) or "")
-                    # `_claims` applies the two documented exclusions (the
-                    # support ADDRESS, and `suspend`'s "by an operator") and
-                    # then runs BOTH mechanisms.
+                    # `_claims` applies every removal it lists (in its own
+                    # docstring — the list lives in ONE place) then runs BOTH
+                    # mechanisms.
                     assert not self._claims(text, etype), (
                         f"{etype}.{field} asserts a human or a follow-up: "
                         f"{text!r} — the operator signal is best-effort, so we "
                         "cannot know")
-        # The two documented exclusions, restated against the REAL strings.
+        # The removals restated against the REAL strings, in the direction that
+        # makes each safe (the inventory itself is `_claims`' docstring).
         suspended = _alert_dict({"event_type": "suspend", "details": {},
                                  "created_at": "2026-09-25T17:19:05+00:00"})
         assert "by an operator" in suspended["message"], suspended["message"]
@@ -1815,19 +1829,28 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     """#8818: the deterministic refusal pin for this module's client seams.
 
     No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
-    comes from the REAL ``WaitBoundMiddleware``. Twenty-five of this file's
-    twenty-six constructions are converted — every ``TestClient(env["app"])``
-    (the ``env`` fixture's hosted app, shared by all REST test classes) — so the
-    seam covers every REST read bound from them: ``GET /v1/team/keys`` (the
-    busiest), ``GET /v1/team`` (the route this pin drives),
-    ``GET /v1/team/alerts?org_id=`` (requested three times — two 200 reads and a
-    403 assertion), ``DELETE /v1/team/keys/{kid}``, ``POST /v1/points``,
-    ``POST /v1/session/key``, ``POST /v1/signup/email`` and the session-JWT REST
-    lane — none of them exempt from the bound. The one construction left PLAIN is
-    ``TestMcp._mcp_client``: it wraps a local ``Starlette`` carrying ONLY
-    ``OrgResolutionMiddleware``, so no ``WaitBoundMiddleware`` is on its path
-    and none of its reads can be a refusal — its ``status_code == 200`` reads
-    are answered by that local echo route, never by the hosted app.
+    comes from the REAL ``WaitBoundMiddleware``. Every construction of the hosted
+    app is converted — every ``TestClient(env["app"])`` (the ``env`` fixture's
+    hosted app, shared by all REST test classes) — so the seam covers every REST
+    read bound from them: ``GET /v1/team/keys`` (the busiest), ``GET /v1/team``
+    (the route this pin drives), ``GET /v1/team/alerts?org_id=``, ``DELETE
+    /v1/team/keys/{kid}``, ``POST /v1/points``, ``POST /v1/session/key``,
+    ``POST /v1/signup/email`` and the session-JWT REST lane — none of them exempt
+    from the bound.
+
+    What is NOT converted, and why: ``TestMcp._mcp_client`` wraps a local
+    ``Starlette`` carrying ONLY ``OrgResolutionMiddleware``, so no
+    ``WaitBoundMiddleware`` is on its path and none of its reads can be a
+    refusal — its ``status_code == 200`` reads are answered by that local echo
+    route, never by the hosted app. This pin's own ``TestClient(ha.app)`` is
+    plain DELIBERATELY and briefly: it is the non-vacuity control described at
+    the end of this docstring.
+
+    Neither this paragraph nor the enumeration above records a COUNT of
+    constructions. It said "twenty-five of twenty-six" until this PR added tests
+    and made it wrong — a numeral here re-stales on every test added, so the
+    property is what is stated: no construction of the hosted app is exempt, and
+    each exception says why it cannot reach the bound.
 
     The plain-client control is the non-vacuity leg: it is the exact
     ``assert 504 == 200`` shape this conversion removes, and it goes RED if the
