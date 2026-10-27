@@ -195,14 +195,17 @@ export const onRequest: PagesFunction = async (context) => {
   // query reaches this worker's logs either way, so the status code buys no
   // security.
   //
-  // What keeps the redirect safe is upstream of it: GoTrue refuses a
-  // `redirect_to` it does not recognise, so the guard is the identity provider's
-  // redirect allow-list. The property that MUST hold is that no allow-list entry
-  // authorises a code for THIS origin's `/auth/callback`. The entries required
-  // today are recorded in `docs/ops/auth-email-flows.md` §3 — which still lists
-  // `https://tortoise.premiselabs.co` for legacy links, so the list is wider than
-  // the app origin — and #8680 is the OPEN audit that confirms the legacy
-  // `/auth/callback` entry can be removed. That audit is not closed.
+  // What keeps the redirect safe is upstream of it: the identity provider's redirect allow-list
+  // is the only control. ⛔ NOT because GoTrue refuses an unrecognised `redirect_to` — it does
+  // not: it silently substitutes the project Site URL and still delivers a live `code` there
+  // (measured #10088; `docs/ops/auth-email-flows.md` §1/§3), which on a Site URL of THIS worker's
+  // own origin would 302 the live code straight on. So a mismatched entry is not a loud failure;
+  // it is exactly the path this comment exists to reason about. The property that MUST hold is
+  // that no allow-list entry authorises a code for THIS origin's `/auth/callback`. The entries
+  // required today are recorded in `docs/ops/auth-email-flows.md` §3 — which still lists
+  // `https://tortoise.premiselabs.co` for legacy links, so the list is wider than the app origin —
+  // and #8680 is the OPEN audit that confirms the legacy `/auth/callback` entry can be removed.
+  // That audit is not closed.
   //
   // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
   // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521 /

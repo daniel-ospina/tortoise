@@ -343,3 +343,14 @@ def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None
         f"open audit ({AUDIT_ISSUE}); do not assert a control the record contradicts "
         "(#8682 review, P1)"
     )
+    # #10088: the rationale used to argue the 302 is safe because "GoTrue refuses a `redirect_to`
+    # it does not recognise". That is false — an unrecognised target is silently replaced with the
+    # project Site URL and the live `code` is still delivered there (§1/§3, measured) — and on a
+    # Site URL of this worker's own origin that is precisely the redirect the comment guards.
+    # A lane reconciling the code against the record would find them arguing opposite mechanisms.
+    assert "refuses a `redirect_to`" not in comment, (
+        "the `/auth/*` rationale is back to arguing from 'GoTrue refuses a redirect_to it does "
+        "not recognise' — it does not: it silently substitutes the Site URL and still delivers "
+        "a live code, which is exactly why the allow-list is the only control (docs/ops/"
+        "auth-email-flows.md §1/§3, #10088)"
+    )

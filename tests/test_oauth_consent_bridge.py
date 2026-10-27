@@ -295,6 +295,21 @@ def test_the_consent_page_still_does_not_call_any_logout_api() -> None:
 
 # ── Task 5 — the sign-in fallback origin must be ACCOUNTED FOR ──────────────
 
+def _entry_cell(row: str) -> str:
+    """The first cell of a markdown table row, with its markdown emphasis removed.
+
+    Entry shapes are decided on what the cell SAYS, not on how the cell is formatted: a row may
+    bold its entry (`| **`https://…`** | why |`) and a covering rewrite that only changes the
+    emphasis must not red the guard that checks coverage. The code span is preferred when the cell
+    carries one, because a glob's own `**` is indistinguishable from a bold marker once the
+    backticks are gone (`**`https://…/**`**` must read as `https://…/**`, not `https://…/`).
+    """
+    cell = row.strip().strip("|").split("|")[0].strip()
+    spans = re.findall(r"`([^`]+)`", cell)
+    if spans:
+        return spans[0].strip()
+    return cell.replace("*", "").strip()
+
 def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
     """The consent page signs in with `redirectTo = window.location.origin + /oauth/authorize`.
 
@@ -329,17 +344,54 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
         "oauth/authorize). #10088 narrowed the target from a query-bearing form to the bare path; "
         "the record must keep naming it, because a shape's coverage is decided against it."
     )
-    assert (
-        "https://api.premiselabs.co/**" in table
-        or "| `https://api.premiselabs.co/oauth/authorize`" in table
-    ), (
-        "§3 records no entry SHAPE that covers the bare /oauth/authorize target. `/**` covers it "
-        "and so does the bare path written out; `/*` does not cross the `/`, which is why the "
-        "shape has to be recorded rather than implied (#10088)."
+    # The SHAPE rule is checked on the entry CELLS, not on raw substrings: a row may
+    # legitimately list the bare path written out instead of `/**` (that is the
+    # record's own preference, "the full paths rather than a bare origin plus a
+    # hope"), and either is covering. Matching raw text made a covering rewrite red,
+    # which is a false blocker on a security-tightening edit.
+    entries = {_entry_cell(row) for row in table.splitlines() if row.startswith("|")}
+    covering = {"https://api.premiselabs.co/**",
+                "https://api.premiselabs.co/oauth/authorize"}
+    assert entries & covering, (
+        "§3 records no entry SHAPE that covers the bare /oauth/authorize target — its entries "
+        f"under api.premiselabs.co are {sorted(e for e in entries if 'api.premiselabs.co' in e)}. "
+        "`/**` covers it and so does the bare path written out; `/*` does not cross the `/`, "
+        "which is why the shape has to be recorded rather than implied (#10088)."
     )
 
 
 # ── Task 5 / #10088 — the provider-return marker list is ONE list, in two homes ─
+
+
+def test_the_retry_affordance_cannot_be_shown_without_a_request() -> None:
+    """A STATIC pin, and deliberately so.
+
+    In the missing-request state the retry button's own copy says retrying cannot work, so the
+    affordance must never be turned on — but no scenario this harness can drive reaches that
+    combination: `showRetrySignin` is only called with a refusal pending (`showError` /
+    `showSignin`, which `showTerminalFallback` calls BEFORE it decides the missing-request state),
+    and a refused write cannot be produced at load from the `?error=` return leg. Measured: with
+    the guard deleted, the whole page suite stays green — an unpinned guard is the same defect as
+    a missing one, so it is pinned where it lives instead of pretending a behavioural test covers
+    it. (The CLICK half is behavioural: `test_10088_an_error_return_with_no_request_fails_closed_
+    the_same_way` drives the handler and asserts the message and the disabled controls survive.)
+    """
+    src = OAUTH.read_text()
+    match = re.search(r"function showRetrySignin\(\) \{(.*?)\n  \}", src, re.S)
+    assert match is not None, (
+        "the consent page no longer declares `function showRetrySignin() { … }` — this pin is now "
+        "scanning nothing, so re-derive it before trusting it"
+    )
+    body = match.group(1)
+    assert "btn-retry-signin" in body, (
+        "`showRetrySignin` no longer touches `btn-retry-signin`, so this is not the function that "
+        "owns the affordance and the assertion below would be vacuous"
+    )
+    assert "REQUEST_MISSING" in body, (
+        "`showRetrySignin` can turn the retry control on in the missing-request state — a control "
+        "whose own copy says retrying cannot work (invariant 21), and one whose click the handler "
+        "then has to defend against (#10088)"
+    )
 
 def test_the_provider_return_markers_are_one_list_on_both_sides() -> None:
     """The server and the page decide the SAME question from opposite sides.

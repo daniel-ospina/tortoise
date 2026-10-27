@@ -2878,10 +2878,17 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   }
   function renderCapability(incap) {
     const blocked = !!incap;
+    // #10088: a MISSING REQUEST is the other reason a provider click cannot work,
+    // and it disables on its own. `blocked` is recomputed from the page's
+    // capability probe on paths that re-render the sign-in view (the retry
+    // handler), so keying on `blocked` alone re-enabled two controls that every
+    // handler then refuses — three enabled, inert buttons on a screen whose
+    // cause+remedy message the same click had just wiped.
+    const off = blocked || REQUEST_MISSING;
     for (const id of ["btn-github", "btn-google"]) {
       const b = document.getElementById(id);
-      b.disabled = blocked;
-      if (blocked) b.setAttribute("aria-disabled", "true");
+      b.disabled = off;
+      if (off) b.setAttribute("aria-disabled", "true");
       else b.removeAttribute("aria-disabled");
     }
     const notice = document.getElementById("signin-capability");
@@ -3009,6 +3016,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   };
 
   document.getElementById("btn-retry-signin").onclick = () => {
+    // #10088: a retry cannot recreate the connection request, so in that state this
+    // handler re-asserts the fail-closed screen and returns. The normal path below
+    // clears `writeRefused` and re-runs the capability probe, which on this screen
+    // wipes the cause+remedy and re-enables controls every handler then refuses —
+    // leaving a screen of disabled buttons with nothing on it to explain why.
+    if (REQUEST_MISSING) { disableSigninAffordances(); return; }
     // #5734: a retry re-probes capability — it may have changed since the
     // attempt that failed (or since load). User-initiated, so it also clears a
     // pending refusal.
@@ -3159,6 +3172,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     return text;
   }
   function showRetrySignin() {
+    // #10088: in the missing-request state there is no retry that can work (the
+    // copy's remedy is the CLIENT), so the affordance stays away wherever it is
+    // asked for — including the refused-write re-assert paths in `showError` and
+    // `showSignin`, which would otherwise put it back on this screen and let one
+    // click wipe the cause+remedy and re-enable the sign-in controls.
+    if (REQUEST_MISSING) { hideRetrySignin(); return; }
     document.getElementById("btn-retry-signin").style.display = "block";
   }
   function hideRetrySignin() {

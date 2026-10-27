@@ -1061,6 +1061,67 @@ def test_10088_a_return_with_no_request_fails_closed() -> None:
     )
 
 
+def test_10088_an_error_return_with_no_request_fails_closed_the_same_way() -> None:
+    """Invariant 26 covers BOTH provider return channels, and only `?code=` was pinned.
+
+    A declined or failed sign-in comes back as `?error=…`, and that load reaches
+    `showTerminalFallback` — a DIFFERENT function from the `?code=` leg's
+    `runConsentFlow` guard, and the only place that decides the retry affordance on
+    the refusal channel. Measured at the pre-fix head: deleting its
+    `if (REQUEST_MISSING) { disableSigninAffordances(); return; }` left this whole
+    module green, and the page then offered `showRetrySignin()` — a retry whose own
+    message says retrying cannot work.
+
+    The retry click is driven too, because the affordance is the FOURTH dead
+    control: its handler clears `writeRefused`, wipes the message and re-runs
+    `renderCapability`, so a click that lands there must not leave enabled-but-inert
+    buttons on a screen with no message at all.
+    """
+    r = _run("flow_return", search="?error=access_denied", previewOk=True,
+             page=_render_shell())
+    assert r["viewSignin"] == "block", r
+    assert r["viewConsent"] != "block", (
+        f"consent rendered for a client the page cannot name, on the refusal channel: {r}"
+    )
+    assert r["errorVisible"] is True, r
+    assert "connection request" in r["errorText"], (
+        f"the refusal channel does not name the cause: {r['errorText']!r}"
+    )
+    assert "MCP client" in r["errorText"], (
+        f"the refusal channel does not name the only remedy: {r['errorText']!r}"
+    )
+    assert r["retrySigninVisible"] == "none", (
+        f"the refusal channel offered a retry control on a missing-request screen: {r}"
+    )
+    assert r["githubDisabled"] is True, r
+    assert r["googleDisabled"] is True, r
+    assert r["emailDisabled"] is True, r
+    assert r["navs"] == [], f"the refusal channel navigated somewhere: {r['navs']}"
+
+    clicked = _run("flow_return", search="?error=access_denied", previewOk=True,
+                   page=_render_shell(), clickRetrySignin=True)
+    assert clicked["errorVisibleAfterRetryClick"] is True, (
+        f"a retry click wiped the fail-closed message, leaving a screen with no cause "
+        f"at all: {clicked}"
+    )
+    assert (clicked["errorTextAfterRetryClick"]
+            == clicked["errorTextBeforeRetryClick"]), (
+        f"a retry click rewrote the fail-closed message: "
+        f"{clicked['errorTextAfterRetryClick']!r} (was "
+        f"{clicked['errorTextBeforeRetryClick']!r})"
+    )
+    assert clicked["retrySigninVisibleAfterRetryClick"] == "none", (
+        f"the retry control came back on a screen whose message says retrying cannot "
+        f"work: {clicked['retrySigninVisibleAfterRetryClick']}"
+    )
+    assert clicked["githubDisabledAfterRetryClick"] is True, (
+        f"a retry click re-enabled the provider buttons that every handler refuses: "
+        f"{clicked}"
+    )
+    assert clicked["googleDisabledAfterRetryClick"] is True, clicked
+    assert clicked["emailDisabledAfterRetryClick"] is True, clicked
+
+
 def test_10088_a_refused_stash_never_spends_the_round_trip() -> None:
     """Invariant 27 (#10088): the stash refusal is the LAST fail-closed gate
     before the browser leaves for the provider, and it is the one no other
@@ -2372,6 +2433,27 @@ function innerTarget(assignUrl) {
       out.errorVisibleAfterEmailClick = els['error']
         ? els['error'].classList.contains('visible') : null;
       out.errorTextAfterEmailClick = els['error'] ? String(els['error'].textContent) : null;
+    }
+    // #10088: the RETRY affordance is the fourth dead control on the
+    // missing-request screen when the refused-write re-assert paths put it back
+    // (`showError`/`showSignin` both call `showRetrySignin`, and the button lives
+    // OUTSIDE both views so it survives the view swap). Its handler clears
+    // `writeRefused`, wipes the message and re-runs `renderCapability`, so a click
+    // there does not fail harmlessly — it leaves enabled controls, no message, and
+    // every handler refusing. Driven programmatically: the affordance is HIDDEN,
+    // and a hidden button is exactly what a regression would make clickable.
+    if (opts.clickRetrySignin) {
+      out.errorTextBeforeRetryClick = els['error'] ? String(els['error'].textContent) : null;
+      await q('document.getElementById("btn-retry-signin").onclick()');
+      await sleep(30);
+      out.errorVisibleAfterRetryClick = els['error']
+        ? els['error'].classList.contains('visible') : null;
+      out.errorTextAfterRetryClick = els['error'] ? String(els['error'].textContent) : null;
+      out.retrySigninVisibleAfterRetryClick = els['btn-retry-signin']
+        ? String(els['btn-retry-signin'].style.display) : null;
+      out.githubDisabledAfterRetryClick = els['btn-github'] ? els['btn-github'].disabled : null;
+      out.googleDisabledAfterRetryClick = els['btn-google'] ? els['btn-google'].disabled : null;
+      out.emailDisabledAfterRetryClick = els['btn-email'] ? els['btn-email'].disabled : null;
     }
     out.exchangeCount = fetchCalls.filter(function (c) {
       return c.url.indexOf('/auth/v1/token') >= 0;

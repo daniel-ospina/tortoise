@@ -291,7 +291,7 @@ bridge plus the page rewrite. Deleted by this issue when the bridge lands (not b
 | `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2242-2265` (`:2242`, `:2257`, `:2258`, `:2259`, `:2265`), `:2420`, `:2430` |
 | the supabase-js CDN `<script>` + `createClient` + `flowType: "pkce"` + `detectSessionInUrl` | `oauth.py:2216-2218`, `:2437-2447` |
 | `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2799-3235` |
-| `onAuthStateChange` (property 4's anchor) | `oauth.py:3238` |
+| `onAuthStateChange` (property 4's anchor) | `oauth.py:3257` |
 
 **`SCOPE.md` §10 item:** `oauth.py:2258` hardcodes `COOKIE_DOMAIN = ".premiselabs.co"`, and Gate 4 required
 that scope to be **configuration, not a literal**, so the Python surface and the BFF cannot disagree about
