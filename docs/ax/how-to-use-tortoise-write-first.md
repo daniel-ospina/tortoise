@@ -87,10 +87,10 @@ from the wrong partition.
 And the write path does not refuse. A kind that belongs to **another declared
 layer** is now reported back to you (a `kind_other_layer` advisory); one declared
 only on the sibling entity layer is *routed* to that layer, also with an advisory.
-But a kind the vocabulary **does not declare at all** is accepted with a log line
-the caller never sees. And a mechanism that contradicts the mechanism your own
-declared meaning fixes produces a warning and then stores **the mechanism you
-passed**. You are the only check in this pipeline.
+But a kind the vocabulary **does not declare at all** is silent — no advisory,
+and on the entity doors not even a log line. And a mechanism that contradicts
+your own declared meaning fixes produces a warning and then stores **the
+mechanism you passed**. You are the only check in this pipeline.
 
 ## The seven decisions
 
@@ -160,7 +160,7 @@ copy of it.
 ```text
 Subject: Acme (organization) · role: CFO
 Object:  Series B tranche state (funded 2 of 3) · pricing stance (hold)
-Event:   tranche 2 released (2026-05-14, eventKind: milestone)
+Event:   tranche 2 released (2026-05-14, eventKind: disbursement)
          board meeting (2026-06-03, eventKind: meeting)
          decision to hold pricing (2026-06-03, eventKind: decision,
                                    aboutObject -> pricing stance)
@@ -188,7 +188,7 @@ nothing:
 | Point | `pointKind` | `incident` is an Object kind; on a Point it is legal to the flat registry and wrong for every reader |
 | Subject | `subjectKind` | `person` — the declared spelling is `naturalPerson`; `company` → `organization` |
 | Object | `objectKind` | `offering` — declare a product/offering kind, or use `other` deliberately |
-| Event | `eventKind` | `disbursement` where the occurrence is a `milestone` |
+| Event | `eventKind` | `tranche` — an Object kind; the release itself is a `disbursement` |
 | Source | `sourceKind` | `research` is **not** a `sourceKind`; it is a `documentKind` |
 | Source genre | `documentKind` | a genre is not a credibility tier and not a source type |
 
@@ -207,10 +207,10 @@ not a new word at the call site.
 **What the surface will and will not tell you.** A kind declared on another
 *axis* is reported (`kind_other_layer`, naming the layer that declares it). A
 kind declared exclusively on the sibling entity layer is routed there for you. An
-**undeclared** kind is silent — the vocabulary is deliberately open, so the notice
-only reaches a log. That asymmetry is exactly why the measured failures are what
-they are: `person`, `company`, `offering` and `research` are all *undeclared*, so
-none of them produced a word back to the writer.
+**undeclared** kind is silent — the vocabulary is deliberately open, so nothing
+comes back. That is why the measured failures are what they are: `person`,
+`company`, `offering` and `research` are all *undeclared*, so none produced a
+word back.
 
 > **Measured:** the single most common failure in the eval — 14 scored items
 > across 5 of 10 inputs — is a kind no vocabulary declares on that layer
@@ -314,7 +314,7 @@ past 0.50.
 
 **Retract, do not delete, to undo.** A retracted mitigation (any terminal status)
 contributes nothing, so the operator's undamped weight returns. Deleting it is
-unnecessary, and deletion is terminal and unaudited by comparison.
+unnecessary: the two differ in what they *remove*, never in whether EP stops.
 
 ### The fan-out trap — one mitigation, many edges
 
@@ -385,15 +385,16 @@ every audit eventually asks.
   marked superseded; the new one takes over its connections. **Transfer the
   edges as part of the supersede** — a superseded node whose edges still
   propagate is a belief the graph still prices but no longer holds. Never move
-  edges by hand afterwards; the transfer is what supersede is for.
+  edges by hand afterwards. ⚠️ **Blanket today; `docs/ONTOLOGY.md` §4 forbids it:**
+  disposition is restatement-scoped, so a rebuttal motivating a correction stays off.
 - **Retract** when it stops being true with no replacement. Retraction is
   terminal: a re-assertion creates a new node, it does not revive the old one.
 - **Superseded operators still propagate.** An operator is a node with its own
   life; one left live on a superseded claim keeps moving confidence for a claim
   nobody holds. Check the operators that pointed at the belief you superseded.
 - **Delete** is for a node that should never have existed — a mis-write, a
-  duplicate. Hard removal, no history. It is not how you express a change of
-  mind.
+  duplicate. It destroys content, leaving a journal record of the destruction —
+  not how you express a change of mind.
 
 ## 7 · Provenance
 
