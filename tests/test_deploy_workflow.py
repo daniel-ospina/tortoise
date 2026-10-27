@@ -2641,10 +2641,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "outcome as a fault; the counter-example that makes the qualifier "
         "checkable is missing or unravelled"
     )
-    assert not re.search(r"attribute (?:any|a|each|the) `no_tenant` growth", flat), (
-        "the section still tells the operator to attribute `no_tenant` growth per "
-        "request — the step the ⛔ ruling below rules out"
-    )
+    # The "do not attribute growth per request" ruling is pinned ONCE, below, by a
+    # sentence-scoped scan — the narrow negative pin that lived here
+    # (`attribute (?:any|a|each|the) `no_tenant` growth`) required an article and the
+    # backticked counter, so it stayed green on `Attribute any `no_tenant` growth …`
+    # and on the document's own `Then attribute that growth per request …`
+    # (#10083 review cycle 2, P2). One stronger pin, not two overlapping ones.
     # ⛔ `only` is not exhaustive without the fault arm: `_resolve_record_tenant`
     # is fail-soft (#5148) and returns `None` on ANY exception, so an org-wide key
     # whose resolution faults also lands in `no_tenant`. Dropping that clause
@@ -2759,10 +2761,51 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # an operator who greps recipe 1, sees nothing and clears the capture passes a
     # capture-own `no_tenant` growth as other traffic — a fail-open in the very
     # verification this section exists to provide (#10083 review P1).
-    assert re.search(r'grep "could not resolve the record tenant"', flat), (
-        "the fault disjunct names no command that surfaces the fault, so the "
-        "operator is sent to a grep that cannot match it"
+    # ⛔ The command must match EVERY message that carries a resolution fault, not
+    # just the per-request one. There are three: `hosted_api._resolve_record_tenant`
+    # ("could not resolve the record tenant for this request"),
+    # `hosted_api._bind_default_graph_record_tenant` ("could not resolve the
+    # DEFAULT-graph record tenant for org …", the seed / indexing lanes), and
+    # `supabase_control.default_graph_id_for` ("graphs default-row read failed …"),
+    # which SWALLOWS its exception and returns None — so on a default-row read
+    # fault neither hosted_api line is emitted at all. A single-message grep sends
+    # the operator to an empty read on two of the three, i.e. "no fault" on a
+    # fail-and-fix `no_tenant` growth: the same fail-open this PR closes, one
+    # message further out (#10083 review cycle 2, P1).
+    assert re.search(
+        r'grep -E "could not resolve the record tenant\|could not resolve the '
+        r'DEFAULT-graph record tenant\|graphs default-row read failed"',
+        flat,
+    ), (
+        "the fault disjunct's grep matches only ONE of the three resolution-fault "
+        "messages, so a default-row read fault (or a seed/indexing bind fault) "
+        "reads as 'no fault'"
     )
+    for _msg in (r"could not resolve the DEFAULT-graph record tenant for org",
+                 r"graphs default-row read failed — the record tenant stays unnamed"):
+        assert re.search(re.escape(_msg), flat), (
+            f"recipe 1's exclusion (c) does not name {_msg!r} among the resolution "
+            "faults, so its 'three MESSAGES' count and its members disagree"
+        )
+    # ⛔ Attribution is forbidden, not merely unmentioned: EVERY sentence that
+    # speaks of attributing growth per request must be a prohibition. The old
+    # negative pin required the article and the backticked counter
+    # (`attribute (?:any|a|each|the) `no_tenant` growth`), so `Attribute any
+    # `no_tenant` growth per request …` (sentence-initial capital) and `Then
+    # attribute that growth per request …` — the document's own phrasing — both
+    # stayed GREEN while instructing the impossible step (#10083 review cycle 2,
+    # P2, measured). Sentence-scoped and case-insensitive instead.
+    _attribution = re.findall(r"[^.]{0,80}attribute[^.]{0,40}growth per request", flat, re.I)
+    assert _attribution, (
+        "the section never rules per-request attribution out at all — the ruling "
+        "below is the only thing that makes the arm executable"
+    )
+    for _sentence in _attribution:
+        assert re.search(r"(?:Do not|Never|not try|may not|must not)", _sentence, re.I), (
+            "the section instructs per-request attribution of growth — the step "
+            "the ⛔ ruling below forbids, and the log carries no request identity: "
+            f"{_sentence.strip()!r}"
+        )
     # REVERT-DETECTOR, not a claim pin: this reds only if one draft's exact wording
     # ("recipe 1 logs …") comes back — the phrase exists nowhere else in the tree,
     # so the assertion is green by construction and its message describes a class it
@@ -2785,19 +2828,19 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "bound names a third (the `tortoise.hosted_api` tenant-resolution fault), "
         "so a reader takes an exhaustive enumeration that is not exhaustive"
     )
-    assert re.search(r"\(c\) The `tortoise\.hosted_api` tenant-resolution fault", flat), (
-        "the exclusion list does not name the hosted_api fault among its members, "
-        "so the count and the members disagree"
+    assert re.search(r"\(c\) The tenant-RESOLUTION faults — three MESSAGES", flat), (
+        "the exclusion list does not name the resolution-fault member, so the "
+        "count and the members disagree"
     )
     # The reason the fault escapes the grep is the MESSAGE, not the logger: the
     # section's own ⛔ paragraph names `tortoise/sdk.py` — a different module — as
     # emitting the identical prefix, so "a different module's logger" is refuted by
     # the sentence five lines below it (#10083 review P2). Pin the MESSAGE reason,
     # and pin that the logger claim is gone.
-    assert re.search(r"carries a \*\*different MESSAGE\*\*,\s+so this grep does not match it", flat), (
-        "the list does not say WHY the fault escapes the grep (a different "
-        "MESSAGE), which is the fact that stops a reader from checking "
-        "recipe 1 and concluding 'no fault'"
+    assert re.search(r"The discriminator is the message text, not\s+the logger", flat), (
+        "the list does not say WHY the faults escape the grep (the MESSAGE is the "
+        "discriminator, not the module), which is the fact that stops a reader "
+        "from checking recipe 1 and concluding 'no fault'"
     )
     assert not re.search(r"different\s+module's\*\* logger, so it does not match", flat), (
         "the list attributes the escape to the LOGGER again — the section's own ⛔ "

@@ -3231,15 +3231,21 @@ text, so do not grep the 9090 listener for a counter name.
    it repeats at most once per window, and it is exactly the line that item 2's
    `record_position_unproven` counter is counting — grepping only the
    `did not happen` prefix for it returns nothing.
-   (c) The `tortoise.hosted_api` tenant-resolution fault —
-   `could not resolve the record tenant for this request` (#5148's fail-soft
-   path, `hosted_api._resolve_record_tenant`) — carries a **different MESSAGE**,
-   so this grep does not match it. (The discriminator is the message text, not
-   the logger: the SDK's `no_journal` line, from a *different module*, IS in the
-   grep — see the ⛔ paragraph below.) The refusal that
-   fault then produces (`the record write did not happen (no_tenant)`) IS in the
-   grep, but that is the growth, not the fault; read the fault itself with the
-   command in the ⚠️ `no_tenant` bound below.
+   (c) The tenant-RESOLUTION faults — three MESSAGES, none of which this grep
+   matches (`tortoise.hosted_api`'s fail-soft path, #5148):
+   `could not resolve the record tenant for this request`
+   (`_resolve_record_tenant`, the per-request lane),
+   `could not resolve the DEFAULT-graph record tenant for org …`
+   (`_bind_default_graph_record_tenant`, the seed / indexing lanes), and
+   `graphs default-row read failed — the record tenant stays unnamed`
+   (`supabase_control.default_graph_id_for` — which swallows that exception and
+   returns `None`, so on a default-row read fault NEITHER of the other two is
+   logged at all). (The discriminator is the message text, not the logger: the
+   SDK's `no_journal` line, from a *different module*, IS in the grep — see the
+   ⛔ paragraph below.) The refusal each fault then produces
+   (`the record write did not happen (no_tenant)`) IS in the grep, but that is
+   the growth, not the fault; read the faults with the `grep -E` in the ⚠️
+   `no_tenant` bound below, which matches all three.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed
@@ -3388,11 +3394,12 @@ why the two recipes above are the verification and the deploy status is not.
    cross-tenant note below for what that declaration may and may not cover.
    Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
    only when the capture ran **unbound**, when item 1's row did not appear, or
-   when the capture's own tenant resolution faulted — a `tortoise.hosted_api`
-   WARN (`could not resolve the record tenant for this request`) that
+   when the capture's own tenant resolution faulted — a tenant-RESOLUTION fault,
+   which logs one of THREE messages (all three are listed in recipe 1's
+   exclusion (c) above) and
    **recipe 1's grep does NOT match** (it greps
-   `the record write did not happen`), so read it with
-   `fly logs -a tortoise-y4mjjq | grep "could not resolve the record tenant"`.
+   `the record write did not happen`) any of them, so read the faults with
+   `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed"`.
    ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
