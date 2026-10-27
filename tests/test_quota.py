@@ -145,6 +145,22 @@ class TestEnforceTeamLimit:
         with pytest.raises(QuotaCheckError):
             enforce_org_limit({"org_id": "t", "max_points": 10}, "widgets")
 
+    def test_missing_limit_key_fails_closed(self):
+        """#310 GAP-B: a MISSING limit key is fail-closed; present-None is not.
+
+        THE HOLE THIS CLOSES (measured by the #9567 capstone): the suite had no
+        test of the missing-key branch, so mutating its
+        ``raise QuotaCheckError(...)`` to ``return`` left this file GREEN — a
+        fail-OPEN regression of the exact guard the branch exists to be. The
+        two-line pair below is what makes that mutation red: same dict, one key
+        REMOVED (refused) versus PRESENT-and-None (unlimited, allowed).
+
+        Nothing is counted: the branch fires before the count, so no sdk.
+        """
+        with pytest.raises(QuotaCheckError, match="missing max_points"):
+            enforce_org_limit({"org_id": "team1"}, "points")
+        enforce_org_limit({"org_id": "team1", "max_points": None}, "points")
+
 
 # ── #683: users + graphs enforcement ──────────────────────────────────────
 

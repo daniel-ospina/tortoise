@@ -64,6 +64,10 @@
         "check"
       ],
       [
+        "deploy-staleness.yml",
+        "check"
+      ],
+      [
         "skip-bypass-expiry.yml",
         "check"
       ]
@@ -507,7 +511,7 @@
       ]
     ]
   },
-  "gate_digest": "3e914d9a70183ec2b56e92a78ea9f0f8f7513796ece3e840318d8276cbd2fe82",
+  "gate_digest": "451ab15d1c2c916ea308d8fc0b22fd350a227b2bc0c5f51aa79822bb7a3cf809",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -531,5 +535,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-25T01:38:44Z"
+  "verified_at": "2026-10-27T03:31:01Z"
 }

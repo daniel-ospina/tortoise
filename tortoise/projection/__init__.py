@@ -7512,6 +7512,23 @@ _NO_PROJECTION_FOLD = frozenset({
     # (tests/test_record_projection.py) the only thing standing between a new
     # producer and a warning storm.
     "SessionNarrated",
+    # #10017: §9.1's raw-TURN carrier, the sibling of the narrative above and
+    # folded nowhere for the same reason — §9.1's D1 places the raw transcript
+    # "not in the graph" (owner, 2026-09-23: *"the same rule applies to raw
+    # turns"*), so a capture's turn set reaches the record
+    # (`public.point` at `cache_tier = 'record_only'`) and NOT the cache. Listing
+    # it here is what keeps a replay of a journal holding one from reaching the
+    # `else` arm: that arm calls `record_non_folded`, which fails a whole
+    # `rebuild`/`recover_from_log` run — so the carrier would make a lost graph
+    # unrecoverable, not merely noisy. ⚠️ Its torn tail is NOT tolerated (see
+    # `log.TORN_TAIL_HARMLESS_EVENT_TYPES`): the turns ARE the transcript, so a
+    # dropped one loses a capture's turn set, unlike the narrative's summary.
+    # ⚠️ The measured consequence, so nobody reads this entry as "replayed
+    # elsewhere": with a carrier present a replay completes and reports success
+    # having folded NO turn state — which is the ruling (the record is the home),
+    # not a gap. Nothing emits the type yet, so no journal can hold one before
+    # step 7 turns the producer over.
+    "TurnsRecorded",
 })
 
 # #3305: the Point-lifecycle terminalizers whose replay fold is a per-event
@@ -8962,6 +8979,95 @@ def journal_object_surviving_keys(
                         # already hold leaves every one of them standing.
                         name_to_ids.setdefault(newname, set()).add(rid)
     return frozenset(id_to_name), frozenset(name_to_ids)
+
+
+def journal_object_registered_names(events) -> frozenset[str]:
+    """Every Object NAME the journal ever puts in the graph — the
+    addressability oracle for the #3590 D2 exemption.
+
+    :func:`journal_object_surviving_keys` answers a DIFFERENT question ("does
+    this Object exist at the journal's END"), and it cannot separate "never
+    registered" from "registered then hard-deleted". The D2 exemption covers
+    only the FIRST: a name the journal registered and then deleted belongs to
+    the separately-carried ``supersede-target-deleted`` bound and must keep
+    refusing here. So this reads the positive sources alone and never
+    subtracts.
+
+    A NAME set, deliberately, not a name->id map: the record that needs the
+    answer may carry no usable id (``_fold_object_superseded`` returned
+    ``(0, 0)`` for it), so the name is the only identity it offers.
+
+    ⚠️ TWO name sources, and the second is NOT optional. ``ObjectRegistered``
+    is the obvious one; an ``EntityMutated`` **state op** is the other, because
+    the fold applies ``SET n += $state`` — a rename CARRIES a name into the
+    MERGE key the supersede sweep matches on, which is exactly why
+    :func:`journal_object_surviving_keys` models the same arm ("a rename moves
+    the MERGE key"). Reading registrations alone left a rename-produced name
+    looking unregistered, so a supersede the journal COULD have addressed was
+    exempted on ``rebuild_all`` while ``rebuild()`` folded it — a silent
+    divergence where ``main`` refused (#10107 review P1).
+
+    ``EventRecorded``'s mentioned-name stubs ARE excluded, and the claim is
+    deliberately ONE-DIRECTIONAL: a mention does not create an entity (#3590
+    D1), so it is not a registration and counting it would let a name the
+    journal never really established suppress the refusal. The cost of
+    excluding them is bounded and loud, not silent: a mention stub DOES put a
+    node in the graph (``_event_plain_merge``), so where the stub exists the
+    graph folds the supersede and only the reference fold may emit an EXEMPT
+    "matched no Object" entry — an over-report in the health report, never a
+    skipped fold and never a rebuild/apply divergence.
+    """
+    names: set[str] = set()
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        ev = _norm(raw)
+        t = ev.get("type")
+        if t == "ObjectRegistered":
+            name = ev.get("name")
+        elif (t == "EntityMutated"
+                and ev.get("op") in _ENTITY_MUTATION_STATE_OPS):
+            label = ev.get("label")
+            if (isinstance(label, str)
+                    and label in _CANONICAL_ENTITY_LABELS
+                    and label != "Object"):
+                continue
+            state = ev.get("state")
+            name = state.get("name") if isinstance(state, dict) else None
+        else:
+            continue
+        if isinstance(name, str) and name:
+            names.add(name)
+    return frozenset(names)
+
+
+def _supersede_name_unregistered(ev: dict, registered_names) -> bool:
+    """True ONLY when the record carries a NAME the journal never established
+    (#3590 D2).
+
+    A record with no name at all is NOT this exemption: nothing in it is
+    addressable, so "the journal never registered it" is unfalsifiable and the
+    fail-closed default must stand. A record whose name WAS established keeps
+    ``object-superseded-miss`` — the bound that stops a supersede which could
+    have landed from ever becoming skippable.
+
+    ⚠️ The name is read through ``_norm`` so all three classifying surfaces see
+    the SAME spelling: the two graph engines already normalise, while
+    ``consistency``'s reference fold iterates the raw journal, and a nested
+    record let those two halves disagree (one exempt, one refusing — the #3585
+    asymmetry; #10107 review P2). ``_norm`` is idempotent, so normalising an
+    already-normalised record changes nothing.
+
+    The record's ``id``, when present, is deliberately NOT consulted: the D2
+    producer path synthesises one for the legacy target, so requiring its
+    absence would refuse the very records this exemption exists for. An id in
+    this shape addresses nothing in the journal either way — the refusal
+    machinery for a real id miss is ``object-superseded-miss``.
+    """
+    name = _norm(ev).get("name") if isinstance(ev, dict) else None
+    return (isinstance(name, str) and bool(name)
+            and registered_names is not None
+            and name not in registered_names)
 
 
 def journal_object_hard_deleted_ids(events) -> frozenset[str]:
@@ -11552,6 +11658,7 @@ class FalkorProjection(
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
               journal_existence=None,
+              journal_object_registered_names=None,
               about_links_deferred: bool = False) -> None:
         # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
         # A fold is the cache WRITE of the record/cache split, so on a
@@ -12049,7 +12156,12 @@ class FalkorProjection(
                 if not _survives and not _deleted:
                     record_non_folded(
                         classify_terminalizer_miss(
-                            "ObjectSuperseded", target_deleted=False),
+                            "ObjectSuperseded", target_deleted=False,
+                            # #3590 D2: exempt ONLY the never-registered case.
+                            # `None` (the one-record LIVE path, which has no
+                            # journal to consult) stays fail-closed.
+                            name_unregistered=_supersede_name_unregistered(
+                                ev, journal_object_registered_names)),
                         event_id=ev.get("event_id"),
                         event_type="ObjectSuperseded", id=_oid,
                         candidates=((_oname,) if isinstance(_oname, str)
@@ -12446,6 +12558,10 @@ class FalkorProjection(
         # whose target the journal never leaves in place while NOT refusing a
         # forward reference (which ``rebuild_all``'s deferred sweep folds).
         journal_object_surviving = journal_object_surviving_keys(events)
+        # #3590 D2: the journal's own addressability oracle, the sibling of the
+        # pair above — `apply()` exempts a supersede whose target NAME the
+        # journal never registered, and refuses one it did.
+        registered_object_names = journal_object_registered_names(events)
         # #7719: the object-delete set is derived from the GATED map, judged by
         # the shared ``_hard_deleted_any``: an anchor-suppressed delete does not
         # exempt the supersede, matching `rebuild_all`'s sweep.
@@ -12497,6 +12613,8 @@ class FalkorProjection(
                        journal_object_deleted=journal_object_deleted,
                        journal_first_materialized=first_materialized,
                        journal_existence=epistemic_existence,
+                       journal_object_registered_names=
+                       registered_object_names,
                        journal_seq=seq,
                        about_links_deferred=_is_evrec)
             # #8398: buffer the record so its about* links are re-wired once
@@ -14302,6 +14420,10 @@ class FalkorProjection(
         # nothing) for a forward reference, while a target that was created and
         # then HARD-DELETED (first <= seq) still attempts the fold and refuses.
         first_materialized = journal_first_materialization(events)
+        # #3590 D2: the journal's OWN addressability oracle for an id-less
+        # supersede (see `journal_object_registered_names`). Computed once for
+        # the whole journal, like the other whole-journal maps above.
+        registered_object_names = journal_object_registered_names(events)
         # #7936 review: the ORDERED creation/hard-delete boundary for the
         # BELIEF gate. Pass 1a hoists every Point/Operator creation, so a
         # non-Point target created LATER is absent at the record while pass-1b
@@ -15010,7 +15132,9 @@ class FalkorProjection(
                 _sup_shape = classify_terminalizer_miss(
                     "ObjectSuperseded",
                     target_deleted=_hard_deleted_any(
-                        hard_deleted_seq, "Object", ev.get("id")))
+                        hard_deleted_seq, "Object", ev.get("id")),
+                    name_unregistered=_supersede_name_unregistered(
+                        ev, registered_object_names))
                 record_non_folded(
                     _sup_shape, event_id=ev.get("event_id"),
                     event_type="ObjectSuperseded", seq=seq,

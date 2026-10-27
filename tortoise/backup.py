@@ -669,6 +669,7 @@ def restore(backup_dir: str, db_path: str,
                 journal_first_materialization,
                 journal_hard_delete_seqs,
                 journal_object_surviving_keys,
+                journal_object_registered_names,
                 plan_point_restamp_folds,
             )
             # #7951 §17.1: a replay's records came FROM the journal, so the
@@ -738,6 +739,10 @@ def restore(backup_dir: str, db_path: str,
                 # feature-detect the kwargs (an `apply(ev)`-only injected backend
                 # must not be handed a kwarg it does not accept).
                 journal_object_surviving = journal_object_surviving_keys(records)
+                # #3590 D2: the journal's own addressability oracle, so this
+                # engine's supersede gate agrees with `rebuild_all`'s sweep.
+                registered_object_names = journal_object_registered_names(
+                    records)
                 # #7719: derived from the GATED map via `_hard_deleted_any`, so an
                 # anchor-suppressed delete no longer exempts the supersede.
                 journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
@@ -762,6 +767,9 @@ def restore(backup_dir: str, db_path: str,
                     _pass_seq = "journal_seq" in _apply_params
                 if "journal_existence" in _apply_params:
                     apply_kwargs["journal_existence"] = epistemic_existence
+                if "journal_object_registered_names" in _apply_params:
+                    apply_kwargs["journal_object_registered_names"] = \
+                        registered_object_names
                 # The refusal is a RUN BOUNDARY, exactly as on the other three
                 # engines: without the collector `record_non_folded` is a no-op
                 # and the context would change nothing. `assert_no_non_folded`

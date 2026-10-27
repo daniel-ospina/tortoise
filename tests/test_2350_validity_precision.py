@@ -732,14 +732,25 @@ def test_reader_marker_on_the_search_wire_states_an_undatable_end(lane):
     The pure-function pin above builds the hit itself, so it would still pass
     if the search wire stopped carrying ``end_state``/``valid_to_precision``
     (the renderer would fall back or print the raw bound again). This reads
-    the marker off a hit ``create_point(validTo="TBD")`` produced through the
-    PUBLIC write and the scan decoration — the path the ask lane renders.
+    the marker off a hit produced by the PUBLIC write and the scan decoration —
+    the path the ask lane renders.
+
+    ⚠️ **The un-datable fixture is a PRE-2026-10-26 row, written directly** (#9202
+    merged after this pin was written): the shaping ruling makes
+    ``create_point(validTo="TBD")`` store the canonical un-datable form — no end
+    plus the declared marker — instead of the literal, so a LITERAL end on the
+    wire can now only come from a graph written before the ruling. Every
+    assertion below is unchanged: the renderer's contract is the same for both
+    spellings, which is the property this pin exists to protect.
     """
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
     un_datable = sdk.create_point("statement", "un-datable end",
-                                 validFrom="2024-01-01", validTo="TBD")
+                                 validFrom="2024-01-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'",
+        params={"i": un_datable["id"]})
     dated = sdk.create_point("statement", "dated end",
                              validFrom="2024-01-01", validTo="2024-06-01")
     hits = {r["id"]: r for r in _scan(sdk)}
@@ -1029,8 +1040,17 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     The issue asked that the both-ends consequence be stated EXPLICITLY rather
     than discovered: a declaration on a PRESENT-but-unorderable ``validTo``
     (accepted by the same write boundary, which only refuses a declaration on an
-    ABSENT end) also resolves to no precision. Measured through the public write
-    so a future edit to either end's plumbing reddens this.
+    ABSENT end) also resolves to no precision.
+
+    ⚠️ **The fixture is a PRE-2026-10-26 row, written directly.** Under the
+    #9202 shaping ruling a caller ``validTo="TBD"`` is SHAPED (no value + the
+    declared ``unknown`` marker), so this pair can no longer be produced by the
+    public write: shaping would leave a concrete ``validToPrecision`` beside an
+    absent bound, and the #2350 precision gate refuses that pair. The row here is
+    the one that exists on graphs written BEFORE the ruling, which is exactly the
+    population this read property is about — and every assertion below is
+    unchanged, because the ruling deliberately left the read path (and those
+    rows) alone.
 
     ``end_state`` stays ``known`` for a DATED bound (the control below).
     Whether a stored-but-un-datable END should report ``END_UNKNOWN`` was
@@ -1039,8 +1059,11 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     """
     sdk, _events = lane
     p = sdk.create_point("statement", "declared end on no instant",
-                         validFrom="2024-06-01", validTo="TBD",
-                         validToPrecision="year")
+                         validFrom="2024-06-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) "
+        "SET n.validTo = 'TBD', n.validToPrecision = 'year'",
+        params={"i": p["id"]})
     props = _window_props(sdk, p["id"])
     assert props["validTo"] == "TBD", props
     assert props["validToPrecision"] == "year", props
@@ -1193,8 +1216,13 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
     sdk, _events = lane
     from tortoise.assembly import docker_walker_port
 
+    # A PRE-2026-10-26 row, written directly: the shaping ruling (#9202) makes
+    # the public write store the canonical un-datable form instead, and the read
+    # property pinned here is about rows that carry the literal value.
     p = sdk.create_point("statement", "unorderable end",
-                         validFrom="2024-01-01", validTo="TBD")
+                         validFrom="2024-01-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'", params={"i": p["id"]})
     assert _props(sdk, p["id"])["validTo"] == "TBD"
 
     # 1. get_historical_knowledge (raw bound)

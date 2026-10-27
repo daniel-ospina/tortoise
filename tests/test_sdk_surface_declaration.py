@@ -9,11 +9,11 @@ What each test is for, and why the naive version of it would prove nothing:
   1. **The declaration is the owner's list.** A literal 40, and set-equality with the
      document in BOTH directions. `len(__all__) == len(parse(doc))` would pass on two
      different sets of 40.
-  2. **A second ledger cannot come back.** The previous draft folded the 149-method inventory
-     into the same module (`OFF_SURFACE` + `APPROVED_PENDING`), which made "there is a
-     method I never approved" and "the migration has not reached it" the same observation
-     and let the gate stay green over a 109-method surplus. Loading such a module is now a
-     REFUSAL, asserted directly.
+  2. **A second ledger cannot come back.** The previous draft folded the whole live-method
+     inventory into the same module (`OFF_SURFACE` + `APPROVED_PENDING`), which made "there is
+     a method I never approved" and "the migration has not reached it" the same observation
+     and let the gate stay green over the entire off-surface backlog. Loading such a module
+     is now a REFUSAL, asserted directly.
   3. **An added public method fails, and the failure is NAMED.** Plus a non-vacuity test: the
      same live set passes once the declaration accounts for the name — so the red is caused
      by the declaration's content, not by the test's other machinery.
@@ -221,6 +221,83 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
     assert sum(1 for p in problems if "does NOT exist on TortoiseSDK" in p) == len(absent)
     assert len(problems) == len(off_surface) + len(absent)
+
+
+def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
+    """#10044 review F2: the prose must not misstate the gap the module is the authority for.
+
+    The docstring is what a maintainer reads before touching a name, and it said "149 public
+    methods are live on `TortoiseSDK` today; 40 are approved. The other 109 are the migration
+    gap — Phase 2 of #4282 removes them" (149 was the live count when that text was written).
+    `109` is the DELTA to the target COUNT — not a set — and the set it named as REMOVED is
+    the wrong one: the approved methods already implemented stay, so the removals are
+    `live − overlap`, while the approved-but-absent names are what Phase 2 IMPLEMENTS (a
+    disjoint set, the opposite operation). Both of this module's own artifacts already said
+    so — the baseline document tabulates the same split and the gate prints `N live method(s)
+    off the approved surface, M approved method(s) not implemented` — so the declaration
+    disagreed with the gate it exists to feed.
+
+    Checked on the CLAIM, not the wording: every line mentioning 109 must also label it a
+    delta, the two measured set sizes must appear, and any count attached to the implement
+    set must BE the measured one (round-6 ISSUE 1: the first rewrite folded the row-1
+    `Tortoise(...)` into the set Phase 2 implements and claimed `31` declared names for it,
+    while both the gate and this file measure 30 — and the count pin was satisfied by the
+    `30` echoed in the very sentence that claimed 31). RED on the pre-fix docstring (its
+    `The other 109 are the migration gap` line carries no delta label and the text never
+    states the two set sizes), so this is not vacuous.
+    """
+    import ast
+    import re
+
+    doc = ast.get_docstring(ast.parse(DECLARATION.read_text(encoding="utf-8"))) or ""
+    assert doc, "the declaration module lost its docstring, so this pin protects nothing"
+    declared, live = _declaration()["__all__"], _live()
+    off_surface = live - set(declared)
+    absent = [n for n in declared if not surface.resolves(n, live)]
+
+    assert str(len(off_surface)) in doc, (
+        f"the docstring never states the {len(off_surface)} live methods that are off the "
+        "approved surface — the set Phase 2 removes, by measurement"
+    )
+    assert str(len(absent)) in doc, (
+        f"the docstring never states the {len(absent)} approved-but-absent methods — the set "
+        "Phase 2 implements, by measurement"
+    )
+
+    # ROUND-6 ISSUE 1: the count pin above is satisfied by a bare `30` ANYWHERE, which is how
+    # a sentence claiming `31 declared names` for the implement set passed. Attach the count
+    # to the CLAIM: a line that says what Phase 2 IMPLEMENTS must carry the MEASURED size,
+    # and must not attach any other count to methods/names.
+    implements = [ln.replace("**", "").replace("`", "") for ln in doc.splitlines()
+                  if "IMPLEMENTS" in ln]
+    assert implements, (
+        "the docstring no longer says what Phase 2 does with the approved-but-absent names, "
+        "so this pin would be checking nothing"
+    )
+    assert any(str(len(absent)) in ln for ln in implements), (
+        f"no line carrying `IMPLEMENTS` states the measured implement set ({len(absent)}): "
+        "the count must be attached to the claim, not echoed a sentence away"
+    )
+    claimed = {
+        int(n) for ln in implements for n in re.findall(r"(\d+)\s+(?:declared\s+)?(?:methods|names)", ln)
+    }
+    overlap = len(set(declared) & set(live))
+    assert claimed <= {len(absent)}, (
+        f"a line carrying `IMPLEMENTS` attaches the count(s) {sorted(claimed)} to the "
+        f"implement set; the measured set is {len(absent)}. "
+        f"`{len(declared) - overlap}` is the complement of the {overlap}-method overlap — a "
+        "DELTA against the declared list, not a set of things to implement: the row-1 "
+        f"`Tortoise(...)` already resolves, and the {len(absent)} absent names exclude it."
+    )
+
+    unlabelled = [ln.strip() for ln in doc.splitlines()
+                  if "109" in ln and "delta" not in ln.lower()]
+    assert unlabelled == [], (
+        "the docstring states the target-count DELTA (live − approved) as if it were the set "
+        f"of methods the migration removes: {unlabelled}. The removals are the "
+        f"{len(off_surface)}, and the {len(absent)} absent approved names are IMPLEMENTED, "
+        "not removed — say `delta` on any line that quotes 109."
+    )
 
 
 def test_the_gate_is_NOT_always_red():

@@ -96,12 +96,16 @@ its own leg. Gap 6 — a writer outside `tortoise/` — cannot be probed from
 inside the walk, so it is STATED and not pinned, and no test here claims to
 block every future absolute, because none can.
 
-`sdk.supersede_point` and `projection._rebuild_all_replay` — which earlier
-revisions of this file recorded as re-materializers — are NOT. Its `SET r += $attrs` is on the 2a-DIRECT leg,
+`sdk.supersede_point` WAS one of these until `#9417`, which made its structural
+transfer carry the old edge's properties (`SET nr += $attrs`) — it is a counted
+MAP-form writer now. `projection._rebuild_all_replay` — which earlier revisions of
+this file recorded as a re-materializer — is NOT: Its `SET r += $attrs` is on the 2a-DIRECT leg,
 whose rows are discovered by `MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`,
-so `rtype` is provably `IMPL|NAND`; the about edge is transferred by a separate
-BARE `MERGE (new)-[:{rel}]->(t)` with no `SET`. On an about edge it writes no
-property — it DROPS `confidence` (filed as `#9417`). `_rebuild_all_replay`
+so `rtype` is provably `IMPL|NAND`. The about edge is transferred by a separate
+`MERGE (new)-[nr:{rel}]->(t)` that **does** carry the old edge's properties
+(`SET nr += $attrs`, whitelisted to the `RelationUpsert.attrs` vocabulary), so
+since #9417 this writer DOES write `confidence` on an about edge and is no longer
+an exemption here. The REBUILD half is still bare — traced as #10139. `_rebuild_all_replay`
 carries TWO `SET r += $attrs` statements, and neither is protected the same way:
 the `DirectEdgeCreated` fold has TWO producers since `#9553` — `create_direct_edge`,
 whose `op_type` allowlist is `{IMPL, NAND}` so its descriptor can never name an
@@ -120,11 +124,12 @@ written.
 Its about/structural transfer is a separate BARE `MERGE` whose own comment says
 so (*"Structural 2b transfers are bare: NO attr SET"*). (`create_about_edge`
 DOES journal a bare `DirectEdgeCreated` since `#9553` — attribute-free, which is
-what this leg pins — so it is a producer here, not an absence.) Both
-functions therefore carry NO property on an about edge. The census's whole-function
-variable union cannot tell which edge the `SET` lands on, so BOTH rows are
-declared FALSE POSITIVES in `NOT_AN_ABOUT_WRITER` rather than counted as
-re-materializations — the false-POSITIVE version of this file's own defect.
+what this leg pins — so it is a producer here, not an absence.) That function
+therefore carries NO property on an about edge; the census's whole-function
+variable union cannot tell which edge the `SET` lands on, so its row is a
+declared FALSE POSITIVE in `NOT_AN_ABOUT_WRITER` rather than a counted
+re-materialization — the false-POSITIVE version of this file's own defect.
+`supersede_point` was the second such row and left it in `#9417`.
 
 ⚠️ An EXEMPTION is a fail-open cell unless something compares against it, which
 is why this row is NOT exempt from the name-set comparison: it declares
@@ -147,8 +152,8 @@ THE SAME BLINDNESS, ONE LEVEL DOWN (review cycle on this file's first version)
 A census that reads only `SET r.<prop>` repeats the error: the property-MAP
 form `SET r += $props` / `SET r = $p` is structurally invisible to it, and two
 shipped sites already use that form on an allowlisted `aboutObject` predicate
-(listed above) — two MORE use it on an `IMPL|NAND` leg and are the declared
-false positives below, which is why the population it must NOT count is the
+(listed above) — one MORE uses it on an `IMPL|NAND` leg and is the
+    declared false positive below, which is why the population it must NOT count is the
 exemptions rather than the census rows (the pinned numbers are in
 `test_the_document_population_counts_match_the_census`). So the census reads all three write forms **where `_PATTERN`
 recognises the spelling** (the gap list above names the spellings it does not),
@@ -262,8 +267,8 @@ WHAT IS PINNED (one entry per test, in file order)
    and that composition is false: `projection/entities._fold_entity_linked_reason`
    reproduces on REPLAY what the journal already carried, which is the documents'
    own definition of RE-MATERIALIZING. The census can only see the WRITE FORM
-   (3 named + 2 map), which is why the wrong number read plausibly; the causal
-   split is 2 + 3, and the legs red if the fold is filed as an originator again
+   (3 named + 3 map since #9417), which is why the wrong number read plausibly; the causal
+   split is 2 + 4, and the legs red if the fold is filed as an originator again
    (`#9403` review, P2).
 14. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
    own round-5 rule (`at HEAD` on every number that is not true at the pin) is
@@ -626,6 +631,13 @@ RECORDED_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
 #: rule — so the documents' set is `confidence` (originated) plus `idx`
 #: (re-materialized), not one name.
 MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
+    #: #9417: the structural transfer now CARRIES the old edge's properties
+    #: (`SET nr += $attrs`, whitelisted to the RelationUpsert vocabulary), so an
+    #: `about*` edge keeps the binder's `confidence`. It was a declared false
+    #: positive until this landed. REBUILD is still bare — traced as #10139.
+    ("tortoise/sdk.py", "supersede_point"): (
+        "SET nr += $attrs",
+    ),
     ("tortoise/cache_projection.py", "relation_statement"): (
         "MERGE (src)-[r:{rel.rel_type} {{idx:$idx}}]->(tgt) SET r += $props",
     ),
@@ -641,13 +653,6 @@ MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
 #: false-POSITIVE version of this PR's own defect (an instrument that cannot
 #: tell which edge the `SET` lands on).
 NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
-    ("tortoise/sdk.py", "supersede_point"): (
-        "the `SET r += $attrs` is on the 2a-DIRECT leg, whose rows come from "
-        "`MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)` (rtype is provably "
-        "IMPL|NAND); the about edge is transferred by a separate BARE "
-        "`MERGE (new)-[:{rel}]->(t)` with no SET — so this writer carries NO "
-        "property on an about edge (it drops `confidence`; #9417)"
-    ),
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         "it carries TWO `SET r += $attrs` statements, and the exemption depends "
         "on each separately: the `DirectEdgeCreated` fold — which has TWO "
@@ -674,10 +679,6 @@ NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
 #: membership test would be satisfied while a `SET` sat on the about transfer,
 #: which is exactly the false negative these rows must not hide.
 FALSE_POSITIVE_STATEMENTS: dict[tuple[str, str], tuple[str, str]] = {
-    ("tortoise/sdk.py", "supersede_point"): (
-        "SET r += $attrs",
-        "MERGE (new)-[:{rel}]->(t)",
-    ),
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         "SET r += $attrs",
         "MERGE (s)-[:{etype}]->(t)",
@@ -2305,7 +2306,7 @@ def test_the_document_population_counts_match_the_census():
     # The causal axis must PARTITION the same population, not exceed it.
     # the two counts are stated with their parenthetical explanations between them,
     # so the window has to allow prose: "2 ORIGINATING (the two writers that write it
-    # first) and 3 RE-MATERIALIZING (the replay fold, …)"
+    # first) and 4 RE-MATERIALIZING (the replay fold, …)"
     # `_flat` normalises the hyphen out, so match the space form too
     split = re.search(
         r"(\d+) ORIGINATING.{0,200}?(\d+) RE[ -]MATERIALIZING", storage, re.S
@@ -2316,18 +2317,22 @@ def test_the_document_population_counts_match_the_census():
         f"§13's causal split {originating} + {rematerializing} does not add up "
         f"to the census population of {total}"
     )
-    # §11.1 states the same two numbers in a DIFFERENT spelling — "ORIGINATED by two
-    # sites and written by three in the named form" — and that spelling was pinned by
-    # nothing: measured at `#9403` review, editing it to "three sites" left the suite
-    # green while the paragraph above contradicted it. Words, not digits, so both
-    # spellings are checked against the tables.
+    # The document states the same two numbers in a DIFFERENT spelling, in §13:
+    # "ORIGINATED by two sites and written by three in the named form". (At this head
+    # §11.1 spells them differently again — "the two that ORIGINATE it" and "a third
+    # NAMED-form writer" — so §11.1 is not where those numerals live; an earlier
+    # revision of this comment said it was, and the leg passed anyway because it
+    # searches the whole flattened document.) That spelling was pinned by nothing:
+    # measured at `#9403` review, editing it to "three sites" left the suite green
+    # while the paragraph above contradicted it. Words, not digits, so both spellings
+    # are checked against the tables.
     words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
     assert f"ORIGINATED by {words[originating]} sites" in storage, (
-        f"§11.1 no longer states 'ORIGINATED by {words[originating]} sites', which is the "
+        f"the document no longer states 'ORIGINATED by {words[originating]} sites', which is the "
         f"ORIGINATING count {originating} the census split implies"
     )
     assert f"written by {words[named]} in the named form" in storage, (
-        f"§11.1 no longer states 'written by {words[named]} in the named form', which is "
+        f"the document no longer states 'written by {words[named]} in the named form', which is "
         f"what `RECORDED_WRITERS` holds ({named})"
     )
     ordinals = {2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
@@ -2340,7 +2345,7 @@ def test_the_document_population_counts_match_the_census():
     # occurrences to carry the ordinal the table implies.
     ordinal_hits = re.findall(rf"\b{ordinals[named]} NAMED form writer\b", storage, re.I)
     assert len(ordinal_hits) == 2, (
-        f"§11.1 must say '{ordinals[named]} NAMED form writer' in both places it names "
+        f"the document must say '{ordinals[named]} NAMED form writer' in both places it names "
         f"that writer (RECORDED_WRITERS={named}); found {len(ordinal_hits)}"
     )
     # ⛔ The matcher is PROBED before it is used, because this loop was DEAD
@@ -2379,7 +2384,9 @@ def test_the_document_population_counts_match_the_census():
             f"§11.1 still calls that writer the '{wrong}' NAMED-form writer while "
             f"RECORDED_WRITERS={named} makes it the {ordinals[named]}"
         )
-    assert f"{words[len(NOT_AN_ABOUT_WRITER)]} declared false positives" in storage, (
+    _fp = len(NOT_AN_ABOUT_WRITER)
+    _fp_noun = "positive" if _fp == 1 else "positives"
+    assert f"{words[_fp]} declared false {_fp_noun}" in storage, (
         "§13's declared-false-positive count no longer matches `NOT_AN_ABOUT_WRITER` "
         f"({len(NOT_AN_ABOUT_WRITER)})"
     )
@@ -2388,9 +2395,11 @@ def test_the_document_population_counts_match_the_census():
     ), (
         f"§11.1 no longer states that {originating} writers ORIGINATE the property"
     )
-    assert len(NOT_AN_ABOUT_WRITER) == 2, (
-        "the exemption table changed size; §13's '5, not 7' arithmetic and the "
-        "declared-false-positive prose were written for two exemptions"
+    assert len(NOT_AN_ABOUT_WRITER) == 1, (
+        "the exemption table changed size; §13's '6, not 7' arithmetic and the "
+        "declared-false-positive prose were written for ONE exemption — "
+        "`supersede_point` stopped being one when #9417 made it carry the edge's "
+        "properties, so it moved into MAP_WRITERS"
     )
 
 
@@ -2408,7 +2417,7 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
 
     The axes are separate, which is why the number read plausibly: the census
     can only see the WRITE FORM (named `SET r.<prop>` vs property MAP), and that
-    split really is 3 + 2. The CAUSAL split is 2 originating + 3
+    split really is 3 + 3. The CAUSAL split is 2 originating + 4
     re-materializing. Nothing pinned either, so both readings stayed green.
     """
     storage = _doc(STORAGE)
@@ -2430,13 +2439,14 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
         "STORAGE-ARCHITECTURE.md §13 files the replay fold as an ORIGINATING "
         "writer — `_fold_entity_linked_reason` re-writes on replay what the "
         "journal already carried, which is this document's own definition of "
-        "RE-MATERIALIZING; the causal split is 2 + 3"
+        "RE-MATERIALIZING; the causal split is 2 + 4 (the #9417 supersede "
+        "transfer is a fourth re-materializer)"
     )
-    assert _flat("2 originating + 3 re-materializing") in _flat(
+    assert _flat("2 originating + 4 re-materializing") in _flat(
         _doc(STORAGE_CHANGELOG)
     ), (
         "STORAGE-ARCHITECTURE-CHANGELOG.md no longer states the corrected "
-        "causal composition (2 originating + 3 re-materializing) — the ledger "
+        "causal composition (2 originating + 4 re-materializing) — the ledger "
         "is where the count's current form is recorded, so a ledger still "
         "carrying only the wrong composition is the history a reader mistakes "
         "for the claim"
@@ -2445,9 +2455,9 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
     # is satisfied by deleting the classification altogether.
     assert (
         _flat("2 ORIGINATING") in section_13
-        and _flat("3 RE-MATERIALIZING") in section_13
+        and _flat("4 RE-MATERIALIZING") in section_13
     ), (
-        "§13 no longer states the causal split (2 originating + 3 "
+        "§13 no longer states the causal split (2 originating + 4 "
         "re-materializing) — the measured population's composition is a claim, "
         "and deleting it leaves the number a reader cannot check"
     )
@@ -2543,9 +2553,9 @@ def test_the_named_and_map_form_writer_populations_are_disjoint():
     )
     assert len(MAP_WRITERS) >= 2, (
         "the map-form population shrank below the two shipped sites the "
-        "documents now record (5 writers the census sees: 3 named-form + 2 "
-        "map-form, i.e. 2 originating + 3 re-materializing; two further "
-        "census hits are declared false positives) — if a writer was "
+        "documents now record (6 writers the census sees: 3 named-form + 3 "
+        "map-form, i.e. 2 originating + 4 re-materializing; one further "
+        "census hit is a declared false positive) — if a writer was "
         "genuinely removed, re-derive the documents' count with it"
     )
     #: A site cannot be both a real writer and a declared false positive.

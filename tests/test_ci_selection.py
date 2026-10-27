@@ -212,10 +212,18 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
-    Three guards in `tests/test_definite_description_backfill_5059.py` assert
-    only against `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's
-    destructive half*: the load-bearing share, the `archived`-has-a-writer
-    claim, and the `_ALLOWED_TRANSITIONS` production-reader scan. The file was
+    Four guards in `tests/test_definite_description_backfill_5059.py` bind
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's destructive
+    half*, and **three** of them read the document: the load-bearing share
+    (which also reads its own module for the measurement), the
+    `archived`-has-a-writer claim (which rejects the set of no-writer spellings
+    it enumerates, rather than one literal — the literal form was evaded
+    twice), and the recorded design decision itself. The fourth, the
+    `_ALLOWED_TRANSITIONS` production-reader scan, reads **no line of the
+    document**: it AST-scans `tortoise/` for a consumer of the map the passage
+    cites, so a docs-only edit cannot red it (#10069 review, P3 — this
+    docstring said all four read only the document, which was false for it).
+    The file was
     registered in `core` alone — which is right for its module-level guards, and
     useless for these: `docs/` is in NON_PYTHON_PREFIXES and the document
     matches no SOURCE_PATTERNS entry, so a docs-only diff filters to
@@ -571,6 +579,38 @@ def test_the_capacity_guards_derived_source_selects_the_guard():
     assert "test_capacity_page.py" in r["test_files"], (
         f"{changed} does not select test_capacity_page.py — the derived "
         "write-concurrency figure has no guard on the change that invalidates it"
+    )
+
+
+def test_the_declaration_gate_selects_its_own_proofs():
+    """#10044 review F1: a change to the APPROVED-surface gate must select its proofs.
+
+    `tools/sdk_surface_declaration.py` is executed by the REQUIRED `surface-guard`
+    job (from the PR's own tree) and its proofs live in
+    `tests/test_sdk_surface_declaration.py`, registered `api` + `core`. Both
+    registrations were unreachable for the diff that can neuter the gate: `tools/`
+    is in `NON_PYTHON_PREFIXES` and no `SOURCE_PATTERNS` row claimed this module, so
+    the changed set emptied (`surfaces: []`, `full: false`) and the required job ran
+    an edited gate whose 17 proofs never executed — the #1349/#3332/#3616
+    silent-drop class, and the one bypass the "residual bypass, stated" paragraph in
+    `tools/surface_manifest.py` does not cover.
+
+    Asserted on the SURFACE and on the PROOF FILE, not on non-emptiness: a bare
+    "surfaces is non-empty" check passes for a `tests/`-relative path on its own.
+    Watched RED before the `SOURCE_PATTERNS["api"]` entry (`surfaces == []`),
+    GREEN after.
+    """
+    changed = "tools/sdk_surface_declaration.py"
+    assert (REPO / changed).exists(), f"the declaration gate is gone: {changed}"
+    r = _sel([changed])
+    assert "api" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the gate's own proofs are not "
+        "selected, so a gate-only PR can make `contract_problems()` return [] and "
+        "merge with every required check green and none of its tests run (#10044 F1)"
+    )
+    assert "test_sdk_surface_declaration.py" in r["test_files"], (
+        f"{changed} does not select test_sdk_surface_declaration.py — the gate "
+        "that holds the owner's 40 has no proof on the diff that edits it"
     )
 
 
@@ -1901,6 +1941,30 @@ def test_token_ts_change_selects_the_consent_bridge_guard():
     assert "test_oauth_consent_bridge.py" in r["test_files"], (
         "a token.ts-only diff does not run tests/test_oauth_consent_bridge.py, "
         "so its task-3 guard cannot fire on the change it pins (#3524)"
+    )
+
+
+def test_a_consent_token_only_diff_runs_the_bridge_guard():
+    """#3524 review (P1): the verifier's own diff must select the guard that pins it.
+
+    `tests/test_oauth_consent_bridge.py` is registered `api` + `onboarding` and
+    NOT `core`; a named-surface match REPLACES the `core` fallback. So before
+    `tortoise/consent_token.py` was a `SOURCE_PATTERNS["api"]` entry, a diff that
+    touched the verifier and nothing else selected `core`, where that guard does
+    not exist — a regression in the signature/`alg`/`bind`/`jti` logic (the
+    security half of the bridge) red nowhere and merged green. Asserts the
+    SELECTION, not the registration, so it reds on the pre-fix patterns.
+    """
+    r = _sel(["tortoise/consent_token.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a consent_token.py-only diff selects {r['surfaces']} — the bridge "
+        "guard is registered on `api`, and `core` does not run it"
+    )
+    assert "test_oauth_consent_bridge.py" in r["test_files"], (
+        "a consent_token.py-only diff does not run "
+        "tests/test_oauth_consent_bridge.py, so its verifier guards cannot fire "
+        "on the change they pin (#3524)"
     )
 
 
@@ -5646,6 +5710,76 @@ def test_the_paren_guard_is_not_vacuous():
     assert _durations_rows_with_unbalanced_parens(legitimate) == []
 
 
+#: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
+_WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
+
+
+def _durations_rows_stating_a_stale_watchdog_floor(text: str, floor: int):
+    """Rows whose OWN note attaches a `WATCHDOG_FLOOR_MIN` that is not the current one.
+
+    The row's own tail only, never its continuation lines: a wrapped continuation can
+    belong to a comment BLOCK that describes the row BELOW it (the `355.0` cap block
+    sits *above* its `test_lane_stash.py` row), so reading continuations here would
+    attribute a neighbour's prose to the wrong key.
+    """
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None:
+            continue
+        for claim in _WATCHDOG_FLOOR_CLAIM_RE.finditer(m.group("tail")):
+            if int(claim.group("minutes")) != floor:
+                out.append((m.group("key"), int(claim.group("minutes"))))
+    return out
+
+
+def test_no_durations_row_states_a_retired_watchdog_floor():
+    """#10044 review F3 (P2): the two cap rows still asserted the 15-min basis.
+
+    `WATCHDOG_FLOOR_MIN` moved 15 -> 19 (#10055, its own 2.9x derivation), which
+    falsifies every clause the `test_calibration.py` and `test_write_path_operator_lane.py`
+    notes were written at 15 min: at 19 min = 1140 s, 1140/390.0 = 2.92x and
+    1140/386.2 = 2.95x CLEAR the 2.5x those rows said they failed, so both readings
+    ARE declarable and the arithmetic ceiling is <456 s, not <360 s. The file's own
+    header rule ("a row's comment is kept only while the value AND its stated basis
+    are unchanged") is what the rows violated; no guard covered prose of this shape.
+
+    Only the mechanically checkable half is pinned — the number a note attaches to the
+    CONSTANT, on the row's own line. A row may still NARRATE the retired floor ("at the
+    15-min floor this cap was chosen under"), because that sentence is history, not a
+    claim about the file today; it must not state the retired number AS the constant's
+    value.
+    """
+    from tools.ci_selection import WATCHDOG_FLOOR_MIN
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_stating_a_stale_watchdog_floor(text, WATCHDOG_FLOOR_MIN)
+    assert offenders == [], (
+        "a durations row states a retired `WATCHDOG_FLOOR_MIN` — the floor moved and "
+        f"the note's stated basis did not (#10044 review F3): {offenders}. Restate the "
+        "row at the current floor, keeping every ⛔ do-not-read-355.0 instruction and "
+        "the #9172 pointer.")
+
+
+def test_the_watchdog_floor_guard_is_not_vacuous():
+    """The guard above must bite on the pre-move rows and stay quiet on the rewrite."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 355.0  # #6133 CEILING, not a reading: `WATCHDOG_FLOOR_MIN` "
+        "(15 min) must clear the largest fast file by 2.5x.\n"
+        "  test_b.py: 1.0  # a row that names no floor at all.\n"
+        "surfaces: []\n")
+    legitimate = (
+        "durations:\n"
+        "  test_c.py: 355.0  # the #6133 rule is that `WATCHDOG_FLOOR_MIN` (19 min) "
+        "must clear the largest fast file by 2.5x. At the 15-min\n"
+        "      # floor this cap was chosen under, 900/360 = 2.5 exactly.\n"
+        "  test_d.py: 0.2\n"
+        "surfaces: []\n")
+    assert [k for k, _ in _durations_rows_stating_a_stale_watchdog_floor(stale, 19)] == [
+        "test_a.py"]
+    assert _durations_rows_stating_a_stale_watchdog_floor(legitimate, 19) == []
+
+
 def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
     """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
 
@@ -6407,6 +6541,105 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the leg is killed mid-suite and the gate reds before pytest can "
             f"report. Re-derive the budget (and the outer cap above it) from "
             f"the committed `durations` map.")
+
+
+# ── #3239, extended: the REQUIRED surface may not inherit the 360m default ──
+# `test_every_bounded_pytest_job_caps_above_its_watchdog` closes the class for
+# jobs whose pytest step carries a LITERAL watchdog. It cannot see a job with no
+# pytest step at all, and measured 2026-10-27 that gap was open on `packs-compile`
+# and on `python-ci-gate` — the REQUIRED check itself — plus FIVE of the seven
+# required contexts in `ci.yml` and the `ai-review-gate` job. A wedged job there is
+# not a slow CI, it is a merge queue held on a pending check for six hours.
+#
+# The required-context invariant below is deliberately DERIVED, never a hard-coded
+# job list: the names come from `.mergify.yml`'s own conditions (the same source
+# `tools/mergify_config_guard.py` reads), so a new required context is covered the
+# day it is named rather than the day someone remembers this file. The measured
+# bounds themselves live in `docs/ops/ci-wall-clock.md`.
+
+def test_every_python_ci_job_carries_an_outer_cap():
+    """Every job in `python-ci.yml` must carry a literal `timeout-minutes`.
+
+    This is the workflow that emits `python-ci-gate`, the REQUIRED merge check, and
+    twelve of its jobs are in that job's `needs:` — so any one of them without a
+    cap can withhold the required check for GitHub's 360-minute default (#3239).
+    The assertion is deliberately workflow-wide rather than `needs:`-scoped: the
+    two jobs outside `needs:` (`canary-streak`, and the aggregator itself) are one
+    selector output away from joining it, and a 360m default is never the bound
+    anyone would choose. A job that needs longer than its measured work is fine:
+    pick the number from a measurement and record it, as
+    `docs/ops/ci-wall-clock.md` does.
+    """
+    wf = _load_python_ci()
+    uncapped = [
+        name for name, job in wf["jobs"].items()
+        if not isinstance(job.get("timeout-minutes"), int)
+        or job["timeout-minutes"] <= 0
+    ]
+    assert not uncapped, (
+        f"python-ci.yml job(s) {uncapped} carry no literal `timeout-minutes` — "
+        f"GitHub's 360m default then holds them, and twelve of this workflow's "
+        f"jobs are in `python-ci-gate`'s `needs:`, so a hung job withholds the "
+        f"REQUIRED check for six hours (#3239). Set a bound from a measurement "
+        f"(docs/ops/ci-wall-clock.md), not from the default.")
+
+
+def test_every_required_merge_check_carries_an_outer_cap():
+    """A job EMITTING a required merge context must carry a literal cap.
+
+    The required set is read from `.mergify.yml` (`queue_conditions` gates ENTRY,
+    `merge_conditions` gates the MERGE — both are required, so both are checked),
+    and each name is resolved to the job that emits it through the same emitter
+    map `tools/mergify_config_guard.py` uses — a job's effective name is its
+    `name:` field when set, else its id.
+
+    A required name that resolves to NO job is asserted against rather than
+    skipped: today all seven resolve, and a name the workflows do not emit is
+    either a new gating workflow that needs a bound or a condition that can never
+    be satisfied (the deadlock the mergify guard exists to catch). If a required
+    context is ever emitted by a non-workflow app, extend this test's resolution
+    — do not weaken the assertion, because a skipped name is a silently unbounded
+    merge path.
+
+    Scope note: this covers the SEVEN required contexts. It does not assert
+    anything about merge-path workflows that emit no required context (e.g.
+    `drift-guard`) — those are bounded by hand, with their measurement recorded
+    in `docs/ops/ci-wall-clock.md`.
+    """
+    docs = mcg._workflow_docs(REPO)
+    mergify = mcg._load_mergify(REPO)
+    required: list[str] = []
+    for rule in mergify["queue_rules"]:
+        for key in ("queue_conditions", "merge_conditions"):
+            required.extend(mcg._success_names(rule.get(key) or []))
+    required = sorted(set(required))
+    assert required, (
+        ".mergify.yml declares no positive `check-success=` condition — the "
+        "required set is empty, so this guard would assert nothing")
+
+    by_name: dict[str, list[dict]] = {}
+    for emitter in mcg._emitters(docs):
+        by_name.setdefault(emitter["name"], []).append(emitter)
+
+    unemitted = [name for name in required if name not in by_name]
+    assert not unemitted, (
+        f"required merge context(s) {unemitted} are named in .mergify.yml but "
+        f"NO job's effective check name matches — either a gating workflow is "
+        f"missing a bound this test cannot see, or the context can never be "
+        f"satisfied (see tools/mergify_config_guard.py).")
+
+    uncapped: list[str] = []
+    for name in required:
+        for emitter in by_name[name]:
+            job = docs[emitter["workflow"]]["jobs"][emitter["job"]]
+            cap = job.get("timeout-minutes") if isinstance(job, dict) else None
+            if not isinstance(cap, int) or cap <= 0:
+                uncapped.append(f"{name} ({emitter['workflow']}:{emitter['job']})")
+    assert not uncapped, (
+        f"required merge check(s) {uncapped} carry no `timeout-minutes`, so a "
+        f"wedged job holds the merge queue on GitHub's 360m default instead of "
+        f"failing in minutes-to-tens-of-minutes. Set the bound from a "
+        f"measurement (docs/ops/ci-wall-clock.md).")
 
 
 def test_slow_shards_are_duration_packed_and_meet_the_wall_target():

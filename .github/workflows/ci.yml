@@ -413,6 +413,11 @@ jobs:
                   # the record cannot silently lose the cadence factor that
                   # qualifies every availability figure.
                   startswith(".github/scripts/availability-record"),
+                  # #10109: the deploy-staleness detector — its harness pins the
+                  # positive reading (deployed sha vs origin/main), the
+                  # fail-closed unreadable-revision red, the behind-bound
+                  # verdict, and the divergence-vs-lag distinction.
+                  startswith(".github/scripts/check-deploy-staleness"),
                   # #4545: the post-deploy health gate's harness — extracted from
                   # deploy-hosted.yml so the gate that decides whether a deploy
                   # SUCCEEDED is testable. It pins the regression where the gate
@@ -436,6 +441,7 @@ jobs:
                   isfile(".github/workflows/availability-liveness.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
                   isfile(".github/workflows/availability-record.yml"),
+                  isfile(".github/workflows/deploy-staleness.yml"),
                   isfile(".github/workflows/deploy-hosted.yml"),
                   # #3907: the auto-file adopters — a change to the monitor that
                   # calls the substrate re-runs its harness.
@@ -629,13 +635,16 @@ jobs:
       - name: Check migrations are append-only
         run: bash .github/scripts/check-migration-append-only diff
         env:
-          # #7628: this is the PR's MERGE-BASE, which is NOT what the `docs`
-          # changed set uses any more (that now resolves the base branch TIP).
-          # Whether THIS consumer shares the #7628 defect is unmeasured — its
-          # policy only ever ADDS migrations, so the over-inclusion is narrower —
-          # but two different meanings of "the base" for "the changed set" is the
-          # inconsistency a future reader will trip over. Change it only with its
-          # own measurement, not for symmetry.
+          # #7628: this is the PR's MERGE-BASE, not the base branch TIP that
+          # `docs` resolves any more. MEASURED on #10110 (2026-10-27): over a
+          # refs/pull/N/merge checkout the two meanings differ by everything the
+          # base gained after the fork, so main's own new migration arrived as
+          # this PR's `A` and failed it — a migrations-free PR reported as
+          # breaking append-only, and the merge rail refused the tree on that
+          # check. The consumer therefore resolves the merge commit's base parent
+          # for itself (see the script's "WHICH BASE" header); this value stays
+          # because the decision needs a fork point to prove it is one, and a
+          # plain-commit checkout still diffs against it directly.
           DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # #1235: enables the unapplied-rename exception (same-repo PRs);
           # forks don't get secrets → strict block preserved (fail-closed).
@@ -644,6 +653,12 @@ jobs:
     # #682: canonical pricing must exist on main and stay in sync with the
     # tier_limits() table — a missing/renamed product/pricing.json fails CI.
     runs-on: ubuntu-latest
+    # REQUIRED context (branch protection + .mergify.yml queue_conditions) that
+    # carried NO cap, so a wedged install held it pending for GitHub's 360m
+    # default. Measured 2026-10-27 (60 newest completed ci.yml runs,
+    # first-step→last-step): p50 0.60m, p95 0.73m, max 0.73m (n=25). 15m is a
+    # runner-stall floor; the table is docs/ops/ci-wall-clock.md.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -676,6 +691,15 @@ jobs:
 
   docs:
     runs-on: ubuntu-latest
+    # REQUIRED context (branch protection + queue_conditions `check-success=docs`)
+    # with no cap of any kind — job-level or step-level — so a hung markdownlint/
+    # lychee step held entry to the merge queue for up to 360 minutes.
+    # Measured 2026-10-27 (60 newest completed ci.yml runs): p50 0.96m, p95 1.10m,
+    # max 10.25m (n=26) — the max is a RUNNER-SIDE stall on a one-minute job, and
+    # it is why the floor here is 20m rather than 5m: a cap under the observed
+    # stall would false-red a required check and cost a whole re-run cycle, the
+    # cost this bound exists to remove. Table: docs/ops/ci-wall-clock.md.
+    timeout-minutes: 20
     steps:
       # #5215 Task 8 (D13): the main-health call has no PR base, so a scheduled
       # `git diff` against `pull_request.base.sha` is empty and markdownlint/
@@ -1243,6 +1267,11 @@ jobs:
 
   test-isolation:
     runs-on: ubuntu-latest
+    # REQUIRED context, no cap → the 360m default. Measured 2026-10-27 (60
+    # newest completed ci.yml runs): p50 0.13m, p95 0.15m, max 0.33m (n=27); the
+    # 15m floor is the runner-stall allowance, not the work. See
+    # docs/ops/ci-wall-clock.md.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Check test isolation (repo-local lint)
@@ -1357,6 +1386,23 @@ jobs:
         # that a low figure never fails the run (record-only, not a gate).
         if: ${{ !cancelled() }}
         run: bash .github/scripts/availability-record.test.sh
+
+      # ── deploy-staleness (#10109) ─────────────────────────────────────
+      - name: Deploy staleness detector (#10109)
+        # The POSITIVE staleness reading: builds a synthetic repo, pins the
+        # deployed commit, and proves the detector reds on a behind-bound lag
+        # (the mutation), a divergent commit, a sha not in the repo, and an
+        # unreadable revision — and that a current commit passes and states the
+        # distance. Also pins the fail-closed read side (curl failure, missing
+        # token/jq) and the dedupe (one alert, PATCHed not duplicated).
+        # The two bounds are pinned as MUTATIONS: a docs-only lag (raw distance
+        # over the bound, zero deployable commits) stays GREEN — the false alarm
+        # that makes a pager inert — while a single deployable commit older than
+        # the age bound REDS even though the count is within bound; and an
+        # unreadable `on.push.paths` filter is a RED, never a pass. The real
+        # `deploy-hosted.yml` filter is pinned in both directions.
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/check-deploy-staleness.test.sh
 
       # ── deploy-health-gate (#4545) ────────────────────────────────────────
       - name: Deploy health gate poll (#4545)
@@ -1539,6 +1585,10 @@ jobs:
 
   license-surface:
     runs-on: ubuntu-latest
+    # REQUIRED context, no cap → the 360m default. Measured 2026-10-27 (60
+    # newest completed ci.yml runs): p50 0.13m, p95 0.15m, max 0.15m (n=24); 15m
+    # is the runner-stall floor. See docs/ops/ci-wall-clock.md.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Check license surface consistency (BSL 1.1 + $5M AUG, 4 files)
@@ -1951,6 +2001,12 @@ jobs:
 
   legal-e2e:
     runs-on: ubuntu-latest
+    # REQUIRED context, no cap → the 360m default, which also covered a
+    # `wrangler pages dev` preview this job starts below. Measured
+    # 2026-10-27 (60 newest completed ci.yml runs, completed jobs only):
+    # p50 1.79m, p95 8.91m, max 9.25m (n=26) — 20m clears the measured max by
+    # >2× and stays above the runner-stall floor. See docs/ops/ci-wall-clock.md.
+    timeout-minutes: 20
     # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks
     # (privacy/tos/license/dpa content, consent + pricing content, mocked
     # signup/signin flows, mobile render, full link crawl). The suite is
