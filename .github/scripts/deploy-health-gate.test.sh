@@ -368,11 +368,20 @@ zero_bound_rc=0
 OUT=$(GATE_BASE="https://stub.invalid" CURL_MAX_TIME_READY=0 bash "$GATE" 2>&1) || zero_bound_rc=$?
 assert_eq "$zero_bound_rc" "2" "a zero request bound exits 2"
 assert_contains "$OUT" "must be a POSITIVE integer" "explains why 0 is refused"
+# ⛔ `0` is not the only spellings: `00`/`000` are INTEGRAL, so a pattern test
+# that lists `0` alone accepts them — and curl reads `--max-time 00` as "no
+# limit" exactly like `--max-time 0` (measured). Each spelling is asserted, so
+# the guard is pinned on the VALUE and cannot regress to a string comparison.
+for zero_spelling in 00 000; do
+  padded_rc=0
+  OUT=$(GATE_BASE="https://stub.invalid" CURL_MAX_TIME_READY="$zero_spelling" bash "$GATE" 2>&1) || padded_rc=$?
+  assert_eq "$padded_rc" "2" "a zero-padded bound ('$zero_spelling') exits 2, not 0"
+done
 
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=50
+expected_assertions=52
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

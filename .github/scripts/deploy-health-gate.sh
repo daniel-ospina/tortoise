@@ -164,13 +164,23 @@ done
 # `--max-time 0` as "no limit", so allowing 0 here would silently restore the
 # unbounded request this change exists to remove — a guard that permits the
 # hole is worse than none, because the file then claims a bound it does not have.
+# ⛔ `0` is not the only SPELLING of zero: `00` and `000` are integral, so they
+# pass the pattern test, and curl reads `--max-time 00` as "no limit" exactly
+# like `--max-time 0` (measured). The first guard is therefore on the SHAPE and
+# the second is on the VALUE — a guard that pattern-matched `0` alone would
+# report a bound the file does not have on any zero-padded override.
 for _knob in CURL_CONNECT_TIMEOUT CURL_MAX_TIME_APP CURL_MAX_TIME_HEALTH CURL_MAX_TIME_READY; do
   case "${!_knob}" in
-    '' | *[!0-9]* | 0)
+    '' | *[!0-9]*)
       echo "::error::$_knob must be a POSITIVE integer — curl reads 0 as 'no limit', which is the unbounded request this bound exists to remove (got '${!_knob}')"
       exit 2
       ;;
   esac
+  # `10#` forces base 10, so `08` is eight rather than an invalid octal literal.
+  if [ "$((10#${!_knob}))" -le 0 ]; then
+    echo "::error::$_knob must be a POSITIVE integer — got '${!_knob}', whose VALUE is 0, and curl reads a zero --max-time (0, 00, 000) as 'no limit', which is the unbounded request this bound exists to remove"
+    exit 2
+  fi
 done
 
 # ── 1. app reachable (fail fast) ────────────────────────────────────────────
