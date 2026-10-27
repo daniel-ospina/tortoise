@@ -959,10 +959,11 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # but a redaction rule that only matches the case it happened to see fails OPEN
     # on the next mint, and a leaked credential cannot be un-leaked. The prefix was
     # case-sensitive in an earlier revision on the theory that widening it would
-    # match prose — measured FALSE: what spares `APIKEY_THE_FIELD…` and
-    # `apikey_a1b2` is the 24-hex FLOOR, not the case, and the only thing the
-    # case-sensitive prefix did was let `APIKEY_<36 hex>_<64 hex>` (a well-formed
-    # uppercase mint) leak whole with the count at 0.
+    # match prose — measured FALSE: `APIKEY_THE_FIELD…` is spared by the hex BODY
+    # CLASS (a `T` never starts a body) and `apikey_a1b2` by the 24-hex FLOOR;
+    # neither is spared by case, and the only thing the case-sensitive prefix did
+    # was let `APIKEY_<36 hex>_<64 hex>` (a well-formed uppercase mint) leak whole
+    # with the count at 0.
     # ⛔ THE TRAILING LOOKAHEAD IS THE BODY CLASS MINUS ITS OWN CHARACTERS — the
     # invariant stated in this table's own header. It is INERT by construction here
     # (`{24,}` and the optional `{8,}` are greedy over the same class, so the next
@@ -979,16 +980,14 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # `apikey_` anchors the match tightly enough that a bare segment-1 form cannot
     # be ordinary prose — the class this module refuses to match is an UNANCHORED
     # hex run, not this one.
-    # ⚠️ RESIDUALS live in the TEST, not in prose here (`{24,}` and the optional
-    # `{8,}` already make a narrative of every wrap position stale — a mid-segment
-    # split keeps whatever hex run survives the break, and the two segments have
-    # DIFFERENT thresholds: a break inside segment 1 below 24 hex matches NOTHING
-    # (count 0, the whole key survives), at/above 24 the pre-break run is redacted;
-    # a break inside segment 2 below 8 hex leaves the whole remaining tail, at/above
-    # 8 the leading part is redacted). `test_the_typesafe_rule_is_pinned_at_its_measured_shape`
-    # asserts every split shape it records (a count here would re-stale the moment
-    # one is added); 0 mid-segment splits over 1,128 session transcripts measured
-    # 2026-10-26 (the corpus grows — re-measure rather than quoting this).
+    # ⚠️ THE SPLIT AND ESCAPE RESIDUALS ARE ASSERTED IN
+    # `test_the_typesafe_rule_is_pinned_at_its_measured_shape`, deliberately not
+    # stated here: every wrap position has its own threshold, so a narrative of them
+    # goes stale the moment one is added. The shape of the residual: a mid-segment
+    # split keeps whatever hex run survives the break, and an escaped `\n` (a literal
+    # backslash-n, as raw JSONL holds it) does not match the `\s*` separator at all.
+    # Over the session corpus as of 2026-10-26: no mid-segment split observed
+    # (re-measure; the corpus grows).
     ("typesafe_api_key",
      re.compile(r"(?<![A-Za-z0-9])(?i:apikey_)[0-9a-fA-F]{24,}"
                 r"(?:\s*_\s*[0-9a-fA-F]{8,})?"

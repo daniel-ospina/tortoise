@@ -1209,9 +1209,12 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         SECOND-segment ceiling leaks the tail;
     (c) prefix AND body are case-INSENSITIVE — a future uppercase mint must not
         leak (an earlier case-sensitive prefix let `APIKEY_<36>_<64>` through with
-        the count at 0), while an `APIKEY_<ID>` heading stays prose on the HEX
-        FLOOR, not on case;
-    (d) the separator tolerates a wrap, and the second segment is OPTIONAL: a
+        the count at 0), while an `APIKEY_<ID>` heading stays prose on the hex BODY
+        CLASS (a `T` never starts a body), not on case — the 24-hex floor is what
+        spares `apikey_a1b2`. Both halves are asserted, the prose one included;
+    (d) the separator tolerates a WHITESPACE wrap (a literal newline or spaces
+        around the `_` — NOT an escaped `\n`, which is a different residual and is
+        asserted as such in (e)), and the second segment is OPTIONAL: a
         TRUNCATED key (`apikey_<36 hex>_<16 hex>…`, what a compaction summary or a
         display ellipsis leaves — present in the measured corpus) must not survive
         in full;
@@ -1280,6 +1283,12 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         "an UPPERCASE-PREFIX mint leaked whole — the prefix must be "
         "case-insensitive, like the body")
     assert heading_counts.get("typesafe_api_key") == 1, heading_counts
+    # …and the NEGATIVE half of (c), pinned rather than probed by hand: widening the
+    # prefix to BOTH cases must not eat prose that merely starts with the literal.
+    for prose in ("APIKEY_THE_FIELD_NAMES_THE_KEY is the heading",
+                  "The apikey_a1b2 field is the id",
+                  "Set apikey_ in the console"):
+        assert redact_secrets(prose) == (prose, {}), prose
 
     # (d) wrapped at the separator (terminal width), as `jwt` is
     for wrapped in (f"key apikey_{first}\n_{second}",
@@ -1301,6 +1310,11 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     assert high_counts.get("typesafe_api_key") == 1, (
         "a split at/above the floor must still redact the pre-break run")
     assert first[:30] not in high_out, high_out
+    # …and pin the SURVIVOR too, not just the redacted run: the rest of segment 1
+    # and ALL of segment 2 stay in cleartext, which is the extent of the residual
+    # this shape is documented to leave (asserting only `first[:30] not in out` is
+    # satisfied by redacting any part, and would stay green if the rule narrowed).
+    assert first[30:] + "_" + second in high_out, high_out
     tail_out, tail_counts = redact_secrets(
         f"key apikey_{first}_{second[:47]}\n{second[47:]}")
     assert tail_counts.get("typesafe_api_key") == 1, (
