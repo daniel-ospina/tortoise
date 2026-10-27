@@ -1573,3 +1573,35 @@ pinned in both directions — the verbatim pre-fix lines and a near-miss — in
 the same as pinning the class, which is why the class is now pinned. The entry's own pointer is
 pinned by
 `tests/test_extractor_v4_citation_rot.py::test_the_changelog_entry_names_the_section_the_stamp_actually_left`.
+
+## §9.1's turn half — the rule stayed, the delivery state left (`#10000`, 2026-10-26)
+
+The rule in §9.1 is unchanged and was already decided: the transcript lives outside the graph
+(owner, 2026-09-23 — *"the narrative is not something we're suggesting to store in the graph (same as
+raw) but store in supabase"*). What moved here is the paragraph that said **where that rule stands**:
+the `✅ … IMPLEMENTED AND MEASURED (#10000, 2026-10-26)` stamp, the before/after narration, and the
+note that the record is not armed on any deployment today. Issue state and the narrative of what
+changed belong in this file (#8542); §9.1 states the rule they settled on.
+
+What the design document now says in that place — the rule, plus the measured per-turn graph cost and the
+pointer to the evidence bundle: the turn write has **one home**,
+and the **capability** decides which — turns go to the record whenever the record can hold them (and
+then no turn node is written at all; the graph keeps the `:Session` and its counters, and
+`get_session_detail` serves the transcript from the record), and the graph write runs unchanged where
+it cannot. The store follows the capability, because removing the graph write unconditionally would
+put the transcript in no store at all.
+
+Delivery state as of this entry, for the record: the turn half is in `main` and **measured** —
+`docs/evidence/10000-turns-bytes/README.md`, three arms on one fixed corpus, 322,063 → 32,032 bytes
+per captured session, −90.0%, 0 turn nodes. The record is **not armed in hosting yet** (`#9548`, the
+open arming act; its state is readable from `GET /health`'s `record.armed` block, which is `#9989`,
+merged), so live deployments still take the graph path by design — the documented capability fallback,
+measured **within 0.28%** of the pre-change writer (888 B/session, `measurement-after-unarmed.json` vs
+`measurement-before.json`; **not** byte-identical — run-to-run variance, not a re-implementation). The
+nodes those deployments already hold are `#10017`'s separate, gated, destructive removal.
+
+Why it left: the class guard
+(`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
+reds on an issue-state claim adjacent to a `#NNN` — `IMPLEMENTED … (#10000` is exactly that shape —
+which is the same GUARD (the same test) whose other arm moved §13's issue map out with the
+`CORRECTED 20xx-xx-xx` stamps (`_CHANGE_NARRATION`, a different regex) on 2026-10-15.

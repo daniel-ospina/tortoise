@@ -33,20 +33,20 @@ something derivable from today's code.
 | `get_entity` | 7 | `type=` | yes |
 | `search_knowledge` | 7 | `mode=` (full-text / hybrid) | **no — Part C1** |
 | `list_knowledge` | 6 | `kind=` | **no — Part C1** |
-| `update_knowledge` | 4 | *(which fields — incl. the retract fields)* | **no — Part C1** |
+| `update_knowledge` | 4 | *(which fields — incl. the retract fields)* | yes |
 | `adjust_relationship` | 3 | *(strength)* | **no — Part C1** |
-| `delete_knowledge` | 3 | *(node or link)* | **no — Part C1** |
+| `delete_knowledge` | 3 | *(node or link)* | yes |
 | `explore_connections` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `index_sources_from_directory` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `manage_sources` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `refresh_confidence` | 3 | `scope=` | **no — Part C1** |
 | `review_link_candidates` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
-| `link_entities` | 2 | *(relation kind)* | **no — Part C1** |
+| `link_entities` | 2 | *(relation kind)* | yes |
 | `manage_source_trust` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `mine_knowledge_from_session` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `supersede_knowledge` | 2 | *(link policy)* | **no — Part C1** |
 
-**18 merged targets. 2 of them have a method behind them today.** The other **16** are Phase 2 work, not renames.
+**18 merged targets. 5 of them have a method behind them today.** The other **13** are Phase 2 work, not renames.
 
 ## Part B — every served name and its single destination (81 live + 18 retired)
 
@@ -226,12 +226,9 @@ Destination rows: **29**. Registry tools: **99**.
 | `mine_knowledge_from_session` | MCP | no `def` on TortoiseSDK |
 | `mine_knowledge_from_directory` | MCP | no `def` on TortoiseSDK |
 | `manage_source_trust` | MCP | no `def` on TortoiseSDK |
-| `link_entities` | MCP | no `def` on TortoiseSDK |
 | `write_question` | MCP | no `def` on TortoiseSDK |
 | `record_decision` | MCP | no `def` on TortoiseSDK |
-| `update_knowledge` | MCP | no `def` on TortoiseSDK |
 | `supersede_knowledge` | MCP | no `def` on TortoiseSDK |
-| `delete_knowledge` | MCP | no `def` on TortoiseSDK |
 | `adjust_relationship` | MCP | no `def` on TortoiseSDK |
 | `refresh_confidence` | MCP | no `def` on TortoiseSDK |
 | `create_memory_graph` | tenancy | no `def` on TortoiseSDK |
