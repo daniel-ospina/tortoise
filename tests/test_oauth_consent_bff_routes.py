@@ -118,7 +118,16 @@ class FakeD1 {
       const [state, client_id, redirect_uri, code_challenge, scope, resource, user_id, created_at, expires_at] = args;
       const existing = rows.find((r) => r.state === state);
       if (existing) {
-        if (user_id != null) existing.user_id = user_id;
+        // ⛔ THIS DOUBLE DELEGATES THE OWNER RULE TO THE SQL IT IS GIVEN, it does not restate it.
+        // The real statement writes `user_id=COALESCE(excluded.user_id, consent_attempts.user_id)`;
+        // a double that hardcoded "only overwrite with non-null" would keep the suite green if that
+        // COALESCE were deleted, and the nulling is exactly what lets a SECOND identity pass the
+        // mint's `attempt.user_id !== row.user_id` check for a flow someone else began.
+        if (/user_id\s*=\s*COALESCE/i.test(sql)) {
+          if (user_id != null) existing.user_id = user_id;
+        } else {
+          existing.user_id = user_id;
+        }
         existing.expires_at = expires_at;
         return { meta: { changes: 1 } };
       }
@@ -193,7 +202,8 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow()];
-  const e = env({ SESSIONS: new FakeD1({ sessions, consent_attempts: [] }) });
+  const seeded = opts.seededAttempts || [];
+  const e = env({ SESSIONS: new FakeD1({ sessions, consent_attempts: seeded }) });
   const source = opts.params || {
     client_id: "client-abc", redirect_uri: "https://client.example/cb",
     code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
@@ -512,6 +522,21 @@ _CROSS_HALF_URIS = [
     "http://[::ffff:127.0.0.1]:1234/cb",
     "http://[::ffff:7f00:1]:1234/cb",
     "http://[::ffff:127.1.2.3]/cb",
+    # ⛔ EVERY zero-padded / compressed spelling of `::1` must be accepted, because `ipaddress`
+    # normalises before it decides. Enumeration is unbounded, so the code expands the address —
+    # these rows are what makes that observable (13 spellings were refused while the table stayed
+    # green, which is how the enumerated version survived a review round).
+    "http://[::01]:6277/cb",
+    "http://[::0001]:6277/cb",
+    "http://[0::1]:6277/cb",
+    "http://[::0:0:1]:6277/cb",
+    "http://[0000::1]:6277/cb",
+    "http://[0:0:0:0:0:0:0:01]:6277/cb",
+    "http://[0:0:0:0:0:ffff:127.0.0.1]:6277/cb",
+    # the IPv4 guards: leading-zero octets are ambiguous to `ipaddress` (it REFUSES them) while
+    # WHATWG reads them as decimal, and an octet above 255 makes WHATWG refuse the parse entirely.
+    "http://127.000.000.001/cb",
+    "http://127.0.0.256/cb",
     # ── spellings where WHATWG and `urlsplit` see DIFFERENT HOSTS. For **http** that changes the
     # verdict: `new URL` rewrites these into 127.0.0.1, but `urlsplit` reports them verbatim so
     # `_is_loopback` says no and the AS REFUSES — a BFF that accepted one would advance a flow the
@@ -544,6 +569,7 @@ _CROSS_HALF_URIS = [
 _BFF_STRICTER_THAN_AS = [
     "https://client.example:99999/cb",
     "https://client.example:abc/cb",
+    "https://127.0.0.256:6277/cb",
 ]
 
 
@@ -607,6 +633,36 @@ def test_the_BFF_is_stricter_than_the_AS_only_where_a_parse_differs_hopelessly()
             f"{row['uri']!r} IS parseable by WHATWG, so a browser can navigate it — refusing it "
             "is a real divergence, not the tolerated kind"
         )
+
+
+def test_the_return_leg_never_nulls_a_recorded_owner() -> None:
+    """A re-entry WITHOUT a session must not erase the owner an earlier leg recorded.
+
+    The start route records the attempt on BOTH legs, and on the return leg it re-records the SAME
+    row keyed by `state`. The write is `user_id=COALESCE(excluded.user_id, consent_attempts.user_id)`
+    precisely so a cold-browser re-entry (or a stale tab) cannot null a known owner: with a plain
+    assignment, the next person to arrive signed in as someone else passes the mint's
+    `attempt.user_id !== row.user_id` check — which is the check
+    `test_the_mint_route_refuses_a_flow_a_DIFFERENT_identity_started` exists to prove — and mints an
+    assertion into a flow another identity began. Nothing pinned that COALESCE before: the D1
+    double restated the rule in JavaScript, so deleting it from the SQL left every test green.
+    """
+    owner = "user-1"
+    seeded = [{
+        "state": "state-xyz", "client_id": "client-abc",
+        "redirect_uri": "https://client.example/cb",
+        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "scope": "mcp", "resource": None, "user_id": owner,
+        "created_at": 0, "expires_at": 0,
+    }]
+    out = _run("start_terminal_after_retry", seededAttempts=seeded)
+    assert out["status"] == 200, out
+    rows = [r for r in out["attempts"] if r["state"] == "state-xyz"]
+    assert len(rows) == 1, rows
+    assert rows[0]["user_id"] == owner, (
+        f"the return leg nulled the owner ({rows[0]['user_id']!r}) — a different identity could "
+        "then mint into this flow, which is what the mint's foreign-owner refusal prevents"
+    )
 
 
 @pytest.mark.parametrize("broken,needle", [

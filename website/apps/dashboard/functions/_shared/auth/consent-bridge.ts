@@ -64,32 +64,82 @@ export const CONSENT_ATTEMPT_TTL_S = 15 * 60;
 export const NATIVE_REDIRECT_SCHEMES = ["cursor"] as const;
 
 /**
+ * Expand an IPv6 literal (brackets already stripped) into its eight hextets, or `null` if it is not
+ * one. A trailing dotted quad is folded into two hextets first, so `::ffff:127.0.0.1` and
+ * `::ffff:7f00:1` come out identical.
+ *
+ * ⛔ THIS EXISTS BECAUSE ENUMERATING SPELLINGS IS UNBOUNDED. The previous version compared the host
+ * to the literals `"::1"` and `"0:0:0:0:0:0:0:1"`, so `[::01]`, `[0::1]`, `[::0:0:1]`,
+ * `[0000::1]` and 11 other zero-padded / compressed spellings were refused here while `ipaddress`
+ * accepts every one of them — a registered `http://[::0001]:6277/cb` died at `/api/consent/start`
+ * with a message saying the host was not loopback. Addresses are compared as ADDRESSES.
+ */
+function expandIpv6(host: string): number[] | null {
+  let text = host;
+  if (!text.includes(":")) return null;  // a plain IPv4 is not this function's job
+  const dotted = /(^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (dotted) {
+    const octets = dotted[2].split(".");
+    // The embedded IPv4 must be canonical: `ipaddress` refuses `127.0.0.01` and `.256` here too.
+    if (octets.some((o) => !/^\d{1,3}$/.test(o) || (o.length > 1 && o.startsWith("0")) ||
+      Number(o) > 255)) {
+      return null;
+    }
+    const [a, b, c, d] = octets.map(Number);
+    text = text.slice(0, dotted.index) + ":" + ((a << 8) | b).toString(16) + ":" +
+      ((c << 8) | d).toString(16);
+    // `::ffff:127.0.0.1` → slice keeps `::ffff`, and the leading `:` was consumed by the match, so
+    // the rejoined text is `::ffff:7f00:1`.
+    if (text.startsWith(":::")) text = "::" + text.slice(3);
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string): number[] | null => {
+    if (part === "") return [];
+    const out: number[] = [];
+    for (const g of part.split(":")) {
+      if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+      out.push(parseInt(g, 16));
+    }
+    return out;
+  };
+  const left = groups(halves[0]);
+  const right = halves.length === 2 ? groups(halves[1]) : [];
+  if (left === null || right === null) return null;
+  if (halves.length === 2) {
+    const fill = 8 - left.length - right.length;
+    if (fill < 1) return null;
+    return [...left, ...new Array<number>(fill).fill(0), ...right];
+  }
+  return left.length === 8 ? left : null;
+}
+
+/**
  * Loopback host, mirroring `tortoise/oauth.py::_is_loopback` (RFC 8252 §7.3).
  *
- * `new URL("http://[::1]:9/cb").hostname` is `"[::1]"` — WITH the brackets — so comparing it to
- * `"::1"` is dead code that refuses the RFC's own IPv6 example. `localhost`, all of `127.0.0.0/8`,
- * and the IPv4-MAPPED IPv6 forms of that range are loopback; nothing else is.
+ * `localhost`, all of `127.0.0.0/8`, and `::1` — including every zero-padded/compressed spelling of
+ * it and the IPv4-MAPPED forms of `127/8` — are loopback; nothing else is.
  *
  * ⛔ THE MAPPED FORMS ARE NOT AN EDGE CASE. `ipaddress.ip_address("::ffff:127.0.0.1").is_loopback`
  * is True, so the AS accepts such a redirect at REGISTRATION; a mirror that only knew `::1` would
  * refuse it here — after the visitor had consented — which is exactly the failure this function
- * exists to prevent. Both spellings (`::ffff:127.0.0.1` dotted, `::ffff:7f00:1` hex) appear.
+ * exists to prevent.
  */
 export function isLoopbackHost(hostname: string): boolean {
   let host = hostname;
   if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
   const lower = host.toLowerCase();
   if (lower === "localhost") return true;
-  if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
-  const mapped = /^::ffff:(.+)$/.exec(lower);
-  if (mapped) {
-    const rest = mapped[1];
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) return ipv4Loopback(rest);
-    // `::ffff:7f00:1` — the same address in hex group form: the FIRST embedded octet decides.
-    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
-    return hex !== null && parseInt(hex[1], 16) >> 8 === 127;
+  if (lower.includes(":")) {
+    const hextets = expandIpv6(lower);
+    if (hextets === null) return false;
+    const isV6Loopback =
+      hextets.slice(0, 7).every((h) => h === 0) && hextets[7] === 1;
+    const mapped = hextets.slice(0, 5).every((h) => h === 0) && hextets[5] === 0xffff;
+    // `::ffff:a.b.c.d` — the embedded IPv4's FIRST octet decides (127/8).
+    return isV6Loopback || (mapped && hextets[6] >> 8 === 127);
   }
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(lower) && ipv4Loopback(lower);
+  return ipv4Loopback(lower);
 }
 
 function ipv4Loopback(host: string): boolean {
