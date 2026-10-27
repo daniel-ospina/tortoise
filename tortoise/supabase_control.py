@@ -4219,10 +4219,13 @@ _DEFAULT_ROW_MINT_RETRY: dict[str, float] = {}
 #: Prune the cache above this many orgs (see `_record_default_row_mint_failure`).
 _DEFAULT_ROW_MINT_RETRY_MAX = 1024
 #: Serialises every access to `_DEFAULT_ROW_MINT_RETRY` (#10027 review F1).
-#: The dict is PROCESS state, and this mint runs on three executors in the same
-#: process — the auth pool (`resolve_api_key`, up to
+#: The dict is PROCESS state, and this mint runs on several executors in the
+#: same process — the auth pool (`resolve_api_key`, up to
 #: `monitoring.CONTROL_PLANE_WORKERS` threads), the org pool (`provision_org`),
-#: and the MCP loop thread — so a bare read-modify-write over it is not safe:
+#: the telemetry pool (a hosted SESSION/JWT, `hosted_api._session_user_org`'s
+#: best-effort offload, since #10046) and the event loop's DEFAULT EXECUTOR (the
+#: MCP OAuth lane's `asyncio.to_thread`, since #10046) — so a bare
+#: read-modify-write over it is not safe:
 #: CPython documents that "iterating views while adding or deleting entries in
 #: the dictionary may raise a RuntimeError or fail to iterate over all
 #: entries", and a raise here is not a lost cache entry, it is an exception out
@@ -4239,7 +4242,9 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
 
     The seam that must SURVIVE an unreadable control plane: both provisioning
     wrappers (their RPC has committed, and their callers compensate
-    destructively on a raise) and the API-key auth self-heal (auth must not
+    destructively on a raise) and the credential-resolution self-heal — an API
+    key since #10025, and a hosted SESSION/JWT and an OAuth ``oat_`` token since
+    #10046, all through :func:`default_graph_id_for_credential` (auth must not
     fail because a control-plane write did). Returns the row's id, or ``None``
     when the mint could not be done — which leaves the record write REFUSED
     ``no_tenant`` (the documented fail-closed direction), never filed under a
@@ -4277,7 +4282,8 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
             "default graphs row NOT minted for org %s (%s): the org's record "
             "writes stay refused `no_tenant` until it is healed — a TRANSIENT "
             "cause (an unreadable table, a race) heals on the org's next "
-            "API-key request, which re-attempts the mint. The two PERSISTENT "
+            "credential resolution — API key, hosted session/JWT or OAuth "
+            "`oat_` token, which all re-attempt the mint. The two PERSISTENT "
             "shapes do not: a graph already named 'default', and a "
             "kind='default' row whose status is neither 'active' nor "
             "'deleted' — a re-run of 20261028000001 skips those too (it "
@@ -4305,10 +4311,11 @@ def _record_default_row_mint_failure(org_id: str, now: float) -> None:
     long-lived process, so expired entries are pruned once it grows.
 
     ⛔ The prune iterates a SNAPSHOT, never the live view. This dict is
-    process-global and is written from three concurrent executors in ONE
-    process — the auth pool (8 workers, through `resolve_api_key`'s self-heal),
-    the org pool (4, the provisioning wrappers) and the event loop (the MCP
-    lane) — so the loop can run while another thread inserts a new org key.
+    process-global and is written from concurrent executors in ONE process —
+    the auth pool (8 workers, through the API-key self-heal), the org pool (4,
+    the provisioning wrappers), the telemetry pool (a hosted SESSION/JWT) and
+    the loop's default executor (the MCP OAuth lane) — so one of them can run
+    while another inserts a new org key.
     Mutating a dict during iteration "has an undefined effect and will in most
     cases raise a RuntimeError exception" (PEP 3106; CPython raises
     `dictionary changed size during iteration`), and that raise would not stay
