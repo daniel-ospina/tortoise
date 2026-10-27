@@ -507,7 +507,32 @@ _CROSS_HALF_URIS = [
     "https://client.example/cb\\x",
     # refused by both — unspecified, not loopback
     "http://0.0.0.0:1/cb",
+    # ── the IPv4-MAPPED IPv6 forms: the AS ACCEPTS these (`ipaddress.is_loopback` is True), so a
+    # mirror that only knew `::1` refused a redirect the client had already registered.
+    "http://[::ffff:127.0.0.1]:1234/cb",
+    "http://[::ffff:7f00:1]:1234/cb",
+    "http://[::ffff:127.1.2.3]/cb",
+    # ── spellings where WHATWG and `urlsplit` see DIFFERENT HOSTS. `new URL` rewrites these into
+    # 127.0.0.1 (or invents an authority for a special scheme); `urlsplit` reports them verbatim,
+    # so the AS refuses. A BFF that accepted one would advance a flow the AS then refuses — the
+    # reverse of the round-3 direction and just as silent, so the BFF refuses them too.
+    "http://127.1/cb",
+    "http://2130706433/cb",
+    "http://127.0.0.1./cb",
+    "http://0.0.0.0x7f000001/cb",
+    "https:client.example/cb",
+    "http:localhost:6277/cb",
+    # both accept (case, userinfo and an explicit default port are read the same by both)
+    "HTTP://LOCALHOST:6277/cb",
+    "https://user:pw@client.example/cb",
 ]
+
+# ⛔ DELIBERATELY ONE-DIRECTIONAL, and named rather than tolerated. `urlsplit` never validates the
+# port, so the AS accepts a URI no browser can navigate (WHATWG refuses to parse it, which is why
+# the BFF answers "must be an absolute URI"). Being STRICTER here costs a client a 400 at consent
+# start; being laxer would hand the browser a target it cannot reach. Asserted in the direction that
+# matters (BFF refuses, AS accepts) so the divergence cannot silently grow into a class.
+_BFF_STRICTER_THAN_AS = ["https://client.example:99999/cb"]
 
 
 def test_the_redirect_uri_rule_agrees_with_the_AS() -> None:
@@ -542,6 +567,23 @@ def test_the_redirect_uri_rule_agrees_with_the_AS() -> None:
     # NON-VACUITY: the table must contain both verdicts, or it proves only one direction.
     accepted = {row["accepted"] for row in out["verdicts"]}
     assert accepted == {True, False}, f"the table is one-sided: {accepted}"
+
+
+def test_the_BFF_is_stricter_than_the_AS_only_where_a_parse_differs_hopelessly() -> None:
+    """The named, one-directional divergence — pinned so it cannot grow into a class.
+
+    A row exists here only if no browser could navigate the URI either. If a future row needs to be
+    added, this test forces the argument to be made rather than the divergence to be absorbed.
+    """
+    from tortoise.oauth import _valid_redirect_uri
+
+    out = _run("redirect_uri_table", uris=_BFF_STRICTER_THAN_AS)
+    for row in out["verdicts"]:
+        assert not row["accepted"], f"expected the BFF to refuse {row['uri']!r}: {row}"
+        assert _valid_redirect_uri(row["uri"]), (
+            f"{row['uri']!r} is no longer accepted by the AS either — remove it from "
+            "_BFF_STRICTER_THAN_AS, it is no longer a divergence"
+        )
 
 
 @pytest.mark.parametrize("broken,needle", [

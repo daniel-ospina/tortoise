@@ -201,5 +201,24 @@ BEGIN
     'the prune collected the row this same call inserted — the ordering is backwards');
 END $$;
 
+-- ── The EXACT boundary, in ONE transaction ────────────────────────────────
+-- With `<` a row stamped at exactly `now()` survives; with `<=` it is collected. That polarity
+-- is the whole contract (`verify_consent_token` refuses only when `exp + LEEWAY < now`, so at
+-- EQUALITY the token still verifies) and it is invisible to any test that stamps `now() + 30s`
+-- and `now() - 1s`: mutation-verified that changing `<` to `<=` left the earlier version of this
+-- suite GREEN. `now()` is transaction-start time, so inside a single explicit transaction the
+-- prune's `now()` and the row's stamp are the SAME instant — which is the only way to sit on the
+-- boundary deterministically.
+BEGIN;
+INSERT INTO public.oauth_consent_tickets (jti, expires_at)
+     VALUES ('3524-exact-boundary', now());
+SELECT public.consume_oauth_consent_ticket('3524-boundary-probe', now() + interval '1 hour');
+DO $$ BEGIN
+  PERFORM tests.assert(
+    EXISTS (SELECT 1 FROM public.oauth_consent_tickets WHERE jti = '3524-exact-boundary'),
+    'a row stamped at EXACTLY now() was pruned — at equality the token still verifies, so its jti is replayable again (prune uses <= instead of <)');
+END $$;
+COMMIT;
+
 -- ── Cleanup ────────────────────────────────────────────────────────────────
 DELETE FROM public.oauth_consent_tickets WHERE jti LIKE '3524-%';
