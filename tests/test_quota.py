@@ -165,14 +165,12 @@ class TestEnforceTeamLimit:
         """#4051: a limit that cannot be READ is refused, never "unlimited".
 
         The limit is read from the org's OWN source (here `max_points`), so a
-        corrupt value must not degrade into no limit at all. The raw-value
-        lanes are real: `get_current_org_session` carries `_org_limits_from_node`'s
-        uncoerced `max_api_keys` into `_check_org_limit(org, "api_keys")` at the
-        key-mint / rotate sites. WHICH lanes arrive raw and which die earlier is
-        stated ONCE, in `quota.enforce_org_limit`'s SCOPE note — not restated
-        here (this docstring used to carry a second copy, and it contradicted
-        both that note and itself: it named key-mint as NOT reaching this gate
-        and then, one clause later, as the lane that reaches it raw).
+        corrupt value must not degrade into no limit at all. WHICH lanes arrive
+        raw, and which die earlier, is stated ONCE — in `quota.enforce_org_limit`'s
+        SCOPE note — and deliberately NOT restated here: this docstring used to
+        carry a second copy, and it contradicted both that note and itself (it
+        named a lane as never reaching this gate and then, one clause later, as
+        the lane that reaches it raw). A copy is how the two drifted apart.
 
         Mutation REDs this: drop the validation and let the non-numeric value
         reach the comparison — pre-change it raised a bare `TypeError`, refused

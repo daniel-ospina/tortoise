@@ -2539,6 +2539,17 @@ class TestCommitPointsGate:
         would stay green (they all supply the key). Mutation REDs this: make
         the missing-key branch in `quota.enforce_org_limit` `return` instead of
         raise — the commit then 200s and mints the chain.
+
+        ⚠️ IT DOES NOT DISCRIMINATE THIS CHANGE, and says so rather than letting
+        a green run imply it: for a limits dict with no `max_points` at all, the
+        PRE-change tree also 500s naming `max_points` (the old
+        `_check_org_limit(org, "sessions")` ran first and `enforce_org_limit`'s
+        missing-key raise fires on whichever limit is asked for). Measured, not
+        assumed: revert both source files to `origin/main` and this test still
+        PASSES while
+        `test_session_cap_is_not_the_org_limit_gate` and
+        `test_unreadable_max_points_refuses_and_mints_nothing` both RED. It is a
+        guard-rail against a FUTURE edit, not evidence for this one.
         """
         limits = dict(TEST_TEAM)
         del limits["max_points"]
