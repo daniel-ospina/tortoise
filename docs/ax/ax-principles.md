@@ -113,38 +113,63 @@ The **principle** itself lives here and on #10183, which that issue names as its
 to that file is allowed without the owner's approval of the exact change. An ontology edit reverted
 for exactly this reason is recorded on #9202. Propose the verbatim edit and wait.
 
-## 5. Applying it to a gate (total ladder — every input has a branch)
+## 5. Applying it to a gate
 
-1. **Is the intent legible?** No → question 3, **before** refusing. Yes → question 2. (If the surface
-   cannot establish what the input *means* — not merely how it is spelled — it is not legible; see §2.)
-2. **Is the value one we can store?**
-   - **Merely a different spelling of the same value** (`5:02`, `2024-3-1`) → re-spell and proceed,
-     silently (§1).
-   - **Already a value that names an instant** → accept it; nothing to do.
-   - **Declares no date** (a blank, or a marker such as `TBD` / `n/a` / `-`) in a field whose
-     vocabulary has an undatable state → store the **canonical un-datable form** — no `validTo` value
-     **plus** `validToPrecision="unknown"` — and **echo it in the reply** (§1, §2). Never read it as
-     absent.
-   - **The same, but beside a declared concrete precision** (`validTo="TBD"` with
-     `validToPrecision="day"`) → question 3. That pair states two different things about one bound;
-     shaping it silently would overwrite the caller's declared granularity, so it is refused and the
-     caller picks one.
-   - **An absent bound that still declares a concrete precision** (`validTo` `None` with
-     `validToPrecision="day"`, or the START's equivalent) → question 3: a granularity cannot describe
-     a bound that does not exist, so it is refused, and the caller either drops the precision or
-     supplies the bound.
-   - **Declares no date in a field whose vocabulary has NO undatable state** (the window START) and
-     carries **no** concrete precision → accept it **with a warning**, read as *no start was recorded*
-     (#6140). Never refuse, and never mint an undatable state the vocabulary does not have. (With a
-     precision declared, the bullet above applies instead.)
-   - **Is absent** (`validTo` is `None` with **no precision declared at all**, or the property omitted
-     on create) → accept it; the bound is open and there is nothing to do.
-   - **Well-formed but names no instant** (`2026-02-30`, month 13, an epoch rendered as a string) →
-     question 3. Never re-spell it into the nearest real value: that invents a date the caller did not
-     state.
+Three questions, in order — then the decision table below settles the temporal case without a prose
+ladder, because the answer depends on **two axes at once** (what the bound is, and what precision was
+declared beside it).
+
+1. **Is the intent legible?** No → question 3, **before** refusing. Yes → next. (If the surface cannot
+   establish what the input *means* — not merely how it is spelled — it is not legible; see §2.)
+2. **Is only the form off?** A different spelling of the same value (`5:02`, `2024-3-1`) **on a shaped
+   door** → re-spell and proceed, silently (§1). This is the window END only: the START has no
+   normalizing door, so a non-ISO start is a present-but-unorderable start rather than a re-spell. For
+   anything else, use the table.
 3. **If refusing: can the fix be written, concretely enough that the caller can act on it?** Yes →
    refuse with the three parts. **No → the surface must not refuse**: make it a recorded, reported,
    non-failing outcome with its own distinct state, and say plainly that there is nothing to do.
+
+### The temporal decision shape (window bounds)
+
+The END and the START are **different contracts**, and the difference is not cosmetic: a shaping door
+is wired to the END only (`sdk._shape_or_refuse_caller_end`; "⛔ NOT wired to `validFrom`"). The END
+therefore has an undatable state and the START does not. Two tables, because one table with a shared
+"outcome" column has already proven it will be read side-agnostically and reverse #6140.
+
+**The authority is executable, not this page:** `tortoise/validity.py::validate_validity_precision`
+plus `read_caller_end` are the shipped rules; the tables below name the *decision shape* and the two
+asymmetries a reader must not "fix". Where they disagree with the code, the code is right and this page
+is stale.
+
+**The END** (shaped; the 3-state vocabulary lives here)
+
+| the end | precision beside it | outcome |
+|---|---|---|
+| names an instant | none, or `year` / `month` / `day` | accept |
+| names an instant | `unknown` | **refuse** — the marker means un-datable, so no date may sit beside it |
+| a marker (`TBD`, `n/a`, `-`, blank) | none | **shape and echo** — store the canonical un-datable form and return the receipt |
+| a marker | `unknown` | **shape and echo**, exactly as the row above: the marker is confirmed, not contradicted |
+| a marker | a concrete granularity | **refuse** — two statements about one bound; the caller picks one |
+| absent (`None`, or omitted on create) | none | accept; the bound is open, nothing to do |
+| absent | `unknown` | **accept** — this *is* the canonical un-datable form |
+| absent | a concrete granularity | **refuse** — a granularity cannot describe a bound that does not exist |
+| any bound | a word outside `year`/`month`/`day`/`unknown` | **refuse** — a caller error, not a granularity; name the four legal words |
+| well-formed but names no instant (`2026-02-30`, month 13) | any | question 3 — never re-spell it into the nearest real value |
+
+**The START** (no shaping door; #6140 governs)
+
+| the start | precision beside it | outcome |
+|---|---|---|
+| names an instant | none, or `year` / `month` / `day` | accept |
+| un-orderable (`TBD`, `n/a`, `-`, blank, a non-ISO spelling such as `2024-3-1`, `2026-02-30`, an epoch rendered as a string) | none, or a concrete granularity | **accept with the #6140 warning**; store verbatim; the start's precision reads `null` — *no start was recorded*. There is no silent re-spell here: the normalizing door is END-only |
+| any | `unknown` | **refuse** — `validFromPrecision="unknown"` is illegal even when the start's text is unorderable; the 3-state vocabulary is end-only |
+| absent (`None`, or omitted on create) | none | accept; the bound is open |
+| absent | a concrete granularity | **refuse** — a granularity cannot describe a bound that does not exist |
+| any | a word outside `year`/`month`/`day` | **refuse** — a caller error |
+
+⚠️ The asymmetry is deliberate and twice decided: **never refuse a present-but-unorderable START**
+(#6140: watch, do not block), and **never mint an `unknown` start** (the vocabulary is end-only).
+Narrowing the START's write contract is #9244's open question, not this page's.
 
 ## 6. What this is not
 
