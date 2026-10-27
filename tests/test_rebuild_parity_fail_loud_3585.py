@@ -2235,34 +2235,55 @@ def test_classify_object_supersede_unregistered_is_its_own_exempt_shape():
     # addressable, so the flag is unfalsifiable and the caller must not set it
     # (see `_supersede_name_unregistered`).
     from tortoise.projection import _supersede_name_unregistered
-    assert _supersede_name_unregistered({"name": None}, frozenset()) is False
-    assert _supersede_name_unregistered({"name": ""}, frozenset()) is False
+    _none_established = (frozenset(), frozenset())
+    assert _supersede_name_unregistered(
+        {"name": None}, _none_established) is False
+    assert _supersede_name_unregistered(
+        {"name": ""}, _none_established) is False
     assert _supersede_name_unregistered({"name": "X"}, None) is False, (
         "the one-record LIVE path supplies no journal and must stay "
         "fail-closed")
+    # The ID limb: an id the journal established blocks the exemption even
+    # when the name is one nothing established (review P1).
+    assert _supersede_name_unregistered(
+        {"name": "GHOST", "id": "o-1"},
+        (frozenset(), frozenset({"o-1"}))) is False
+    assert _supersede_name_unregistered(
+        {"name": "GHOST", "id": "never-seen"},
+        (frozenset(), frozenset({"o-1"}))) is True
 
 
-def test_journal_object_registered_names_counts_registrations_not_mentions():
-    """The oracle reads REGISTRATIONS only — a mention does not address.
+def test_journal_object_established_counts_every_address_and_separates_ids():
+    """The oracle counts EVERY route that puts a name in the merge key, and
+    keeps the established ids separately.
 
-    FAILS IF: `EventRecorded`'s mentioned-name stubs are counted as
-    registrations. A mention does not create an entity (#3590 D1), so counting
-    it would exempt a supersede whose name the journal only ever MENTIONED —
-    the fail-OPEN direction. It is also the D2 counterpart of
-    `journal_object_surviving_keys`, which refuses to let a mention mint a
-    carrier.
+    FAILS IF: the oracle reads `ObjectRegistered` alone. Each of the other two
+    name sources is a route the fold can MATCH on, so missing one exempts a
+    supersede the journal could have addressed: a rename carries a name in via
+    `SET n += $state` (review P1), and a `EventRecorded` mention stub MERGEs an
+    Object by that name (review P2).
+
+    The `ids` half exists for the other review P1: a record carrying an id the
+    journal established is ADDRESSABLE even when the name it also carries is
+    one nothing established, so it must not be exempted on the name alone.
     """
-    from tortoise.projection import journal_object_registered_names
+    from tortoise.projection import journal_object_established
 
     events = [
         {"type": "ObjectRegistered", "id": "o-1", "name": "KNOWN"},
         {"type": "EventRecorded", "id": "e-1", "eventKind": "k",
          "object": "MENTIONED"},
         {"type": "ObjectRegistered", "id": "o-2", "name": ""},
+        {"type": "EntityMutated", "op": "rename", "label": "Object",
+         "id": "o-1", "state": {"name": "RENAMED"}},
+        {"type": "EntityMutated", "op": "rename", "label": "Point",
+         "id": "p-1", "state": {"name": "POINT-NAME"}},
     ]
-    names = journal_object_registered_names(events)
-    assert names == frozenset({"KNOWN"}), names
-    assert "MENTIONED" not in names, names
+    names, ids = journal_object_established(events)
+    assert names == frozenset({"KNOWN", "MENTIONED", "RENAMED"}), names
+    assert "POINT-NAME" not in names, (
+        "a Point rename is not an Object name — the label gate is load-bearing")
+    assert ids == frozenset({"o-1", "o-2"}), ids
     assert "" not in names, names
 
 
@@ -2270,7 +2291,8 @@ def test_name_from_a_rename_counts_as_established_both_engines(env):
     """#10107 review P1: a name a RENAME carried into the merge key is
     ESTABLISHED, so the exemption must not fire for it.
 
-    FAILS IF: `journal_object_registered_names` reads `ObjectRegistered` alone.
+    FAILS IF: the oracle ignores `EntityMutated` state ops, i.e. it reads
+    `ObjectRegistered` alone.
     Then "B" looks unregistered, the sweep EXEMPTS the record and `rebuild_all`
     silently drops a supersede, while `rebuild()` — which folds chronologically,
     when the node was still named "B" — applies it: one journal, two graphs, and
@@ -2316,4 +2338,88 @@ def test_nested_record_spelling_agrees_on_every_engine(env):
     assert r["non_folded_refused_count"] == 0, (
         "the reference fold refused a record both graph engines exempt — the "
         f"nested spelling split the predicate: {r['non_folded_events']}")
+    assert r["divergence"] != "non-folded", r["divergence"]
+
+
+def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
+    """#10107 review P1: an id the journal ESTABLISHED is addressable even
+    when the name the record also carries is one nothing established.
+
+    FAILS IF: the predicate is decided on the NAME alone (as it was before this
+    test). `Reg(a,N), Reg(b,N)` collapses to ONE node carrying `b`, so
+    `Sup(id=a, name=<never established>)` folds 0 rows; on the name alone the
+    record looks unaddressable and is exempted, so `rebuild_all` and the health
+    gate both report clean while the supersede did not land — the #5285
+    cycle-4 FIX 2 fail-open, re-opened by the exemption.
+
+    REACHABLE: the pinned sibling test uses `Sup(id=a)` with NO name; a raw or
+    legacy producer that carries a stale/renamed name alongside the id is the
+    shape this closes.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectRegistered", id="obj-p1-a", name="COLL2",
+         status="live", event_id="e-p1-a")
+    _raw(events, type="ObjectRegistered", id="obj-p1-b", name="COLL2",
+         status="live", event_id="e-p1-b")
+    _raw(events, type="ObjectSuperseded", id="obj-p1-a", name="GHOST-OF-COLL2",
+         supersedes_by="y", event_id="e-p1-sup")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), (
+        "an established id was exempted because its NAME was unestablished — "
+        f"the exemption widened past its bound: {ei.value}")
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+
+
+def test_mention_established_then_deleted_name_still_refuses(env):
+    """#10107 review P2: a name the journal established via a mention stub is
+    established, so its later deletion does not make the record exempt.
+
+    FAILS IF: the oracle ignores `EventRecorded` mention stubs, which
+    `_event_plain_merge` MERGEs as an Object by name. Once the stub is deleted,
+    a name-only supersede of it folds 0 rows and would be exempted as "never
+    established" — while `main` refused, and while `EXEMPT_SHAPES` promises
+    that a name the journal established still refuses.
+
+    REACHABLE: mention a name, hard-delete the stub by its deterministic id,
+    then supersede by name.
+    """
+    sdk, events = env
+    _raw(events, type="EventRecorded", id="e-ment-1", eventKind="k",
+         object="MENT-DEL", event_id="e-ment-rec")
+    _raw(events, type="EntityMutated", op="delete", label="Object",
+         id=_entity_name_id("Object", "MENT-DEL"), event_id="e-ment-del")
+    _raw(events, type="ObjectSuperseded", name="MENT-DEL", supersedes_by="y",
+         event_id="e-ment-sup")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
+
+
+def test_nested_supersede_of_an_established_name_agrees_on_every_engine(env):
+    """#10107 review P2: the reference fold's RESOLUTION must read the same
+    spelling the predicate does.
+
+    FAILS IF: only the classification is normalised while `_object_target` in
+    `consistency`'s sweep still reads the raw envelope. With a REGISTERED name
+    the two halves then disagree the other way: `rebuild_all` folds the
+    supersede and `check_consistency` records a miss and reports
+    `divergence="non-folded"` — a false RED on a healthy journal.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectRegistered", id="obj-nest-1", name="NEST-OK",
+         status="live", event_id="e-nest-reg")
+    _raw(events, type="ObjectSuperseded", point={"name": "NEST-OK"},
+         supersedes_by="y", event_id="e-nest-sup")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, (
+        "the reference fold refused a supersede the graph engine folded — the "
+        f"two halves read different spellings: {r['non_folded_events']}")
     assert r["divergence"] != "non-folded", r["divergence"]

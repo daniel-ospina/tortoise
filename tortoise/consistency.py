@@ -82,7 +82,7 @@ from .projection import (
     journal_epistemic_existence,
     journal_first_materialization,
     journal_hard_delete_seqs,
-    journal_object_registered_names,
+    journal_object_established,
     journal_object_surviving_keys,
     journal_recreate_seqs,
     plan_point_restamp_folds,
@@ -1724,7 +1724,7 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # #3590 D2: the journal's OWN addressability oracle — the sibling of the
     # surviving-keys pair, and the third surface `classify_terminalizer_miss`
     # must agree with (`rebuild_all` and `apply()` are the other two).
-    journal_registered_names = journal_object_registered_names(events)
+    object_established = journal_object_established(events)
     # #7719: the anchor-gated MEMBERSHIP map — the named
     # `supersede-target-deleted` exemption `rebuild_all`'s sweep carries. The
     # ungated `journal_object_hard_deleted_ids` used here before exempted an
@@ -1853,7 +1853,7 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             classify_terminalizer_miss(
                 "ObjectSuperseded", target_deleted=False,
                 name_unregistered=_supersede_name_unregistered(
-                    ev, journal_registered_names)),
+                    ev, object_established)),
             event_id=ev.get("event_id"), event_type="ObjectSuperseded",
             seq=seq,
             id=ev.get("id") if isinstance(ev.get("id"), str) else None,
@@ -2123,7 +2123,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         elif t == "ObjectSuperseded":
             # #5285 cycle-4 (FIX 1): defer EVERY supersede to the ONE trailing
             # sweep — never apply it here. See the sweep below.
-            supersede_events.append((seq, ev))
+            # #10107 review P2: normalise ONCE here, so the trailing sweep's
+            # `_object_target` reads the same name/id the classifying predicate
+            # does (a nested `point`/`event` payload is otherwise invisible to
+            # it while `_norm` sees it).
+            supersede_events.append((seq, _norm(ev)))
     # ── #5285 cycle-4 (FIX 1): the ONE trailing supersede sweep.
     #
     # EVERY `ObjectSuperseded` resolves here, against the journal's END index —
@@ -3597,7 +3601,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # #3590 D2: the journal's own addressability oracle — passed alongside the
     # pair above so `apply()`'s supersede gate reaches the same verdict as
     # `rebuild_all`'s sweep and this module's reference fold.
-    registered_object_names = journal_object_registered_names(events)
+    object_established = journal_object_established(events)
     # #7719: derived from the GATED map via `_hard_deleted_any`, so an
     # anchor-suppressed delete no longer exempts the supersede.
     journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
@@ -3623,8 +3627,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
         _pass_seq = "journal_seq" in _apply_params
     if "journal_existence" in _apply_params:
         apply_kwargs["journal_existence"] = epistemic_existence
-    if "journal_object_registered_names" in _apply_params:
-        apply_kwargs["journal_object_registered_names"] = registered_object_names
+    if "journal_object_established" in _apply_params:
+        apply_kwargs["journal_object_established"] = object_established
     # #3585 (R8/R9): this apply-based engine folds inside the non-folded
     # collector too. A refused event means the recovery REPLAYED an incomplete
     # journal — reporting `recovered: True` there is the false PASS #3947's
