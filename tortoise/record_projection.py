@@ -1096,11 +1096,16 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
             "nothing emits this type yet (step 7 does, in its own change). The "
             "tier cannot ride the event payload: `_RECORD_ONLY_KEYS` strips it "
             "before the insert, so step 7 must write it as its own column "
-            "statement (#10070). Until then the two rebuild routes agree by "
-            "BOTH having nothing to do — "
+            "statement (#10070). Until then, FOR THIS TYPE, the two rebuild "
+            "routes agree by BOTH having nothing to do — "
             "`projection/__init__.py::_NO_PROJECTION_FOLD` folds the type "
-            "nowhere, and this entry projects no row. The payload is pinned to "
-            "the writer's per-turn snapshot; see TURNS_SNAPSHOT_KEYS."
+            "nowhere, and this entry projects no row. That agreement is about "
+            "the CARRIER and says nothing about the per-turn `PointAdded` "
+            "records a capture still emits, which BOTH routes still fold into "
+            "turn nodes — so do not read it as §9.1 already holding; see "
+            "that section's measured note in STORAGE-ARCHITECTURE.md. The "
+            "payload is pinned to the writer's per-turn snapshot; see "
+            "TURNS_SNAPSHOT_KEYS."
         ),
     ),
     "SessionDeleted": Mutation(
