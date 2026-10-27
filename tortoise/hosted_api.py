@@ -40963,12 +40963,21 @@ async def oauth_consent(request: Request):
     fall-through) when `CONSENT_TOKEN_SECRET` is unset (§2.3).
 
     WIRE CONTRACT for §9 steps 3/4 (the spec pins the token's CONTENT, not its
-    transport): the body carries `consent_token`, and the four authorize params
-    it binds are presented alongside it in the body exactly as the bearer path
-    presents them (`client_id`, `redirect_uri`, `code_challenge`,
-    `code_challenge_method`, `state`). §2.2 requires each of those to be
-    PRESENTED at redemption — the token proves the flow, it does not replace the
-    request. The response shape is identical on both arms.
+    transport): the body carries `consent_token`, and the authorize params are
+    presented alongside it in the body exactly as the bearer path presents them.
+    Two sets, deliberately kept apart:
+      * REQUIRED in the request: `client_id`, `redirect_uri`,
+        `response_type=code`, `code_challenge`, `code_challenge_method=S256`,
+        `state`. `validate_authorize_params` refuses anything but
+        `response_type=code`, so a step-3/4 call that omits it is a 400 however
+        valid its token is.
+      * BOUND by the token (§2.1, `BIND_FIELDS`): `client_id`, `redirect_uri`,
+        `code_challenge`, `state` — exactly these four must match the token's
+        `bind`; `response_type` and `code_challenge_method` are checked by the
+        authorize path but are NOT part of the bind set.
+    §2.2 requires every bound param to be PRESENTED at redemption — the token
+    proves the flow, it does not replace the request. The response shape is
+    identical on both arms.
 
     ⛔ Do NOT read the token on the consent page here or anywhere else yet:
     a page that half-reads a token and half-reads the old cookie is the

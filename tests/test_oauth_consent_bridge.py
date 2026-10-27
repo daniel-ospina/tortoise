@@ -2193,6 +2193,13 @@ def test_a_token_that_is_not_base64url_is_refused_and_never_500s(
     (lambda claims: _signed(claims, alg="RS256"), "alg confusion"),
     (lambda claims: _signed(claims, alg="HS512"), "alg substitution"),
     (lambda claims: ".".join(_signed(claims).split(".")[:2]), "two segments"),
+    # The OTHER side of the same guard: the structure rule is `len == 3`, not `len >= 3`.
+    # A trailing segment must be REFUSED, not ignored — a verifier that ignores it
+    # disagrees with every other consumer about what the token IS, which is the
+    # differential a smuggling class starts from. Measured: with the guard weakened to
+    # `< 3` the whole file stayed green (`107 passed`) and `h.p.s.junk` verified, because
+    # `parts[3:]` is never looked at.
+    (lambda claims: _signed(claims) + ".junk", "four segments"),
 ])
 def test_a_forged_token_is_refused(bridge_client, mint_spy, bearer_refuses, build, why: str) -> None:
     """§2.1 — HMAC-SHA256 and nothing else; the signature is checked before any claim is read."""
