@@ -58,6 +58,18 @@ from tortoise.projection.nonfolded import (
     record_non_folded,
 )
 from tortoise.source_identity import normalize_source_url, resolve_source_key
+
+# #8933: the identifier ALIAS derivation shares ONE implementation with the
+# query path (`tortoise/sparse.py` is stdlib-only + env_truthy, so this cannot
+# cycle). Deriving the write-side alias from anywhere else is how the two
+# halves of the mechanism drift and every identifier query silently returns
+# nothing — the ruling's load-bearing invariant.
+from tortoise.sparse import (
+    MAX_ALIASES_PER_POINT,
+    identifier_aliases,
+    identifier_tokens_enabled,
+    index_text,
+)
 from tortoise.vector_write import (
     clear_embedding,
     clear_then_set_prefix,
@@ -1156,6 +1168,73 @@ def flatten_search_keys_prop(props: dict) -> None:
                 props.pop(key, None)
 
 
+def point_identifier_aliases(props: dict) -> list[str]:
+    """#8933 Stage 2 — the identifier aliases this Point's INDEXED TEXT implies.
+
+    Derived from ``content`` ∪ ``search_keys`` — the exact text the ``Point``
+    fulltext index already holds (``("Point", ["content", "search_keys"])``,
+    ``projection/__init__.py``) — and written into ``search_keys``, which is
+    already one of its fields. So the alias needs **no schema change, no new
+    indexed property and no DDL**: it is additive text in a channel that is
+    already indexed.
+
+    Two properties this function deliberately has, both from the ruling:
+
+    * **The write side is the PRECISE half.** ``space_separated=False``, so a
+      document's prose cannot mint an alias ("sprint 2024" must not spend
+      index space on ``sprint2024``). The read side accepts the space form
+      because a person typed it, and its noise is bounded to one query.
+    * **It is derived, never recorded.** The journal keeps E3's ``search_keys``
+      list unchanged; a replay re-derives the same aliases from ``content``,
+      so the backfill for records written before this change is the EXISTING
+      rebuild path (pass 1a → ``_upsert_point_props``), not new code — and it
+      is idempotent by construction.
+
+    Returns ``[]`` when the mechanism is switched off
+    (``TORTOISE_IDENTIFIER_TOKENS``) or nothing identifier-shaped is present —
+    in which case the writer takes no copy and writes byte-identically to
+    before. Redaction is not re-litigated here: the capture path scrubs BEFORE
+    the payload reaches the projection (``sdk._redact_turn_contents``), and a
+    scrub REPLACES the whole matched value (``security._REDACTION_VALUE``), so
+    no secret bytes survive into the source text.
+    """
+    if not identifier_tokens_enabled():
+        return []
+    keys = props.get("search_keys")
+    if isinstance(keys, (list, tuple)):
+        keys = " ".join(str(s) for s in keys)
+    return identifier_aliases(
+        index_text(props.get("content"), keys), space_separated=False)
+
+
+def append_identifier_aliases(props: dict, aliases: list[str]) -> bool:
+    """#8933 Stage 2 — write the aliases into ``search_keys`` (already FLAT).
+
+    ``search_keys`` must already be in its canonical flat STRING form — every
+    caller runs :func:`flatten_search_keys_prop` first, on the same copy. The
+    append is a set difference against the tokens already present, so applying
+    it twice (a replay, a re-derivation, a caller that pre-computed the alias)
+    is a NO-OP rather than a growth loop, and it is capped at
+    ``MAX_ALIASES_PER_POINT`` so a pathological input cannot mint an unbounded
+    index value.
+
+    Returns ``True`` when a write happened (the caller uses it only for
+    diagnostics; the copy it must take is decided BEFORE this is called).
+    """
+    if not aliases:
+        return False
+    current = props.get("search_keys")
+    current = current if isinstance(current, str) else ""
+    present = set(current.split())
+    fresh = [a for a in aliases if a and a not in present]
+    if not fresh:
+        return False
+    if len(fresh) > MAX_ALIASES_PER_POINT:
+        fresh = fresh[:MAX_ALIASES_PER_POINT]
+    props["search_keys"] = " ".join([current, *fresh]).strip()
+    return True
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -1964,10 +2043,22 @@ class _EntityHandlers:
         # blank-list pop is visible to the drop-report loop below, which would
         # otherwise log a false "list prop dropped" for a key that was
         # deliberately normalized away.
-        if any(isinstance(p.get(k), (list, tuple))
-               for k in _POINT_FLATTEN_LIST_PROPS):
+        #
+        # #8933 Stage 2: the SAME copy carries the derived IDENTIFIER ALIASES —
+        # `ERR-4032` -> `err4032` in `search_keys`, the alias channel already in
+        # the Point fulltext field set. Derived from the payload's own
+        # `content`/`search_keys` on every write (live, replay, promote), so the
+        # value is a pure function of the journal record and a rebuild
+        # re-derives it identically. The alias list is computed ONCE, before the
+        # copy, because that is also the condition that decides whether a copy
+        # is needed at all: a point with no identifier takes the pre-#8933 path
+        # and writes byte-identically.
+        alias_tokens = point_identifier_aliases(p)
+        if alias_tokens or any(isinstance(p.get(k), (list, tuple))
+                               for k in _POINT_FLATTEN_LIST_PROPS):
             p = dict(p)
             flatten_search_keys_prop(p)
+            append_identifier_aliases(p, alias_tokens)
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r5): parity with _create_edges' r4 guard — a
