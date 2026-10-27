@@ -86,7 +86,6 @@ slow_shards: 5
 
 surfaces:
   api:
-  - test_10156_alert_registers.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
@@ -405,6 +404,13 @@ surfaces:
   - test_3998_raw_absent_state.py
   - test_abuse.py
   - test_abuse_integration.py
+  # #10156: the `api` arm of the dual registration. `tortoise/hosted_api.py` (the
+  # `GET /v1/team/alerts` feed and the new `POST /v1/team/alerts/ack` route with
+  # its owner/admin gate) is an exact `api` SOURCE_PATTERN, so a hosted_api-only
+  # diff selects `api` alone; the `core` arm (upper in this file) is what covers
+  # an `abuse.py`-only diff. Same idiom as `test_abuse.py` above — this suite is
+  # the continuation of that one, so it lives beside it on this surface too.
+  - test_10156_alert_registers.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   # #8617: the DECLARED ACL-layer posture + the recorded absence (unit lane:
   # no server, no docker — the refusal shapes a healthy self-hosted
@@ -1648,6 +1654,19 @@ surfaces:
   core:
   - test_10017_cache_tier.py
   - test_10017_record_carrier.py  # #10017 step 3: the raw-turn carrier's declaration, its refusals, and the journal-vs-record agreement over a record-carried capture
+  # #10156: registers, episode grouping, acknowledgement durability and the
+  # read-velocity calibration. The subject is `tortoise/abuse.py`, which matches
+  # NO `SOURCE_PATTERNS` entry — so an abuse.py-only diff falls through to the
+  # `core` fallback, and THIS is the arm that selects the file for the code it
+  # guards. (`api` carries the sibling arm, below: `tortoise/hosted_api.py` is an
+  # exact `api` match, so a hosted_api.py-only diff — the `POST /v1/team/alerts/ack`
+  # route and its role gate — selects `api` and REPLACES the `core` fallback. That
+  # is the #7968 / #3561 dual-registration idiom, stated at those entries.)
+  # Without this arm the file was in NO surface: `ci_selection.py --integrity`
+  # listed it as drift (redding the REQUIRED `manifest-integrity` leg, and with it
+  # `test_ci_selection.py` / `test_ci_timing.py` / `test_ci_manifest.py`), and no
+  # test leg selected the suite at all.
+  - test_10156_alert_registers.py
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
@@ -7543,6 +7562,11 @@ durations:
   test_longmem_reader_prompting.py: 15.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 11.2
   test_pages_bindings.py: 30.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 7.3
   test_abuse_integration.py: 13.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 17.8
+  # #10156: measured locally with `--durations` on the fast lane (58 tests, 7.9s
+  # wall) — a hand entry, NOT a junit re-derivation, because the file is new in
+  # this change (#8544's idiom). Without a row it packed at DEFAULT_FAST_WEIGHT and
+  # its shard's estimate stopped being a lower bound.
+  test_10156_alert_registers.py: 7.9
   test_github_index_lifecycle.py: 21.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 11.1
   test_main_guards.py: 14.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 13.5
   test_epic903_fixtures.py: 34.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 25.7

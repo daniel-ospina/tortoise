@@ -216,11 +216,49 @@ test('#10156: the panel source never reintroduces the blanket imperative', () =>
 //
 // Each assertion names the production consequence, so a deliberate change is a
 // deliberate edit here rather than a silent one.
-test('#10156: the ack write path posts to the real route, with org scope', () => {
-  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
-  const start = main.indexOf('async function acknowledgeAlert')
+//
+// The slice is bounded by the function's OWN braces, not by a fixed character
+// window (review finding P3): `acknowledgeAlert` is declared at two-space indent
+// inside `App`, so the first `\n  }` after the declaration is its closing brace —
+// a `\n    }` or deeper never matches. The previous `start + 2600` window ran
+// ~1 200 characters PAST the end of a ~1 400-character function into
+// `completeLogin`, so its assertions ranged over code the test does not name (and
+// any assertion added beyond 2 600 characters silently read text outside the
+// function it claims to pin).
+const ACK_DECL = 'async function acknowledgeAlert'
+const ackPath = (main = readFileSync(join(here, 'main.jsx'), 'utf8')) => {
+  const start = main.indexOf(ACK_DECL)
   assert.ok(start !== -1, 'acknowledgeAlert must exist in main.jsx')
-  const body = main.slice(start, start + 2600)
+  const close = '\n  }'
+  const end = main.indexOf(close, start)
+  assert.ok(end !== -1,
+    'acknowledgeAlert must stay a two-space-indented declaration so its closing '
+    + 'brace bounds the slice')
+  return main.slice(start, end + close.length)
+}
+
+//: `setAlerts(` is the ONLY way this component mutates its local alert list, so
+//: "no optimistic local hide" is exactly "the ack path never calls it". Asserting
+//: the ABSENCE OF THE STATE WRITE — rather than the absence of one shape of it —
+//: is the point: the previous pin was
+//: `doesNotMatch(body, /setAlerts\((?!\(prev\) => prev\.filter)/)`, whose negative
+//: lookahead WHITELISTED `setAlerts((prev) => prev.filter(...))` — the idiom an
+//: optimistic hide is actually written in. A change that hid the row locally
+//: before the write confirmed kept that pin green (review finding P3).
+//:
+//: This is the decision the docs put first for exactly this reason: a confirmed
+//: write invalidates and RE-READS (TanStack Query, "Invalidations from
+//: Mutations"), while an optimistic update is an explicit opt-in that also owes
+//: an `onError` rollback ("Optimistic Updates") — machinery a security feed has
+//: no reason to carry for a dismissal that is already persisted server-side.
+const assertNoOptimisticHide = (body, label) =>
+  assert.doesNotMatch(body, /setAlerts\(/,
+    `${label}: no optimistic local hide — hiding a row the server did not record `
+    + 'reads as a broken control on the next poll; the ack path must only RE-READ '
+    + 'the list (`await loadAlerts(tid)`) after a confirmed write')
+
+test('#10156: the ack write path posts to the real route, with org scope', () => {
+  const body = ackPath()
 
   assert.match(body, /\/v1\/team\/alerts\/ack`/,
     'the URL must match the declared route (a typo here is a silent 404)')
@@ -234,9 +272,33 @@ test('#10156: the ack write path posts to the real route, with org scope', () =>
   assert.match(body, /if \(!res\.ok\)/, 'a refusal must be handled, not ignored')
   assert.match(body, /await loadAlerts\(/, 'the list must be re-fetched from the '
     + 'server after a confirmed write')
-  assert.doesNotMatch(body, /setAlerts\((?!\(prev\) => prev\.filter)/,
-    'no optimistic local hide: hiding a row the server did not record reads as a '
-    + 'broken control on the next poll')
+  assertNoOptimisticHide(body, 'acknowledgeAlert')
+})
+
+test('#10156: the ack slice is the whole function and nothing after it', () => {
+  const body = ackPath()
+  assert.ok(body.trimEnd().endsWith('}'), 'the slice must end on a closing brace')
+  assert.doesNotMatch(body, /\n  (async )?function /,
+    'the slice must not reach the NEXT sibling declaration — an over-long window '
+    + 'makes this test assert things about code it does not name')
+  assert.doesNotMatch(body, /completeLogin/,
+    'completeLogin is the next declaration; its presence means the slice ran past '
+    + 'the end of acknowledgeAlert')
+})
+
+test('#10156: the no-optimistic-hide pin rejects the idiom it exists to catch', () => {
+  // A pin that cannot fail is not a pin. Feed the check the shape a developer
+  // would actually write an optimistic hide in — the one the previous
+  // negative-lookahead assertion whitelisted — and require it to be rejected.
+  const real = ackPath()
+  const optimistic = real.replace('      await loadAlerts(tid)',
+    '      setAlerts((prev) => prev.filter((a) => a.episode !== alert.episode))\n'
+    + '      await loadAlerts(tid)')
+  assert.notEqual(optimistic, real, 'the mutation must actually change the source')
+  assert.throws(() => assertNoOptimisticHide(optimistic, 'mutated'),
+    /no optimistic local hide/,
+    'an optimistic hide in the `prev.filter` idiom must red this pin — it passed '
+    + 'the previous negated-lookahead assertion')
 })
 
 test('#10156: the ack control is role-gated at the mount, not just in the panel', () => {
