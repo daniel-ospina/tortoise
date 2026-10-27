@@ -170,7 +170,7 @@ is stale.
 
 ⚠️ The asymmetry is deliberate and twice decided: **never refuse a present-but-unorderable START**
 (#6140: watch, do not block), and **never mint an `unknown` start** (the vocabulary is end-only).
-#9244 shipped the READ-side gate on orderability and left the write contract unchanged — a
+Issue #9244 shipped the READ-side gate on orderability and left the write contract unchanged — a
 `validFromPrecision` beside an unorderable START is still accepted and stored verbatim. Narrowing
 that write boundary is **undecided and tracked by no open issue**; it is not this page's call, and
 reading this page as having decided it would be wrong in either direction.
