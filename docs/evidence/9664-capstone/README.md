@@ -180,7 +180,8 @@ on them would be recording a capability we did not ship.
 2. Step 2 — narrowing packs and the persisted `configured` flag (browser + tenant).
    *The premise* is MEASURED (census rows 2a-2e); what is uncovered is the click. → **DONE for 2b**
    (`step2g`–`step2l`: narrow → save → reload, with `configured` flipping) — **not** `step2m`–`step2o`,
-   which are re-opens of an **all-active** set; see the index's 2b row for what each frame shows;
+   which do **not** carry the narrowed set (`step2m` and `step2o` are all five Active; `step2n` shows
+   `agent-ops` Off *with* the save banner on screen); see the index's 2b row for what each frame shows;
    **2a remains a FAIL** on `#8617`.
 3. Steps 4/6/7/8/9 **through ChatGPT** — the tool-call trace as the model actually emits it,
    the OAuth consent as ChatGPT renders it. Needs a ChatGPT Plus/Pro account and a human to
