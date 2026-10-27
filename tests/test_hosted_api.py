@@ -4481,6 +4481,136 @@ class TestSessionDetail:
             f"{r.status_code}: {r.text[:300]}")
         assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
 
+    def test_detail_refuses_a_copy_one_turn_short(self, client, monkeypatch):
+        """#8447: the ±1 BOUNDARY of the count comparison — the shape a window
+        length makes most likely, not a contrived one.
+
+        The neighbouring pins are all at ±2 or at exact equality of the count
+        (`:4255` 2-vs-2, `:4376` 0-vs-0, `:4306` 2-vs-4, `:4423` 4-vs-2). That
+        leaves the boundary one step in unpinned: a mutant that tolerates an
+        off-by-one —
+
+            if len(turns) != _expected_turns and len(turns) != _expected_turns - 1: raise
+
+        — passes every other test in this class. #8447 names exactly this
+        boundary ("exactly-at-limit", "limit+1"), and the guard's own NAMED LIMITS
+        note records that `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so
+        a one-turn discrepancy is the mildest form of the appending mismatch that
+        note defers — the most likely truncation shape here, not the least.
+
+        Shape: capture 4 turns, then remove ONLY the last turn node — a copy one
+        turn short of the session's own count. Both numbers are ASSERTED, so this
+        cannot silently degrade into the ±2 prefix case pinned above.
+
+        Mutation: add a one-short tolerance to the count comparison — this REDs
+        on the 200.
+        """
+        sid = "detail-record-down-off-by-one-short"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+                {"role": "user", "content": "And Postgres for the record."},
+                {"role": "assistant", "content": "Agreed."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 4, r.json()
+
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "WHERE t.id = $id DETACH DELETE t",
+            params={"sid": sid, "id": f"{sid}_t3"})
+
+        # The precondition, asserted rather than assumed: THREE nodes, count FOUR.
+        nodes = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)", params={"sid": sid}).result_set
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert nodes[0][0] == 3, nodes
+        assert counts[0][0] == 4, counts
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the fallback served a 3-turn copy of a 4-turn transcript — one turn "
+            f"short — at {r.status_code}: {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_refuses_a_copy_one_turn_long(self, client, monkeypatch):
+        """#8447: the MIRROR of the ±1 boundary — exactly one turn LONGER than
+        the session's own count is still not the session's transcript.
+
+        `test_detail_refuses_a_copy_one_turn_short` kills the `- 1` tolerance;
+        this kills the `+ 1` one, which is a separate line and survives every
+        other pin in this class for the same reason (the existing superset case is
+        at +2, `:4423`). Without it, one direction of the boundary is pinned and
+        the other is not, and a future "off-by-one is harmless" adjustment in that
+        direction restores a body that contradicts itself with a fully green
+        suite.
+
+        Shape: capture 4 turns, then set the Session's `turn_count` to 3 leaving
+        all four nodes in place — the state a 3-turn re-capture leaves when the
+        stale-turn sweep is skipped. Both numbers are ASSERTED.
+
+        Mutation: add a one-long tolerance to the count comparison — this REDs on
+        the 200.
+        """
+        sid = "detail-record-down-off-by-one-long"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+                {"role": "user", "content": "And Postgres for the record."},
+                {"role": "assistant", "content": "Agreed."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 4, r.json()
+
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) SET s.turn_count=3",
+            params={"sid": sid})
+
+        # The precondition, asserted rather than assumed: FOUR nodes, count THREE.
+        nodes = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)", params={"sid": sid}).result_set
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert nodes[0][0] == 4, nodes
+        assert counts[0][0] == 3, counts
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the fallback served a 4-node copy as a 3-turn transcript — one turn "
+            f"long — at {r.status_code}: {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
     def test_detail_refuses_when_the_session_has_no_turn_count(
             self, client, monkeypatch):
         """#8447: an ABSENT count is not a known zero — it is an unknown, and the
