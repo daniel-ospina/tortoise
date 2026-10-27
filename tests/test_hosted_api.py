@@ -4616,8 +4616,8 @@ class TestSessionDetail:
         """#8447: an ABSENT count is not a known zero — it is an unknown, and the
         read refuses rather than assert "no turns" on a session it cannot count.
 
-        The commit path's `MERGE (s:Session)` (`hosted_api.py:16920`) and the held
-        path (`:18028`) create Session nodes with no `turn_count` at all; a
+        The commit path's `MERGE (s:Session)` (`hosted_api.py:16928`) and the held
+        path (`:18036`) create Session nodes with no `turn_count` at all; a
         legacy capture whose count went missing looks identical from here.
         Collapsing that None into 0 (`sess[2] or 0`) folded it into the emptiness
         test by accident — this pins the split as deliberate, and pins WHICH way

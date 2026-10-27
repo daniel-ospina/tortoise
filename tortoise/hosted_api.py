@@ -18653,7 +18653,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # `turn_count` is NOT collapsed to 0 when absent (`or 0`): KNOWN ZERO (a
     # capture that stored no turns) makes an empty copy the COMPLETE answer, while
     # ABSENT — no capture ever wrote a count: the commit path's `MERGE (s:Session)`
-    # at `hosted_api.py:16920`, the held path at `:18028` — cannot be told from a
+    # at `hosted_api.py:16928`, the held path at `:18036` — cannot be told from a
     # legacy capture whose count went missing.
     #
     # ⛔ AN ABSENT COUNT IS REFUSED WHATEVER THE COPY'S SIZE, not only when the
