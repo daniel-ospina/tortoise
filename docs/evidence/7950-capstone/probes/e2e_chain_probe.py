@@ -79,6 +79,11 @@ RECORD_MIGRATIONS = [
     # `key_property` re-declared). A probe Postgres without it keys the semantic
     # layer by `name` while the read parses `id` from these files.
     "20261027000001_record_semantic_id_key.sql",
+    # #10017's cache tier. The chain probe's list is the DEAD duplicate of the
+    # bootstrap's, kept EQUAL on purpose (#9550): the same Postgres stands up
+    # both, so a list that disagrees here would drift the moment the duplicate
+    # is revived.
+    "20261029000001_record_point_cache_tier.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")

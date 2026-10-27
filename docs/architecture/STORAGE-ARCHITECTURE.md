@@ -1904,6 +1904,15 @@ uv run python docs/evidence/7983-cost-magnitudes/probes/graph_content_census.py
 
 **`ρ` — its DENOMINATOR (the disk line) is a measured value; of the three non-storage lines, IOPS and egress are PRICED but conditional on a miss RATE no tenant exists to provide (both are $0 below their step), and the compute tier is a DENSITY assumption.** Bench: a throwaway `postgres:16` carrying the **committed** record migrations (`2026101200000{1..4}_record_*.sql` + `20261014000001`), **TWO tenants** planted at §17.4.2's stock (**89,701 nodes each**, so the per-tenant figure below is the measured total ÷ 2 and not an extrapolation), with the content width and vector share taken from the dogfood graph — `graph-content-census.json`, measured 2026-10-17 at this same commit: **4,145 / 10,374 = 39.96%** of Points carry a vector, and content is planted at the graph's MEASURED distribution — **1,121.4 B over the 49.0% of Points that carry any** (5,696,946 ÷ 1,121.4 = 5,080 of 10,374), **549.1 B over ALL of them** (5,696,946 ÷ 10,374). ⚠️ **Those are two different populations and the footprint needs the second**: `avg()` skips NULLs, so applying the carrying mean to every node would overstate the row by the dominant column (content is ~85% of a carrying row). Reads measured with `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`; **blocks are exact and deterministic across both runs**, milliseconds are a range over two runs on a shared-CPU container with default settings (this is an accounting bench, not a vendor benchmark). ⛔ **AND THE READ SHAPE MATTERS: `EXPLAIN (ANALYZE)` on `SELECT *` sends its tuples to a dummy receiver that never runs an OUTPUT function, so a TOASTed column stays an 18-byte pointer and its TOAST heap is never read — a 14.5× undercount of a rebuild.** The quoted figures therefore come from the DETOASTING shape a real reader pays (`octet_length(t::text)`, i.e. the row converted to text exactly as a text-mode client fetch does), with the heap-only number beside it labelled as the undercount:
 
+⚠️ **BASIS (2026-10-26, #10017):** cut on a record schema WITHOUT
+`public.point.cache_tier` and `idx_point_graph_tier`. A re-run applies both, so this
+footprint and every figure derived from it — `ρ`, `ratio`, the break-evens, the tenant
+count to the 8 GB allowance — are no longer what the probe measures. The delta is the
+partial INDEX, not the column; it is measured, with its method and both bases, in
+daniel-ospina/tortoise#10070 comment 6426999081. Re-cutting is deliberately not done
+here (`ρ` is a pricing input; #4051 is deferred on this migration), so treat the figures
+below as a correct measurement **as of 2026-10-17**, not as today's schema.
+
 | `ρ`'s line | measured | base / denominator |
 |---|---|---|
 | **planted content width** | **1,133 B** over the **49.0%** of Points that carry content · **555 B over ALL** | calibrated to the dogfood's two means (1,121.4 B / 549.1 B) and measured back. ⚠️ The dogfood's **19,061 B content tail is NOT planted** — no TOAST regime — so the footprint below is a **LOWER BOUND** for a tenant whose text hits it |
