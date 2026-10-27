@@ -631,7 +631,47 @@ jobs:
     # under test-slow's 60m outer cap.
     needs: changes
     if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
+    # ── #6897: the fast matrix splits across BOTH runner classes ────────────
+    # Throughput, not runner class (owner ruling 2026-10-27: use the compute
+    # capacity wherever it is). The hosted queue is the bottleneck, not the
+    # tests: 42-44 `ubuntu-latest` runs queue against 1-3 in progress (~100 runs
+    # created/h vs ~56 completed/h), while the self-hosted pool has capacity (9
+    # runners; all reported `busy=false` when this was measured). A pool job starts
+    # in 2-4 s where a hosted job waits minutes —
+    # measured on probe run 40548658598 (`[self-hosted, self-hosted-x64]` ->
+    # `pi-runner-cell4-x64-1`, created->started 2 s; `[self-hosted,
+    # self-hosted-arm64]` -> `pi-runner-vm-5`, 2-4 s; both success).
+    #
+    # `matrix.runner` is the selector's per-row label array as a JSON string
+    # (`tools.ci_selection.fast_shard_runner`), so the split is POSITIONAL and
+    # derived: odd shards -> the x64 cells, even shards + the LAST one stay on
+    # `ubuntu-latest`. The last shard is the `canary_producer` the streak compares
+    # across runs, so it keeps the label it has always used.
+    #
+    # Pool half: x64 ONLY, never ARM64 — per-test cost on the same nodeids is
+    # 1.16x hosted on the x64 cells but 4.46x on the ARM64 VMs (654 common
+    # testcases, run 40238275534 vs 40249711042). Naming `self-hosted-x64`
+    # explicitly is what makes that hold.
+    #
+    # ⛔ NAMED RESIDUAL, not fixed here: the hosted half is `ubuntu-latest`, which
+    # on this repo is NOT hosted-only — `scripts/ci_runner_gate.sh` attaches it to
+    # the self-hosted pool as a FALLBACK, and #6897 measured it attached while
+    # GitHub-hosted was healthy. So an even shard can still land on the ARM64
+    # class and meet the kill this change exists to avoid (shards c and e are
+    # even and are the two measured at 17.3m/19.9m of a 20m budget there). That
+    # exposure is MAIN'S and is carried over unchanged; `ubuntu-24.04` is the
+    # hosted-only label that would close it, and moving this half to it is a
+    # separate decision (it also drops the outage fallback and breaks
+    # comparability with the canary streak's history) — filed, not taken.
+    #
+    # ROLLBACK IS A REPO VARIABLE, NOT A CODE CHANGE: set
+    # `CI_SHARD_ROUTING=hosted-only` (Settings -> Variables) and every leg
+    # returns to `ubuntu-latest` on the next run. No revert, no PR, and it needs
+    # no coordination with a shard-set change. That lever is also the mitigation
+    # for the NEW failure mode this routing introduces: if every x64 cell is
+    # offline the odd half queues with no fallback (the pool has no
+    # `ubuntu-latest` of its own unless the runner gate attaches one).
+    runs-on: ${{ fromJSON(vars.CI_SHARD_ROUTING == 'hosted-only' && '["ubuntu-latest"]' || matrix.runner) }}
     strategy:
       fail-fast: false
       # #6135: the WHOLE matrix is the selector's output — the shard count
@@ -643,6 +683,8 @@ jobs:
       # feed the canary streak). The labels MUST stay a, b, c, … — the merge
       # rail's lane-parity is a name subtraction, so an S-adding diff has to be
       # a SUPERSET of main's `test (a)`, `test (b)`.
+      # #6897: rows also carry `runner` — the `runs-on` label array as a JSON
+      # string, consumed ONLY by this job's `runs-on` above.
       matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}
     name: test (${{ matrix.half }})
     # Outer cap: setup (checkout+install+cache) + manifest collect-only
@@ -1750,14 +1792,24 @@ jobs:
     # yet") instead of being killed into a false red on the class that cannot finish
     # them, while the fast matrix keeps using the pool.
     #
-    # ⚠️ NAMED RESIDUAL (not fixed here): the fast matrix (`test (a)`…`test (i)`) is
-    # still `ubuntu-latest`, so the pool can still take it. Its per-shard margin is
-    # thinner than this leg's, not safer: a 9.72m committed estimate against a 20m
-    # budget, and the pool consumed 17.3m and 19.9m of JOB wall on shards (c) and (e)
-    # in the two other main runs measured that evening (39327442614, 39304878787) —
-    # ~78% and ~91% of the 20m pytest budget after ~1.7m of setup. Pinning the whole matrix would remove the fallback the gate exists for,
-    # which is a capacity decision, not a CI-hygiene one; the measurement is filed on
-    # #6897 instead.
+    # ✅ NOW EXPLICIT FOR THE FAST MATRIX (#6897, the change this paragraph belongs
+    # to — it is not yet on main): `test` no longer inherits this ambiguity BLINDLY — its `runs-on` reads the
+    # selector's per-row `runner`, so odd shards name
+    # `[self-hosted, self-hosted-x64]` EXPLICITLY (they cannot be resolved by the
+    # ARM64 class the `ubuntu-latest` fallback attaches, which is the class the
+    # margin below was measured on) while even shards keep `ubuntu-latest` — the
+    # SAME label, and the same residual ambiguity, that this header describes.
+    # Do not read "explicit" as "the fast matrix is now class-safe": the even
+    # half still is not, and that half includes shards (c) and (e) — the two
+    # measured below at ~78%/~91% of the 20m budget on the ARM64 VMs. Closing THAT
+    # needs `ubuntu-24.04` on the even rows, which also drops the outage fallback
+    # this gate exists for: a capacity decision, not a CI-hygiene one, filed on
+    # #6897. Kept here as the record of why THIS job is version-pinned: a 9.72m
+    # committed estimate against a 20m budget, and the pool consumed 17.3m and
+    # 19.9m of JOB wall on shards (c) and (e) in the two other main runs measured
+    # that evening (39327442614, 39304878787) — ~78% and ~91% of the 20m pytest
+    # budget after ~1.7m of setup, on the ARM64 VMs. Pinning THIS leg would remove
+    # the fallback the gate exists for. The measurement is filed on #6897.
     # Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`.
     runs-on: ubuntu-24.04
     # #1471: parallel duration-balanced legs (matrix), mirroring the `test`

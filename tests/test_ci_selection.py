@@ -5161,6 +5161,10 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     assert len({e["half"] for e in inc}) == 5
     assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
     assert sum(len(e["files"].split()) for e in inc) == len(flat)
+    # #6897: every row carries its `runner`, and `fast_matrix_include` must not
+    # silently drop it — the whole lane is that key plus the workflow's `runs-on`.
+    for e in inc:
+        assert "runner" in e, f"the emitted matrix must carry the runner (#6897): {e['half']}"
     # #6145: the emitted headroom is this change's only new OUTPUT — the whole
     # feature is "the margin a leg actually got is visible" — and it had NO
     # assertion: deleting the key from `fast_matrix_include` left all 221 tests
@@ -5418,6 +5422,10 @@ def test_shard_count_is_stable_regardless_of_the_selection_size():
     assert [e["name"] for e in entries] == list("abcdefghi")
     inc = fast_matrix_include(entries)["include"]
     assert [e["half"] for e in inc] == list("abcdefghi")
+    # #6897: the routing is POSITIONAL and derived, so a tiny selection that leaves
+    # most shards EMPTY must still emit a class for every row — an empty shard is
+    # still a JOB, and a row without `runner` makes `runs-on` resolve to null.
+    assert all(e.get("runner") for e in inc), inc
     # every file still rides exactly one shard; the rest are legitimately empty
     flat = [f for e in entries for f in e["files"]]
     assert sorted(flat) == ["test_a", "test_b", "test_c"]
@@ -5513,6 +5521,135 @@ def test_no_required_check_names_a_fast_leg():
     assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
         "no required context may be a shard leg — the shard set changes with S, so "
         "keying the required set on a leg name would make the gate unsatisfiable")
+
+
+# ── #6897: the fast matrix routes across BOTH runner classes ──────────────
+# The capacity decision is #6897's (owner ruling 2026-10-27: use the compute
+# capacity wherever it is; THROUGHPUT over runner class). These pin the three
+# properties that decision turns on: every row HAS a class (a missing key makes
+# `runs-on` resolve to null and the file is refused — #6253's zero-jobs case),
+# the canary producer stays on the label it has always used so the streak is
+# comparable run over run, and the split actually uses both classes instead of
+# degenerating to one and buying nothing but a new failure mode.
+#
+# ⛔ WHAT THESE DO **NOT** CLAIM: that the hosted half is GitHub-hosted. On this
+# repo `ubuntu-latest` is not hosted-only — `scripts/ci_runner_gate.sh` attaches
+# it to the self-hosted pool as a fallback, and #6897 measured it attached while
+# GitHub-hosted was healthy. The class a `ubuntu-latest` row lands on is main's
+# existing ambiguity, carried over unchanged; `SHARD_RUNNER_HOSTED` names the
+# LABEL, which is all this lane decides.
+
+
+def test_every_fast_row_names_a_runner_and_the_split_uses_both_classes():
+    """#6897: `runner` is emitted per row, positional, and never degenerates."""
+    from tools.ci_selection import (
+        SHARD_RUNNER_HOSTED,
+        SHARD_RUNNER_X64,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+    )
+    inc = fast_matrix_include(push_legs(load_manifest())["shards"])["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    for e in inc:
+        assert "runner" in e, f"missing runner (#6897): {e['half']}"
+        # a JSON ARRAY STRING, not a bare label: `runs-on` needs an array, and a
+        # matrix value is always a string, so the workflow must `fromJSON` it.
+        parsed = json.loads(e["runner"])
+        assert isinstance(parsed, list) and parsed, e
+        assert all(isinstance(x, str) for x in parsed), e
+        assert parsed in (SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64), (
+            f"unexpected runner class on {e['half']}: {parsed}")
+    # THE CANARY PRODUCER STAYS ON THE HOSTED LABEL — the one it has always used,
+    # so the canary streak keeps comparing tests rather than classes. It is the
+    # HOSTED LABEL and not "GitHub-hosted": see this block's header for why that
+    # label's class is not a guarantee on this repo.
+    producer = [e for e in inc if e["canary_producer"]]
+    assert len(producer) == 1, producer
+    assert json.loads(producer[0]["runner"]) == SHARD_RUNNER_HOSTED, (
+        "the canary producer must stay on the hosted label, not the pool (#6897): "
+        f"{producer[0]['half']} -> {producer[0]['runner']}")
+    # BOTH CLASSES, or the routing is a rename of `ubuntu-latest` with extra
+    # failure modes. (The opposite degeneracy — every row on the pool — would
+    # ALSO lose the hosted fallback the ci_runner_gate exists for.)
+    classes = {e["runner"] for e in inc}
+    assert classes == {json.dumps(SHARD_RUNNER_HOSTED), json.dumps(SHARD_RUNNER_X64)}, (
+        f"the fast matrix must split across both classes, got {sorted(classes)}")
+
+
+def test_runner_routing_is_positional_and_the_last_shard_is_always_on_the_hosted_label():
+    """#6897: the routing rule, on SYNTHETIC shard counts.
+
+    The real manifest is S=9, where "alternate by index" and "the last shard
+    keeps the hosted label" happen to agree (index 8 is even) — so pinning the
+    rule only against the real config would let an S=10 change flip the canary
+    producer onto the pool without a red. This asserts the rule for both
+    parities.
+    """
+    from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64, fast_shard_runner
+    for count in range(2, 13):
+        runners = [fast_shard_runner(i, count) for i in range(count)]
+        assert runners[-1] == SHARD_RUNNER_HOSTED, (
+            f"S={count}: the last shard is the canary producer and must keep the "
+            "hosted label")
+        if count == 2:
+            # DEGENERATE BY CONSTRUCTION, and safe: with two shards, index 0 is
+            # even and index 1 IS the pinned last one, so there is no pool row to
+            # give. It falls back to exactly main's pre-#6897 behaviour (both on
+            # the hosted label) rather than inventing a split the rule does not
+            # describe.
+            assert runners == [SHARD_RUNNER_HOSTED, SHARD_RUNNER_HOSTED], runners
+        else:
+            assert set(map(tuple, runners)) == {
+                tuple(SHARD_RUNNER_HOSTED), tuple(SHARD_RUNNER_X64)
+            }, f"S={count}: a single class is not a split"
+        # positional alternation over every shard that is not the pinned last one
+        for i, got in enumerate(runners[:-1]):
+            want = SHARD_RUNNER_HOSTED if i % 2 == 0 else SHARD_RUNNER_X64
+            assert got == want, (count, i, got, want)
+        # the returned list is a COPY: a caller mutating one row's label array
+        # (json.dumps in `fast_matrix_include` reads it, so a later edit could
+        # plausibly extend it) must not change the class the NEXT row gets. The
+        # assertion compares against an INDEPENDENT literal and checks identity,
+        # because `==` against the module constant is an aliasing tautology —
+        # dropping the `list()` copy survives it (measured).
+        runners[0].append("mutated")
+        assert fast_shard_runner(0, count) == ["ubuntu-latest"], count
+        assert fast_shard_runner(0, count) is not SHARD_RUNNER_HOSTED, (
+            "fast_shard_runner must return a copy, never the module constant")
+        assert fast_shard_runner(1, count) is not SHARD_RUNNER_X64
+        # The hosted LABEL is pinned deliberately, and a change to it must be a
+        # deliberate change: `ubuntu-latest` is what main uses today, so moving to
+        # the hosted-ONLY `ubuntu-24.04` would also drop the outage fallback and
+        # break comparability with the canary streak's history. That is a decision
+        # (#6897), not a tidy-up — so it cannot happen behind a green suite.
+        assert SHARD_RUNNER_HOSTED == ["ubuntu-latest"], SHARD_RUNNER_HOSTED
+
+
+def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback():
+    """#6897: the workflow half of the routing.
+
+    Three claims the unit tests above cannot see: `runs-on` reads the selector's
+    per-row class (no literal that would ignore the matrix), the operator
+    rollback is the repo VARIABLE rather than a code edit, and the job is not
+    renamed — branch protection and the merge rail key on `test (a)`….
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    runs_on = str(job["runs-on"])
+    assert "matrix.runner" in runs_on, (
+        "`test` must take its runner class from the selector's matrix row")
+    assert "fromJSON" in runs_on, (
+        "the row value is a JSON string; `runs-on` needs the parsed array")
+    assert "CI_SHARD_ROUTING" in runs_on and "hosted-only" in runs_on, (
+        "the rollback must be the CI_SHARD_ROUTING repo variable, not a code change")
+    # the job id and its `test (<half>)` name are branch-protection surfaces
+    assert job["name"] == "test (${{ matrix.half }})", job["name"]
+    # ⛔ and the legs that CANNOT run on the pool keep their version pin: a
+    # `self-hosted` here would let a 39.6m leg be killed at its watchdog (the
+    # measurement in the test-slow header).
+    assert wf["jobs"]["test-slow"]["runs-on"] == "ubuntu-24.04", (
+        "test-slow must stay version-pinned to GitHub-hosted (#6897 does not touch it)")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():

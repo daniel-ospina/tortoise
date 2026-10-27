@@ -4032,6 +4032,67 @@ def non_gating_report(manifest: dict) -> str:
     return "\n".join(lines)
 
 
+# #6897 (owner ruling 2026-10-27: use the compute capacity wherever it is,
+# prioritise THROUGHPUT over runner class): the two runner classes the fast
+# matrix splits across, as the LABEL ARRAYS `runs-on` wants. Emitted as a JSON
+# ARRAY STRING because a matrix value is always a string, and `runs-on` needs an
+# array — the workflow `fromJSON`s it back (`python-ci.yml`, `test:` job).
+#
+# x64 CELLS ONLY for the pool half, never the ARM64 VMs: measured per-test cost
+# on the SAME nodeids splits by class — arm64 legs are 4.46x hosted, x64 cells
+# only 1.16x (654 common testcases, run 40238275534 vs hosted 40249711042; the
+# figures live in the `test` job's "WHICH RUNNER CLASS CARRIES THIS LEG" header).
+# Routing a fast shard onto ARM64 would buy queue time and pay it back in test
+# time — and naming `self-hosted-x64` EXPLICITLY, rather than inheriting a
+# generic label, is what makes that guarantee hold.
+#
+# ⛔ The hosted half is `ubuntu-latest` — MAIN'S CURRENT LABEL, and deliberately
+# NOT described here as "GitHub-hosted". On this repo that label is not
+# hosted-only: `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the
+# self-hosted pool as a FALLBACK, and #6897 measured it attached WHILE
+# GitHub-hosted was healthy (the gate logged `set_labels ok=16 fail=0`, a false
+# PASS), so a `ubuntu-latest` job can land on the ARM64 class — that is the
+# mechanism behind the 39.6m `test-slow (a)` kill on run 39309984832. It reads as
+# hosted today (probe 40548658598: no runner carries the label, and the
+# `ubuntu-latest` probe job queued 3m50s and was then CANCELLED without ever
+# being assigned a runner — it never landed on the pool), which is why "today"
+# is a measurement, not a guarantee. `ubuntu-24.04` is the hosted-ONLY label
+# (`test-slow`, `workflow-lint`, finding-provenance pin it for that reason);
+# moving this half to it is a SEPARATE decision, not taken here, because it would
+# also drop the outage fallback and break comparability with the canary streak's
+# history.
+SHARD_RUNNER_HOSTED = ["ubuntu-latest"]
+SHARD_RUNNER_X64 = ["self-hosted", "self-hosted-x64"]
+
+
+def fast_shard_runner(index: int, count: int) -> list[str]:
+    """#6897: which runner class carries shard `index` of `count`.
+
+    Two rules, in this order:
+
+    1. The LAST shard is ALWAYS the HOSTED LABEL — it is the `canary_producer`,
+       whose artifacts feed the canary streak, and that streak is compared
+       across runs. Keeping the producer on the same label it has always used
+       keeps the comparison a comparison of TESTS. (That label's resolving class
+       is main's ambiguity, carried over unchanged — see the constants above; it
+       is not a promise this function can make.)
+    2. Everything else ALTERNATES by position (even -> the hosted label, odd ->
+       the x64 pool) so the work splits across BOTH runner classes and the
+       matrix actually adds throughput instead of queueing every leg on one.
+
+    At `count == 2` rule 2 has no row to give (index 0 is even, index 1 is the
+    pinned last one), so the split degrades to all-hosted-label — main's
+    pre-#6897 behaviour, never a half-applied one. Any S >= 3 uses both classes.
+
+    Positional, never content-based: the same property #6135 uses for the
+    labels, so the routing does not have to be re-derived when the pack moves a
+    file between shards.
+    """
+    if index == count - 1:
+        return list(SHARD_RUNNER_HOSTED)
+    return list(SHARD_RUNNER_HOSTED if index % 2 == 0 else SHARD_RUNNER_X64)
+
+
 def fast_matrix_include(shards: list[dict]) -> dict:
     """#6135: the GitHub Actions matrix the `test` job expands.
 
@@ -4040,6 +4101,11 @@ def fast_matrix_include(shards: list[dict]) -> dict:
     marks the ONE shard whose artifacts feed the canary streak: the last shard,
     chosen positionally so the marker never has to name a half (`half == 'b'`
     stopped existing the moment S rose — the exact coupling #6135 removes).
+
+    #6897: `runner` carries the label array (as a JSON string) for `runs-on`,
+    assigned by POSITION via `fast_shard_runner()`. The workflow's `runs-on`
+    is its only consumer, and the operator rollback is the
+    `CI_SHARD_ROUTING=hosted-only` repo variable, never an edit here.
     """
     include = []
     for i, s in enumerate(shards):
@@ -4057,6 +4123,7 @@ def fast_matrix_include(shards: list[dict]) -> dict:
             "watchdog_minutes": s["watchdog_minutes"],
             "watchdog_headroom": round(float(headroom), 2),
             "canary_producer": i == len(shards) - 1,
+            "runner": json.dumps(fast_shard_runner(i, len(shards))),
         })
     return {"include": include}
 
