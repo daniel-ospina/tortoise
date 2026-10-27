@@ -45,8 +45,10 @@ plain statement that there is nothing to do.
 - **Format is not semantics.** Alternate spellings of one *token* are one token: `na`, `N/A`, `-`, and
   a blank are all spellings of "no date". They normalize to whichever of *unknown* or *absent* is
   actually true — **but only when the surface can establish which**; otherwise the next bullet applies.
-  (`unknown` is the word the owner used and the one #9202 settled for an asserted-but-un-datable end;
-  *absent* is our reading of `-`, which #9202 keeps as its own state.)
+  (`unknown` is the word the owner used and the one #9202 settled for an asserted-but-un-datable end —
+  the shipped write door reads `na`, `n/a`, `-` and a blank `validTo` all as *that*; *absent* is a
+  bound never written at all (`validTo=None`, or omitted on create), which #9202 keeps as its own
+  state, `END_OPEN`. Do not re-map a marker the shipped doors already map.)
 - **Never normalize a *meaning*.** Rule 1 licenses normalizing spelling, not choosing the convenient
   interpretation. `n/a` is *unknown* or *absent* depending on which is true — picking one because it
   lets the write through is fabrication, not self-healing. **If the surface cannot establish which of
@@ -60,13 +62,14 @@ plain statement that there is nothing to do.
 ## 3. Worked examples
 
 `#10158` is the one measured live in this tree. `#9202` is included because it is the ruling this
-document's placement section comes from — its read half is **fixed** and does not reproduce. The rest
-are cited from their own issues, `#1418` in `daniel-ospina/agent-infra`, and `#5734` is a human-UX
-analogue rather than an instance of the rule.
+document's placement section comes from — its **read half is fixed** and no longer reproduces, though
+the issue stays open for an unguarded write route (#9649). The rest are cited from their own issues,
+`#1418` in `daniel-ospina/agent-infra`, and `#5734` is a human-UX analogue rather than an instance of
+the rule.
 
 | Surface | What it was | Which rule |
 |---|---|---|
-| **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` | the reported-state analogue of rule 2's second part — and the reason §4 exists |
+| **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **Read half FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` shapes or refuses on the guarded caller doors (`create_point`, `update_point`) **only**, so **the issue stays OPEN** for the unguarded `update_entity` / `supersede_point` route held by #9649 | the reported-state analogue of rule 2's second part — and the reason §4 exists |
 | **#10158** — the rebuild abort | prescribes *"reconcile the journal (a missing creation event, an out-of-order append, or an unjournaled producer)"* for a record nothing can ever address — no missing creation exists, nothing is out of order, there is no producer to journal, and retrying reproduces it | the admission test — **the prescribed repair is not performable for this record.** Whether the shape must therefore stop refusing is #10158's own question, **not decided here** (see §6) |
 | `daniel-ospina/agent-infra` #1418 | a checkpoint whose *"remedy (rebase) is the tool it blocks"* | admission test |
 | #9365 · #7541 | a red *"no agent can clear"*; a terminal verdict with no follow-on stage | admission test |
