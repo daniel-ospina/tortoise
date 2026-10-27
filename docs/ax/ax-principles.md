@@ -162,7 +162,7 @@ is stale.
 | the start | precision beside it | outcome |
 |---|---|---|
 | names an instant | none, or `year` / `month` / `day` | accept |
-| un-orderable (`TBD`, `n/a`, `-`, blank, a non-ISO spelling such as `2024-3-1`, `2026-02-30`, an epoch rendered as a string) | none, or a concrete granularity | **accept with the #6140 warning**; store verbatim; the start's precision reads `null` — *no start was recorded*. There is no silent re-spell here: the normalizing door is END-only |
+| un-orderable (`TBD`, `n/a`, `-`, blank; a non-ISO spelling such as `2024-3-1`; a well-formed date that names no calendar day such as `2026-02-30`; an epoch rendered as a string) | none, or a concrete granularity | **accept with the #6140 warning**; store verbatim; the start's precision reads `null` — *no start was recorded*. There is no silent re-spell here: the normalizing door is END-only |
 | any | `unknown` | **refuse** — `validFromPrecision="unknown"` is illegal even when the start's text is unorderable; the 3-state vocabulary is end-only |
 | absent (`None`, or omitted on create) | none | accept; the bound is open |
 | absent | a concrete granularity | **refuse** — a granularity cannot describe a bound that does not exist |
