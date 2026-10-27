@@ -34,6 +34,13 @@
 #   14. bound garbage / overflow              → normalized to the default
 #   15. a valid explicit bound is honoured    → not force-defaulted
 #   16. cannot resolve main (bad ref)         → exit 1 (cannot verify = never a pass)
+#   17. a docs-ONLY lag, raw behind > bound   → exit 0 (deployable=0)   ← MUTATION (no crying wolf)
+#   18. within COUNT bound but the oldest deployable commit is 48 h old
+#                                             → exit 1, reason behind-too-long ← MUTATION (#10109 T-arm)
+#   19. within COUNT bound, deployable commit is young → exit 0, age stated
+#   20. the deploy trigger's `paths:` cannot be read → exit 1 (never a pass)
+#   21. PARITY: the REAL `deploy-hosted.yml` filter is what the checker derives
+#       (tortoise/ counts as deployable, docs/ does not)
 
 set -uo pipefail
 
@@ -55,25 +62,85 @@ assert_not_contains() { case "$1" in *"$2"*) bad "$3 (unexpectedly found '$2')" 
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
 
-# ── the synthetic repo: c0 → c1 → c2 → c3 on main, plus a side branch ────────
+# ── the synthetic repo: c0 → c1 → c2 → c3 on main, plus two side lines ───────
+# Every main commit touches `tortoise/` (DEPLOYABLE under the fixture filter), so
+# the count cases below exercise the deployable distance, not a docs-only lag.
+# `docs-lag` adds three DOCS-ONLY commits (raw lag 3, deployable 0 — the
+# false-alarm shape) and `old-deploy` adds ONE deployable commit dated 48 h ago
+# (count 1, age over the bound — the "deploys stopped landing" shape).
 REPO="$FIX/repo"
-mkdir -p "$REPO"
+mkdir -p "$REPO/tortoise" "$REPO/docs"
+commit_file() { # <path> <content> <message> [epoch]
+  printf '%s\n' "$2" > "$REPO/$1"
+  git -C "$REPO" add "$1"
+  if [ -n "${4:-}" ]; then
+    GIT_AUTHOR_DATE="@$4 +0000" GIT_COMMITTER_DATE="@$4 +0000" \
+      git -C "$REPO" commit -q -m "$3"
+  else
+    git -C "$REPO" commit -q -m "$3"
+  fi
+  git -C "$REPO" rev-parse HEAD
+}
+
 git init -q -b main "$REPO"
 git -C "$REPO" config user.email t@t
 git -C "$REPO" config user.name t
-: > "$REPO/f"
-git -C "$REPO" add f
-git -C "$REPO" commit -q -m c0
-C0="$(git -C "$REPO" rev-parse HEAD)"
-echo 1 > "$REPO/f"; git -C "$REPO" commit -qam c1; C1="$(git -C "$REPO" rev-parse HEAD)"
-echo 2 > "$REPO/f"; git -C "$REPO" commit -qam c2; C2="$(git -C "$REPO" rev-parse HEAD)"
-echo 3 > "$REPO/f"; git -C "$REPO" commit -qam c3; C3="$(git -C "$REPO" rev-parse HEAD)"
+C0="$(commit_file tortoise/app.py 0 c0)"
+C1="$(commit_file tortoise/app.py 1 c1)"
+C2="$(commit_file tortoise/app.py 2 c2)"
+C3="$(commit_file tortoise/app.py 3 c3)"
+
+# A side line, for the divergence case.
 git -C "$REPO" checkout -q -b side "$C1"
-echo side > "$REPO/g"; git -C "$REPO" add g; git -C "$REPO" commit -qam side
-SIDE="$(git -C "$REPO" rev-parse HEAD)"
+SIDE="$(commit_file tortoise/side.py side side)"
+
+# Three DOCS-ONLY commits on top of c3: raw lag 3, deployable lag 0.
+git -C "$REPO" checkout -q -b docs-lag "$C3"
+commit_file docs/n1.md 1 'docs 1' >/dev/null
+commit_file docs/n2.md 2 'docs 2' >/dev/null
+DLAG="$(commit_file docs/n3.md 3 'docs 3')"
+
+# ONE deployable commit, committed 48 h ago: within the COUNT bound, past the
+# AGE bound. 48 h chosen so the assertion does not sit near the 6 h default.
+HOW_LONG_AGO=$(( $(date +%s) - 48 * 3600 ))
+git -C "$REPO" checkout -q -b old-deploy "$C3"
+OLD="$(commit_file tortoise/hotfix.py x 'hotfix' "$HOW_LONG_AGO")"
+
 git -C "$REPO" checkout -q main
 # main is 3 ahead of C1: `rev-list --count C1..main` == 2 (c2, c3).
 BEHIND_C1="$(git -C "$REPO" rev-list --count "${C1}..main")"
+BEHIND_DEPLOYABLE_C1="$(git -C "$REPO" rev-list --count "${C1}..main" -- 'tortoise/**')"
+# docs-lag: raw 3, deployable 0.
+BEHIND_CLAG="$(git -C "$REPO" rev-list --count "${C3}..docs-lag")"
+BEHIND_DEPLOYABLE_CLAG="$(git -C "$REPO" rev-list --count "${C3}..docs-lag" -- 'tortoise/**')"
+
+# ── the fixture deploy trigger the checker derives its paths from ───────────
+# Deliberately carries the shapes the real file has: a trailing comment after
+# an item, a multi-line comment INSIDE the block, and a quoted scalar.
+DEPLOY_WF_FIXTURE="$FIX/deploy-hosted.fixture.yml"
+cat > "$DEPLOY_WF_FIXTURE" <<'WF_EOF'
+name: Fixture deploy
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tortoise/**'
+      - 'packs/**'          # a trailing comment must not become part of the glob
+      # a comment line inside paths: must not terminate the block
+      - 'Dockerfile.hosted'
+  workflow_dispatch:
+WF_EOF
+# An unreadable-filter fixture: no `paths:` under on.push.
+DEPLOY_WF_NOPATHS="$FIX/deploy-hosted.nopaths.yml"
+cat > "$DEPLOY_WF_NOPATHS" <<'WF_EOF'
+name: Fixture deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+WF_EOF
+# The REAL workflow, for the parity case (never a copy of its path list).
+DEPLOY_WF_REAL="$SCRIPT_DIR/../workflows/deploy-hosted.yml"
 
 BIN="$FIX/bin"
 mkdir -p "$BIN"
@@ -138,6 +205,7 @@ export PATH="$BIN:$PATH"
 export GITHUB_REPOSITORY="daniel-ospina/tortoise"
 export DEPLOY_STALENESS_REPO_DIR="$REPO"
 export DEPLOY_STALENESS_REF="main"
+export DEPLOY_STALENESS_DEPLOY_WORKFLOW="$DEPLOY_WF_FIXTURE"
 unset GITHUB_ACTIONS || true
 
 reset_case() {
@@ -145,11 +213,13 @@ reset_case() {
   rm -f "$STUB_TMP/created.json" "$STUB_TMP/patched.log" "$STUB_TMP/comments.log"
   unset STUB_SEARCH_FAIL STUB_ALERT_SEARCH_JSON STUB_ALERT_CREATE_FAIL STUB_NEW_ALERT \
         STUB_COMMENT_FAIL STUB_ALERT_PATCH_FAIL STUB_CURL_FAIL STUB_VERSION_JSON \
-        DEPLOY_STALENESS_COMMIT_SHA DEPLOY_STALENESS_MAX_BEHIND 2>/dev/null || true
+        DEPLOY_STALENESS_COMMIT_SHA DEPLOY_STALENESS_MAX_BEHIND DEPLOY_STALENESS_MAX_AGE_HOURS \
+        DEPLOY_STALENESS_DEPLOY_WORKFLOW 2>/dev/null || true
   export GH_TOKEN="test-token"
   export PATH="$BIN:$PATH"
   export DEPLOY_STALENESS_REPO_DIR="$REPO"
   export DEPLOY_STALENESS_REF="main"
+  export DEPLOY_STALENESS_DEPLOY_WORKFLOW="$DEPLOY_WF_FIXTURE"
 }
 
 run_checker() { # <commit-sha-or-UNSET> [bound]  → sets RC, OUT (stderr)
@@ -160,6 +230,23 @@ run_checker() { # <commit-sha-or-UNSET> [bound]  → sets RC, OUT (stderr)
     export DEPLOY_STALENESS_COMMIT_SHA="$1"
   fi
   [ -n "${2:-}" ] && export DEPLOY_STALENESS_MAX_BEHIND="$2"
+  set +e
+  "$BASH_BIN" "$CHECKER" </dev/null 2>"$STUB_TMP/stderr.log"
+  RC=$?
+  OUT="$(cat "$STUB_TMP/stderr.log" 2>/dev/null || true)"
+  set -e
+}
+
+# The same, with the ref / deploy-trigger / age-bound seams overridable — the
+# path-scoping and age-arm cases need a different tip, a different filter, and a
+# moving age bound.
+run_checker_with() { # <sha> [bound] [ref] [deploy-workflow] [max-age-hours]
+  reset_case
+  export DEPLOY_STALENESS_COMMIT_SHA="$1"
+  [ -n "${2:-}" ] && export DEPLOY_STALENESS_MAX_BEHIND="$2"
+  [ -n "${3:-}" ] && export DEPLOY_STALENESS_REF="$3"
+  [ -n "${4:-}" ] && export DEPLOY_STALENESS_DEPLOY_WORKFLOW="$4"
+  [ -n "${5:-}" ] && export DEPLOY_STALENESS_MAX_AGE_HOURS="$5"
   set +e
   "$BASH_BIN" "$CHECKER" </dev/null 2>"$STUB_TMP/stderr.log"
   RC=$?
@@ -322,6 +409,69 @@ set +e; "$BASH_BIN" "$CHECKER" </dev/null 2>"$STUB_TMP/stderr.log"; RC=$?; set -
 OUT="$(cat "$STUB_TMP/stderr.log" 2>/dev/null || true)"
 assert_eq "$RC" 1 "case 16: cannot resolve main → exit 1 (cannot verify = never a pass)"
 assert_contains "$OUT" "cannot resolve" "case 16: names the unresolvable ref"
+
+# ── 17. docs-ONLY lag is NOT staleness (the false-alarm shape) ───────────────
+# Raw distance 3 (> the bound of 2) with ZERO deployable commits. Before the
+# deployability scope this filed "PRODUCTION STALE" and pointed the operator at
+# `deploy-hosted` runs that do not exist for those commits — the muddied alarm
+# that makes a detector inert. It MUST be green, and both numbers MUST be stated
+# so the reader can see why.
+run_checker_with "$C3" 2 "docs-lag" "" ""
+assert_eq "$RC" 0 "case 17 (MUTATION): docs-only lag (raw ${BEHIND_CLAG}, deployable ${BEHIND_DEPLOYABLE_CLAG}) → exit 0"
+assert_contains "$OUT" "behind=${BEHIND_CLAG}" "case 17: the RAW distance is still stated"
+assert_contains "$OUT" "behind_deployable=${BEHIND_DEPLOYABLE_CLAG}" "case 17: the deployable distance is stated as 0"
+[ ! -f "$STUB_TMP/created.json" ] && ok "case 17: no alert filed for a non-deployable lag" || bad "case 17: an alert was filed for a docs-only lag"
+
+# ── 18. the AGE arm: within the COUNT bound, but deploys stopped landing ─────
+# ONE deployable commit, dated 48 h ago. The count (1) is within the bound (2),
+# so the count bound alone reports GREEN forever — the #10109 state. The age arm
+# is what reds it.
+run_checker_with "$C3" 2 "old-deploy" "" ""
+assert_eq "$RC" 1 "case 18 (MUTATION): 1 deployable commit, 48 h old, bound 2 → exit 1"
+assert_contains "$OUT" "behind-too-long" "case 18: reason names the age arm"
+assert_contains "$OUT" "behind_deployable=1" "case 18: states that the COUNT is within bound"
+assert_contains "$OUT" "max_age_hours=6" "case 18: names the age bound it crossed"
+if [ -f "$STUB_TMP/created.json" ]; then
+  ok "case 18: alert filed"
+  assert_contains "$(cat "$STUB_TMP/created.json")" "behind_deployable=1" "case 18: body states the deployable distance"
+  assert_contains "$(cat "$STUB_TMP/created.json")" "deployable_age_h=" "case 18: body states the deployable age"
+else
+  bad "case 18: alert was NOT filed"
+fi
+# 18b DISCRIMINATION: the SAME tree and the SAME count, with the age bound
+# raised past the pending commit's age → green. Proves the red in 18 came from
+# the age, not from the count (a detector that reds on everything passes 18).
+run_checker_with "$C3" 2 "old-deploy" "" "100"
+assert_eq "$RC" 0 "case 18b: same commit, age bound 100 h → exit 0 (the age decided, not the count)"
+[ ! -f "$STUB_TMP/created.json" ] && ok "case 18b: no alert filed" || bad "case 18b: unexpected alert"
+
+# ── 19. within the count bound, deployable commit is YOUNG → green, age stated ─
+run_checker_with "$C2" 2 "" "" ""
+assert_eq "$RC" 0 "case 19: 1 young deployable commit ≤ bound 2 → exit 0"
+assert_contains "$OUT" "behind_deployable=1" "case 19: deployable distance stated"
+assert_contains "$OUT" "deployable_age_h=0" "case 19: the age of the pending commit is stated even when green"
+
+# ── 20. the deploy trigger's paths cannot be read → RED, never a pass ─────────
+# A checker that cannot tell which commits deploy cannot judge staleness. This
+# is the fail-closed half of the path-scoping: a `deploy-hosted.yml` whose
+# trigger shape changed must red, not silently fall back to a raw count (which
+# would start crying wolf) or to "no paths" (which would count nothing and go
+# green forever — the exact defect #10109 is about).
+run_checker_with "$C1" 2 "" "$DEPLOY_WF_NOPATHS" ""
+assert_eq "$RC" 1 "case 20: unreadable deploy paths → exit 1"
+assert_contains "$OUT" "deploy-paths-unreadable" "case 20: reason names the unreadable filter"
+
+# ── 21. PARITY with the REAL deploy-hosted.yml, both directions ─────────────
+# The checker derives the filter at run time instead of duplicating it, and the
+# price of that is this pin: a commit touching `tortoise/**` is deployable, a
+# commit touching `docs/` is not. If the real trigger's shape ever stops being
+# parsed, case 20 reds; if the parse silently stops matching, these two red.
+run_checker_with "$C1" "" "" "$DEPLOY_WF_REAL" ""
+assert_eq "$RC" 0 "case 21a: real filter — tortoise/** commits are deployable (2 ≤ bound 2)"
+assert_contains "$OUT" "behind_deployable=2" "case 21a: the real filter counts tortoise/** commits"
+run_checker_with "$C3" "" "docs-lag" "$DEPLOY_WF_REAL" ""
+assert_eq "$RC" 0 "case 21b: real filter — a docs-only lag on the real trigger → exit 0"
+assert_contains "$OUT" "behind_deployable=0" "case 21b: the real filter does NOT count docs/ commits"
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"

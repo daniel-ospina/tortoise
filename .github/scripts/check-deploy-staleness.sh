@@ -49,6 +49,27 @@
 # divergent one is not, and those are different failures). The count is only
 # the STATED distance.
 #
+# WHAT COUNTS AS BEHIND (two clocks, both needed)
+# ----------------------------------------------
+# 1. COUNT, over the commits that CAN change the deployment. `deploy-hosted.yml`
+#    deploys on `on.push.paths` only, so a merge confined to `docs/`, `skills/`,
+#    `tools/`, `.github/`, `website/` or `operations/` (or to `tests/` other than
+#    `tests/sample_transcript.txt`, which the image copies) advances main
+#    WITHOUT deploying anything — by the pipeline's own declared policy. Counting
+#    those as lag reds the check for a condition nobody can act on, and an alarm
+#    that cries wolf is the defect this check exists to prevent, restated.
+#    Measured on main: with a raw-distance bound of 3, ~14% of the time was red
+#    for a non-deployable lag (longest false-red window 3.6 h, 20 alert
+#    create/PATCH cycles per 500 commits). So `behind_deployable=` decides and
+#    `behind=` (the raw distance) is stated alongside it.
+# 2. AGE, because a count bound alone stays GREEN forever in the state #10109
+#    was filed about: one deployable commit pending, tolerated by the bound,
+#    never deployed. `deployable_age_h=` is the age of the OLDEST undeployed
+#    deployable commit (its committer date — stateless, no memory of previous
+#    ticks), and it reds past `max_age_hours`. The age arm is what makes "the
+#    deploy stopped landing" observable independently of how many merges piled
+#    up behind it.
+#
 # WHY IT CANNOT BE STARVED INTO SILENCE
 # -------------------------------------
 # The 4 runs that vanished tonight were cancelled by the `deploy-hosted`
@@ -70,9 +91,10 @@
 #   for the pager, closing which needs an endpoint external to GitHub and an
 #   owner decision.
 #
-# EXIT CONTRACT: 0 = current (behind ≤ bound, distance stated); 1 = STALE,
-# diverged, unreadable, or the checker itself could not assess — every red is
-# loud, and a non-zero exit fails the run.
+# EXIT CONTRACT: 0 = current (deployable lag ≤ bound AND the oldest deployable
+# lag is at or under the age bound; distance stated); 1 = STALE, diverged, unreadable,
+# or the checker itself could not assess — every red is loud, and a non-zero exit
+# fails the run.
 #
 # Harness: .github/scripts/check-deploy-staleness.test.sh (synthetic git repo,
 # stubs gh, no network).
@@ -93,14 +115,33 @@ ALERT_LABEL="${ALERT_LABEL:-auto-filed}"
 ALERT_MARKER='<!-- deploy-staleness-alert -->'
 ALERT_TITLE='[OPS] production deployment is stale (behind origin/main)'
 
-# The ONE bound: how many commits of lag are tolerated before the check reds.
-# Default 2 — a deploy in flight can legitimately sit 1-2 commits behind while
-# main advances under it; more than that for longer than one tick is "deploys
-# are not keeping up". The 2026-10-26 incident (7 behind) would have fired on
-# the first tick at this bound. Overridable via vars.DEPLOY_STALENESS_MAX_BEHIND
-# (the workflow passes it) or DEPLOY_STALENESS_MAX_BEHIND for the harness.
+# BOUND 1 (count): how many DEPLOYABLE commits of lag are tolerated before the
+# check reds. Default 2 — a deploy in flight can legitimately sit 1-2 deployable
+# commits behind while main advances under it; more than that for longer than
+# one tick is "deploys are not keeping up". The 2026-10-26 incident (7 behind,
+# all of them fixing `tortoise/`) would have fired on the first tick at this
+# bound. Overridable via vars.DEPLOY_STALENESS_MAX_BEHIND (the workflow passes
+# it) or DEPLOY_STALENESS_MAX_BEHIND for the harness.
 MAX_BEHIND_DEFAULT=2
 MAX_BEHIND="${DEPLOY_STALENESS_MAX_BEHIND:-}"
+
+# BOUND 2 (age): how long the OLDEST undeployed deployable commit may sit
+# undeployed before the check reds. Default 6 h — deploys land in tens of
+# minutes, and the 2026-10-26 incident ran 9 h, so 6 h fires while there is
+# still an evening to recover. Independent of the count: one pending deployable
+# commit that never deploys is exactly the state a count bound tolerates
+# forever. Overridable via vars.DEPLOY_STALENESS_MAX_AGE_HOURS (the workflow
+# passes it) or DEPLOY_STALENESS_MAX_AGE_HOURS for the harness.
+MAX_AGE_HOURS_DEFAULT=6
+MAX_AGE_HOURS="${DEPLOY_STALENESS_MAX_AGE_HOURS:-}"
+# A year. The cap exists so a mangled value cannot mute the arm via `[ -gt ]`
+# reading FALSE on an over-intmax integer.
+MAX_AGE_HOURS_CAP=8760
+
+# The deploy trigger whose `on.push.paths` defines "a commit that can change the
+# deployment". A seam so the harness can pin a fixture filter; production reads
+# the real workflow from the same checkout.
+DEPLOY_WORKFLOW="${DEPLOY_STALENESS_DEPLOY_WORKFLOW:-$SCRIPT_DIR/../workflows/deploy-hosted.yml}"
 
 # A browser UA — Cloudflare serves 403 to the default curl/urllib agent (the
 # same UA tools/ship_test_onboarding.py uses for the same endpoint).
@@ -118,29 +159,64 @@ else
   fail() { echo "ERROR: $*" >&2; }
 fi
 
-# ⛔ THE BOUND IS UNTRUSTED (a repository variable / env). Accept ONLY a plain
+# ⛔ THE BOUNDS ARE UNTRUSTED (repository variables / env). Accept ONLY a plain
 # integer; digit-stripping `2h`→2 or `-1`→1 would silently near-zero the bound
 # and false-fire on every run — the pager that cries wolf is the defect
 # restated. Bound the MAGNITUDE before any arithmetic: bash's `[ -gt ]` on an
 # over-intmax value reads FALSE (and `$(( ))` wraps), which would mute the
-# comparison. Reject on DIGIT COUNT, then on range.
-normalize_max_behind() { # <raw> -> commits
-  local raw="${1:-}"
-  if [ -z "$raw" ]; then printf '%s' "$MAX_BEHIND_DEFAULT"; return 0; fi
+# comparison. Reject on DIGIT COUNT, then on range. ONE normalizer for both
+# bounds, so neither can drift into a laxer parse than the other.
+normalize_uint() { # <raw> <default> <name> <cap> -> uint
+  local raw="${1:-}" default="$2" name="$3" cap="$4"
+  if [ -z "$raw" ]; then printf '%s' "$default"; return 0; fi
   case "$raw" in
     *[!0-9]*)
-      warn "DEPLOY_STALENESS_MAX_BEHIND='[${raw}]' is not a plain integer — using the default ${MAX_BEHIND_DEFAULT} (a mangled bound must not disable the comparison)"
-      printf '%s' "$MAX_BEHIND_DEFAULT"; return 0 ;;
+      warn "${name}='[${raw}]' is not a plain integer — using the default ${default} (a mangled bound must not disable the comparison)"
+      printf '%s' "$default"; return 0 ;;
   esac
-  [ "${#raw}" -gt 6 ] && {
-    warn "DEPLOY_STALENESS_MAX_BEHIND='[${raw}]' has more than 6 digits — using the default ${MAX_BEHIND_DEFAULT}"
-    printf '%s' "$MAX_BEHIND_DEFAULT"; return 0; }
+  if [ "${#raw}" -gt 6 ]; then
+    warn "${name}='[${raw}]' has more than 6 digits — using the default ${default}"
+    printf '%s' "$default"; return 0; fi
   raw="$(printf '%s' "$raw" | sed 's/^0*//')"
   [ -n "$raw" ] || raw=0
-  if [ "$raw" -gt 10000 ]; then
-    warn "DEPLOY_STALENESS_MAX_BEHIND=${raw} is above 10000 — using the default ${MAX_BEHIND_DEFAULT}"
-    printf '%s' "$MAX_BEHIND_DEFAULT"; return 0; fi
+  if [ "$raw" -gt "$cap" ]; then
+    warn "${name}=${raw} is above ${cap} — using the default ${default}"
+    printf '%s' "$default"; return 0; fi
   printf '%s' "$raw"
+}
+
+normalize_max_behind() { normalize_uint "${1:-}" "$MAX_BEHIND_DEFAULT" "DEPLOY_STALENESS_MAX_BEHIND" 10000; }
+normalize_max_age_hours() { normalize_uint "${1:-}" "$MAX_AGE_HOURS_DEFAULT" "DEPLOY_STALENESS_MAX_AGE_HOURS" "$MAX_AGE_HOURS_CAP"; }
+
+# ── what a merge must TOUCH to redeploy, read from the trigger itself ────────
+# One glob per line from `on.push.paths` of the deploy workflow. Printed empty
+# when the filter cannot be read (no file, no `on.push.paths`, or a shape this
+# parser does not recognise) — and the call site turns that into a RED, because
+# a checker that cannot tell which commits deploy cannot judge staleness, and an
+# unanswered question is never a pass (agent-infra#1745 doctrine).
+#
+# ⛔ The set is NEVER duplicated in this script: a second copy would silently
+# stop matching the trigger it mirrors, and the check would then contradict the
+# pipeline on every merge that touches whatever the copy missed.
+read_deploy_paths() { # -> globs on stdout, one per line
+  [ -f "$DEPLOY_WORKFLOW" ] || return 0
+  awk '
+    /^on:[[:space:]]*$/ { in_on=1; next }
+    in_on && /^[^[:space:]#]/ { in_on=0; in_push=0; in_paths=0 }
+    in_on && /^  push:[[:space:]]*$/ { in_push=1; next }
+    in_on && in_push && /^  [A-Za-z_]/ { in_push=0; in_paths=0 }
+    in_push && /^    paths:[[:space:]]*$/ { in_paths=1; next }
+    in_paths {
+      if ($0 ~ /^[[:space:]]*(#.*)?$/) next
+      if ($0 ~ /^      - /) {
+        v=$0; sub(/^      - /,"",v); sub(/[[:space:]]+#.*$/,"",v)
+        gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^["\047]|["\047]$/,"",v)
+        if (v!="") print v
+        next
+      }
+      exit
+    }
+  ' "$DEPLOY_WORKFLOW" 2>/dev/null
 }
 
 # ── the deployed revision, positively read ───────────────────────────────────
@@ -260,6 +336,7 @@ deployed=$3
 main=$4
 ${2}
 max_behind=${MAX_BEHIND}
+max_age_hours=${MAX_AGE_HOURS}
 checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 ⛔ **The commit production is running is not current.** The invariant is one
@@ -272,6 +349,19 @@ main=$4
 ${2}
 \`\`\`
 
+**What the two distances mean.** \`behind=\` is every commit on main after the
+deployed one. \`behind_deployable=\` is the commits that can actually change the
+deployment — the ones touching \`on.push.paths\` in
+\`.github/workflows/deploy-hosted.yml\` (\`tortoise/**\`, \`packs/**\`, the image
+inputs: \`Dockerfile.hosted\`, \`entrypoint.sh\`, \`requirements.txt\`,
+\`pyproject.toml\`, \`uv.lock\`, \`fly.toml\`, \`product/pricing.json\`, …). A
+\`docs/\`-only lag is **not** staleness — the pipeline deliberately does not
+redeploy for it — so the alarm keys on the second number. \`deployable_age_h=\`
+is how long the OLDEST undeployed deployable commit has been waiting, which is
+what reds the \`max_age_hours\` (${MAX_AGE_HOURS} h) arm even when the count is
+small: one commit that never deploys is the state a count bound tolerates
+forever.
+
 This is a **positive reading**, not an absence: the deployed revision was
 observed (via \`GET ${API_URL%/}/v1/version\`), compared with \`origin/main\`
 via \`git merge-base --is-ancestor\`, and found stale. No failure was inferred
@@ -280,7 +370,9 @@ from silence — the silence is what this check exists to break.
 **Check, in this order:**
 1. \`gh run list --workflow deploy-hosted.yml --limit 20\` — are deploys landing?
    Red/cancelled runs here are the cause (a migration-drift gate failing closed,
-   or a \`cancel-in-progress\` cascade from rapid merges).
+   or a \`cancel-in-progress\` cascade from rapid merges). If there is **no run
+   at all** for the undeployed deployable commits, the deploy was never
+   triggered — check the trigger's path filter, not the deploy's logs.
 2. The drift gate's own report (the failing run's \`Check migration drift\`
    step) — if a migration is ahead of the app, the co-move flip sequence in
    \`supabase-deploy.yml\` is the fix path, NOT a bypass.
@@ -294,7 +386,9 @@ BODY
 
 # ── main ────────────────────────────────────────────────────────────────────
 main() {
-  local deployed main behind state reason behind_clause alert search_error new_body
+  local deployed main behind behind_deployable state reason behind_clause alert search_error new_body
+  local deploy_paths oldest_ts age_secs age_hours age_clause
+  local -a deploy_paths_arr
 
   # Fail closed: a checker that cannot alert is a deaf checker.
   if [ -z "$GH_TOKEN" ]; then
@@ -310,8 +404,9 @@ main() {
     exit 1
   fi
   MAX_BEHIND="$(normalize_max_behind "$MAX_BEHIND")"
+  MAX_AGE_HOURS="$(normalize_max_age_hours "$MAX_AGE_HOURS")"
 
-  log "check-deploy-staleness (#10109) — ${REPO}; ref=${REF}; bound=${MAX_BEHIND} commits"
+  log "check-deploy-staleness (#10109) — ${REPO}; ref=${REF}; bounds: behind≤${MAX_BEHIND} deployable commits, age≤${MAX_AGE_HOURS}h"
 
   main="$(resolve_main)"
   if [ -z "$main" ]; then
@@ -337,19 +432,76 @@ main() {
   elif [ "$deployed" = "$main" ]; then
     state="current"; reason="current"
     behind=0
-    behind_clause="behind=0"
+    behind_clause="behind=0 behind_deployable=0 deployable_age_h=none"
   elif git -C "$REPO_DIR" merge-base --is-ancestor "$deployed" "$main" 2>/dev/null; then
     if ! behind="$(git -C "$REPO_DIR" rev-list --count "${deployed}..${main}" 2>/dev/null)"; then
       # A lag whose distance cannot be counted is STILL a lag: red, not green.
       # (A `|| 0` here would read a failed count as "current" — a fail-open.)
       state="unknown"; reason="distance-unreadable"
       behind_clause="behind=unknown (could not count the distance)"
-    elif [ "$behind" -gt "$MAX_BEHIND" ]; then
-      state="stale"; reason="behind"
-      behind_clause="behind=${behind}"
     else
-      state="current"; reason="within-bound"
-      behind_clause="behind=${behind}"
+      # The distance that DECIDES is the deployable one (the deploy trigger's
+      # own path filter). `behind` stays stated alongside it: it is the raw lag
+      # a reader may want, just not the staleness verdict.
+      deploy_paths="$(read_deploy_paths)"
+      if [ -z "$deploy_paths" ]; then
+        # Cannot tell which commits deploy = cannot judge staleness = never a
+        # pass (agent-infra#1745). RED, and it names what it could not read.
+        state="unknown"; reason="deploy-paths-unreadable"
+        behind_clause="behind=${behind} behind_deployable=unknown (could not read on.push.paths from ${DEPLOY_WORKFLOW})"
+      else
+        deploy_paths_arr=()
+        while IFS= read -r p; do
+          if [ -n "$p" ]; then deploy_paths_arr+=("$p"); fi
+        done <<< "$deploy_paths"
+        if ! behind_deployable="$(git -C "$REPO_DIR" rev-list --count "${deployed}..${main}" -- "${deploy_paths_arr[@]}" 2>/dev/null)"; then
+          # Same rule as the raw count: an uncountable deployable distance is a
+          # RED, never a silent "current".
+          state="unknown"; reason="deployable-distance-unreadable"
+          behind_clause="behind=${behind} behind_deployable=unknown (could not count the deployable distance)"
+        else
+          age_secs=0; age_hours=0; age_clause=" deployable_age_h=none"
+          if [ "$behind_deployable" -gt 0 ]; then
+            # The OLDEST undeployed deployable commit's committer date — the
+            # stateless half of the #10109 T-arm. `sort -n | sed -n 1p` takes the
+            # minimum regardless of traversal order (a merge commit can be
+            # traversed after an older sibling), and `sed` drains the pipe so
+            # `set -o pipefail` cannot see a SIGPIPE from `git log`.
+            # `|| oldest_ts=""` so a genuine git failure lands on the NAMED arm
+            # below (reason=deployable-age-unreadable) instead of aborting the
+            # script under `set -e` with no reason: red either way, but a red
+            # that says what it could not read is the point.
+            oldest_ts="$(git -C "$REPO_DIR" log --format=%ct "${deployed}..${main}" -- "${deploy_paths_arr[@]}" 2>/dev/null | sort -n | sed -n '1p')" || oldest_ts=""
+            case "$oldest_ts" in
+              ''|*[!0-9]*)
+                state="unknown"; reason="deployable-age-unreadable"
+                behind_clause="behind=${behind} behind_deployable=${behind_deployable} deployable_age_h=unknown (could not date the oldest undeployed deployable commit)"
+                ;;
+            esac
+            if [ -z "$state" ]; then
+              age_secs=$(( $(date -u +%s) - oldest_ts ))
+              [ "$age_secs" -lt 0 ] && age_secs=0   # clock skew must not read as ancient
+              age_hours=$(( age_secs / 3600 ))
+              age_clause=" deployable_age_h=${age_hours} max_age_hours=${MAX_AGE_HOURS}"
+            fi
+          fi
+          if [ -z "$state" ]; then
+            if [ "$behind_deployable" -gt "$MAX_BEHIND" ]; then
+              state="stale"; reason="behind-deployable"
+              behind_clause="behind=${behind} behind_deployable=${behind_deployable}${age_clause}"
+            elif [ "$behind_deployable" -gt 0 ] && [ "$age_secs" -gt $(( MAX_AGE_HOURS * 3600 )) ]; then
+              # COUNT within bound, but the pending deployable commits are old:
+              # deploys are not landing. This is the #10109 shape a count bound
+              # alone reports as GREEN forever.
+              state="stale"; reason="behind-too-long"
+              behind_clause="behind=${behind} behind_deployable=${behind_deployable}${age_clause}"
+            else
+              state="current"; reason="within-bound"
+              behind_clause="behind=${behind} behind_deployable=${behind_deployable}${age_clause}"
+            fi
+          fi
+        fi
+      fi
     fi
   else
     state="diverged"; reason="not-ancestor"
@@ -358,7 +510,7 @@ main() {
 
   # The distance is ALWAYS stated — even green, even the degenerate cases — so a
   # reader can see the bound being approached before it is crossed.
-  note "deployed=${deployed} main=${main} ${behind_clause} (state=${state}, bound=${MAX_BEHIND})"
+  note "deployed=${deployed} main=${main} ${behind_clause} (state=${state}, bound=${MAX_BEHIND} deployable commits / ${MAX_AGE_HOURS}h)"
 
   alert="$(search_issue "$ALERT_MARKER" "$ALERT_TITLE")"
   case "$alert" in

@@ -34,6 +34,17 @@
 #   observe — the same residual availability-liveness (#4573) already names for
 #   the pager; closing it needs an endpoint external to GitHub and an owner
 #   decision.
+#
+# TWO BOUNDS, BOTH NEEDED (see the script's header)
+# ------------------------------------------------
+#   DEPLOY_STALENESS_MAX_BEHIND     — DEPLOYABLE commits of lag tolerated (2)
+#   DEPLOY_STALENESS_MAX_AGE_HOURS  — hours the oldest undeployed deployable
+#                                     commit may wait (6)
+# Deployable = touching the `on.push.paths` filter of `deploy-hosted.yml`, read
+# from that workflow at run time (never duplicated in the checker). A count
+# bound alone reports a single never-deployed commit as green forever; an age
+# bound alone reports nothing until the clock has run. Both are plain integers;
+# a mangled value warns and falls back rather than disabling the arm.
 name: Deploy staleness (production behind main)
 
 on:
@@ -92,6 +103,16 @@ jobs:
           # else warns and falls back (a mangled bound must not disable the
           # comparison). Raising it trades detection latency for fewer false
           # alarms; the 2026-10-26 incident (7 behind) fires on the first tick
-          # at the default.
+          # at the default. Only DEPLOYABLE commits count (the ones touching
+          # `deploy-hosted.yml`'s `on.push.paths`), so a docs-only lag is not
+          # staleness. Must be a PLAIN INTEGER, same rule as below.
           DEPLOY_STALENESS_MAX_BEHIND: ${{ vars.DEPLOY_STALENESS_MAX_BEHIND }}
+          # The SECOND bound: how long the oldest undeployed DEPLOYABLE commit
+          # may wait before the check reds, even when the count is within the
+          # bound. Unset → the script's default (6 h). This is the arm that
+          # catches "deploys stopped landing" while only one or two deployable
+          # commits are pending — the state a count bound alone reports green
+          # forever. Default 6 h because deploys land in tens of minutes and
+          # 2026-10-26 ran 9 h; raising it slows detection, it cannot mute it.
+          DEPLOY_STALENESS_MAX_AGE_HOURS: ${{ vars.DEPLOY_STALENESS_MAX_AGE_HOURS }}
         run: bash .github/scripts/check-deploy-staleness.sh

@@ -1372,6 +1372,12 @@ jobs:
         # unreadable revision — and that a current commit passes and states the
         # distance. Also pins the fail-closed read side (curl failure, missing
         # token/jq) and the dedupe (one alert, PATCHed not duplicated).
+        # The two bounds are pinned as MUTATIONS: a docs-only lag (raw distance
+        # over the bound, zero deployable commits) stays GREEN — the false alarm
+        # that makes a pager inert — while a single deployable commit older than
+        # the age bound REDS even though the count is within bound; and an
+        # unreadable `on.push.paths` filter is a RED, never a pass. The real
+        # `deploy-hosted.yml` filter is pinned in both directions.
         if: ${{ !cancelled() }}
         run: bash .github/scripts/check-deploy-staleness.test.sh
 
