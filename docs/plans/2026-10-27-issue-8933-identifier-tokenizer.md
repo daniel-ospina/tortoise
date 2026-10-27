@@ -103,9 +103,11 @@ integration test; step 6 is the whole file.
 **Rounds:** 1 (verifiers: 1, class: code)
 
 ### Review Scope Contract
+
 **Class:** code
 
 **Risk surface** — what this change can break, each with the check that would catch it:
+
 - R1 **A query that matched before stops matching** (the alias/phrase could displace or de-rank an
   original token) → `TestRawRetrievalUnchanged` (non-identifier queries are byte-identical
   `build_or_query` output; a mixed-alnum query keeps every original token) and the A4 reserved-slot
@@ -131,6 +133,7 @@ integration test; step 6 is the whole file.
 **Threat classes:** (not adversarial) — no gate/enforcement code in this diff.
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
+
 - the #10121 tie-break/recency ordering (a separate issue with its own decision; this change
   raises the exact match's *score*, it does not change tie ordering);
 - widening the identifier grammar to `.`/`/`/`#` (ruling risk 1: a separate measured step);
