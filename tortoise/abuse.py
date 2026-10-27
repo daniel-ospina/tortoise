@@ -1367,7 +1367,28 @@ def _alert_dict(row: dict) -> dict:
         # #10156: informational, never incident-grade. See
         # ``_read_velocity_message`` for the defect this replaces.
         EVENT_READ_VELOCITY: _read_velocity_message(details),
-        EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
+        # Round 13 (review finding). This is PRE-EXISTING copy that the property
+        # test cannot see (it only asserts the ABSENCE of claims) and that the
+        # `has a message` pin only checks the presence of — so it shipped
+        # unreviewed while being rendered verbatim, in the same `messages` dict
+        # this change owns. Three of the defects this PR exists to remove:
+        #   * "breach" asserts a violation. `signup_velocity` is an ACTIVITY
+        #     register row — a notify-only rate measurement, like the other two
+        #     velocity detectors. Nothing was breached.
+        #   * "velocity" / "anon signups" is our internal vocabulary, and the raw
+        #     `'?'` fallbacks are the placeholder class `_read_velocity_message`
+        #     already calls out: with empty details it rendered
+        #     "Signup velocity breach: ? anon signups from ?".
+        #   * it offered no route at all.
+        # The remedy is NOT the key one: these are ANONYMOUS signups from one
+        # source, so revoking the reader's own keys would address nothing. The
+        # row can know that an org was minted and that its rate was unusual, so
+        # the route is for someone who does not recognise the Organization.
+        EVENT_SIGNUP_VELOCITY: ("Signup activity from one source crossed our "
+                                "unusual-activity threshold. This is "
+                                "informational; it did not change anything. If "
+                                "you didn't expect this Organization to be "
+                                "created, contact support@premiselabs.co."),
     }
     at = row.get("created_at")
     return {

@@ -814,11 +814,20 @@ class TestAlertRegistersAndAcks:
     #: module level so the self-fixture below can prove the predicate matches
     #: the strings it is supposed to reject — a pin that asserts only the
     #: current copy's ABSENCE cannot show it would have caught anything.
-    _ACTOR = (r"(?:an?\s+operator|operators?|our\s+team|a\s+human|we|us|"
-              r"our\s+[\w-]+\s+(?:engineer|team|staff|sre|developer)|on-?call)")
+    #: Round 13 (review finding): the first-person-possessive branch required a
+    #: THREE-token phrase ("our on-call engineer"), so every single-word role
+    #: escaped it — "Our engineers have been notified." matched nothing. The
+    #: modifier is optional and the role tolerates a plural now.
+    _ACTOR = (r"(?:an?\s+operator|operators?|a\s+human|we|us|on-?call|"
+              r"our\s+(?:[\w-]+\s+)?"
+              r"(?:engineers?|team|staff|sres?|developers?|humans?))")
     _AUX = (r"(?:has|have|had|is|are|was|were|am|will|would|can|should|must|"
             r"do|does|did|been|being)")
-    _GAP = r"[\s,;:—-]+(?:\S+[\s,;:—-]+){0,3}"
+    #: Round 13 (review finding): {0,3} let ONE filler word defeat the passive
+    #: arm — "This alert has already been escalated to our team." has four
+    #: intervening tokens. {0,6} still cannot reach any accepted string's actor
+    #: from its auxiliary (asserted in the accept list below).
+    _GAP = r"[\s,;:—-]+(?:\S+[\s,;:—-]+){0,6}"
     #: actor → auxiliary ("an operator has…") | auxiliary → actor ("was
     #: escalated to an operator") | actor → contraction ("We're…").
     _HUMAN = re.compile(
@@ -826,9 +835,14 @@ class TestAlertRegistersAndAcks:
         rf"\b{_ACTOR}\b\s*'(?:re|ve|d|m|ll|s)\b)", re.I)
     #: A promise of contact/timing where the actor is ELIDED ("…, and will be in
     #: touch"), which the actor arms cannot see.
+    #: Round 13 (review finding): a BARE "reach(?:ing)? out" is not a promise —
+    #: "If you need a higher limit, reach out to support@…" is the accepted
+    #: imperative shape, with the CUSTOMER as subject, and the old pattern
+    #: rejected it. It now requires the elided-actor auxiliary ("…, and will
+    #: reach out") that the actor arms cannot see.
     _PROMISE = re.compile(
-        r"(will be in touch|reach(?:ing)? out|get back to you|"
-        r"follow(?:ing)? up with you|hear from us|"
+        r"(will be in touch|(?:will|'ll)\s+reach(?:ing)?\s+out|"
+        r"get back to you|follow(?:ing)? up with you|hear from us|"
         r"within \d+\s*(?:hours?|days?|business days?))", re.I)
 
     def test_the_human_claim_predicate_actually_REJECTS_known_bad_strings(self):
@@ -841,28 +855,56 @@ class TestAlertRegistersAndAcks:
         to an operator") or a contraction ("We're") defeated it. So the predicate
         is now tested against the strings it MUST reject, and the next round has
         to demonstrate that rather than assert it."""
-        must_reject = [
+        #: Caught by the ACTOR arms, and asserted to be caught by THEM: a
+        #: fixture entry that happened to match the promise list instead would
+        #: leave the actor arm unproven for that shape (round-13 finding — the
+        #: timeline entry below matched the auxiliary-first actor arm, so the
+        #: `within N hours` alternative was load-bearing and unasserted).
+        must_reject_human = [
             # the three historical wordings, verbatim
-            "Nothing has been disabled, and will be in touch.",
             "Nothing has been disabled, and our team is reviewing it.",
             "…and an operator has been asked to look at it.",
-            # ACTOR-LAST (passive) — the round-11 shape could not see this
             "This alert was escalated to an operator for review.",
             # CONTRACTION — `\bwe\b` + `\s+` never matches "We're"
             "We're investigating this now.",
-            # a pure timeline promise with the actor as OBJECT
-            "You will hear from us within 24 hours.",
             # the round-11 bypasses, kept so they cannot come back
             "An operator is looking into it.",
             "An operator will review this.",
             "Our on-call engineer was paged.",
+            # ONE-WORD ROLES — the three-token possessive branch missed these
+            "Our engineers have been notified.",
+            "Our SRE will take a look.",
+            "Our staff is aware.",
+            # ONE filler word past the old {0,3} gap
+            "This alert has already been escalated to our team.",
+            # the actor as OBJECT of the auxiliary
+            "You will hear from us within 24 hours.",
         ]
-        for text in must_reject:
-            assert (self._HUMAN.search(text) or self._PROMISE.search(text)), (
-                f"the predicate MISSES a false human claim: {text!r} — a pin "
+        #: Caught by the PROMISE list where the actor is ELIDED, which no actor
+        #: arm can see. Each must NOT match the actor arms, or it proves nothing
+        #: about the promise list.
+        must_reject_promise = [
+            "Nothing has been disabled, and will be in touch.",
+            "Expect a response within 24 hours.",
+            # elided actor with the auxiliary retained — the shape no actor arm
+            # can see. (A bare "…and reach out shortly." is NOT here on purpose:
+            # with no auxiliary it is indistinguishable from the accepted
+            # imperative, and banning it would forbid legitimate copy.)
+            "…and will reach out shortly.",
+        ]
+        for text in must_reject_human:
+            assert self._HUMAN.search(text), (
+                f"the ACTOR arms miss a false human claim: {text!r} — a pin "
                 "that cannot reject this cannot guard the real copy either")
-        # …and it must NOT reject the two documented exclusions, or every future
-        # copy iteration would be forced to fight the test instead of the bug.
+        for text in must_reject_promise:
+            assert self._PROMISE.search(text), (
+                f"the PROMISE list misses an elided-actor promise: {text!r}")
+            assert not self._HUMAN.search(text), (
+                f"{text!r} is supposed to prove the PROMISE list (actor "
+                "elided) but the actor arms catch it too, so the promise arm "
+                "stays unproven for this shape")
+        # …and it must NOT reject legitimate copy, or every future iteration
+        # would fight the test instead of the bug.
         must_accept = [
             # backed by the ROW'S EXISTENCE: suspend_org() is the only writer
             "Organization suspended by an operator",
@@ -870,14 +912,17 @@ class TestAlertRegistersAndAcks:
             "review your API keys in Keys — an unrecognised key should be "
             "revoked there",
             "If you need a higher limit, contact support@premiselabs.co.",
+            # the imperative reach-out shape (round-13 finding: the old bare
+            # "reach out" promise pattern rejected this)
+            "If you need a higher limit, reach out to support@premiselabs.co.",
             "Total read volume for this Organization crossed our threshold. "
             "This is informational; it did not change anything.",
         ]
         for text in must_accept:
             assert not self._HUMAN.search(text), (
-                f"the predicate rejects an ACCEPTED string: {text!r}")
+                f"the ACTOR arms reject an ACCEPTED string: {text!r}")
             assert not self._PROMISE.search(text), (
-                f"the promise list rejects an ACCEPTED string: {text!r}")
+                f"the PROMISE list rejects an ACCEPTED string: {text!r}")
 
     def test_no_customer_string_claims_what_a_HUMAN_is_doing(self):
         """Rounds 6 / 9 / 10 / 11 / 12 (review findings). The same promise was
