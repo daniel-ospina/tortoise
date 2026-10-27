@@ -298,12 +298,13 @@ def test_the_consent_page_still_does_not_call_any_logout_api() -> None:
 def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
     """The consent page signs in with `redirectTo = window.location.origin + /oauth/authorize`.
 
-    GoTrue refuses a `redirect_to` it does not recognise, and the repo's record of the required
-    allowlist entries (`docs/ops/auth-email-flows.md` §3) does not contain the consent page's
-    origin. Either the allowlist is missing it (provider sign-in on the only working auth flow is
-    refused) or the record is incomplete. Both are defects; silence is the one that is
-    unfalsifiable, so the record must mention the origin — as an entry, or as a recorded
-    non-requirement once the bridge moves provider sign-in to the app origin.
+    GoTrue does NOT refuse a `redirect_to` it does not recognise — it silently substitutes the
+    project Site URL and still delivers a live `code` there, so a missing or non-covering entry
+    does not fail loudly, it strands the sign-in with nothing to read (#10088; `§3`'s consent-page
+    row). The record (`docs/ops/auth-email-flows.md` §3) must therefore name the consent page's
+    target — as an entry, or as a recorded non-requirement once the bridge moves provider sign-in
+    to the app origin — and it must name a SHAPE that covers it: `/**` does, the bare path written
+    out does, `/*` does not cross the `/`, and a query-bearing form is no longer required.
     """
     record = ALLOWLIST_RECORD.read_text()
     section = record.split("## 3. Redirect allowlist", 1)
@@ -318,6 +319,61 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
         "the consent page's sign-in fallback origin (https://api.premiselabs.co/oauth/authorize) "
         "is absent from the redirect-allowlist record. Add the entry, or record that the bridge "
         "removed the dependency — do not leave the origin unaddressed (#3524 task 5)."
+    )
+
+    # #10088: naming the origin is no longer enough. The target is now the BARE path, and the
+    # record's own rule is that the entry must COVER it — so pin both the target and a covering
+    # shape, or a later edit can drop the requirement while this guard stays green.
+    assert "https://api.premiselabs.co/oauth/authorize" in table, (
+        "§3 no longer names the consent page's BARE target (https://api.premiselabs.co/"
+        "oauth/authorize). #10088 narrowed the target from a query-bearing form to the bare path; "
+        "the record must keep naming it, because a shape's coverage is decided against it."
+    )
+    assert (
+        "https://api.premiselabs.co/**" in table
+        or "| `https://api.premiselabs.co/oauth/authorize`" in table
+    ), (
+        "§3 records no entry SHAPE that covers the bare /oauth/authorize target. `/**` covers it "
+        "and so does the bare path written out; `/*` does not cross the `/`, which is why the "
+        "shape has to be recorded rather than implied (#10088)."
+    )
+
+
+# ── Task 5 / #10088 — the provider-return marker list is ONE list, in two homes ─
+
+def test_the_provider_return_markers_are_one_list_on_both_sides() -> None:
+    """The server and the page decide the SAME question from opposite sides.
+
+    `hosted_api._PROVIDER_RETURN_MARKERS` decides whether a request without a `client_id` is a
+    provider return leg (so the page is served instead of the JSON 400). The page's
+    `TRANSIENT_MARKERS` decides whether a load is treated as a provider return. A marker in the
+    server's list but not the page's is a served page that then renders the plain sign-in view; a
+    marker in the page's list but not the server's is a real return leg answered `400
+    invalid_request` — after the provider code is already spent, so the user is stranded with
+    nothing to retry. Both lists are hand-maintained and the comment at the server's asserts they
+    "draw the same line" (#10088) — this is what makes that comment true, because nothing else
+    does. Neither list can move without the other.
+    """
+    from tortoise.hosted_api import _PROVIDER_RETURN_MARKERS
+
+    server = tuple(_PROVIDER_RETURN_MARKERS)
+
+    page_src = OAUTH.read_text()
+    match = re.search(r"const TRANSIENT_MARKERS = \[(.*?)\];", page_src, re.S)
+    assert match is not None, (
+        "the consent page no longer declares `const TRANSIENT_MARKERS = [...]` — the server's "
+        "`_PROVIDER_RETURN_MARKERS` is now pinned against nothing, so this guard would pass "
+        "silently while the two sides drifted apart"
+    )
+    page = tuple(re.findall(r'"([^"]+)"', match.group(1)))
+    assert page, f"TRANSIENT_MARKERS parsed empty from {match.group(0)!r} — nothing was read"
+
+    assert set(server) == set(page), (
+        "the provider-return markers disagree between the server and the page — "
+        f"hosted_api._PROVIDER_RETURN_MARKERS={sorted(server)} vs the page's "
+        f"TRANSIENT_MARKERS={sorted(page)}. A marker only the server knows serves a page that "
+        "then renders the plain sign-in view; a marker only the page knows strands a real return "
+        "leg on `400 invalid_request` with the provider code already spent (#10088)."
     )
 
 

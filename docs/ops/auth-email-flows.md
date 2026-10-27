@@ -25,8 +25,11 @@ Every email-initiated auth flow reaches the app through ONE route, `/auth/confir
 before minting a session.
 
 The route is correct only if two things outside this repo are correct: the **email templates** (they must build a
-link the route can consume) and the **redirect allowlist** (GoTrue refuses a `redirect_to` it does not recognise).
-Neither can be changed from this repository. This is the in-repo record of what they must be.
+link the route can consume) and the **redirect allowlist**. ⚠️ GoTrue does NOT refuse a `redirect_to` it does
+not recognise: it **silently** substitutes the project Site URL and still delivers a live `code` there, so a
+mismatched entry kills the flow with **no error to read** (measured 2026-10-26, #10088 — the verification is
+§3's consent-page row). Neither can be changed from this repository. This is the in-repo record of what they
+must be.
 
 ## 2. The template contract, per flow
 
