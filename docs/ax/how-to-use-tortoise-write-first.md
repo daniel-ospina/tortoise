@@ -15,7 +15,7 @@ aboutObjects: tortoise, how-to-use-tortoise
 > **What this file is.** The authored text of the rewritten skill, produced from
 > the measured failure list in [`how-to-use-tortoise-step1-eval.md`](how-to-use-tortoise-step1-eval.md)
 > (`#9675` Step 1, landed as `#9695`). **The body is the `## Contents` section
-> through the last line — 503 lines**, line for line: the port is a copy, not a
+> through the last line — 518 lines**, line for line: the port is a copy, not a
 > second rewrite. The port adds only what `writing-skills` requires around it
 > (see below).
 >
@@ -42,17 +42,20 @@ aboutObjects: tortoise, how-to-use-tortoise
 > allowed-tools: read write edit bash grep find
 > ```
 >
-> ⛔ **The port is not the body alone — it must also carry the three blocks
-> `writing-skills` makes mandatory.** `skills/writing-skills/SKILL.md` §"Mandatory
-> Blocks" states them as *"no exceptions"*, each validated by a `grep -c` that
-> must be ≥ 1: the `# How to Use Tortoise` H1 above the body; the gate warning
-> `> ⛔ **This skill MUST be read in full — not skimmed.**` immediately after the
-> frontmatter; and the closing `> Continue following the workflow as mandated by
-> this skill. Do not skip steps.` directive. `type: Workflow` additionally
-> requires `allowed-tools`, in Pi tool names rather than Claude's. All of these
-> are in the served mirror today
-> (`website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md`), and a
-> port that drops them fails a contract the artifact it replaces satisfies.
+> ⛔ **The port is not the body alone.** `skills/writing-skills/SKILL.md`
+> §"Mandatory Blocks" requires **two** blocks, *"no exceptions"*, each validated
+> by a `grep -c` that must be ≥ 1: a gate warning after the frontmatter
+> (`grep 'MUST be read in full'`) and a continuity directive at the bottom
+> (`grep 'Continue following the workflow'`). Carry both — **in the mirror's own
+> words, not the template's**: the served file reads
+> `> ⛔ **This skill MUST be read in full before any Tortoise graph write.** Skipping corrupts the graph.`
+> and closes with `> Continue following the workflow as mandated by this skill. Do not skip steps.`
+> Rewriting a served line to match a template is a change nobody decided.
+> `type: Workflow` additionally requires `allowed-tools`, in Pi tool names rather
+> than Claude's. The mirror also carries an `# How to Use Tortoise` H1 above the
+> body and `tags`/`summary`/`created`/`updated` — convention rather than a
+> mandatory block, but carry them too: a port that drops any of this fails a
+> contract the artifact it replaces already satisfies.
 >
 > **Why this draft names no verb.** `#9675`'s own recorded sequencing — the
 > `owner-decision` line *"Sequenced after #4282 Phase 3 for any tool name"* —
@@ -412,7 +415,15 @@ every audit eventually asks.
   terminal: a re-assertion creates a new node, it does not revive the old one.
 - **Superseding a claim does not supersede its operators.** An operator is a node
   with its own life: the transfer moves it onto the successor, so it prices the
-  new claim; one left on the old node is dangling wiring the check reports.
+  new claim; one left on the old node is dangling wiring the check reports. The
+  ghost itself never moves — a superseded claim is excluded from the inference
+  unconditionally (`retracted` / `superseded` / `archived` / `outdated` /
+  `deprecated`, plus the legacy outdated flag), so an operator still pointing at
+  it contributes **nothing**, and if the stripping leaves fewer than two
+  participating inputs the operator's whole factor is skipped, with only a log
+  line to say so. The edge does not price a ghost; it makes the operator's target
+  set wrong and the reader's picture wrong — so check the operators that pointed
+  at the claim you superseded, and unwire or supersede them.
 - **Delete** is for a node that should never have existed — a mis-write, a
   duplicate. It destroys content, leaving a journal record of the destruction —
   not how you express a change of mind.
@@ -480,11 +491,18 @@ structure, not the return value.
   not an operator, or to a node whose state excludes it from the dampener. This
   is the most valuable check, because it is the one thing a
   structurally-correct-looking graph can still get wrong.
-- **Run the graph's structural integrity check.** What it reports: evidence with
-  no provenance (`missing_sourceKind`), and a superseded claim that still has
-  live `IMPL`/`NAND` edges into it (`superseded_active_edges`). What it does not:
-  an orphan contradiction, or a source edge pointing at a node that is gone.
-  Those are yours, at write time (§5, §7).
+- **Run both integrity surfaces, and read what each covers.** They are not
+  interchangeable. The **hygiene audit** reports nine classes, among them a
+  superseded claim with no replacement edge (`superseded_no_edge`, high),
+  evidence with no provenance (`missing_sourceKind`), a superseded claim that
+  still has live `IMPL`/`NAND` edges into it (`superseded_active_edges`), and a
+  keyword heuristic over `IMPL` edges that may have belonged to `NAND`
+  (`impl_instead_of_nand`). The **chain-integrity check** validates the
+  product-strategy chain rules only — dangling journey→use-case, workflow→JTBD
+  and requirement→workflow references, orphaned use cases and drafts — and
+  reports no provenance class at all. Neither finds an orphan contradiction, and
+  neither finds a source edge pointing at a node that is gone: those are yours,
+  at write time (§5, §7).
 
 ## The checklist
 
