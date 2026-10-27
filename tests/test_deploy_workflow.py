@@ -2484,7 +2484,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         flat,
     ), (
         "the bar reads absolute on `no_tenant` while the ⚠️ bound below says the "
-        "growth is a fail-and-fix only for an unbound capture — a reader who "
+        "growth is a fail-and-fix only for the three cases the ⚠️ bound names — "
+        "a reader who "
         "stops at item 2 fails a healthy deployment on its default traffic"
     )
     # ⛔ The SAME absolute, one paragraph lower (third review cycle, P1): the reason
@@ -2792,6 +2793,29 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section does not rule out the empty-read misreading — read the "
         "`kind='default'` row, not the log"
     )
+    # ⛔ And the REMEDY itself, not just its lead-in: "read the row" is the only
+    # executable step for the silent arm, and it was unpinned (measured: replacing it
+    # with "read whatever the operator finds most convenient" left the suite green,
+    # #10083 review cycle 4 P2). The QUALIFIER is on the `id`, not the name: the
+    # minted row is NAMED `default` (`supabase_control.ensure_default_graph_row`,
+    # and the migration's own backfill), and the `default` sentinel is a pre-#10025
+    # value of the ID field (`record_tenant_for` refuses `default_graph_id ==
+    # "default"`). Qualifying on the name would reject the healthy row.
+    assert re.search(
+        r"read the org's `kind='default'` `public.graphs` row itself", flat
+    ), (
+        "the silent arm's remedy is not named — the operator is left with the "
+        "empty grep the paragraph above says does not clear it"
+    )
+    assert re.search(r"its `id` must be a real `g_<hex>`", flat), (
+        "the remedy does not say what a healthy default row looks like, so "
+        "'read the row' is unactionable"
+    )
+    assert not re.search(r"not the `default` name sentinel", flat), (
+        "the remedy qualifies on the row's NAME — the minted `kind='default'` row "
+        "IS named `default`, so that rejects the row the operator must find; the "
+        "sentinel is an ID value"
+    )
     # ⛔ The command must match EVERY message that carries a resolution fault, not
     # just the per-request one. There are three: `hosted_api._resolve_record_tenant`
     # ("could not resolve the record tenant for this request"),
@@ -2813,30 +2837,38 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the fault disjunct's grep misses at least one reachable resolution-fault "
         "message, so that fault reads as 'no fault'"
     )
-    # ⛔ Scoped to the (c) PARAGRAPH, not the whole section: the same two literals
+    # ⛔ Scoped to the (c) PARAGRAPH, not the whole section: the same literals
     # appear elsewhere in this section, so a section-wide search let (c) stop naming
     # a member while the pin stayed green (#10083 review cycle 3, P2, measured).
+    # ALL THREE members are pinned — the per-request one was missing from this
+    # tuple, so it could be deleted (or reworded to a literal the code never emits)
+    # with the suite green (#10083 review cycle 4, P2, measured). A FOURTH (real)
+    # message is not a defect and is not forbidden; what is pinned is that these
+    # three — the ones `hosted_api`/`supabase_control` actually emit — are named,
+    # and that the count word still agrees with the member count.
     _excl_c = flat[
         flat.index("(c) The tenant-RESOLUTION faults"):
         flat.index("⛔ **`no_journal` and `seam_unimportable` ARE in it**")
     ]
-    for _msg in (r"could not resolve the DEFAULT-graph record tenant for org",
-                 r"graphs default-row read failed — the record tenant stays unnamed"):
+    _msgs = (r"could not resolve the record tenant for this request",
+             r"could not resolve the DEFAULT-graph record tenant for org",
+             r"graphs default-row read failed — the record tenant stays unnamed")
+    for _msg in _msgs:
         assert re.search(re.escape(_msg), _excl_c), (
             f"recipe 1's exclusion (c) does not name {_msg!r} among the resolution "
             "faults, so its 'three MESSAGES' count and its members disagree"
         )
-    # ⛔ Attribution is forbidden, not merely unmentioned: every SENTENCE that names
-    # attribution (or its synonym `assign`) AND a request must be a prohibition.
-    # Two earlier forms of this pin were measured evadable (#10083 review cycles 2
-    # and 3): the first required an article plus the backticked counter, so
-    # sentence-initial capital and "that growth" slipped through; the second keyed
-    # on the literal phrase "growth per request", so "Per-request attribution of
-    # that growth is possible from the log" and "Assign each `no_tenant` growth to
-    # the request that caused it" both stayed green. Sentence-scoped over both verb
-    # families now. RESIDUAL, stated rather than implied: a synonym this section
-    # never uses (e.g. "pin the growth on") is still not detected — a regex pins the
-    # vocabulary that exists, and a reviewer, not a regex, judges a rewrite.
+    assert len(_msgs) == 3 and re.search(r"three MESSAGES", _excl_c), (
+        "the exclusion (c) no longer presents exactly the three emitted messages "
+        "under a matching count"
+    )
+    # ⛔ POLARITY, not vocabulary: the negation must GOVERN the attribution verb
+    # ("Do not try to attribute…", "cannot attribute", "never assign"), or the
+    # sentence must say the PRACTICE is infeasible ("attribution would be
+    # unexecutable"). An allow-list of bare words was measured evadable — "…is not
+    # impossible: the log line names the request" and "…is impossible to avoid: the
+    # log line names the request" both passed on the word "impossible" alone
+    # (#10083 review cycle 4, P2).
     _sentences = [s for s in re.split(r"(?<=\.)\s+", flat)
                   if re.search(r"attribut|assign", s, re.I)
                   and re.search(r"\brequest", s, re.I)]
@@ -2846,8 +2878,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     for _sentence in _sentences:
         assert re.search(
-            r"(?:\bDo not\b|\bNever\b|\bnot try\b|\bmay not\b|\bmust not\b|"
-            r"\bcannot\b|\bcan't\b|\bimpossible\b|\bunexecutable\b)",
+            r"(?:(?:\bDo not\b|\bNever\b|\bnot\b|\bmay not\b|\bmust not\b|"
+            r"\bcannot\b|\bcan't\b)\s+(?:try\s+to\s+)?(?:attribut|assign)|"
+            r"attribut\w*\s+would\s+be\s+(?:unexecutable|impossible))",
             _sentence, re.I,
         ), (
             "the section presents per-request attribution of growth as possible — "

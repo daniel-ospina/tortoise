@@ -3487,8 +3487,10 @@ why the two recipes above are the verification and the deploy status is not.
      word when `default_graph_id_for` yields no row, whose only other caller-side
      trace is the mint failure. So an **empty read of that grep does not clear
      this arm** — read the org's `kind='default'` `public.graphs` row itself
-     (active, and not the `default` name sentinel) before calling the growth
-     other traffic.
+     before calling the growth other traffic: its `status` must be `active`, and
+     its `id` must be a real `g_<hex>` (the `default` SENTINEL is a pre-#10025
+     id value, never a row NAME — the minted row is named `default`, so the name
+     tells you nothing here).
    ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
