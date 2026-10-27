@@ -46,10 +46,12 @@ Invariants pinned here:
  9 no WebCrypto refuses locally; with the guard removed the bundle downgrades
    to `code_challenge_method=plain` (the paired control)
 11 the return target the page hands the provider is the BARE path — no query at
-   all, so it is byte-identical to the path the redirect-allowlist record names
-   (`docs/ops/auth-email-flows.md` §3; GoTrue matches the whole url, query
-   included, and answers a mismatch by delivering a live code to the Site URL —
-   #10088). The survival half moved carrier with it: the authorize request
+   all, which is byte-identical to the entry when the redirect-allowlist record
+   writes it out AS the path and a glob match under its `/**` form, so it is
+   covered under either shape (`docs/ops/auth-email-flows.md` §3; GoTrue matches
+   the whole url, query included, cuts only the fragment, and answers a mismatch
+   by silently delivering a live code to the Site URL — #10088). The survival
+   half moved carrier with it: the authorize request
    crosses the round trip in the page's own aux store (inv 25), pinned as the
    params the flow NEEDS, because an over-strip would otherwise stay green
 12 the aux stores hold no verifier after the removal path
@@ -116,7 +118,10 @@ Invariants pinned here:
 25 the return leg RESUMES: a `?code=` load with the request only in the store
    renders the consent view for the RESTORED client/state and consumes the
    entry (single-use) — with a restore-removed control that lands on the
-   sign-in view instead, so a page that stopped restoring cannot pass
+   sign-in view instead, so a page that stopped restoring cannot pass. The
+   restored request is also mirrored back onto the address bar (additive: the
+   provider transient stays), so a reload of the consent screen takes the
+   server's normal validated path instead of the bare path the AS answers 400
 26 a return leg whose request did NOT come back fails CLOSED and says so: no
    consent view for a client the page cannot name, a message naming the client
    as the remedy, and NO retry affordance (the message implies none) — neither
@@ -932,6 +937,29 @@ def test_10088_the_return_leg_resumes_the_restored_request() -> None:
     )
     assert r["flowEntriesLeft"] == [], (
         f"the restored request was not consumed (single-use): {r['flowEntriesLeft']}"
+    )
+    # #10088 review: the request must also go BACK on the address bar. The library
+    # strips `code` once the exchange lands, and the AS answers a bare
+    # `/oauth/authorize` with `400 invalid_request` (the shell is served only for
+    # a provider return) — so without the mirror a reload of a consent screen that
+    # just worked is a dead end the OLD query-bearing target did not have. The
+    # mirror is ADDITIVE: the transient the library has yet to consume stays, so
+    # it cannot race the exchange. (The harness's `replaceState` records the URL
+    # but does not mutate `location`, so this asserts the page's own call rather
+    # than the library's later cleanup.)
+    mirrored = [u for u in r["replaceStates"] if "client_id=client-1" in u]
+    assert mirrored, (
+        f"the restored request was not put back on the address bar, so a reload "
+        f"of this consent screen is a bare `/oauth/authorize` (400): "
+        f"{r['replaceStates']}"
+    )
+    assert "code=THECODE" in mirrored[0], (
+        f"the mirror dropped the transient the exchange still needs, which would "
+        f"race (or strand) the code exchange: {mirrored[0]}"
+    )
+    assert "error" not in mirrored[0] and "client_name" not in mirrored[0], (
+        f"the mirror put a non-request or transient field on the authorize url: "
+        f"{mirrored[0]}"
     )
 
     no_restore = _render_shell().replace(

@@ -2732,8 +2732,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   //
   // So the authorize request crosses the provider boundary in the page's own
   // origin-scoped aux store (`stashAuthorizeFlow`), the SAME store the PKCE
-  // verifier already has to survive in — if that store cannot hold the request,
-  // the exchange could not complete either. What a restored entry is WORTH is a
+  // verifier has to survive in. That store can hold the VERIFIER and still refuse
+  // the REQUEST: the request is the larger value (~265 bytes vs the verifier's
+  // ~114), so a per-item cap can sit between the two — the exchange completes and
+  // the request is lost. That band is why the stash has its own fail-closed gate
+  // before the browser leaves, and why the gate is not redundant with the
+  // verifier's own store requirement. What a restored entry is WORTH is a
   // property of the path that reads it, not of the store:
   //
   //  - the APPROVE path re-posts the restored values to /oauth/consent, which
@@ -2755,9 +2759,14 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // credential, ~300 bytes) and the next attempt overwrites it — the same
   // bounded residual the capability probe records, without a randomised key.
   const FLOW_KEY = COOKIE_NAME + "-authorize-flow";
-  const FLOW_FIELDS = ["client_id", "redirect_uri", "response_type",
-                       "code_challenge", "code_challenge_method", "state",
-                       "scope", "resource", "redirect_target", "client_name"];
+  // #10088: the fields that belong on an AUTHORIZE URL — the ones a CLIENT sends.
+  // `redirect_target` and `client_name` are SERVER-derived and are never request
+  // params, so they stay out of the address bar (they are restored into PARAMS
+  // only).
+  const AUTHORIZE_URL_FIELDS = ["client_id", "redirect_uri", "response_type",
+                                "code_challenge", "code_challenge_method", "state",
+                                "scope", "resource"];
+  const FLOW_FIELDS = AUTHORIZE_URL_FIELDS.concat(["redirect_target", "client_name"]);
   function stashAuthorizeFlow() {
     const flow = {};
     FLOW_FIELDS.forEach((k) => { flow[k] = PARAMS[k] == null ? "" : String(PARAMS[k]); });
@@ -3060,7 +3069,28 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // by the time `runConsentFlow` renders.
   if (!PARAMS.client_id) {
     const flow = takeAuthorizeFlow();
-    if (flow) FLOW_FIELDS.forEach((k) => { PARAMS[k] = flow[k]; });
+    if (flow) {
+      FLOW_FIELDS.forEach((k) => { PARAMS[k] = flow[k]; });
+      // #10088: put the restored request BACK on the address bar, keeping the
+      // provider's transient — i.e. reconstructing exactly the URL the OLD
+      // query-bearing target produced (`?<authorize request>&code=…`).
+      //
+      // Without this the address bar is the BARE path once the library strips
+      // `code`, and a reload of a perfectly good consent screen is answered by
+      // the AS with `400 invalid_request` (the page shell is served only for a
+      // provider return). The old shape did not have that dead end: there the
+      // authorize params survived the strip and a reload took the server's normal
+      // validated path. Additive only — the transient the library has yet to
+      // consume stays on the URL, so this cannot race the exchange, and
+      // `replaceState` adds no history entry.
+      const mirrored = new URLSearchParams();
+      AUTHORIZE_URL_FIELDS.forEach((k) => { if (flow[k]) mirrored.set(k, flow[k]); });
+      const transient = window.location.search.replace(/^\?/, "");
+      const restored = mirrored.toString() + (transient ? "&" + transient : "");
+      try {
+        history.replaceState(null, "", AUTHORIZE_PATH + "?" + restored);
+      } catch (e) { /* cosmetic: the screen works; only a reload would lose it */ }
+    }
   }
   // True only on a return leg whose request did not come back (another tab or
   // browser, cleared storage, or a stashed entry this page already spent). The
