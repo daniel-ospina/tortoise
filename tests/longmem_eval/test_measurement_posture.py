@@ -791,7 +791,7 @@ def test_the_contribution_populations_are_published():
          {"question_id": "q2", "question_type": "multi-session",
           "belief_activation": _census(points_off_neutral=0)},
          {"question_id": "q3", "question_type": "single-session-user",
-          "belief_activation": _unmeasured_manifest(operators=0)}],
+          "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)}],
         requested=True)
     # coverage (unchanged bar): 2 of 3 questions carry a measured posterior
     assert summary["questions"] == 3
@@ -834,7 +834,7 @@ def test_a_covered_but_neutral_run_still_reads_activated():
     ({"ep_ran": False, "error": "RuntimeError: boom"},
      mp.INERT_ACTIVATION_FAILED),
     # the pass ran, the graph has no operator at all: STRUCTURAL
-    (_unmeasured_manifest(operators=0, no_op_reason="no_ep_factors"),
+    (_unmeasured_manifest(factor_edges=0, operators=0, no_op_reason="no_ep_factors"),
      mp.INERT_NO_OPERATORS),
     # operators exist, none reached the window: the SDK's own diagnosis
     (_unmeasured_manifest(operators=3, no_op_reason="no_ep_factors"),
@@ -885,11 +885,11 @@ def test_a_measured_question_is_measured_whatever_the_cause_cell_says():
 def test_by_question_type_turns_the_assertion_into_a_measurement():
     summary = mp.summarize_belief_activation(
         [{"question_id": "s1", "question_type": "single-session-user",
-          "belief_activation": _unmeasured_manifest(operators=0)},
+          "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
          {"question_id": "s2", "question_type": "single-session-user",
-          "belief_activation": _unmeasured_manifest(operators=0)},
+          "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
          {"question_id": "s3", "question_type": "single-session-assistant",
-          "belief_activation": _unmeasured_manifest(operators=0)},
+          "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
          {"question_id": "m1", "question_type": "multi-session",
           "belief_activation": _census(points_off_neutral=5)}],
         requested=True)
@@ -910,6 +910,19 @@ def test_by_question_type_turns_the_assertion_into_a_measurement():
         summary["questions_off_neutral"]
     assert sum(b["questions_neutral"] for b in by_type.values()) == \
         summary["questions_neutral"]
+    # #10137 review (P1): the CONTRIBUTION cells are the ones that did NOT
+    # reconcile — the run-level cell summed EVERY manifest while the buckets
+    # counted only classified ``measured`` questions, so one report published
+    # two different numbers for ``points_off_neutral``. Both are now derived
+    # from the buckets, and this asserts the property rather than the fix.
+    assert sum(b["points_off_neutral"] for b in by_type.values()) == \
+        summary["points_off_neutral"]
+    assert sum(b["points_moved_off_neutral"] for b in by_type.values()) == \
+        summary["points_moved_off_neutral"]
+    # the per-type counter is named apart from the run-level ``measured``
+    # (which counts MANIFESTS, a different population — #10137 review)
+    assert sum(b["questions_measured"] for b in by_type.values()) == \
+        summary["questions_off_neutral"] + summary["questions_neutral"]
 
 
 def test_populations_are_order_independent():
@@ -917,7 +930,7 @@ def test_populations_are_order_independent():
     enumeration is sorted, never insertion-ordered."""
     rows = [
         {"question_id": "q3", "question_type": "b",
-         "belief_activation": _unmeasured_manifest(operators=0)},
+         "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
         {"question_id": "q1", "question_type": "a",
          "belief_activation": _census(points_off_neutral=0)},
         {"question_id": "q2", "question_type": "a",
@@ -964,7 +977,7 @@ def test_the_structural_causes_are_named_apart_from_the_arm_causes():
 
     structural = mp.summarize_belief_activation(
         [{"question_id": "q1", "belief_activation":
-          _unmeasured_manifest(operators=0)}], requested=True)
+          _unmeasured_manifest(factor_edges=0, operators=0)}], requested=True)
     arm_side = mp.summarize_belief_activation(
         [{"question_id": "q1", "belief_activation":
           _unmeasured_manifest(operators=3, no_op_reason="no_ep_factors")}],
@@ -973,3 +986,82 @@ def test_the_structural_causes_are_named_apart_from_the_arm_causes():
         mp.INERT_REASONS_STRUCTURAL
     assert arm_side["inert_questions"][0]["reason"] not in \
         mp.INERT_REASONS_STRUCTURAL
+
+
+# ── #10137 review fixes ───────────────────────────────────────────────────
+
+def test_an_unknown_edge_census_never_fabricates_a_structural_cause():
+    """`operators == 0` alone does NOT make a graph structurally EP-inert: an
+    IMPL/NAND straight between two claims is a factor with no operator node
+    (#888 W5). The STRUCTURAL verdict needs BOTH censuses to be a MEASURED
+    zero, so an UNKNOWN edge census must fall through, not assert it."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1",
+          # operator count measured as 0, edge census never read
+          "belief_activation": _unmeasured_manifest(operators=0)}],
+        requested=True)
+    assert summary["inert_questions"][0]["reason"] == mp.INERT_UNMEASURED
+
+
+def test_operators_zero_with_direct_factor_edges_is_not_structural():
+    """The other half: an operator-less graph that DOES carry direct IMPL/NAND
+    edges has factors, so calling it structural would be a false cause."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1",
+          "belief_activation": _unmeasured_manifest(
+              operators=0, factor_edges=3, no_op_reason="no_ep_factors")}],
+        requested=True)
+    assert summary["inert_questions"][0]["reason"] == mp.INERT_NO_EP_FACTORS
+    assert summary["inert_questions"][0]["reason"] not in \
+        mp.INERT_REASONS_STRUCTURAL
+
+
+def test_a_failed_question_never_contributes_to_the_run_level_census():
+    """The published ``points_off_neutral`` is derived from the CLASSIFIED
+    population, so a question whose belief layer failed cannot inflate it —
+    the enumerated views and the run-level cell must be one number."""
+    failed = {"ep_ran": False, "error": "boom", "points_off_neutral": 7,
+              "operators": 2, "factor_edges": 2}
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": failed},
+         {"question_id": "q2", "belief_activation": _census(
+             points_off_neutral=4, points_moved_off_neutral=4)}],
+        requested=True)
+    assert summary["points_off_neutral"] == 4       # NOT 7 + 4
+    assert summary["points_moved_off_neutral"] == 4
+    assert sum(b["points_off_neutral"]
+               for b in summary["by_question_type"].values()) == 4
+
+
+def test_an_unknown_graph_census_is_published_as_unknown_not_zero():
+    """`operators`/`factor_edges` are `None` when no manifest could read one —
+    a fabricated 0 would read as "this graph mints no operators"."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _unmeasured_manifest()}],
+        requested=True)
+    assert summary["operators"] is None
+    assert summary["factor_edges"] is None
+
+
+def test_a_measured_run_publishes_both_off_neutral_cells_apart():
+    """State and CONTRIBUTION are published separately: a claim that was
+    already off the neutral mean before the pass is state, not contribution."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _census(
+            points_off_neutral=6, points_moved_off_neutral=2)}],
+        requested=True)
+    assert summary["points_off_neutral"] == 6
+    assert summary["points_moved_off_neutral"] == 2
+
+
+def test_a_diagnosis_outside_the_closed_vocabulary_is_carried_not_dropped():
+    """The reason vocabulary is a closed set a lane routes a fix on, but the
+    SDK's own diagnosis must survive classification as `unmeasured` — it is
+    carried verbatim on the enumerated entry, never silently discarded."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _unmeasured_manifest(
+            operators=3, factor_edges=3, no_op_reason="budget_zero")}],
+        requested=True)
+    entry = summary["inert_questions"][0]
+    assert entry["reason"] == mp.INERT_UNMEASURED
+    assert entry["no_op_reason"] == "budget_zero"

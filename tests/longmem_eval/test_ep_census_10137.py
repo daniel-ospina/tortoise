@@ -10,12 +10,13 @@ whether the belief layer *did* anything, not merely whether it *ran*:
 * ``no_op_reason`` — the SDK's own diagnosis of a pass that wrote nothing.
 
 Two of those are NEW Cypher queries, and this file exists because a broken
-census query fails SILENTLY: ``_scalar`` maps an absent result set to ``0``,
-so a query that never matches would report "this graph has no operators" and
-"nothing moved" on every graph — a zero indistinguishable from the defect
-being measured. Only a real database can tell the two apart, so the stub-based
-coverage in ``test_ep_activation.py`` (query shape, guards, degradation) is
-paired with these end-to-end pins.
+census query fails SILENTLY: a count maps an absent result set to ``0`` while a
+claim-state read maps it to an empty set, so a query that never matches reports
+"this graph has no operators" and "nothing moved" on every graph — a zero
+indistinguishable from the defect being measured. The production reads therefore
+distinguish UNKNOWN from ``0`` (``_scalar_or_none``), and these end-to-end pins
+catch a wrong predicate, epsilon or neutral mean that the stub-based coverage in
+``test_ep_activation.py`` cannot.
 
 The three graphs are the #10137 populations, measured on the issue:
 
@@ -90,8 +91,10 @@ def test_operatorless_graph_is_structural_and_diagnosed(sdk):
 
     assert manifest["ep_ran"] is True          # the pass really ran
     assert manifest["operators"] == 0          # ...and there was nothing to run
+    assert manifest["factor_edges"] == 0       # no direct factor edge either
     assert manifest["points_with_ep"] == 0     # nothing stamped
     assert manifest["points_off_neutral"] == 0
+    assert manifest["points_moved_off_neutral"] == 0
     assert manifest["factors"] == 0            # this pass selected nothing
     assert manifest["no_op_reason"] == "no_ep_factors"
 
@@ -117,9 +120,13 @@ def test_covered_graph_over_uniform_priors_reads_zero_off_neutral(sdk):
     manifest = _manifest_of(sdk)
 
     assert manifest["operators"] == 2          # the factors EXIST
+    # Only zero-vs-nonzero carries the verdict (each IMPL operator mints two
+    # edges — premise→op and op→conclusion — so the census reads 4 here).
+    assert manifest["factor_edges"] > 0         # factors DO exist
     assert manifest["factors"] == 2            # ...and this pass used them
     assert manifest["points_with_ep"] == 3     # full coverage
     assert manifest["points_off_neutral"] == 0  # zero contribution
+    assert manifest["points_moved_off_neutral"] == 0
     assert manifest["no_op_reason"] is None    # it was NOT a no-op
 
     # The recorded bar is deliberately unchanged (an open owner decision):
@@ -147,33 +154,55 @@ def test_a_real_source_baseline_moves_the_census(sdk):
     manifest = _manifest_of(sdk)
 
     assert manifest["operators"] == 2
+    assert manifest["factor_edges"] > 0          # factors DO exist
     assert manifest["points_with_ep"] == 3
     assert manifest["points_off_neutral"] == 3
+    # `b`'s baseline was set BEFORE the pass, so only the two claims the pass
+    # actually moved count as contribution — the pre-existing prior does not.
+    assert manifest["points_moved_off_neutral"] == 2
 
     summary = mp.summarize_belief_activation(
         [{"question_id": "q1", "belief_activation": manifest}],
         requested=True)
     assert summary["questions_off_neutral"] == 1
     assert summary["points_off_neutral"] == 3
+    assert summary["points_moved_off_neutral"] == 2
     assert summary["neutral_questions"] == []
 
 
 def test_the_census_agrees_with_the_canonical_read(sdk):
     """The off-neutral count is derived FROM ``read_confidence`` over the
-    graph's own rows, so the two surfaces cannot disagree."""
-    _, b, _c = _impl_pair(sdk)
+    graph's own rows, so the two surfaces cannot disagree.
+
+    ⚠️ The expectation here is deliberately INDEPENDENT of the module's own
+    constants and helpers (#10137 review, P2): re-querying with
+    ``epa._SELECT_CLAIM_EP_STATES`` and re-counting through
+    ``epa.read_confidence`` made this a tautology, so a wrong WHERE predicate,
+    a wrong epsilon or a wrong neutral mean all still passed. Here the rows
+    come from a hand-written Cypher query and the arithmetic from this test.
+    """
+    a, b, c = _impl_pair(sdk)
     sdk.set_point_baseline(b, 6.0, 2.0)
     manifest = _manifest_of(sdk)
 
     rows = sdk._get_proj().g.query(
-        epa._SELECT_CLAIM_EP_STATES).result_set
-    by_read = 0
+        "MATCH (n:Point) "
+        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+        "AND n.posterior_alpha IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha, n.posterior_beta").result_set
+    off = set()
     for row in rows:
-        cells = list(row) + [None] * (5 - len(row))
-        mean = epa.read_confidence({"posterior_alpha": cells[1],
-                                    "posterior_beta": cells[2],
-                                    "ep_alpha": cells[3],
-                                    "ep_beta": cells[4]})
-        if mean is not None and abs(mean - epa.NEUTRAL_MEAN) > epa.NEUTRAL_EPS:
-            by_read += 1
-    assert manifest["points_off_neutral"] == by_read == 3
+        pid, pa, pb = row[0], row[1], row[2]
+        if not pid or pa is None or pb is None:
+            continue
+        alpha, beta = float(pa), float(pb)
+        if alpha + beta <= 0:
+            continue
+        mean = alpha / (alpha + beta)
+        if abs(mean - 0.5) > 1e-6:
+            off.add(str(pid))
+
+    assert off == {a, b, c}                     # hand-derived, literal
+    assert manifest["points_off_neutral"] == len(off) == 3
+    # `b` was already off-neutral before the pass; only `a`/`c` are its doing.
+    assert manifest["points_moved_off_neutral"] == 2

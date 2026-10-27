@@ -90,14 +90,18 @@ class _FakeGraph:
     """Records every Cypher and answers by matching the (normalized) query."""
 
     def __init__(self, draft_ids, op_map, total, with_ep, operators=0,
-                 ep_rows=None):
+                 factor_edges=None, ep_rows=None):
         self.draft_ids = list(draft_ids)
         self.op_map = dict(op_map)
         self.total = total
         self.with_ep = with_ep
-        # #10137: graph operator census + the persisted EP state of every
-        # claim that carries any (the off-neutral census's input).
+        # #10137: graph operator census + direct factor-edge census (the two
+        # cells the STRUCTURAL verdict is corroborated from), and the persisted
+        # EP state of every claim that carries any (the off-neutral census's
+        # input). ``factor_edges=None`` models a census the stub cannot read —
+        # the UNKNOWN shape, never a fabricated 0.
         self.operators = operators
+        self.factor_edges = factor_edges
         self.ep_rows = list(ep_rows or [])
         self.queries: list[tuple[str, dict]] = []
 
@@ -117,6 +121,8 @@ class _FakeGraph:
             return _Result(out)
         if "RETURN count(o)" in c:            # #10137 COUNT_OPERATORS
             return _Result([[self.operators]])
+        if "RETURN count(r)" in c:            # #10137 COUNT_FACTOR_EDGES
+            return _Result([[self.factor_edges]])
         if "n.posterior_alpha, n.posterior_beta" in c:   # #10137 states
             return _Result(self.ep_rows)
         if "count(n)" in c and "posterior_alpha IS NOT NULL" in c:
@@ -162,10 +168,11 @@ class _FakeSDK:
 
 
 def _make(draft_ids, op_map=None, total=None, with_ep=0, namespace="eval-ns",
-          operators=0, ep_rows=None):
+          operators=0, factor_edges=None, ep_rows=None):
     graph = _FakeGraph(draft_ids, op_map or {},
                        total=len(draft_ids) if total is None else total,
                        with_ep=with_ep, operators=operators,
+                       factor_edges=factor_edges,
                        ep_rows=ep_rows)
     return _FakeSDK(graph, namespace=namespace), graph
 
@@ -421,3 +428,110 @@ def test_no_op_reason_is_not_read_after_a_failed_pass():
     assert manifest["ep_ran"] is False
     assert manifest["factors"] is None
     assert manifest["no_op_reason"] is None
+
+
+# ── #10137 review fixes: UNKNOWN discipline, real contribution, corroboration ─
+
+def test_the_operator_census_uses_the_engine_predicate():
+    """The census must count what EP counts. `ep.py` treats a node as an
+    operator on `is_operator = true OR op_type IS NOT NULL`, so a census that
+    matches only the flag would report "no operators" for a graph whose
+    operators are spelled `op_type`-only — while EP consumes them as factors."""
+    sdk, graph = _make(["c1"])
+    epa.activate_beliefs(sdk)
+    (cypher,) = [c for c, _ in graph.matching("RETURN count(o)")]
+    assert "is_operator = true" in cypher
+    assert "op_type IS NOT NULL" in cypher
+
+
+def test_the_structural_verdict_is_corroborated_by_a_factor_edge_census():
+    """`operators == 0` alone does NOT prove structural inertness: an IMPL/NAND
+    straight between two claims is a factor with no operator node (#888 W5).
+    The manifest therefore publishes the edge census the verdict needs."""
+    sdk, graph = _make(["c1"], operators=0, factor_edges=0)
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["operators"] == 0
+    assert manifest["factor_edges"] == 0
+    assert len(graph.matching("RETURN count(r)")) == 1
+
+
+def test_an_unreadable_census_is_unknown_never_a_fabricated_zero():
+    """A census the run could not read is UNKNOWN. `0` is a published FINDING
+    here ("this graph mints no operators"), so collapsing a failed read into it
+    would invent a structural cause."""
+    sdk, graph = _make(["c1"], operators=0, factor_edges=0)
+
+    real_query = graph.query
+
+    def failing_query(cypher, params=None):
+        if "RETURN count(o)" in cypher or "RETURN count(r)" in cypher:
+            raise RuntimeError("census read blew up")
+        return real_query(cypher, params)
+
+    graph.query = failing_query
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["operators"] is None
+    assert manifest["factor_edges"] is None
+
+
+def test_a_census_failure_does_not_discard_a_completed_pass():
+    """A MEASUREMENT query failing must not retroactively invalidate a pass
+    whose promotion writes and posteriors are already committed."""
+    sdk, graph = _make(["c1"], with_ep=1)
+
+    real_query = graph.query
+
+    def failing_query(cypher, params=None):
+        if "RETURN count(o)" in cypher:
+            raise RuntimeError("census read blew up")
+        return real_query(cypher, params)
+
+    graph.query = failing_query
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["ep_ran"] is True          # the pass still counts
+    assert manifest["points_with_ep"] == 1     # ...and its coverage survives
+    assert manifest["operators"] is None       # only the unread cell is UNKNOWN
+
+
+def test_a_failed_pass_publishes_no_contribution_number():
+    """Contribution describes what THIS pass did. A pass that raised did
+    nothing, so its contribution cells are UNKNOWN — never a number attributed
+    to a pass that never ran."""
+    sdk, _graph = _make(["c1"], operators=3, factor_edges=4,
+                        ep_rows=[["c1", 6.0, 2.0, None, None]])
+
+    def dream_boom(**kwargs):
+        raise RuntimeError("EP exploded")
+
+    sdk.dream = dream_boom
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["ep_ran"] is False
+    assert manifest["points_moved_off_neutral"] is None
+    # the graph SHAPE is a property of the graph, not of the pass
+    assert manifest["operators"] == 3
+    assert manifest["factor_edges"] == 4
+
+
+def test_the_contribution_is_the_difference_from_the_pre_pass_baseline():
+    """`points_off_neutral` is a STATE census: a claim given a non-uniform
+    baseline sits off the neutral mean with EP never having run. The
+    CONTRIBUTION is what the pass NEWLY moved, so a pre-existing off-neutral
+    claim must not be counted as the pass's doing."""
+    # `pre` is off-neutral BEFORE the pass; `post` becomes off-neutral during it.
+    sdk, graph = _make(
+        ["c1"], operators=2, factor_edges=2,
+        ep_rows=[["pre", 6.0, 2.0, None, None]])   # the pre-pass baseline read
+
+    def dream_then_move(**kwargs):
+        graph.ep_rows = [["pre", 6.0, 2.0, None, None],
+                         ["post", 6.0, 2.0, None, None]]
+        return {"mode": "full"}
+
+    sdk.dream = dream_then_move
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["points_off_neutral"] == 2          # state: both are off
+    assert manifest["points_moved_off_neutral"] == 1    # contribution: only `post`

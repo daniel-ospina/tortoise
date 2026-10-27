@@ -35,11 +35,13 @@ fabricates a ``0.5``.
 
 #10137 — the manifest also answers "did the pass MOVE anything?". Arming
 beliefs is necessary but not sufficient: a graph whose extraction minted no
-IMPL/NAND is EP-inert for ever (``operators == 0``), and a graph of IMPL-only
-operators over the no-source ``Beta(1,1)`` prior is a fixed point, so every
-posterior is exactly ``0.50`` and the belief layer contributes nothing while
-COVERAGE (``points_with_ep``) reads complete. ``points_off_neutral`` /
-``operators`` / ``factors`` / ``no_op_reason`` are that half, and
+IMPL/NAND is EP-inert for ever (``operators == 0`` AND ``factor_edges == 0``
+— a direct IMPL/NAND between two claims is still a factor, #888 W5), and a
+graph of IMPL-only operators over the no-source ``Beta(1,1)`` prior is a fixed
+point, so every posterior is exactly ``0.50`` and the belief layer contributes
+nothing while COVERAGE (``points_with_ep``) reads complete.
+``points_off_neutral`` / ``points_moved_off_neutral`` / ``operators`` /
+``factor_edges`` / ``factors`` / ``no_op_reason`` are that half, and
 ``measurement_posture`` publishes the populations built from them. The
 state's own bar is deliberately NOT re-cut here (that is #8486's recorded
 disclosure rule and an open owner decision) — see
@@ -119,12 +121,31 @@ NEUTRAL_MEAN = 0.5
 #: 0.75 / 0.5945 / 0.5352).
 NEUTRAL_EPS = 1e-6
 
-#: Graph census of OPERATOR nodes. ``0`` means the extraction minted no
-#: IMPL/NAND, so the graph is EP-inert for ever and no arm can change that
-#: (#10137). Mirrors the operator predicate `_SELECT_DRAFT_OPERATORS` uses.
+#: Graph census of OPERATOR nodes (#10137).
+#:
+#: Widened to the ENGINE's operator predicate, NOT `_SELECT_DRAFT_OPERATORS`'s
+#: narrower ``is_operator:true`` one (#10137 review, P1). `ep.py` treats a node
+#: as an operator when ``is_operator = true OR op_type IS NOT NULL`` (its
+#: operator-mediated selections), and the projection layer's canonical test is
+#: ``bool(is_operator or op_type)``. Counting only the flag MISSES legacy
+#: ``op_type``-only operators that EP consumes as factors, so it would publish
+#: "this graph mints no operators" for a graph whose operators are merely
+#: spelled differently.
 _COUNT_OPERATORS = (
-    "MATCH (o:Point {is_operator:true}) "
+    "MATCH (o:Point) "
+    "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
     "RETURN count(o)"
+)
+
+#: Direct factor edges between claims. An IMPL/NAND with NO operator node
+#: between its endpoints is still a factor (#888 W5), so ``operators == 0``
+#: alone does NOT prove the graph is structurally EP-inert. The STRUCTURAL
+#: ``no_operators`` verdict therefore requires THIS census to be ``0`` as well
+#: (#10137 review, P1) — otherwise the module publishes "no factor can ever
+#: reach a claim" over a graph that carries direct factors.
+_COUNT_FACTOR_EDGES = (
+    "MATCH ()-[r:IMPL|NAND]->() "
+    "RETURN count(r)"
 )
 
 #: Every non-operator claim carrying ANY persisted EP state, with BOTH
@@ -193,6 +214,54 @@ def _scalar(result_set) -> int:
         return 0
 
 
+def _scalar_or_none(result_set) -> int | None:
+    """First cell of a single-row count query, ``None`` when it was not read.
+
+    The UNKNOWN-preserving twin of :func:`_scalar` (#10137 review, P1). ``_scalar``
+    maps an absent/empty/unparseable result set to ``0``, which is right for a
+    cell where 0 and "could not read" are the same published fact — and WRONG
+    for the operator census, where ``0`` is published as a named STRUCTURAL
+    cause. A count query that returned no row failed; it did not measure a
+    zero.
+    """
+    if not result_set or not result_set[0]:
+        return None
+    try:
+        return max(int(result_set[0][0]), 0)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _census(g, query: str) -> int | None:
+    """Run a single-cell census query, degrading a failure to UNKNOWN.
+
+    #10137 review (P2): an unguarded census read propagated out of
+    ``activate_beliefs``, so a MEASUREMENT query's failure discarded a pass
+    that had already succeeded — the promotion writes and the posteriors were
+    committed, yet the caller's fail-open handler turned the whole question
+    into ``activation_failed``. A census that cannot be read is UNKNOWN; it is
+    never a reason to throw away a completed measurement.
+    """
+    try:
+        return _scalar_or_none(g.query(query).result_set)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        logger.warning(
+            "activate_beliefs: census query failed, reporting UNKNOWN: %s",
+            exc, exc_info=True)
+        return None
+
+
+def _census_ids(g, query: str) -> set[str] | None:
+    """:func:`_census` for the claim-state read — a SET of ids, or UNKNOWN."""
+    try:
+        return off_neutral_ids(g.query(query).result_set)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        logger.warning(
+            "activate_beliefs: claim-state census failed, reporting UNKNOWN: "
+            "%s", exc, exc_info=True)
+        return None
+
+
 def _optional_int(value) -> int | None:
     """A manifest cell that may be genuinely UNKNOWN (``None``).
 
@@ -222,21 +291,40 @@ def points_off_neutral(rows) -> int:
     ``None``) is NOT counted: unmeasured is not a contribution, and it is
     already visible as ``points_unmeasured``.
     """
-    count = 0
+    return len(off_neutral_ids(rows))
+
+
+def off_neutral_ids(rows) -> set[str]:
+    """The claim IDS whose persisted posterior is not the neutral 0.50.
+
+    Same read as :func:`points_off_neutral`, but keeping the id so a PRE-pass
+    and POST-pass census can be DIFFERENCED (#10137 review). That difference
+    is the only honest way to say "this pass moved these claims": a claim
+    created with a non-uniform baseline (``set_point_baseline``) sits off the
+    neutral mean with EP never having run, so a bare off-neutral COUNT cannot
+    distinguish pre-existing prior from contribution.
+
+    Rows that carry no usable id are dropped: an id-less row cannot be
+    differenced, and a count that silently includes it would not reconcile
+    with the set arithmetic.
+    """
+    ids: set[str] = set()
     for row in rows or ():
         if not row:
             continue
         cells = list(row)
         while len(cells) < 5:  # a projection may omit trailing null cells
             cells.append(None)
-        _, pa, pb, ea, eb = cells[:5]
+        pid, pa, pb, ea, eb = cells[:5]
+        if not pid:
+            continue
         mean = read_confidence({"posterior_alpha": pa, "posterior_beta": pb,
                                 "ep_alpha": ea, "ep_beta": eb})
         if mean is None:
             continue
         if abs(mean - NEUTRAL_MEAN) > NEUTRAL_EPS:
-            count += 1
-    return count
+            ids.add(str(pid))
+    return ids
 
 
 def _read_no_op_reason(sdk) -> str | None:
@@ -280,35 +368,43 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
 
     Returns a manifest:
         ``{points_promoted, operators_promoted, ep_ran, ep_engine,
-        points_with_ep, points_unmeasured, operators, points_off_neutral,
-        factors, no_op_reason, duration_ms}``
+        points_with_ep, points_unmeasured, operators, factor_edges,
+        points_off_neutral, points_moved_off_neutral, factors, no_op_reason,
+        duration_ms}``
 
-    ``points_with_ep`` / ``points_unmeasured`` count NON-operator points
-    carrying / lacking persisted EP state after the pass — COVERAGE.
+    #10137 adds the cells that say whether the coverage MEANT anything,
+    because coverage alone cannot. Every one of them is ``None`` (UNKNOWN)
+    when it could not be MEASURED — a census that failed is never published
+    as a ``0``, because ``0`` is itself a published finding here.
 
-    #10137 adds the three cells that say whether the coverage MEANT anything,
-    because coverage alone cannot:
-
-    * ``points_off_neutral`` — the CONTRIBUTION census. Non-operator claims
-      whose persisted posterior mean is not the neutral ``0.50`` of the
-      unmeasured ``Beta(1,1)`` prior. On a graph of IMPL-only operators over
-      uniform priors every posterior IS ``0.50`` (the uniform prior is that
-      model's fixed point), so this reads ``0`` while ``points_with_ep``
-      reads every claim — the shape that could otherwise publish a
-      "belief-activated" number for a run in which the belief layer moved
-      nothing.
-    * ``operators`` — a graph census of operator nodes. ``0`` means the
-      extraction minted no IMPL/NAND, so nothing EP does can ever reach a
-      claim: EP-inert for ever, whatever the arm does.
+    * ``points_off_neutral`` — the STATE census: non-operator claims whose
+      persisted posterior mean is not the neutral ``0.50`` of the unmeasured
+      ``Beta(1,1)`` prior. On a graph of IMPL-only operators over uniform
+      priors every posterior IS ``0.50`` (the uniform prior is that model's
+      fixed point), so this reads ``0`` while ``points_with_ep`` reads every
+      claim — the shape that could otherwise publish a "belief-activated"
+      number for a run in which the belief layer moved nothing.
+    * ``points_moved_off_neutral`` — the CONTRIBUTION proper: claims that were
+      NOT off-neutral before this pass and are after it. ``points_off_neutral``
+      alone cannot say this: a claim given a non-uniform baseline
+      (``set_point_baseline``) sits off the neutral mean with EP never having
+      run, so it would be counted as a contribution it is not. UNKNOWN when
+      the pass did not run or either census read failed.
+    * ``operators`` — a graph census of operator nodes, over the ENGINE's
+      predicate (``is_operator`` OR ``op_type``).
+    * ``factor_edges`` — a census of direct ``IMPL``/``NAND`` edges. An edge
+      between two claims with no operator node between them is still a factor
+      (#888 W5), so ``operators == 0`` on its own does NOT make a graph
+      structurally EP-inert; a STRUCTURAL verdict needs BOTH to be a measured
+      ``0``.
     * ``factors`` — the operators THIS PASS selected, read from the dream
       result's ``budget_used`` (full mode). Deliberately not the health
       surface's ``operator_counts``: a full pass is a batch loop and the
       Dreamer's ``_last_operator_count`` is written PER BATCH, so the health
       cell holds the last batch's selection, not the pass's.
-    * ``no_op_reason`` — the SDK's own diagnosis of a pass that returned with
-      no belief write (#3139): ``no_ep_factors`` (no factor reaches the
-      window), ``stale_run_guard`` (#1163), ``silent_no_op``, ... ``None``
-      when the SDK is too old / a stub — UNKNOWN, never invented.
+      NOTE: ``factors``/``no_op_reason`` are only read for a pass that
+      RETURNED — ``None`` here is UNKNOWN, never a claim that the pass wrote
+      nothing (``ep_ran`` says whether it ran at all).
 
     Fail-open on the EP call (matching the capture block's non-fatal
     posture): a dream failure is logged and reported via ``ep_ran: False``
@@ -367,6 +463,14 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     if draft_ids:
         sdk._mark_dirty(draft_ids)
 
+    # ── 1d. PRE-pass contribution baseline (#10137 review, P1) ────────
+    # `points_off_neutral` alone cannot separate "this pass MOVED a claim"
+    # from "this claim was ALREADY off the neutral mean": a point created
+    # with a non-uniform baseline (`set_point_baseline`) sits off-neutral with
+    # EP never having run. The CONTRIBUTION is the claims NEWLY off-neutral,
+    # so the set is captured BEFORE the pass and differenced after it.
+    off_neutral_before = _census_ids(g, _SELECT_CLAIM_EP_STATES)
+
     # ── 2. Run EP — whole-graph stabilization, posteriors persisted ───
     ep_ran = False
     dream_result = None
@@ -385,9 +489,25 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     with_ep = _scalar(g.query(_COUNT_POINTS_WITH_EP).result_set)
     points_unmeasured = max(total - with_ep, 0)
     # #10137: coverage is not contribution. Both are measured, every run.
-    operators = _scalar(g.query(_COUNT_OPERATORS).result_set)
-    off_neutral = points_off_neutral(
-        g.query(_SELECT_CLAIM_EP_STATES).result_set)
+    #
+    # The GRAPH SHAPE (`operators`, `factor_edges`) is a property of the graph,
+    # so it is read whether or not the pass ran. The CONTRIBUTION cells
+    # describe what THIS pass did, so a pass that never ran publishes UNKNOWN
+    # for them — publishing a contribution figure attributed to a pass that
+    # raised is the false number this whole PR exists to stop
+    # (#10137 review, P1).
+    operators = _census(g, _COUNT_OPERATORS)
+    factor_edges = _census(g, _COUNT_FACTOR_EDGES)
+    off_neutral_after = _census_ids(g, _SELECT_CLAIM_EP_STATES)
+    off_neutral = (len(off_neutral_after)
+                   if off_neutral_after is not None else None)
+    # The CONTRIBUTION proper: claims NEWLY off the neutral mean. UNKNOWN when
+    # the pass did not run or when EITHER census read failed — a baseline we
+    # could not take cannot yield a contribution count.
+    moved_off_neutral = (
+        len(off_neutral_after - off_neutral_before)
+        if ep_ran and off_neutral_after is not None
+        and off_neutral_before is not None else None)
     # The pass's OWN operator selection (full mode's accumulated count), not
     # the health surface's per-batch `_last_operator_count`.
     factors = (_optional_int(dream_result.get("budget_used"))
@@ -406,7 +526,9 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
         # #10137 contribution census — `points_with_ep == points` while
         # `points_off_neutral == 0` is a fully covered, zero-contribution graph.
         "operators": operators,
+        "factor_edges": factor_edges,
         "points_off_neutral": off_neutral,
+        "points_moved_off_neutral": moved_off_neutral,
         "factors": factors,
         "no_op_reason": no_op_reason,
         "duration_ms": round((time.monotonic() - t0) * 1000),
