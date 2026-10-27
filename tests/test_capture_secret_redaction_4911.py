@@ -1222,7 +1222,11 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         being OPTIONAL is what catches the TAIL-ABSENT form (`apikey_<36 hex>`,
         cut AT the separator) — two different cases, pinned separately;
     (e) the SPLIT shapes are recorded here rather than narrated in the rule's
-        comment, so the record cannot drift from the behaviour.
+        comment, so the record cannot drift from the behaviour — INCLUDING the
+        mid-segment ones, which are deliberately NOT tolerated (whitespace inside
+        the body would let a match cross into following text that starts with a
+        hex character; measured on the linearity family), so they are pinned as
+        residuals rather than described.
     """
     key = _synth("apikey_", "a1b2c3d4e5f6a7b8" * 2, "c1d2", "_",
                  "e5f6a7b8c9d0e1f2" * 4)
@@ -1325,13 +1329,21 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     # …and wrapped right AFTER the prefix, which is the shape that defeated the
     # anchor literal itself: with no `\s*` at that position the key came back
     # byte-identical and the count read 0 — total cleartext that looks like a clean
-    # scan, and the widest surviving span of any wrap shape. Both separators.
+    # scan. Both separators.
     for wrapped in (f"key apikey_\n{first}_{second}",
                     f"key apikey_ {first}_{second}"):
         out, counts = redact_secrets(wrapped)
         assert first not in out and second not in out, (
             "a prefix-adjacent wrap left the key in cleartext")
         assert counts.get("typesafe_api_key") == 1, wrapped
+    # …and the BREADTH of both `\s*` runs, not just the single-character case: an
+    # indented wrap is the common one, and narrowing either `\s*` to `\s{0,1}`
+    # (or `[ \n]`) passed every leg above while `apikey_\n    <36 hex>` matched
+    # nothing and returned the key whole. Pins the class too: CR, LF, tab, spaces.
+    wide = redact_secrets(f"key apikey_\r\n\t  {first} \t _ \r\n  {second}")
+    assert first not in wide[0] and second not in wide[0], (
+        "a MULTI-character / tab / CR wrap left part of the key in cleartext")
+    assert wide[1].get("typesafe_api_key") == 1, wide
 
     # (e) a MID-SEGMENT split — the residual the rule's comment points here for,
     # so the record is the assertion rather than a narrative that re-stales:
@@ -1340,6 +1352,17 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     #   · in the second segment the leading part is redacted, the tail survives
     low = redact_secrets(f"key apikey_{first[:12]}\n{first[12:]}_{second}")
     assert low[1] == {}, "a split below the floor should not match at all"
+    # …and the WORST mid-segment shape, one hex short of the floor (23): nothing
+    # matches, so the WHOLE key survives with the count at 0 — total cleartext that
+    # reads as a clean scan. It is pinned as EXPECTED (see the rule's comment for why
+    # whitespace in the body is declined), not left to be discovered.
+    worst = redact_secrets(f"key apikey_{first[:23]}\n{first[23:]}_{second}")
+    assert worst[1] == {}, "a split one hex short of the floor must not match"
+    assert (first[:23] in worst[0] and first[23:] in worst[0]
+            and second in worst[0]), (
+        "the 23-hex split is the total-cleartext residual — if any part of it now "
+        "redacts, the rule tolerates whitespace inside a hex segment and the "
+        "comment is stale")
     high_out, high_counts = redact_secrets(
         f"key apikey_{first[:30]}\n{first[30:]}_{second}")
     assert high_counts.get("typesafe_api_key") == 1, (

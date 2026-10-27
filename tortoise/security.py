@@ -972,13 +972,22 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # with it, `…<64 hex>Z` backtracks to the segment-1-only alternative, so the
     # SECOND SEGMENT survives in cleartext while the count still reads 1 (measured;
     # the worse failure, because the record looks redacted).
-    # `\s*` sits in TWO positions — after the prefix and around the separator —
-    # because this token is 108 chars and a terminal wrap can land anywhere in it.
-    # The SEPARATOR is the obvious one; the PREFIX-ADJACENT one is the dangerous
-    # one, because a break there defeats the anchor LITERAL itself: with no `\s*`
-    # after `apikey_`, `apikey_\n<36 hex>_<64 hex>` redacted NOTHING and came back
-    # byte-identical with the count at 0 — the whole 100-hex body in cleartext, the
-    # largest surviving span of any wrap shape, and invisible in the counts.
+    # `\s*` sits at the TWO TOKEN BOUNDARIES — after the prefix and around the
+    # separator — and deliberately NOWHERE ELSE. The separator is the obvious
+    # wrap point; the prefix-adjacent one is the dangerous one, because a break
+    # there defeats the anchor LITERAL itself: with no `\s*` after `apikey_`,
+    # `apikey_\n<36 hex>_<64 hex>` redacted NOTHING and came back byte-identical
+    # with the count at 0 — the whole body in cleartext and invisible in the counts.
+    # ⛔ A WRAP INSIDE A HEX SEGMENT IS NOT TOLERATED, and that is a measured
+    # choice, not an oversight. Tolerating it means letting whitespace into the
+    # BODY (`[0-9a-fA-F](?:\s*[0-9a-fA-F]){23,}`), and whitespace in the body lets
+    # the match cross into whatever follows: every word starting with `a`-`f` or a
+    # digit becomes a continuation. Measured on this suite's own linearity family
+    # (`" apikey_" + "a"*23 + " "*2048`, one hex short of the floor, repeated), that
+    # body matched 100 of 100 units — redacting ordinary text across spaces and
+    # newlines, which corrupts the stored record the redaction exists to preserve.
+    # So the residual is: a break inside a segment keeps whatever hex run survives
+    # the break, and the widths of those runs are asserted, not described.
     # The SECOND segment is OPTIONAL, and what that buys is the TAIL-ABSENT form
     # (`apikey_<36 hex>` with no separator at all — a cut at the separator, which a
     # display ellipsis or a compaction summary produces). It is NOT what catches a
