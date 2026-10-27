@@ -18404,10 +18404,12 @@ def _record_unavailable() -> HTTPException:
     repealed: a graph copy that is COMPLETE against the Session's own
     ``turn_count`` is still served byte-identically, because it protects a
     transcript that is really there. A copy that is only a stale PREFIX of that
-    transcript is NOT protected — serving it would be the same silent truncation
-    in a less obvious shape — and `sess[2]` is the count this endpoint already
-    publishes. This body is for the cases that arm cannot cover: the fallback
-    yielded no turns at all, or fewer than the count it would report alongside.
+    transcript — or a stale SUPERSET of it — is NOT protected; serving it would be
+    the same silent truncation in a less obvious shape. `sess[2]` is the count this
+    endpoint already publishes, and it is what makes the copy checkable at all.
+    This body is for the cases that arm cannot cover: the Session carries no
+    ``turn_count`` to check the copy against, or the copy disagrees with the count
+    it would report alongside.
 
     Same envelope as :func:`_graph_unavailable` on this route (``503`` +
     ``error_code``) rather than a new one, because on this route that body is
@@ -18644,7 +18646,16 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # capture that stored no turns) makes an empty copy the COMPLETE answer, while
     # ABSENT — no capture ever wrote a count: the commit path's `MERGE (s:Session)`
     # at `hosted_api.py:16920`, the held path at `:18028` — cannot be told from a
-    # legacy capture whose count went missing, so an empty copy there is refused.
+    # legacy capture whose count went missing.
+    #
+    # ⛔ AN ABSENT COUNT IS REFUSED WHATEVER THE COPY'S SIZE, not only when the
+    # copy is empty. The bound is what makes a copy verifiable: absent means no
+    # `turn_count` was ever written, so NEITHER a prefix NOR a superset can be
+    # ruled out — and a non-empty copy served on that evidence is exactly the
+    # `#8447` shape ("never a silently truncated result indistinguishable from a
+    # complete one"), which the `!=` arm above closes only where a count exists.
+    # Serving the non-empty sub-case was the hole: it made "absent is
+    # fail-closed" true only for the empty copy, and no test read it.
     #
     # ⚠️ NAMED LIMITS. Equality here proves only that the COUNTS agree — the same
     # arithmetic `tools/backfill_graph_turns.py:522-528` refuses to attribute a
@@ -18670,13 +18681,18 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     #     on a session with no turns — including any session created without a
     #     capture — turns a truthful `200 {"turn_points": []}` into a 503. It needs
     #     the read to fail, and the message is worded not to claim the record held
-    #     the transcript. #10021's shared predicate closes it.
+    #     the transcript. #10021's shared predicate closes it. The ABSENT-count
+    #     refusal widens this deliberately: a legacy session whose `turn_count`
+    #     went missing but whose graph still holds its turns is also refused on a
+    #     record outage, though the graph copy may in fact be complete. That is
+    #     the fail-closed direction on evidence that cannot distinguish it from a
+    #     partial copy (`tools/backfill_graph_turns.py:522-528` calls the same
+    #     comparison a MEASUREMENT, never a cause).
     _expected_turns = sess[2]
     if _record_read_failed:
         if _expected_turns is None:
-            if not turns:
-                raise _record_unavailable()
-        elif len(turns) != _expected_turns:
+            raise _record_unavailable()
+        if len(turns) != _expected_turns:
             raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM

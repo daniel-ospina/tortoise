@@ -4486,8 +4486,8 @@ class TestSessionDetail:
         """#8447: an ABSENT count is not a known zero — it is an unknown, and the
         read refuses rather than assert "no turns" on a session it cannot count.
 
-        The commit path's `MERGE (s:Session)` (`hosted_api.py:16920`) creates
-        Session nodes with no `turn_count` at all, and so does the demo seed; a
+        The commit path's `MERGE (s:Session)` (`hosted_api.py:16920`) and the held
+        path (`:18028`) create Session nodes with no `turn_count` at all; a
         legacy capture whose count went missing looks identical from here.
         Collapsing that None into 0 (`sess[2] or 0`) folded it into the emptiness
         test by accident — this pins the split as deliberate, and pins WHICH way
@@ -4529,6 +4529,119 @@ class TestSessionDetail:
             f"nothing and must not be served as an answer: {r.status_code} "
             f"{r.text[:300]}")
         assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_refuses_an_uncountable_copy_that_is_not_empty(
+            self, client, monkeypatch):
+        """#8447: an ABSENT count refuses a NON-EMPTY copy too — the size of the
+        copy is not evidence, because absent means no bound was ever written.
+
+        The sibling test above pins absent + EMPTY. That test alone cannot
+        distinguish "refuse an UNCOUNTABLE copy" from "refuse an EMPTY copy", so
+        it survived a guard written as `if _expected_turns is None: if not
+        turns: raise`. That guard served a non-empty absent-count copy at 200 as
+        a complete transcript — the #8447 shape on the one population with no
+        count to check it against: a copy that cannot be proven a PREFIX or a
+        SUPERSET of the session is not the session.
+
+        Shape: a Session with NO `turn_count` and TWO turn nodes, record read
+        failing. Both the absence and the node count are ASSERTED.
+
+        Mutation: restore the size test (`if _expected_turns is None: if not
+        turns: raise`) — this REDs on the 200. Mutation: treat absent as known
+        zero (`_expected_turns = 0`) — this REDs too (2 != 0).
+        """
+        sid = "detail-record-no-turn-count-with-turns"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 2, r.json()
+
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        # Drop the count, KEEP the turns: the legacy population `turn_count`
+        # cannot bound. Both halves of the shape are then asserted below rather
+        # than assumed.
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) REMOVE s.turn_count",
+            params={"sid": sid})
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert counts[0][0] is None, counts
+        nodes = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)", params={"sid": sid}).result_set
+        assert nodes[0][0] == 2, nodes
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the session carries no turn_count, so a 2-node copy cannot be "
+            "proven complete — serving it is the silent-truncation shape: "
+            f"{r.status_code} {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_serves_the_list_when_the_record_answers(
+            self, client, monkeypatch):
+        """The completeness guard is gated on the record read FAILING.
+
+        Without this, a guard that fired on the success path too would still
+        pass every other test in this class: their record answers agree with
+        `turn_count`, so the count comparison is silent either way. Here the
+        record returns 2 turns while `turn_count` says 4 — a DISAGREEMENT — and
+        the endpoint must still serve the record's own answer at 200, because
+        reading the record SUCCEEDED and the record is the store of record.
+
+        This pins "guard only on the fail-soft arm" WITHOUT asserting that the
+        disagreement is correct: a record answer that succeeds but disagrees is
+        #8447's remaining read-side hole, owned by #10021 (its P0-3), where the
+        record's own answer becomes authoritative instead of being compared to a
+        graph count.
+
+        Mutation: drop the `if _record_read_failed` gate (`if True:`) — this REDs
+        on the 503.
+        """
+        sid = "detail-record-answers-disagreeing"
+        import tortoise.hosted_api as ha
+        from tortoise.record_read import Turn
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at=$now, s.is_episodic=true, s.turn_count=4",
+            params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
+
+        class _Conn:
+            def close(self):
+                pass
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True
+        monkeypatch.setattr(ha, "_open_record", lambda: _Conn())
+        monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
+            Turn(turn_id=f"{sid}_t0", index=0, content="[user] from record 0.",
+                 speaker="user", created_at="2026-10-25T00:00:00+00:00"),
+            Turn(turn_id=f"{sid}_t1", index=1, content="[assistant] from record 1.",
+                 speaker="assistant", created_at="2026-10-25T00:00:01+00:00"),
+        ])
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 200, (
+            "the record read SUCCEEDED — its own answer is served even where it "
+            f"disagrees with the graph's count: {r.status_code} {r.text[:300]}")
+        assert len(r.json()["turn_points"]) == 2, r.json()["turn_points"]
 
     def test_detail_exposes_the_session_source_node(self, client):
         """#3809: the detail carries the session's graph Source node
