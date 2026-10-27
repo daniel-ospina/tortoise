@@ -8961,6 +8961,19 @@ def journal_object_surviving_keys(
                 nm = id_to_name.pop(rid, None)
                 _drop_carrier(nm, rid)
             elif ev.get("op") in _ENTITY_MUTATION_STATE_OPS:
+                # ⛔ A STATE OP is not id-wide — only `delete` is (#3860).
+                # `_fold_entity_mutation` returns 0 for a label that is not a
+                # canonical label string (`state-op-miss`), so the graph never
+                # applies `state` and the node keeps its OLD name. Moving the
+                # name here for such a record dropped a name the graph still
+                # carries: a later name-only supersede then read as
+                # unaddressable and produced a false `object-superseded-miss`
+                # record in `check_consistency`'s report — the model and the
+                # fold disagreeing about the same op (tortoise#10162, review
+                # 12 P3, measured on a label-less rename).
+                if not (isinstance(label, str)
+                        and label in _CANONICAL_ENTITY_LABELS):
+                    continue
                 # `state` carries the full APPLIED map, so a rename moves the
                 # MERGE key the supersede sweep matches on
                 # (`_fold_entity_mutation`). Ignoring it would leave the OLD
@@ -8981,49 +8994,81 @@ def journal_object_surviving_keys(
     return frozenset(id_to_name), frozenset(name_to_ids)
 
 
-def journal_object_registered_names(events) -> frozenset[str]:
-    """Every Object NAME the journal ever puts in the graph — the
+class JournalObjectEstablished(NamedTuple):
+    """``(names, ids)`` the journal ESTABLISHES for Objects — the #3590 D2
+    addressability oracle's return type.
+
+    A NAMED tuple, deliberately: :func:`journal_object_surviving_keys` returns
+    the same pair in the OPPOSITE order, and a positional 2-tuple let a future
+    caller mix the two silently (#10107 review P3). Attribute access makes the
+    halves unambiguous.
+    """
+
+    names: frozenset[str]
+    ids: frozenset[str]
+
+
+def journal_object_established(events) -> JournalObjectEstablished:
+    """``(names, ids)`` of every Object the journal ESTABLISHES — the
     addressability oracle for the #3590 D2 exemption.
 
     :func:`journal_object_surviving_keys` answers a DIFFERENT question ("does
     this Object exist at the journal's END"), and it cannot separate "never
-    registered" from "registered then hard-deleted". The D2 exemption covers
-    only the FIRST: a name the journal registered and then deleted belongs to
-    the separately-carried ``supersede-target-deleted`` bound and must keep
-    refusing here. So this reads the positive sources alone and never
-    subtracts.
+    established" from "established then hard-deleted". The D2 exemption covers
+    only the FIRST: a target the journal established and then deleted belongs
+    to the separately-carried ``supersede-target-deleted`` bound and must keep
+    refusing here. So this reads the positive sources alone and never subtracts.
 
-    A NAME set, deliberately, not a name->id map: the record that needs the
-    answer may carry no usable id (``_fold_object_superseded`` returned
-    ``(0, 0)`` for it), so the name is the only identity it offers.
+    THREE name sources, and all three are required — each one is a route by
+    which a name reaches the Object MERGE key, so missing any of them would
+    exempt a supersede the journal COULD have addressed:
 
-    ⚠️ TWO name sources, and the second is NOT optional. ``ObjectRegistered``
-    is the obvious one; an ``EntityMutated`` **state op** is the other, because
-    the fold applies ``SET n += $state`` — a rename CARRIES a name into the
-    MERGE key the supersede sweep matches on, which is exactly why
-    :func:`journal_object_surviving_keys` models the same arm ("a rename moves
-    the MERGE key"). Reading registrations alone left a rename-produced name
-    looking unregistered, so a supersede the journal COULD have addressed was
-    exempted on ``rebuild_all`` while ``rebuild()`` folded it — a silent
-    divergence where ``main`` refused (#10107 review P1).
+    * ``ObjectRegistered`` — the obvious one.
+    * an ``EntityMutated`` **state op** — the fold applies ``SET n += $state``,
+      so a rename carries a name into the merge key (the arm
+      :func:`journal_object_surviving_keys` models as "a rename moves the MERGE
+      key"). Without it a rename-produced name looked unestablished,
+      ``rebuild_all`` exempted a record ``rebuild()`` folded, and the supersede
+      was silently lost (#10107 review P1).
+    * an ``EventRecorded`` **mention stub** — ``_event_plain_merge`` MERGEs an
+      Object by that name. It is not a *registration* (a mention does not
+      create an entity, #3590 D1), which is why it is counted here as an
+      ADDRESS rather than as an entity, and not reusing the sibling's carrier
+      model was a scope error (#10107 review P2): once such a stub was deleted,
+      a name-only supersede of it was exempted as "never established" while
+      ``main`` refused.
 
-    ``EventRecorded``'s mentioned-name stubs ARE excluded, and the claim is
-    deliberately ONE-DIRECTIONAL: a mention does not create an entity (#3590
-    D1), so it is not a registration and counting it would let a name the
-    journal never really established suppress the refusal. The cost of
-    excluding them is bounded and loud, not silent: a mention stub DOES put a
-    node in the graph (``_event_plain_merge``), so where the stub exists the
-    graph folds the supersede and only the reference fold may emit an EXEMPT
-    "matched no Object" entry — an over-report in the health report, never a
-    skipped fold and never a rebuild/apply divergence.
+    The ``ids`` half is the second limb of the same question: a record that
+    carries an id the journal established IS addressable, even if the name it
+    also carries is one nothing established (a collapsed-away carrier, #5285
+    cycle-4 FIX 2) — so such a record must keep refusing rather than being
+    exempted on the name alone (#10107 review P1). Its THREE id sources mirror
+    the name sources for the same reason — each is a route by which the id
+    reaches a live node, so missing one exempts a supersede the journal COULD
+    have addressed:
+
+    * ``ObjectRegistered``'s ``id``.
+    * an ``EventRecorded`` mention stub's DETERMINISTIC id —
+      ``_event_plain_merge`` writes it ``ON CREATE``, and a later registration
+      re-ids that node, so the stub id is addressable at the stub's own seq
+      (#10107 review P1).
+    * an ``EntityMutated`` state op's TARGET ``id`` — the record names an
+      Object the journal could address by id, so referring to that id is not
+      "established by nothing". Counting only the state-op NAME exempted a
+      supersede carrying the id of the very object the journal had just
+      mutated (#10107 review round 6).
     """
     names: set[str] = set()
+    ids: set[str] = set()
     for raw in events:
         if not isinstance(raw, dict):
             continue
         ev = _norm(raw)
         t = ev.get("type")
         if t == "ObjectRegistered":
+            oid = ev.get("id")
+            if isinstance(oid, str) and oid:
+                ids.add(oid)
             name = ev.get("name")
         elif (t == "EntityMutated"
                 and ev.get("op") in _ENTITY_MUTATION_STATE_OPS):
@@ -9032,42 +9077,77 @@ def journal_object_registered_names(events) -> frozenset[str]:
                     and label in _CANONICAL_ENTITY_LABELS
                     and label != "Object"):
                 continue
+            # The mutation's TARGET id is established: this record addresses an
+            # Object by id, so a supersede carrying the same id describes a
+            # carrier the journal could reach. Counting only the state NAME
+            # exempted it as "established by nothing at all" (#10107 review 6).
+            mid = ev.get("id")
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
             state = ev.get("state")
             name = state.get("name") if isinstance(state, dict) else None
+        elif t == "EventRecorded":
+            for stub_label, stub in _event_mentioned_name_stubs(ev):
+                if stub_label != "Object" or not stub:
+                    continue
+                names.add(stub)
+                # The stub's DETERMINISTIC id is established too, not just the
+                # name: `_event_plain_merge` writes it `ON CREATE`, so a record
+                # carrying that id IS addressable (the same id
+                # `journal_object_surviving_keys` counts as a carrier). Missing
+                # it exempted a record `rebuild()` folds — one journal, two
+                # graphs, opposite verdicts (#10107 review P1).
+                stub_id = _entity_name_id("Object", stub)
+                if isinstance(stub_id, str) and stub_id:
+                    ids.add(stub_id)
+            continue
         else:
             continue
         if isinstance(name, str) and name:
             names.add(name)
-    return frozenset(names)
+    return JournalObjectEstablished(frozenset(names), frozenset(ids))
 
 
-def _supersede_name_unregistered(ev: dict, registered_names) -> bool:
-    """True ONLY when the record carries a NAME the journal never established
-    (#3590 D2).
+def _supersede_name_unregistered(ev: dict, established) -> bool:
+    """True ONLY when the journal cannot ADDRESS this supersede (#3590 D2).
 
-    A record with no name at all is NOT this exemption: nothing in it is
-    addressable, so "the journal never registered it" is unfalsifiable and the
-    fail-closed default must stand. A record whose name WAS established keeps
-    ``object-superseded-miss`` — the bound that stops a supersede which could
-    have landed from ever becoming skippable.
+    Both limbs must say "no":
+
+    * the NAME is one nothing established (not registered, not carried by a
+      state op, not mentioned) — an unestablished name is not addressable;
+    * the record's ``id``, when it carries one, is NOT an id the journal
+      established. An established id IS a real target: the fold missed because
+      the carrier was collapsed away or renamed, not because it never existed,
+      so exempting on the name alone would hide a genuine divergence (the
+      #5285 cycle-4 FIX 2 fail-open, #10107 review P1).
+
+    A record carrying NO name is not this exemption: nothing in it is
+    addressable, "the journal never established it" is unfalsifiable, and the
+    fail-closed default must stand.
 
     ⚠️ The name is read through ``_norm`` so all three classifying surfaces see
     the SAME spelling: the two graph engines already normalise, while
     ``consistency``'s reference fold iterates the raw journal, and a nested
-    record let those two halves disagree (one exempt, one refusing — the #3585
-    asymmetry; #10107 review P2). ``_norm`` is idempotent, so normalising an
-    already-normalised record changes nothing.
-
-    The record's ``id``, when present, is deliberately NOT consulted: the D2
-    producer path synthesises one for the legacy target, so requiring its
-    absence would refuse the very records this exemption exists for. An id in
-    this shape addresses nothing in the journal either way — the refusal
-    machinery for a real id miss is ``object-superseded-miss``.
+    record let those two halves disagree (the #3585 asymmetry; #10107 review
+    P2). ``_norm`` is idempotent, so normalising twice changes nothing.
     """
-    name = _norm(ev).get("name") if isinstance(ev, dict) else None
-    return (isinstance(name, str) and bool(name)
-            and registered_names is not None
-            and name not in registered_names)
+    if established is None:
+        return False
+    # ⛔ ATTRIBUTE access, never a positional unpack (review P2). The sibling
+    # oracle `journal_object_surviving_keys` returns ``(ids, names)`` — the
+    # OPPOSITE order — so `names, ids = established` silently inverts BOTH
+    # limbs the moment a caller passes the wrong oracle: the exemption would
+    # narrow to unestablished IDS while widening to unestablished NAMES, an
+    # unguarded fail-open. `JournalObjectEstablished` is a NamedTuple precisely
+    # so the two halves cannot be mixed, and that guarantee only exists if
+    # every consumer reads it by name.
+    names, ids = established.names, established.ids
+    ev = _norm(ev) if isinstance(ev, dict) else {}
+    name = ev.get("name")
+    if not (isinstance(name, str) and name) or name in names:
+        return False
+    oid = ev.get("id")
+    return not (isinstance(oid, str) and oid and oid in ids)
 
 
 def journal_object_hard_deleted_ids(events) -> frozenset[str]:
@@ -11658,7 +11738,7 @@ class FalkorProjection(
               journal_object_deleted=None, journal_first_materialized=None,
               journal_seq: int | None = None,
               journal_existence=None,
-              journal_object_registered_names=None,
+              journal_object_established=None,
               about_links_deferred: bool = False) -> None:
         # #7951 §17.1 — THE SINGLE-WRITER GATE (fail-closed, default REFUSAL).
         # A fold is the cache WRITE of the record/cache split, so on a
@@ -12161,7 +12241,7 @@ class FalkorProjection(
                             # `None` (the one-record LIVE path, which has no
                             # journal to consult) stays fail-closed.
                             name_unregistered=_supersede_name_unregistered(
-                                ev, journal_object_registered_names)),
+                                ev, journal_object_established)),
                         event_id=ev.get("event_id"),
                         event_type="ObjectSuperseded", id=_oid,
                         candidates=((_oname,) if isinstance(_oname, str)
@@ -12559,9 +12639,10 @@ class FalkorProjection(
         # forward reference (which ``rebuild_all``'s deferred sweep folds).
         journal_object_surviving = journal_object_surviving_keys(events)
         # #3590 D2: the journal's own addressability oracle, the sibling of the
-        # pair above — `apply()` exempts a supersede whose target NAME the
-        # journal never registered, and refuses one it did.
-        registered_object_names = journal_object_registered_names(events)
+        # pair above — `apply()` exempts a supersede only when NEITHER limb of
+        # its identity is established (the name by registration / rename /
+        # mention, AND the id), and refuses one where either was.
+        object_established = journal_object_established(events)
         # #7719: the object-delete set is derived from the GATED map, judged by
         # the shared ``_hard_deleted_any``: an anchor-suppressed delete does not
         # exempt the supersede, matching `rebuild_all`'s sweep.
@@ -12613,8 +12694,7 @@ class FalkorProjection(
                        journal_object_deleted=journal_object_deleted,
                        journal_first_materialized=first_materialized,
                        journal_existence=epistemic_existence,
-                       journal_object_registered_names=
-                       registered_object_names,
+                       journal_object_established=object_established,
                        journal_seq=seq,
                        about_links_deferred=_is_evrec)
             # #8398: buffer the record so its about* links are re-wired once
@@ -14447,10 +14527,10 @@ class FalkorProjection(
         # nothing) for a forward reference, while a target that was created and
         # then HARD-DELETED (first <= seq) still attempts the fold and refuses.
         first_materialized = journal_first_materialization(events)
-        # #3590 D2: the journal's OWN addressability oracle for an id-less
-        # supersede (see `journal_object_registered_names`). Computed once for
-        # the whole journal, like the other whole-journal maps above.
-        registered_object_names = journal_object_registered_names(events)
+        # #3590 D2: the journal's OWN addressability oracle for a supersede
+        # (see `journal_object_established`) — BOTH limbs, name and id.
+        # Computed once for the whole journal, like the other maps above.
+        object_established = journal_object_established(events)
         # #7936 review: the ORDERED creation/hard-delete boundary for the
         # BELIEF gate. Pass 1a hoists every Point/Operator creation, so a
         # non-Point target created LATER is absent at the record while pass-1b
@@ -15161,7 +15241,7 @@ class FalkorProjection(
                     target_deleted=_hard_deleted_any(
                         hard_deleted_seq, "Object", ev.get("id")),
                     name_unregistered=_supersede_name_unregistered(
-                        ev, registered_object_names))
+                        ev, object_established))
                 record_non_folded(
                     _sup_shape, event_id=ev.get("event_id"),
                     event_type="ObjectSuperseded", seq=seq,
