@@ -99,9 +99,11 @@ block every future absolute, because none can.
 `sdk.supersede_point` and `projection._rebuild_all_replay` — which earlier
 revisions of this file recorded as re-materializers — are NOT. Its `SET r += $attrs` is on the 2a-DIRECT leg,
 whose rows are discovered by `MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`,
-so `rtype` is provably `IMPL|NAND`; the about edge is transferred by a separate
-BARE `MERGE (new)-[:{rel}]->(t)` with no `SET`. On an about edge it writes no
-property — it DROPS `confidence` (filed as `#9417`). `_rebuild_all_replay`
+so `rtype` is provably `IMPL|NAND`. The about edge is transferred by a separate
+`MERGE (new)-[nr:{rel}]->(t)` that **does** carry the old edge's properties
+(`SET nr += $attrs`, whitelisted to the `RelationUpsert.attrs` vocabulary), so
+since #9417 this writer DOES write `confidence` on an about edge and is no longer
+an exemption here. The REBUILD half is still bare — traced as #10139. `_rebuild_all_replay`
 carries TWO `SET r += $attrs` statements, and neither is protected the same way:
 the `DirectEdgeCreated` fold has TWO producers since `#9553` — `create_direct_edge`,
 whose `op_type` allowlist is `{IMPL, NAND}` so its descriptor can never name an
@@ -626,6 +628,13 @@ RECORDED_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
 #: rule — so the documents' set is `confidence` (originated) plus `idx`
 #: (re-materialized), not one name.
 MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
+    #: #9417: the structural transfer now CARRIES the old edge's properties
+    #: (`SET nr += $attrs`, whitelisted to the RelationUpsert vocabulary), so an
+    #: `about*` edge keeps the binder's `confidence`. It was a declared false
+    #: positive until this landed. REBUILD is still bare — traced as #10139.
+    ("tortoise/sdk.py", "supersede_point"): (
+        "SET nr += $attrs",
+    ),
     ("tortoise/cache_projection.py", "relation_statement"): (
         "MERGE (src)-[r:{rel.rel_type} {{idx:$idx}}]->(tgt) SET r += $props",
     ),
@@ -641,13 +650,6 @@ MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
 #: false-POSITIVE version of this PR's own defect (an instrument that cannot
 #: tell which edge the `SET` lands on).
 NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
-    ("tortoise/sdk.py", "supersede_point"): (
-        "the `SET r += $attrs` is on the 2a-DIRECT leg, whose rows come from "
-        "`MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)` (rtype is provably "
-        "IMPL|NAND); the about edge is transferred by a separate BARE "
-        "`MERGE (new)-[:{rel}]->(t)` with no SET — so this writer carries NO "
-        "property on an about edge (it drops `confidence`; #9417)"
-    ),
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         "it carries TWO `SET r += $attrs` statements, and the exemption depends "
         "on each separately: the `DirectEdgeCreated` fold — which has TWO "
@@ -674,10 +676,6 @@ NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
 #: membership test would be satisfied while a `SET` sat on the about transfer,
 #: which is exactly the false negative these rows must not hide.
 FALSE_POSITIVE_STATEMENTS: dict[tuple[str, str], tuple[str, str]] = {
-    ("tortoise/sdk.py", "supersede_point"): (
-        "SET r += $attrs",
-        "MERGE (new)-[:{rel}]->(t)",
-    ),
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         "SET r += $attrs",
         "MERGE (s)-[:{etype}]->(t)",
@@ -2388,9 +2386,11 @@ def test_the_document_population_counts_match_the_census():
     ), (
         f"§11.1 no longer states that {originating} writers ORIGINATE the property"
     )
-    assert len(NOT_AN_ABOUT_WRITER) == 2, (
-        "the exemption table changed size; §13's '5, not 7' arithmetic and the "
-        "declared-false-positive prose were written for two exemptions"
+    assert len(NOT_AN_ABOUT_WRITER) == 1, (
+        "the exemption table changed size; §13's '6, not 7' arithmetic and the "
+        "declared-false-positive prose were written for ONE exemption — "
+        "`supersede_point` stopped being one when #9417 made it carry the edge's "
+        "properties, so it moved into MAP_WRITERS"
     )
 
 
@@ -2430,13 +2430,14 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
         "STORAGE-ARCHITECTURE.md §13 files the replay fold as an ORIGINATING "
         "writer — `_fold_entity_linked_reason` re-writes on replay what the "
         "journal already carried, which is this document's own definition of "
-        "RE-MATERIALIZING; the causal split is 2 + 3"
+        "RE-MATERIALIZING; the causal split is 2 + 4 (the #9417 supersede "
+        "transfer is a fourth re-materializer)"
     )
-    assert _flat("2 originating + 3 re-materializing") in _flat(
+    assert _flat("2 originating + 4 re-materializing") in _flat(
         _doc(STORAGE_CHANGELOG)
     ), (
         "STORAGE-ARCHITECTURE-CHANGELOG.md no longer states the corrected "
-        "causal composition (2 originating + 3 re-materializing) — the ledger "
+        "causal composition (2 originating + 4 re-materializing) — the ledger "
         "is where the count's current form is recorded, so a ledger still "
         "carrying only the wrong composition is the history a reader mistakes "
         "for the claim"
@@ -2445,9 +2446,9 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
     # is satisfied by deleting the classification altogether.
     assert (
         _flat("2 ORIGINATING") in section_13
-        and _flat("3 RE-MATERIALIZING") in section_13
+        and _flat("4 RE-MATERIALIZING") in section_13
     ), (
-        "§13 no longer states the causal split (2 originating + 3 "
+        "§13 no longer states the causal split (2 originating + 4 "
         "re-materializing) — the measured population's composition is a claim, "
         "and deleting it leaves the number a reader cannot check"
     )

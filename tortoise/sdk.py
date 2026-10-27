@@ -16541,9 +16541,9 @@ class TortoiseSDK:
                 target_props = row[3] or {}
                 # #9417: the old relationship's own properties (row[4]) — carried
                 # onto the successor edge below, never silently dropped. WHITELISTED
-                # to the same set the functional transfer keeps (`_keep`, above) and
-                # that `RelationUpsert.attrs` replays: copying `properties(r)` raw
-                # would carry EP-managed / internal fields onto the successor.
+                # to the `RelationUpsert.attrs` vocabulary (the set the replay
+                # contract understands) — copying `properties(r)` raw would carry
+                # EP-managed / internal fields onto the successor.
                 edge_props = {
                     k: v for k, v in (row[4] or {}).items()
                     if k in ("direction", "confidence", "weight", "label",
