@@ -1166,6 +1166,12 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    # #10108 review (P2): the E-row audit's own `file:line` cites (the gate's
+    # step list, the two extractor surfaces, the receipt fold) were read by no
+    # sweep at all — a document whose thesis is "a claim nothing re-checks can
+    # rot silently" cannot leave its own claims unwatched.
+    ("E1-E5-PROOFS.md",
+     _REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md"),
     ("probes/capstone_measure.py", PROBE),
     ("probes/capstone_run.py",
      _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),

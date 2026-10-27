@@ -25,12 +25,19 @@ either came apart:
 **One behaviour:** the figures §10 publishes for the replicated run are the
 figures the registered falsifier produces when it is run now.
 
-**FAILS IF** §10's replicated-run table is edited (any digit — measured: changing
-raw's pooled loss `52.0%` to `53.0%` reds this test), deleted (the heading is
-named in the failure), or moves away from what the scorer emits (an instrument
-change with no write-back). It does not pin prose, formatting outside those two
-tables, or the run-1 block — run 1's receipts were never retained, so its numbers
-are a record and not re-derivable (`#9738`).
+**FAILS IF** the cells §10 publishes for the replicated run move: each arm's
+pooled loss / absent / flattened, distortion, recall, precision and claims emitted
+(measured: raw's `52.0%` to `53.0%` reds this), the holdout `(decision input)`
+row's n / both losses / Δloss, the `#### ⚠️ REPLICATED 2026-10-18` heading itself
+(deleted or renamed reds, named in the failure), a duplicated or deleted table row
+(exactly-one-match), or the scorer's own thresholds (an instrument change with no
+write-back).
+
+It does NOT pin the split table's `tuning` / `bound` / `unbound` rows, the prose
+beside the tables, or the run-1 block — run 1's receipts were never retained, so
+its numbers are a record and not re-derivable (`#9738`). The unpinned split cells
+are a known gap, stated as one: measured, editing the `tuning` row's `5 (33%)` to
+`99%` leaves this test GREEN.
 
 Deterministic and hermetic: the scorer is stdlib-only over the committed arm
 receipts and this tree's gold. No DB, no network, no model.

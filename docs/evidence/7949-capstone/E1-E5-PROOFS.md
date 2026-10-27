@@ -122,22 +122,25 @@ what would have to move:
 | E1 | `#5333` — the owner ruling on whether any pass may **remove or relocate** an Object. Without it there is no mechanism to prove: the gate drops 0 of 34 `^the <X>` and `value_gate`'s own docstring says a definite description is *"left to the arbiter, and is reported, not dropped"* | **OPEN** |
 | E2 | `#9775` — the carve-out is absent on the compact render path; and the surviving-value loss (1 of 14) is upstream of the filter, so the row needs the extraction loss fixed, not the gate | **OPEN** |
 | E3 | `#9736` — the registered denominator counts `:Object` mention links, which carry no anchor **by design** (owner option A, `#5199`). Either the metric is re-registered or the model reopened: an owner decision, not a lane's | **OPEN** |
-| E4 | the planted edges are not formed: 5 of 15 wired-and-persisted on the frozen corpus (`#8503` closed at 5/14 on `#9873`; the remaining misses are content-level as well as connect-level), and the receipt's retrievability rate is still unmeasured (`#9596`) | `#8503` CLOSED / `#9596` **OPEN** |
+| E4 | the planted edges are not formed: 5 of 15 wired-and-persisted on the frozen corpus (`#8503`'s own criterion reports 5/14 with `wp02` excluded as the pre-registered exclusion, `#9873`; the frozen denominator is **15** and every receipt reads `planted=15` — the remaining misses are content-level as well as connect-level), and the receipt's retrievability rate is still unmeasured (`#9596`) | `#8503` CLOSED / `#9596` **OPEN** |
 | E5 | the epic's own wording is **met** (falsifier run + written back; both halves now test-pinned). The **pre-registered** outcome floor is not: raw recovery 0.4800 against a `>= 0.80` bar, on an n of 25 that must be reconciled with the record's 29 marker sentences (`#9738`). Reporting that as GREEN is the one thing this bundle exists to refuse | `#9738` **OPEN** |
 
 ### One measured correction to the scoreboard's E4 row, not applied to it
 
 The E4 row cites `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`
 (`edge_correct` **2** of 15), whose own `corpus_hash` is `sha256:943a99ec…` — **not**
-the frozen pin. Two later receipts landed with `#9873` (`2cba48d3c`) on the **frozen**
+the frozen pin. **Three** later receipts landed with `#9873` (`2cba48d3c`) on the **frozen**
 corpus (`sha256:dd7e8520…cb035dc`, re-derived from this tree and matched against
-`preregistration.json`):
+`preregistration.json`), and all three agree:
 
 | receipt | date | planted | `edge_correct` | corpus |
 |---|---|---|---|---|
+| `w2b-operator-2026-10-24-8503-preleg.json` | 2026-10-24T05:46:51Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-a.json` | 2026-10-24T06:03:47Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-b.json` | 2026-10-24T06:10:47Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-19.json` (cited by the row) | 2026-10-19T01:39:26Z | 15 | 2 | `943a99ec…` |
+
+The figure does not depend on which frozen receipt is read.
 
 E4 is therefore **5 of 15**, not 2 of 15, and the fresher figure is measured on the
 pre-registered corpus. The verdict does not move — the bar is 15 of 15 — and the
