@@ -1,0 +1,69 @@
+{
+  "arm": "after-unarmed",
+  "tree": {
+    "tortoise_module": "/private/tmp/r10000-lane/tortoise/sdk.py",
+    "git_head": "fffcc7c0c2a490624fb472253a0c846298c3928e"
+  },
+  "corpus": {
+    "sessions": 25,
+    "turns_per_session": 40,
+    "turn_chars": 1500,
+    "dim": 384
+  },
+  "graph": {
+    "namespace": "test_r10000_after_unarmed_r3",
+    "graph_name": "test_r10000_after_unarmed_r3_tortoise",
+    "node_counts": {
+      "GraphEvent": 1000,
+      "GraphEventMeta": 1,
+      "Point": 1000,
+      "Session": 25
+    },
+    "edge_counts": {
+      "CONTAINS": 1000
+    }
+  },
+  "used_memory_bytes": {
+    "before": 4017504,
+    "after": 12046872,
+    "delta": 8029368,
+    "delta_per_session": 321174.7
+  },
+  "graph_memory_usage_mb": {
+    "total_graph_sz_mb": 5,
+    "label_matrices_sz_mb": 0,
+    "relation_matrices_sz_mb": 0,
+    "amortized_node_block_sz_mb": 0,
+    "amortized_node_attributes_by_label_sz_mb": [
+      "Point",
+      3,
+      "Subject",
+      0,
+      "Object",
+      0,
+      "Event",
+      0,
+      "Source",
+      0,
+      "Session",
+      0,
+      "Meta",
+      0,
+      "GraphEvent",
+      0,
+      "GraphEventMeta",
+      0
+    ],
+    "amortized_unlabeled_nodes_attributes_sz_mb": 0,
+    "amortized_edge_block_sz_mb": 0,
+    "amortized_edge_attributes_by_type_sz_mb": [
+      "CONTAINS",
+      0
+    ],
+    "indices_sz_mb": 1
+  },
+  "turn_nodes_in_graph": {
+    "turn_ids_read_back_from_the_graph": 1000,
+    "graphwide_text_hits_over_sessions": 1000
+  }
+}

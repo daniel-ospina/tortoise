@@ -237,6 +237,18 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "SessionNarrated": {"id": "e1", "sessionId": "sess1",
                        "story_arc": "the session, told as prose",
                        "summary": "one line"},
+    # #10017: the raw-TURN carrier. Its producer is step 7, so this is the shape
+    # that producer will emit: the capture writer's own per-turn snapshots
+    # (`record_projection.TURNS_SNAPSHOT_KEYS`) under `turns`, with the
+    # `contains_session` link on the ENVELOPE (#3947) — not an invented shape.
+    # It declares `NoRecordEffect`, so it must produce NO statement at all.
+    "TurnsRecorded": {"id": "e1", "sessionId": "sess1",
+                      "contains_session": "sess1",
+                      "turns": [{"id": "sess1_t0", "content": "hi",
+                                 "pointKind": "event", "speaker": "user",
+                                 "is_episodic": True, "status": "draft",
+                                 "createdAt": "2026-10-25T00:00:00Z",
+                                 "embedding": None}]},
     "SessionDeleted": {"id": "sess1"},
     "EntityLinked": {"id": "p1", "source_label": "Point", "source_id": "p1",
                      "target_label": "Object", "target_id": "o1",

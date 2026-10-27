@@ -1214,6 +1214,14 @@ class _EntityHandlers:
         # rejects in `sdk._sanitize_props` / mcp `_SERVER_MANAGED_PROPS` are
         # where a tenant is told no.
         "contains_session",
+        # #10017 R2: the cache TIER is a placement declaration, never a node
+        # property. Same shape as `contains_session` above — it rides a record
+        # envelope, and `_persist_extra_props`' skip set is the only thing
+        # stopping a `PointAdded` that carries it from putting it on a `:Point`
+        # while a record-sourced rebuild (which drops it via the record's props
+        # strip) does not: the two rebuild routes would then diverge on a
+        # property, which is the failure #10017 exists to remove.
+        "cache_tier",
         # Lane L5 (#5097): the `SourceCreated` record's OWN discriminator, set by
         # the one producer whose record COMPLETES an existing stub instead of
         # creating a Source (`sdk._materialize_session_source`'s trailing

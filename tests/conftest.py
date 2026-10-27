@@ -602,9 +602,30 @@ def _no_ambient_record_arming(monkeypatch):
     for name in ("TORTOISE_RECORD_DSN", "TORTOISE_RECORD_ORG_ID",
                  "TORTOISE_RECORD_GRAPH_ID", "TORTOISE_RECORD_SINGLE_TENANT"):
         monkeypatch.delenv(name, raising=False)
+    # #10093: the per-graph ACL layer's DECLARED posture is the same hazard, and
+    # a worse one. `TORTOISE_ACL_LAYER=off` is the HOSTED value shipped in
+    # fly.toml, so it is the value a reader of fly.toml is most likely to export
+    # locally — and it would turn every self-hosted ACL case into a vacuous
+    # `absent_by_design` and red the docker lane's capability probe, for a reason
+    # that has nothing to do with the test. Cleared per test; a test that wants a
+    # posture sets it with `monkeypatch.setenv`, which is now the only way one
+    # can reach a test. The once-per-process announcement latch is reset on both
+    # sides for the same reason the record breaker is: a test that proves the
+    # "said once" bound must not silence the next test's record.
+    monkeypatch.delenv("TORTOISE_ACL_LAYER", raising=False)
+    # `sys.modules.get`, never an import: this is an AUTouse fixture, so a direct
+    # `from tortoise import hosted_api` would make the whole suite depend on that
+    # module importing cleanly. Resetting a latch only matters when the module is
+    # already loaded — which is exactly when a test can observe it.
+    import sys
+    _hosted = sys.modules.get("tortoise.hosted_api")
+    if _hosted is not None:
+        _hosted._ACL_ABSENCE_ANNOUNCED.clear()
     from tortoise import record_writer
     record_writer._close_live_breaker()
     yield
+    if _hosted is not None:
+        _hosted._ACL_ABSENCE_ANNOUNCED.clear()
     record_writer._close_live_breaker()
 
 

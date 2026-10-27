@@ -119,8 +119,11 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   hosted REST lane carries the SAME pair by value rather than through this
   `ContextVar` — `hosted_api._data_sdk` → `sdk._bind_record_tenant` — which is
   the seam its `TortoiseSDK` reads. Unwired still: a SESSION/JWT credential and
-  an OAuth `oat_` token (neither carries a `default_graph_id`) and the
-  seed/index runners that build their own SDK — #10047.
+  an OAuth `oat_` token, neither of which carries a `default_graph_id` (#10046).
+  The lanes that build their OWN SDK — the background indexing jobs and the
+  seed runners — are wired since #10047
+  (`hosted_api._bind_default_graph_record_tenant`, same `record_tenant_for`
+  answer, org default graph by construction).
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
   consults the env pair ONLY when the deployment declared itself single-tenant
   (`record_writer.single_tenant_declared()` → `TORTOISE_RECORD_SINGLE_TENANT`,
@@ -159,6 +162,9 @@ __all__ = [
     "TENANT_GUC_SQL",
     "TENANT_SCOPE_SQL",
     "THE_RECORD_TABLES",
+    "TURNS_RECORD_TYPE",
+    "TURNS_SNAPSHOT_KEYS",
+    "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "RecordProjectionError",
     "RefusedJournalOperation",
     "ReplayReport",
@@ -250,6 +256,7 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # pre-move contract (`Object -> name`) while the database enforced the
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
+    "20261029000001_record_point_cache_tier.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -452,6 +459,65 @@ ENVELOPE_KEYS: frozenset[str] = frozenset({
 #: `create_document(type="SourceCreated")` journal nothing at all.
 NARRATIVE_RECORD_TYPE = "SessionNarrated"
 
+#: The ONE record type whose whole job is to carry a capture's raw TURN SET into
+#: the record (#10017, step 3 of the ruling on that issue). Declared ONCE here and
+#: — from step 7, which turns the producer over — imported by it
+#: (`sdk._write_capture_turns`), for the same reason as
+#: :data:`NARRATIVE_RECORD_TYPE`: a producer and a registry that spell one type
+#: two ways is the class of defect that made `create_document(type="SourceCreated")`
+#: journal nothing at all.
+#:
+#: ⛔ NOTHING EMITS IT YET, and that is the change this declaration belongs to:
+#: declaring the carrier is INERT until step 7 emits it, so the capture writer's
+#: per-turn `PointAdded` records are untouched here.
+#:
+#: ⛔ AND STEP 7 INHERITS A THIRD STORE, not just the two this type names. The
+#: per-turn `PointAdded` records it replaces are ALSO the `:GraphEvent` /
+#: claim-transition stream — `sdk._GRAPH_EVENT_TYPES`, `shared_state.events
+#: .CLAIM_EVENT_TYPES`, and `docs/event-catalog.md`'s `PointAdded` row ("one per
+#: `{session_id}_t{i}` turn Point") — which is what `poll_events` serves. A
+#: "move" that simply stops emitting them silently removes one subscriber row per
+#: turn, and NOTHING gates that: the catalog is prose and no test pins it. So
+#: step 7 must EITHER keep a store-only per-turn emission (the two-store split
+#: this same writer already performs for the stale-turn sweep: `PointRetracted`
+#: store-only + `EntityMutated` for JSONL) OR record the decision to drop the
+#: turn rows from `poll_events`. `TurnsRecorded` must NOT be added to
+#: `_GRAPH_EVENT_TYPES` to compensate — that set's shape is a recorded decision.
+TURNS_RECORD_TYPE = "TurnsRecorded"
+
+#: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a
+#: reshape. Each entry of the carrier's ``turns`` list is one of the
+#: ``_turn_snapshot`` dicts `sdk._write_capture_turns` builds today, verbatim —
+#: these keys ALWAYS, plus at most one branch of the optional set below. The
+#: ``contains_session`` link rides the EVENT ENVELOPE rather than the per-turn
+#: dicts, exactly as it does for `PointAdded` (#3947: it is a capture-write
+#: STRUCTURAL fact, restored by the projection's edge fold, and never a node
+#: property the live write does not set).
+#:
+#: `tests/test_10017_record_carrier.py` reads the snapshots a REAL capture emits
+#: — one with no vector, one that ENCODED one, one that PRESERVED one — and
+#: compares them to these sets, so the pin is against the producer rather than
+#: against this comment.
+TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
+    "id", "content", "pointKind", "speaker", "is_episodic", "status",
+    "createdAt", "embedding",
+})
+#: ``embedding_preserved`` rides a snapshot ONLY when the live write PRESERVED a
+#: prior vector instead of encoding one (#5004 round 3). The three IDENTITY
+#: stamps are the other branch: `embeddings.stamp_journal_embedding(payload,
+#: creating=True)` adds `embedding_model` / `embedding_revision` /
+#: `embedding_text_hash` to the journalled point when the write DID encode one,
+#: and deliberately withholds them from a preserved vector — that vector may come
+#: from a DIFFERENT model, so attesting the active one would record a false
+#: origin, the failure #5004/R1 exists to prevent. So these keys are optional one
+#: branch at a time, NOT absent in practice. ⛔ Step 7 must carry them VERBATIM: a
+#: carrier that kept `embedding` but dropped the identity would replay a vector
+#: with no origin, which is the silent model change the stamps expose.
+TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
+    "embedding_preserved",
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+})
+
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
 #: dispatch (`tortoise/projection/`) and the producers' emit sites, and pinned
 #: by `tests/test_record_projection.py` against both. A type that appears in a
@@ -479,6 +545,7 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
     "DocumentCreated",
     "SessionRecorded",
     NARRATIVE_RECORD_TYPE,
+    TURNS_RECORD_TYPE,
     "SessionDeleted",
     "EntityLinked",
     "DirectEdgeCreated",
@@ -1014,6 +1081,33 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
             "tests/test_record_projection.py's totality fixture."
         ),
     ),
+    # ── §9.1's raw-TURN carrier (#10017) ─────────────────────────────────────
+    TURNS_RECORD_TYPE: Mutation(
+        NoRecordEffect(
+            "#10017 — §9.1's raw-turn carrier: one capture's turn set on ONE "
+            "record, where the capture writer emits one `PointAdded` per turn "
+            "today. It materialises NO node, and that is the ruling rather than "
+            "an omission: §9.1's D1 places the raw transcript 'not in the "
+            "graph, not a `Document` node, not a `Point`' (owner, 2026-09-23: "
+            "the same rule applies to raw turns). Its RECORD home is "
+            "`public.point` — the table `record_read` already serves the "
+            "transcript from — with `cache_tier = 'record_only'`; NOT a new "
+            "table, and no secondary projection is declared here because "
+            "nothing emits this type yet (step 7 does, in its own change). The "
+            "tier cannot ride the event payload: `_RECORD_ONLY_KEYS` strips it "
+            "before the insert, so step 7 must write it as its own column "
+            "statement (#10070). Until then, FOR THIS TYPE, the two rebuild "
+            "routes agree by BOTH having nothing to do — "
+            "`projection/__init__.py::_NO_PROJECTION_FOLD` folds the type "
+            "nowhere, and this entry projects no row. That agreement is about "
+            "the CARRIER and says nothing about the per-turn `PointAdded` "
+            "records a capture still emits, which BOTH routes still fold into "
+            "turn nodes — so do not read it as §9.1 already holding; see "
+            "that section's measured note in STORAGE-ARCHITECTURE.md. The "
+            "payload is pinned to the writer's per-turn snapshot; see "
+            "TURNS_SNAPSHOT_KEYS."
+        ),
+    ),
     "SessionDeleted": Mutation(
         NodeDelete(
             Node("session", "Session", "id"), key_from="id",
@@ -1319,6 +1413,20 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # cache is the projection). `test_record_projection`'s storable-primary leg
     # is what keeps that distinction honest.
     "agent_id",
+    # #10017 R2: a PLACEMENT declaration, not a derived value.
+    # ⛔ This is the RECORD's strip set, and deleting it as "redundant now that
+    # the column exists and the schema refuses it" would be a silent data
+    # disaster: `_split_properties` checks `column in cols` BEFORE `refused`, so
+    # a payload `cache_tier` is written to the COLUMN — the refusal cannot catch
+    # it. Without this entry any `PointAdded` could set
+    # `cache_tier='record_only'` and hide a real graph point from the cache.
+    # The GRAPH half is `projection/entities.py::_META_KEYS` (the `agent_id`
+    # precedent — the record strip alone was never sufficient for that key).
+    # ⛔ And because this strips it, the tier can NOT be set through an event
+    # payload: it is dropped before the insert, so the row lands the DEFAULT
+    # `graph` and the turn would be materialised again. Step 7 must write it as
+    # its own column statement.
+    "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -2186,7 +2294,13 @@ def _op_dispatch_statements(
         col_values, tail = _split_properties(
             table, dict(state),
             columns=columns, refused=refused,
-            drop=dispatch.never_store.get(table, frozenset()),
+            # #10017 R2: `cache_tier` is a placement declaration, so the
+            # `EntityMutated` path must drop it too. Without it a `state` map
+            # carrying the tier writes `object.props`/`subject.props`, and a
+            # record-sourced rebuild sets it on the node while the journal
+            # replay strips it (`_META_KEYS`) — the two rebuild routes diverging
+            # on a property, which is the class this change exists to close.
+            drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]

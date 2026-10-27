@@ -990,6 +990,24 @@ surfaces:
   # `hosted_api.py`/`supabase_control.py`-only change, the #2938 silent-drop
   # class this comment exists to prevent.
   - test_10025_graph_identity.py
+  # #10047 (the #10025 residual): the five lambdas that build their OWN SDK —
+  # the onboarding/starter seed runners and the three background index jobs —
+  # install the org's DEFAULT-graph record tenant via
+  # `_bind_default_graph_record_tenant`. DUAL-REGISTERED (`api` + `core`), for
+  # exactly the reason stated directly above for its `test_10025` sibling: the
+  # file drives `tortoise/hosted_api.py` and `tortoise/supabase_control.py`
+  # (`default_graph_id_for`), BOTH exact `SOURCE_PATTERNS["api"]` entries, so an
+  # api-only diff selects `api` + `onboarding` and REPLACES the `core` fallback
+  # — measured on this entry's absence: `--changed-files
+  # tortoise/hosted_api.py` -> surfaces=['api','onboarding'] with this file
+  # ABSENT, and `--changed-files tortoise/supabase_control.py` -> ['api'] with
+  # it ABSENT too. The `core` arm is load-bearing for the other input,
+  # `tortoise/record_writer.py` (`record_tenant_for`, the seam the tenant must
+  # reach), which matches no SOURCE_PATTERNS row and so takes the `core`
+  # fallback. Dropping either arm is the #2938/#3154 silent-drop class this
+  # comment exists to prevent. DB-free: a fake control plane and a recording
+  # fake SDK, no graph writes, no server.
+  - test_10047_record_every_lane.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -1167,7 +1185,7 @@ surfaces:
   - test_mcp_refusal_telemetry_9084.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
-  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix.
+  - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec + verifier guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5), and (since §9 step 2 landed) the `tortoise/consent_token.py` verifier's bind/`alg`/`jti`/strength contract. DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix. The verifier half is reachable through `api` only because `tortoise/consent_token.py` is a `SOURCE_PATTERNS["api"]` entry (tools/ci_selection.py; pinned by tests/test_ci_selection.py::test_a_consent_token_only_diff_runs_the_bridge_guard) — a named-surface match replaces the `core` fallback, and this file is not registered on `core`.
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
   # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
@@ -1627,9 +1645,12 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_10017_cache_tier.py
+  - test_10017_record_carrier.py  # #10017 step 3: the raw-turn carrier's declaration, its refusals, and the journal-vs-record agreement over a record-carried capture
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
+  - test_9567_record_capstone.py
   - test_9583_openapi_read_only_claim.py
   # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
   # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that
@@ -3207,6 +3228,7 @@ surfaces:
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
   - test_10025_graph_identity.py  # #10025: graph id vs user-editable name; default-graph record tenant; dual: api
+  - test_10047_record_every_lane.py  # #10047: the seed runners + background index jobs install the DEFAULT-graph tenant; dual: api (core is load-bearing for record_writer.py, which matches no SOURCE_PATTERN)
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
@@ -3328,6 +3350,17 @@ surfaces:
   # `SOURCE_PATTERNS` row matches, so a selector edit lands in the unknown-path
   # fail-closed branch -> FULL matrix, where this pin runs too.
   - test_ci_selection_changed_files_9109.py
+  # #10130: the LOCAL affected-subset run (`tools/run_affected.sh`) — the wrapper
+  # pipes the changed-name LIST into `--changed-files -` on stdin, prints the
+  # selected `tests/…` set, refuses a `full: true` selection unless `--allow-full`,
+  # and refuses the #9109 path-as-argument shape instead of reproducing it. Pin:
+  # `tests/test_run_affected.py` (the refusal's exit code 3, the selector same-pass
+  # comparison, and a static pin that the only `--changed-files` form used is `-`).
+  # `core` is CLASSIFICATION only: a `tools/run_affected.sh`-only diff is a
+  # non-python path and takes tier-1 smoke (measured: surfaces=[], 64 files), and
+  # this lane may not add a `CORE_ALSO` claim — that is `tools/ci_selection.py`,
+  # which #10131/#10132/#10133 share. A `core`-tier selection runs this pin.
+  - test_run_affected.py
   # #9790: the batch-review harness (`tools/batch_review.py`) — per-PR schema
   # validation, the per-PR head/diff binding, and the fail-closed record refusals
   # (no record for a result that fell out, for `issues`, without its own evidence
@@ -3936,6 +3969,20 @@ surfaces:
   # (#1262) AND runs in no leg (#1349/#2938) — without this row the 16 pins
   # here, including the parity grid, would be green-by-absence.
   - test_5140_pending_extraction.py
+  # #5140 finding 8: the `:Document` → `:Source` relabel migration
+  # (`tortoise/migrate_kinds.py::relabel_legacy_documents`) and the two things
+  # it unblocks — the `document` kind rows can finally SEE the population they
+  # re-type, and the pre-D10 extraction backlog becomes discoverable for the
+  # part of it a relabel can fold (a `_event_plain_merge` document has no clock,
+  # so the pass refuses it as `undated` instead of inventing §4.6's
+  # `ingestedAt`; and the REBUILT-graph backlog stays a product decision on
+  # #5140). Same
+  # surface as its sibling (`tortoise/migrate_kinds.py` and `tortoise/ingest.py`
+  # match no SOURCE_PATTERN, so both fall through to this `core` arm). Docker
+  # lane (`_live_db` skipif, per-test `test_5140_relabel_*` graphs), so NOT in
+  # `carve_out:`. Registered because an unlisted file is a `manifest-integrity`
+  # red (#1262) AND runs in no leg (#1349/#2938) — green by absence.
+  - test_5140_d10_relabel_migration.py
   - test_ingest.py
   - test_ingest_audit.py
   - test_ingest_bundle.py
@@ -4368,8 +4415,10 @@ surfaces:
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
-  # `xfail(strict=True)` pin is the forcing function for the open owner ruling
-  # on that issue). Registered under `core` for the #3518 reason above:
+  # `xfail(strict=True)` pin stays ARMED, and it reds on a FUSION-side remedy
+  # (the first one being option D, which the owner ruling CLOSED) rather than on
+  # the dedup fix, which is a write-path change and never reaches it — deleting
+  # the pin is a deliberate act in that change). Registered under `core` for the #3518 reason above:
   # `tortoise/search_engine.py` (where `rrf_fusion` lives) matches no
   # SOURCE_PATTERNS entry and falls to the `core` fallback, so a
   # search_engine.py-only PR would otherwise never run this pin. Hermetic (no
@@ -6493,10 +6542,17 @@ tier1:
 # contradict the declared policy.
 - test_extractor_v4_failure_policy.py
 # #5333 review (P1, twice): the SAME document's *G5's destructive half* guards now
-# live in `test_definite_description_backfill_5059.py` (`core` above) — three of
-# them read ONLY `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
-# load-bearing share (§4.3's evidence bar), the `archived`-has-a-writer claim,
-# and the `_ALLOWED_TRANSITIONS` production-reader scan. `docs/` is in
+# live in `test_definite_description_backfill_5059.py` (`core` above) — FOUR of
+# them BIND the passage and THREE read the document: the load-bearing share
+# (§4.3's evidence bar — it also reads its own module for the measurement), the
+# `archived`-has-a-writer claim (which now rejects the set of no-writer spellings
+# it enumerates, rather than one literal — the literal form was evaded twice),
+# and the recorded design decision itself (add-only, never a delete, fold-only
+# removal — the newest and the load-bearing one). The fourth, the
+# `_ALLOWED_TRANSITIONS` production-reader scan, reads NO line of the document:
+# it AST-scans `tortoise/` for a consumer of the map the passage cites, so a
+# docs-only edit cannot red it (#10069 review, P3 — this comment said FOUR read
+# ONLY the document, which was false for it). `docs/` is in
 # NON_PYTHON_PREFIXES and this document matches no SOURCE_PATTERNS entry, so a
 # docs-only edit of the passage filters to `changed == []` and takes
 # `select()`'s early return — tier1 ONLY. Registered in `core` alone, those
@@ -7733,19 +7789,20 @@ durations:
   # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING — the two LOADED post-#8423
   # readings (366.4s, 422.9s) are ABOVE it and a quiet-host one (216.6s at 115
   # tests) below; the spread is fleet load, and erring high is the rule. The
-  # declaration cannot be raised past the ceiling either:
-  # `WATCHDOG_FLOOR_MIN` (15 min) must clear the largest fast file by 2.5x
-  # (#6133, asserted by
+  # #6133 constraint on this declaration is `WATCHDOG_FLOOR_MIN` clearing the
+  # largest fast file by 2.5x (#6133, asserted by
   # `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
-  # from this manifest): 900/360 = 2.5 exactly, so EVERY declarable weight is
-  # <360s and 366.4 / 380 / 422.9 all fail that assertion. The arithmetic ceiling
-  # is therefore just under 360s (359.9 still clears it: 900/359.9 = 2.501), and
-  # 355.0 is a ROUNDED CAP below that ceiling — not the ceiling itself — chosen to
-  # leave the #6133 assertion real margin instead of sitting on it. It is still far
-  # above every pre-#8423 reading, so sharding stays accurate to ~within the
-  # skew of one file. Overtaking the runtime honestly needs the WATCHDOG FLOOR
-  # raised with it, which is a CI-budget decision recorded on #9172 rather than
-  # smuggled in with a weight.
+  # from this manifest). When this cap was chosen the floor was 15 min, so
+  # 900/360 = 2.5 exactly made <360s the arithmetic ceiling and every reading
+  # above it (366.4 / 380 / 422.9) failed that assertion. The floor is now 19 min
+  # = 1140 s: the 2026-10-26 sweep put `test_calibration.py` at 390.0 s, so the
+  # floor moved to the value its own 2.9x derivation requires
+  # (`ceil(390.0 × 2.9 / 60)`), and 1140/422.9 = 2.70 — the arithmetic ceiling no
+  # longer binds. 355.0 is RETAINED anyway: it is a deliberate weighing choice
+  # (erring high without sitting on a constraint), and raising it is a CI-budget
+  # decision recorded on #9172 rather than smuggled in with a weight. It is still
+  # far above every pre-#8423 reading, so sharding stays accurate to ~within the
+  # skew of one file.
   #
   # NO test count in the claim above: nothing reads or revalidates a count in a
   # comment (the reason `test_journal_growth.py` below dropped its own), so a count
@@ -7888,7 +7945,7 @@ durations:
   test_about_event_untangle.py: 1.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.5
   test_auth_flip.py: 2.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.8
   test_battery_config.py: 1.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.2
-  test_calibration.py: 355.0  # #6133 CEILING, not a reading: the 2026-10-26 sweep (run 40259128208) measured this file at 390.0s, which EXCEEDS the largest weight this map may declare — `WATCHDOG_FLOOR_MIN` (15 min) must clear the largest fast file by 2.5x, so 900/390 = 2.31x fails and EVERY declarable weight is <360s (900/360 = 2.5 exactly). The arithmetic and its precedent are recorded on the `test_lane_stash.py` row below, which capped a 366.4s reading at this same rounded 355.0 for the same reason. ⛔ 390.0 is the file's real cost and is recorded HERE as the provenance of the cap — do not read 355.0 as a measurement of this file. Overtaking 360s honestly needs the WATCHDOG FLOOR raised with it, which is a CI-budget decision recorded on #9172 rather than smuggled in with a weight. Was 2.0.
+  test_calibration.py: 355.0  # #6133 CEILING, not a reading: the 2026-10-26 sweep (run 40259128208) measured this file at 390.0s, which is ABOVE this rounded cap. The #6133 headroom rule is that `WATCHDOG_FLOOR_MIN` (19 min) must clear the largest fast file by 2.5x; at the 15-min floor this cap was chosen under, 900/390 = 2.31x FAILED it and EVERY declarable weight was <360s (900/360 = 2.5 exactly), and the floor has since moved to 19 min = 1140 s (#10055, its own 2.9x derivation) — so 390.0 IS declarable (1140/390.0 = 2.92x) and the arithmetic ceiling is now <456s (1140/2.5). The cap is RETAINED as a weighing choice, not because the constraint binds. The arithmetic and its precedent are recorded on the `test_lane_stash.py` row below, which capped a 366.4s reading at this same rounded 355.0 for the same reason. ⛔ 390.0 is the file's real cost and is recorded HERE as the provenance of the cap — do not read 355.0 as a measurement of this file. Raising the declaration itself is a CI-budget decision recorded on #9172 rather than smuggled in with a weight. Was 2.0.
   test_9269_operator_shaped_factor_input.py: 3.2  # new in #9269; the sweeper fills this from the run's junit — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.5
   test_eval_ingest_cache.py: 3.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.5
   test_lme_ingest_v2_supersession.py: 3.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.8
@@ -8375,7 +8432,7 @@ durations:
   test_session_reinjection.py: 4.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.0
   test_session_reinjection_rules.py: 0.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_backups_v1_alias.py: 0.1
-  eval/write_path/test_write_path_operator_lane.py: 355.0  # #6133 CEILING, not a reading: the 2026-10-26 sweep (run 40259128208) measured this file at 386.2s, which EXCEEDS the largest weight this map may declare — `WATCHDOG_FLOOR_MIN` (15 min) must clear the largest fast file by 2.5x, so 900/386.2 = 2.33x fails and EVERY declarable weight is <360s (900/360 = 2.5 exactly). The arithmetic and its precedent are recorded on the `test_lane_stash.py` row below, which capped a 366.4s reading at this same rounded 355.0 for the same reason, as the `test_calibration.py` row above does for its 390.0. ⛔ 386.2 is the file's real cost and is recorded HERE as the provenance of the cap — do not read 355.0 as a measurement of this file. Overtaking 360s honestly needs the WATCHDOG FLOOR raised with it, which is a CI-budget decision recorded on #9172 rather than smuggled in with a weight. Was 25.0.
+  eval/write_path/test_write_path_operator_lane.py: 355.0  # #6133 CEILING, not a reading: the 2026-10-26 sweep (run 40259128208) measured this file at 386.2s, which is ABOVE this rounded cap. The #6133 headroom rule is that `WATCHDOG_FLOOR_MIN` (19 min) must clear the largest fast file by 2.5x; at the 15-min floor this cap was chosen under, 900/386.2 = 2.33x FAILED it and EVERY declarable weight was <360s (900/360 = 2.5 exactly), and the floor has since moved to 19 min = 1140 s (#10055, its own 2.9x derivation) — so 386.2 IS declarable (1140/386.2 = 2.95x) and the arithmetic ceiling is now <456s (1140/2.5). The cap is RETAINED as a weighing choice, not because the constraint binds. The arithmetic and its precedent are recorded on the `test_lane_stash.py` row below, which capped a 366.4s reading at this same rounded 355.0 for the same reason, as the `test_calibration.py` row above does for its 390.0. ⛔ 386.2 is the file's real cost and is recorded HERE as the provenance of the cap — do not read 355.0 as a measurement of this file. Raising the declaration itself is a CI-budget decision recorded on #9172 rather than smuggled in with a weight. Was 25.0.
   eval/write_path/test_write_path_operator_receipt.py: 20.0  # #9077: 62 pure-dict tests (13.6 s warm, 19.5 s cold, `-p no:cacheprovider`, carve-out env); errs high deliberately — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.4s) is a LOWER bound; kept 20.0
   longmem_eval/test_temporal_admission_trace.py: 0.1
   test_2884_ep_state_journaled.py: 8.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.7
@@ -8967,6 +9024,16 @@ durations:
   test_5089_operator_status_parity.py: 0.6
   test_5097_capture_source_replay.py: 5.8
   test_5140_pending_extraction.py: 2.1
+  # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
+  # per-test graphs; two of the functions are parametrised, so the collected
+  # count is larger than the function count — deliberately not restated here,
+  # because a hard number in a timing-provenance note goes stale on the next
+  # test added and reads as a stale timing). ADDED BY THIS PR, so the
+  # refresher — which samples push-to-main junit — cannot have measured it; the
+  # flat `DEFAULT_FAST_WEIGHT` is the only honest row, and a local reading is not
+  # a shard-layout input (#3419/#2818). `tools/ci_timing.py --refresh-durations`
+  # replaces it.
+  test_5140_d10_relabel_migration.py: 2.0  # unmeasured — new in #5140
   test_5321_embedder_accessor_liveness.py: 0.1
   test_5346_paged_read_total_order.py: 10.7
   test_5404_entity_type_guard.py: 0.1

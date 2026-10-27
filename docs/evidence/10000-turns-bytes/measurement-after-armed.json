@@ -1,0 +1,104 @@
+{
+  "arm": "after-armed",
+  "tree": {
+    "tortoise_module": "/private/tmp/r10000-lane/tortoise/sdk.py",
+    "git_head": "fffcc7c0c2a490624fb472253a0c846298c3928e"
+  },
+  "corpus": {
+    "sessions": 25,
+    "turns_per_session": 40,
+    "turn_chars": 1500,
+    "dim": 384
+  },
+  "graph": {
+    "namespace": "test_r10000_after_armed_r2",
+    "graph_name": "test_r10000_after_armed_r2_tortoise",
+    "node_counts": {
+      "EpMeta": 1,
+      "Event": 2,
+      "GraphEvent": 1008,
+      "GraphEventMeta": 1,
+      "Object": 1,
+      "Point": 1,
+      "Session": 26,
+      "Source": 1
+    },
+    "edge_counts": {
+      "CONTAINS": 1,
+      "aboutObject": 1,
+      "extractedFrom": 1,
+      "references": 1
+    }
+  },
+  "used_memory_bytes": {
+    "before": 6812992,
+    "after": 7613800,
+    "delta": 800808,
+    "delta_per_session": 32032.3
+  },
+  "graph_memory_usage_mb": {
+    "total_graph_sz_mb": 0,
+    "label_matrices_sz_mb": 0,
+    "relation_matrices_sz_mb": 0,
+    "amortized_node_block_sz_mb": 0,
+    "amortized_node_attributes_by_label_sz_mb": [
+      "Point",
+      0,
+      "Subject",
+      0,
+      "Object",
+      0,
+      "Event",
+      0,
+      "Source",
+      0,
+      "Session",
+      0,
+      "Meta",
+      0,
+      "GraphEvent",
+      0,
+      "GraphEventMeta",
+      0,
+      "EpMeta",
+      0
+    ],
+    "amortized_unlabeled_nodes_attributes_sz_mb": 0,
+    "amortized_edge_block_sz_mb": 0,
+    "amortized_edge_attributes_by_type_sz_mb": [
+      "references",
+      0,
+      "extractedFrom",
+      0,
+      "aboutObject",
+      0,
+      "CONTAINS",
+      0
+    ],
+    "indices_sz_mb": 0
+  },
+  "turn_nodes_in_graph": {
+    "turn_ids_read_back_from_the_graph": 0,
+    "graphwide_text_hits_over_sessions": 0
+  },
+  "public_capture_census": {
+    "receipt_ok": true,
+    "node_counts": {
+      "EpMeta": 1,
+      "Event": 2,
+      "GraphEvent": 8,
+      "GraphEventMeta": 1,
+      "Object": 1,
+      "Point": 1,
+      "Session": 1,
+      "Source": 1
+    },
+    "source_content_bytes": 0,
+    "turn_text_hits": 0
+  },
+  "record_rows": {
+    "point_rows": 1007,
+    "content_bytes": 1518584,
+    "expected_rows": 1000
+  }
+}
