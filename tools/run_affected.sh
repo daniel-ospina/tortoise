@@ -83,6 +83,7 @@ MODE="print"
 MODE_SET=""
 ALLOW_FULL=0
 FILES_FROM=""
+FILES_FROM_GIVEN=0
 RANGE="$DEFAULT_RANGE"
 RANGE_GIVEN=0
 PYTEST_ARGS=()
@@ -106,7 +107,9 @@ while [[ $# -gt 0 ]]; do
     --allow-full) ALLOW_FULL=1; shift ;;
     --files-from)
       [[ $# -ge 2 ]] || die 2 "--files-from needs a FILE operand"
-      FILES_FROM="$2"; shift 2 ;;
+      [[ -n "$2" ]] || die 2 "--files-from needs a NON-EMPTY FILE operand — an empty \
+operand would silently fall through to the range branch and answer a different question"
+      FILES_FROM="$2"; FILES_FROM_GIVEN=1; shift 2 ;;
     --range)
       [[ $# -ge 2 ]] || die 2 "--range needs a RANGE operand"
       [[ "$RANGE_GIVEN" == "0" ]] || die 2 "two ranges given (--range $RANGE and '$2')"
@@ -115,14 +118,14 @@ while [[ $# -gt 0 ]]; do
     --) shift; PYTEST_ARGS=("$@"); break ;;
     -*) die 2 "unknown option '$1' (try --help)" ;;
     *)
-      [[ "$RANGE" == "$DEFAULT_RANGE" ]] || die 2 "two ranges given (--range $RANGE and '$1')"
+      [[ "$RANGE_GIVEN" == "0" ]] || die 2 "two ranges given ('$RANGE' and '$1')"
       RANGE="$1"; RANGE_GIVEN=1; shift ;;
   esac
 done
 
 [[ "$MODE" == "run" || ${#PYTEST_ARGS[@]} -eq 0 ]] \
   || die 2 "extra pytest arguments need --run (got them with --$MODE)"
-if [[ -n "$FILES_FROM" && "$RANGE_GIVEN" == "1" ]]; then
+if [[ "$FILES_FROM_GIVEN" == "1" && "$RANGE_GIVEN" == "1" ]]; then
   die 2 "--files-from and a range are two different sources of truth — pick one \
 (got list '$FILES_FROM' and range '$RANGE')"
 fi
@@ -220,6 +223,7 @@ fi
 uv run --quiet python - "$SELECTION" "$MODE" "$ALLOW_FULL" "$PATHS" <<'PY'
 """Report / refuse / emit the selection. Exit 3 = the `full: true` refusal."""
 import json
+import os
 import sys
 
 selection_path, mode, allow_full, paths_out = sys.argv[1:5]
@@ -289,19 +293,28 @@ else:
         f"carve-out leg: {'yes' if carve_out_run else 'no'} NOT run locally)"
     )
 
-if mode == "summary":
-    print(f"full: {'true' if full else 'false'}")
-    print(f"surfaces: {','.join(surfaces)}")
-    print(f"test_files: {len(targets)}")
-    print(f"slow_selected: {len(slow_selected)}")
-    print(f"carve_out_run: {'true' if carve_out_run else 'false'}")
-else:
-    for target in targets:
-        print(target)
+# `--print | head -1` is a documented way to inspect the list, and a reader that closes
+# early raises BrokenPipeError inside this interpreter — which escapes as EXIT 1 with a
+# raw traceback, a code the exit table does not define. Emit through one guard that
+# retires the broken stream quietly, so a piped inspection exits 0 like any other read.
+try:
+    if mode == "summary":
+        print(f"full: {'true' if full else 'false'}")
+        print(f"surfaces: {','.join(surfaces)}")
+        print(f"test_files: {len(targets)}")
+        print(f"slow_selected: {len(slow_selected)}")
+        print(f"carve_out_run: {'true' if carve_out_run else 'false'}")
+    else:
+        for target in targets:
+            print(target)
 
-# The summary is a ONE-LINE explanation of the size, on stderr so `--print`'s stdout
-# stays a clean list a caller can pipe (and so a big number arrives explained — trap 2).
-print(count_line, file=sys.stderr)
+    # The summary is a ONE-LINE explanation of the size, on stderr so `--print`'s stdout
+    # stays a clean list a caller can pipe (and so a big number arrives explained — trap 2).
+    print(count_line, file=sys.stderr)
+except BrokenPipeError:
+    # Point stdout at /dev/null so the interpreter's shutdown flush cannot raise again.
+    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    raise SystemExit(0)
 
 if mode == "run":
     with open(paths_out, "w", encoding="utf-8") as handle:

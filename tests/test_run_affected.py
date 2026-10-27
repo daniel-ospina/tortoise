@@ -30,7 +30,17 @@ What these pins establish, each of which can fail:
 
 Hermetic: no DB, no network. The selector is exercised as a real subprocess (its
 own pins live in `tests/test_ci_selection*.py`); the changed lists are passed with
-`--files-from`, so no throwaway branch is needed to produce a diff shape.
+`--files-from`, so no throwaway branch is needed to produce a diff shape. No pin needs
+`origin/main` to exist: the CI `test` job checks out at `fetch-depth: 1`, and the one
+pin that touches git by default (`test_a_dirty_worktree_is_warned_about`) uses
+`--range HEAD...HEAD` and stubs `origin/main` as ABSENT so a regression to the default
+range reds here rather than on every `core`-selecting PR.
+
+One guarded behaviour is deliberately NOT pinned: `--print | head -1` closes the reader
+and the tool retires the resulting `BrokenPipeError` as a clean exit (it used to exit 1
+with a raw traceback). That race is not reproducible in-process — measured 6/6 runs
+identical with the guard disarmed, because `uv run` proxies the child's stdout — so a
+pin here would be a test that cannot fail, which is worse than an honest gap.
 """
 from __future__ import annotations
 
@@ -145,8 +155,11 @@ def test_a_full_selection_is_refused_naming_the_reason(tmp_path):
     assert "full: true" in proc.stderr, proc.stderr
     assert "--allow-full" in proc.stderr, (
         "the refusal must name the escape hatch, or a caller has no next step")
-    # The REASON, not just the verdict — the selector's own cause line is echoed.
-    assert "SHARED_MODULES" in proc.stderr or "BLAST RADIUS" in proc.stderr, proc.stderr
+    # The REASON, not just the verdict. Assert the SELECTOR's own line — the wrapper's
+    # canned refusal also contains "BLAST RADIUS" and "SHARED_MODULES", so asserting
+    # either of those passes even if the selector's diagnostic is never echoed.
+    assert "ci_selection: FULL matrix because a SHARED_MODULES path changed" in proc.stderr, (
+        f"the selector's own cause line must be echoed, not just paraphrased: {proc.stderr}")
 
 
 def test_allow_full_accepts_the_selection(tmp_path):
@@ -237,18 +250,27 @@ def test_a_dirty_worktree_is_warned_about(tmp_path):
     stub_bin = tmp_path / "stub-git"
     stub_bin.mkdir()
     stub = stub_bin / "git"
-    # Only `status --porcelain` is faked; every real git call passes through.
+    # Only `status --porcelain` is faked; every real git call passes through — except any
+    # `origin/main` lookup, which fails as it does in the CI `test` job (`fetch-depth: 1`).
+    # That makes this pin self-defending: an edit back to the DEFAULT range reds here
+    # locally, instead of reding the shard on every `core`-selecting PR.
     stub.write_text(
         "#!/bin/sh\n"
         'case "$*" in\n'
         "  'status --porcelain'*) printf ' M tortoise/sdk.py\\n?? notes.txt\\n'; exit 0 ;;\n"
+        "  *origin/main*) echo 'fatal: ambiguous argument origin/main (no such ref)' >&2; exit 128 ;;\n"
         "esac\n"
         f'exec "{real_git}" "$@"\n',
         encoding="utf-8",
     )
     stub.chmod(0o755)
 
-    proc = _run(["--print"], tmp_path,
+    # `--range HEAD...HEAD`, not the default: the CI `test` job checks out at
+    # `fetch-depth: 1` (only the `changes` job has `origin/main`), so a pin that needed
+    # the default range would red the shard on every `core`-selecting PR — including
+    # this one. The warning is emitted before the empty-selection branch, so this still
+    # exercises it.
+    proc = _run(["--range", "HEAD...HEAD", "--print"], tmp_path,
                 env_extra={"PATH": f"{stub_bin}:{os.environ['PATH']}"})
 
     assert proc.returncode == 0, proc.stderr
@@ -368,3 +390,24 @@ def test_two_modes_at_once_is_a_usage_error(tmp_path):
     proc = _run(["--print", "--run"], tmp_path)
     assert proc.returncode == 2, proc.stderr
     assert "pick ONE" in proc.stderr, proc.stderr
+
+
+def test_two_positional_ranges_are_a_usage_error(tmp_path):
+    """Value-comparing against the default spelling silently dropped the first range."""
+    proc = _run(["origin/main...HEAD", "HEAD...HEAD", "--summary"], tmp_path)
+
+    assert proc.returncode == 2, (
+        f"a second positional range must be refused, not silently dropped: "
+        f"{proc.returncode} {proc.stdout[:200]}")
+    assert "two ranges" in proc.stderr, proc.stderr
+
+
+def test_an_empty_files_from_operand_is_a_usage_error(tmp_path):
+    """`--files-from ""` must not fall through to the range branch (a different question)."""
+    proc = _run(["--files-from", "", "--summary"], tmp_path)
+
+    assert proc.returncode == 2, (
+        f"an empty list operand must be a usage error, not a range selection: "
+        f"{proc.returncode} {proc.stdout[:200]}")
+    assert proc.stdout.strip() == "", f"nothing should be selected: {proc.stdout!r}"
+    assert "NON-EMPTY" in proc.stderr, proc.stderr
