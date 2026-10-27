@@ -129,16 +129,20 @@ def test_operator_fts_leg_orders_a_tied_result_by_id(sdk):
     data-determined order. This leg scores EVERY row a constant ``1.0``, so the
     whole leg is one tie and nothing but the secondary keys can order it.
 
-    THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order
-    (``zulu``, ``mike``, ``alpha``) and carry NO timestamp property, so the
+    THE FIXTURE REACHES IT: the three nodes are created in ASCENDING id order
+    (``alpha``, ``mike``, ``zulu``) and carry NO timestamp property, so the
     recency key coalesces to ``''`` for all three and the id key decides. #10121
     reversed that key's DIRECTION (newest first), so the expected order is
-    ``["zulu-op", "mike-op", "alpha-op"]``. This also confirms the BRUTE-FORCE
-    path honours multi-key ordering (the operator leg uses no fulltext index),
-    which the issue asks to establish.
+    ``["zulu-op", "mike-op", "alpha-op"]`` — the REVERSE of the mint order,
+    which is the one order a bare DB scan cannot produce. (#10121's tie direction
+    reversed the seeding too: minting them DESCENDING, as this fixture did
+    before, made the expectation coincide with insert order, so the assertion
+    passed whether or not the leg ordered anything at all.) This also confirms
+    the BRUTE-FORCE path honours multi-key ordering (the operator leg uses no
+    fulltext index), which the issue asks to establish.
     """
     graph = sdk._get_proj().g
-    for pid in ["zulu-op", "mike-op", "alpha-op"]:
+    for pid in ["alpha-op", "mike-op", "zulu-op"]:
         graph.query(
             "CREATE (n:Point {id:$id, is_operator:true, label:$label})",
             params={"id": pid, "label": "determinism needle"},
@@ -165,14 +169,15 @@ def test_index_fts_leg_orders_a_tied_result_by_id(sdk):
     multi-key ordering on THIS path, not only the brute-force one — so this
     asserts the behaviour rather than the query text.
 
-    THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order,
-    carry NO timestamp, and all match the term — so they score identically, the
-    recency key coalesces to ``''``, and the id key decides. #10121 made that key
-    ``DESC`` (newest first), so ``["zulu-ix", "mike-ix", "alpha-ix"]`` is the
-    order, and it is unreachable unless the secondary keys are applied.
+    THE FIXTURE REACHES IT: the three nodes are created in ASCENDING id order
+    (``alpha``, ``mike``, ``zulu``), carry NO timestamp, and all match the term —
+    so they score identically, the recency key coalesces to ``''``, and the id
+    key decides. #10121 made that key ``DESC`` (newest first), so
+    ``["zulu-ix", "mike-ix", "alpha-ix"]`` is the order — the REVERSE of the
+    mint order, and it is unreachable unless the secondary keys are applied.
     """
     graph = sdk._get_proj().g
-    for pid in ["zulu-ix", "mike-ix", "alpha-ix"]:
+    for pid in ["alpha-ix", "mike-ix", "zulu-ix"]:
         graph.query(
             "CREATE (n:Point {id:$id, content:'determinism needle', "
             "pointKind:'statement'})",
@@ -198,13 +203,15 @@ def test_structural_leg_orders_a_constant_scored_result_by_id(sdk):
     ``0.5``), so it is one tie exactly like the operator leg — and it carried no
     ``ORDER BY`` at all, which made it the one leg that was completely unordered.
 
-    THE FIXTURE REACHES IT: the three nodes are created in DESCENDING id order,
-    so an order-determined result is reachable only through the secondary keys.
-    #10121 made the id key ``DESC``; with no timestamps the recency key coalesces
-    to ``''`` and ``["zulu-st", "mike-st", "alpha-st"]`` is the expected order.
+    THE FIXTURE REACHES IT: the three nodes are created in ASCENDING id order
+    (``alpha``, ``mike``, ``zulu``), so an order-determined result is reachable
+    only through the secondary keys — the expected value is the REVERSE of the
+    mint order, i.e. the one thing DB row order cannot return. #10121 made the id
+    key ``DESC``; with no timestamps the recency key coalesces to ``''`` and
+    ``["zulu-st", "mike-st", "alpha-st"]`` is the expected order.
     """
     graph = sdk._get_proj().g
-    for pid in ["zulu-st", "mike-st", "alpha-st"]:
+    for pid in ["alpha-st", "mike-st", "zulu-st"]:
         graph.query(
             "CREATE (n:Point {id:$id, pointKind:$kind, content:$id})",
             params={"id": pid, "kind": "statement"},
@@ -234,12 +241,13 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
     ``projection.edges._mint_source_stub`` — the REAL stub path every provenance
     link uses — which sets url / sourceKind / contentHash / ingestedAt and NEVER
     sets ``id`` (measured: ``MATCH (s:Source) RETURN s.url, s.id`` =
-    ``[['z-doc', None], ['m-doc', None], ['a-doc', None]]``). ``documentKind`` is
+    ``[['a-doc', None], ['m-doc', None], ['z-doc', None]]`` — the mint order).
+    ``documentKind`` is
     then written onto those same nodes, which leaves ``id`` NULL — a state
     ``_upsert_source`` cannot repair either, since it sets ``id`` only ON CREATE.
-    They are minted in DESCENDING url order, so
-    ``["a-doc", "m-doc", "z-doc"]`` is unreachable unless the leg orders by the
-    document's canonical key.
+    They are minted in ASCENDING url order (``a-doc``, ``m-doc``, ``z-doc``), so
+    ``["z-doc", "m-doc", "a-doc"]`` — the reverse of the mint order — is
+    unreachable unless the leg orders by the document's canonical key.
 
     WHY THIS IS BEHAVIOURAL AND NOT A SECOND STRING PIN:
     ``test_every_leg_query_carries_a_secondary_sort_key`` asserts the ORDER BY
@@ -251,7 +259,7 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
     from tortoise.projection.edges import _mint_source_stub
 
     graph = sdk._get_proj().g
-    for url in ["z-doc", "m-doc", "a-doc"]:
+    for url in ["a-doc", "m-doc", "z-doc"]:
         _mint_source_stub(graph, url)
         graph.query(
             "MATCH (s:Source {url:$url}) SET s.documentKind=$kind",
