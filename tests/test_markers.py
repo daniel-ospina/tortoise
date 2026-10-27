@@ -852,6 +852,10 @@ def test_no_redirect_stems_registry_exact():
         # working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_bm25_lexical_8488",
+        # #8488 scope 1: the context-enriched turn-embedding write path — the
+        # sibling of the lexical arm above, same three-way mirror (carve_out,
+        # TEST_NO_REDIRECT_STEMS, and this pin).
+        "test_context_enrich_8488",
         # #9209: the write handle's NON-CYPHER verbs. The suite's
         # `sdk_with_journal` fixture asserts `proj._is_embedded` and counts
         # real nodes on that embedded projection, and the module carries

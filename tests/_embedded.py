@@ -335,6 +335,12 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # shipped read's own fusion), so it is exempt from the docker redirect and
     # routed to the URI-unset carve-out job.
     "test_bm25_lexical_8488",
+    # #8488 scope 1: the context-enriched turn-embedding write path — module-level
+    # ``pytest.mark.embedded_only`` (its subject is the embedded lane and the
+    # dense leg's on/off behaviour), so it is exempt from the docker redirect
+    # and routed to the URI-unset carve-out job, exactly like its lexical
+    # sibling above.
+    "test_context_enrich_8488",
     # #5140: the behavioural `ingestedAt` file constructs its own embedded
     # `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`), so the
     # construction IS the under-test input — a URI-set run would discard the

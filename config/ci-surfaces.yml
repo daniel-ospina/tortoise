@@ -4385,6 +4385,12 @@ surfaces:
   # — a `core`-only registration would leave the manifest green and the file
   # never executed.
   - test_bm25_lexical_8488.py
+  # #8488 scope 1: the context-enriched turn-embedding write path. `tortoise/
+  # context_enrich.py` is a NEW module, so it matches no SOURCE_PATTERNS entry
+  # and falls through to `core` (its lexical sibling lives here too). ALSO in
+  # `carve_out`: its `pytestmark` is `embedded_only`, so a `core`-only
+  # registration would leave the manifest green and the file never executed.
+  - test_context_enrich_8488.py
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
@@ -6848,6 +6854,11 @@ carve_out:
 # Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
 # test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_bm25_lexical_8488.py
+# #8488 scope 1: the context-enriched turn-embedding write path. Module-level
+# `embedded_only` (its subject is the embedded lane + the dense leg's on/off
+# behaviour), so a `core`-only registration would make the manifest green and
+# run NOTHING on a docker leg. Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS.
+- test_context_enrich_8488.py
 - test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
