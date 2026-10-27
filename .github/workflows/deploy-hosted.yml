@@ -246,22 +246,22 @@ on:
 # COMPANION BOUND, required BY the change above: with no cancellation there is no
 # escape from a runaway deploy, and no job below declared `timeout-minutes`, so
 # GitHub's 360-minute default was the only bound on a hang that would hold this
-# group — and every deploy behind it — for six hours. Each job is now capped at
-# 2× its measured maximum (nearest 5; the rule #10151 applies to the merge-gating
-# jobs), measured on completed runs 2026-10-27: `packaging-smoke` max 28.2 min
-# (n=27) → 55; `post-deploy-verify` max 0.4 min (n=6) → 15 (the floor).
-# `deploy-api` is the exception, for arithmetic rather than padding: its own
-# retry loop is 5 `timeout`-bounded attempts (11 min each, + 4 × 45 s) = 58.0 min —
-# the per-attempt bound is what makes that a number, because `--wait-timeout 420`
-# bounds only the release wait and not `flyctl deploy`'s remote build — so a 2×
-# cap over its measured maximum would red the fail-safe retry path it exists to
-# allow. 60 bounds the job without ever being the thing that fails it.
+# group — and every deploy behind it — for six hours. Each job is now bounded
+# from a MEASUREMENT, and the three do not use one formula because their shapes
+# differ (measured on completed runs 2026-10-27):
+#   • `packaging-smoke` — 2× its measured max (28.2 min, n=27) → 55.
+#   • `post-deploy-verify` — 2× its worst case, which is the DB health gate's own
+#     budget, not its measured 0.4 min → 25 (see that job's comment).
+#   • `deploy-api` — loop + non-Deploy steps + margin → 65 (see that job's
+#     comment): a 2× cap over its measured maximum would red the fail-safe retry
+#     path it exists to allow, because `--wait-timeout 420` bounds only the
+#     release wait and not `flyctl deploy`'s remote build.
 #
 # ⚠️ NOTHING OUTSIDE THIS WORKFLOW IS BOUNDED BY THESE CAPS ALONE: the sum
-# (55 + 60 + 15 = 130 min) is now the worst case a run can HOLD this group for,
+# (55 + 65 + 25 = 145 min) is now the worst case a run can HOLD this group for,
 # which is what `supabase-deploy.yml`'s flip watcher has to out-wait (it queues
 # behind a running run instead of pre-empting it) — that watcher's own bound is
-# derived from this 130.
+# derived from this 145.
 concurrency:
   group: deploy-hosted
   cancel-in-progress: false
@@ -397,15 +397,28 @@ jobs:
   deploy-api:
     runs-on: ubuntu-latest
     needs: packaging-smoke
-    # Bounded ABOVE this job's own arithmetic, not at a multiple of its 3.5 min
-    # measured maximum: the retry loop is now 5 × 11-minute attempts + 4 × 45 s
-    # = 58.0 min (each attempt is `timeout`-bounded — `--wait-timeout 420` bounds
-    # only the release wait, not the remote build), so 60 leaves the fail-safe
-    # path room without ever being the thing that fails it. The ≤6.4 min DB
-    # health gate is NOT in this job (it moved to `post-deploy-verify` in
+    # Bounded ABOVE this job's own worst case, NOT at a multiple of its measured
+    # maximum: the retry loop is 5 × 11-minute attempts + 4 × 45 s = 58.0 min
+    # (each attempt is `timeout`-bounded — `--wait-timeout 420` bounds only the
+    # release wait, not the remote build), and this job has THIRTEEN other steps
+    # sharing the same budget (the dependency parity gate alone runs two `uv`
+    # commands). So:
+    #   58.0  loop worst case
+    # +  0.42 non-Deploy steps — MEASURED max over 8 deploy-api jobs 2026-10-27
+    #         (0.22, 0.27, 0.32, 0.33, 0.38, 0.40, 0.40, 0.42)
+    # = 58.42 → 65, i.e. 6.6 min of headroom (15.7× the measured non-Deploy term).
+    # ⛔ The headroom is the point, not padding: a `timeout-minutes` kill ends the
+    # job BEFORE `if: failure()` is evaluated (see the POST-DEPLOY RESIDUAL note
+    # below), so a cap the loop alone can reach silences the #2240 out-of-band
+    # alert on the very fail-safe path the retry exists to protect. The previous
+    # 60 left 2 minutes for those thirteen steps.
+    # For the record, this job's measured max is 6.68 min (n=8, run 40458809781),
+    # of which the Deploy step is 6.27 — a cap of "2× the measured job max" would
+    # be 15 and would red a single slow build.
+    # The DB health gate is NOT in this job (it moved to `post-deploy-verify` in
     # #4538, which is where its budget is counted). See the workflow's
     # `concurrency:` note.
-    timeout-minutes: 60
+    timeout-minutes: 65
     # #2240: the failure alert files/updates a GitHub issue through the shared
     # substrate, which asserts the writer is `github-actions[bot]` — so this job
     # needs `issues: write`. `contents: read` MUST be spelled out: specifying ANY
@@ -1025,18 +1038,21 @@ jobs:
           # ⛔ Each ATTEMPT is bounded, because `--wait-timeout 420` bounds only
           # the RELEASE wait — NOT `flyctl deploy`'s remote build — so without
           # this the loop is 5 × (unbounded build + 420 s): its worst case is not
-          # a number, and `timeout-minutes: 60` can kill attempt 5 of a deploy
-          # that was making progress, failing the very fail-safe path the retry
-          # exists to rescue. The per-attempt bound is the largest the job's 60
-          # allows: (60 − 4 × 45 s) / 5 = 11.4 → 11 min, so the loop is
-          # 5 × 11 + 4 × 45 s = 58.0 min.
+          # a number, and `timeout-minutes` can kill attempt 5 of a deploy that
+          # was making progress, failing the very fail-safe path the retry
+          # exists to rescue. The per-attempt bound is derived from MEASUREMENT,
+          # not back-solved from the job cap — the earlier "largest the job's 60
+          # allows" derivation made the loop 97% of the cap and left ~2 min for
+          # the job's thirteen other steps — so 11 min is 1.75× this step's
+          # measured max and the cap is derived ABOVE the loop instead (see
+          # `deploy-api`'s `timeout-minutes`).
           # MEASURED for THIS STEP, not the job — a `deploy-api` JOB duration
-          # here is mostly runner-queue latency and says nothing about attempt
-          # length (the tempting 55.1-min example, run 40451731878, was
-          # `cancelled` with `steps=0`: the step never started). The step's own
+          # says nothing about attempt length: the tempting 55.1-min example,
+          # run 40451731878, was `cancelled` with `steps=0`, so the step never
+          # started and the span is runner-QUEUE latency. The step's own
           # completed durations: max 6.27 min (run 40458809781, 08:02:06→08:08:22),
-          # then 3.03, 2.78, 2.43, 1.63. 11 min is 1.75× that max, and the retry
-          # loop is what absorbs an attempt that really is slow.
+          # then 3.03, 2.78, 2.43, 1.63. The retry loop absorbs an attempt that
+          # really is slow.
           for attempt in 1 2 3 4 5; do
             if timeout 11m flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
               exit 0
@@ -1182,9 +1198,10 @@ jobs:
   post-deploy-verify:
     runs-on: ubuntu-latest
     needs: deploy-api
-    # 15 is the floor (measured max 0.4 min, n=6): the DB health gate below is
-    # this job's real worst case, so the headroom is measured against THAT rather
-    # than against the measurement.
+    # 25 is 2× the DB health gate's own worst case (12.65 min), which is this
+    # job's real worst case — its measured max (0.4 min, n=6) says nothing about
+    # a slow release, so the headroom is derived against the GATE, not against
+    # the measurement.
     # ⛔ THAT WORST CASE WAS NOT ACTUALLY BOUNDED UNTIL #10155's review: the gate
     # is `N tries × S sleep`, which bounds a phase only if each REQUEST is
     # bounded — and curl has no total-transfer timeout by default, so a SLOW (not
@@ -1192,13 +1209,13 @@ jobs:
     # here than anywhere else in the workflow: a `timeout-minutes` kill ends the
     # job BEFORE `if: failure()` is evaluated (see the deploy-api RESIDUAL note),
     # so the #2240 out-of-band alert would never run and a LIVE, unhealthy
-    # release would be reported ONLY as a red run with a truncated log. The gate
-    # now bounds every request, so the worst case is a number:
-    #   5 × (10 + 5) + 18 × (5 + 10) + 18 × (5 + 10) = 615 s = 10.25 min,
-    # i.e. 15 is 1.46× that — and the request bounds are generous next to the
-    # SERVER's own probes (~1.5 s `_HEALTH_PROBE`), so they cannot red a healthy
-    # release.
-    timeout-minutes: 15
+    # release would be reported ONLY as a red run with a truncated log. Every
+    # request is now bounded, and the readiness bound is derived from the
+    # SERVER's own declared bounds (5.6 s data plane + 6.0 s control plane =
+    # 11.6 s → 13 s), so the worst case is a number:
+    #   5 × (10 + 5) + 18 × (5 + 10) + 18 × (13 + 10) = 759 s = 12.65 min,
+    # i.e. 25 is 1.98× that.
+    timeout-minutes: 25
     if: ${{ needs.deploy-api.result == 'success' }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
     # a red here means the release is LIVE and unhealthy, and nothing else in

@@ -119,7 +119,15 @@ state="${STUB_STATE:?}"
 # (`--max-time`/`--connect-timeout`). Without this, deleting the bounds leaves
 # every behavioural case green: an unbounded request still succeeds against a
 # stub that answers instantly, so only the ARGV can distinguish them.
+#
+# TWO logs, because two different questions are asked: `curl-argv.log` is one
+# arg per line (any arg is findable), and `curl-req.log` is one REQUEST per line
+# — without the per-request boundary, "some request carried --max-time" is
+# indistinguishable from "every request did", which is the defect this pin had
+# (case 12 asserted a substring of the concatenation of ALL requests, so
+# deleting the bound from the /health/ready phase alone left it green).
 printf '%s\n' "$@" >> "$state/curl-argv.log"
+printf '%s\n' "$*" >> "$state/curl-req.log"
 bump() { # <file> → prints the new count
   local f="$state/$1" n
   n=$(cat "$f" 2>/dev/null || echo 0)
@@ -322,11 +330,34 @@ echo "12. every request is BOUNDED (the phase budgets are not bounds on their ow
 # caller-facing consequence: `post-deploy-verify`'s `timeout-minutes` is the
 # only thing left that can end an unbounded probe, and a `timeout-minutes` kill
 # ends the job BEFORE `if: failure()` runs, silencing the #2240 alert.
+#
+# ⛔ COUNTED PER REQUEST, not substring-searched: a healthy run makes exactly
+# three requests (app probe + db.ok poll on `/health`, then `/health/ready`), and
+# the assertions below fail if ANY ONE of them loses its bound. The previous
+# form (`assert_contains` over the whole concatenated log) passed on a single
+# occurrence, so deleting the bound from the readiness request — the phase whose
+# unboundedness this change exists to remove — stayed green.
 run_gate "yes" 1 1
 assert_eq "$RC" "0" "a healthy run still passes with the bounds in place"
-ARGV=$(cat "$LAST_STATE/curl-argv.log" 2>/dev/null || true)
-assert_contains "$ARGV" "--max-time" "every request carries --max-time"
-assert_contains "$ARGV" "--connect-timeout" "every request carries --connect-timeout"
+REQ_LOG="$LAST_STATE/curl-req.log"
+NREQ=$(wc -l < "$REQ_LOG" | tr -d ' ')
+assert_eq "$NREQ" "3" "the healthy run made 3 requests (the denominator for the pins below)"
+assert_eq "$(grep -c -- '--max-time' "$REQ_LOG")" "$NREQ" "EVERY request carries --max-time"
+assert_eq "$(grep -c -- '--connect-timeout' "$REQ_LOG")" "$NREQ" "EVERY request carries --connect-timeout"
+# …and each phase carries ITS OWN server-derived knob. One knob for both is the
+# defect this split fixes: `/health` is an in-memory snapshot, while
+# `/health/ready` runs BOTH server-side plane binders sequentially (11.6 s
+# declared worst case), so a shared 5 s bound reds a slow-but-healthy release.
+assert_eq "$(grep -c -- '--max-time 13' "$REQ_LOG")" "1" "the /health/ready request is bounded at the READY knob (13s)"
+assert_eq "$(grep -c -- '--max-time 10' "$REQ_LOG")" "1" "the phase-1 app probe is bounded at the APP knob (10s)"
+assert_eq "$(grep -c -- '--max-time 5' "$REQ_LOG")" "1" "the phase-2 db.ok poll on /health is bounded at the HEALTH knob (5s)"
+
+# ⛔ The readiness knob is DERIVED, not chosen: it must clear the server's own
+# declared worst case (DB_PROBE_HARD_TIMEOUT + CONTROL_PLANE_HARD_TIMEOUT), or a
+# healthy-but-slow 200 arrives after curl gave up and phase 3 reports `000` as
+# "no response from the app". Pinned in python (tests/test_deploy_workflow.py:
+# test_the_readiness_request_bound_clears_the_servers_own_bound) because the
+# server constants live in an importable module, not in this shell.
 
 echo "13. a ZERO request bound → exit 2 (curl reads 0 as 'no limit')"
 # The same fail-open shape as case 8, one level down: a guard that accepted 0
@@ -334,14 +365,14 @@ echo "13. a ZERO request bound → exit 2 (curl reads 0 as 'no limit')"
 # because the numeric loop above deliberately permits 0 for the phase knobs
 # (``DB_SLEEP=0`` is how this harness runs at all).
 zero_bound_rc=0
-OUT=$(GATE_BASE="https://stub.invalid" CURL_MAX_TIME_PROBE=0 bash "$GATE" 2>&1) || zero_bound_rc=$?
+OUT=$(GATE_BASE="https://stub.invalid" CURL_MAX_TIME_READY=0 bash "$GATE" 2>&1) || zero_bound_rc=$?
 assert_eq "$zero_bound_rc" "2" "a zero request bound exits 2"
 assert_contains "$OUT" "must be a POSITIVE integer" "explains why 0 is refused"
 
 echo
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=46
+expected_assertions=50
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

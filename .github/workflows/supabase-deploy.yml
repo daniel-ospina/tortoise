@@ -364,8 +364,9 @@ jobs:
           # ⛔ 330m, not the pre-#10155 45m, and the DERIVATION is split in two
           # because the wait is not execution-dominated:
           #   • what this workflow can BOUND is execution: a predecessor holds the
-          #     group for at most its job caps (55 + 60 + 15 = 130 min) and this
-          #     run for the same, so 2 × 130 = 260 + slack;
+          #     group for at most its job caps (55 + 65 + 25 = 145 min — the caps
+          #     `deploy-hosted.yml` derives, re-derive this sum if they move) and
+          #     this run for the same, so 2 × 145 = 290 min + slack;
           #   • what it CANNOT bound is runner-queue latency, and that is now the
           #     larger term — measured on the newest SUCCESSFUL deploy-hosted run
           #     (40458809781, 2026-10-27): wall clock 167.3 min against 16.8 min
@@ -385,7 +386,10 @@ jobs:
           # ⛔ So 330 is a POLICY choice against an unbounded term, and the thing
           # that must be CORRECT is the verdict below, not the constant: only a
           # non-zero exit from a run that reached a terminal state is evidence
-          # the flip failed. Exhausting the bound is NOT (see the branch below).
+          # the flip failed. Exhausting the bound is NOT (see the branch below),
+          # and neither is a FAILED POLL — `gh run watch` returns the same
+          # non-zero exit for a transport/API error, so the arm below reads the
+          # run's own `status`/`conclusion` before it claims anything.
           if command -v timeout >/dev/null 2>&1; then
             watch=(timeout 330m "${watch[@]}")
           fi
@@ -403,7 +407,41 @@ jobs:
             exit 1
           fi
           if [ "${watch_rc}" -ne 0 ]; then
-            echo "::error::deploy-hosted run ${run_id} did not reach success — the app did NOT flip. The schema IS applied, so tenant-scoped reads return 0 rows and provisioning fails until the app is flipped (#3627). A merge to main landing while this flip was still PENDING supersedes it (deploy-hosted.yml's shared `concurrency` group holds one pending run; `cancel-in-progress: false` stops a RUNNING deploy being cancelled but cannot save a pending one); re-run this workflow, or flip by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
+            # ⛔ A non-zero exit from `gh run watch` has TWO causes, and only ONE
+            # of them is evidence about the flip: the run reached a non-success
+            # CONCLUSION (`--exit-status`), or ANY poll failed — the CLI calls
+            # `GetRun` every 3 s and returns `failed to get run: %w` on a
+            # transport/5xx/auth error. Over a 330-minute window that is ~6,600
+            # polls, so a single transient error is realistic, and its exit code
+            # is indistinguishable from a failed deploy. Claiming "the app did
+            # NOT flip" on it asserts a product conclusion that was never
+            # observed, and its remediation (re-dispatch / flip by hand) is the
+            # pair the 124 arm above exists to forbid — both queue behind the
+            # run and supersede its pending slot.
+            # So READ the run's own state before claiming anything. `status` +
+            # `conclusion` is the terminal truth; only a COMPLETED run with a
+            # non-success conclusion is evidence the flip failed.
+            run_state=""
+            run_conclusion=""
+            if api_state="$(gh api "repos/${REPO_SLUG}/actions/runs/${run_id}" \
+                  --jq '[.status, (.conclusion // "-")] | @tsv' 2>/dev/null)"; then
+              run_state="${api_state%%$'\t'*}"
+              run_conclusion="${api_state#*$'\t'}"
+            fi
+            if [ "${run_state}" = "completed" ] && [ "${run_conclusion}" = "success" ]; then
+              # The watch exited non-zero because a POLL failed; the run itself
+              # says it finished successfully. The conclusion is the stronger
+              # signal (it is what `--exit-status` reads), so report it as what
+              # it is — never as a failure, which would send an operator to
+              # re-dispatch a deploy that already landed.
+              echo "✅ app flip completed (run ${run_id}) — the run's own conclusion is success; the watch exited ${watch_rc}, which over a 330-minute window is a poll error and not the run: https://github.com/${REPO_SLUG}/actions/runs/${run_id}"
+              exit 0
+            fi
+            if [ "${run_state}" != "completed" ] || [ -z "${run_conclusion}" ] || [ "${run_conclusion}" = "-" ]; then
+              echo "::error::deploy-hosted run ${run_id} reported a non-zero exit (${watch_rc}) but its state is NOT terminal (status='${run_state:-unreadable}' conclusion='${run_conclusion:-none}') — the flip is UNKNOWN, NOT failed. The watch most likely lost the API on one of its polls. Do NOT re-dispatch and do NOT flip by hand: both queue behind this run and supersede its pending slot. Watch it instead: gh run watch ${run_id} --repo ${REPO_SLUG} (#3627)"
+              exit 1
+            fi
+            echo "::error::deploy-hosted run ${run_id} did not reach success (status=${run_state}, conclusion=${run_conclusion}) — the app did NOT flip. The schema IS applied, so tenant-scoped reads return 0 rows and provisioning fails until the app is flipped (#3627). A merge to main landing while this flip was still PENDING supersedes it (deploy-hosted.yml's shared `concurrency` group holds one pending run; `cancel-in-progress: false` stops a RUNNING deploy being cancelled but cannot save a pending one); re-run this workflow, or flip by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
             exit 1
           fi
           echo "✅ app flip completed (run ${run_id}) — this schema's window is closed (#3627)"

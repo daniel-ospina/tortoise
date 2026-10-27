@@ -109,21 +109,40 @@ READY_SLEEP="${READY_SLEEP:-10}"
 # caller's own `timeout-minutes` then becomes the thing that kills the job, and
 # a `timeout-minutes` kill ends the job BEFORE `if: failure()` is evaluated —
 # so the #2240 out-of-band alert never runs and a LIVE, unhealthy release is
-# reported only as a red run with a truncated log. Measured: the caller's
-# 15-minute cap (deploy-hosted.yml `post-deploy-verify`) was justified as 2× a
-# “≤ 6.4 min” worst case that assumed every curl returned INSTANTLY.
+# reported only as a red run with a truncated log. Measured: the caller's cap
+# (deploy-hosted.yml `post-deploy-verify`) was justified as 2× a “≤ 6.4 min”
+# worst case that assumed every curl returned INSTANTLY.
+# ⛔ ONE KNOB PER SERVER-SIDE BOUND, never one knob for both probed endpoints.
+# They cost different things on the SERVER, so a single figure is too tight for
+# one of them — and a client bound below the server's own bound reds a HEALTHY
+# but slow release (the 200 arrives after curl gave up, curl prints 000, and
+# phase 3 reports it as "no response from the app", the indistinguishable-
+# failure class this file exists to avoid).
+#   • `/health` is an in-memory snapshot — no I/O — so 5 s is generous.
+#   • `/health/ready` runs BOTH plane coordinators SEQUENTIALLY in Supabase mode
+#     (`hosted_api.health_ready`: `_READY_PROBE` then `_CONTROL_PLANE_PROBE`),
+#     and each enforces its OWN hard bound:
+#         DB_PROBE_HARD_TIMEOUT      = `monitoring.PROBE_HARD_TIMEOUT`
+#                                      = 3.1 + 2.0 + 0.5 = 5.6 s
+#           (it ALIASES the coordinator bound; the 1.5 s `PROBE_TIMEOUT` is the
+#            inner QUERY leg only, and quoting that as the total is the trap
+#            #2988 was fought over)
+#         CONTROL_PLANE_HARD_TIMEOUT = 5.0 phases + 1.0 margin = 6.0 s
+#     → the server's declared worst case is 11.6 s, so the client bound is
+#     derived ABOVE it (11.6 → 13, ~1.12×): a bound must bind the REQUEST, and
+#     the request is the whole two-plane call. Re-derive it if either constant
+#     moves. `_READY_PROBE` is `fresh_only=True` and the polls are 15 s apart,
+#     so EVERY poll re-probes — a sustained slow data plane must not be read as
+#     a dead one, which is exactly what a 5 s bound did.
 # With these bounds the worst case IS a number:
 #   phase 1  5 × (10 + 5)  = 75 s
 #   phase 2 18 × ( 5 + 10) = 270 s
-#   phase 3 18 × ( 5 + 10) = 270 s
-#                     total = 615 s = 10.25 min  (vs 15 min → 1.46×)
-# The request bounds are generous next to the SERVER's own probes, which are
-# already capped (~1.5 s `_HEALTH_PROBE`, `DB_PROBE_HARD_TIMEOUT`), so these
-# cannot red a healthy release; they only stop a stuck one spending the budget
-# of the whole job and silencing its own alert.
+#   phase 3 18 × (13 + 10) = 414 s
+#                     total = 759 s = 12.65 min  (vs the caller's 25 min → 1.98×)
 CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
 CURL_MAX_TIME_APP="${CURL_MAX_TIME_APP:-10}"
-CURL_MAX_TIME_PROBE="${CURL_MAX_TIME_PROBE:-5}"
+CURL_MAX_TIME_HEALTH="${CURL_MAX_TIME_HEALTH:-5}"
+CURL_MAX_TIME_READY="${CURL_MAX_TIME_READY:-13}"
 
 # ── guard the knobs ─────────────────────────────────────────────────────────
 # A non-integer override would make `seq` produce nothing and then blow up the
@@ -145,7 +164,7 @@ done
 # `--max-time 0` as "no limit", so allowing 0 here would silently restore the
 # unbounded request this change exists to remove — a guard that permits the
 # hole is worse than none, because the file then claims a bound it does not have.
-for _knob in CURL_CONNECT_TIMEOUT CURL_MAX_TIME_APP CURL_MAX_TIME_PROBE; do
+for _knob in CURL_CONNECT_TIMEOUT CURL_MAX_TIME_APP CURL_MAX_TIME_HEALTH CURL_MAX_TIME_READY; do
   case "${!_knob}" in
     '' | *[!0-9]* | 0)
       echo "::error::$_knob must be a POSITIVE integer — curl reads 0 as 'no limit', which is the unbounded request this bound exists to remove (got '${!_knob}')"
@@ -172,7 +191,7 @@ echo "app reachable — polling DB data plane"
 # ── 2. data plane: read the db.ok FIELD, never text-match the body ──────────
 db_ok=0
 for _ in $(seq 1 "$DB_TRIES"); do
-  if curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_PROBE" "$GATE_BASE/health" 2>/dev/null \
+  if curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_HEALTH" "$GATE_BASE/health" 2>/dev/null \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("db") or {}).get("ok") else 1)' 2>/dev/null; then
     db_ok=1
     break
@@ -209,7 +228,7 @@ for _ in $(seq 1 "$READY_TRIES"); do
   # line), and overwriting an observed 200 with 000 would report "no response"
   # for an app that answered — the indistinguishable-failure class this file's
   # comment warns about.
-  ready_code=$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_PROBE" -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null)
+  ready_code=$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME_READY" -o /dev/null -w '%{http_code}' "$GATE_BASE/health/ready" 2>/dev/null)
   [ -n "$ready_code" ] || ready_code="000"
   if [ "$ready_code" = "200" ]; then
     ready_ok=1

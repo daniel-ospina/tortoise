@@ -3151,3 +3151,63 @@ def test_the_record_is_not_armed_single_tenant_on_the_hosted_app():
         assert name not in argv_keys, f"the deploy stages {name} to Fly"
         assert name not in env_bound, f"the deploy binds {name} from a GitHub secret"
         assert name not in declared, f"{name} is declared in fly-managed-secrets.txt"
+
+
+def test_the_readiness_request_bound_clears_the_servers_own_bound() -> None:
+    """The gate's per-REQUEST bound must sit ABOVE the bound the SERVER enforces.
+
+    `deploy-health-gate.sh` bounds each request because a `N tries × S sleep`
+    phase budget is only a bound if the request is one — but the number has to be
+    derived from the endpoint's own server-side bound, not chosen. `/health/ready`
+    runs BOTH plane coordinators SEQUENTIALLY in Supabase mode
+    (`hosted_api.health_ready`): `_READY_PROBE`, bounded at
+    ``DB_PROBE_HARD_TIMEOUT`` (which ALIASES ``monitoring.PROBE_HARD_TIMEOUT`` =
+    3.1 + 2.0 + 0.5 = 5.6 s — NOT the 1.5 s inner ``PROBE_TIMEOUT``), then
+    `_CONTROL_PLANE_PROBE`, bounded at ``CONTROL_PLANE_HARD_TIMEOUT`` (5.0 phases
+    + 1.0 margin = 6.0 s).
+
+    A client bound below that sum is the defect #10155's review found live: the
+    gate shipped a shared 5 s knob, so a healthy-but-slow release answering
+    between 5 s and 11.6 s was cut off, curl printed `000`, and phase 3 reported
+    it as "no response from the app" — the indistinguishable-failure class the
+    gate exists to avoid. `_READY_PROBE` is `fresh_only=True` and the polls are
+    15 s apart, so EVERY poll re-probes and a sustained slow data plane fails the
+    whole phase.
+    """
+    gate = (_REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh").read_text(
+        encoding="utf-8")
+    # The READINESS knob specifically — a single shared knob cannot satisfy this
+    # and the `/health` snapshot bound (5 s) at the same time, which is why the
+    # pin reads the ready knob by NAME.
+    match = re.search(r'CURL_MAX_TIME_READY="\$\{CURL_MAX_TIME_READY:-(\d+)\}"', gate)
+    assert match, (
+        "the readiness request bound is no longer a numeric default of "
+        "CURL_MAX_TIME_READY in deploy-health-gate.sh — the derivation this test "
+        "pins has nothing to read"
+    )
+    shipped = int(match.group(1))
+
+    import tortoise.hosted_api as hosted_api
+    import tortoise.monitoring as monitoring
+
+    # Guard the derivation itself first: if the server's hard bound ever stops
+    # ALIASING the coordinator constant, `DB_PROBE_HARD_TIMEOUT` silently becomes
+    # a restated literal and the sum below would measure the wrong thing.
+    assert hosted_api.DB_PROBE_HARD_TIMEOUT == monitoring.PROBE_HARD_TIMEOUT, (
+        "DB_PROBE_HARD_TIMEOUT no longer aliases monitoring.PROBE_HARD_TIMEOUT — "
+        "re-derive CURL_MAX_TIME_READY against whatever now bounds the data plane"
+    )
+    server_worst = (hosted_api.DB_PROBE_HARD_TIMEOUT
+                    + hosted_api.CONTROL_PLANE_HARD_TIMEOUT)
+    assert server_worst > 5.0, (
+        f"the server's own readiness worst case reads {server_worst}s; this test "
+        "assumes it exceeds the /health snapshot bound, which is why one knob "
+        "cannot serve both endpoints"
+    )
+    assert shipped > server_worst, (
+        f"CURL_MAX_TIME_READY is {shipped}s but /health/ready's server-side worst "
+        f"case is {server_worst}s (DB_PROBE_HARD_TIMEOUT "
+        f"{hosted_api.DB_PROBE_HARD_TIMEOUT} + CONTROL_PLANE_HARD_TIMEOUT "
+        f"{hosted_api.CONTROL_PLANE_HARD_TIMEOUT}) — a client bound below it reds "
+        "a healthy-but-slow release and reports it as `000 = no response`"
+    )
