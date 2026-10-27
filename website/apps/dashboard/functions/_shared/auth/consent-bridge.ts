@@ -408,8 +408,12 @@ function randomHex(bytes: number): string {
  *   - `sub` — the identity, and the ONLY thing the AS may take from this token. `email` is
  *     display-only and never an authorization input.
  *
- * `kid` is fixed to `consent-1` here and accepted-for-presence by the verifier, because §2.3
- * makes rotation `kid`-scoped — a hardcoded acceptance list would make a rotation a code change.
+ * `kid` is fixed to `consent-1` here and accepted FOR PRESENCE ONLY by the verifier. §2.3 states a
+ * `kid`-scoped rotation as the goal, but that allowlist is deliberately NOT BUILT (one
+ * `CONSENT_TOKEN_SECRET` is configured, so a two-`kid` window cannot exist): a rotation today is a
+ * VALUE SWAP that invalidates in-flight assertions for their 120 s TTL. Do not read this line as
+ * the rotation property — it is the seam for it (docs/engineering/auth/consent-identity-bridge.md
+ * §9 step 1 records the allowlist as unbuilt).
  */
 export async function mintConsentToken(input: {
   secret: string;
