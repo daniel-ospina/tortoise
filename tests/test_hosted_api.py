@@ -7913,6 +7913,78 @@ class TestProvisioningService:
         finally:
             gen.close()
 
+    def test_mint_succeeds_when_the_acl_layer_is_declared_off(self, tmp_path,
+                                                              monkeypatch):
+        """#8617 rulings 1/3: on a lane that DECLARES the per-graph ACL layer
+        unavailable (`TORTOISE_ACL_LAYER=off`, which `fly.toml` sets for the
+        hosted app), a graph mint is NOT rolled back for the credential we are
+        not allowed to use.
+
+        The refusal is simulated, not discovered: on FalkorDB Cloud every mint
+        reaches a credential that lacks `+ACL` (measured on production,
+        e1e3e80 — see #8617), and this test must not depend on a live Cloud
+        call. The SAME refusal is then replayed with the layer left at its
+        default `strict`, which is the self-hosted posture: there the mint still
+        rolls back and 503s (no graph without its ACL user), so this test also
+        pins that the change did not disarm the self-hosted lane.
+
+        Mutation behind this test: drop `_acl_layer_declared_strict()` from the
+        hook's strict arm — the declared-off create below 503s with the graph
+        rolled back, i.e. the exact production defect this issue is.
+        """
+        import tortoise.hosted_api as ha_mod
+        from tortoise.acl_graph_users import AclLayerError
+
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            contacted: list[str] = []
+
+            def _cloud_refusal(graph_id, org_id):
+                contacted.append(graph_id)
+                raise AclLayerError(
+                    "ACL SETUSER refused for graph org_x (user=tenant_x): "
+                    "NOPERM this user has no permissions to run the "
+                    "'acl|setuser' command")
+
+            monkeypatch.setattr("tortoise.acl_graph_users.create_acl_user",
+                                _cloud_refusal)
+            monkeypatch.setattr(ha_mod, "_ACL_ABSENCE_ANNOUNCED", set())
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            headers = {"Authorization": f"Bearer {key['api_key']}"}
+
+            # (a) DECLARED OFF — the refusal is recorded and the mint proceeds.
+            monkeypatch.setenv("TORTOISE_ACL_LAYER", "off")
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
+                        json={"name": "acl-off"}, headers=headers)
+            assert r.status_code == 201, r.text
+            gid = r.json()["graph"]["id"]
+            assert gid in contacted, (
+                "the ACL create seam never ran — this would pass for the "
+                "wrong reason (a dormant hook, not a declared-off layer)")
+            # The graph is NOT rolled back (ruling 3) and its key is usable.
+            rows = sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.status",
+                params={"gid": gid, "tid": tid}).result_set
+            assert rows and rows[0][0] != "deleted", rows
+            assert r.json()["key_plaintext"].startswith("tk_")
+
+            # (b) The same refusal with the default (strict) posture is still a
+            # rollback: self-hosted behaviour is unchanged (ruling 2).
+            monkeypatch.delenv("TORTOISE_ACL_LAYER", raising=False)
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
+                        json={"name": "acl-strict"}, headers=headers)
+            assert r.status_code == 503, r.text
+            assert "TORTOISE_ACL_LAYER=off" in r.json()["detail"], r.json()
+            rolled = sdk._get_registry().query(
+                "MATCH (g:Graph {org_id:$tid}) RETURN g.name",
+                params={"tid": tid}).result_set
+            assert "acl-strict" not in {row[0] for row in rolled}, \
+                "the strict lane must still roll back — no graph without its " \
+                "ACL user (self-hosted behaviour is unchanged)"
+        finally:
+            gen.close()
+
     def test_child_policy_strips_escalation_scopes(self, tmp_path):
         """W1: graphs:create requested on the MINTED key is stripped (child
         policy) — the minted key can never escalate."""

@@ -767,9 +767,11 @@ def test_integration_fused_path_applies_contested_boost(
     boost's final-score contribution.  Measured on this fixture: similarity
     gap 0.0378 => 0.0189 of final score, vs the boost's 0.0175 — so the
     contested twin ranks BELOW its twin on this path and the outcome is
-    decided by the id tie-break, not the contested signal (#7704).  That gap
-    is a product decision (boost magnitude / fusion tie semantics) and is
-    tracked on #7704; this test pins the path-independent contract instead.
+    decided by the id tie-break, not the contested signal (#7704).  That gap's
+    ordering half is DECIDED: #7704's owner ruling closed the remedy options there
+    and assigns the fusion FORM to #4210's own open ruling, with the boost
+    magnitude a tuning value, not the fix; this test pins the path-independent
+    contract instead.
 
     What IS asserted, on the fused path: the twins tie on every leg (the
     precondition above), the contested twin carries exactly

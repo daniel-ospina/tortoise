@@ -30,7 +30,8 @@ MANIFEST_PATH = HARNESS_DIR / "_manifest.json"
 BASELINE_CONFIG: dict = {
     "suites": sorted(schema.SUITE_VALUES),
     "mode": "BPRE",
-    "reflex": "null",          # W4 lands the graded reflex; null = honest baseline
+    "reflex": "graded",        # #8125: the REAL volunteer.decide reflex over EP-warmed cells
+                               # (null = the honest pre-W4 lane, debug only)
     "holdout_excluded": True,  # gate corpus excludes holdout fixtures
     "seed": 42,
     "extractor_posture": "llm",

@@ -24,6 +24,14 @@ PRICING MAP — provenance discipline (the honesty contract):
 
 Map entries (USD per 1M tokens; verified 2026-09):
 
+  openrouter / deepseek/deepseek-flash          in 0.14  out 0.28  cache 0.028
+      ALIAS of the v4-flash row — the id the #8486 pilot's reader served. It
+      had NO row, so the meter priced the reader lane at $0.0 and the field
+      named ``cost.usd`` reported $0.008456 of a $0.0620 run. estimated=True:
+      the rate is the Flash table checked against the measured pilot's token
+      counts, not a vendor page naming this id.
+  deepseek-direct / deepseek-flash              in 0.14  out 0.28  cache 0.0028
+      the same alias on the direct lane (cache-hit at DeepSeek's 2% rate).
   openrouter / deepseek/deepseek-v4-flash      in 0.14  out 0.28  cache 0.028
       source: openrouter.ai/deepseek/deepseek-v4-flash provider table
       (the DeepSeek-majority listing; cross-checked against
@@ -80,7 +88,10 @@ import math
 #: Bump ONLY when the map below changes (the report's pricing snapshot pins
 #: this so published numbers carry their exact map version). Bumped 2026-09-04
 #: when the openrouter gpt-4o-2024-08-06 row was added (round-2 code review).
-PRICING_MAP_VERSION = "2026-09-04"
+#: Bumped 2026-10-25 for the ``deepseek-flash`` alias (#8486 F1): the id a
+#: measured pilot served had no row, so the meter priced that lane at $0.0 and
+#: ``usage.cost.usd`` reported $0.008456 for a $0.0620 run.
+PRICING_MAP_VERSION = "2026-10-25"
 
 PRICING_MAP: dict[str, dict[str, dict]] = {
     "openrouter": {
@@ -107,6 +118,17 @@ PRICING_MAP: dict[str, dict[str, dict]] = {
                        "table (deepseek-chat is the v4-flash alias)"),
             "verified_on": "2026-09-03", "estimated": True,
             "note": "alias resolution — verify at next map update"},
+        "deepseek/deepseek-flash": {
+            "prompt_per_1m": 0.14, "completion_per_1m": 0.28,
+            "cache_read_per_1m": 0.028,
+            "source": ("openrouter lane of the v4-flash id: deepseek-flash is "
+                       "the retired id DeepSeek still accepts and bills at "
+                       "the Flash price — measured #8486 pilot 2026-10-25"),
+            "verified_on": "2026-10-25", "estimated": True,
+            "note": ("ALIAS, not a vendor-published row: the rate is the "
+                     "v4-flash table applied to the measured pilot "
+                     "(437,253 prompt / 60,928 cache-hit / 2,330 "
+                     "completion = $0.0535085, the Flash card to the cent)")},
         "gpt-4o-2024-08-06": {
             "prompt_per_1m": 2.625, "completion_per_1m": 10.5,
             "cache_read_per_1m": None,
@@ -139,6 +161,18 @@ PRICING_MAP: dict[str, dict[str, dict]] = {
             "source": "api-docs.deepseek.com/quick_start/pricing",
             "verified_on": "2026-09-03", "estimated": False,
             "note": ""},
+        "deepseek-flash": {
+            "prompt_per_1m": 0.14, "completion_per_1m": 0.28,
+            "cache_read_per_1m": 0.0028,
+            "source": ("api-docs.deepseek.com/quick_start/pricing applied to "
+                       "the retired deepseek-flash id, which the vendor still "
+                       "accepts and bills at the Flash price; measured "
+                       "#8486 pilot 2026-10-25 (437,253 prompt / 60,928 "
+                       "cache-hit / 2,330 completion = $0.0535085)"),
+            "verified_on": "2026-10-25", "estimated": True,
+            "note": ("ALIAS, not a vendor-published row — the id has no row "
+                     "of its own; priced at the Flash card because the "
+                     "measured spend reproduces it to the cent")},
     },
     "openai": {
         "gpt-4o-2024-08-06": {

@@ -41,16 +41,18 @@ WHAT PROVES IT NOW — three legs, deliberately different in kind:
 
 WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 
-* The REST/hosted lane's installer is **#10047**, not this file. It cannot be a
-  one-line wrap there: an org-wide/session-authenticated request carries no
-  `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only). The
-  org-wide **MCP** credential IS named on this lane since #10025 —
+* The REST/hosted lane's installer is `hosted_api._data_sdk` →
+  `_bind_record_tenant` (#9188 / #10025), not this file. It cannot be a
+  one-line wrap on THIS lane: an org-wide/session-authenticated request carries
+  no `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only).
+  The org-wide **MCP** credential IS named on this lane since #10025 —
   `resolve_api_key` puts the org's active `kind='default'` row id on the
   credential as `default_graph_id`, and the pinned legs below assert BOTH
   directions: named when the control plane resolved the row
   (`test_an_org_wide_control_plane_key_is_named_by_its_default_graph`), and
-  REFUSED when it did not. What remains #10047's is the REST/middleware installer
-  for the hosted lane; the default-graph question cannot be closed by guessing a
+  REFUSED when it did not. What remains #10046's is the SESSION/OAuth credential
+  class (the REST/middleware installer for a credential that carries no
+  `default_graph_id`); the default-graph question cannot be closed by guessing a
   tenant id anywhere.
 * The cross-tenant pin at the FOLD (`tests/test_record_projection.py`) is
   #9214's and stays; this file adds the caller-level leg above it.
