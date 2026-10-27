@@ -166,6 +166,74 @@ protocol, and it stays ONE tool.** No tool is added, removed, or renamed; `torto
   `tests/test_dry_run_preview.py` re-pins the one tool whose DEFAULT path is now a preview.
 status: approved · principal: daniel-ospina · issue #9660 · date: 2026-10-25.
 
+**Amended 2026-10-27** (owner ruling in answer to the two questions posted on **#4282**, **PR #__PR__**):
+**what may be deleted, and that a retiring tool does not need a no-replacement warning.** Both
+answers are **relayed verbatim by the lane that asked them, not posted by the owner** — the relay is
+comment `6451…` on #4282 (search the issue for *"cna re-use"*). Neither answer is a word in the
+owner's own post; treat the relay comment as the source of record for the quotation.
+
+**(a) The surplus SDK methods that nothing calls may be DELETED — not merely made private — with the
+code archived.** Owner: *"1 yes (archive the code so we cna re-use it later if needed)"*. Measured on
+`origin/main` @ `17f604b054`: of the 138 public `TortoiseSDK` methods off the approved 40, **104 are
+referenced somewhere under `tortoise/**`** (a deliberately conservative superset — see the archive
+doc's rule) and **34 are referenced by no code under `tortoise/**` at all**. The 104 become
+**private** (`_name`) with their call sites re-pointed — the `graph_count` → `_graph_count`
+precedent of 2026-10-25 — and keep their capability. The **34** are deleted, and their code is
+archived at tag **`archive/4282-surplus-sdk-methods`** (points at `17f604b054`; **pushed**, verified
+with `git ls-remote --tags origin`) with a per-method index and restore recipe in
+[`archived-sdk-methods-2026-10.md`](archived-sdk-methods-2026-10.md). Deleting them is *not* a
+licence to re-add them: a restored method returning to the public surface is a new surface change
+and needs this document amended again.
+
+> **One caller sits outside the scanned population.** `tools/purge_test_residue.py:133` calls
+> `store.delete_point(...)`; that call site must re-point to the private name in the deleting PR, or
+> the tool breaks. It is a `tools/` caller, so it did not appear in the `tortoise/**` measurement —
+> the deletion lane must re-run the search across the whole repo, not trust the 34 as a safe list of
+> unreferenced names.
+
+**(b) A retiring tool does not need a no-replacement warning.** Owner: *"2 we dont have customers
+other than 2 guys using it self-hosted so let's not worry about migration and rather focus on
+delievrign the end result propelry and cleanly"*. This settles the question actually asked — whether
+the **9** tools that leave the MCP with **no destination** need a warning naming a replacement. They
+do not: a warning that names nothing serves a caller who does not exist. The **9** are
+`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_onboarding_state`,
+`tortoise_onboarding_seed`, `tortoise_onboarding_demo_create`,
+`tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`, `tortoise_packs_list`,
+`tortoise_pack_install` (all nine live in `TOOL_REGISTRY`, measured 2026-10-27).
+
+**What this does NOT authorise — stated because the answer was broader than the question.** The
+**18** existing `RETIRED_USE_INSTEAD` forward entries are a *different population*: every one of them
+names a **live** replacement (`tortoise_get` → `tortoise_get_entity(id, type="point")`,
+`tortoise_health` → `tortoise_overview(section="health")`, … — 18 of 18 verified). They are neither
+"machinery serving a caller who does not exist" nor covered by the question that was asked, and they
+carry two recorded decisions **in this document**: the 2026-10-17 amendment (retired *"through
+`RETIRED_USE_INSTEAD` (#3883), not deleted — a caller still resolves them and is handed the
+replacement"*) and the 2026-10-25 one (*"the absorbed names stay retired-forward entries"*).
+**Removing them is a separate decision** and would need its own argument naming #3540 and #9660; it
+is not done here. The end state of the epic is still **27 advertised tools**, but that is reached by
+the full 81 → 27 consolidation, **not** by this amendment — these two answers remove 0 tools and 0
+methods on their own.
+
+> **OVERRIDES:** the plan item `1.4` (`#3883`) requirement that *nothing is removed from the MCP
+> surface until a caller of a retired tool name gets a warning naming its replacement* — for the
+> **9 tools that have no replacement to name**, the warning is dropped. The owner removed that
+> premise on 2026-10-27 (2 self-hosted users, no customer callers), so a warning that can only say
+> "gone" is optional machinery rather than a precondition. **Scope of this override:** the 9
+> no-destination retirements only. It does **not** touch the 18 replacement-naming forward entries
+> (#3540, #9660), and it does **not** touch the SDK half (`2.5`, the #3836 (c) ruling), which already
+> ships a clean hard failure that names the replacement. The 18 keep answering exactly as recorded.
+
+**Correction carried by this amendment, and the arithmetic of the error.** The number first published
+on #4282 was **26** deletable methods; the correct number is **34**, and the *reason* the first scan
+was wrong matters more than the number: it was a **regex over file text**, so (i) it counted **prose**
+mentions as code — `tortoise/write_verb.py:36`, `capture_consent.py:52`, `quota.py:1008` and others
+say `` `sdk.capture_session` `` in docstrings and comments, which kept 9 genuinely uncalled methods
+"referenced"; and (ii) it saw attribute access only, so a bare `ulid()` — a **different** function
+imported from `tortoise/ids.py` — was reported as dead. The AST rule in the archive doc fixes both,
+and any deletion PR must use **34**.
+
+status: approved · principal: daniel-ospina · PR #__PR__ · date: 2026-10-27.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so
