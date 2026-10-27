@@ -16515,11 +16515,19 @@ class TortoiseSDK:
             derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
                 f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
-                f"RETURN id(target), target.id, labels(target), properties(target)",
+                # ⛔ #9417: the EDGE's properties are selected too. The transfer
+                # below recreates the relationship on the successor, and a bare
+                # MERGE mints it with NO properties — so an `about*` edge carrying
+                # the subject binder's `confidence` (session_link.py:381,
+                # subject_binding.py:481) lost it on supersede. Selecting
+                # `properties(r)` here is what lets the transfer carry it across.
+                f"RETURN id(target), target.id, labels(target), properties(target), "
+                f"properties(r)",
                 params={"old_id": old_id},
             ).result_set
             for row in struct_rows:
-                # Row shape: [internal id, logical id, labels, properties] —
+                # Row shape: [internal id, logical id, labels, properties,
+                # edge properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
                 # replay key at emission: `name` for aboutSubject/Object/Event/
@@ -16531,6 +16539,16 @@ class TortoiseSDK:
                 # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
+                # #9417: the old relationship's own properties (row[4]) — carried
+                # onto the successor edge below, never silently dropped. WHITELISTED
+                # to the same set the functional transfer keeps (`_keep`, above) and
+                # that `RelationUpsert.attrs` replays: copying `properties(r)` raw
+                # would carry EP-managed / internal fields onto the successor.
+                edge_props = {
+                    k: v for k, v in (row[4] or {}).items()
+                    if k in ("direction", "confidence", "weight", "label",
+                             "batch_id", "source_version")
+                }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
@@ -16584,11 +16602,27 @@ class TortoiseSDK:
                             target_label=target_label,
                             edge_type=rel,
                         )
-                # Create new edge: new point → same target (MERGE = idempotent, no dupes)
+                # Create new edge: new point → same target (MERGE = idempotent,
+                # no dupes).
+                # ⛔ #9417: `SET nr += $attrs` carries the old edge's properties
+                # across. Without it the MERGE recreates the `about*` edge bare and
+                # the binder's `confidence` is DROPPED, not copied — the additive
+                # form is the one this file already uses elsewhere, and it is
+                # emitted only when the old edge actually had properties so the
+                # empty case stays a plain MERGE.
+                # ⛔ #9417: params carry `attrs` ONLY when there is something to
+                # carry — an empty map is not writable by FalkorDB and the
+                # projection degrades it to null with a #7369 warning, so the
+                # empty case must stay a plain MERGE with no `attrs` key at all.
+                _params = {"new_id": new_id, "tid": target_graph_id}
+                _carry = ""
+                if edge_props:
+                    _carry = "SET nr += $attrs"
+                    _params["attrs"] = edge_props
                 proj.g.query(
                     f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
-                    f"MERGE (new)-[:{rel}]->(t)",
-                    params={"new_id": new_id, "tid": target_graph_id},
+                    f"MERGE (new)-[nr:{rel}]->(t) {_carry}",
+                    params=_params,
                 )
                 # Delete old edge (match by exact internal node id)
                 proj.g.query(

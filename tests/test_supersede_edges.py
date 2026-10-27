@@ -551,3 +551,38 @@ def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):
     assert proj.g.query(
         "MATCH (old:Point {id:$o})-[:INPUT]->(:Point {is_operator:true}) "
         "RETURN count(*)", params={"o": old["id"]}).result_set[0][0] == 0
+
+
+# ── #9417: an about* edge keeps the binder's confidence across a supersede ────
+def test_supersede_carries_about_edge_confidence(sdk):
+    """#9417: the structural transfer recreated `about*` edges with a BARE MERGE,
+    so the subject binder's `confidence` (session_link.py:381,
+    subject_binding.py:481) was dropped rather than copied. It must cross over.
+
+    Non-vacuity: with `SET nr += $attrs` removed from the transfer, the
+    transferred edge has no `confidence` key and this assertion goes red.
+    """
+    proj = sdk._get_proj()
+    old = _make_point(sdk, content="Old: the subject binding")
+    new = _make_point(sdk, content="New: the same claim, restated")
+    subject = sdk.create_point("statement", "The bound subject")
+
+    # Wire the about* edge exactly as the binder does: MERGE + SET r.confidence
+    proj.g.query(
+        "MATCH (s:Point {id:$sid}), (t:Point {id:$tid}) "
+        "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$conf",
+        params={"sid": old["id"], "tid": subject["id"], "conf": 0.83},
+    )
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "
+        "RETURN properties(r)",
+        params={"nid": new["id"], "tid": subject["id"]},
+    ).result_set
+    assert rows, "the aboutSubject edge was not transferred to the successor"
+    assert rows[0][0].get("confidence") == pytest.approx(0.83), (
+        "#9417: the binder's confidence was dropped on supersede — "
+        f"transferred edge properties: {rows[0][0]}"
+    )
