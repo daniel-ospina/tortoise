@@ -735,10 +735,11 @@ class OpDispatch:
     materialized a superseded entity with NO `status`, which
     `live._terminal_excluded` reads as LIVE. The computing half is
     `cache_projection.DERIVED_FROM_RECORD` (from this module's own PRIMARY
-    carrier, `superseded_by`); its docstring names the statuses the record
-    carries NO signal for at all (an explicit `restatus`, whose only carrier is
-    `public.journal_event.payload`) — those stay an ownership decision, not a
-    silent success.
+    carriers, `superseded_by` / `superseded_at`, the same OR-predicate the
+    record's `public.*_current_status` views use); its docstring names the
+    statuses the record carries NO signal for at all (an explicit `restatus`,
+    whose only carrier is `public.journal_event.payload`) — those stay an
+    ownership decision, not a silent success.
     """
 
     table_for_label: Mapping[str, str]

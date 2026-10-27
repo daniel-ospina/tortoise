@@ -1073,10 +1073,16 @@ def test_the_derivation_fabricates_nothing_where_the_record_is_silent():
     the record carries no lifecycle signal would replace *"the record did not
     say"* with a positive claim — and for a row the record holds a NON-default
     status for by other means (an event-kind fold, `restatus`) that claim would
-    be false. So an Object with no `supersededBy` carries NO `status`: the
-    absent value keeps `_terminal_excluded`'s documented legacy rule
-    (*"nodes without a stored status are LIVE"*) instead of minting a value the
-    record cannot support.
+    be false. So an Object the record carries NO supersession signal for carries
+    NO `status`: the absent value keeps `_terminal_excluded`'s documented legacy
+    rule (*"nodes without a stored status are LIVE"*) instead of minting a value
+    the record cannot support.
+
+    ⚠️ The silence being read is the PAIR (`supersededBy` OR `supersededAt`),
+    not `supersededBy` alone — a blank `supersededBy` is NOT silence when
+    `supersededAt` is present, which is exactly the id-only legacy shape
+    (:func:`test_an_id_only_supersession_is_derived_not_left_live`) that a
+    `supersededBy`-only reading left resurrected.
     """
     obj = _node("Object", {"id": "o-2", "name": "gamma"})
     assert "status" not in obj.props, (
@@ -1084,20 +1090,53 @@ def test_the_derivation_fabricates_nothing_where_the_record_is_silent():
         "— #9974's residue (restatus / event-kind folds) is a DECISION, not a "
         "constant to fabricate"
     )
-    # An EMPTY carrier is not a supersession either: the fold stores the
-    # successor name verbatim, and a blank one names no successor.
+    # A blank successor is not a supersession when NOTHING else marks one. (On
+    # its own `supersededBy=''` is not decisive: the fold sets `status` from an
+    # `ObjectSuperseded` whatever `supersedes_by` held, so the record's OTHER
+    # PRIMARY carrier, `supersededAt`, decides — see the id-only test.)
     blank = _node("Object", {"id": "o-3", "name": "delta", "superseded_by": ""})
     assert "status" not in blank.props
 
 
-def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
-    """A `status` derivation is only sound while the fold writes the PAIR.
+def test_an_id_only_supersession_is_derived_not_left_live():
+    """#9974's own shape, on the carrier the record writes for it.
 
-    `DERIVED_FROM_RECORD` infers `status='superseded'` from `supersededBy`. That
-    inference holds only because both folds write the two properties in ONE
-    statement — so this pin reads the fold's clauses and reds if either half
-    moves. Source-parsed for the same reason as the
-    `FOLD_ON_CREATE_DEFAULTS` pin: a live graph cannot guard the DB-free lane.
+    The record does NOT always carry `supersededBy`. An id-only (legacy §6b)
+    `ObjectSuperseded` — still replayed, and pinned by
+    `test_status_projection.py::test_rebuild_all_legacy_6b_id_only_shape_supersedes`
+    (#2164/#2193) — folds `status='superseded'` with `supersededBy=''`, and the
+    mutation writes `superseded_at` ALONE:
+
+        UPDATE public.object SET superseded_at = %s …          (no supersedes_by)
+
+    So a derivation reading `supersededBy` only derives NOTHING here, and the
+    entity is materialized without a `status` — which `_terminal_excluded` reads
+    as LIVE. That is #9974 itself, unfixed on a shape the record still emits.
+    The sources therefore mirror the record's own views (`superseded_by IS NOT
+    NULL OR superseded_at IS NOT NULL`), not a narrower second definition.
+    """
+    for label in ("Object", "Subject"):
+        node = _node(label, {"id": "x-1", "name": "acme",
+                             "superseded_at": "2026-01-01T00:00:00Z"})
+        assert node.props.get("status") == "superseded", (
+            f"an id-only supersession left the rebuilt :{label} with no status "
+            "— the record carries `superseded_at`, so this is #9974 again"
+        )
+    # …and the value reaches the STATEMENT, not only the model.
+    stmt = cp.node_statement(_node("Object", {
+        "id": "o-4", "name": "acme", "superseded_at": "2026-01-01T00:00:00Z"}))
+    assert stmt.params["props"]["status"] == "superseded"
+
+
+def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
+    """A `status` derivation is only sound while the fold writes the CARRIERS.
+
+    `DERIVED_FROM_RECORD` infers `status='superseded'` from a supersession
+    carrier. That inference holds only because the folds write `status`
+    together with those carriers — so this pin reads the fold's clauses and the
+    mutation builders, and reds if any half moves. Source-parsed for the same
+    reason as the `FOLD_ON_CREATE_DEFAULTS` pin: a live graph cannot guard the
+    DB-free lane.
     """
     fold = _fold_source()
     # Object: the blind (replay) clause writes status AND supersededBy together.
@@ -1111,6 +1150,13 @@ def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
         "`_fold_object_superseded`'s CAS arm changed shape — re-derive the "
         "status/supersededBy pairing, do not guess"
     )
+    # The fold sets status UNCONDITIONALLY on `supersedes_by` (it is $sb, which
+    # may be ''), which is why a blank successor is still a supersession and the
+    # id-only shape needs the `supersededAt` carrier rather than a blank check.
+    assert re.search(r"supersededBy=\$sb", fold), (
+        "the fold no longer binds supersededBy to the raw $sb — a blank-"
+        "successor supersession may have become conditional; re-derive"
+    )
     # Subject: `commit_ops` builds ONE state map carrying both keys, and the
     # generic `SET s += $s` fold applies it atomically.
     ops = (REPO_ROOT / "tortoise" / "commit_ops.py").read_text()
@@ -1119,6 +1165,20 @@ def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
     ), (
         "`commit_ops._apply_subject_supersession` no longer journals status and "
         "supersededBy in ONE state map — the Subject derivation lost its carrier"
+    )
+    # The MUTATION path is the record's second writer, and it is the one that
+    # produces `superseded_at` with NO `superseded_by` (an id-only event). Pin
+    # that shape, because it is the carrier the derivation nearly missed.
+    from tortoise.record_projection import mutations_for
+    id_only = mutations_for(
+        {"type": "ObjectSuperseded", "ts": "2026-01-01T00:00:00Z", "id": "o-1"},
+        org_id="o", graph_id="g",
+    )
+    sql = " ".join(s.sql for s in id_only)
+    assert "superseded_at" in sql and "superseded_by" not in sql, (
+        "an id-only ObjectSuperseded no longer writes `superseded_at` alone — "
+        "if it started writing `superseded_by` the two carriers converged and "
+        "this pin (and the id-only test) must be re-derived"
     )
     # The scope of the table is asserted, so adding a member without this
     # review is a red rather than a silent widening of what the cache invents.
@@ -1129,4 +1189,17 @@ def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
         "DERIVED_FROM_RECORD gained or lost a derived property — every member "
         "must be a §2.6 DERIVED name with a PRIMARY carrier, and each needs its "
         "own pin"
+    )
+    # …and every member must read the record's whole OR-predicate, both PRIMARY
+    # carriers (§2.6: `supersededBy` and `supersededAt`). A one-carrier member
+    # resurrects the shape that carrier does not cover.
+    assert {label: tuple(member[1] for member in members)
+            for label, members in cp.DERIVED_FROM_RECORD.items()} == {
+        "Object": (("supersededBy", "supersededAt"),),
+        "Subject": (("supersededBy", "supersededAt"),),
+    }, (
+        "a DERIVED_FROM_RECORD member stopped covering BOTH PRIMARY "
+        "supersession carriers — the record emits each alone (id-only legacy "
+        "shape carries only superseded_at), so a one-carrier reading leaves "
+        "#9974 open on the other"
     )

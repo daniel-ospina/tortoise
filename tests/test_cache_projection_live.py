@@ -321,12 +321,19 @@ def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
       … is never resolved to a terminal id"*), and the twin of #9962 on the
       record→cache route.
 
-    The carrier is the record's own PRIMARY column: both supersession folds
-    write `status` and `supersededBy` in ONE statement, so the cache derives the
-    lifecycle value from the column it does hold
-    (`cache_projection.DERIVED_FROM_RECORD`). The assertion is on the READ
-    consequence, not just the property: a value written but not honoured by the
-    identity read would leave the defect in place.
+    The carrier is the record's own PRIMARY columns: both supersession folds
+    write `status` alongside them, so the cache derives the lifecycle value from
+    the columns it does hold (`cache_projection.DERIVED_FROM_RECORD`). The
+    assertion is on the READ consequence, not just the property: a value written
+    but not honoured by the identity read would leave the defect in place.
+
+    ⚠️ TWO carriers, because the record emits each ALONE. `o-idonly` below is
+    the id-only (legacy §6b) shape: `ObjectSuperseded` with no `supersedes_by`,
+    which the record writes as `superseded_at` only — and which the fold replays
+    as `status='superseded'` with `supersededBy=''`. A `supersededBy`-only
+    derivation derives nothing for it, so it comes back LIVE: #9974 itself, on
+    the shape `test_status_projection.py::…_legacy_6b_id_only_shape_supersedes`
+    pins as still reachable.
     """
     proj = _projection()
     view = cp.RecordView(nodes=(
@@ -340,6 +347,11 @@ def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
                                      "superseded_by": "role-v2", "props": {}}),
         cp.node_from_row("Subject", {"id": "s-role-v2", "name": "role-v2",
                                      "subject_kind": "team", "props": {}}),
+        # id-only legacy supersession: `superseded_at` ONLY, `supersededBy` ''
+        cp.node_from_row("Object", {"id": "o-idonly", "name": "beta",
+                                    "object_kind": "core:org",
+                                    "superseded_at": "2026-01-01T00:00:00Z",
+                                    "props": {}}),
     ))
     proj.rebuild_from_record(view, confirm_destructive=True)
 
@@ -351,6 +363,10 @@ def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
     assert _props(proj, "Subject", "id", "s-role").get("status") == "superseded", (
         "the rebuilt :Subject lost its lifecycle status (#1423's half of the "
         "same §2.6 cache)"
+    )
+    assert _props(proj, "Object", "id", "o-idonly").get("status") == "superseded", (
+        "an id-only supersession (superseded_at, blank superseded_by) came "
+        "back with no status — the record's OTHER PRIMARY carrier was not read"
     )
     # …and the LIVE successor is untouched by the derivation.
     assert "status" not in _props(proj, "Object", "id", "o-alpha-v2"), (
@@ -369,4 +385,16 @@ def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
     assert resolve_entity_id(proj.g, "Object", "alpha") is None, (
         "resolve_entity_id resolved a name to a SUPERSEDED id — the D2 "
         "refusal entity_identity.py exists to make"
+    )
+    # The id-only shape's read consequence, which is the whole point of
+    # covering the second carrier: without it the name resolves to the
+    # superseded id again.
+    assert live_name_holder_ids(proj.g, "Object", "beta") == [], (
+        "the id-only superseded Object is a LIVE name holder after the rebuild "
+        "— #9974 unfixed on the shape the record writes with superseded_at"
+    )
+    assert all_name_holder_ids(proj.g, "Object", "beta") == ["o-idonly"]
+    assert resolve_entity_id(proj.g, "Object", "beta") is None, (
+        "resolve_entity_id resolved an id-only superseded name — the D2 "
+        "refusal is bypassed on the second carrier"
     )
