@@ -637,7 +637,8 @@ class KindClassifier:
         ``_adjudicate_batches``, and a session runs two classify passes.
         """
         seam = stats.setdefault("seam", {"assignments": 0, "calls": 0,
-                                         "cost_usd": 0.0, "rejected": [],
+                                         "cost_usd": 0.0, "input_tokens": 0.0,
+                                         "rejected": [],
                                          "items": 0, "unavailable": 0,
                                          "skipped_no_offer": 0, "degraded": {}})
         try:
@@ -662,6 +663,17 @@ class KindClassifier:
             cost = _bounded_cost(seam_stats.get("cost_usd"))
             if cost is not None:
                 seam["cost_usd"] += cost
+            tokens = _bounded_cost(seam_stats.get("input_tokens"))
+            if tokens is not None:
+                # The vendor endpoint reports TOKENS, not money: its
+                # ``usage`` is ``{input_tokens, output_tokens}`` and there is
+                # no ``cost_usd`` to read. Dropping this term left the
+                # classify half with a seeded ``cost_usd: 0.0`` — a number
+                # the service never reported — and no receipt at all, while
+                # the design record promises the armed run produces one.
+                # The VET half folds the seam's WHOLE stats dict, so the
+                # two halves would have disagreed about the same call.
+                seam["input_tokens"] += tokens
             prompt = seam_stats.get("prompt")
             if isinstance(prompt, str) and prompt:
                 seam["prompt"] = prompt

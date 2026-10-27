@@ -28,26 +28,34 @@ own ``type`` — which is what :func:`_noul` / :func:`_score` / :func:`_choice`
 validate against, so an answer of the wrong primitive fails closed rather than
 being coerced.
 
-Three shapes were taken from a reference page rather than a caller, and the
-host that page belonged to is the reason this paragraph was rewritten: the page
-fetched on 2026-10-26 was ``jevtypesafeai.com``'s — the LOOKALIKE host the fleet
-billed until that day (``tortoise#7864``), not the vendor's. Against the real
-endpoint (``api.typesafe.ai``) two of them are now corroborated by a caller that
-has been live there since the migration (``agent-infra/scripts/turn-classify.py``):
-the ``choice`` question's ``criteria`` **map** (kind → description) and the
-``model``-echo pin in :func:`_decide`. The third — the element-attribution
-convention (``state`` as ``[{id, text}]`` + ``element id=c0`` inside each
-question, built in :func:`vet_verdicts` / :func:`classify_tail`), together with
-the ``noul`` and ``score`` primitives themselves, is **unexercised against the
-vendor**: the in-repo caller this construction was copied from
-(``tools/collision_preflight.py``, whose JEV call ``#8175`` removed — the file
-still exists) used ``noul`` only, and ``docs.typesafe.ai`` was unreachable from
-the box that reconciled this (a fetch to it fails at connect, measured
-2026-10-27). So: a wrong ``noul``/``score`` shape returns 400 →
-:class:`Unavailable` → the declared fallback, and the first armed call is what
-settles it; the attribution shape is the one that would fail SILENTLY, which is
-why it has a runtime guard (§5) rather than a procedural promise. Nothing here
-decides a label on an unverified shape.
+The shapes this module sends are documented, or they are FLAGGED. The page the
+first version of this paragraph cited was ``jevtypesafeai.com``'s — the LOOKALIKE
+host the fleet billed until 2026-10-26 (``tortoise#7864``) — so it was re-checked
+against the vendor's own documentation (``docs.typesafe.ai``, fetched 2026-10-27;
+an earlier fetch in the same session died at DNS, ``could not resolve host``, and
+the "unreachable" wording this docstring briefly carried was that artifact). The
+vendor documents ``questions`` as a map, every question's ``type`` and
+``instructions``, ``criteria`` as a **map** for ``choice`` and an **ordered list
+of 2-10 levels** for ``score``, and ``state`` as a string, object or array. A
+caller that has been live on the vendor endpoint since the migration
+(``agent-infra/scripts/turn-classify.py``) additionally corroborates the
+``choice`` criteria map and the ``model`` field in the envelope — the pin
+:func:`_decide` enforces.
+
+**What is not documented is the element attribution, and it is the one that
+fails SILENTLY.** ``state`` is sent as an array of ``{id, text}`` and each
+question names its element as ``element id=c0``; the vendor's documented
+addressing is a backticked dot-and-index path into the state
+(`` `support.tickets[0].message` ``), and this idiom appears nowhere in its docs.
+A model that does not implement it answers in-schema and in-band — about the
+WRONG element — so this is not a 400, it is a wrong ``DISCARD``. That is why the
+attribution check is a RUNTIME guard (:func:`_answers_are_identical_across_chunk`,
+§5) rather than a procedural promise, and why re-addressing to the documented
+path form is a precondition of the first scored run — filed as ``tortoise#10176``
+together with the re-measurement it forces (it moves the request this record's
+cost table was measured on), not changed here. A wrong ``noul``/``score`` shape is the
+benign case: 400 → :class:`Unavailable` → the declared fallback, and the counters
+name it. Nothing here decides a label on an unverified shape.
 
 **Failure policies — both belong to the STEPS (§4.4), not to this module.**
 This module never decides which way a step fails; it only refuses to invent a
@@ -376,14 +384,20 @@ def _api_key() -> str | None:
         lines = dotenv.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
-    for line in lines:
-        line = line.strip()
-        if line.startswith("export "):
-            line = line[len("export "):].strip()
-        for name in KEY_ENV_VARS:
+    # Per NAME, then per line — the same order as the env term. A single pass
+    # that returns on the first name it MATCHES in file order lets an empty
+    # ``TYPESAFE_API_KEY=`` (the line `.env.example` shows you how to uncomment)
+    # shadow a populated ``JEV_API_KEY=`` below it and report no key at all,
+    # while a key sits in the file.
+    for name in KEY_ENV_VARS:
+        for line in lines:
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
             if line.startswith(f"{name}="):
                 value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                return value or None
+                if value:
+                    return value
     return None
 
 

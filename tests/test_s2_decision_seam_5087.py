@@ -1,4 +1,7 @@
-"""S2.2/S2.3 typed-decision seam (#5087) — six discriminating tests.
+"""S2.2/S2.3 typed-decision seam (#5087) — the tests, named by what they pin.
+
+No count is stated, here or in `docs/architecture/S2-DECISION-SEAM.md` (§8): the file grew
+every review round, and every stale count written down was itself a review finding.
 
 **Why the first two.** This seam exists to prevent one defect class: *an answer
 that does not fit the schema is trusted anyway*. Both are either "a valid typed
@@ -446,8 +449,8 @@ def test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter():
     site (or the key from the stat dict) and that lane is invisible again.
     """
     clf = _classifier(lambda _rows: ({"i0": "core:workflow"}, {
-        "calls": 1, "cost_usd": 0.001, "prompt": seam.CLASSIFY_PROMPT,
-        "model": seam.MODEL}))
+        "calls": 1, "cost_usd": 0.001, "input_tokens": 6112,
+        "prompt": seam.CLASSIFY_PROMPT, "model": seam.MODEL}))
     out = clf.classify_items(
         [{"id": "i0", "type": "entity", "text": "the plan workflow"}])
     stats = out["stats"]
@@ -457,6 +460,15 @@ def test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter():
     assert stats["assigned_seam"] == 1, (
         "the seam's assignments must be countable on their own lane")
     assert stats["seam"]["calls"] == 1
+    # The receipt. On the VENDOR endpoint a response's ``usage`` is
+    # ``{input_tokens, output_tokens}`` and carries NO ``cost_usd`` at all, so a
+    # classify half that folded only ``cost_usd`` published the seeded "0.0" — a
+    # number the service never reported — and dropped the only receipt there was,
+    # while the VET half (which folds the seam's whole stats dict) kept it. The
+    # two halves disagreed about the same call.
+    assert stats["seam"]["input_tokens"] == 6112, (
+        "the vendor reports tokens, not money — the token receipt must survive "
+        f"the fold into stats['seam'] — got {stats['seam'].get('input_tokens')!r}")
     assert "llm" not in stats, (
         "no LLM spend was made, so no LLM spend block is reported")
 
@@ -913,6 +925,19 @@ def test_the_module_guards_the_suite_never_proved_redden_when_removed(monkeypatc
     monkeypatch.setenv("TYPESAFE_API_KEY", "   ")
     assert seam._api_key() == "jv_live_old_name", (
         "a whitespace-only value is truthy — it must not win and send `Bearer `")
+    # …and the FILE term honours the same order: an EMPTY `TYPESAFE_API_KEY=` line
+    # (the line `.env.example` shows you how to uncomment) must not shadow a
+    # populated `JEV_API_KEY=` line below it and report no key at all while a key
+    # sits in the file. A single file-order scan that returns on the first name it
+    # matches does exactly that.
+    for name in seam.KEY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    repo_env.write_text("TYPESAFE_API_KEY=\nJEV_API_KEY=jv_live_from_legacy_line\n",
+                        encoding="utf-8")
+    (empty_home / ".pi" / "agent" / "jev-config.json").unlink()
+    assert seam._api_key() == "jv_live_from_legacy_line", (
+        "an empty vendor-name line must not shadow a populated legacy-name line "
+        f"in the same .env — got {seam._api_key()!r}")
 
 
 def test_the_arming_flag_reaches_the_PRODUCTION_call_sites(monkeypatch):

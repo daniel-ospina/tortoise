@@ -52,30 +52,41 @@ The envelope is validated before any answer is read: `model` must equal the pin
 (`jev-1.13.0`) and `answers` must be a map. An answer attributed to an unverified
 model is not an answer.
 
-**What is NOT previously-exercised.** Three shapes here are taken from the
-vendor's own reference page (fetched 2026-10-26), not from a live in-repo
-caller: the `choice` question's `criteria` **map** (kind → description), the
-`model`-echo check in the envelope, and — the one that does not fail loudly —
-the **element-attribution convention**: `state` is sent as an array of
-`{id, text}` and each question names its element as `element id=c0`
-(`s2_decision_seam.py`, built inline in the state/questions assembly of
-`vet_verdicts` and `classify_tail` — there is no separate `_vet_payload` helper). The reference page
-documents `state` as "a string, object, or array" but not this addressing
-convention, and unlike the two shapes above its failure is **silent**: a model
-that ignores the `id` field still returns in-schema, in-band answers — about the
-wrong element — which is a wrong `DISCARD`, not a 400. **The first armed call
-should still settle it with a 2-item batch whose answers must differ** (that is
-the cheap, direct evidence), but the seam no longer *depends* on anyone
-remembering to run it: identical answers across **three or more** elements of a
-chunk are checked at runtime and yield **no verdict** for that chunk (§5), so an
-ignored-attribution model costs a refused chunk, not 40 silently dropped items.
-The in-repo caller this module's construction was copied
-from (`tools/collision_preflight.py`; `#8175` removed its JEV claim-ownership call — the file still
-  exists, the `noul` construction in it did not) used `noul` only.
-If either of the first two shapes is wrong, the first armed call returns 400 → `Unavailable` → the
-declared fallback (nothing is dropped, nothing is minted) and that call is what
-settles it; the counters name it. The third shape is the dangerous one precisely
-because it would NOT do that. Do not read this page as "verified live".
+**What the vendor's own documentation settles, and what it does not.**
+`docs.typesafe.ai` is reachable and is the primary source (fetched 2026-10-27; an
+earlier attempt in the same session died at DNS — `could not resolve host` — and
+the "unreachable" claim this record briefly carried was that artifact, not a
+fact). It documents, explicitly: `questions` as a **map** of id → question; every
+question's `type` (`choice` / `score` / `noul`) and `instructions`; `criteria` as
+a **map** for a `choice` and an **ordered list of levels** for a `score`; `state`
+as a string, object or **array**; and element addressing as a **backticked
+dot-and-index path** into the state (`` `support.tickets[0].message` ``,
+`concepts/how-to-build-with-system-one.md`). A caller that has been live on the
+vendor endpoint since the 2026-10-26 migration (`agent-infra/scripts/turn-classify.py`:
+`JEV_URL = https://api.typesafe.ai/v1/systemone`, `JEV_MODEL = jev-1.13.0`)
+corroborates two more: the `choice` `criteria` **map** and the `model` field in
+the envelope.
+
+**What is NOT verified — and it is the one that fails silently.** The
+**element-attribution convention** used here is the PRE-migration host's idiom,
+not the vendor's: `state` is sent as an array of `{id, text}` and each question
+names its element as `element id=c0`, built inline in the state/questions
+assembly of `vet_verdicts` and `classify_tail` (there is no separate
+`_vet_payload` helper). That form appears nowhere in the vendor's documentation,
+whose addressing is a dot-and-index path. A model that ignores an idiom it does
+not implement returns in-schema, in-band answers — about the **wrong element** —
+which is a wrong `DISCARD`, not a 400. So this shape is guarded at RUNTIME rather
+than by a procedural promise: identical answers across **three or more** elements
+of a chunk yield **no verdict** for that chunk (§5), so an ignored attribution
+costs a refused chunk, not 40 silently dropped items. **Re-addressing it to the
+documented path form is a precondition of the first scored run**, and it is filed
+rather than done here (`tortoise#10176`) because it changes the request this record's
+cost table was measured on — `#10117`'s untrusted-data framing moves the same request,
+so the two are re-measured and re-cut in ONE pass. The
+`noul` / `score` primitives are documented by the vendor and exercised by no
+caller of ours; a wrong shape there returns 400 → `Unavailable` → the declared
+fallback (nothing is dropped, nothing is minted), and the counters name it. Never
+read this record as "verified live": the first armed call is what does that.
 
 ## 3. What it does
 
@@ -359,7 +370,7 @@ different failures, and only the latter reddens a pure-logic test.
 | `test_the_batch_bound_the_read_cap_and_the_offer_bind_are_pinned` | `_step` floors at 1, clamps to `BATCH_MAX` and maps an unbounded knob (`inf`, an object) to the ceiling instead of raising `OverflowError`; an over-cap body degrades **for the cap reason**, asserted on a VALID-JSON body so a deleted guard cannot pass via the JSON parse instead; and a **generator** `offered` set still populates `criteria` (binding it twice consumed it, shipping the empty map the guard exists to prevent). |
 | `test_identical_answers_across_a_chunk_are_not_attributable` | the runtime half of the attribution check: three elements answered identically (every `keep` equal **and** every `atomic` equal) produce **no verdict** at all, `attribution_rejects == 1`, `by_outcome == {}`, and every item is named `seam.attribution_unverified` with the prompt version. The **control in the same test** answers three *differing* pairs and gets `DISCARD`/`KEEP`/`NOOP` — so the guard is not a blanket refusal dressed as a check. |
 | `test_an_unattributable_chunk_cannot_discard_through_the_real_gate` | the composition: an armed seam answering identically for three candidates through the **real `vet_gate`** leaves every one of them `KEEP` (`by_outcome == {"KEEP": 3}`), which is the product fact — an unattributable answer cannot drop anything. |
-| `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` | an armed classify run reports `assigned_seam == 1` and `stats["seam"]["calls"] == 1` while `adjudication_calls` stays `0` and no `stats["llm"]` block appears — the seam's lane is countable **without** blending its spend into the LLM's (a census showing only `adjudication_calls: 0` beside a non-zero tail rate reads the arm as inert). |
+| `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` | an armed classify run reports `assigned_seam == 1` and `stats["seam"]["calls"] == 1` while `adjudication_calls` stays `0` and no `stats["llm"]` block appears — the seam's lane is countable **without** blending its spend into the LLM's (a census showing only `adjudication_calls: 0` beside a non-zero tail rate reads the arm as inert). Round 14 added the **receipt**: the vendor's `usage` is `{input_tokens, output_tokens}` with no `cost_usd`, and this half's fold copied only `cost_usd` — so an armed classify run published the seeded `0.0` (a number the service never reported) and dropped the only receipt there was, while the VET half (which folds the seam's whole stats dict) kept it. |
 
 Mutation-checked (each restores byte-identically — verified with `diff`). Rows cite methods and
 assertions by NAME, never by line number: this table has already had one citation go stale when a
@@ -394,6 +405,8 @@ later commit inserted lines above it.
 | rebase: `ENDPOINT` reverts to the lookalike host (`https://jevtypesafeai.com/api/v1/decide`) | ✅ `test_the_module_guards_the_suite_never_proved_redden_when_removed` reddens on the vendor-host assertion (`got 'https://jevtypesafeai.com/api/v1/decide'`) — 1 failed / 12 passed on a `/tmp` copy, which is the point: the branch REALLY carried that constant, and no doc line caught it |
 | rebase: `_api_key` skips the 0600 store (env → `.env` only) | ✅ the guards test reddens on `_api_key() == "apikey_from_the_store"` — the documented arming HOME stops being read, which is the inert-arming-path class |
 | rebase: `_api_key` drops `.strip()` on the env value | ✅ the guards test reddens on the whitespace-only case (`"   "` wins and sends `Bearer `) |
+| round 14: `_decide_tail_seam` stops folding `input_tokens` (the receipt) | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `seam["input_tokens"] == 6112` — measured on a `/tmp` copy, 1 failed / 12 passed, restored `diff`-identically |
+| round 14: `_api_key`'s `.env` term reverts to a single file-order scan that returns on the first name it matches | ✅ the guards test reddens on the shadowing case (an empty `TYPESAFE_API_KEY=` line above a populated `JEV_API_KEY=` line reported no key) — measured the same way |
 
 ## 9. What this does NOT close
 
