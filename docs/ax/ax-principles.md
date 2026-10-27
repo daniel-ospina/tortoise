@@ -51,8 +51,9 @@ plain statement that there is nothing to do.
   a blank are all spellings of "no date". **Where the field's vocabulary has an undatable state**, a
   marker present in that column asserts a value the author could not date, so the answer is that
   undatable state — for a window END it is `unknown`, **never `absent`**. *Absent* is not a marker's
-  target at all; it is the state of a bound that was never written: `validTo` is `None` **with no**
-  `validToPrecision="unknown"` (or the property omitted on create). The **canonical un-datable form**
+  target at all; it is the state of a bound that was never written: `validTo` is `None` with **no
+  precision declared at all** — no `validToPrecision="unknown"` and no concrete granularity (or the
+  property omitted on create). The **canonical un-datable form**
   is the opposite pairing — no `validTo` value **plus** `validToPrecision="unknown"`. The two differ
   only by that marker, which is why the marker must be written: without it, an asserted-but-un-datable
   end would read as one that was never asserted. That
@@ -128,11 +129,16 @@ for exactly this reason is recorded on #9202. Propose the verbatim edit and wait
      `validToPrecision="day"`) → question 3. That pair states two different things about one bound;
      shaping it silently would overwrite the caller's declared granularity, so it is refused and the
      caller picks one.
-   - **Declares no date in a field whose vocabulary has NO undatable state** (the window START) →
-     accept it **with a warning**, read as *no start was recorded* (#6140). Never refuse, and never mint
-     an undatable state the vocabulary does not have.
-   - **Is absent** (`validTo` is `None` **with no** `validToPrecision="unknown"`, or the property
-     omitted on create) → accept it; the bound is open and there is nothing to do.
+   - **An absent bound that still declares a concrete precision** (`validTo` `None` with
+     `validToPrecision="day"`, or the START's equivalent) → question 3: a granularity cannot describe
+     a bound that does not exist, so it is refused, and the caller either drops the precision or
+     supplies the bound.
+   - **Declares no date in a field whose vocabulary has NO undatable state** (the window START) and
+     carries **no** concrete precision → accept it **with a warning**, read as *no start was recorded*
+     (#6140). Never refuse, and never mint an undatable state the vocabulary does not have. (With a
+     precision declared, the bullet above applies instead.)
+   - **Is absent** (`validTo` is `None` with **no precision declared at all**, or the property omitted
+     on create) → accept it; the bound is open and there is nothing to do.
    - **Well-formed but names no instant** (`2026-02-30`, month 13, an epoch rendered as a string) →
      question 3. Never re-spell it into the nearest real value: that invents a date the caller did not
      state.
