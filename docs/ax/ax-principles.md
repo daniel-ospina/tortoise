@@ -43,17 +43,18 @@ plain statement that there is nothing to do.
 ## 2. What follows
 
 - **Format is not semantics.** Alternate spellings of one *token* are one token: `na`, `N/A`, `-`, and
-  a blank are all spellings of "no date". They normalize to whichever of *unknown* or *absent* is
-  actually true — **but only when the surface can establish which**; otherwise the next bullet applies.
-  (`unknown` is the word the owner used and the one #9202 settled for an asserted-but-un-datable end —
-  the shipped write door reads `na`, `n/a`, `-` and a blank `validTo` all as *that*; *absent* is a
-  bound never written at all (`validTo=None`, or omitted on create), which #9202 keeps as its own
-  state, `END_OPEN`. Do not re-map a marker the shipped doors already map.)
+  a blank are all spellings of "no date". Where the field has a value-presence cue, the cue settles it: a
+  marker **present** in that column asserts a value the author could not date, so the answer is
+  *unknown* — never *absent*. *Absent* is not a marker's target at all; it is the state of a bound that
+  was never written (`None`, or omitted on create). That is why #9202's write door reads every one of
+  those spellings as `unknown` while keeping `END_OPEN` for a bound that was never written — **do not
+  re-map a marker the shipped doors already map, and never render `unknown` back as `-`.**
 - **Never normalize a *meaning*.** Rule 1 licenses normalizing spelling, not choosing the convenient
-  interpretation. `n/a` is *unknown* or *absent* depending on which is true — picking one because it
-  lets the write through is fabrication, not self-healing. **If the surface cannot establish which of
-  the two is true, the intent is not legible**: refuse — a third part *is* writable here, and it names
-  the choice ("resubmit as `unknown` or `absent`"). Never pick.
+  interpretation. The rule that settles §2's first bullet is the value-presence cue; where a field has
+  **no** such cue — a free-text `status` whose `n/a` could mean "not set" or "explicitly not
+  applicable" — the surface must establish which is true before normalizing. **If it cannot, the intent
+  is not legible**: refuse — a third part *is* writable here, and it names the choice ("resubmit as
+  `not set` or `not applicable`"). Never pick.
 - **The reported state must not flatten different failures into one label.** "Could never be
   addressed" and "was addressable and got dropped" are different facts with different consequences
   (one has nothing to fix, the other must be repaired). If the reply reports them identically, it fails
@@ -69,7 +70,7 @@ the rule.
 
 | Surface | What it was | Which rule |
 |---|---|---|
-| **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **Read half FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` shapes or refuses on the guarded caller doors (`create_point`, `update_point`) **only**, so **the issue stays OPEN** for the unguarded `update_entity` / `supersede_point` route held by #9649 | the reported-state analogue of rule 2's second part — and the reason §4 exists |
+| **#9202** — a stored-but-un-datable END | read `end_state: "known"`, reporting an unknown as a known. **Read half FIXED** — `#10009` (`73d110a2f5`) makes it read `unknown` per the owner's ruling B, pinned in `tests/test_2350_validity_precision.py`; write door `#10079` shapes or refuses on the guarded caller doors (`create_point`, `update_point`) **only**. Two distinct residuals keep the issue OPEN, and they are not the same thing: `update_entity`'s Point arms are the **unguarded** route (#9649); `supersede_point`'s numeric `valid_from` kwarg is a **deliberate** exemption recorded in `docs/ONTOLOGY.md` §4.7 / #5360, not a gap | the reported-state analogue of rule 2's second part — and the reason §4 exists |
 | **#10158** — the rebuild abort | prescribes *"reconcile the journal (a missing creation event, an out-of-order append, or an unjournaled producer)"* for a record nothing can ever address — no missing creation exists, nothing is out of order, there is no producer to journal, and retrying reproduces it | the admission test — **the prescribed repair is not performable for this record.** Whether the shape must therefore stop refusing is #10158's own question, **not decided here** (see §6) |
 | `daniel-ospina/agent-infra` #1418 | a checkpoint whose *"remedy (rebase) is the tool it blocks"* | admission test |
 | #9365 · #7541 | a red *"no agent can clear"*; a terminal verdict with no follow-on stage | admission test |
@@ -98,8 +99,10 @@ for exactly this reason is recorded on #9202. Propose the verbatim edit and wait
 
 ## 5. Applying it to a gate (three questions, in order)
 
-1. **Is the intent legible?** No → refuse with the three parts. Yes → next. (If the surface cannot
-   establish what the input *means* — not merely how it is spelled — it is not legible; see §2.)
+1. **Is the intent legible?** No → go to question 3, **before** refusing: every refusal passes the
+   admission test first, or it is the `#10158` defect class wearing the right form. Yes → next. (If the
+   surface cannot establish what the input *means* — not merely how it is spelled — it is not legible;
+   see §2.)
 2. **Is only the form wrong?** Yes → normalize and proceed (never normalize the meaning).
 3. **If refusing: can the fix be written, concretely enough that the caller can act on it?** No → the
    case must not refuse; make it a recorded, reported, non-failing outcome with its own distinct state.
