@@ -41,7 +41,7 @@ transitive set of `tortoise/**` modules it imports. Modules under analysis are n
 | files sharing the single largest closure (185 modules) | **424** |
 | files with an EMPTY closure (no `tortoise/**` import at all) | **113** |
 | files reaching `tortoise/__init__.py` | **625 (84.7 %)** |
-| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 141 (19.1 %) |
+| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 140 (19.0 %) |
 
 ### 1.1 Function-local imports are the whole ballgame (and the trap)
 
@@ -70,7 +70,7 @@ The best reduction a closure-based split could deliver for those changes is 738 
 
 `tortoise/__init__.py`'s own closure is **185 modules**. Removing a single edge drops it to **7**:
 
-```
+```text
 tortoise/__init__.py        line 39   from tortoise.config import RELATIVE_PATH_ERROR   (module level)
 tortoise/config.py          line 135  from tortoise.sdk import _derive_graph_name       (function-local)
 tortoise/sdk.py             42 090 lines, 89 in-repo modules (16 import-time, 74 function-local)
@@ -83,7 +83,7 @@ on `tortoise/__init__.py`** — but the mechanism is not "the shim re-exports ev
 imports four modules (`config`, `embedded_lifecycle`, `fork_safety`, and one function-local), and
 `config.py`'s *cycle-breaking deferred* import of `sdk` is what drags the hub in. Measured:
 
-```
+```text
 closure(tortoise/__init__.py)                                  = 185 modules
 closure(tortoise/__init__.py)  without the config → sdk edge    =   7 modules
 ```
@@ -133,7 +133,7 @@ The three classes are additive requirements, not bugs to patch:
 1. keep the hand-written registrations for non-Python subjects (`SOURCE_PATTERNS` / `CORE_ALSO` —
    which already exist and are the reason `core` is blunt);
 2. keep a surface-wide minimum when a **test file** changes (today's rule);
-3. resolve the 141 tainted files, or exclude them from any narrowing.
+3. resolve the 140 tainted files, or exclude them from any narrowing.
 
 Requirement (1) alone means the closure can never *replace* the hand-written map — only narrow the
 part of `core` that is genuinely import-driven. That is a smaller change than the issue anticipated,
