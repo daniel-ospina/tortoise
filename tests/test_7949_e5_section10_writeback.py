@@ -27,7 +27,10 @@ figures the registered falsifier produces when it is run now.
 
 **FAILS IF** the cells §10 publishes for the replicated run move: each arm's
 pooled loss / absent / flattened, distortion, recall, precision and claims emitted
-(measured: raw's `52.0%` to `53.0%` reds this), the holdout `(decision input)`
+(measured: raw's `52.0%` to `53.0%` reds this), the arms table's column HEADER
+(measured: swapping the `recall` / `precision` labels reds — without it every cell
+below is read by POSITION, so a relabelled column would publish the wrong figure
+green), the holdout `(decision input)`
 row's subset label, n / both losses / **Δloss and its Δprecision / Δrecall legs**
 (the `#10108` review measured the leg gap: `+0.8` retyped to `+8.0` stayed GREEN
 while publishing a branch-1 firing the run does not have), the
@@ -174,6 +177,43 @@ def _row(block: str, first_cell_pattern: str) -> list[str]:
     return [c.strip().replace("*", "") for c in found[0].split("|")]
 
 
+#: §10's arms-table column header. Pinned because every arm cell below is compared
+#: by POSITION (`got[2]` is recall, `got[3]` is precision), so a header EDIT that
+#: swaps two labels would publish the wrong figure under the right number and stay
+#: green — measured (`#10108` review P2): swapping `recall` / `precision` in the
+#: header, deleting the header row, and renaming `qualifier loss` → `distortion` all
+#: left the pin GREEN while the table said something the run does not.
+_ARM_HEADER = ("qualifier loss", "distortion", "recall", "precision",
+               "claims emitted")
+
+
+def _header_cells(block: str) -> list[str]:
+    """The cells of the arms table's header row (the one beginning `| arm |`)."""
+    found = re.findall(r"^\|\s*arm\s*\|(.*)\|\s*$", block, re.M)
+    assert len(found) == 1, (
+        "expected exactly one `| arm | ... |` header row under "
+        f"{_REPLICATED!r}, found {len(found)} — without it the cells below are "
+        "read by POSITION and a relabelled column publishes the wrong figure")
+    return [c.strip().replace("*", "") for c in found[0].split("|")]
+
+
+#: A Δ cell in percentage points: `+10.0 pp`, `−13.3 pp`, `0 pp`. Parsed, never
+#: compared as text — the document itself renders the same column as `+10.0 pp`
+#: (holdout) and `0 pp` (unbound), so a text compare would red a re-publication
+#: that is CORRECT in the document's own format (`#10108` review P2). The Unicode
+#: minus is accepted because §10 already uses it in the tuning row.
+_PP_CELL = re.compile(r"^([+\-\u2212]?\s*\d+(?:\.\d+)?)\s*pp$")
+
+
+def _pp(cell: str, *, row: str) -> float:
+    """Read a `±<n> pp` cell as a signed float, `−` (U+2212) as `-`."""
+    match = _PP_CELL.match(cell.strip())
+    assert match, (
+        f"§10's {row} cell {cell!r} is not `<±n> pp` — the row can no longer be "
+        "read, so this pin would be comparing nothing")
+    return float(match.group(1).replace("\u2212", "-").replace(" ", ""))
+
+
 def _pooled(score: dict, arm: str) -> dict:
     """The arm's pooled precision/recall, summed over the per-session rows."""
     rows = [r for r in score["precision_recall"] if r["arm"] == arm]
@@ -194,6 +234,18 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
     score = json.loads(out.read_text())
 
     block = _block(DOC.read_text(), _REPLICATED)
+
+    # The HEADER first: every arm cell below is compared by POSITION, so a header
+    # edit that swaps two labels publishes the wrong figure under the right number
+    # and would otherwise stay green (`#10108` review P2 — measured: swapping
+    # `recall` / `precision`, deleting the header row, and renaming `qualifier
+    # loss` → `distortion` all left the pin GREEN while the table said something
+    # the run does not).
+    assert _header_cells(block) == list(_ARM_HEADER), (
+        f"§10's arms table header is {_header_cells(block)!r}; the registered "
+        f"table is {list(_ARM_HEADER)!r}. The cells below are read by POSITION, "
+        "so a relabelled column publishes a different figure as green — restore "
+        "the column order (or re-derive the pin if the registration moved)")
 
     # The arms' cells are compared as NUMBERS on the document's own grid, not as
     # text (`#10108` review P3 — the same class the holdout row's `_loss_cell`
@@ -276,10 +328,17 @@ def test_section10_publishes_the_numbers_the_registered_falsifier_produces(tmp_p
             f"§10's holdout {branch} cell {cell!r} publishes {rate}%; the "
             f"registered falsifier produced "
             f"{agg_holdout[branch]['loss_rate'] * 100:.4g}%")
-    assert got_holdout[4] == f"+{holdout['delta_loss_pp']:.1f} pp", (
+    # Δloss: PARSED, never compared as text (`#10108` review P2). The document
+    # renders this column both ways (`+10.0 pp` here, `0 pp` on the `unbound` row
+    # at `EXTRACTOR-V4-ARCHITECTURE.md:1332`), so a text compare reds a
+    # re-publication that is CORRECT in the document's own format — the same trap
+    # the comment above names — and `f"+{...:.1f} pp"` additionally renders a
+    # negative Δ as `+-12.3 pp`, which can never match.
+    delta_loss = _pp(got_holdout[4], row="holdout Δloss")
+    assert abs(delta_loss - holdout["delta_loss_pp"]) <= 0.05, (
         "§10's holdout decision-input row no longer publishes the Δloss the "
         f"registered rule reads.\n  §10:    {got_holdout[4]}\n  scorer: "
-        f"+{holdout['delta_loss_pp']:.1f} pp")
+        f"{holdout['delta_loss_pp']:+.1f} pp")
 
     # …and its LAST cell, which was UNPINNED until the `#10108` review (P2). The pin
     # stopped at `[4]` (Δloss), so `Δprecision +0.8` could be retyped `+8.0` and stay

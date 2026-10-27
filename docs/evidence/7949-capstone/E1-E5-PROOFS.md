@@ -46,7 +46,7 @@ unknown". The blockers are named with the artefact that has to move first.
 | **E3** `:Object` included | `tests/test_graph_census_7949.py::test_an_object_reached_only_by_aboutObject_has_no_derivation_link` | green (as a **reported gap**) | the capture's `:Object` carries **no derivation link at all** (`with_derivation_link == 0`), so E3's literal "every derived node" bar is unreachable **as registered** — an owner metric decision (`#9736`), not a defect a lane may repair | n/a — the pin exists so a change in this fact is noticed, not to green the row |
 | **E4** planted operator edges wired + persisted | **none on the unpatched leg.** `tests/eval/write_path/test_write_path_operator_lane.py` monkeypatches `extract_session_v2` and says so in its own docstring | red (5 of 15) | nothing about the product: a patched extractor cannot say whether the extractor *forms* the operators | — (the criterion is not implemented; no proof is possible) |
 | **E5** the falsifier is run on OUR corpus | `tests/eval/write_path/test_score_qualifiers.py::test_the_committed_score_artifact_regenerates_byte_identically` | green | a fresh run of the registered scorer over the committed arm receipts reproduces the committed score artefact **byte for byte** | (pre-existing; its own docstring names the mutation class — an edit to `MARKERS`, the 0.6 threshold or `classify()`) |
-| **E5** …and **written back into §10** | **ADDED HERE** — `tests/test_7949_e5_section10_writeback.py::test_section10_publishes_the_numbers_the_registered_falsifier_produces` | green | §10's replicated-run table publishes exactly the figures a fresh falsifier run produces — the write-back half of E5's criterion, which nothing in the tree checked | ✔ measured ×3: `52.0%` → `53.0%` in §10 reds; deleting the replicated subsection reds (heading named); moving the scorer's claim threshold `0.6 → 0.9` reds (instrument drift with no write-back) |
+| **E5** …and **written back into §10** | **ADDED HERE** — `tests/test_7949_e5_section10_writeback.py::test_section10_publishes_the_numbers_the_registered_falsifier_produces` | green | §10's replicated-run table publishes exactly the figures a fresh falsifier run produces — the write-back half of E5's criterion, which nothing in the tree checked | ✔ measured ×5: `52.0%` → `53.0%` in §10 reds; deleting the replicated subsection reds (heading named); moving the scorer's claim threshold `0.6 → 0.9` reds (instrument drift with no write-back); swapping the arms table's `recall` / `precision` HEADER labels reds (the cells are read by position, so without this the table could publish the wrong figure green); `Δloss +10.0 pp` → `+11.0 pp` reds while `+10 pp` and `+10.00 pp` stay green (the Δ cells are parsed, not text-compared) |
 
 ### Why the E5 write-back was the one hole that could be closed now
 
@@ -77,6 +77,23 @@ hold["delta_recall_pp"], …)`), so an unpinned leg was an unpinned verdict. Fou
 the `#10108` review, measured both ways (`+8.0` and `Δrecall +9.0` now red); the cell
 is pinned by `_DELTA_CELL`.
 
+⚠️ **Two more gaps of the same shape were found by the review of the fix**, and both
+were measured before being closed — recorded because each one is a *pin that stops one
+step short*, which is exactly what this file exists to name:
+
+1. **The arms table's column HEADER was unpinned.** Every arm cell is compared by
+   POSITION (`got[2]` is recall, `got[3]` is precision), so a header edit that swaps
+   two labels publishes the wrong figure under the right number and stays GREEN —
+   measured: swapping `recall` / `precision`, deleting the header row, and renaming
+   `qualifier loss` → `distortion` all left the pin GREEN. Now pinned by
+   `_ARM_HEADER` / `_header_cells`; measured red, naming the header it read.
+2. **The holdout Δloss was a TEXT compare**, contradicting this pin's own doctrine one
+   cell over: `got_holdout[4] == f"+{…:.1f} pp"` reds a re-publication that is
+   numerically CORRECT in the document's own format (§10's `unbound` row already
+   renders `0 pp`, not `0.0 pp`), and renders a negative Δ as `+-12.3 pp`, which can
+   never match. Now parsed by `_pp`; measured: `+10 pp` and `+10.00 pp` are GREEN,
+   `+11.0 pp` reds.
+
 ---
 
 ## What this audit does NOT add, and why
@@ -91,9 +108,18 @@ is pinned by `_DELTA_CELL`.
 * **One `docs/00_index.md` row — added in this PR, not "none".** The bundle carries
   one row PER ARTEFACT (the `#7949` / `#9080` gate/probes/logs row, the
   PRE-REGISTRATION row, and the E1+E2 row), cited **by title, never by line**: a line
-  number ROTS — these read `:140`/`:146`/`:147`/`:148` when the bullet was written and
-  are `:141`/`:148`/`:149`/`:150` at this head, two of the four having routed a reader
-  to a different epic's row, which is the same failure this audit exists to name. And
+  number ROTS. ⚠️ Corrected by the `#10108` review: the first draft of this bullet
+  said those numbers *rotted* (`:140`/`:146`/`:147`/`:148` → `:141`/`:148`/`:149`/`:150`).
+  Measured with `git show <ref>:docs/00_index.md` over every commit that touched the
+  bundle's rows, they read `:141`/`:148`/`:149` at the pre-PR head `59cd1101` and
+  `:141`/`:148`/`:149`/`:150` at the commit that wrote that sentence (`b65c79080`) —
+  i.e. those four numbers were **wrong when written, not stale**, and nothing rotted
+  between then and this head. The rot claim is the same kind of unmeasured assertion
+  this audit exists to catch, so it is recorded rather than deleted. The consequence
+  is unchanged and worse than the draft said: at this head `:140` (the Objective-7
+  exit artifact), `:146` (hosted prerequisites, epic #7879) and `:147` (the read
+  path, #7970) are **three other rows**, so three of the four would have routed a
+  reader into someone else's epic. And
   the README does not name this file — so "reachable through the bundle's rows" was
   false and a reader routing by the documented entry point could not reach it. (An
   earlier draft justified adding nothing by `_index_row`'s "exactly one" rule; that was
