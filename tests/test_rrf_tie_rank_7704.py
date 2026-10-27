@@ -103,7 +103,9 @@ respected, and a tie group does not displace a row the legs ranked lower).
     test already pins; re-derive the positional assertion, keep the score one.
   * ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``
     — its ``{0.0, 1.0}`` similarity span (contested twin at ``0``) assumes the id
-    tie-break hands the lower-ULID twin rank 0; with averaged ranks
+    tie-break hands ONE twin rank 0 — the HIGHER-ULID one since #10121's DESC
+    reversal, which is why ``_seed_twin_conflict`` now mints the contested twin
+    first; with averaged ranks
     ``_min_max_normalize`` returns the all-equal midpoint ``0.5`` for both.
     NOTE: the first assertion to fail there is the BARE ``== {0.0, 1.0}`` check,
     which carries no message at all; the "FIXTURE PREMISE BROKEN … regenerate the

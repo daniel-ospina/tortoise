@@ -685,14 +685,15 @@ class TestRunVectorQuery:
 
         #6214: THE ORDER IS PART OF THE CONTRACT AND THE ENGINE'S IS NOT.
         Both rows tie on distance (2.4), and the engine mock hands them back
-        with ``zulu`` first. The leg must return ``alpha`` first because the
-        secondary key is the id — not because of the order the engine
-        produced. Dropping the id key makes this assertion fail
-        (``zulu`` would stay first).
+        with ``alpha`` FIRST — deliberately the reverse of the expected answer,
+        so "no secondary sort at all" fails this test rather than passing it by
+        agreeing with the mock's order (#10121 review). The leg must return
+        ``zulu`` first: the tie is recency-then-id DESC and neither row carries
+        a timestamp, so the id key decides.
         """
         graph = MultiCallGraph([
             (None, Exception("Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("zulu", 2.4), ("alpha", 2.4)], None),
+            ([("alpha", 2.4), ("zulu", 2.4)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
@@ -796,15 +797,15 @@ class TestRunVectorQuery:
         Sig B's rows are DISTANCES and come back as similarities (#5583).
 
         #6214: the returned ORDER is now contractual. The two rows tie on
-        distance (0.0 — perfect matches), so the id is the only thing that
-        can order them; the engine mock hands them back ``zulu`` first, and
-        the leg must return ``alpha`` first. Removing the id key leaves the
-        mock's order and fails this assertion.
+        distance (0.0 — perfect matches), so the secondary keys are the only
+        thing that can order them. The mock hands them back ``alpha`` FIRST —
+        deliberately the reverse of the expected answer, so a leg that applies
+        NO sort fails instead of agreeing with the mock (#10121 review).
         """
         graph = MultiCallGraph([
             (None, Exception(
                 "Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("zulu", 0.0), ("alpha", 0.0)], None),
+            ([("alpha", 0.0), ("zulu", 0.0)], None),
         ])
 
         result = run_vector_query(
@@ -824,13 +825,15 @@ class TestRunVectorQuery:
         not a ranking and reverses under a re-sort (the reason the pre-#6214
         code could not be fixed by sorting alone).
 
-        Two rows tie on distance (0.0), and the engine mock hands them back
-        ``zulu`` first, so the id key decides — #10121 turned it DESC, so
-        ``zulu`` is the expected lead and ``alpha`` last is reachable only
-        through that key.
+        Two rows tie on distance (0.0). The engine mock hands them back
+        ``alpha`` FIRST — deliberately the reverse of the expected answer, so a
+        leg that applies NO secondary sort keeps the mock's order and FAILS
+        (#10121 review: the earlier version's expectation matched the mock, so
+        deleting the sort stayed green). The tie is recency-then-id DESC; no
+        row carries a timestamp, so ``zulu`` leads on the id key.
         """
         graph = MultiCallGraph([
-            ([("zulu", 0.0), ("alpha", 0.0)], None),   # sig A succeeds
+            ([("alpha", 0.0), ("zulu", 0.0)], None),   # sig A succeeds
         ])
 
         result = run_vector_query(
@@ -1006,6 +1009,45 @@ class TestRunVectorQuery:
         assert "queryNodes('Event'," in cypher
         assert "node.eventId" in cypher
         assert "vec.euclideanDistance" not in cypher
+
+
+def test_index_branch_survives_an_id_less_row():
+    """#10121 review P1: a NULL pid must not raise inside the sort.
+
+    ``:Object`` nodes are written id-less, so ``row[0]`` can be ``None``. An
+    unconditional ``sort(key=lambda item: item[2])`` compares those ``None``
+    keys for EVERY pair (not only on a distance tie), raises
+    ``TypeError: '<' not supported``, and the branch's ``except Exception``
+    swallows it — silently demoting every such read to a full scan with the
+    mechanism mislabelled and the score unit flipped. The shared
+    ``recency_tie_key`` normalises ``None`` to ``''`` so the sort is total.
+    """
+    graph = MultiCallGraph([
+        # The id-less row comes back FIRST from the engine, so `alpha` reaching
+        # the lead is reachable only through the sort — the assertion is not
+        # satisfied by the mock's own order (#10121 round-4 review). The third
+        # column is the recency projection, so the projected value is
+        # exercised rather than silently absent.
+        ([(None, 0.5, ""), ("alpha", 0.5, "2026-01-01T00:00:00Z")], None),
+    ])
+
+    trace: list[dict] = []
+    result = run_vector_query(
+        graph, [0.1] * 384, limit=10, is_embedded=False,
+        vector_index_api="procedure", excluded_statuses=(), leg_trace=trace)
+
+    assert len(result) == 2, f"both rows must survive the sort: {result}"
+    assert result == [("alpha", pytest.approx(0.5)), (None, pytest.approx(0.5))], (
+        "an id-less row must sort as the LAST identity, not raise: "
+        f"{result}"
+    )
+    mechanism = next(
+        (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
+        None)
+    assert mechanism == MECHANISM_INDEX, (
+        "the leg must still answer from the INDEX — a swallowed sort error "
+        f"silently demotes it to a scan, which is the defect this pins: {trace}"
+    )
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")

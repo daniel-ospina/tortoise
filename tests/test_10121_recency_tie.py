@@ -326,6 +326,7 @@ def test_writers_stamp_zero_padded_iso_timestamps():
     assert rows, "FIXTURE NOT REACHED: the point was not written"
     from datetime import datetime
 
+    suffixes: set[str] = set()
     stamp = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
     for value in rows[0]:
         if value is None:
@@ -338,10 +339,14 @@ def test_writers_stamp_zero_padded_iso_timestamps():
         # the same instant but different strings, and the tie is a string
         # comparison — one authoring format, asserted here.
         datetime.fromisoformat(text)
-        assert text.endswith(("+00:00", "Z")) and text[-6:] in ("+00:00", ":00:00Z"), (
-            f"a writer stamped a non-canonical UTC suffix ({value!r}) — the tie "
-            "compares these as STRINGS, so every writer must agree on one "
-            "spelling")
+        assert text.endswith(("+00:00", "Z")), (
+            f"a writer stamped a non-UTC-offset suffix ({value!r}) — the tie "
+            "compares these as STRINGS, so the timezone spelling is part of "
+            "the ordering")
+        suffixes.add(text[-6:] if text.endswith("+00:00") else text[-1:])
+    assert len(suffixes) == 1, (
+        "writers disagree on the UTC suffix spelling, so the string tie is not "
+        f"a total order across them — ``Z`` sorts above ``+00:00``: {suffixes}")
 
 
 # ── the two legs that rank themselves ─────────────────────────────────────
@@ -439,3 +444,20 @@ def test_vector_scan_branch_breaks_equal_distance_ties_newest_first():
         f"(recency and id disagree here, so the id key alone gives the inverse "
         f"order): {ids}"
     )
+
+
+def test_the_recency_key_normalises_an_absent_identity():
+    """The Python-side key must be TOTAL — a None pid is a live population.
+
+    ``:Object`` rows are written id-less, so ``recency_tie_key`` receives
+    ``None``. A raw ``None`` in a sort key raises ``TypeError`` and the vector
+    index branch swallows it, demoting the read to a full scan (round-3
+    review's P1). Pinned directly, engine-free.
+    """
+    from tortoise.search_engine import recency_tie_key
+
+    assert recency_tie_key(None, None) == ("", "")
+    assert recency_tie_key("2026-01-01T00:00:00Z", "abc") == (
+        "2026-01-01T00:00:00Z", "abc")
+    # A numeric stamp keeps its own ordering direction — stated, not fixed.
+    assert recency_tie_key(20261201, "abc") == ("20261201", "abc")

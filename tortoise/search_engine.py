@@ -1394,15 +1394,50 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
     return f"{recency_key_expr(alias)} DESC, {alias}.{id_field} DESC"
 
 
+def recency_tie_key(recency: object, ident: object) -> tuple[str, str]:
+    """The PYTHON-side twin of :func:`recency_tie_clause`'s secondary keys.
+
+    Two legs sort in Python rather than in cypher — this one's vector index
+    branch and ``bm25.bm25_rank`` — and #10121's review found them re-expressing
+    the rule by hand (a three-pass sort here, a tuple key there), i.e. the same
+    drift seam the cypher helper was created to close. Both use THIS, sorted
+    DESCENDING.
+
+    ⚠️ Scope, stated with its DIRECTION rather than as "not our problem": the
+    comparison is STRING-based, as the cypher clause's is. A non-string stamp (a
+    numeric epoch) sorts as the NEWEST here — ``str(20261201)`` starts with
+    ``'2'``, which beats the ``'-'`` in every ISO stamp — while cypher's type
+    precedence puts numbers FIRST under ``DESC`` too, so the two agree in
+    direction but not necessarily in order. No writer emits one today (the
+    writer test pins the stamps of ``create_point``; a props passthrough could
+    still carry one), and making that impossible is its own change, not a silent
+    guess made here.
+
+    ``None`` is normalised to ``''`` on both components: ``''`` sorts as the
+    OLDEST stamp and as the LAST identity, which is what the clause means by an
+    undated or id-less row — and it makes the tuple comparable, which the raw
+    values are not (``sorted([None, None])`` raises, and an id-less ``:Object``
+    is a live population — that TypeError was swallowed by the index branch's
+    ``except Exception`` and silently demoted every such read to a full scan).
+    """
+    return (
+        "" if recency is None else str(recency),
+        "" if ident is None else str(ident),
+    )
+
+
 def recency_key_expr(alias: str) -> str:
     """The recency EXPRESSION alone — the one a projection must RETURN.
 
     Split out of :func:`recency_tie_clause` because #10121's review found the
     window and the ranking disagreeing: the ORDER BY used the CASE below while
     the BM25 arm's corpus read and both vector index signatures projected a
-    plain ``coalesce``, so a row stamped ``updatedAt: ''`` (or a numeric stamp)
-    was admitted as the NEWEST by the window and then sorted as OLDEST — or
-    dropped — by the ranking. One expression now decides both.
+    plain ``coalesce``, so a row stamped ``updatedAt: ''`` was admitted as the
+    NEWEST by the window and then sorted as OLDEST — or dropped — by the
+    ranking. One expression now decides both for every string stamp. (A
+    non-string stamp is out of scope and stays that way: no writer emits one,
+    and mixing engine type precedence with ``str()`` would need its own
+    decision — see :func:`recency_tie_key`.)
 
     The CASE (not a plain ``coalesce``) is load-bearing: ``coalesce`` stops at
     the first NON-NULL, so ``updatedAt: ''`` would SUPPRESS a valid
@@ -2368,10 +2403,11 @@ def run_vector_query(
             # vec.cosineDistance over the yielded node (the pre-#6214 A
             # substituted the row POSITION for a score, so ANY re-sort would
             # have reversed its ranking) — and the engine's tie order is
-            # replaced here, ONCE, by (distance, id). There is deliberately no
+            # replaced here, ONCE, by (distance ASC, then the shared
+            # recency/id key DESC — #3019, #10121). There is deliberately no
             # second ordering predicate (no per-signature Cypher ORDER BY):
-            # one sort, over the one shape both signatures now produce, so the
-            # two cannot drift apart.
+            # one Python sort, over the one shape both signatures now produce,
+            # so the two cannot drift apart.
             #
             # #5583: the engine's value is a DISTANCE (lower is better), NOT a
             # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
@@ -2397,27 +2433,25 @@ def run_vector_query(
             # rides the cypher RETURN above; a row shape without it (an older
             # signature, a degraded path) falls back to ``''``, which sorts as
             # OLDEST exactly as the shared clause does.
-            annotated: list[tuple[float | None, str, str]] = []
+            annotated: list[tuple[float | None, tuple[str, str], object]] = []
             for row in rows:
                 try:
                     distance = float(row[1])
                 except (IndexError, TypeError, ValueError):
                     distance = None
-                recency = (
-                    "" if len(row) <= 2 or row[2] is None else str(row[2]))
-                annotated.append((distance, recency, row[0]))
-            # An unreadable distance carries no evidence of similarity — rank it
-            # LAST. `inf` is the sort key, not the reported score. THREE stable
-            # passes express `(distance ASC, recency DESC, id DESC)` without
-            # string negation: id first (the determinism base), then recency,
-            # then the primary key.
-            annotated.sort(key=lambda item: item[2], reverse=True)
+                recency = row[2] if len(row) > 2 else None
+                annotated.append((distance, recency_tie_key(recency, row[0]),
+                                  row[0]))
+            # (distance ASC, then the SHARED recency/id key DESCENDING). An
+            # unreadable distance carries no evidence of similarity — rank it
+            # LAST; `inf` is the sort key, not the reported score. Two stable
+            # passes: the secondary key first, then the primary one.
             annotated.sort(key=lambda item: item[1], reverse=True)
             annotated.sort(key=lambda item: (
                 item[0] if item[0] is not None else float("inf")))
             out = [
                 (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
-                for dist, _recency, pid in annotated
+                for dist, _key, pid in annotated
             ]
             if min_similarity is not None and out:
                 # Score is a true cosine similarity now, for BOTH signatures —
