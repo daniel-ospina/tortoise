@@ -76,8 +76,12 @@ It pins **no prose** and not the run-1 block, whose receipts were never retained
   never by editing a number. The new test is a *pin on the write-back*, not a
   verdict change.
 * **No `docs/00_index.md` row.** This file lives inside the already-registered
-  bundle path; the index's unit is the bundle, and a second row naming
-  `docs/evidence/7949-capstone/**` would break `_index_row`'s "exactly one" rule.
+  bundle path and its pins are reached through it, so the bundle's existing row is
+  the index's unit. (An earlier draft justified this by `_index_row`'s "exactly
+  one" rule — that was wrong: `_index_row` (`tests/test_e1_e2_measurement.py:1839`)
+  selects rows containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`,
+  so a second row naming this file would not collide. The conclusion stands on the
+  bundle-unit convention alone.)
 * **No E1/E2/E4 proof.** Their mechanisms are missing, not their pins (below).
 
 ---

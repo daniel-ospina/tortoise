@@ -6601,6 +6601,19 @@ tier1:
 # is the one it covers. The `core` half is what `--integrity` reads.
 - test_7949_capstone_measure.py
 - test_7949_capstone_verdict_check.py
+# #10108 review (P1): the SAME document's E5 *write-back* pin (`core` above) —
+# `test_7949_e5_section10_writeback.py` binds §10's replicated-run table to a
+# fresh run of the registered scorer (`tests/eval/write_path/score_qualifiers.py`).
+# It is a pure, no-DB file/JSON read, and the diff class that can red it is a
+# docs-only edit of `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — exactly
+# the diff on which `docs/` takes NON_PYTHON_PREFIXES → `changed == []` →
+# `select()`'s early return → tier1 ONLY. Registered in `core` alone it was
+# asleep on the one change it exists to catch (retype a digit, or delete the
+# subsection, and it merged green), which is the same #4309/#3332/#3616
+# silent-drop class as the sibling rows above. Pinned behaviourally by
+# tests/test_ci_selection.py::test_7949_e5_section10_writeback_runs_on_a_docs_only_diff
+# and ::test_docs_scanning_gates_stay_in_tier1.
+- test_7949_e5_section10_writeback.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 # WHY THIS BLOCK EXISTS. `test-slow (b)` was reported as the CI critical path
