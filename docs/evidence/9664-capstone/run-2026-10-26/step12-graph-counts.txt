@@ -1,0 +1,92 @@
+Two read-only questions, raw results please, no writes: (1) tortoise_overview(section="graphs") — for every graph show the id or namespace it returns AND its point count; (2) tortoise_search for "capstone-9664 write probe 2026-10-26" with limit 1 — confirm whether that point is still there and which graph it lives in.
+
+Worked for 15s
+ChatGPT said:
+1. tortoise_overview(section="graphs")
+
+Arguments
+
+JSON
+{"section":"graphs"}
+
+Raw result
+
+JSON
+{
+  "text": "[\"org_2e34bf114bd077dc819619daaf\"]"
+}
+
+Graph namespace
+
+Point count
+org_2e34bf114bd077dc819619daaf
+
+Not returned
+The response lists one namespace but supplies neither a graph ID separately nor a point count.
+
+2. tortoise_search (limit 1)
+
+Arguments
+
+JSON
+{
+  "query": "capstone-9664 write probe 2026-10-26",
+  "limit": 1
+}
+
+Raw result
+
+JSON
+{
+  "result": [
+    {
+      "id": "1a1708b7fa1-7eac9866d403",
+      "content": "plus-write-probe-20261025T005216Z",
+      "point_kind": "fact",
+      "match_source": "rrf",
+      "relationships": [],
+      "topics": [],
+      "summary": "",
+      "sessionId": "",
+      "eventId": "",
+      "sourcePath": "",
+      "similarity": 0.04098360655737705,
+      "snippet": "plus-write-probe-20261025T005216Z",
+      "scores": {
+        "fts": 2.5,
+        "vector": 0.861166179180145,
+        "structural": null,
+        "rrf": 0.04098360655737705
+      },
+      "ep": {
+        "confidence_mean": 0.5,
+        "evidence": {
+          "impl_count": 0,
+          "nand_count": 0,
+          "total": 0
+        },
+        "contention": 0,
+        "variance": 0.083333,
+        "contested": false,
+        "has_ep": false,
+        "measured": false,
+        "baseline": false
+      },
+      "status": "live",
+      "subject_unavailable": "aboutSubject has no reachable producer for Points or Events on this graph, so 'subject' is structurally empty rather than unknown: the capture entity spine writes SUBJECT-kind entities as :Object (#4934), and the document extractor's Subject writer — on by default since #4938 — writes document-Source-sourced edges only, which cannot resolve a Point's subject. Tracked producers: #1370, #1509."
+    }
+  ]
+}
+Conclusions
+
+Graphs: One namespace returned; point count unavailable.
+
+Capstone probe: Not found in the single returned search result. This does not prove deletion because semantic search returned an unrelated point.
+
+Graph containing the probe: Unconfirmed.
+
+Writes performed: None.
+
+Both requested calls completed successfully.
+
+ChatGPT can make mistakes. Chec
