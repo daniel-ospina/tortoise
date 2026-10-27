@@ -21,8 +21,9 @@ The run's verdict table is the sibling index. Read the two together: this file s
 surfaces it drove (the Tortoise dashboard and the real ChatGPT UI), with a dated screenshot or a
 trace for each row, and it names the two remaining blockers — `#8617` (step 2a, graph creation
 refused by the FalkorDB ACL layer) and `#10088` (step 4, the authorize page's sign-in delivers the
-code to the marketing host). Two of this file's claims were superseded by the run and are marked in
-place below.
+code to the marketing host). Two of this file's claims were superseded by the run: the status line
+above, **replaced** with the run's own status rather than annotated, and one further claim — the
+"no addressable form on the connector" paragraph — **marked `SUPERSEDED` in place below**.
 
 Issue #9664 defines a *manual, agent-run clickthrough* across three surfaces (Tortoise
 web, the ChatGPT UI, our MCP server). It is deliberately **not** a script and **not** a CI

@@ -1,3 +1,17 @@
+---
+title: "#9664 acceptance run — evidence index (2026-10-26), the run's own index kept verbatim"
+type: evidence
+domain: platform
+doc_status: historical
+created: 2026-10-26
+subjects.team: epistemic-team
+aboutSubjects: Tortoise onboarding, MCP connector, ChatGPT
+aboutObjects: "#9664, #8617, #10084, #10088, chatgpt-acceptance browser profile"
+---
+
+<!-- Frontmatter added at publication; everything below this line is the run's own index, verbatim,
+     including its doubled `# #9664` heading. It is the prior summary `INDEX.md` corrects. -->
+
 # #9664 acceptance run — evidence index (2026-10-26, 12:51–13:21 UTC-05 / 17:51–18:21 UTC)
 
 Instrument: cmux browser surface `surface:1000030017`, real headed webview, driven via `cmux browser`.

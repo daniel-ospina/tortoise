@@ -15,7 +15,7 @@ This directory is the **run** half of the #9664 capstone. Its sibling one level 
 (`../README.md`) is the measurable half. **When it was written** it said plainly that the run had not
 been executed — *"Screenshots and the model's tool-call trace remain outstanding; nothing in this
 directory substitutes for them."* — and this publication replaces that status line with the run's own
-link (`../README.md:14-16`), so that sentence is **history, not the current state**. This is that
+link (`../README.md:15-17`), so that sentence is **history, not the current state**. This is that
 artifact.
 
 ## Instrument and chain of custody
@@ -78,13 +78,13 @@ available without the socket.
 | 0 | **PASS** — owner logged in | `step0-logged-out-20261026-125130.png`, `step0-logged-out-pane-visible-…125450.png`, `step0-state-change-…125538.png`, `step0-logged-in-plus-…125551.png` |
 | 1 | **PASS** — `team-named` complete, **as state — no sign-up was performed** | `step1a-tortoise-auth-page-…125614.png`, `step1b-tortoise-login-tab-…125624.png`, `step1-org-overview-…125908.png`, `step1-settings-…125922.png`; `step7-graphs-and-step5-onboarding-state.txt` (`completed_steps` contains `team-named`) |
 | 2a | **FAIL — known bug, fix in flight** — graph creation refused, FalkorDB ACL → **#8617** | pre-submit chain: `step2a-graphs-list-…125947.png` (the `default` graph, *"1/2 graphs used"*), `step2b-graphs-state-…130026.png` (*"Dashboard — Checking your session…"* splash), `step2d-name-typed-…130129.png` (`capstone-9664` typed into *New graph name*); then `step2e-graph-create-FAILED-acl-…130137.png`, `step2f-graph-create-retry-acl-…130154.png`; `step2e-graph-create-failed-error.txt` (*"Per-graph ACL provisioning failed — the FalkorDB ACL layer rejected the graph user"*) |
-| 2b | **PASS** — packs narrow → persist → `configured` pinned. **The PASS rests on `step2g`–`step2l` only** | `step2g-…130201.png`, `step2h`, `step2i`, `step2j`, **`step2l-packs-persisted-after-reload-…130248.png`** — after a reload `Marketing` is **Off** and *"This graph has never been configured"* is gone, i.e. `configured` flipped; `step2g-packs-before.txt`, `step2k-packs-after-save.txt` (`Marketing … Off`, *"Saved — new extraction on this graph uses the set above"*). **The four re-opens are NOT one unchanged set.** Measured from the pixels (which pack is Off): `step2l` **marketing** · `step2m` **none** (all five Active) · `step2n` **agent-ops** · `step2o` **none** (all five Active). The alphabetical re-order is already present in `step2m`, not `step2n`; `step2n` was captured over the Overview page (*"Security alerts — Suspicious activity detected on this Organization"*), not the Graphs page. `step2m`/`step2n` carry the "Saved — …" banner and `step2o` — a fresh reload — does not; that is measured, and it shows **at least one save happened between `step2l` and `step2m`**. What the frames do **not** record is the toggle history: `step2n` shows agent-ops Off *with* the banner on screen, which is consistent either with an **unsaved** toggle (the banner stale from `step2m`, and `step2m`'s all-active set restored by `step2o`'s reload) or with a save that was then reversed before `step2o`. **No self-changing set is observed under either reading, and no defect is claimed here** — but the toggles are untraced, so what `step2m`–`step2o` show is that the set which **persists** is all five Active (`step2o`'s fresh reload), not the narrowed set this step asserts. `step2o`'s name ("final-restored-persisted") therefore overstates what it carries. The sort itself is still not adjudicated. |
-| 3 | **PASS as corrected** — there is no ChatGPT dashboard card; the docs page is the door | `step3a-setup-guide-after-run-…131734.png`, `step3b-docs-chatgpt-section-…`, `step3c-docs-chatgpt-scrolled-…`, `step3d-docs-chatgpt-section-…`; `step3a-settings-setup-guide.txt` |
-| 4 | **BLOCKED — `#10088`** (product defect, 3 stacked; the code is delivered to the marketing host) | `step4a-plugins-installed`, `step4b`, `step4c`, `step4d`, `step4e-connect-consent-dialog-…131902.png` (consent renders), `step4f-oauth-authorize-page-asks-signin-…131924.png`, `step4g-plugin-state-unchanged-…131936.png`, `step4h-authorize-page-awaiting-owner-signin-…133950.png`, `step4i-oauth-code-landed-on-marketing-site-…135207.png`, `step4j-authorize-page-old-signin-design-…135207.png` (dashboard: *"No connection observed yet"*); **`step4k-visit-chain-trace.txt`** |
+| 2b | **PASS** — packs narrow → persist → `configured` pinned. **The PASS rests on `step2g`–`step2l` only** | `step2g-…130201.png`, `step2h-packs-narrowed-unsaved-…130213.png`, `step2i-packs-saved-…130222.png` (**byte-identical to `step2h` — still the pre-save frame, so its name mis-describes it and it contributes no state; the save lands in `step2j`**), `step2j-packs-save-result-…130231.png`, **`step2l-packs-persisted-after-reload-…130248.png`** — after a reload `Marketing` is **Off** and *"This graph has never been configured"* is gone, i.e. `configured` flipped; `step2g-packs-before.txt`, `step2k-packs-after-save.txt` (`Marketing … Off`, *"Saved — new extraction on this graph uses the set above"*). **The four re-opens are NOT one unchanged set.** Measured from the pixels (which pack is Off): `step2l` **marketing** · `step2m` **none** (all five Active) · `step2n` **agent-ops** · `step2o` **none** (all five Active). The alphabetical re-order is already present in `step2m`, not `step2n`; `step2n` was captured over the Overview page (*"Security alerts — Suspicious activity detected on this Organization"*), not the Graphs page. `step2m`/`step2n` carry the "Saved — …" banner and `step2o` — a fresh reload — does not; that is measured, and it shows **at least one save happened between `step2l` and `step2m`**. What the frames do **not** record is the toggle history: `step2n` shows agent-ops Off *with* the banner on screen, which is consistent either with an **unsaved** toggle (the banner stale from `step2m`, and `step2m`'s all-active set restored by `step2o`'s reload) or with a save that was then reversed before `step2o`. **No self-changing set is observed under either reading, and no defect is claimed here** — but the toggles are untraced, so what `step2m`–`step2o` show is that the set which **persists** is all five Active (`step2o`'s fresh reload), not the narrowed set this step asserts. `step2o`'s name ("final-restored-persisted") therefore overstates what it carries. The sort itself is still not adjudicated. |
+| 3 | **PASS as corrected** — there is no ChatGPT dashboard card; the docs page is the door | `step3b-docs-chatgpt-section-…`, `step3c-docs-chatgpt-scrolled-…`, `step3d-docs-chatgpt-section-…` (the docs page — the third host this row rests on); `step3a-settings-setup-guide.txt`. **Not** `step3a-setup-guide-after-run-…131734.png`: a blank capture, see the notes below |
+| 4 | **BLOCKED — `#10088`** (product defect, 3 stacked; the code is delivered to the marketing host) | `step4a-plugins-installed`, `step4b`, `step4c`, `step4d` (**byte-identical to `step4e`, i.e. the consent dialog itself — not an intermediate pre-click state**), `step4e-connect-consent-dialog-…131902.png` (consent renders), `step4f-oauth-authorize-page-asks-signin-…131924.png`, `step4g-plugin-state-unchanged-…131936.png`, `step4h-authorize-page-awaiting-owner-signin-…133950.png`, `step4i-oauth-code-landed-on-marketing-site-…135207.png`, `step4j-authorize-page-old-signin-design-…135207.png` (dashboard: *"No connection observed yet"*); **`step4k-visit-chain-trace.txt`** |
 | 5 | **PASS as corrected** — nothing closes at token issue | `step6e-full-trace.txt` (`connection-written` → *"Not applicable to ChatGPT"*); `step7-graphs-and-step5-onboarding-state.txt` |
 | 6 | **PASS** — `tortoise_overview(section="health")`, no `load_skill` | `step6a-onboarding-doc-pasted-…`, `step6b`, `step6c`, `step6d-onboarding-doc-trace-…131231.png`; `step6e-full-trace.txt`; pasted document kept as `skill-tortoise-onboarding.md` |
 | 7 | **PASS** — one entitled namespace; a foreign id is refused | `step7a-list-graphs-and-onboarding-state-…131021.png`; `step7-graphs-and-step5-onboarding-state.txt` (`["org_2e34bf114bd077dc819619daaf"]`); probe B case 2 (`step11-ugly-cases-trace.txt`) |
-| 8 | **PASS** — write **without** a `graph` argument landed and read back | `step8a`, `step8b`, `step8c-write-probe-result-…130929.png`, `step8d-overview-after-writes-…132019.png`; `step8c-write-probe-full-trace.txt` (id `1a17966af61-e7dfb7eeea90`, read back) |
+| 8 | **PASS** — write **without** a `graph` argument landed and read back | `step8a`, `step8b`, `step8c-write-probe-result-…130929.png`; `step8c-write-probe-full-trace.txt` (id `1a17966af61-e7dfb7eeea90`, read back). **Not** `step8d-overview-after-writes-…132019.png`: a blank capture, see the notes below |
 | 9 | **PASS** — `decide-completed` Pending → Complete; `onboarding_complete: true` | `step9a-decide-response-…131515.png`; `step9b-decide-full-trace.txt` |
 | 10 | **PASS** — the ChatGPT capture row renders its reason, not silence | **`step10-capture-disclosure-tall-…130452.png` is the frame that carries it** (*"ChatGPT — ChatGPT connects from its own cloud — session capture isn't available for it"*). The four earlier `step10-capture-disclosure-chatgpt-…` frames are **not** independent evidence: `…130431`, `…-row-…` and `…-row2-…` are one identical image that stops at Cursor, *above* the ChatGPT row, and `step10-…-as-rendered-…130416.png` is a blank Settings page — see the filename note below |
 | probe A (minute-one write) | **PASS** — same call as step 8 (not independent evidence) | `step8c-write-probe-full-trace.txt` |
@@ -159,13 +159,26 @@ recorded so nobody later cites it as one.
 
 ## Notes on the artifacts
 
-* `INDEX-original.md` is the index the run itself wrote, kept verbatim: it is the prior summary this
-  file corrects, and keeping it is cheaper than arguing about what it said.
-* Several frames are **byte-identical** (the same state captured twice): `step3b`/`step3d`, and
+* `INDEX-original.md` is the index the run itself wrote, kept verbatim **below the affiliation
+  frontmatter block added at publication** (the docs convention its two siblings carry; the body under
+  the block is untouched): it is the prior summary this file corrects, and keeping it is cheaper than
+  arguing about what it said.
+* Several frames are **byte-identical** (the same state captured twice): `step3b`/`step3d`,
+  `step2h-packs-narrowed-unsaved-…130213`/`step2i-packs-saved-…130222` (the **pre-save** frame under
+  both names — the save is `step2j`), `step4d-connect-another-account-state-…131855`/`step4e-connect-consent-dialog-…131902`
+  (the consent dialog under both names), and
   `step10-capture-disclosure-chatgpt-…130431` = `…-row-…` = `…-row2-…` = `step3-dashboard-loading-…131706`
   — **one image, four names** (it stops at Cursor, so it proves nothing about the ChatGPT row). They
   are kept because the filenames are the step's chain of custody. `step10-…-as-rendered-…130416` is
   **not** in that set: it is byte-identical to `step2a-graphs-tab-…125932` instead.
+* **Two cited frames are blank captures — one colour, no content — and carry no evidence.**
+  `step3a-setup-guide-after-run-…131734.png` is a single-colour `(6,11,20)` rectangle and
+  `step8d-overview-after-writes-…132019.png` is a single-colour white one (measured: 1 distinct pixel
+  value each, 1280×720, against ≥294 in every other frame of the 54). Neither is in a row's basis any
+  more: row 3 rests on `step3b`–`step3d` plus `step3a-settings-setup-guide.txt`, and row 8 on
+  `step8a`/`step8b`/`step8c-write-probe-result` plus the full trace with the read-back. No verdict
+  moves; a reader who opened the file named "overview after writes" would otherwise get a white
+  rectangle.
 * **Several filenames mis-describe their frames, and the index follows the pixels, not the name.**
   `step4j-authorize-page-old-signin-design-…135207.png` is the **app dashboard**
   (`app.premiselabs.co`, *"No connection observed yet"*), captured in the same second as `step4i` —
@@ -174,5 +187,12 @@ recorded so nobody later cites it as one.
   what its name promises. `step3-dashboard-loading-…131706.png` is the **step-10 capture disclosure**,
   not a loading dashboard. `step2c-create-form-…130102.png` is byte-identical to
   `step2a-graphs-list-…125947.png` (the graphs list) — no create form was captured under that name.
+  `step2i-packs-saved-…130222.png` asserts a save over the **unsaved** frame (byte-identical to
+  `step2h`, no "Saved —" banner, *"never been configured"* still on screen); and
+  `step4d-connect-another-account-state-…131855.png` asserts an intermediate connect state over the
+  **consent dialog** itself (byte-identical to `step4e`). `step3a-setup-guide-after-run-…131734.png`
+  and `step8d-overview-after-writes-…132019.png` assert a frame and deliver a blank rectangle.
 * `skill-tortoise-onboarding.md` (66,457 bytes) is the document that was pasted into ChatGPT for step 6,
-  fetched from `https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md` (HTTP 200).
+  fetched from `https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md` (HTTP 200). It is a
+  **byte-identical copy of the served document**, so it carries no `docs/` affiliation frontmatter by
+  design: adding one would break the identity claim that makes it evidence of what was pasted.
