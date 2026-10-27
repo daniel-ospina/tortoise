@@ -6543,6 +6543,105 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the committed `durations` map.")
 
 
+# ── #3239, extended: the REQUIRED surface may not inherit the 360m default ──
+# `test_every_bounded_pytest_job_caps_above_its_watchdog` closes the class for
+# jobs whose pytest step carries a LITERAL watchdog. It cannot see a job with no
+# pytest step at all, and measured 2026-10-27 that gap was open on `packs-compile`
+# and on `python-ci-gate` — the REQUIRED check itself — plus FIVE of the seven
+# required contexts in `ci.yml` and the `ai-review-gate` job. A wedged job there is
+# not a slow CI, it is a merge queue held on a pending check for six hours.
+#
+# The required-context invariant below is deliberately DERIVED, never a hard-coded
+# job list: the names come from `.mergify.yml`'s own conditions (the same source
+# `tools/mergify_config_guard.py` reads), so a new required context is covered the
+# day it is named rather than the day someone remembers this file. The measured
+# bounds themselves live in `docs/ops/ci-wall-clock.md`.
+
+def test_every_python_ci_job_carries_an_outer_cap():
+    """Every job in `python-ci.yml` must carry a literal `timeout-minutes`.
+
+    This is the workflow that emits `python-ci-gate`, the REQUIRED merge check, and
+    twelve of its jobs are in that job's `needs:` — so any one of them without a
+    cap can withhold the required check for GitHub's 360-minute default (#3239).
+    The assertion is deliberately workflow-wide rather than `needs:`-scoped: the
+    two jobs outside `needs:` (`canary-streak`, and the aggregator itself) are one
+    selector output away from joining it, and a 360m default is never the bound
+    anyone would choose. A job that needs longer than its measured work is fine:
+    pick the number from a measurement and record it, as
+    `docs/ops/ci-wall-clock.md` does.
+    """
+    wf = _load_python_ci()
+    uncapped = [
+        name for name, job in wf["jobs"].items()
+        if not isinstance(job.get("timeout-minutes"), int)
+        or job["timeout-minutes"] <= 0
+    ]
+    assert not uncapped, (
+        f"python-ci.yml job(s) {uncapped} carry no literal `timeout-minutes` — "
+        f"GitHub's 360m default then holds them, and twelve of this workflow's "
+        f"jobs are in `python-ci-gate`'s `needs:`, so a hung job withholds the "
+        f"REQUIRED check for six hours (#3239). Set a bound from a measurement "
+        f"(docs/ops/ci-wall-clock.md), not from the default.")
+
+
+def test_every_required_merge_check_carries_an_outer_cap():
+    """A job EMITTING a required merge context must carry a literal cap.
+
+    The required set is read from `.mergify.yml` (`queue_conditions` gates ENTRY,
+    `merge_conditions` gates the MERGE — both are required, so both are checked),
+    and each name is resolved to the job that emits it through the same emitter
+    map `tools/mergify_config_guard.py` uses — a job's effective name is its
+    `name:` field when set, else its id.
+
+    A required name that resolves to NO job is asserted against rather than
+    skipped: today all seven resolve, and a name the workflows do not emit is
+    either a new gating workflow that needs a bound or a condition that can never
+    be satisfied (the deadlock the mergify guard exists to catch). If a required
+    context is ever emitted by a non-workflow app, extend this test's resolution
+    — do not weaken the assertion, because a skipped name is a silently unbounded
+    merge path.
+
+    Scope note: this covers the SEVEN required contexts. It does not assert
+    anything about merge-path workflows that emit no required context (e.g.
+    `drift-guard`) — those are bounded by hand, with their measurement recorded
+    in `docs/ops/ci-wall-clock.md`.
+    """
+    docs = mcg._workflow_docs(REPO)
+    mergify = mcg._load_mergify(REPO)
+    required: list[str] = []
+    for rule in mergify["queue_rules"]:
+        for key in ("queue_conditions", "merge_conditions"):
+            required.extend(mcg._success_names(rule.get(key) or []))
+    required = sorted(set(required))
+    assert required, (
+        ".mergify.yml declares no positive `check-success=` condition — the "
+        "required set is empty, so this guard would assert nothing")
+
+    by_name: dict[str, list[dict]] = {}
+    for emitter in mcg._emitters(docs):
+        by_name.setdefault(emitter["name"], []).append(emitter)
+
+    unemitted = [name for name in required if name not in by_name]
+    assert not unemitted, (
+        f"required merge context(s) {unemitted} are named in .mergify.yml but "
+        f"NO job's effective check name matches — either a gating workflow is "
+        f"missing a bound this test cannot see, or the context can never be "
+        f"satisfied (see tools/mergify_config_guard.py).")
+
+    uncapped: list[str] = []
+    for name in required:
+        for emitter in by_name[name]:
+            job = docs[emitter["workflow"]]["jobs"][emitter["job"]]
+            cap = job.get("timeout-minutes") if isinstance(job, dict) else None
+            if not isinstance(cap, int) or cap <= 0:
+                uncapped.append(f"{name} ({emitter['workflow']}:{emitter['job']})")
+    assert not uncapped, (
+        f"required merge check(s) {uncapped} carry no `timeout-minutes`, so a "
+        f"wedged job holds the merge queue on GitHub's 360m default instead of "
+        f"failing in minutes-to-tens-of-minutes. Set the bound from a "
+        f"measurement (docs/ops/ci-wall-clock.md).")
+
+
 def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     """#9539: the slow legs must be a complete, duration-balanced partition AND
     the wall their pack projects must stay inside the CI guideline.
