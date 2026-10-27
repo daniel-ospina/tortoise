@@ -174,22 +174,30 @@ owner's own post; treat the relay comment as the source of record for the quotat
 
 **(a) The surplus SDK methods that nothing calls may be DELETED — not merely made private — with the
 code archived.** Owner: *"1 yes (archive the code so we cna re-use it later if needed)"*. Measured on
-`origin/main` @ `17f604b054`: of the 138 public `TortoiseSDK` methods off the approved 40, **104 are
+`origin/main` @ `17f604b054`: of the 138 public `TortoiseSDK` methods off the approved 40, **111 are
 referenced somewhere under `tortoise/**`** (a deliberately conservative superset — see the archive
-doc's rule) and **34 are referenced by no code under `tortoise/**` at all**. The 104 become
+doc's rule) and **27 are referenced by no code under `tortoise/**` at all**. The 111 become
 **private** (`_name`) with their call sites re-pointed — the `graph_count` → `_graph_count`
-precedent of 2026-10-25 — and keep their capability. The **34** are deleted, and their code is
+precedent of 2026-10-25 — and keep their capability. The **27** are deleted, and their code is
 archived at tag **`archive/4282-surplus-sdk-methods`** (points at `17f604b054`; **pushed**, verified
 with `git ls-remote --tags origin`) with a per-method index and restore recipe in
 [`archived-sdk-methods-2026-10.md`](archived-sdk-methods-2026-10.md). Deleting them is *not* a
 licence to re-add them: a restored method returning to the public surface is a new surface change
 and needs this document amended again.
 
-> **One caller sits outside the scanned population.** `tools/purge_test_residue.py:133` calls
-> `store.delete_point(...)`; that call site must re-point to the private name in the deleting PR, or
-> the tool breaks. It is a `tools/` caller, so it did not appear in the `tortoise/**` measurement —
-> the deletion lane must re-run the search across the whole repo, not trust the 34 as a safe list of
-> unreferenced names.
+> **The 111 include seven methods that look unreferenced to any scan that skips `sdk.py`** —
+> `delete_point`, `create_direct_edge`, `create_derivation`, `compute_reputation`,
+> `dream_health_state`, `membership_get`, `resolve_id` — because the only caller is the class itself
+> (`self.<name>(...)`). They are load-bearing: deleting them breaks live tools (`tortoise_delete`,
+> `tortoise_delete_point`, `tortoise_ingest`, `tortoise_assess_source`, `tortoise_dream_health`) and
+> the approved target method **`link_entities`**. The selection rule therefore reads `sdk.py` as
+> well; see the archive doc's correction table for the three wrong counts that preceded **27**.
+
+> **Callers outside the scanned population.** `tools/purge_test_residue.py:133` calls
+> `store.delete_point(...)` — that method is in the **111**, so the call site re-points to the private
+> name in the deleting PR. And **all 27 are referenced from `tests/`**, so the deletion is a
+> test-churn change. The deletion lane must re-run the search across the whole repo (`tests/`,
+> `tools/`, `graph-scripts/`), not trust `tortoise/**` as a safe list of unreferenced names.
 
 **(b) A retiring tool does not need a no-replacement warning.** Owner: *"2 we dont have customers
 other than 2 guys using it self-hosted so let's not worry about migration and rather focus on
@@ -223,14 +231,13 @@ methods on their own.
 > (#3540, #9660), and it does **not** touch the SDK half (`2.5`, the #3836 (c) ruling), which already
 > ships a clean hard failure that names the replacement. The 18 keep answering exactly as recorded.
 
-**Correction carried by this amendment, and the arithmetic of the error.** The number first published
-on #4282 was **26** deletable methods; the correct number is **34**, and the *reason* the first scan
-was wrong matters more than the number: it was a **regex over file text**, so (i) it counted **prose**
-mentions as code — `tortoise/write_verb.py:36`, `capture_consent.py:52`, `quota.py:1008` and others
-say `` `sdk.capture_session` `` in docstrings and comments, which kept 9 genuinely uncalled methods
-"referenced"; and (ii) it saw attribute access only, so a bare `ulid()` — a **different** function
-imported from `tortoise/ids.py` — was reported as dead. The AST rule in the archive doc fixes both,
-and any deletion PR must use **34**.
+**Correction carried by this amendment — the count was wrong twice, and each error is a different
+trap.** The number first published on #4282 was **26** (a non-recursive **regex** over
+`tortoise/*.py` — it never read the subpackages, and a regex counts prose like
+`` `sdk.capture_session` `` in a docstring as usage). It then read **34** (AST, but with **`sdk.py`
+excluded** from the readers, which hid the seven methods the class calls on itself). **27 is the
+governing number**, and the archive doc carries the four-row table of how each reading was produced
+plus the single command that reproduces 27. Any deletion PR must use **27 / 111**.
 
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
