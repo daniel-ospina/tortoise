@@ -1208,6 +1208,11 @@ def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
     import tortoise.hosted_api as ha
 
     hosted = inspect.getsource(ha.get_session_detail)
-    assert "NO_ACCOUNT" in hosted, (
+    # CODE ONLY: a full-line comment naming the token must not satisfy this, or
+    # the pin passes on the prose that explains the branch it is pinning.
+    hosted_code = "\n".join(
+        line for line in hosted.splitlines()
+        if not line.strip().startswith("#"))
+    assert "TurnAnswer.NO_ACCOUNT" in hosted_code, (
         "the hosted door narrates the no-account shape at the same level as a "
         "divergence — the endpoint half of the finding is unfixed")
