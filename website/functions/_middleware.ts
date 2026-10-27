@@ -195,17 +195,25 @@ export const onRequest: PagesFunction = async (context) => {
   // query reaches this worker's logs either way, so the status code buys no
   // security.
   //
-  // What keeps the redirect safe is upstream of it: the identity provider's redirect allow-list
-  // is the only control. ⛔ NOT because GoTrue refuses an unrecognised `redirect_to` — it does
+  // What keeps the redirect safe is upstream of it, and it is ⛔ NOT the redirect allow-list.
+  // GoTrue honours a `redirect_to` on TWO independent grounds (`supabase/auth`,
+  // `internal/utilities/request.go::IsRedirectURLValid`): (a) its host equals the project Site
+  // URL's host — ANY path on that host, with no allow-list entry at all — or (b) it matches one
+  // of the allow-list globs. The project Site URL IS this worker's own origin
+  // (`https://tortoise.premiselabs.co` — the #10088 artefact is the evidence: an unrecognised
+  // target was silently substituted with exactly that origin, live `code` and all), so
+  // `/auth/callback` on THIS host is an authorised target unconditionally: the hostname
+  // comparison returns true BEFORE the allow-list is ever consulted. The entries in
+  // `docs/ops/auth-email-flows.md` §3 therefore do not govern this path, and removing the legacy
+  // one cannot establish the property. What actually bounds it is this 302 plus the app-origin
+  // handler's own validation. ⛔ And NOT because GoTrue rejects an unrecognised target — it does
   // not: it silently substitutes the project Site URL and still delivers a live `code` there
   // (measured #10088; `docs/ops/auth-email-flows.md` §1/§3), which on a Site URL of THIS worker's
-  // own origin would 302 the live code straight on. So a mismatched entry is not a loud failure;
-  // it is exactly the path this comment exists to reason about. The property that MUST hold is
-  // that no allow-list entry authorises a code for THIS origin's `/auth/callback`. The entries
-  // required today are recorded in `docs/ops/auth-email-flows.md` §3 — which still lists
-  // `https://tortoise.premiselabs.co` for legacy links, so the list is wider than the app origin —
-  // and #8680 is the OPEN audit that confirms the legacy `/auth/callback` entry can be removed.
-  // That audit is not closed.
+  // own origin would 302 the live code straight on. A mismatched entry is not a loud failure; it
+  // is exactly the path this comment exists to reason about. #8680 is still the OPEN audit of the
+  // allow-list, but it is a HYGIENE edit, not the closure of this property — dropping the legacy
+  // `/auth/callback` entry cannot make the allow-list the control, because for this host the list
+  // is never read. That audit is not closed.
   //
   // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
   // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521 /

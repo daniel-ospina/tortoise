@@ -230,6 +230,14 @@ claims, and only the second one decides the flow.
 - the `redirect_to` is matched **whole** against each allow-list glob (compiled with separators `'.'`, `'/'`, so
   `**` crosses `/` while `*` does not) — only the **fragment** is cut before matching, so the **query string is
   part of the string being matched**;
+- ⛔ **the glob list is not always consulted at all.** `IsRedirectURLValid` returns `true` when the target's
+  hostname equals `config.SiteURL`'s (`base.Hostname() == refurl.Hostname()`; on the pinned tags examined —
+  `v2.150.0`, `v2.160.0`, `v2.170.0` — the test is hostname-only, on `master` it also compares scheme and port),
+  and it does so **before** the loop. So a target on the project Site URL's own host is authorised with **no
+  entry**, and no allow-list entry can be the control for it. This row's target is `api.premiselabs.co`, which is
+  **not** the Site URL's host (`tortoise.premiselabs.co`), so the short-circuit does not apply to the flow in this
+  section — but it is why the legacy `/auth/callback` entry audit (#8680) is hygiene and not the closure of the
+  `/auth/*` 302's property;
 - a `redirect_to` that does not match is **not an error**: `GetReferrer` silently falls back (then the `Referer`
   header, then `config.SiteURL`), and the flow state stores that fallback as the callback destination. The code
   is still minted and still delivered — to the wrong origin.

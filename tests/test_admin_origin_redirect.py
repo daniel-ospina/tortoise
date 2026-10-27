@@ -348,9 +348,40 @@ def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None
     # project Site URL and the live `code` is still delivered there (§1/§3, measured) — and on a
     # Site URL of this worker's own origin that is precisely the redirect the comment guards.
     # A lane reconciling the code against the record would find them arguing opposite mechanisms.
-    assert "refuses a `redirect_to`" not in comment, (
+    #
+    # ⛔ Asserted POSITIVELY, and in the form the reading itself needs. The first cut of this guard
+    # was `"refuses a `redirect_to`" not in comment`, which never matched the head text at all
+    # (`refuses an UNRECOGNISED `redirect_to``) — so it was vacuous: inverting the sentence's
+    # `NOT because` into `Because` re-asserted the refuted mechanism and the assertion still
+    # passed. A blacklist only ever rejects the phrasings its author happened to think of; the
+    # corrected mechanism has to be REQUIRED or the guard cannot see it go away.
+    assert "silently substitutes" in comment, (
+        "the `/auth/*` rationale no longer states that GoTrue silently substitutes the project "
+        "Site URL for an unrecognised `redirect_to` and still delivers a live `code` there — the "
+        "measured fact the 302 exists because of (docs/ops/auth-email-flows.md §1/§3, #10088)"
+    )
+    assert "refuses an unrecognised `redirect_to`" not in comment and (
+        "refuses a `redirect_to`" not in comment
+    ) and "rejects an unrecognised `redirect_to`" not in comment, (
         "the `/auth/*` rationale is back to arguing from 'GoTrue refuses a redirect_to it does "
         "not recognise' — it does not: it silently substitutes the Site URL and still delivers "
-        "a live code, which is exactly why the allow-list is the only control (docs/ops/"
-        "auth-email-flows.md §1/§3, #10088)"
+        "a live code, which is exactly why the 302 plus the app-origin handler are the control "
+        "here, NOT the allow-list (docs/ops/auth-email-flows.md §1/§3, #10088)"
+    )
+    # #10088 (P2): `IsRedirectURLValid` returns true on `base.Hostname() == refurl.Hostname()`
+    # BEFORE it ever walks the glob list, and the project Site URL IS this worker's own origin —
+    # so `/auth/callback` on this host is an authorised target with no entry at all. Naming the
+    # allow-list as the control (or as the property #8680 closes) sends the next lane to audit a
+    # list the matcher never reads for this path. Require the function that decides the claim to
+    # be cited, and reject the one sentence shape that asserts the opposite.
+    assert "IsRedirectURLValid" in comment, (
+        "the `/auth/*` rationale does not cite `IsRedirectURLValid`, so it cannot be checked "
+        "against the matcher it depends on — that matcher honours a same-host target BEFORE the "
+        "allow-list, which is why the allow-list is not the control for THIS origin (#10088)"
+    )
+    assert "the only control" not in comment, (
+        "the `/auth/*` rationale names the identity provider's redirect allow-list as the only "
+        "control, but `IsRedirectURLValid` returns true on a same-hostname target before the "
+        "glob loop and the project Site URL is this worker's own origin — so no entry governs "
+        "this path and a lane would close #8680 believing the property now holds (#10088 review)"
     )
