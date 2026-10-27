@@ -408,10 +408,11 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 - **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
   lane taking ownership of the issue's work?") — model `jev-1.13.0` at the time this was
-  measured; the fleet's deployed callers now send the vendor alias `jev-latest` (owner ruling
-  2026-10-27), so a measurement of that seam would have to name its model rather than assume
-  this one, and the fleet's bars are owed a first calibration on the vendor's API (agent-infra
-  #2918). Prompt version
+  measured. The fleet's TRACKED callers send the vendor alias `jev-latest` (owner ruling
+  2026-10-27, agent-infra#2914); the deployed copies under `~/.pi/agent/` are DERIVED from the
+  agent-infra checkout, so they mirror whatever that checkout holds and are not migrated by a
+  merge alone — assert them (`grep -n 'JEV_MODEL ='`, see `.env.example`). Either way a
+  measurement of this seam must name its model rather than assume one. Prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
   `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
