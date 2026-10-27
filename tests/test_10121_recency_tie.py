@@ -496,6 +496,12 @@ def test_an_id_less_row_does_not_lead_a_tie_group_without_timestamps():
             "CREATE (o:Object {name:$n, objectKind:'concept', "
             "content:'obj dated probe'})", params={"n": f"obj dated {suffix}"})
 
+    full = run_fts_query(graph, "obj dated", entity_type="object", limit=10,
+                         excluded_statuses=())
+    assert len({round(s, 6) for _, s in full}) == 1, (
+        "TIE PREMISE BROKEN: the Object rows must score identically, or the id "
+        f"key is not what this test measures: {full}"
+    )
     rows = run_fts_query(graph, "obj dated", entity_type="object", limit=2,
                          excluded_statuses=())
     ids = [pid for pid, _ in rows]
