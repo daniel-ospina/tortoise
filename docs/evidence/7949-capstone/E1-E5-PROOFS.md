@@ -63,7 +63,8 @@ network, no model, ~2.4 s) and compares §10's published cells against what that
 produced: the two pooled arm rows (loss/absent/flattened, distortion, recall,
 precision, claims emitted), both table HEADERS (the cells are compared by position,
 so a relabelled column would otherwise publish the wrong figure green), all six rows
-of the split table (n, both loss counts, both published rates, and Δ — `holdout` /
+of the split table (n, both loss counts, the rates the document prints there, and Δ
+— `holdout` /
 `tuning` × `all qualifiers` / `bound` / `unbound`), and the holdout decision-input
 row's Δprecision/Δrecall legs, which the registered rule also reads. It pins **no
 prose**, not the split table's `other` column, and not the run-1 block, whose
@@ -108,7 +109,17 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
    `_split_table` / `_assert_split_table` — all six rows, every numeric cell — with
    a row-length check so a cell added or dropped cannot silently shift the columns.
    Measured after: each of those reds, while a correct re-rendering (`+16.67 pp` for
-   `+16.7 pp`, `0.0 pp` for `0 pp`) stays GREEN.
+   `+16.7 pp`, `0.0 pp` for `0 pp`) stays GREEN. ⚠️ The FIRST version of that fix
+   was weaker than its own claim, and the measurement that showed it is kept here
+   because it is the same failure mode one level up: the rows were keyed in a dict,
+   so a **duplicated** row collapsed onto its key and a corrupted row hid behind a
+   correct twin (measured GREEN — and the same content graded RED with the rows in
+   the other order, i.e. the verdict depended on merge order); a printed rate could
+   be **deleted** and stay GREEN; and a second `| split |` table placed above the
+   real one would be the only one read. All three are now pinned — physical row
+   count, a unique-table assertion, and `_RATE_ROWS` for the four rows that print a
+   rate today — and each is measured red, while a row written `||` (a valid empty
+   final cell) and a rate ADDED to a row that prints none both stay GREEN.
 
 ---
 

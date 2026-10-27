@@ -40,9 +40,11 @@ row's subset label, n / both losses / **Δloss and its Δprecision / Δrecall le
 (the `#10108` review measured the leg gap: `+0.8` retyped to `+8.0` stayed GREEN
 while publishing a branch-1 firing the run does not have), the
 `#### ⚠️ REPLICATED 2026-10-18` heading itself
-(deleted or renamed reds, named in the failure), a duplicated, deleted or
-column-misaligned table row, or the scorer's own thresholds (an instrument change
-with no write-back).
+(deleted or renamed reds, named in the failure), a DUPLICATED, deleted,
+column-misaligned or fork-ordered table row, a second `| split |` table placed
+above the real one, a printed rate dropped from one of the four split rows that
+carry one, or the scorer's own thresholds (an instrument change with no
+write-back).
 
 It does NOT pin the prose beside the tables, the split table's `other` column
 (except the decision-input row's Δ legs, which the registered rule reads), or the
@@ -78,28 +80,6 @@ SESSIONS = (*sq.TUNING_SESSIONS, *sq.HOLDOUT_SESSIONS)
 _REPLICATED = "#### ⚠️ REPLICATED 2026-10-18"
 
 
-#: The doc's `<loss> (<rate>%)` loss cell (`6 (60%)`) — the holdout row's form.
-_LOSS_CELL = re.compile(r"^(\d+)\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)$")
-
-
-def _loss_cell(cell: str, *, row: str) -> tuple[int, float]:
-    """Read a `<loss> (<rate>%)` cell as `(loss, rate-in-percent)`.
-
-    Compared as NUMBERS, never as text. The document renders the holdout row's
-    rates in whole percent (`6 (60%)`), while any formatter here (`:g`) renders
-    two-thirds as `66.6667` — so a TEXT compare would red a re-publication that is
-    CORRECT in the document's own format, and the tempting repair for that red is
-    to edit §10 to fit the test instead of the test to fit the document. The rate
-    is compared on the document's own one-decimal grid, so `60`, `60.0` and
-    `60.00` all read the same and 66.6667 matches `66.7`.
-    """
-    match = _LOSS_CELL.match(cell.strip())
-    assert match, (
-        f"§10's {row} cell {cell!r} is not `<loss> (<rate>%)` — the row can no "
-        "longer be read, so this pin would be comparing nothing")
-    return int(match.group(1)), float(match.group(2))
-
-
 #: A bare rate cell (`20.0%`, `52%`) — the unit the document prints on its own
 #: one-decimal grid.
 _RATE_CELL = re.compile(r"^(\d+(?:\.\d+)?)\s*%$")
@@ -116,8 +96,9 @@ _DELTA_CELL = re.compile(
 def _rate(cell: str, *, row: str) -> float:
     """Read a `<rate>%` cell as a percentage number.
 
-    Compared as a NUMBER, never as text — the same reason `_loss_cell` is (`#10108`
-    review P3). The document renders `52.0%`; a re-publication that writes `52%` or
+    Compared as a NUMBER, never as text — the same reason `_split_loss_cell` is
+    (`#10108` review P3). The document renders `52.0%`; a re-publication that writes
+    `52%` or
     `52.00%` is numerically the SAME figure and must not red. What must red is a
     figure that MOVED. The accepted forms are the document's own grid (a plain
     decimal percentage); an exponent form such as `5.2e+01%` is REJECTED on
@@ -251,6 +232,15 @@ def _lup_tol(published: str) -> float:
 _SPLIT_HEADER = ("split", "subset", "n", "raw loss", "narrative loss", "Δ",
                  "other")
 
+#: The split rows that print a rate beside each loss today (`6 (60%)`, `4 (67%)`).
+#: Required on these four, so DELETING a printed rate cannot narrow this pin in
+#: silence (`#10108` review round 7: measured, stripping the parentheticals from
+#: `holdout | bound` left it GREEN). The two `tuning` bound/unbound rows print bare
+#: counts, so a rate there is accepted and compared if present, never demanded —
+#: requiring its ABSENCE would red a future document that improved by printing it.
+_RATE_ROWS = frozenset({("holdout", "all"), ("holdout", "bound"),
+                        ("holdout", "unbound"), ("tuning", "all")})
+
 
 def _split_table(block: str) -> list[list[str]]:
     """Every row of §10's split table, header first, `**` stripped.
@@ -260,20 +250,30 @@ def _split_table(block: str) -> list[list[str]]:
     guard for the arms table and the wrong one here.
     """
     lines = block.splitlines()
+    assert len(re.findall(r"^\|\s*split\s*\|", block, re.M)) == 1, (
+        "§10 carries more than one `| split | ... |` table under "
+        f"{_REPLICATED!r} — only the FIRST would be read, so a second (or a "
+        "forked) table could publish different figures while this pin validated "
+        "the other one. Exactly one is required")
     for index, line in enumerate(lines):
         if re.match(r"^\|\s*split\s*\|", line):
             break
-    else:
+    else:  # pragma: no cover — the count above already proved it exists
         raise AssertionError(
             "§10 no longer carries the `| split | ... |` table under "
             f"{_REPLICATED!r} — the table the decision input is published in is "
             "gone, so this pin would be comparing nothing")
     rows = []
     for line in lines[index:]:
-        if not line.lstrip().startswith("|"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
             break
-        cells = [c.strip().replace("*", "")
-                 for c in line.strip().strip("|").split("|")]
+        # Strip ONE leading and ONE trailing pipe, never `str.strip('|')` — that
+        # eats every trailing pipe, so a row whose last cell is empty and written
+        # `||` (valid GFM, the same row as `| |`) would read as a cell SHORT and
+        # red as "misaligned" (`#10108` review P3, measured).
+        body = stripped[1:-1] if stripped.endswith("|") else stripped[1:]
+        cells = [c.strip().replace("*", "") for c in body.split("|")]
         if all(c and set(c) <= set("-: ") for c in cells):
             continue  # the `|---|---|…` separator
         rows.append(cells)
@@ -284,11 +284,12 @@ def _split_loss_cell(cell: str, *, row: str) -> tuple[int, float | None, float |
     """Read a split-table loss cell: `3`, or `3 (50%)`.
 
     Returns `(loss, rate-percent-or-None, rate-tolerance-or-None)`. The rate is
-    OPTIONAL because the document prints it on some rows and not others (`holdout |
-    bound` carries `4 (67%)`, `tuning | bound` carries a bare `2`) — a parser that
-    demanded it would red a table the document publishes as-is, and one that
-    required its ABSENCE would be just as wrong. When it is printed, it is compared
-    on the precision it is printed at.
+    OPTIONAL at the PARSER level because the document prints it on some rows and
+    not others (`holdout | bound` carries `4 (67%)`, `tuning | bound` carries a bare
+    `2`) — a parser that demanded it would red a table the document publishes
+    as-is. The CALLER then requires it on exactly the rows that print one today
+    (`_RATE_ROWS`), so deleting a printed rate is not silently tolerated either.
+    When it is printed, it is compared on the precision it is printed at.
     """
     match = re.match(r"^(\d+)(?:\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\))?$",
                      cell.strip())
@@ -305,8 +306,8 @@ def _assert_split_table(block: str, score: dict) -> None:
     """Pin every NUMERIC cell of §10's split table against the fresh run.
 
     Six rows — `holdout` / `tuning` × `all qualifiers` / `bound` / `unbound` — whose
-    n, both loss counts, both published rates and the Δ all come straight out of
-    `score`. Pinned wholesale because the gap this closes was measured, not
+    n, both loss counts, the rates the document prints, and the Δ all come straight
+    out of `score`. Pinned wholesale because the gap this closes was measured, not
     suspected (`#10108` review round 6): with only the holdout decision-input row
     pinned, `holdout | bound`'s `**+16.7 pp**` could be retyped `**+99.9 pp**` and
     stay GREEN — and `+16.7 pp` is the one figure §10 names as *"past branch 1's
@@ -321,10 +322,21 @@ def _assert_split_table(block: str, score: dict) -> None:
         f"§10's split table header is {rows[0] if rows else None!r}; the registered "
         f"table is {list(_SPLIT_HEADER)!r}. The cells below are read by POSITION, "
         "so a relabelled column publishes a different figure as green")
+    # The ROW count is physical, and it is asserted SEPARATELY from the keyed count
+    # below: `got` is a dict, so a DUPLICATED row collapses onto its key and the
+    # corrupted original is simply discarded — measured (`#10108` review round 7):
+    # `holdout | bound`'s Δ retyped `+99.9 pp` plus a re-appended correct row stayed
+    # GREEN, and the same content graded RED with the rows in the other order, i.e.
+    # the verdict depended on merge order. A conflict resolution that keeps both
+    # sides of one row produces exactly that.
+    assert len(rows) - 1 == 6, (
+        f"§10's split table publishes {len(rows) - 1} data rows, expected 6 "
+        "(holdout and tuning × all qualifiers / bound / unbound). A duplicated row "
+        "is how one corrupted row hides behind a correct twin, so the count is "
+        "physical, not keyed")
     got = {(r[0].split(" ")[0], r[1].split(" ")[0]): r for r in rows[1:]}
     assert len(got) == 6, (
-        f"§10's split table publishes {len(got)} rows, expected 6 (holdout and "
-        f"tuning × all qualifiers / bound / unbound): {sorted(got)}")
+        f"§10's split table keys {len(got)} rows, expected 6: {sorted(got)}")
 
     for split in ("holdout", "tuning"):
         aggregate = score["splits"]["aggregate"][split]
@@ -350,6 +362,12 @@ def _assert_split_table(block: str, score: dict) -> None:
                 assert loss == branch["loss"], (
                     f"§10's {label} row publishes loss={loss} (cell {cell!r}); the "
                     f"registered falsifier produced {branch['loss']}")
+                if (split, key) in _RATE_ROWS:
+                    assert rate is not None, (
+                        f"§10's {label} row no longer prints the rate beside the "
+                        f"loss (cell {cell!r}) — the rate the document published "
+                        "is a figure the run produced, and dropping it narrows "
+                        "this pin silently")
                 if rate is not None:
                     produced = branch["loss_rate"] * 100
                     assert abs(rate - produced) <= tol, (
