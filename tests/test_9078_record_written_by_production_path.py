@@ -2718,7 +2718,12 @@ def test_the_seam_refuses_a_malformed_carried_tenant(monkeypatch):
         _refused = record_writer.write_live_record(
             {"type": "PointAdded", "id": "p1"}, seq=1, tenant=bad)
         assert _refused is not None and _refused.applied is False, (_refused, bad)
-        assert _refused.refusal == "no_tenant", (_refused, bad)
+        # The token names WHICH tenant silence it was (#10000 review): a CARRIED
+        # pair that was malformed is `no_tenant_carried`, told apart from
+        # `no_tenant` (a tenant nobody named) so the WARNING can say which. Both
+        # are counted on the SAME `no_tenant` counter — the metric gained no
+        # term, which the `after - before` assertion below still pins.
+        assert _refused.refusal == "no_tenant_carried", (_refused, bad)
     assert calls == [], calls
     after = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
     assert after - before == len(malformed), (
