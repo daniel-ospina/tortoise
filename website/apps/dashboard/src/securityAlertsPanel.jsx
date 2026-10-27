@@ -23,6 +23,7 @@ import React from 'react'
 
 import {
   ACKED_CHIP,
+  ALL_RECENT_ACKED,
   ACK_BUTTON,
   ACK_PENDING,
   ACTIVITY_HEADING,
@@ -39,13 +40,23 @@ import {
   groupAlerts,
 } from './securityAlerts.js'
 
-function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError }) {
+function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError,
+                    canAcknowledge }) {
   const at = alert.at ? new Date(alert.at) : null
   const stamp = at && !Number.isNaN(at.getTime()) ? at.toLocaleString() : ''
   const age = ageLabel(alert.at, now)
   const count = episodeCountLabel(alert)
   const range = episodeRangeLabel(alert)
-  const canAck = typeof onAcknowledge === 'function' && alert.episode
+  // #10156 review finding: the ack route is owner/admin-only, so showing the
+  // control to a member offers an action that can NEVER succeed — every click
+  // would render the retryable wording for a permanent 403. The role decision
+  // travels in as a prop (the panel cannot read the team's role itself).
+  // A `truncated` episode is not acknowledgeable either: its key is anchored to
+  // the oldest row we can SEE, so the acknowledgement would evaporate as the
+  // scan window slides — the server refuses it (409) and the panel must not
+  // offer it.
+  const canAck = canAcknowledge && typeof onAcknowledge === 'function'
+    && alert.episode && !alert.truncated
   // #10156: the pending/error state is PER EPISODE, not per panel — one write at
   // a time, and a failure lands on the row it belongs to rather than turning
   // every row's control into an error message.
@@ -82,6 +93,9 @@ function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError }) {
       {error ? (
         <span className="error small"> · {error}</span>
       ) : null}
+      {alert.truncated ? (
+        <span className="dim small"> · older than the window we can identify</span>
+      ) : null}
     </li>
   )
 }
@@ -94,7 +108,7 @@ function AlertRow({ alert, now, onAcknowledge, ackPendingEpisode, ackError }) {
  * register's copy asserts that something happened.
  */
 function Register({ heading, lead, className, group, now, onAcknowledge,
-                   ackPending, ackError }) {
+                   ackPending, ackError, canAcknowledge }) {
   // The hook is called UNCONDITIONALLY, before the empty-group bail-out: a
   // `useState` after an early `return null` changes the hook count between
   // renders the moment an empty register receives its first row, which React
@@ -106,6 +120,13 @@ function Register({ heading, lead, className, group, now, onAcknowledge,
     <section className={`overview ${className}`} aria-label={heading}>
       <h2>{heading}</h2>
       <p className="dim small">{lead}</p>
+      {/* Review finding: with every current row acknowledged, the lead sentence
+          ("Something happened…") rendered above an EMPTY list. State what is
+          actually true of the collapsed group instead of leaving a claim over
+          nothing. */}
+      {group.current.length === 0 && group.recentHidden > 0 ? (
+        <p className="dim small">{ALL_RECENT_ACKED}</p>
+      ) : null}
       {group.current.length === 0 && olderHidden && group.recentHidden === 0 ? (
         <p className="dim small">{NOTHING_RECENT}</p>
       ) : null}
@@ -119,6 +140,7 @@ function Register({ heading, lead, className, group, now, onAcknowledge,
               onAcknowledge={onAcknowledge}
               ackPendingEpisode={ackPending}
               ackError={ackError}
+              canAcknowledge={canAcknowledge}
             />
           ),
         )}
@@ -140,7 +162,10 @@ function Register({ heading, lead, className, group, now, onAcknowledge,
  * Props: `alerts` (the `/v1/team/alerts` array, newest first), `now` (injected
  * for deterministic ages), `onAcknowledge(alert)`, `ackPending` (the EPISODE
  * currently being written, or null — one row at a time), `ackError`
- * (`{episode, message}` from a failed write, rendered on its own row).
+ * (`{episode, message}` from a failed write, rendered on its own row), and
+ * `canAcknowledge` (owner/admin — the ack route is role-gated server-side, so a
+ * member who is shown the control is being offered an action that cannot
+ * succeed).
  */
 export function SecurityAlertsPanel({
   alerts,
@@ -148,6 +173,7 @@ export function SecurityAlertsPanel({
   onAcknowledge,
   ackPending = null,
   ackError = null,
+  canAcknowledge = false,
 }) {
   const grouped = groupAlerts(alerts, now, OLD_AFTER_DAYS)
   if (!grouped.alerts.total && !grouped.activity.total) return null
@@ -162,6 +188,7 @@ export function SecurityAlertsPanel({
         onAcknowledge={onAcknowledge}
         ackPending={ackPending}
         ackError={ackError}
+        canAcknowledge={canAcknowledge}
       />
       <Register
         heading={ACTIVITY_HEADING}
@@ -172,6 +199,7 @@ export function SecurityAlertsPanel({
         onAcknowledge={onAcknowledge}
         ackPending={ackPending}
         ackError={ackError}
+        canAcknowledge={canAcknowledge}
       />
     </>
   )

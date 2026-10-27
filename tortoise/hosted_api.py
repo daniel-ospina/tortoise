@@ -11052,6 +11052,13 @@ def _org_is_anon(org_id: str) -> bool:
         return False
 
 
+#: Episode-feed depth the acknowledgement route resolves against (#10156).
+#: Larger than the dashboard's render limit on purpose: the owner may be
+#: acknowledging an episode that `limit=20` does not render, and "we did not
+#: look" must not be reported back as "no such episode".
+_ALERT_ACK_SCAN = 200
+
+
 @app.get("/v1/team/alerts")
 async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """#308 (R7) — suspicious-activity alert history for the dashboard.
@@ -11094,6 +11101,20 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
     suspended (the appeal flow reads it — #1853). Acknowledging changes no
     enforcement state and disables nothing; it records that a human saw a row,
     so owner/admin is the right gate and the suspension stamp is not.
+
+    The episode is RESOLVED against the org's current feed before it is written
+    (review findings, two of them):
+
+    * an arbitrary/stale ``episode`` string is refused instead of being written
+      as a row that nothing will ever match (the previous version accepted any
+      string from an owner and accumulated one row per attempt);
+    * a ``truncated`` episode — one whose oldest row fell outside the alert
+      scan — is refused with 409. Its key is anchored to the oldest row WE CAN
+      SEE, so as the window slides that anchor moves and the acknowledgement
+      would silently evaporate on the next poll: the write would return 200 and
+      the row would reappear as current. That is exactly the failure the
+      503-not-200 rule exists to prevent, so it must be a refusal, not a
+      pretend-success. The panel does not offer the control on those rows.
     """
     try:
         body = await request.json()
@@ -11110,10 +11131,29 @@ async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)
     if role not in ("owner", "admin"):
         raise HTTPException(status_code=403,
                             detail="Requires owner or admin role in team")
+    from tortoise.supabase_control import get_abuse_store
     try:
-        from tortoise.supabase_control import get_abuse_store
-        get_abuse_store().record_alert_ack(org_id, episode,
-                                           by=user.get("user_id"))
+        store = get_abuse_store()
+        # A LARGE limit: the caller's `episode` may be any episode in the feed,
+        # not just the newest 20 the dashboard renders.
+        current = store.recent_alerts(org_id, limit=_ALERT_ACK_SCAN)
+    except Exception as exc:
+        _raise_503_if_cp_outage(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="alert episode could not be resolved") from exc
+    match = next((a for a in current if a.get("episode") == episode), None)
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no such alert episode on this Organization")
+    if match.get("truncated"):
+        raise HTTPException(
+            status_code=409,
+            detail=("this episode is older than the alert window we can "
+                    "identify, so it cannot be acknowledged"))
+    try:
+        store.record_alert_ack(org_id, episode, by=user.get("user_id"))
     except Exception as exc:
         _raise_503_if_cp_outage(exc)
         raise HTTPException(

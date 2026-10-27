@@ -1106,16 +1106,24 @@ def _read_velocity_message(details: dict) -> str:
     The replacement states the FACT first (a read volume crossed a threshold),
     then the consequence (nothing was changed), and keeps the revoke route
     CONDITIONAL on the one case where it is right (a key you do not recognise).
-    The three properties are pinned by test — ``test_10156_alert_registers.py``
-    asserts the absence of the blanket imperative and the presence of both
-    honesty clauses, and its own mutation proves the assertion is load-bearing.
+
+    ⚠️ The row NAMES NO IDENTIFIER (review finding). An earlier version printed
+    ``details["id"]`` — which is ``api_keys.id``, a 24-hex value — and said
+    "revoke it in Keys". The Keys table renders the key's NAME plus
+    ``key_prefix`` (``tt_xxxxxxxx``); the id appears nowhere a customer can see
+    it, so that sentence handed the reader an identifier they could not match to
+    any row and made the one action it offered unperformable — the same class of
+    unactionable remedy this change exists to remove. The remedy now points at
+    the list they CAN read ("review your keys in Keys") instead of promising a
+    locatability we do not provide.
     """
-    ident = details.get("id")
     scope = details.get("scope")
-    if scope == "key" and ident:
-        return (f"Read volume on API key {ident} crossed our unusual-activity "
-                "threshold. This is informational; nothing was changed. If "
-                "you don't recognise this key, revoke it in Keys.")
+    if scope == "key":
+        return ("Read volume on one of this Organization's API keys crossed "
+                "our unusual-activity threshold. This is informational; "
+                "nothing was changed. If you don't recognise this activity, "
+                "review your API keys in Keys — an unrecognised key should be "
+                "revoked there.")
     return ("Total read volume for this Organization crossed our "
             "unusual-activity threshold. This is informational; nothing was "
             "changed — a retrieval-heavy agent routinely reads at this rate.")
@@ -1331,11 +1339,14 @@ def _alert_feed(rows, *, acks, limit: int,
     # The scan is newest-first, so only the OLDEST episode can have been cut by
     # it. Saying so is the difference between "×100" and "×100+": a count
     # measured on a truncated window is a floor, and rendering it as a count
-    # would overstate what we know. Marked AFTER the `limit` slice, so the
-    # marker stays on the last episode actually RETURNED (marking the pre-slice
-    # tail would drop it whenever the caller's limit is smaller than the feed).
+    # would overstate what we know.
+    #
+    # Only stamped when the SCAN (not the caller's `limit`) is what cut the
+    # tail: if `limit` dropped episodes after us, the last one we return was
+    # complete and labelling it `×N+` would be the same overstatement in the
+    # other direction (review finding).
     out = episodes[:limit]
-    if scan_saturated and out:
+    if scan_saturated and out and len(episodes) <= limit:
         out[-1]["truncated"] = True
     return out
 
@@ -1629,6 +1640,30 @@ class ReadVelocityTracker:
     (comma-separated) exempt first-party and test keys. An exempt ORG never
     alerts at all; an exempt KEY only skips the per-key scope, so a genuinely
     unusual org total still surfaces.
+
+    ⚠️ The exemption MEANS are shipped, the exemption VALUES are an operator
+    step: this module cannot know which ids are first-party, so both lists
+    default to empty and the deployment must set them. Empty means "exempt
+    nobody", which is the pre-#10156 behaviour and therefore safe, but it leaves
+    first-party traffic able to alert whenever it out-runs its own baseline — so
+    setting them is part of rolling this out, not an optional tuning.
+
+    MEASURED FIRING RATE before/after (``tests/test_10156_alert_registers.py``
+    re-runs these; counts are firing windows over 60 simulated windows):
+
+    ================  =======  ======  =======
+    traffic profile   before   after   note
+    ================  =======  ======  =======
+    20 reads/5min        0       0      normal traffic, silent either way
+    sustained 130/5min  60       1      the defect: every window an alert
+    sustained 500/5min  60       1      no longer punished for being steady
+    5 -> 400/5min        —       fires   the case the detector is FOR
+    cold start 0->100+   —       fires   first sighting has no baseline
+    ================  =======  ======  =======
+
+    The floor is unchanged, so nothing is reported that a cold start could not
+    already report; what changes is that a scope which is ALWAYS busy is no
+    longer reported every five minutes forever.
     """
 
     def __init__(self, threshold: int | None = None, window_s: int | None = None,
@@ -1678,7 +1713,7 @@ class ReadVelocityTracker:
                 count = len(kb)
                 if key_id not in self.exempt_keys and self._over(count, "key", key_id):
                     breach = ("key", key_id)
-                self._sample_baseline("key", key_id, now, count)
+                self._sample_baseline("key", key_id, now)
             if org_id:
                 tb = self._by_org[org_id]
                 tb[:] = [t for t in tb if t > cutoff]
@@ -1686,7 +1721,7 @@ class ReadVelocityTracker:
                 count = len(tb)
                 if breach is None and self._over(count, "team", org_id):
                     breach = ("team", org_id)
-                self._sample_baseline("team", org_id, now, count)
+                self._sample_baseline("team", org_id, now)
             # bound memory growth (mirrors _register_buckets hygiene).
             # #10156: the re-wrap in ``defaultdict`` is NOT cosmetic. A plain
             # dict comprehension left these as ORDINARY dicts, so the NEXT
@@ -1757,8 +1792,7 @@ class ReadVelocityTracker:
             return True
         return count > self.baseline_factor * baseline
 
-    def _sample_baseline(self, scope: str, ident: str, now: float,
-                         count: int) -> None:
+    def _sample_baseline(self, scope: str, ident: str, now: float) -> None:
         """Feed the per-scope baseline ONE sample per completed window.
 
         Sampling is gated on the tracker's OWN window, and that gate is the

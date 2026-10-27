@@ -11130,6 +11130,7 @@ function claimIntentInFlight() {
             onAcknowledge={acknowledgeAlert}
             ackPending={ackPending}
             ackError={ackError}
+            canAcknowledge={isOwnerAdmin}
           />
         )}
         {tab === 'overview' && team === null && (

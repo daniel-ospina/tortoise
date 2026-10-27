@@ -782,6 +782,49 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
+    def test_ack_refuses_an_episode_that_is_not_in_the_feed(self, env):
+        """#10156 review finding: the route accepted ANY string from an owner and
+        wrote a row nothing would ever match — accumulating one dead row per
+        attempt. It now resolves the episode against the org's own feed."""
+        self._owner(env)
+        self._seed_velocity(env["fake"])
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM, "episode": "made-up|x|y"})
+            assert r.status_code == 404, r.text
+            assert not [x for x in env["fake"].tables["abuse_events"]
+                        if x["event_type"] == "alert_ack"]
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_ack_refuses_a_TRUNCATED_episode(self, env):
+        """#10156 review finding: a truncated episode's key is anchored to the
+        oldest row the scan can SEE, so as the window slides the key moves and an
+        acknowledgement would silently evaporate — 200 now, current again on the
+        next poll. That must be a refusal, not a pretend-success."""
+        self._owner(env)
+        fake = env["fake"]
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        # One row past the scan, all one key: the oldest episode is cut.
+        fake.seed("abuse_events", [
+            {"id": i + 1, "org_id": TEAM, "event_type": "read_velocity",
+             "details": {"scope": "key", "id": "k-10156"},
+             "created_at": (base + timedelta(minutes=5 * i)).isoformat()}
+            for i in range(abuse._ALERT_SCAN + 1)])
+        try:
+            with verdict_client(env["app"]) as tc:
+                feed = tc.get(f"/v1/team/alerts?org_id={TEAM}").json()["alerts"]
+                assert feed and feed[-1]["truncated"] is True, feed[-1]
+                r = tc.post("/v1/team/alerts/ack",
+                            json={"org_id": TEAM,
+                                  "episode": feed[-1]["episode"]})
+            assert r.status_code == 409, r.text
+            assert not [x for x in fake.tables["abuse_events"]
+                        if x["event_type"] == "alert_ack"]
+        finally:
+            env["app"].dependency_overrides.clear()
+
     def test_a_failed_write_is_reported_not_swallowed(self, env):
         """A dismissal that does not persist must NOT return 200: the row would
         reappear on the next poll and read as a broken control."""

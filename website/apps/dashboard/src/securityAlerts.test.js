@@ -50,9 +50,10 @@ const REAL_VELOCITY_ROW = {
   acked: false,
   episode: 'read_velocity|key|989c68e6a35b479b923a28542e|2026-09-25T17:19:05',
   message:
-    "Read volume on API key 989c68e6a35b479b923a28542e crossed our " +
+    "Read volume on one of this Organization's API keys crossed our " +
     'unusual-activity threshold. This is informational; nothing was changed. ' +
-    "If you don't recognise this key, revoke it in Keys.",
+    "If you don't recognise this activity, review your API keys in Keys — " +
+    'an unrecognised key should be revoked there.',
 }
 
 const NOW = new Date('2026-10-26T12:00:00Z')

@@ -68,6 +68,11 @@ export const ACK_PENDING = 'Saving…'
 export const SHOW_OLDER = (n) => `Show ${n} older`
 export const HIDE_OLDER = 'Hide older'
 export const NOTHING_RECENT = 'Nothing in the last two weeks.'
+//: Shown when the current list is empty BECAUSE every recent row is
+//: acknowledged — distinct from "nothing happened", which is what the line above
+//: means (#10156 review finding: an acknowledged 1-minute-old row rendered the
+//: incident lead over an empty list).
+export const ALL_RECENT_ACKED = 'Everything in the last two weeks is acknowledged.'
 
 /** Register for one alert row. Unknown → the quiet register (see module note). */
 export function registerOf(alert) {

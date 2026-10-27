@@ -44,6 +44,7 @@ import {
   ALERTS_HEADING,
   ALERTS_LEAD,
   ACKED_CHIP,
+  ALL_RECENT_ACKED,
 } from './securityAlerts.js'
 
 afterEach(cleanup)
@@ -65,9 +66,10 @@ const velocity = {
   acked: false,
   episode: 'read_velocity|key|989c68e6a35b479b923a28542e|2026-09-25T17:19:05',
   message:
-    'Read volume on API key 989c68e6a35b479b923a28542e crossed our ' +
+    "Read volume on one of this Organization's API keys crossed our " +
     'unusual-activity threshold. This is informational; nothing was changed. ' +
-    "If you don't recognise this key, revoke it in Keys.",
+    "If you don't recognise this activity, review your API keys in Keys — " +
+    'an unrecognised key should be revoked there.',
 }
 
 const suspension = {
@@ -82,8 +84,12 @@ const suspension = {
   message: 'Organization suspended by an operator',
 }
 
+//: The panel is owner/admin-facing by default here because the acknowledge
+//: control only EXISTS for them (the route is role-gated server-side); the
+//: member case is its own test below rather than the ambient default, so a
+//: regression that hides the control from everyone cannot pass silently.
 function renderPanel(props) {
-  return render(<SecurityAlertsPanel now={NOW} {...props} />)
+  return render(<SecurityAlertsPanel now={NOW} canAcknowledge {...props} />)
 }
 
 const rows = (container) => container.querySelectorAll('li.alert-row')
@@ -182,6 +188,35 @@ test('#10156: a failed acknowledgement is visible, not silent', () => {
     ackError: { episode: fresh.episode, message: 'could not be saved' },
   })
   assert.match(text(container), /could not be saved/)
+})
+
+test('#10156: a MEMBER is not offered an action that can never succeed', () => {
+  // The ack route is owner/admin-only. Showing the control to a member renders a
+  // retryable error for a permanent 403 — an unactionable remedy, the same class
+  // of defect this change exists to remove.
+  const fresh = { ...velocity, at: at(0.02) }
+  renderPanel({ alerts: [fresh], canAcknowledge: false, onAcknowledge: () => {} })
+  assert.equal(screen.queryByRole('button', { name: /^acknowledge$/i }), null)
+})
+
+test('#10156: a TRUNCATED episode is not acknowledgeable, and says why', () => {
+  // Its key is anchored to the oldest row the scan can SEE, so the
+  // acknowledgement would evaporate as that window slides. The server refuses it
+  // (409); the panel must not offer it and must not look like an oversight.
+  const fresh = { ...velocity, at: at(0.02), truncated: true }
+  const { container } = renderPanel({ alerts: [fresh], onAcknowledge: () => {} })
+  assert.equal(screen.queryByRole('button', { name: /^acknowledge$/i }), null)
+  assert.match(text(container), /older than the window we can identify/)
+})
+
+test('#10156: an ALL-acknowledged register does not print a lead over an empty list', () => {
+  // Self-review catch: the incident lead ("Something happened…") rendered above
+  // an empty <ul> when every current row was acknowledged.
+  const fresh = { ...velocity, at: at(0.02), acked: true }
+  const { container } = renderPanel({ alerts: [fresh] })
+  assert.equal(rows(container).length, 0, 'nothing current is rendered')
+  assert.ok(text(container).includes(ALL_RECENT_ACKED),
+    'the collapsed state must be stated, not left as an empty list under a claim')
 })
 
 test('#10156: a register that gains its FIRST row keeps its hook order', () => {

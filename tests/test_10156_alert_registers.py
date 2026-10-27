@@ -419,13 +419,27 @@ class TestVelocityCopy:
         message = _velocity_message()
         assert "informational" in message.lower(), message
         assert "nothing was changed" in message.lower(), message
-        assert KEY in message, "the row must name the key it is about"
         assert "read volume" in message.lower(), message
 
-    def test_the_revoke_route_is_conditional_on_not_recognising_the_key(self):
+    def test_the_message_names_NO_identifier_the_customer_cannot_find(self):
+        """#10156 review finding. An earlier version interpolated
+        ``details["id"]`` — ``api_keys.id``, a 24-hex value — and said "revoke it
+        in Keys". The Keys table renders the key's NAME plus ``key_prefix``
+        (``tt_xxxxxxxx``); the id appears nowhere in the UI, so the sentence
+        offered an identifier the customer could not match to any row and made
+        its one action unperformable — the same unactionable-remedy class this
+        change exists to remove."""
         message = _velocity_message()
-        assert re.search(r"if you don'?t recognise this key, revoke it",
-                         message, re.IGNORECASE), message
+        assert KEY not in message, message
+        assert not re.search(r"\b[0-9a-f]{16,}\b", message), message
+        assert "keys" in message.lower(), (
+            "the remedy must point at the surface the customer can actually read")
+
+    def test_the_revoke_route_is_conditional_on_not_recognising_the_activity(self):
+        message = _velocity_message()
+        assert re.search(r"if you don'?t recognise this activity", message,
+                         re.IGNORECASE), message
+        assert re.search(r"revoked there", message, re.IGNORECASE), message
 
     def test_an_org_scope_message_carries_no_revoke_instruction(self):
         """There is no single key to recognise, so there is nothing to offer a
@@ -531,8 +545,10 @@ class TestCalibration:
         `_sample_baseline` is gated on the window."""
         tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
 
-        def per_read(scope, ident, now, count):
+        def per_read(scope, ident, now):
             key = (scope, ident)
+            bucket = (tracker._by_org if scope == "team" else tracker._by_key)
+            count = len(bucket.get(ident, ()))
             prev = tracker._baseline.get(key)
             tracker._baseline[key] = (
                 float(count) if prev is None
