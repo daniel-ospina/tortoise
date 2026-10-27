@@ -2463,12 +2463,25 @@ def _record_prior_vectors(sdk, session_id: str,
     itself: every row would look unchanged and a vector for replaced text would
     be preserved, which is the dense-leg lie #5004 exists to remove.
 
-    Fail-soft in ONE direction only: an unreadable record yields ``{}`` (no
-    prior vector known ⇒ the caller journals ``None`` ⇒ the vector is cleared)
-    and logs a WARNING. That is the honest reading — this capture cannot attest a
-    value it could not read — but it is a DEGRADATION, not a normal path, so it
-    is never silent. The alternative (omit the key) would let the replay
-    RE-ENCODE the text under whatever model is active, which is the #5004 defect.
+    Fail-soft in ONE direction only: an unreadable record yields ``None`` — NOT
+    ``{}`` — and logs a WARNING. ``None`` means "this capture cannot know", and it
+    has TWO consequences in the caller, one per half of the row:
+
+    * the VECTOR half is CLEARED: the caller folds ``None`` to an empty map, so no
+      prior row is known for any id and the journalled embedding stays ``None``
+      (the replay's instruction to drop the stored vector);
+    * the ``created_at``/``status`` half is OMITTED, not cleared: the caller marks
+      them ``_UNATTESTABLE`` and the journalled snapshot leaves both fields out,
+      so the replay cannot assert this capture's own values over the record's.
+
+    That asymmetry is why ``{}`` is the wrong value here: ``{}`` means "the record
+    holds no row for these ids" (a fresh turn), which licenses the caller to
+    write this capture's own ``created_at``/``status`` — restoring the
+    re-stamp/demote bug this rule fixes. The honest reading is the one that
+    cannot attest a value it could not read; it is a DEGRADATION, not a normal
+    path, so it is never silent. The alternative (omit the key entirely) would
+    let the replay RE-ENCODE the text under whatever model is active, which is
+    the #5004 defect.
 
     No tenant, no read: the record's key is ``(org_id, graph_id)``, and a tenant
     the write itself would be refused for is not one this may read from.
@@ -16876,11 +16889,19 @@ class TortoiseSDK:
             derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
                 f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
-                f"RETURN id(target), target.id, labels(target), properties(target)",
+                # ⛔ #9417: the EDGE's properties are selected too. The transfer
+                # below recreates the relationship on the successor, and a bare
+                # MERGE mints it with NO properties — so an `about*` edge carrying
+                # the subject binder's `confidence` (session_link.py:381,
+                # subject_binding.py:481) lost it on supersede. Selecting
+                # `properties(r)` here is what lets the transfer carry it across.
+                f"RETURN id(target), target.id, labels(target), properties(target), "
+                f"properties(r)",
                 params={"old_id": old_id},
             ).result_set
             for row in struct_rows:
-                # Row shape: [internal id, logical id, labels, properties] —
+                # Row shape: [internal id, logical id, labels, properties,
+                # edge properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
                 # replay key at emission: `name` for aboutSubject/Object/Event/
@@ -16892,6 +16913,27 @@ class TortoiseSDK:
                 # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
+                # #9417: the old relationship's own properties (row[4]) — carried
+                # onto the successor edge below, never silently dropped. WHITELISTED
+                # to the `RelationUpsert.attrs` vocabulary (the set the replay
+                # contract understands) — copying `properties(r)` raw would carry
+                # EP-managed / internal fields onto the successor.
+                # ⛔ NOT `source_version`: it is the RECORD column name, and this
+                # file's graph rels carry the anchor as `sourceVersion`
+                # (`projection/edges.py:504`, `_anchor_on_create`) — nothing writes
+                # `r.source_version`, so the entry could never match and only
+                # implied a carry that never happened. It is also the one key the
+                # record contract forbids re-applying on a re-link ("a re-link must
+                # not ADVANCE a recorded version", `record_projection.py:2061-2068`).
+                # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
+                # STILL dropped on transfer. That is the pre-existing loss #10139
+                # owns (the rebuild half is bare there too); stating it here rather
+                # than letting the word "never" above imply otherwise.
+                edge_props = {
+                    k: v for k, v in (row[4] or {}).items()
+                    if k in ("direction", "confidence", "weight", "label",
+                             "batch_id")
+                }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
@@ -16945,11 +16987,42 @@ class TortoiseSDK:
                             target_label=target_label,
                             edge_type=rel,
                         )
-                # Create new edge: new point → same target (MERGE = idempotent, no dupes)
+                # Create new edge: new point → same target (MERGE = idempotent,
+                # no dupes).
+                # ⛔ #9417: the old edge's properties are carried across, because a
+                # bare MERGE recreates the `about*` edge with NO properties and the
+                # binder's `confidence` is then DROPPED, not copied.
+                # ⛔ `ON CREATE SET`, NOT a bare `SET`. `SET nr += $attrs` overwrites
+                # PER KEY, so an unconditional carry made the RETIRED point's value
+                # win over a confidence the SUCCESSOR already held on the same
+                # target — measured: old 0.42 + successor's own live 0.91 → 0.42,
+                # successor destroyed (target: #9417 review P1). The collision is
+                # the COMMON case: `supersede_point` is the RESTATEMENT path, so a
+                # restated claim about the same subject is bound to the same
+                # Subject by `bind_point_subjects` and both edges exist. In a chain
+                # (X→Y→Z) each transfer would re-stamp the newest successor with the
+                # oldest ancestor's value, and the descriptor below carries no
+                # `attrs`, so the overwritten value is journaled NOWHERE and cannot
+                # be rebuilt.
+                # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
+                # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
+                # untouched), so this preserves it while still refusing to leave a
+                # NEWLY created edge bare. A successor edge that exists but is
+                # partially populated is deliberately NOT topped up — its own state
+                # is authoritative.
+                # ⛔ params carry `attrs` ONLY when there is something to carry — an
+                # empty map is not writable by FalkorDB and the projection degrades
+                # it to null with a #7369 warning, so the empty case must stay a
+                # plain MERGE with no `attrs` key at all.
+                _params = {"new_id": new_id, "tid": target_graph_id}
+                _carry = ""
+                if edge_props:
+                    _carry = "ON CREATE SET nr += $attrs"
+                    _params["attrs"] = edge_props
                 proj.g.query(
                     f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
-                    f"MERGE (new)-[:{rel}]->(t)",
-                    params={"new_id": new_id, "tid": target_graph_id},
+                    f"MERGE (new)-[nr:{rel}]->(t) {_carry}",
+                    params=_params,
                 )
                 # Delete old edge (match by exact internal node id)
                 proj.g.query(
@@ -38147,7 +38220,11 @@ class TortoiseSDK:
         # the endpoint and the SDK twin disagreeing about one session, which
         # #3557's parity contract exists to prevent.
         turn_points: list[dict] = []
-        from tortoise.record_read import merge_turn_payloads, turn_payloads
+        from tortoise.record_read import (
+            TurnAnswer,
+            merge_turn_payloads,
+            turn_payloads,
+        )
 
         # The id-space high-water mark (sess[12], the `:Session` read above) is
         # the TAIL witness the record's own `turn_count` cannot be: `None` when
@@ -38164,10 +38241,25 @@ class TortoiseSDK:
                 # above states a count: a divergence between the two stores.
                 # Never silence, and never an empty transcript while another
                 # store holds one.
-                _logger.warning(
-                    "session %s: the record did not answer for its whole "
-                    "transcript (%s) — merging the graph copy for the turns "
-                    "it does not hold", session_id, _answer.reason)
+                #
+                # ⛔ UNLESS THE RECORD NEVER SPOKE (#10021 review P2):
+                # `NO_ACCOUNT` is a session captured BEFORE the record was armed
+                # — no narrative row, no turn rows — which is the expected
+                # migrate-phase state and the largest population on a
+                # transitional deployment. Narrating it at WARNING is what makes
+                # a REAL divergence indistinguishable from healthy traffic. The
+                # union merge below is identical either way.
+                if _answer.kind == TurnAnswer.NO_ACCOUNT:
+                    _logger.debug(
+                        "session %s: the record holds no account of this "
+                        "session (%s) — serving the graph copy, which is the "
+                        "pre-arming state and not a divergence",
+                        session_id, _answer.reason)
+                else:
+                    _logger.warning(
+                        "session %s: the record did not answer for its whole "
+                        "transcript (%s) — merging the graph copy for the turns "
+                        "it does not hold", session_id, _answer.reason)
             turn_rows = proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
                 "RETURN t.id, t.content, t.createdAt ORDER BY t.id",

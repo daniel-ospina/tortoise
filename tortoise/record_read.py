@@ -253,12 +253,44 @@ class TurnAnswer:
     could still contribute (empty for the silent cases, the landed prefix for a
     short answer) and it must be served ONLY IN ADDITION to the other store's
     turns, never instead of them — see :func:`merge_turn_payloads`.
+
+    ⛔ ``kind`` IS NOT PROSE, AND THAT IS WHY IT EXISTS (#10021 review P2). A
+    serving door narrates a not-answered answer, and the LEVEL it narrates at
+    decides whether an operator can still see a real split store. The shapes
+    above are NOT uniform in that respect: ``"no-account"`` is the ordinary
+    migrate-phase state — every session captured BEFORE the record was armed
+    looks exactly like it, which is the LARGEST population on the deployment
+    this transitional read exists to serve — while ``"partial"`` and
+    ``"contradiction"`` are the divergences an operator must be able to find.
+    A door that warns on all three fills the one line that means "the two
+    stores disagree" with healthy traffic, so a real divergence becomes
+    indistinguishable from it. ``reason`` stays the human sentence; ``kind`` is
+    what a caller may branch on, and the two doors warn only where it is not
+    ``"no-account"``.
     """
+
+    #: The whole session's transcript is here.
+    COMPLETE = "complete"
+    #: The record states 0 turns and holds 0 rows — an authoritative empty answer.
+    EMPTY = "empty"
+    #: The record spoke and holds only PART of the session's turns (shorter than
+    #: its own count, an interior hole, or a tail below the session's mark).
+    PARTIAL = "partial"
+    #: The record states a count but holds no rows for it — the two stores
+    #: disagree outright.
+    CONTRADICTION = "contradiction"
+    #: The record holds no narrative row and no turn rows: it did not SPEAK.
+    #: The pre-arming population and every unscoped/wrong-tenant read look like
+    #: this, so it is NOT evidence of a divergence.
+    NO_ACCOUNT = "no-account"
 
     answered: bool
     turns: tuple[Turn, ...] = field(default=())
     turn_count: int | None = None
     reason: str = ""
+    #: One of the five constants above. Empty only for a caller that built the
+    #: type itself; :func:`session_turns` always sets it.
+    kind: str = ""
 
 
 def session_turns(conn: Any, *, org_id: str, graph_id: str,
@@ -329,21 +361,24 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
         shortfall = _shortfall(turns, turn_count, turn_max_index)
         if shortfall is None:
             return TurnAnswer(answered=True, turns=turns, turn_count=turn_count,
-                              reason="turn rows")
+                              reason="turn rows", kind=TurnAnswer.COMPLETE)
         return TurnAnswer(answered=False, turns=turns, turn_count=turn_count,
-                          reason=shortfall)
+                          reason=shortfall, kind=TurnAnswer.PARTIAL)
     if turn_count == 0:
         return TurnAnswer(answered=True, turns=(), turn_count=0,
-                          reason="the record states 0 turns")
+                          reason="the record states 0 turns",
+                          kind=TurnAnswer.EMPTY)
     if turn_count is not None:
         return TurnAnswer(
             answered=False, turn_count=turn_count,
             reason=(f"the record states {turn_count} turn(s) but holds no turn "
-                    "rows — not an empty transcript"))
+                    "rows — not an empty transcript"),
+            kind=TurnAnswer.CONTRADICTION)
     return TurnAnswer(
         answered=False, turn_count=None,
         reason=("the record holds no narrative row and no turn rows for this "
-                "session — it did not answer"))
+                "session — it did not answer"),
+        kind=TurnAnswer.NO_ACCOUNT)
 
 
 def _shortfall(turns: Sequence[Turn], turn_count: int | None,

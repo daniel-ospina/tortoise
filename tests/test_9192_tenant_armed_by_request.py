@@ -607,7 +607,11 @@ class TestTheArmingModes:
         before = dict(monitoring.record_write_failure_counts())
 
         assert record_tenant() is None
-        assert write_live_record({"type": "PointAdded"}) is None
+        _refused = write_live_record({"type": "PointAdded"})
+        # #8447: the refusal is REPORTED — not the `None` an unarmed deployment
+        # returns, which is the value this assertion used to accept.
+        assert _refused is not None and _refused.applied is False, _refused
+        assert _refused.refusal == "no_tenant", _refused
 
         assert record_calls == [], "an undeclared process filed a record under env"
         after = dict(monitoring.record_write_failure_counts())
@@ -663,7 +667,8 @@ class TestTheArmingModes:
         monkeypatch.setenv(RECORD_ORG_ENV, "solo-org")
 
         assert record_tenant() is None
-        assert write_live_record({"type": "PointAdded"}) is None
+        _refused = write_live_record({"type": "PointAdded"})
+        assert _refused is not None and _refused.refusal == "no_tenant", _refused
         assert record_calls == []
 
     @pytest.mark.parametrize("declared", ["", "   ", "0", "false", "no",
@@ -691,7 +696,8 @@ class TestTheArmingModes:
             f"{RECORD_SINGLE_TENANT_ENV}={declared!r} declared the deployment "
             "single-tenant — the key is being read for PRESENCE, not truth")
         assert record_tenant() is None
-        assert write_live_record({"type": "PointAdded"}) is None
+        _refused = write_live_record({"type": "PointAdded"})
+        assert _refused is not None and _refused.refusal == "no_tenant", _refused
         assert record_calls == []
 
     @pytest.mark.parametrize("declared", ["1", "true", "TRUE", "yes", "on"])

@@ -1127,3 +1127,87 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     proj = sdk._get_proj()
     assert _graph_text_hits(proj, needle) == [], (
         "a turn's text is in the graph while the record was armed")
+
+
+def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
+        sdk, monkeypatch, caplog):
+    """⛔ P2 (#10021 review): the migrate-phase state must not fill the
+    divergence WARNING.
+
+    `TurnAnswer` distinguishes three not-answered shapes, and only two of them
+    are a divergence between the stores:
+
+    * ``NO_ACCOUNT`` — no narrative row and no turn rows: what EVERY session
+      captured before the record was armed looks like, i.e. the largest
+      population on the deployment this transitional read exists to serve. The
+      graph holds the whole transcript and the read is CORRECT;
+    * ``PARTIAL`` / ``CONTRADICTION`` — the record spoke and did not cover the
+      session: a real split store.
+
+    Both doors used to warn on all three, so the one line that means "the two
+    stores disagree" was filled by healthy traffic — and the pre-arming
+    population does not shrink with time, so an operator who learns to filter it
+    has lost the instrument (the same failure `_shortfall`'s shrink fix removed,
+    at larger scale). `reason` is prose; ``kind`` is what a caller branches on.
+
+    Pinned from BOTH ends so the leg cannot be satisfied by deleting the
+    warning: the ``NO_ACCOUNT`` read must serve the same transcript with NO
+    warning, and the ``PARTIAL`` read must still warn. Served bytes are
+    identical in both cases — only the level moved.
+    """
+    import inspect
+    import logging
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    _bind_tenant(sdk)
+    _capture(sdk, "noacct", [{"role": "user", "content": "a"},
+                             {"role": "assistant", "content": "b"}])
+
+    def _door_answer(answer):
+        monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
+                            lambda self, sid, **kw: answer)
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            detail = sdk.get_session("noacct") or {}
+        return detail, [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    no_account = record_read.TurnAnswer(
+        answered=False, turn_count=None,
+        reason="the record holds no narrative row and no turn rows for this "
+               "session — it did not answer",
+        kind=record_read.TurnAnswer.NO_ACCOUNT)
+    detail, warnings = _door_answer(no_account)
+    assert [t["id"] for t in detail.get("turn_points", [])] == [
+        "noacct_t0", "noacct_t1"], (
+        "the pre-arming read stopped serving the graph copy — the merge arm is "
+        "not what this finding changes")
+    assert warnings == [], (
+        "a session whose turns the graph holds WHOLE was narrated at WARNING: "
+        f"{[r.getMessage() for r in warnings]}")
+
+    partial = record_read.TurnAnswer(
+        answered=False,
+        turns=(record_read.Turn(turn_id="noacct_t0", index=0,
+                                 content="[user] a", speaker="user"),),
+        turn_count=2,
+        reason="the record states 2 turn(s) but holds only 1 — a partial "
+               "transcript",
+        kind=record_read.TurnAnswer.PARTIAL)
+    detail, warnings = _door_answer(partial)
+    assert [t["id"] for t in detail.get("turn_points", [])] == [
+        "noacct_t0", "noacct_t1"], (
+        "the partial answer is not merged with the graph copy")
+    assert any("did not answer for its whole" in r.getMessage()
+               for r in warnings), (
+        "a REAL split store was served silently — the warning must survive for "
+        "the shapes that are a divergence")
+
+    # The hosted door's body is an async route over a live projection, so its
+    # half of the same branch is pinned structurally, exactly as
+    # `test_the_endpoint_and_the_sdk_read_the_same_store` pins the merge call.
+    import tortoise.hosted_api as ha
+
+    hosted = inspect.getsource(ha.get_session_detail)
+    assert "NO_ACCOUNT" in hosted, (
+        "the hosted door narrates the no-account shape at the same level as a "
+        "divergence — the endpoint half of the finding is unfixed")

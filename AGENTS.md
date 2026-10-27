@@ -394,7 +394,7 @@ worse than none: it manufactures false confidence. Never `grep`/`head`/`tail` a 
 
 ### Shared capability — JEV
 
-**JEV is a shared, decision-only capability** — a third-party model (`https://jevtypesafeai.com/docs#apis`)
+**JEV is a shared, decision-only capability** — a third-party model ([TypeSafe's Jev](https://docs.typesafe.ai))
 used by fleet tooling wherever a decision is about **meaning** rather than identity. *Decision-only*
 is the property that makes it a shared capability rather than a model call: it can only return a
 value inside the schema the caller supplies (`Choice` / `Score` / `Noul` — a calibrated 0–1
@@ -407,7 +407,9 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 
 - **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
-  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0`, prompt version
+  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0` (the pin
+  survives the move: the fleet's DEPLOYED callers send that same version to `api.typesafe.ai`, and the
+  agent-infra source caught up in #2859), prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
   `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
