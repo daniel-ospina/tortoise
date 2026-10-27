@@ -36,15 +36,26 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
   session origin (§2.3). The function here is the reference INVERSE of the verifier — it exists so
   the AS has a checkable counterpart to the contract and so tests can mint exactly what §2.1
   specifies. Shipping it as a route would put identity assertion on the wrong origin.
-* **No shared `jti` store.** §2.3's mechanism choice (the D1 `consent_tickets` table, redeemed
-  through the session origin, or a control-plane row) is §9 **step 1** — infrastructure, outside
-  this diff. `ProcessLocalJtiStore` is the default so the property is enforced and testable today;
-  it is PROCESS-LOCAL, so single-use holds per instance. `configure_consent_jti_store()` is the
-  seam step 1 replaces it through, and `consume` is `async` because that replacement is a network
-  call. **Until step 1 lands, the token arm is not fit for a multi-instance AS** — stated here
-  because a reader who finds only the code would reasonably assume otherwise.
 * **No page change.** Reading a token on the page is §9 step 4; a page that half-reads a token and
   half-reads the old cookie is the "strictly worse than not starting" state §9 records for #3559.
+
+The `jti` register IS shared (§2.3, DELIVERED)
+---------------------------------------------
+* `ControlPlaneJtiStore` redeems the nonce against the control plane the AS already holds at the
+  call site, and `hosted_api._lifespan` installs it at startup, so single-use holds across Fly
+  machines rather than per process. The row store is `oauth_consent_tickets`
+  (`supabase/migrations/20261027120001_oauth_consent_tickets.sql`); the RPC decides the winner
+  with one `INSERT … ON CONFLICT DO NOTHING RETURNING`, because a read-then-write is a TOCTOU two
+  machines can both win.
+* `ProcessLocalJtiStore` is therefore the seam's default only when nothing is installed (tests, a
+  bare embed). It is NOT the deployed posture: reading it as the production guarantee understates
+  replay safety and invites a duplicate re-implementation of the shared store.
+* The store stamps `exp + CONSENT_TOKEN_LEEWAY_S`, not `exp`: the verifier accepts until the
+  leeway runs out, so the prune must not forget the nonce while its token still verifies —
+  otherwise the replay deletes its own fence and then re-inserts, for the whole window.
+
+WHAT THIS MODULE DELIBERATELY DOES NOT DO
+-----------------------------------------
 
 REFUSALS (all typed, all fail-closed)
 -------------------------------------
@@ -65,9 +76,11 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
     bearer path is unaffected.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
-  * the shared `jti` store from §9 step 1 — without it, single-use is per-process (above).
-  * ``config/required-bindings.yml`` must declare `CONSENT_TOKEN_SECRET` so the deploy preflight
-    fails closed; that declaration is part of step 1, not of this module.
+  * the shared `jti` store — installed from `hosted_api._lifespan` (above). If nothing is
+    installed the seam falls back to `ProcessLocalJtiStore`, i.e. single-use PER PROCESS.
+  * ``config/required-bindings.yml`` declares `CONSENT_TOKEN_SECRET` (and, as `recommended`,
+    ``CONSENT_AS_ORIGIN`` / ``CONSENT_TOKEN_ISSUER``, since both have correct defaults) so the
+    deploy preflight fails closed instead of shipping an unprovisioned mint.
 """
 
 from __future__ import annotations
@@ -478,16 +491,17 @@ class JtiStoreUnavailable(RuntimeError):
 
 
 class ProcessLocalJtiStore:
-    """A process-local single-use register — the DEFAULT until §2.3's shared store lands.
+    """A process-local single-use register — the seam's fallback, NOT the deployed posture.
 
     §2.3 requires shared state because the AS is multi-instance: this store enforces single-use
-    **per process**, which is exactly the guarantee one instance needs and not the one a fleet
-    needs. It is the default rather than a placeholder because the alternative — no register until
-    step 1 — would ship a verifier whose `jti` field does nothing, i.e. the "specified, not
-    implemented" state #3524 was reopened for. `configure_consent_jti_store()` replaces it.
+    **per process**, which is the guarantee one instance needs and not the one a fleet needs. In
+    the deployed API it is superseded by `ControlPlaneJtiStore` (installed at startup from
+    `hosted_api._lifespan`); it remains here for a bare embed and for tests that want the property
+    without a database. It is kept rather than deleted because the alternative — no register until
+    the shared one — would ship a verifier whose `jti` field does nothing, i.e. the "specified,
+    not implemented" state #3524 was reopened for.
 
-    `consume` is `async` so that replacement is a drop-in: §2.3's preferred mechanism redeems the
-    nonce through the session origin, which is a network call.
+    `consume` is `async` so the shared store is a drop-in: its redemption is a network call.
     """
 
     def __init__(self, *, max_entries: int = _MAX_STORE_ENTRIES,

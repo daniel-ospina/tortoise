@@ -256,12 +256,25 @@ def test_a_row_is_pruned_only_once_its_token_can_no_longer_verify():
     assert asyncio.run(store.consume("jti-edge", exp)) is False, (
         "a nonce whose token can still verify was forgotten — it is replayable again")
 
-    # Once past the stamp, the next consume's bounded prune collects it (the register stays
-    # bounded), so the same jti is a FRESH claim again only because its token can no longer
-    # verify at all — which is exactly the boundary \(`exp + leeway`\) and not one instant before.
-    shared.tables["oauth_consent_tickets"][0]["expires_at"] = datetime.fromtimestamp(
-        stamped_at - 1, tz=UTC).isoformat()
-    assert len(shared.tables["oauth_consent_tickets"]) == 1
+    # ── the DEAD side, driven rather than described ────────────────────────────────
+    # A row whose token can no longer verify MUST be collected, or the register grows
+    # without bound. Two separate facts, both asserted: the prune removes the stale row,
+    # and the fresh nonce is then claimed (so the prune cannot collect the row it is
+    # inserting in the same call — the ordering the RPC depends on).
+    shared.tables["oauth_consent_tickets"].append({
+        "jti": "jti-collectable",
+        "expires_at": datetime.fromtimestamp(time.time() - 1, tz=UTC).isoformat(),
+        "redeemed_at": None,
+    })
+    assert len(shared.tables["oauth_consent_tickets"]) == 2
+    assert asyncio.run(store.consume("jti-after", time.time() + 60)) is True
+    survivors = [row["jti"] for row in shared.tables["oauth_consent_tickets"]]
+    assert "jti-collectable" not in survivors, (
+        "a row whose token can no longer verify was kept — the register grows unbounded")
+    assert "jti-after" in survivors, (
+        "the prune collected the row this same call had just inserted — the ordering is "
+        "backwards and the nonce would be replayable")
+    assert "jti-edge" in survivors, "a row still inside its acceptance window was collected"
 
 
 def test_the_prune_is_bounded_so_one_call_cannot_drain_the_backlog():
