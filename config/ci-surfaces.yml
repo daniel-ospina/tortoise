@@ -3348,6 +3348,17 @@ surfaces:
   # `SOURCE_PATTERNS` row matches, so a selector edit lands in the unknown-path
   # fail-closed branch -> FULL matrix, where this pin runs too.
   - test_ci_selection_changed_files_9109.py
+  # #10130: the LOCAL affected-subset run (`tools/run_affected.sh`) — the wrapper
+  # pipes the changed-name LIST into `--changed-files -` on stdin, prints the
+  # selected `tests/…` set, refuses a `full: true` selection unless `--allow-full`,
+  # and refuses the #9109 path-as-argument shape instead of reproducing it. Pin:
+  # `tests/test_run_affected.py` (the refusal's exit code 3, the selector same-pass
+  # comparison, and a static pin that the only `--changed-files` form used is `-`).
+  # `core` is CLASSIFICATION only: a `tools/run_affected.sh`-only diff is a
+  # non-python path and takes tier-1 smoke (measured: surfaces=[], 64 files), and
+  # this lane may not add a `CORE_ALSO` claim — that is `tools/ci_selection.py`,
+  # which #10131/#10132/#10133 share. A `core`-tier selection runs this pin.
+  - test_run_affected.py
   # #9790: the batch-review harness (`tools/batch_review.py`) — per-PR schema
   # validation, the per-PR head/diff binding, and the fail-closed record refusals
   # (no record for a result that fell out, for `issues`, without its own evidence

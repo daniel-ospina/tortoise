@@ -30,6 +30,7 @@ New how-to guides and operational procedures should be added to `docs/how-to/`.
 | Guide | Path | Summary |
 |---|---|---|
 | **Finding Provenance Gate** | [`CONTRIBUTING.md`](../../CONTRIBUTING.md#a-finding-must-carry-the-tree-it-was-measured-against) | How to stamp and validate defect reports with `tools/finding_provenance.py`. |
+| **Run Only What Your Diff Affects** | [`docs/ci/affected-test-selection.md`](../ci/affected-test-selection.md) | `tools/run_affected.sh` — print or run the tests a diff actually needs locally, with the two traps that make it non-obvious (#10130). |
 | **Ship-Test Instrument** | [`docs/runbook/3806-ship-test-instrument.md`](../runbook/3806-ship-test-instrument.md) | Per-deploy clean-browser onboarding walk (`signup → wizard → connected`). |
 | **Activation Scorecard Runbook** | [`docs/runbook/b7-activation-scorecard.md`](../runbook/b7-activation-scorecard.md) | Measuring session activation vs. signup and cohort roll-ups. |
 | **Blog E2E Residue Cleanup** | [`docs/runbook/4220-blog-e2e-residue-cleanup.md`](../runbook/4220-blog-e2e-residue-cleanup.md) | Dry-run, guards, and verification for cleaning up E2E test rows in production. |
