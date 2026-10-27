@@ -96,8 +96,10 @@ its own leg. Gap 6 — a writer outside `tortoise/` — cannot be probed from
 inside the walk, so it is STATED and not pinned, and no test here claims to
 block every future absolute, because none can.
 
-`sdk.supersede_point` and `projection._rebuild_all_replay` — which earlier
-revisions of this file recorded as re-materializers — are NOT. Its `SET r += $attrs` is on the 2a-DIRECT leg,
+`sdk.supersede_point` WAS one of these until `#9417`, which made its structural
+transfer carry the old edge's properties (`SET nr += $attrs`) — it is a counted
+MAP-form writer now. `projection._rebuild_all_replay` — which earlier revisions of
+this file recorded as a re-materializer — is NOT: Its `SET r += $attrs` is on the 2a-DIRECT leg,
 whose rows are discovered by `MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`,
 so `rtype` is provably `IMPL|NAND`. The about edge is transferred by a separate
 `MERGE (new)-[nr:{rel}]->(t)` that **does** carry the old edge's properties
@@ -122,11 +124,12 @@ written.
 Its about/structural transfer is a separate BARE `MERGE` whose own comment says
 so (*"Structural 2b transfers are bare: NO attr SET"*). (`create_about_edge`
 DOES journal a bare `DirectEdgeCreated` since `#9553` — attribute-free, which is
-what this leg pins — so it is a producer here, not an absence.) Both
-functions therefore carry NO property on an about edge. The census's whole-function
-variable union cannot tell which edge the `SET` lands on, so BOTH rows are
-declared FALSE POSITIVES in `NOT_AN_ABOUT_WRITER` rather than counted as
-re-materializations — the false-POSITIVE version of this file's own defect.
+what this leg pins — so it is a producer here, not an absence.) That function
+therefore carries NO property on an about edge; the census's whole-function
+variable union cannot tell which edge the `SET` lands on, so its row is a
+declared FALSE POSITIVE in `NOT_AN_ABOUT_WRITER` rather than a counted
+re-materialization — the false-POSITIVE version of this file's own defect.
+`supersede_point` was the second such row and left it in `#9417`.
 
 ⚠️ An EXEMPTION is a fail-open cell unless something compares against it, which
 is why this row is NOT exempt from the name-set comparison: it declares
@@ -2377,7 +2380,9 @@ def test_the_document_population_counts_match_the_census():
             f"§11.1 still calls that writer the '{wrong}' NAMED-form writer while "
             f"RECORDED_WRITERS={named} makes it the {ordinals[named]}"
         )
-    assert f"{words[len(NOT_AN_ABOUT_WRITER)]} declared false positives" in storage, (
+    _fp = len(NOT_AN_ABOUT_WRITER)
+    _fp_noun = "positive" if _fp == 1 else "positives"
+    assert f"{words[_fp]} declared false {_fp_noun}" in storage, (
         "§13's declared-false-positive count no longer matches `NOT_AN_ABOUT_WRITER` "
         f"({len(NOT_AN_ABOUT_WRITER)})"
     )
@@ -2544,9 +2549,9 @@ def test_the_named_and_map_form_writer_populations_are_disjoint():
     )
     assert len(MAP_WRITERS) >= 2, (
         "the map-form population shrank below the two shipped sites the "
-        "documents now record (5 writers the census sees: 3 named-form + 2 "
-        "map-form, i.e. 2 originating + 3 re-materializing; two further "
-        "census hits are declared false positives) — if a writer was "
+        "documents now record (6 writers the census sees: 3 named-form + 3 "
+        "map-form, i.e. 2 originating + 4 re-materializing; one further "
+        "census hit is a declared false positive) — if a writer was "
         "genuinely removed, re-derive the documents' count with it"
     )
     #: A site cannot be both a real writer and a declared false positive.
