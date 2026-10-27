@@ -425,7 +425,7 @@ later commit inserted lines above it.
 | round 13: the `assigned_seam` bump at the seam write site is dropped | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `assigned_seam == 1`; measured the same way. |
 | rebase: `ENDPOINT` reverts to the lookalike host (`https://jevtypesafeai.com/api/v1/decide`) | ✅ `test_the_module_guards_the_suite_never_proved_redden_when_removed` reddens on the vendor-host assertion (`got 'https://jevtypesafeai.com/api/v1/decide'`) — 1 failed / 12 passed on a `/tmp` copy, which is the point: the branch REALLY carried that constant, and no doc line caught it |
 | rebase: `_api_key` skips the 0600 store (env → `.env` only) | ✅ the guards test reddens on `_api_key() == "apikey_from_the_store"` — the documented arming HOME stops being read, which is the inert-arming-path class |
-| rebase: `_api_key` drops `.strip()` on the env value | ✅ the guards test reddens on the whitespace-only case (`"   "` wins and sends `Bearer `) |
+| rebase: `_api_key` drops `.strip()` on the env value | ✅ the guards test reddens on the whitespace-only case (`"   "` wins, so the outgoing header value is `Bearer` plus a trailing space) |
 | round 14: `_decide_tail_seam` stops folding `input_tokens` (the receipt) | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `seam["input_tokens"] == 6112` — measured on a `/tmp` copy, 1 failed / 12 passed, restored `diff`-identically |
 | round 14: `_api_key`'s `.env` term reverts to a single file-order scan that returns on the first name it matches | ✅ the guards test reddens on the shadowing case (an empty `TYPESAFE_API_KEY=` line above a populated `JEV_API_KEY=` line reported no key) — measured the same way |
 
