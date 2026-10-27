@@ -61,10 +61,10 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half, #9974): a
    property the record is FORBIDDEN to store and the cache must COMPUTE from the
    columns it does carry — `status` from a supersession carrier
-   (`supersededBy`/`supersededAt`), mirroring the record's own
-   `public.*_current_status` supersession predicate (not its `ELSE 'live'`
-   branch; see the table). Same bound, same pin shape; the residue it
-   deliberately does NOT derive is named at that table.
+   (`supersededBy`/`supersededAt`). Same bound, same pin shape; the divergences
+   from the record's own `public.*_current_status` views (their `ELSE 'live'`
+   branch, and their `IS NOT NULL` reading of an empty carrier) are measured and
+   named at that table, as is the residue it deliberately does NOT derive.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -359,51 +359,86 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #: rather than an omission (#9974):
 #:
 #: * **DERIVED — a supersession, from EITHER PRIMARY carrier.** §2.6 makes
-#:   `supersededBy` AND `supersededAt` PRIMARY, and the record's own views above
-#:   read them with `OR` — so this table mirrors that SUPERSESSION predicate
-#:   exactly rather than defining a second one. Both carriers are needed because
-#:   the record genuinely produces rows with only one of them: an id-only
-#:   (legacy §6b) `ObjectSuperseded` writes `superseded_at` ALONE and replays
-#:   through the fold as `status='superseded'` with `supersededBy=''`
+#:   `supersededBy` AND `supersededAt` PRIMARY, and the record's own views read
+#:   them with `OR`. Both carriers are needed because the record genuinely
+#:   produces rows with only one of them: an id-only (legacy §6b)
+#:   `ObjectSuperseded` writes `superseded_at` ALONE and replays through the
+#:   fold as `status='superseded'` with `supersededBy=''`
 #:   (`test_status_projection.py::test_rebuild_all_legacy_6b_id_only_shape_supersedes`,
 #:   #2164/#2193), while an `op=supersede` mutation may write `superseded_by`
 #:   with no instant. Deriving from `supersededBy` alone left the id-only shape
 #:   resurrected — #9974's own measured defect, still open on a shape the record
 #:   still emits.
-#:   ⚠️ The views' `ELSE 'live'` branch is deliberately NOT mirrored. An absent
-#:   status already reads LIVE to `live._terminal_excluded` (its documented
-#:   legacy-node rule), so the branch changes no terminal decision — while
-#:   WRITING `'live'` would assert a positive lifecycle claim about a row whose
-#:   real status the record may carry elsewhere (a `restatus`, below) and this
-#:   table cannot read. That is the same no-fabrication rule
-#:   `FOLD_ON_CREATE_DEFAULTS` obeys; the divergence is stated here rather than
-#:   left for a reader to discover, and it is the one place the cache and the
-#:   record's view knowingly differ.
-#: * **MONOTONE, and that is the record's own bound — not a soundness claim.**
-#:   Neither carrier is ever CLEARED: a later `update_entity(status='live')`
-#:   journals `EntityMutated op=restatus`, whose patch is a literal no-op over
-#:   this row (`never_store`), so the record cannot express "un-superseded".
-#:   This table therefore reports the record's terminal-ness, exactly as
-#:   `public.*_current_status` does — a live entity that was ever superseded in
-#:   the record reads terminal on a rebuild. That is the SAME reading the
-#:   record's own view gives; changing it means giving the record a signal it
-#:   does not have, which is an ownership decision, not a default here.
-#: * **NOT DERIVED — `deprecated`/`archived`/`retracted` via `restatus`, and the
-#:   event-kind vocabularies.** An explicit `update_entity(status=…)` journals
+#:   ⚠️ TWO deliberate divergences from those views, both measured, so neither is
+#:   a guess:
+#:   (a) The views' `ELSE 'live'` branch is NOT mirrored. An absent status
+#:   already reads LIVE to `live._terminal_excluded` (its documented legacy-node
+#:   rule), so the branch changes no terminal decision — while WRITING `'live'`
+#:   would assert a positive lifecycle claim about a row whose real status the
+#:   record may carry elsewhere (a `restatus`, below) and this table cannot
+#:   read. Same no-fabrication rule `FOLD_ON_CREATE_DEFAULTS` obeys.
+#:   (b) A carrier must be PRESENT AND NON-EMPTY, which is narrower than the
+#:   views' `IS NOT NULL` — and it is the views, not this table, that are wrong
+#:   on that edge. Measured on a live engine:
+#:   `update_entity(obj, supersededBy="")` leaves the node
+#:   `status='live', supersededBy=''`, so `'' IS NOT NULL` makes
+#:   `public.object_current_status` answer `'superseded'` for a node the graph
+#:   holds LIVE. Truthiness agrees with the graph here, so it is what this table
+#:   uses; `tests/test_cache_projection.py`'s
+#:   `test_an_empty_carrier_is_not_a_supersession` pins the measured edge.
+#: * **NOT MONOTONE — the carriers CAN be cleared, and the record writes that.**
+#:   An explicit `sdk.update_entity(obj, status='live', supersededBy=None,
+#:   supersededAt=None)` journals `EntityMutated op=supersede` with null state and
+#:   the record mutation is `UPDATE public.object SET superseded_by = %s,
+#:   superseded_at = %s` bound to `(None, None)` — measured, carriers cleared, and
+#:   a rebuild then correctly derives nothing. Only the STATUS-ONLY
+#:   `update_entity(status='live')` shape is a record no-op (`never_store` yields
+#:   a literal `SET node_key = node_key`), so only that shape leaves an
+#:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
+#:   express un-superseded"; it can, via the carriers.
+#: * **⚠️ NOT SOUND FOR A CARRIER SET WITHOUT THE STATUS FOLD — a LIVE-WRITER
+#:   divergence, measured and OWNED BY #10192.** A carrier present does NOT imply
+#:   the node's `status` is `'superseded'`. Measured on a live engine at this
+#:   head, all three ACCEPTED by `update_entity`:
+#:
+#:       update_entity(obj, supersededBy='v2')                  -> status='live', supersededBy='v2'
+#:       update_entity(obj, supersededAt='2026-01-01T00:00:00Z') -> status='live', supersededAt='…'
+#:       update_entity(obj, supersededBy='')                    -> status='live', supersededBy=''
+#:       update_entity(obj, status='superseded', supersededBy='p-v2') -> status='superseded'  (the coherent pair)
+#:
+#:   The record writes the carrier (`op=supersede` is the classifier's reading of
+#:   that write), so a rebuild would materialize a TERMINAL node for an entity
+#:   the live graph holds LIVE — `live._terminal_excluded` drops it from recall
+#:   and `entity_identity.resolve_entity_id` refuses its name. BOTH carriers are
+#:   exposed; the empty-carrier case is the one this table escapes (see (b)
+#:   above), and the non-empty cases are #10192's, which owns the fix (a write-door
+#:   coherence guard vs a change to the record's fold — its decision, not this
+#:   table's). This table does not try to compensate: it cannot see the graph, and
+#:   inventing a second rule here would give the cache and the record two
+#:   different folds — the defect #9974 is about.
+#: * **NOT DERIVED — `superseded`, and every other `restatus` value
+#:   (`deprecated`/`archived`/`retracted`/`draft`), plus the event-kind
+#:   vocabularies.** `superseded` is named FIRST because it is the value this
+#:   table exists to derive and it too can be reached WITHOUT a carrier: measured,
+#:   `update_entity(subject, status='superseded')` leaves `status='superseded'`
+#:   with `supersededBy`/`supersededAt` both absent, and the record mutation is
+#:   the `never_store` no-op. An explicit `update_entity(status=…)` journals
 #:   `EntityMutated op=restatus`, whose ONLY carrier of the value is
 #:   `public.journal_event.payload` (`state.status`) — `public.object` has no
-#:   row-level trace, and the props tail refuses the name. Those values are
-#:   therefore NOT recoverable from the record's LAYER tables, which is what
-#:   this projection reads. Recovering them means changing what a record-sourced
-#:   rebuild READS (the journal, or a schema column) — an ownership decision on
-#:   #9974, not a silent default here. Naming it is the bound on this table: it
-#:   narrows #9974's window, it does not close it.
+#:   row-level trace, and the props tail refuses the name. So #9974 stays open on
+#:   every `restatus` shape, `superseded` included; it is NOT closed by the
+#:   carrier derivation. Those values are NOT recoverable from the record's
+#:   LAYER tables, which is what this projection reads. Recovering them means
+#:   changing what a record-sourced rebuild READS (the journal, or a schema
+#:   column) — an ownership decision on #9974, not a silent default here. Naming
+#:   it is the bound on this table: it narrows #9974's window, it does not close
+#:   it.
 #:
 #: `(property, source properties, value)`, applied in :func:`node_from_row` only
 #: where the record is SILENT about the target property — which, for a name the
 #: schema refuses, is always. The value is derived when ANY declared source is
-#: present: the sources are the record's own OR-predicate, never a preference
-#: order.
+#: present and non-empty; the sources are alternatives (the record emits each
+#: alone), never a preference order.
 DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
     "Object": (("status", ("supersededBy", "supersededAt"), "superseded"),),
     "Subject": (("status", ("supersededBy", "supersededAt"), "superseded"),),
@@ -824,11 +859,13 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # cannot state it for `status` (the schema refuses the name), which is why
     # this is the only path that can put a lifecycle value on a rebuilt node.
     #
-    # ANY declared source suffices — the sources mirror the record's own
-    # `superseded_by IS NOT NULL OR superseded_at IS NOT NULL` predicate
-    # (`public.*_current_status`), so the cache and the record answer alike. A
-    # single-source reading left the id-only legacy shape (`superseded_at`
-    # alone) underived and therefore LIVE on rebuild — #9974 itself.
+    # ANY declared source suffices, and it must be non-empty — the sources are
+    # alternatives (the record emits each alone: an id-only legacy supersession
+    # carries `supersededAt` and NOT `supersededBy`), never a preference order.
+    # A single-source reading left the id-only shape underived and therefore
+    # LIVE on rebuild, which is #9974 itself. Truthiness (not the record views'
+    # `IS NOT NULL`) is deliberate: an empty carrier is measured to coexist with
+    # a LIVE node; see DERIVED_FROM_RECORD's bound.
     for prop, sources, value in DERIVED_FROM_RECORD.get(label, ()):
         if props.get(prop) is None and any(props.get(src) for src in sources):
             props[prop] = value
