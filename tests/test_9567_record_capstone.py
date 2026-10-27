@@ -433,7 +433,7 @@ def test_D5_D6_the_restore_reproduces_the_record_per_label_and_per_predicate(res
     # `coverage == "complete"`. `relations_not_written` is
     # `relations_selected - relations_written` (`record_restore.py:244`), and
     # `relations_selected` is the projection's own plan size
-    # (`projection/__init__.py:17434`), so 0 means every relation the projection
+    # (`projection/__init__.py:17448`), so 0 means every relation the projection
     # selected was measured back off the target graph.
     assert outcome.relations_not_written == 0, outcome.render()
 
