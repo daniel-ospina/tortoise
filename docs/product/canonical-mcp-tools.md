@@ -203,10 +203,12 @@ and needs this document amended again.
 
 > **Callers and artifacts outside the scanned population.** `tools/purge_test_residue.py:133` calls
 > `store.delete_point(...)` — that method is in the **111**, so the call site re-points to the private
-> name. And **all 26 are referenced from `tests/`**, while 18 are keys in `tools/sdk_rename_table.py`
-> and 26 are members of the canonical partition in `docs/product/canonical-sdk-methods.md` — leaving
-> those stale reds `tests/test_sdk_rename_table.py::test_check_mode_is_clean`. The deletion lane
-> follows the archive doc's work order; `tortoise/**` is not a safe list of unreferenced names.
+> name. And **all 26 are referenced from `tests/`**, while **17** are per-method keys in
+> `tools/sdk_rename_table.py` and all 26 are members of the canonical partition in
+> `docs/product/canonical-sdk-methods.md` — and that file's **rows are quoted verbatim by the rename
+> table's citation anchors**, so editing a row breaks them too. Leaving any of it stale reds
+> `tests/test_sdk_rename_table.py::test_check_mode_is_clean`. The deletion lane follows the archive
+> doc's work order; `tortoise/**` is not a safe list of unreferenced names.
 
 **(b) A retiring tool does not need a no-replacement warning.** Owner: *"2 we dont have customers
 other than 2 guys using it self-hosted so let's not worry about migration and rather focus on

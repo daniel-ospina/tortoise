@@ -92,14 +92,16 @@ bare call **anywhere** under `tortoise/**`, because that mention may be the SDK 
 (`ulid`, a different function in `tortoise/ids.py`, is kept by a bare `ulid()`), which is the safe
 direction — a name wrongly kept is privatised, a name wrongly deleted breaks a tool.
 
-### Correction — this number was wrong three times. Every reading is recorded, because each is a different trap
+### Correction — this number was wrong three times. The three traps are recorded, because each one is a different way to get a safe-looking list that is not safe
 
-| reading | how it was measured | dead | why it was wrong |
-|---|---|---|---|
-| 1st (published on #4282) | **regex** `\.<name>\b` over **`tortoise/*.py` only** (non-recursive) | 26 | never read the subpackages (`tortoise/projection/**`, …), **and** a regex cannot tell code from prose — docstrings such as `` `sdk.capture_session` `` (`write_verb.py:36`, `capture_consent.py:52`, `quota.py:1008`, `retry.py:48`) counted as usage |
-| 2nd | regex, recursive | 20 | prose still counted |
-| 3rd | **AST**, recursive, but **`sdk.py` excluded** | 34 | this file calls its own public methods (`self.delete_point(...)`); excluding it hid **7** load-bearing methods |
-| **4th — governing** | **AST**, recursive, `sdk.py` **included** | **27** → **26** after the `test_guard` ruling | — |
+| reading | how it was measured | why it was wrong |
+|---|---|---|
+| 1st (published on #4282) | a **regex** over file text, `tortoise/*.py` only | **(a) not recursive** — it never read the subpackages, so a name used only under `tortoise/projection/**` read as dead; **(b) regex cannot tell code from prose** — docstrings such as `` `sdk.capture_session` `` (`write_verb.py:36`, `capture_consent.py:52`, `quota.py:1008`, `retry.py:48`) counted as *usage*, so genuinely dead names read as referenced. The two errors pull in OPPOSITE directions, which is why the same scan produced both a false delete list and a false keep list |
+| 2nd | the same regex, recursive and matching attribute access only | prose still counted as usage; and attribute-only matching cannot see a bare-name call |
+| 3rd | **AST**, recursive, but with **`sdk.py` excluded** from the readers | this file calls its own public methods (`self.delete_point(...)`); excluding it made **7** load-bearing methods look dead. **This is the trap that would have broken five live tools and an approved method** |
+| **4th — governing** | **AST**, recursive, `sdk.py` **included** | **27 with no caller**, of which `test_guard` is `RELOCATED` by an owner-approved decision → **26 to delete** |
+
+The intermediate counts from readings 1 and 2 are deliberately **not** quoted: they were produced by scripts that differed in more than the one property each row names, so the numbers cannot be reproduced from the description and quoting them would be a second, quieter error. The **governing command is the one above**, and it reproduces 27 exactly. `test_guard` is then removed by reading a ruling, not a scan.
 
 **26 is the number the deleting PR must use.** The 1st reading's "26" is a coincidence with the
 governing number, not a confirmation — it was a different 26.
@@ -145,59 +147,82 @@ correction; `git rev-parse archive/4282-surplus-sdk-methods^{commit}` has never 
 ## The 26
 
 `sdk.py:<line>` is a citation **at `archive/4282-surplus-sdk-methods`**. The purpose text is the
-method's own first docstring line. The last column is the disposition already recorded in
-`tools/sdk_rename_table.py` — **the deleting PR edits that map in the same commit** (see the work
-order below), it does not invent a new one.
+method's own first docstring line. The last two columns are the disposition **already recorded** in
+`tools/sdk_rename_table.py` (rendered by the tool, not read by eye): a **target** means the next name
+for that capability — the old name going is the rename *completing*, not capability loss — and
+**delete** is the repo's own Phase-2 delete signal. The deleting PR edits that record; it does not
+invent a disposition.
 
-| Method | At the archive commit | What it did | Recorded disposition |
-|---|---|---|---|
-| `apikey_list` | `sdk.py:34696` | List API keys for an org (no plaintext or hashes). | renamed → `list_keys` (approved 40) |
-| `backfill_about_entities` | `sdk.py:23763` | Keyword-match Points against Subject/Object/Event/Document names → about edges. | `DISCARDED` — Phase 2 delete signal |
-| `backfill_sources` | `sdk.py:39369` | Additive reconciliation for legacy Events of BOTH eventKinds (scope | `DISCARDED` — Phase 2 delete signal |
-| `batch_create_points` | `sdk.py:19321` | Create multiple points. Each dict needs {kind, content, **props}. | renamed → `write_knowledge_batch` (approved 40) |
-| `capture_session` | `sdk.py:10995` | Capture an agent session into the graph (#312 delta 4, #822). | no disposition assigned — the deleting PR must add one |
-| `cleanup_expired_invitations` | `sdk.py:35187` | Mark expired invitations as 'expired' status AND delete the fake | `DISCARDED` — Phase 2 delete signal |
-| `commit_session` | `sdk.py:10584` | The production commit path (epic #909, issue #1350). | no disposition assigned — the deleting PR must add one |
-| `complete_source` | `sdk.py:41688` | Populate Source node fields: contentHash, version, externalId. | `DISCARDED` — Phase 2 delete signal |
-| `create_or_update_point` | `sdk.py:10531` | Idempotent create/update — matches by content hash. | renamed → `create_entity` (approved 40) |
-| `get_org_structure` | `sdk.py:41636` | Return organisational structure: members, roles, sub-orgs. | no disposition assigned — the deleting PR must add one |
-| `get_provenance_chain` | `sdk.py:41367` | Return full provenance chain for a Point. | renamed → `get_entity` (approved 40) |
-| `index_file` | `sdk.py:37976` | One idempotent unit operation (epic #900 T3; A8). Returns: | no disposition assigned — the deleting PR must add one |
-| `invitation_accept` | `sdk.py:35117` | Accept an invitation and create a membership. | no disposition assigned — the deleting PR must add one |
-| `invitation_create` | `sdk.py:35025` | Create an invitation with 7-day expiry. | no disposition assigned — the deleting PR must add one |
-| `invitation_get_by_token` | `sdk.py:35112` | Look up an invitation by its plaintext token (salted-hash verify). | no disposition assigned — the deleting PR must add one |
-| `list_drafts` | `sdk.py:17818` | Draft queue for promotion review (J-5 companion, plan §6.1). | renamed → `list_knowledge` (approved 40) |
-| `membership_delete` | `sdk.py:34534` | Delete a membership. Idempotent. | renamed → `remove_member` (approved 40) |
-| `membership_list` | `sdk.py:34505` | List all memberships for an org. | renamed → `list_members` (approved 40) |
-| `membership_update_role` | `sdk.py:34514` | Update a membership's role. | `DISCARDED` — Phase 2 delete signal |
-| `migrate_orgs_to_registry` | `sdk.py:34405` | One-shot: move Org nodes from tortoise graph to control_plane graph. | `DISCARDED` — Phase 2 delete signal |
-| `operator_action` | `sdk.py:18398` | Consolidated operator write action (epic #888 W2, PR #912). | no disposition assigned — the deleting PR must add one |
-| `org_delete` | `sdk.py:34342` | Delete an org and all associated control-plane entities. | `DISCARDED` — Phase 2 delete signal |
-| `org_update` | `sdk.py:34312` | Update mutable org fields. | `DISCARDED` — Phase 2 delete signal |
-| `record_calibration` | `sdk.py:41759` | Record the Gate B calibration milestone as a persisted :Meta marker. | `UNBACKED` — the deleting PR must stake the decision |
-| `retrieval_legs` | `sdk.py:33265` | (C) #2952 — probe the hybrid read surface and DECLARE its legs. | renamed → `check_confidence` (approved 40) |
-| `traverse` | `sdk.py:19009` | Traverse relationships from a Point. Returns connected point dicts. | no disposition assigned — the deleting PR must add one |
+| Method | At the archive commit | What it did | Target | `delete` |
+|---|---|---|---|---|
+| `apikey_list` | `sdk.py:34696` | List API keys for an org (no plaintext or hashes). | `list_keys` | retain |
+| `backfill_about_entities` | `sdk.py:23763` | Keyword-match Points against Subject/Object/Event/Document names → about edges. | — | delete |
+| `backfill_sources` | `sdk.py:39369` | Additive reconciliation for legacy Events of BOTH eventKinds (scope | — | delete |
+| `batch_create_points` | `sdk.py:19321` | Create multiple points. Each dict needs {kind, content, **props}. | `write_knowledge_batch` | retain |
+| `capture_session` | `sdk.py:10995` | Capture an agent session into the graph (#312 delta 4, #822). | `mine_knowledge_from_session` | retain |
+| `cleanup_expired_invitations` | `sdk.py:35187` | Mark expired invitations as 'expired' status AND delete the fake | — | delete |
+| `commit_session` | `sdk.py:10584` | The production commit path (epic #909, issue #1350). | `mine_knowledge_from_session` | retain |
+| `complete_source` | `sdk.py:41688` | Populate Source node fields: contentHash, version, externalId. | — | delete |
+| `create_or_update_point` | `sdk.py:10531` | Idempotent create/update — matches by content hash. | `create_entity` | retain |
+| `get_org_structure` | `sdk.py:41636` | Return organisational structure: members, roles, sub-orgs. | `explore_connections` | retain |
+| `get_provenance_chain` | `sdk.py:41367` | Return full provenance chain for a Point. | `get_entity` | retain |
+| `index_file` | `sdk.py:37976` | One idempotent unit operation (epic #900 T3; A8). Returns: | `index_sources_from_directory` | retain |
+| `invitation_accept` | `sdk.py:35117` | Accept an invitation and create a membership. | — | delete |
+| `invitation_create` | `sdk.py:35025` | Create an invitation with 7-day expiry. | — | delete |
+| `invitation_get_by_token` | `sdk.py:35112` | Look up an invitation by its plaintext token (salted-hash verify). | — | delete |
+| `list_drafts` | `sdk.py:17818` | Draft queue for promotion review (J-5 companion, plan §6.1). | `list_knowledge` | retain |
+| `membership_delete` | `sdk.py:34534` | Delete a membership. Idempotent. | `remove_member` | retain |
+| `membership_list` | `sdk.py:34505` | List all memberships for an org. | `list_members` | retain |
+| `membership_update_role` | `sdk.py:34514` | Update a membership's role. | — | delete |
+| `migrate_orgs_to_registry` | `sdk.py:34405` | One-shot: move Org nodes from tortoise graph to control_plane graph. | — | delete |
+| `operator_action` | `sdk.py:18398` | Consolidated operator write action (epic #888 W2, PR #912). | `adjust_relationship` | retain |
+| `org_delete` | `sdk.py:34342` | Delete an org and all associated control-plane entities. | — | delete |
+| `org_update` | `sdk.py:34312` | Update mutable org fields. | — | delete |
+| `record_calibration` | `sdk.py:41759` | Record the Gate B calibration milestone as a persisted :Meta marker. | — | unstaked (`UNBACKED`) |
+| `retrieval_legs` | `sdk.py:33265` | (C) #2952 — probe the hybrid read surface and DECLARE its legs. | `check_confidence` | retain |
+| `traverse` | `sdk.py:19009` | Traverse relationships from a Point. Returns connected point dicts. | `explore_connections` | retain |
+
+**14 of the 26 already carry a target** and **11 carry `delete`**; **1 is `UNBACKED`** — its delete
+verdict is deliberately unstaked, and **stating it is the only disposition work the deleting PR
+owes**. Nine of the 26 are not per-method `OVERRIDE` entries: their row is derived from the group
+default, which is *why* they still have a target — do **not** overwrite it with `DISCARDED`.
 
 ## The work order for the deleting PR — obey this document exactly, or CI reds
 
 Deleting the 26 also edits artifacts that a search of `tests/`, `tools/` and `graph-scripts/` alone
-will not find. All of these must land **in the same commit**:
+will not find. All of these land **in the same commit**:
 
-- **`tools/sdk_rename_table.py`** — 18 of the 26 are keys in its map. Delete the key with the method.
-- **`docs/product/canonical-sdk-methods.md`** — the 26 are members of its canonical partition, and
-  some carry evidence links there. Leaving them makes `tools/sdk_rename_table.py check` report
-  `STALE canonical member` / `PHANTOM EVIDENCE UNRESOLVED`, which reds
-  **`tests/test_sdk_rename_table.py::test_check_mode_is_clean`** — a registered CI surface
-  (`config/ci-surfaces.yml`).
+- **`tools/sdk_rename_table.py`** — **17** of the 26 are per-method `OVERRIDE` keys: delete the key
+  with the method. The other nine derive their row from the group default, so they need no key
+  change — **and must not be given a `DISCARDED` stamp**, which would overwrite a recorded fold such
+  as `capture_session → mine_knowledge_from_session`.
+- **`docs/product/sdk-rename-table.md` is generated** — it is rewritten by running the tool without
+  `--check`, and that regenerated copy is committed. (As of 2026-10-27 the committed copy is already
+  stale on `main`, so `--check` reports `DRIFT` before any deletion is made; do not read that red as
+  your own.)
+- **`docs/product/canonical-sdk-methods.md`** — all 26 are members of its canonical partition, and
+  some carry evidence links there. Removing them is required (otherwise `tools/sdk_rename_table.py
+  check` reports `STALE canonical member`).
+- **the citations that quote those canonical rows.** The rename table's `CITES` / `TENSION_CITES`
+  anchors (e.g. `r3_canon`, `w3`, `w4_canon`, `t_r3`, `t_r5`) hold the canonical row text
+  **verbatim**, so editing a row breaks every anchor that quotes it: the tool then reports
+  `CITATION DRIFT: <key> names canonical-sdk-methods.md but its anchor no longer locates any
+  region`. Re-anchor them (or re-text the citation) in the same commit.
+- **`TENSIONS` in the same file** — the row `("get_provenance_chain", "check_confidence", "t_r3")`
+  must be deleted **with** its `OVERRIDE` key: the renderer does `OVERRIDE[method][0]`, so leaving the
+  tension while removing the key raises `KeyError` at render time. Likewise `PHANTOMS`
+  (`("recall_legs", "retrieval_legs", "r3")`) is left pointing at a deleted method — a stale record,
+  not a crash, but it is the same edit.
 - **`tests/`** — all 26 are referenced there; the call sites and the pinned name literals go.
-  `config/sdk-surface.json` and `config/surface-manifest.yml` also carry rows for them, and
+  `config/sdk-surface.json` and `config/surface-manifest.yml` also carry rows for them;
   `config/surface-manifest.yml` is re-cut through `tools/surface_manifest.py`, never hand-edited.
-- **`config/disposition-vocabulary.yml`** — the dispositions in the table above live under it: a
-  `DISCARDED` entry is Phase 2's delete signal, a rename entry means the capability already lives
-  under the new name. Nine of the 26 carry **no** disposition yet (`capture_session`,
-  `commit_session`, `get_org_structure`, `index_file`, `invitation_accept`, `invitation_create`,
-  `invitation_get_by_token`, `operator_action`, `traverse`) — assign one before deleting, so the
-  record does not depend on a scan being re-run correctly.
+- **`record_calibration`** is the one name whose delete verdict is **unstaked** (`UNBACKED`): state
+  the decision in the PR, or leave it — but do not silently inherit it.
+
+**The gate this is protecting:** `tests/test_sdk_rename_table.py::test_check_mode_is_clean` is a
+registered CI surface (`config/ci-surfaces.yml`), and it fails on `STALE canonical member`,
+`CITATION DRIFT` or a render `KeyError` — all three of which a deletion done from the method list
+alone produces.
 
 **Scope of the measurement: `tortoise/**`.** It is not "nothing anywhere calls it".
 `tools/purge_test_residue.py:133` calls `store.delete_point(...)` — but `delete_point` is in the
