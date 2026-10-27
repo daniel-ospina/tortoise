@@ -975,10 +975,10 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # whitespace INSIDE a hex segment (the match then crosses into following text
     # that begins with a hex character: 100 matches over a 200-unit prose family);
     # any bounded body class, on either segment (a greedy class with no shorter
-    # alternative matches NOTHING past its ceiling — a FIRST-segment ceiling leaks
-    # the key WHOLE, a TAIL ceiling leaks the segment it bounds with the count
-    # still reading 1); and a case-sensitive prefix (an uppercase mint then leaks
-    # with the count at 0).
+    # alternative matches NOTHING past its ceiling — a FIRST-segment ceiling below
+    # the mint's width leaks the key WHOLE, a TAIL ceiling leaks the segment it
+    # bounds with the count still reading 1); and a case-sensitive prefix (an
+    # uppercase mint then leaks with the count at 0).
     # Everything else — the split shapes, the escaped `\n`, the tail-absent form,
     # the 24/8 floors — is asserted in
     # `test_the_typesafe_rule_is_pinned_at_its_measured_shape` rather than narrated

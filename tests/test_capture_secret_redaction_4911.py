@@ -1217,8 +1217,10 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         (`_`, space) ending the run, NOT case. Both halves are asserted, the prose
         one included;
     (d) `\s*` sits at BOTH wrap positions — around the `_` and after the prefix —
-        for literal whitespace (NOT an escaped `\n`, a different residual asserted
-        in (e)). The prefix-adjacent one is the dangerous one: a break there defeats
+        for literal whitespace. An ESCAPED `\n` is a different residual and the
+        POSITION decides its severity, so both are asserted in (e): at the separator
+        segment 1 is still caught (count 1, tail survives), at the PREFIX the anchor
+        literal is defeated and nothing matches at all (count 0, whole key survives). The prefix-adjacent one is the dangerous one: a break there defeats
         the anchor literal, and without it the whole key came back byte-identical
         with the count at 0 (measured). The tail FLOOR (8) catches a TRUNCATED key
         (`apikey_<36 hex>_<16 hex>…`, what a compaction summary or a display
@@ -1427,6 +1429,15 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     assert second in escaped_out, (
         "the escaped-newline residual changed — if the second segment is now "
         "redacted too, the rule got WIDER and this row must be re-derived")
+    # ⛔ …and the SAME escape at the PREFIX, which is the WORSE position: it defeats
+    # the anchor literal, so NOTHING matches and the whole key survives with the
+    # count at 0 — the total-cleartext case (d) warns about, one shape over from the
+    # separator escape asserted above. Recorded as the residual it is.
+    esc_pfx_out, esc_pfx_counts = redact_secrets(
+        "key apikey_" + "\\n" + first + "_" + second)
+    assert esc_pfx_counts == {}, (
+        "the prefix-adjacent escaped wrap now redacts — re-derive this residual")
+    assert first in esc_pfx_out and second in esc_pfx_out, esc_pfx_out
 
 
 def test_the_window_bounds_the_text_before_the_scan():
