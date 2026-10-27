@@ -414,7 +414,9 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   deployed copies under `~/.pi/agent/` are DERIVED from an agent-infra checkout, so they mirror
   whatever that checkout held WHEN BOOTSTRAPPED — a bootstrap from `main` reverts them to the
   pin (observed twice, most recently 2026-10-27 12:52), which is a derivation artefact, not a
-  decision. Assert them (`grep -n 'JEV_MODEL ='`, see `.env.example`). Either way a measurement
+  decision. Assert them after any bootstrap:
+  `grep -rn 'JEV_MODEL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py`
+  (three paths — a bare `grep 'JEV_MODEL ='` reads stdin and answers nothing). Either way a measurement
   of this seam must name its model rather than assume one. Prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
