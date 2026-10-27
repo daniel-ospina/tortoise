@@ -792,6 +792,24 @@ def test_a_second_identity_cannot_take_over_a_flow_by_re_entering_it() -> None:
         "(identity injection: the foreign-owner refusal at token.ts becomes unreachable by one GET)")
 
 
+def test_start_forwards_the_opaque_state_RAW_so_the_clients_csrf_check_survives() -> None:
+    """`state` is opaque and is echoed to the client, which compares it BYTE-FOR-BYTE.
+
+    `validate()` used to `trim()` it, so a client whose `state` carries padding — a legitimate,
+    RFC 6749-opaque value — received a different `state` back after the visitor consented and
+    (correctly) abandoned the callback as a CSRF mismatch. Nothing in the predicate layer shows it:
+    the route accepts, the AS accepts, and the flow dies after consent. Same class as `redirect_uri`
+    two lines above, which is forwarded raw for the same reason.
+    """
+    for raw in ("  state-xyz  ", "\tstate-xyz", "state-xyz\n", "\u00a0state-xyz"):
+        out = _run("start_validate", params=dict(_PARAMS, state=raw), wantValidated=True)
+        assert out.get("validated") is not None, (raw, out)
+        assert out["validated"]["state"] == raw, (
+            f"the route recorded/forwarded state {out['validated']['state']!r} for a client's "
+            f"{raw!r}: the CLIENT compares state byte-for-byte after consent, so this flow is "
+            "abandoned as a CSRF mismatch after the visitor already approved")
+
+
 @pytest.mark.parametrize("broken,needle", [
     ({"code_challenge": "short"}, "code_challenge"),
     ({"state": ""}, "state"),
