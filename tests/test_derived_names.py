@@ -540,7 +540,7 @@ def _from_uri_violations(root=None):
     import urllib.parse
     violations = []
     for fname, lineno, block in _from_uri_sites(root=root):
-        if "graph_name=" in block:
+        if re.search(r"graph_name\s*=", block):
             continue  # explicit per-test graph
         m = re.match(r"\w+\.from_uri\(\s*\"([^\"]+)\"", block)
         if m:
@@ -676,11 +676,21 @@ def _enclosing_block(src: str, pos: int) -> str:
         # function's journal cannot launder it.
         nxt = re.search(r"\n(?=(?:async )?(?:def |class |@))", masked[pos:])
         return src[line_start:pos + nxt.start() if nxt else len(src)]
-    block_start, block_indent = 0, 0
+    block_start, block_indent, found = 0, 0, False
     for m in re.finditer(r"(?m)^([ ]*)(?:async )?def ", masked[:line_start]):
         ind = len(m.group(1))
         if ind < indent:
-            block_start, block_indent = m.start(), ind
+            block_start, block_indent, found = m.start(), ind, True
+    if not found:
+        # No enclosing `def`: a module-level try/if/with suite, or a class-body
+        # statement. Take the nearest OUTER indented line, so the slice still
+        # contains the site and the DETACH below it — falling through to (0, 0)
+        # returned the file's FIRST line, a block that cannot contain the site,
+        # so the violation was skipped (#10170 review round 5).
+        for m in re.finditer(r"(?m)^([ ]*)\S", masked[:line_start]):
+            ind = len(m.group(1))
+            if ind < indent:
+                block_start, block_indent = m.start(), ind
     for m in re.finditer(r"(?m)^([ ]*)\S", masked[block_start:]):
         if m.start() == 0:
             continue
