@@ -431,6 +431,10 @@ def _exempt_stems() -> set[str]:
 # (#10170): a declaration that reads as coverage and cannot fail.
 _NON_TEST_FILE_EXEMPTIONS = {"_embedded.py"}
 
+# Carve-out stems that name NO file. Pinned so a NEW one reds; removing these is
+# the follow-up in `config/ci-surfaces.yml`'s carve_out mirror, not this census.
+_STALE_CARVEOUT_STEMS = {"test_smoke_embedded"}
+
 
 def _is_exempt(path) -> bool:
     """The census's ONE skip decision (#10170).
@@ -443,35 +447,46 @@ def _is_exempt(path) -> bool:
     return path.stem in _exempt_stems()
 
 
+def _sites_in_file(path):
+    """(line_number, call_block) for every LIVE `from_uri(` call in `path`.
+
+    The census's ONLY detector, and the declaration test uses it too, so a test
+    cannot disagree with the census about what a site is (#10170 review round 2:
+    the declaration test kept its own line regex, which accepted a mention inside
+    a docstring or any string literal). Comment-shaped references and empty
+    `from_uri()` calls are skipped HERE, once, for the same reason.
+    """
+    call_re = re.compile(r"\b(\w+)\.from_uri\s*\(")
+    src = path.read_text(encoding="utf-8")
+    out = []
+    for m in call_re.finditer(src):
+        line_no = src.count("\n", 0, m.start()) + 1
+        line = src.split("\n")[line_no - 1].strip()
+        if line.startswith("#"):
+            continue
+        depth, i = 1, m.end()
+        while i < len(src) and depth:
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+            i += 1
+        block = src[m.start():i]
+        if not block.strip().rstrip(")").strip():
+            continue  # comment-shaped reference (from_uri() with no args)
+        out.append((line_no, " ".join(block.split())))
+    return out
+
+
 def _from_uri_sites(root=None):
     """Yield (file_name, line_number, call_block) for every from_uri( call
     (FalkorProjection or any module-level alias like _FP — review P2: an
     aliased construction must not evade the census) in a migrated file."""
-    call_re = re.compile(r"\b(\w+)\.from_uri\s*\(")
     for f in sorted((root or _TESTS_ROOT).glob("test_*.py")):
         if _is_exempt(f):
             continue
-        src = f.read_text(encoding="utf-8")
-        for m in call_re.finditer(src):
-            # skip matches inside comments/docstrings (the call-block is
-            # empty or the line is a comment)
-            line_no = src.count("\n", 0, m.start()) + 1
-            line = src.split("\n")[line_no - 1].strip()
-            if line.startswith("#"):
-                continue
-            start = m.end()
-            depth = 1
-            i = start
-            while i < len(src) and depth:
-                if src[i] == "(":
-                    depth += 1
-                elif src[i] == ")":
-                    depth -= 1
-                i += 1
-            block = src[m.start():i]
-            if not block.strip().rstrip(")").strip():
-                continue  # comment-shaped reference (from_uri() with no args)
-            yield f.name, line_no, " ".join(block.split())
+        for line_no, block in _sites_in_file(f):
+            yield f.name, line_no, block
 
 
 def test_from_uri_sites_resolve_test_prefixed():
@@ -538,12 +553,6 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
         f"{fname}: uri assignment from the raw env at L{bad} — must "
         f"route through _live_uri(test_..._<uuid>) (cycle-5 P1-6 per-test "
         f"path; the env URI path is the shared job path)")
-
-
-def test_from_uri_routing_table_keys_exist():
-    for fname in _ROUTED_FROM_URI_SITES:
-        assert (_TESTS_ROOT / fname).exists(), \
-            f"_ROUTED_FROM_URI_SITES key {fname!r} is not a test module"
 
 
 # ── raw falkordb-client census (cycle-6 P1-3 / cycle-8 P2-2) ────────────────
@@ -617,7 +626,8 @@ def _enclosing_block(src: str, pos: int) -> str:
         # DETACH that follows. A raw-client site inside the FIRST function of a
         # file was therefore never flagged (#10170 review — found because the
         # behavioural fixture starts with `def` on line 1).
-        last_def = 0
+        end = re.search(r"\ndef ", src[1:])
+        return src[:end.start() + 1] if end else src
     if last_def < 0:
         return head  # genuinely module-level site — the whole head is the block
     return src[last_def:]
@@ -660,15 +670,26 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path):
     """
     from tests._embedded import TEST_NO_REDIRECT_STEMS
 
-    exempt_stem = sorted(TEST_NO_REDIRECT_STEMS)[0]
+    exempt_stem = next(s for s in sorted(TEST_NO_REDIRECT_STEMS)
+                       if s.startswith("test_"))
     offending = (
         "def test_fixture():\n"
         "    proj = _FP.from_uri(\"bolt://localhost:6379\")\n"
         "    from falkordb import FalkorDB\n"
         "    client = FalkorDB(host=\"h\")\n"
         "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
+        "\n"
+        "def test_journaled():\n"
+        "    import os\n"
+        "    from falkordb import FalkorDB\n"
+        "    name = f\"g_{os.urandom(4).hex()}\"\n"
+        "    _journal_append(name)\n"
+        "    c = FalkorDB(host=\"h\")\n"
+        "    c.query(\"MATCH (n) DETACH DELETE n\")\n"
     )
     (tmp_path / f"{exempt_stem}.py").write_text(offending, encoding="utf-8")
+    assert (tmp_path / f"{exempt_stem}.py") in sorted(tmp_path.glob("test_*.py")), \
+        "the exempt fixture is not enumerable by the censuses' own glob"
     (tmp_path / "test_zz_not_exempt.py").write_text(offending, encoding="utf-8")
 
     scanned = [name for name, _ln, _blk in _from_uri_sites(root=tmp_path)]
@@ -691,11 +712,13 @@ def test_the_exemption_key_space_is_UNIFORM_and_nothing_is_inert():
     """
     from tests._embedded import TEST_NO_REDIRECT_STEMS
 
-    exempt = _exempt_stems()
-
-    # One key space, no suffixes — so `f.stem in exempt` can match at all.
-    assert not [e for e in exempt if e.endswith(".py")], (
-        f"the exemption still carries filenames: {sorted(e for e in exempt if e.endswith('.py'))}")
+    # The two RAW spellings the normaliser must bridge. Asserting on `exempt`
+    # instead would be tautological — `removesuffix` cannot leave a `.py` unless
+    # the entry was `x.py.py` (#10170 review round 2).
+    assert all(not s.endswith(".py") for s in TEST_NO_REDIRECT_STEMS), \
+        "TEST_NO_REDIRECT_STEMS must hold BARE STEMS"
+    assert all(p.endswith(".py") for p in _FROM_URI_EXEMPT_FILES), \
+        "_FROM_URI_EXEMPT_FILES must hold FILENAMES"
 
     # Every declared stem names a REAL file. One entry resolves under neither
     # `tests/` nor `bench/` today; it is ALLOWLISTED rather than tolerated so a
@@ -705,13 +728,21 @@ def test_the_exemption_key_space_is_UNIFORM_and_nothing_is_inert():
     stale = {s for s in TEST_NO_REDIRECT_STEMS
              if not (_TESTS_ROOT / f"{s}.py").exists()
              and not (_TESTS_ROOT.parent / "bench" / f"{s}.py").exists()}
-    newly_inert = stale - {"test_smoke_embedded"}
+    newly_inert = stale - _STALE_CARVEOUT_STEMS
     assert not newly_inert, (
         f"TEST_NO_REDIRECT_STEMS gained a stem that names no file: {sorted(newly_inert)}")
+    # The allowlist is asserted VERBATIM so it cannot grow silently; removing the
+    # stale entry is a tracked follow-up in the carve-out mirror, not here.
+    assert {"test_smoke_embedded"} == _STALE_CARVEOUT_STEMS
 
     # Entries the censuses' own glob can never yield are seam helpers, not tests —
     # pinned, because an exemption that cannot match is the same defect class as
     # the bare stems (#10170 review P2-4).
+    # Existence, for the OTHER registry — a renamed module leaves an entry that
+    # can never match, which is the same class (#10170 review round 2).
+    vanished = [e for e in _FROM_URI_EXEMPT_FILES if not (_TESTS_ROOT / e).exists()]
+    assert not vanished, f"_FROM_URI_EXEMPT_FILES names missing module(s): {vanished}"
+
     non_test = {e for e in _FROM_URI_EXEMPT_FILES if not e.startswith("test_")}
     assert non_test == _NON_TEST_FILE_EXEMPTIONS, (
         f"unpinned non-test exemption(s): {sorted(non_test - _NON_TEST_FILE_EXEMPTIONS)}")
@@ -722,32 +753,24 @@ def test_no_declared_route_or_pin_is_inert():
 
     `test_session_capture_e2e.py` carried a routed shape while having ZERO
     `from_uri(` sites, so the row could never fail and proved nothing. A raw
-    substring test would keep that hole open — a mention in a comment or a
-    docstring satisfies it — so this uses the census's OWN detector, with the same
-    comment-skipping rule (review P1).
+    substring test keeps that hole open (a docstring mention satisfies it), so this
+    uses the census's OWN per-file detector — the same function `_from_uri_sites`
+    yields from (#10170 review round 2).
     """
-    call_re = re.compile(r"\b\w+\.from_uri\s*\(")
     gone = []
     for name in _ROUTED_FROM_URI_SITES:
         path = _TESTS_ROOT / name
         if not path.exists():
             gone.append(f"{name}: file missing")
-            continue
-        live = [ln for ln in path.read_text(encoding="utf-8").splitlines()
-                if call_re.search(ln) and not ln.strip().startswith("#")]
-        if not live:
+        elif not _sites_in_file(path):
             gone.append(f"{name}: declares {_ROUTED_FROM_URI_SITES[name]} but has "
-                        "no live from_uri( site (a comment mention does not count)")
+                        "no live from_uri( call")
     for name in _MUST_HAVE_NO_SITES:
         path = _TESTS_ROOT / name
         if not path.exists():
             gone.append(f"{name}: must-have-no-sites file is missing")
-            continue
-        live = [ln for ln in path.read_text(encoding="utf-8").splitlines()
-                if call_re.search(ln) and not ln.strip().startswith("#")]
-        assert not live, (
-            f"{name} is declared site-free but has {len(live)} live from_uri( "
-            f"site(s): {live[:2]}")
+        elif _sites_in_file(path):
+            gone.append(f"{name}: declared site-free but has a live from_uri( call")
     for name in _ENV_URI_PIN_FILES:
         if not (_TESTS_ROOT / name).exists():
             gone.append(f"{name}: _ENV_URI_PIN_FILES entry is not a test module")
