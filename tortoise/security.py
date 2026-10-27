@@ -959,11 +959,16 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # but a redaction rule that only matches the case it happened to see fails OPEN
     # on the next mint, and a leaked credential cannot be un-leaked. The prefix was
     # case-sensitive in an earlier revision on the theory that widening it would
-    # match prose — measured FALSE: `APIKEY_THE_FIELD…` is spared by the hex BODY
-    # CLASS (a `T` never starts a body) and `apikey_a1b2` by the 24-hex FLOOR;
-    # neither is spared by case, and the only thing the case-sensitive prefix did
-    # was let `APIKEY_<36 hex>_<64 hex>` (a well-formed uppercase mint) leak whole
-    # with the count at 0.
+    # match prose — measured FALSE: both prose forms are spared by the 24-hex
+    # FLOOR and by what FOLLOWS the run, not by case. `APIKEY_THE_FIELD_NAMES…` runs
+    # `THE` and stops at `_` (three), `apikey_a1b2` runs `a1b2` and stops at a space
+    # (four) — both far under a floor of 24 — and `_` is not a body character
+    # either. The hex-NESS of the class only decides what a LONG run may continue
+    # with, and `test_the_typesafe_rule_is_pinned_at_its_measured_shape` pins it
+    # with a 40-character non-hex word after the prefix, which a widened
+    # `[A-Za-z0-9]` body would swallow. The only thing the case-sensitive prefix
+    # did was let `APIKEY_<36 hex>_<64 hex>` (a well-formed uppercase mint) leak
+    # whole with the count at 0.
     # ⛔ THE TRAILING LOOKAHEAD IS THE BODY CLASS MINUS ITS OWN CHARACTERS — the
     # invariant stated in this table's own header. It is INERT by construction here
     # (`{24,}` and the optional `{8,}` are greedy over the same class, so the next
@@ -983,9 +988,12 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # BODY (`[0-9a-fA-F](?:\s*[0-9a-fA-F]){23,}`), and whitespace in the body lets
     # the match cross into whatever follows: every word starting with `a`-`f` or a
     # digit becomes a continuation. Measured on this suite's own linearity family
-    # (`" apikey_" + "a"*23 + " "*2048`, one hex short of the floor, repeated), that
-    # body matched 100 of 100 units — redacting ordinary text across spaces and
-    # newlines, which corrupts the stored record the redaction exists to preserve.
+    # (`" apikey_" + "a"*23 + " "*2048", one hex short of the floor, repeated 200
+    # times), that body made 100 matches over 200 units — ONE PER TWO UNITS, because
+    # each match needs 24 hex, takes the next unit's leading `a` from its `apikey_`
+    # and so destroys that unit's anchor: every unit touched, half of them
+    # mis-redacted across spaces and newlines, which corrupts the stored record the
+    # redaction exists to preserve.
     # So the residual is: a break inside a segment keeps whatever hex run survives
     # the break, and the widths of those runs are asserted, not described.
     # The SECOND segment is OPTIONAL, and what that buys is the TAIL-ABSENT form

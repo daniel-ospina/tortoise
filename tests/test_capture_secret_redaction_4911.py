@@ -1203,15 +1203,18 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         is behaviourally equivalent and no assertion here distinguishes that — see
         the rule's comment, which says the same;
     (b) the first-segment floor is a floor and there is NO ceiling — a decoy
-        `{1,}` reds the `apikey_a1b2` prose row (an `apikey_ids_secret` decoy is
-        inert: `i` is not hex, so the body never starts); a FIRST-segment ceiling
+        `{1,}` reds the `apikey_a1b2` prose row; the prose rows are spared by run
+        LENGTH and by the `_`/space that stops them (3-4 characters against a floor
+        of 24), so the hex-NESS of the class is pinned separately, by a 40-character
+        non-hex word the alnum widening would eat; a FIRST-segment ceiling
         (`{24,48}`) matches nothing on a longer body and leaks it WHOLE, while a
         SECOND-segment ceiling leaks the tail;
     (c) prefix AND body are case-INSENSITIVE — a future uppercase mint must not
         leak (an earlier case-sensitive prefix let `APIKEY_<36>_<64>` through with
-        the count at 0), while an `APIKEY_<ID>` heading stays prose on the hex BODY
-        CLASS (a `T` never starts a body), not on case — the 24-hex floor is what
-        spares `apikey_a1b2`. Both halves are asserted, the prose one included;
+        the count at 0), while prose starting with the literal stays prose: the
+        sparing is run length against the 24-hex floor plus a non-body character
+        (`_`, space) ending the run, NOT case. Both halves are asserted, the prose
+        one included;
     (d) `\s*` sits at BOTH wrap positions — around the `_` and after the prefix —
         for literal whitespace (NOT an escaped `\n`, a different residual asserted
         in (e)). The prefix-adjacent one is the dangerous one: a break there defeats
@@ -1287,6 +1290,17 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         "a tail-less key (`apikey_<36 hex>`, cut at the separator) survived — the "
         "second segment is no longer optional")
     assert bare_counts.get("typesafe_api_key") == 1, bare_counts
+
+    # (b, cont.) the hex-NESS of the body class, which the prose rows above do NOT
+    # pin: `APIKEY_THE_FIELD…` and `apikey_a1b2` are spared by their run LENGTH (3-4
+    # characters against a floor of 24) and by the `_`/space that stops them, so a
+    # body widened to `[A-Za-z0-9]{24,}` kept every prose row green (measured). A
+    # 40-character non-hex word after the prefix is what that widening eats.
+    word = "g" * 40
+    word_out, word_counts = redact_secrets(f"key apikey_{word}")
+    assert word_out == f"key apikey_{word}" and word_counts == {}, (
+        "a 40-character NON-HEX run after the prefix was redacted — the body class "
+        "is not hex-only")
 
     # (c) prefix case-sensitivity, body case-insensitivity — the PREFIX is the
     # vendor's lowercase literal, the HEX is a mint we do not control
