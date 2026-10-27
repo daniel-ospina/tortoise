@@ -831,10 +831,15 @@ class TestAlertRegistersAndAcks:
     #: us — so they are matched only when they are not customer-determined. The
     #: first group are our staff and ours alone; a string naming one of those is
     #: making a claim about us whatever determiner precedes it.
+    #: Round 19 (review finding): the customer-determined exemption was a
+    #: lookbehind on the noun, which only sees ADJACENCY — "Ask your security team
+    #: to revoke it." suppressed `security` and then matched `team`, whose
+    #: preceding characters are "rity ". A lookbehind cannot span the phrase, so
+    #: the phrase is REMOVED before the match instead (see `_claims`), exactly like
+    #: the address-as-object strip.
     _ROLE = (r"(?:(?:an?|the|our)\s+)?(?:operators?|humans?|engineers?|"
              r"responders?|developers?|analysts?|sres?|support(?:ers?)?)"
-             r"|(?:(?:an?|the|our)\s+)?(?<!your )(?<!your own )"
-             r"(?:staff|desks?|security|teams?)")
+             r"|(?:(?:an?|the|our)\s+)?(?:staff|desks?|security|teams?)")
     #: First person is a special case: `we` in any tense is a claim about us, and
     #: the only legitimate first-person string this panel ships is an imperative
     #: that names the customer ("contact support@…"), not us. `\bwe\b` also
@@ -887,6 +892,12 @@ class TestAlertRegistersAndAcks:
         stripped = re.sub(
             r"(?i)\b(?:contact|email|e-mail|reach(?:\s+out)?\s+to|write\s+to"
             r"|message)\s+\S+@\S+", "", text)
+        # The CUSTOMER's own staff/settings are not a claim about ours, and the
+        # phrase can be several words long ("your security team", "your own
+        # desk"), which a fixed-width lookbehind cannot express.
+        stripped = re.sub(
+            r"(?i)\byour(?:\s+own)?(?:\s+\w+){0,2}\s+"
+            r"(?:staff|desks?|security|teams?|settings)\b", "", stripped)
         # The `suspend` exemption, and ONLY for that row type. `suspend_org()`
         # writing the row proves an operator suspended the org — not what an
         # operator did next, and not anything about any OTHER event type.
@@ -925,12 +936,18 @@ class TestAlertRegistersAndAcks:
         same defect as a comment that asserts an invariant nothing checks.)
 
         STATED RESIDUAL RISK — read this before trusting the pin further than it
-        goes. It is a FLOOR, not a proof. Two shapes still pass, by construction:
-        an ACTOR-ELIDED passive ("Your keys have been reviewed.") and a noun
-        outside our vocabulary ("A specialist reviewed your account."). Both are
-        false claims the row cannot know. (Round 18 closed three shapes that had
-        been hiding INSIDE the exemptions — an address in subject position, a
-        second clause after "by an operator", and "by us" as a passive agent.) The pin cannot be made exhaustive
+        goes. It is a FLOOR, not a proof, and the shapes still passing are named
+        WITHOUT a count (a count here re-stales the moment a shape is found, which
+        is how this paragraph shipped saying "two" while the code allowed three):
+        an ACTOR-ELIDED passive ("Your keys have been reviewed."), a noun outside
+        the staff vocabulary ("A specialist reviewed your account."), and an
+        ELIDED-ACTOR promise phrased outside `_PROMISE` ("Expect a reply
+        shortly."). All three are claims the row cannot know. The rule is
+        therefore: if you introduce a new word for our staff, extend `_ROLE`; if
+        you introduce a new way of promising contact or timing, extend `_PROMISE`;
+        do it in the same commit. Round 18 closed three shapes that had been
+        hiding INSIDE the exemptions — an address in subject position, a second
+        clause after "by an operator", and "by us" as a passive agent. The pin cannot be made exhaustive
         without a grammar, so the rule for a future copy change is: if you add a
         new word for our staff, add it to `_ROLE` in the same commit. The error
         direction is deliberate — an unlisted benign phrase that NAMES our staff
@@ -1024,9 +1041,13 @@ class TestAlertRegistersAndAcks:
             "If you need a higher limit, reach out to support@premiselabs.co.",
             # an imperative that names the customer, and asks them to reach US
             "If this was not you, contact us.",
-            # the CUSTOMER's own team/settings are not a claim about our staff
+            # the CUSTOMER's own team/settings are not a claim about our staff —
+            # including the PHRASE forms, which the old adjacent-only guard
+            # rejected (round 19 finding)
             "Review your security settings.",
             "Manage your team in Settings.",
+            "Ask your security team to revoke the key.",
+            "Ask your own security desk to revoke the key.",
             "Suspicious activity flagged on this Organization",
             "Access from a new location: ES",
             "Access from a new location",
