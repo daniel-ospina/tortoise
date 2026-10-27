@@ -1192,6 +1192,37 @@ def test_a_camel_case_declaration_cannot_walk_the_record_down() -> None:
     assert event["harness"] == "h"
 
 
+def test_a_camel_case_declaration_still_reaches_the_max() -> None:
+    """The OTHER half of the spelling rule: the declaration must still be READ.
+
+    Dropping `turnCount` from the payload (the test above) is only half the
+    contract. The declaration is also an INPUT to the three-term
+    `max(declared, attached, floor)` — so a filter applied to one side and not
+    the other deletes the graph's number from the max entirely, and a camelCase
+    session writes `max(attached, floor)` while a snake one writes
+    `max(declared, attached, floor)`. Same graph, two record values, decided by
+    a letter's case. Measured before `_declared`: the camelCase row below
+    produced 12/11 instead of 20/45.
+
+    Both spellings are asserted, and against the record's own `snake()` oracle,
+    so the two rows cannot silently diverge again.
+    """
+    camel = copy_mod.build_session_event(
+        "s1", {"turnCount": 20, "turnMaxIndex": 45}, turn_count=12,
+        max_index=11, event_id="E")
+    snake = copy_mod.build_session_event(
+        "s1", {"turn_count": 20, "turn_max_index": 45}, turn_count=12,
+        max_index=11, event_id="E")
+    assert camel["turn_count"] == snake["turn_count"] == 20
+    assert camel["turn_max_index"] == snake["turn_max_index"] == 45
+    # Two spellings of one column are MAXed, never last-wins: a smaller second
+    # declaration may not walk the larger one down.
+    both = copy_mod.build_session_event(
+        "s1", {"turn_count": 20, "turnCount": 6, "turn_max_index": 45,
+               "turnMaxIndex": 5}, turn_count=12, max_index=11, event_id="E")
+    assert both["turn_count"] == 20 and both["turn_max_index"] == 45
+
+
 def test_the_counts_still_rise_to_an_attached_count_above_the_declaration() -> None:
     """The measured direction the census found (declared=6, attached=12) still wins
     — the rule is MAX, not "trust the declaration"."""

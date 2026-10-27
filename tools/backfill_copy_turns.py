@@ -439,6 +439,34 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
     return floor
 
 
+def _declared(props: dict, column: str) -> int | None:
+    """The graph's DECLARED value for one of the copy's own columns.
+
+    Read by the RECORD's identity rule (`record_projection.snake`), not by a
+    spelling: the same rule `build_session_event` filters the payload with, so
+    the two cannot disagree about what a key means. Without it, the payload
+    filter that drops a camelCase `turnCount` also drops it from the DECLARATION —
+    the value then reaches neither the payload nor the three-term `max()`, and a
+    camelCase session silently loses the graph's declaration from a contract the
+    comment block above states absolutely (`max(declared, attached, floor)`).
+
+    Two spellings of one column are MAXed, not last-wins: every number here is
+    part of a guard against writing DOWN, and taking the smaller of two
+    declarations would walk the record down through the very write the guard
+    exists to prevent. `None` means the graph declared nothing this resolver can
+    read.
+    """
+    from tortoise.record_projection import snake as _record_snake
+    found: int | None = None
+    for prop, value in props.items():
+        if _record_snake(prop) != column:
+            continue
+        measured = census._int_or_none(value)
+        if measured is not None and (found is None or measured > found):
+            found = measured
+    return found
+
+
 def build_session_event(session_id: str, props: dict, *, turn_count: int,
                         max_index: int, event_id: str,
                         floor: dict | None = None) -> dict:
@@ -537,8 +565,8 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     #   survives (pinned through the record's own statement emitter below), and a
     #   first insert takes the column's own NULL: the honest "no count was ever
     #   stated", which is what `created_at` above already argues for.
-    declared_count = census._int_or_none(props.get("turn_count")) or 0
-    declared_max = census._int_or_none(props.get("turn_max_index"))
+    declared_count = _declared(props, "turn_count") or 0
+    declared_max = _declared(props, "turn_max_index")
     # Each key is guarded by ITS OWN measurement: `turn_count > 0` is a count,
     # `max_index >= 0` is a high-water mark, and a caller that passes one without
     # the other must not be handed a synthetic `-1` (the value the block above
