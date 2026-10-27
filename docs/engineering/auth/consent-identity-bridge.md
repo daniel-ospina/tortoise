@@ -228,8 +228,10 @@ claims, and only the second one decides the flow.
 `internal/api/external.go` `GetReferrer` / `flow_state.Referrer` / `getExternalRedirectURL`):
 
 - the `redirect_to` is matched **whole** against each allow-list glob (compiled with separators `'.'`, `'/'`, so
-  `**` crosses `/` while `*` does not) — only the **fragment** is cut before matching, so the **query string is
-  part of the string being matched**;
+  `**` crosses `/` while `*` does not), so the **query string is part of the string being matched**. The
+  **fragment** is cut before matching on `master` (`matchAgainst, _, _ := strings.Cut(redirectURL, "#")`) but
+  **not** on the pinned tags examined (`v2.150.0`, `v2.160.0`, `v2.170.0`), which match the raw string — so on
+  those the fragment is part of the match too. Either way the fragment does not rescue a query-bearing target;
 - ⛔ **the glob list is not always consulted at all.** `IsRedirectURLValid` returns `true` when the target's
   hostname equals `config.SiteURL`'s (`base.Hostname() == refurl.Hostname()`; on the pinned tags examined —
   `v2.150.0`, `v2.160.0`, `v2.170.0` — the test is hostname-only, on `master` it also compares scheme and port),

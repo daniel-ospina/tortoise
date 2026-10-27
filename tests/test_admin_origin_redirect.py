@@ -30,6 +30,7 @@ still reach `premise-labs` untouched.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -280,10 +281,16 @@ def test_auth_subtree_is_not_a_prefix_false_positive(path: str) -> None:
 
 
 def _auth_branch_comment() -> str:
-    """The contiguous `//` block immediately above the `/auth/` 302 branch.
+    """The contiguous `//` block immediately above the `/auth/` 302 branch, trimmed to the
+    paragraph that justifies THAT branch.
 
-    Scoped to that block rather than the whole file so an unrelated comment
-    elsewhere cannot satisfy — or break — the claim this guard pins.
+    Scoped to that block rather than the whole file so an unrelated comment elsewhere cannot
+    satisfy — or break — the claim this guard pins. ⛔ And trimmed at the blank `//` separator,
+    because two rationale paragraphs sit in ONE contiguous `//` run: this one, and the
+    `302, NOT 301` / `OVERRIDES` paragraph below it. The un-trimmed walk returned 47 lines and
+    put a paragraph about the status code inside the scope of assertions about the allow-list
+    — so a legitimate "…is not the only control" down there would red an assertion that has
+    nothing to do with it.
     """
     lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
     branch = next(
@@ -297,6 +304,8 @@ def _auth_branch_comment() -> str:
     start = branch
     while start > 0 and lines[start - 1].lstrip().startswith("//"):
         start -= 1
+    while start < branch and lines[start].strip() == "//":
+        start += 1
     assert start < branch, "the `/auth/` branch lost its rationale comment entirely"
     return "\n".join(lines[start:branch])
 
@@ -353,20 +362,31 @@ def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None
     # was `"refuses a `redirect_to`" not in comment`, which never matched the head text at all
     # (`refuses an UNRECOGNISED `redirect_to``) — so it was vacuous: inverting the sentence's
     # `NOT because` into `Because` re-asserted the refuted mechanism and the assertion still
-    # passed. A blacklist only ever rejects the phrasings its author happened to think of; the
-    # corrected mechanism has to be REQUIRED or the guard cannot see it go away.
+    # passed. A word list only ever rejects the phrasings its author happened to think of.
+    #
+    # ⛔ And a trigger-word list CANNOT police this claim even in principle, because the corrected
+    # text quotes the refuted words inside its own negation ("NOT because GoTrue rejects an
+    # unrecognised target — it does not: it silently substitutes …"). So the guard pins the two
+    # things that must both hold: the correction is STATED, and the refuted claim appears ONLY in
+    # a negated form. The second half is what makes deleting the word `NOT` red.
     assert "silently substitutes" in comment, (
         "the `/auth/*` rationale no longer states that GoTrue silently substitutes the project "
         "Site URL for an unrecognised `redirect_to` and still delivers a live `code` there — the "
         "measured fact the 302 exists because of (docs/ops/auth-email-flows.md §1/§3, #10088)"
     )
-    assert "refuses an unrecognised `redirect_to`" not in comment and (
-        "refuses a `redirect_to`" not in comment
-    ) and "rejects an unrecognised `redirect_to`" not in comment, (
-        "the `/auth/*` rationale is back to arguing from 'GoTrue refuses a redirect_to it does "
-        "not recognise' — it does not: it silently substitutes the Site URL and still delivers "
-        "a live code, which is exactly why the 302 plus the app-origin handler are the control "
-        "here, NOT the allow-list (docs/ops/auth-email-flows.md §1/§3, #10088)"
+    refuted_claim = re.compile(r"(?:refuses?|rejects?) an? unrecogni[sz]ed (?:target|`redirect_to`)")
+    negated_by = re.compile(r"(?:NOT because|does not|doesn't|did not)\s+GoTrue\s*$")
+    unnegated = [
+        m.group(0)
+        for m in refuted_claim.finditer(comment)
+        if not negated_by.search(comment[max(0, m.start() - 80) : m.start()])
+    ]
+    assert not unnegated, (
+        "the `/auth/*` rationale is back to arguing from 'GoTrue refuses/rejects an unrecognised "
+        f"redirect_to' — {unnegated!r} appears un-negated. It does not refuse it: it silently "
+        "substitutes the Site URL and still delivers a live code, which is exactly why the 302 "
+        "plus the app-origin handler are the control here, NOT the allow-list (docs/ops/"
+        "auth-email-flows.md §1/§3, #10088)"
     )
     # #10088 (P2): `IsRedirectURLValid` returns true on `base.Hostname() == refurl.Hostname()`
     # BEFORE it ever walks the glob list, and the project Site URL IS this worker's own origin —
@@ -384,4 +404,16 @@ def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None
         "control, but `IsRedirectURLValid` returns true on a same-hostname target before the "
         "glob loop and the project Site URL is this worker's own origin — so no entry governs "
         "this path and a lane would close #8680 believing the property now holds (#10088 review)"
+    )
+    # ⛔ And require the DENIAL to be present, not merely the overclaim to be absent: a lane can
+    # name the allow-list as the guard without ever typing "only" ("it is the redirect allow-list,
+    # which is the guard here"). Requiring the correction is the right polarity — a reworded but
+    # correct rationale reds cheaply and loudly, while a missing guard is silent. This one is
+    # deliberately phrase-shaped, so a legitimate rewrite may need it updated; that cost is
+    # accepted, and it is the same trade the sibling retry-affordance pin takes.
+    assert re.search(r"not the redirect allow-list", comment, re.IGNORECASE), (
+        "the `/auth/*` rationale does not deny that the redirect allow-list is the guard for "
+        "this path, which is the correction #10088 made — `IsRedirectURLValid` returns true on a "
+        "same-host target before the glob loop, and the project Site URL is this worker's own "
+        "origin, so no entry governs it"
     )

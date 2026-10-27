@@ -196,13 +196,15 @@ export const onRequest: PagesFunction = async (context) => {
   // security.
   //
   // What keeps the redirect safe is upstream of it, and it is ⛔ NOT the redirect allow-list.
-  // GoTrue honours a `redirect_to` on TWO independent grounds (`supabase/auth`,
-  // `internal/utilities/request.go::IsRedirectURLValid`): (a) its host equals the project Site
-  // URL's host — ANY path on that host, with no allow-list entry at all — or (b) it matches one
-  // of the allow-list globs. The project Site URL IS this worker's own origin
-  // (`https://tortoise.premiselabs.co` — the #10088 artefact is the evidence: an unrecognised
-  // target was silently substituted with exactly that origin, live `code` and all), so
-  // `/auth/callback` on THIS host is an authorised target unconditionally: the hostname
+  // GoTrue honours a `redirect_to` without consulting the allow-list at all when its host equals
+  // the project Site URL's host — ANY path on that host, no entry required (`supabase/auth`,
+  // `internal/utilities/request.go::IsRedirectURLValid`; on `master` the test is host + scheme +
+  // port, and on the pinned tags `v2.150.0`/`v2.160.0`/`v2.170.0` it is hostname only — an
+  // ordinary `https` default-port target passes either way; `master` also exempts loopback-IP
+  // targets before the list, which cannot be this origin). The project Site URL IS this worker's
+  // own origin (`https://tortoise.premiselabs.co` — the #10088 artefact is the evidence: an
+  // unrecognised target was silently substituted with exactly that origin, live `code` and all),
+  // so `/auth/callback` on THIS host is an authorised target on every version above: the host
   // comparison returns true BEFORE the allow-list is ever consulted. The entries in
   // `docs/ops/auth-email-flows.md` §3 therefore do not govern this path, and removing the legacy
   // one cannot establish the property. What actually bounds it is this 302 plus the app-origin
