@@ -2497,7 +2497,11 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // returned alongside the code by POST /oauth/consent; `PARAMS.redirect_target`
   // is the one the server embedded at authorize time, which covers the deny
   // path (no server round trip) and a page/API version skew mid-deploy. Both
-  // are server-built; neither is `PARAMS.redirect_uri`.
+  // values are server-BUILT — on a provider return leg the second one is the
+  // server-built value carried through the page's origin-scoped store (#10088),
+  // so it is still never the request string, but the deny path's trust in it
+  // rests on that store being same-origin, not on a server round trip (see the
+  // `authorizeReturnTo` note). Neither is `PARAMS.redirect_uri`.
   function redirectBack(params, target) {
     const dest = target || PARAMS.redirect_target;
     if (!dest) {
@@ -2654,7 +2658,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     if (REQUEST_MISSING) {
       showSignin();
       showError(terminalMessage());
-      disableProviderSignin();
+      disableSigninAffordances();
       return Promise.resolve("missing");
     }
     if (previewInFlight) return previewInFlight;
@@ -2840,18 +2844,24 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       + "(or leave private browsing) and reload, or sign in with email and password below.",
   };
   const PROVIDER_LABEL = { github: "GitHub", google: "Google" };
-  // #10088: the missing-request state is not retryable HERE, so the PROVIDER
-  // buttons have to go with the retry affordance. The round trip cannot recreate
-  // the request, and a click does not fail harmlessly: `stashAuthorizeFlow`
-  // writes a `{client_id: "", …}` entry, `signInWithOAuth` spends a freshly
-  // minted provider code, and the return leg takes that entry, rejects it for
-  // having no client, and renders this identical screen again.
+  // #10088: the missing-request state is not retryable HERE, so the sign-in
+  // controls have to go with the retry affordance. The round trip cannot
+  // recreate the request, and a click does not fail harmlessly:
+  // `stashAuthorizeFlow` writes a `{client_id: "", …}` entry, `signInWithOAuth`
+  // spends a freshly minted provider code, and the return leg takes that entry,
+  // rejects it for having no client, and renders this identical screen again.
+  //
+  // The EMAIL form is the same dead retry and is the third control on that
+  // screen: an email session lands, `runConsentFlow` re-enters its
+  // REQUEST_MISSING branch, and the user is back here with a session the page
+  // still cannot use. It spends no code, but the invariant this PR enforces is
+  // "no control the message does not imply" — the copy's remedy is the CLIENT.
   //
   // Not routed through `renderCapability`: that notice explains an INCAPACITY of
   // the page (no crypto / no store), which is not what happened here, and the
   // terminal message already carries this cause and remedy.
-  function disableProviderSignin() {
-    for (const id of ["btn-github", "btn-google"]) {
+  function disableSigninAffordances() {
+    for (const id of ["btn-github", "btn-google", "btn-email"]) {
       const b = document.getElementById(id);
       b.disabled = true;
       b.setAttribute("aria-disabled", "true");
@@ -2873,7 +2883,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     // #10088: the missing-request state has no round trip it can make — the
     // request it would need cannot be recreated here — so refuse BEFORE the
     // store write and before the provider is asked for a code. The buttons are
-    // disabled in this state (see `disableProviderSignin`); this guard is the
+    // disabled in this state (see `disableSigninAffordances`); this guard is the
     // handler half, so a regressed affordance still cannot spend the round trip.
     if (REQUEST_MISSING) return;
     // #5734: a new user-initiated attempt supersedes a pending refusal, so the
@@ -2916,6 +2926,11 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   document.getElementById("btn-github").onclick = () => signInWithProvider("github");
   document.getElementById("btn-google").onclick = () => signInWithProvider("google");
   document.getElementById("btn-email").onclick = async () => {
+    // #10088: an email session cannot recreate the connection request either, so
+    // this is the same dead retry as the provider buttons. Refused BEFORE
+    // `hideError`, which would otherwise wipe the cause this screen exists to
+    // state, and before `writeRefused` is cleared.
+    if (REQUEST_MISSING) return;
     writeRefused = false;   // a new user-initiated attempt supersedes a refusal
     hideError();
     const email = document.getElementById("email").value.trim();
@@ -3128,10 +3143,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     showError(terminalMessage());
     // #10088: a missing request is not retryable HERE (its copy's remedy is the
     // client), so the affordance stays away — a control the message does not
-    // imply is the state invariant 21 exists to prevent. The provider buttons
-    // are a second retry affordance in this state and go for the same reason.
+    // imply is the state invariant 21 exists to prevent. That covers the retry
+    // button AND every sign-in control `showSignin` leaves on screen (the two
+    // provider buttons and the email form), which are the same dead retry in
+    // another costume.
     if (REQUEST_MISSING) {
-      disableProviderSignin();
+      disableSigninAffordances();
       return;
     }
     showRetrySignin();

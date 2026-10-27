@@ -991,6 +991,14 @@ def test_10088_a_return_with_no_request_fails_closed() -> None:
         f"retry whose own message says it cannot work: {r}"
     )
     assert r["googleDisabled"] is True, r
+    # The THIRD affordance on the screen, and the one a "provider buttons only"
+    # reading misses: an email session lands and `runConsentFlow` re-enters
+    # REQUEST_MISSING, so the user ends up back here. It spends no provider code,
+    # but the invariant is "no control the message does not imply".
+    assert r["emailDisabled"] is True, (
+        f"the missing-request state left the email form live, so the screen still "
+        f"offers a sign-in the message says cannot help: {r}"
+    )
     assert r["navsBeforeClick"] == [], r
     assert r["navsAfterClick"] == [], (
         f"a provider click in the missing-request state navigated (spending a "
@@ -999,6 +1007,29 @@ def test_10088_a_return_with_no_request_fails_closed() -> None:
     assert r["flowEntriesAfterClick"] == [], (
         f"a provider click in the missing-request state stashed a request with no "
         f"client, which the return leg can only reject: {r['flowEntriesAfterClick']}"
+    )
+
+    # The email form carries its OWN handler, so a provider-only pin leaves its
+    # guard unpinned: without it the handler runs `hideError()` and replaces the
+    # cause+remedy with a field-validation message, i.e. the screen stops saying
+    # why it is a dead end. Driven here on an EMPTY form on purpose — that is the
+    # case that reaches `hideError()` without a network call, so the assertion is
+    # about the message the guard protects, not about a token request.
+    email_click = _run("flow_return", search="?code=THECODE", seedVerifier="verifier-abc",
+                       previewOk=True, page=_render_shell(), clickEmail=True)
+    assert email_click["errorVisibleAfterEmailClick"] is True, (
+        f"the email handler cleared the fail-closed message: {email_click}"
+    )
+    assert "connection request" in (email_click["errorTextAfterEmailClick"] or ""), (
+        f"the email handler replaced the cause with a different message, so the "
+        f"user is no longer told the request cannot be recreated here: "
+        f"{email_click['errorTextAfterEmailClick']!r} (was "
+        f"{email_click['errorTextBeforeEmailClick']!r})"
+    )
+    assert (email_click["errorTextAfterEmailClick"]
+            == email_click["errorTextBeforeEmailClick"]), (
+        f"the email handler rewrote the fail-closed message: "
+        f"{email_click['errorTextAfterEmailClick']!r}"
     )
 
 
@@ -2288,6 +2319,10 @@ function innerTarget(assignUrl) {
     // affordance is disabled), so the handler half is pinned too.
     out.githubDisabled = els['btn-github'] ? els['btn-github'].disabled : null;
     out.googleDisabled = els['btn-google'] ? els['btn-google'].disabled : null;
+    // #10088: the THIRD control on that screen. An email session cannot recreate
+    // the request either — it lands, `runConsentFlow` re-enters REQUEST_MISSING,
+    // and the user is back here — so it is pinned with the provider buttons.
+    out.emailDisabled = els['btn-email'] ? els['btn-email'].disabled : null;
     if (opts.clickProvider) {
       out.navsBeforeClick = navs.slice();
       await q('document.getElementById("btn-' + opts.clickProvider + '").onclick()');
@@ -2296,6 +2331,19 @@ function innerTarget(assignUrl) {
       out.flowEntriesAfterClick = Array.from(sessionStorage._map.keys())
         .concat(Array.from(localStorage._map.keys()))
         .filter(function (k) { return k.indexOf('-authorize-flow') >= 0; });
+    }
+    // #10088: the EMAIL form's handler carries its own guard, so it needs its own
+    // observable. Pre-guard it ran `hideError()` before it looked at anything,
+    // which WIPED the cause+remedy this screen exists to state and replaced it
+    // with a field-validation message — so the preserved message is what pins the
+    // guard, and its position ahead of `hideError`.
+    if (opts.clickEmail) {
+      out.errorTextBeforeEmailClick = els['error'] ? String(els['error'].textContent) : null;
+      await q('document.getElementById("btn-email").onclick()');
+      await sleep(30);
+      out.errorVisibleAfterEmailClick = els['error']
+        ? els['error'].classList.contains('visible') : null;
+      out.errorTextAfterEmailClick = els['error'] ? String(els['error'].textContent) : null;
     }
     out.exchangeCount = fetchCalls.filter(function (c) {
       return c.url.indexOf('/auth/v1/token') >= 0;
