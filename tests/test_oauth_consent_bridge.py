@@ -2088,6 +2088,88 @@ def test_a_guessably_short_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
         "a 40-byte key was refused for being 20 characters — the floor is a byte measure")
 
 
+def test_a_padded_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """§2.3 — a padded value is UNPROVISIONED, because the minter does not strip it either.
+
+    Measured before this guard: `CONSENT_TOKEN_SECRET="  <40 k>\\n"` was accepted AND silently
+    normalised — `consent_token_secret()` returned the stripped value — while step 3's minter (the
+    BFF, TypeScript) reads `process.env.CONSENT_TOKEN_SECRET` verbatim. The two sides then HMAC
+    DIFFERENT keys: every redemption answers `401 invalid_token: signature does not verify`, i.e.
+    the whole step-4 flow is dead and the diagnosis blames the token instead of the key. Padding is
+    the normal result of `fly secrets set … < file` and of a pasted secret, so this is the
+    realistic operator mistake; refusing it names the fix at the first request instead of never.
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    for padded in (" " + _TEST_SECRET, _TEST_SECRET + "\n", "\t" + _TEST_SECRET + " "):
+        monkeypatch.setenv("CONSENT_TOKEN_SECRET", padded)
+        assert consent_token_secret() is None, (
+            f"a padded key {padded[:3]!r}… was accepted as the HMAC key — the operator's value "
+            "must never be silently normalised, because the minter does not normalise it")
+        problem = consent_token_secret_problem()
+        assert problem and "whitespace" in problem, problem
+
+    # …and the unpadded value is still exactly what is returned, byte-for-byte.
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token_secret() == _TEST_SECRET
+    assert consent_token_secret_problem() is None
+
+
+def test_a_padded_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
+                                                      monkeypatch) -> None:
+    """The padded-secret refusal is a typed 503, not a 401 that blames the token."""
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", " " + _TEST_SECRET)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind), secret=_TEST_SECRET)
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "temporarily_unavailable", r.text
+    assert "whitespace" in r.json()["error_description"], r.text
+    assert mint_spy == [], "an unprovisioned arm must not mint"
+
+    # …and the arm being off must not take the bearer path with it.
+    ok = _post_bearer(tc, bind)
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_secret_that_is_not_utf8_encodable_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """The `UnicodeEncodeError` arm exists so a lone surrogate is a 503, never a 500.
+
+    A surrogate in the ENV value (not in the token) reaches `len(secret.encode("utf-8"))`. Without
+    this arm the exception escapes `consent_token_secret_problem()` → `verify_consent_token` → the
+    handler's token-arm catch-all, which maps only `RuntimeError` to 503 and everything else to
+    `500 server_error` — on the endpoint whose contract is "never a 500 on unauthenticated input".
+    Deleting the `try/except` the suite would otherwise stay green (measured, review round 4).
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "\udcff" * 32)
+    assert consent_token_secret() is None
+    problem = consent_token_secret_problem()
+    assert problem and "encodable" in problem, problem
+
+
+def test_a_surrogate_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
+                                                         monkeypatch) -> None:
+    """End to end: the surrogate-secret arm answers a typed 503, never a 500."""
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "\udcff" * 32)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # The secret check precedes the parse, so no valid signature is needed to reach it.
+    r = _post_token(tc, "a.b.c", bind)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "temporarily_unavailable", r.text
+    assert "encodable" in r.json()["error_description"], r.text
+    assert mint_spy == [], "an unprovisioned arm must not mint"
+
+
 def test_a_short_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
                                                     monkeypatch) -> None:
     """§2.3 — a guessable key is a forged-`sub` oracle, so it is UNPROVISIONED, end to end.
@@ -2414,6 +2496,41 @@ def test_the_bearer_path_never_consults_the_token_arm(bridge_client, monkeypatch
     assert r.status_code == 200, r.text
     tok = _exchange(tc, client_id=client_id, code=r.json()["code"], verifier=verifier)
     assert tok.status_code == 200, tok.text
+
+
+@pytest.mark.parametrize("value", ["", "   ", False, 0, [], {}])
+def test_a_present_but_falsy_token_never_falls_back_to_the_bearer(
+        bridge_client, mint_spy, bearer_ok, value) -> None:
+    """§9 step 2 — a PRESENT token arm is the only identity input, even when its value is junk.
+
+    `consent_token = body.get("consent_token")` then `if consent_token is None:` is the only branch
+    that decides which identity source authenticates the request. `bearer_ok` seeds a session that
+    WOULD mint (verified below with `_post_bearer`), so a fall-through is observable as a 200
+    rather than as an accident of an unverifiable bearer — and the idiomatic rewrite
+    `if not consent_token:` turns every row here into exactly that fall-through: a request that
+    asserts an identity gets the SESSION's code, which is the mixed-version shape §9's #3559
+    window says must never happen. Asserted on the arm's own error code, because the bearer path
+    also 401s.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # The control: the seeded session DOES mint when no token arm is present at all.
+    control = _post_bearer(tc, bind)
+    assert control.status_code == 200, control.text
+    assert len(mint_spy) == 1, "the bearer path must mint, or the fall-through is unobservable"
+    mint_spy.clear()
+
+    r = _post_token(tc, value, bind)
+    assert r.status_code == 401, r.text
+    assert r.json().get("error") == "invalid_token", (
+        f"a present-but-falsy consent_token ({value!r}) was not refused BY THE TOKEN ARM: "
+        f"{r.text}")
+    assert mint_spy == [], (
+        f"a request carrying consent_token={value!r} minted a code from the BEARER — the token "
+        "arm silently fell through to the session identity")
 
 
 def test_the_bound_redirect_uri_wins_over_a_relaxed_loopback_variant(bridge_client, mint_spy,

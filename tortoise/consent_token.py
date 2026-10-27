@@ -169,11 +169,27 @@ def consent_token_secret_problem() -> str | None:
     wider credential silently becomes an assertion signing key. Refusing here costs one
     typed 503 and one restart with the right value; accepting it costs every account.
     """
-    secret = os.environ.get(_SECRET_ENV, "").strip()
-    if not secret:
+    raw = os.environ.get(_SECRET_ENV, "")
+    if not raw:
         return f"{_SECRET_ENV} is not set"
+    # ⛔ BYTE-EXACT, never normalised. Step 3's minter is the BFF (TypeScript), and it reads
+    # `process.env.CONSENT_TOKEN_SECRET` verbatim — it does not strip. A padded value is the
+    # normal result of `fly secrets set CONSENT_TOKEN_SECRET < file`, of a pasted secret, or of a
+    # value round-tripped through a file, and silently stripping it here would make the two sides
+    # HMAC DIFFERENT keys: every redemption then answers `401 invalid_token: signature does not
+    # verify`, i.e. the whole step-4 flow is dead and the diagnosis blames the token rather than
+    # the key. Treating a padded value as unprovisioned costs one typed 503 at the first request
+    # and names the fix; changing the operator's value silently costs the feature.
+    if raw != raw.strip():
+        return (f"{_SECRET_ENV} has leading or trailing whitespace — the minting side (the BFF, "
+                "§9 step 3) reads the value verbatim, so a padded value is a DIFFERENT HMAC key "
+                "and every redemption would answer `invalid_token`. Set it byte-exact")
+    secret = raw
     for name in _REUSED_KEY_ENVS:
-        if secret == os.environ.get(name, "").strip():
+        other = os.environ.get(name, "")
+        # Compared against BOTH spellings of the reused credential: an operator who padded the
+        # service-role key must not slip past the dedicated-secret rule by that accident.
+        if other and secret in (other, other.strip()):
             return (f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
                     "arm is treated as unprovisioned rather than trusting a reused key")
     try:
@@ -191,8 +207,11 @@ def consent_token_secret() -> str | None:
 
     Read per call, not cached at import: provisioning is an operator action on a running platform,
     and a value cached at import would make a rollback to unset invisible until the next deploy.
+
+    Returned BYTE-EXACT as the operator set it (never stripped) — see the whitespace arm of
+    `consent_token_secret_problem`, which is what makes that safe.
     """
-    return None if consent_token_secret_problem() else os.environ[_SECRET_ENV].strip()
+    return None if consent_token_secret_problem() else os.environ[_SECRET_ENV]
 
 
 def consent_token_issuer() -> str:
