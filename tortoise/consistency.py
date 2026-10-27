@@ -1843,9 +1843,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     def _record_supersede_miss(seq: int, ev: dict) -> None:
         candidate = ev.get("name") if isinstance(ev.get("name"), str) \
             and ev.get("name") else ev.get("id")
-        # #3590 D2: exempt ONLY a target NAME the journal never established, so
-        # this fold agrees with `rebuild_all`'s sweep. A established name (or a
-        # record carrying none) stays `object-superseded-miss` and refuses.
+        # #3590 D2: exempt ONLY a record the journal cannot ADDRESS, so this
+        # fold agrees with `rebuild_all`'s sweep. BOTH limbs are required: the
+        # NAME must be unestablished (no `ObjectRegistered`, no `EntityMutated`
+        # state-op name, no `EventRecorded` mention stub) AND the id, if the
+        # record carries one, must not be an established id. Either one
+        # established — or a record carrying no name at all — stays
+        # `object-superseded-miss` and refuses (#10107 review P2: this comment
+        # previously stated the name limb as if it were the whole rule).
         # #10107 review P2: the SAME predicate the two graph engines use, so
         # the two halves of one classification cannot read different spellings
         # (this fold iterates the RAW journal; they normalise).
