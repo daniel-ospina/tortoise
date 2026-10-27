@@ -168,11 +168,19 @@ export function groupAlerts(alerts, now = new Date(), days = OLD_AFTER_DAYS) {
 function splitByAge(list, now, days) {
   const current = []
   const older = []
+  let recentHidden = 0
   for (const alert of list) {
-    if (isCurrent(alert, now, days)) current.push(alert)
-    else older.push(alert)
+    if (isCurrent(alert, now, days)) {
+      current.push(alert)
+    } else {
+      older.push(alert)
+      // An acknowledged row that is NOT old is recent history, not "nothing in
+      // the last two weeks" — review finding: the empty-state line rendered
+      // above a one-minute-old acknowledged row.
+      if (!isOld(alert, now, days)) recentHidden += 1
+    }
   }
-  return { current, older, total: list.length }
+  return { current, older, total: list.length, recentHidden }
 }
 
 /** True when there is nothing to render at all — the panel stays unmounted. */

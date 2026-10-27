@@ -165,6 +165,19 @@ test('#10156: a bout renders its time range', () => {
   assert.equal(episodeRangeLabel({ count: 1, at: REAL_VELOCITY_ROW.at }), '')
 })
 
+test('#10156: a FRESH acknowledged row does not make the panel say "nothing recent"', () => {
+  // Review finding: the empty-state line rendered above a one-minute-old
+  // acknowledged row, because "acknowledged" and "old" both route to `older`.
+  const fresh = { ...REAL_VELOCITY_ROW,
+    at: new Date(NOW.getTime() - 60 * 1000).toISOString(), acked: true }
+  const grouped = groupAlerts([fresh], NOW)
+  assert.equal(grouped.activity.current.length, 0)
+  assert.equal(grouped.activity.recentHidden, 1,
+    'a recent-but-acknowledged row must be distinguishable from history')
+  const aged = groupAlerts([REAL_VELOCITY_ROW], NOW)
+  assert.equal(aged.activity.recentHidden, 0)
+})
+
 test('#10156: the feed is empty only when BOTH registers are empty', () => {
   assert.equal(isEmptyFeed(groupAlerts([], NOW)), true)
   assert.equal(isEmptyFeed(groupAlerts([REAL_VELOCITY_ROW], NOW)), false)

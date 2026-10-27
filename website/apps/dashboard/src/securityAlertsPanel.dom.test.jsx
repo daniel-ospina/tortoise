@@ -195,6 +195,16 @@ test('#10156: a register that gains its FIRST row keeps its hook order', () => {
   assert.ok(document.body.textContent.includes(ACTIVITY_HEADING))
 })
 
+test('#10156: a FRESH acknowledged row does not print "nothing in the last two weeks"', () => {
+  const fresh = { ...velocity, at: at(0.02), acked: true }
+  const { container } = renderPanel({ alerts: [fresh] })
+  assert.equal(rows(container).length, 0)
+  assert.ok(!/nothing in the last two weeks/i.test(text(container)),
+    'the row is one minute old — "nothing recent" is false')
+  fireEvent.click(screen.getByRole('button', { name: /show 1 older/i }))
+  assert.equal(rows(container).length, 1)
+})
+
 test('#10156: an empty feed renders nothing at all', () => {
   const { container } = renderPanel({ alerts: [] })
   assert.equal(text(container), '')

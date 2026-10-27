@@ -804,17 +804,18 @@ class MemoryAbuseStore:
 
     def recent_alerts(self, org_id: str, limit: int = 20) -> list[dict]:
         with self._lock:
-            rows = [r for r in self.rows
-                    if r["org_id"] == org_id
-                    and r["event_type"] in ALERT_TYPES]
-            # Scan the same bound the Supabase store does, so the two stores
-            # cannot disagree about where an episode starts or when a count is
-            # truncated (see ``_ALERT_SCAN``).
-            rows = sorted(rows, key=lambda r: r["created_at"],
+            alerts_only = [r for r in self.rows
+                           if r["org_id"] == org_id
+                           and r["event_type"] in ALERT_TYPES]
+            # Saturation is measured BEFORE the slice, on the population the
+            # slice cuts — a count taken after it is always exactly
+            # ``_ALERT_SCAN`` and could never say "there may be more".
+            scanned = len(alerts_only)
+            rows = sorted(alerts_only, key=lambda r: r["created_at"],
                           reverse=True)[:_ALERT_SCAN]
             acks = _acks_from_rows(self.rows, org_id)
         return _alert_feed(rows, acks=acks, limit=limit,
-                           scan_saturated=len(rows) >= _ALERT_SCAN)
+                           scan_saturated=scanned > _ALERT_SCAN)
 
     def alert_acks(self, org_id: str) -> set[str]:
         with self._lock:
@@ -1041,9 +1042,18 @@ class SupabaseAbuseStore:
                      ("event_type", "neq", EVENT_KEY_CREATE)],
             order="created_at.desc", limit=_ALERT_SCAN,
         )
+        # #10156 review finding: saturation must be measured on the ROW SCAN,
+        # i.e. BEFORE the alert-type filter. Computing it after the filter (as
+        # this did) is true only when ≥500 *alert* rows came back from a
+        # 500-row mixed scan, which is the rare case — so in production a cut
+        # bout was reported as an exact count with its older half silently
+        # missing, and no `+`. Both stores now answer the same QUESTION ("did
+        # the scan that produced these rows hit its budget?"), each with the
+        # budget its own read actually has.
+        scanned = len(rows)
         rows = [r for r in rows if r.get("event_type") in ALERT_TYPES]
         return _alert_feed(rows, acks=self.alert_acks(org_id), limit=limit,
-                           scan_saturated=len(rows) >= _ALERT_SCAN)
+                           scan_saturated=scanned >= _ALERT_SCAN)
 
     def alert_acks(self, org_id: str) -> set[str]:
         """The episode keys this org has ACKNOWLEDGED (#10156).
@@ -1052,15 +1062,24 @@ class SupabaseAbuseStore:
         scan is a 500-row newest-first WINDOW, so an ack written after 500
         later events would fall out of it and the acknowledgement would
         silently evaporate — the one failure mode #10156 says a dismissal must
-        not have. Failure is fail-soft (the caller renders every row as
-        un-acknowledged rather than 500ing the appeal flow); an ack that cannot
-        be read is reported as absent, never as present.
+        not have.
+
+        FAIL-SOFT, in the direction that cannot hide an alert: a failed read
+        returns the empty set, so every row renders as un-acknowledged and
+        stays VISIBLE. Raising would be worse than useless here —
+        ``GET /v1/team/alerts`` catches, so a throw would blank the whole feed
+        and take the ``suspend`` row off the appeal surface with it (review
+        finding: the docstring promised this and the code raised).
         """
-        rows = self._cp.query(
-            "abuse_events", select=["org_id", "event_type", "details"],
-            filters=[("org_id", "eq", org_id),
-                     ("event_type", "eq", EVENT_ALERT_ACK)],
-        )
+        try:
+            rows = self._cp.query(
+                "abuse_events", select=["org_id", "event_type", "details"],
+                filters=[("org_id", "eq", org_id),
+                         ("event_type", "eq", EVENT_ALERT_ACK)],
+            )
+        except Exception:
+            logger.debug("alert ack read failed (%s)", org_id)
+            return set()
         return _acks_from_rows(rows, org_id)
 
     def record_alert_ack(self, org_id: str, episode: str,
@@ -1203,6 +1222,18 @@ def _episode_key(alert: dict) -> str:
     derived from live state (the count, the last-seen time) would re-key an
     acknowledged episode the moment another window fires and the ack would
     silently evaporate. Identity + start cannot move while the episode is open.
+
+    ⚠️ STATED TRADE-OFF, because it is the one path by which an acknowledgement
+    can hide something: an acked bout that Grows inside its own gap chain (more
+    windows firing, no silence longer than ``EPISODE_GAP_S``) keeps the same key,
+    so it stays acknowledged and stays behind "Show older". That is the
+    requested semantics — one episode, one decision — and the alternative
+    (re-keying on count) would break the ack the first time another window
+    fired. The upper bound on the risk is the gap chain itself (3h of unbroken
+    activity) plus, on the incident register, the fact that a suspension writes
+    its OWN event with its own episode key. A future lane that wants an
+    escalation to re-open an acked episode should add a threshold ("re-alert
+    above N× the acknowledged count") rather than re-key on every window.
     """
     etype, subject = _episode_identity(alert)
     parts = [str(etype)] + [str(p) for p in (subject or ())]
@@ -1672,13 +1703,18 @@ class ReadVelocityTracker:
                     k: v for k, v in self._by_org.items()
                     if any(t > cutoff for t in v)})
             # #10156: the calibration maps grow one entry per (scope, id) EVER
-            # seen, so they need the same bound. A scope whose observation
+            # seen, so they need the same bound. The gate is on
+            # ``_window_started`` as well as ``_baseline`` — review finding: a
+            # scope read ONCE never completes a window, so it never enters
+            # ``_baseline``, and a baseline-only gate left ``_window_started``
+            # growing with every key id ever seen while the map it tested stayed
+            # empty (green test, unbounded process). A scope whose observation
             # window has expired is dropped with its baseline: keeping the
-            # baseline while discarding the counts would let a scope that went
-            # quiet for hours be judged against a rate it no longer has (and a
-            # dropped entry is the safe direction — it falls back to the
-            # absolute floor, which never suppresses an alert).
-            if len(self._baseline) > 10_000:
+            # baseline while discarding the counts would judge a scope that went
+            # quiet against a rate it no longer has, and a dropped entry is the
+            # safe direction — it falls back to the absolute floor, which never
+            # suppresses an alert.
+            if len(self._window_started) > 10_000 or len(self._baseline) > 10_000:
                 live = {k for k, ts in self._window_started.items()
                         if now - ts < self.window_s}
                 self._baseline = {k: v for k, v in self._baseline.items()

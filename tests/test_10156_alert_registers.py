@@ -40,8 +40,6 @@ import itertools
 import re
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from tests.fake_control_plane import FakeControlPlane
 from tortoise import abuse
 from tortoise.abuse import (
@@ -238,6 +236,44 @@ class TestEpisodeGrouping:
         assert alerts[-1]["truncated"] is True
         assert alerts[-1]["count"] == len(rows)
 
+    def test_the_MEMORY_store_computes_saturation_itself(self):
+        """#10156 review finding: the only truncation test called `_alert_feed`
+        with `scan_saturated=True` handed to it, so no test exercised the STORE's
+        own computation — which is where the production bug was (the Supabase
+        store measured saturation AFTER filtering, so it was true only when ≥500
+        *alert* rows arrived in a 500-row mixed scan, i.e. almost never)."""
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        store = MemoryAbuseStore()
+        for i in range(abuse._ALERT_SCAN + 5):
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=base + timedelta(minutes=5 * i))
+        alerts = store.recent_alerts(ORG)
+        assert alerts[-1]["truncated"] is True, (
+            "the store cut the scan and did not say so — the count is a floor")
+
+    def test_the_SUPABASE_store_measures_saturation_BEFORE_filtering(self):
+        """The same question at the other store, where the bug actually was.
+
+        The fake returns `_ALERT_SCAN` rows of MIXED types (>half non-alert), so
+        a saturation test taken after the alert-type filter reads ~40% and is
+        False. It must be measured on the row scan instead."""
+        base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
+        rows = []
+        for i in range(abuse._ALERT_SCAN):
+            is_alert = i % 3 == 0
+            rows.append({
+                "id": i + 1, "org_id": ORG,
+                "event_type": EVENT_READ_VELOCITY if is_alert else "flag_clear",
+                "details": ({"scope": "key", "id": KEY} if is_alert else {}),
+                "created_at": (base + timedelta(minutes=5 * i)).isoformat(),
+            })
+        fake = FakeControlPlane(tables={"abuse_events": rows})
+        alerts = SupabaseAbuseStore(fake).recent_alerts(ORG)
+        assert alerts, "the fixture must produce at least one episode"
+        assert alerts[-1]["truncated"] is True, (
+            "the row scan was cut but the store reported an exact count")
+
     def test_grouping_is_pure_and_keeps_the_newest_row_s_fields(self):
         """The folded episode answers with the NEWEST row's label/message, so
         every pre-existing consumer and its pins keep working."""
@@ -318,14 +354,29 @@ class TestAcknowledgementPersistence:
 
     def test_an_unreadable_ack_register_reads_as_unacknowledged(self):
         """Fail-soft in the honest direction: fail to read is ABSENT, never
-        PRESENT (a phantom acknowledgement would hide a live alert)."""
+        PRESENT (a phantom acknowledgement would hide a live alert) — and it
+        must NOT throw, because `GET /v1/team/alerts` catches everything, so a
+        throw blanks the whole feed and takes the `suspend` row off the appeal
+        surface with it (#10156 review finding: this test previously asserted a
+        raise while its name, and the docstring it documents, said the
+        opposite)."""
         class _Broken:
-            def query(self, *a, **kw):
-                raise RuntimeError("control plane down")
+            def query(self, table, **kw):
+                # The ack read fails; the alert scan succeeds.
+                if any(f[0] == "event_type" and f[1] == "eq"
+                       and f[2] == EVENT_ALERT_ACK for f in kw.get("filters", [])):
+                    raise RuntimeError("control plane down")
+                return [{"event_type": EVENT_SUSPEND,
+                         "created_at": "2026-09-25T17:19:05+00:00",
+                         "details": {}}]
 
         store = SupabaseAbuseStore(_Broken())
-        with pytest.raises(RuntimeError):
-            store.alert_acks(ORG)
+        assert store.alert_acks(ORG) == set()
+        feed = store.recent_alerts(ORG)
+        assert [a["type"] for a in feed] == [EVENT_SUSPEND], (
+            "a failed ack read must not remove the alert feed — on a suspended "
+            "org that feed IS the appeal explanation")
+        assert feed[0]["acked"] is False
 
     def test_acks_are_org_scoped(self):
         store = MemoryAbuseStore()
@@ -415,7 +466,6 @@ class TestVelocityCopy:
 # ── 5. Calibration (#10156 step 4) ──────────────────────────────────────────
 
 WINDOW = 300
-REAL_WINDOWS = len(REAL_READ_VELOCITY_TS)
 
 
 def _drive(tracker, key_id, org_id, per_window, windows, start=1_000_000.0):
@@ -490,9 +540,13 @@ class TestCalibration:
 
         tracker._sample_baseline = per_read  # the mutated implementation
         fires = _drive(tracker, "busy-key", "org", 130, 20)
-        assert len(fires) <= 1, (
-            "this test asserts the MUTATION's behaviour, so the pin above is "
-            f"known to discriminate: got {len(fires)} fires")
+        # The mutated implementation goes SILENT (0), the shipped one fires
+        # exactly once (`test_a_key_at_its_own_normal_rate_does_not_keep_alerting`
+        # pins the 1). Asserting `<= 1` here would have passed under BOTH and
+        # proved nothing (#10156 review finding).
+        assert fires == [], (
+            "the per-read mutation must silence the detector; the pair of tests "
+            f"is only discriminating if this is 0 and the other is 1: got {fires}")
 
     def test_a_non_positive_threshold_keeps_its_fail_closed_semantics(self):
         """#5493: threshold 0 is a configured deny-ALL. Calibration must not
@@ -531,26 +585,26 @@ class TestCalibration:
         monkeypatch.delenv("TORTOISE_ABUSE_READ_THRESHOLD", raising=False)
         assert ReadVelocityTracker().threshold == 100
 
-    def test_the_baseline_maps_are_bounded_like_the_count_buckets(self):
+    def test_the_calibration_maps_are_bounded_like_the_count_buckets(self):
         """The calibration added three per-(scope, id) maps, and they grow with
-        every id EVER seen unless pruned. A dropped baseline is the safe
-        direction (the scope falls back to the absolute floor, which never
-        suppresses an alert), so the bound must actually fire."""
+        every id EVER seen unless pruned.
+
+        THIS ASSERTION IS ON `_window_started`, NOT `_baseline`, and that is the
+        point (#10156 review finding): a scope read ONCE never completes a
+        window, so it never enters `_baseline` — the earlier version of this test
+        asserted on a value measured at 0 and passed without the prune ever
+        running, while the map that actually leaked grew unbounded.
+        """
         tracker = ReadVelocityTracker(threshold=100, window_s=WINDOW)
-        now = 1_000_000.0
+        start = 1_000_000.0
         for i in range(10_050):
-            tracker.record_read(f"k{i}", None, now=now)
-        assert len(tracker._baseline) <= 10_050
+            tracker.record_read(f"k{i}", None, now=start)
+        assert len(tracker._window_started) >= 10_000, len(tracker._window_started)
         # A later window, long after every earlier scope went quiet, must prune.
-        tracker.record_read("k-late", None, now=now + 10 * WINDOW)
-        assert len(tracker._baseline) < 10_050, len(tracker._baseline)
+        late = start + 10 * WINDOW
+        tracker.record_read("k-late", None, now=late)
+        assert len(tracker._window_started) < 100, len(tracker._window_started)
         # The new scope is tracked from this call (its baseline only exists once
         # a window COMPLETES, which is why the assertion is on the window map).
         assert ("key", "k-late") in tracker._window_started
 
-    def test_a_steady_high_rate_still_reports_one_episode(self):
-        """What the customer sees after the fix: the bout is ONE row with ×N,
-        so the signal is not lost — it is stated once, with a count, instead of
-        thirteen times as thirteen separate alerts."""
-        assert REAL_WINDOWS == 16
-        assert sum(1 for _ in REAL_READ_VELOCITY_TS) == 16

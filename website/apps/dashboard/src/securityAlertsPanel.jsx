@@ -106,7 +106,7 @@ function Register({ heading, lead, className, group, now, onAcknowledge,
     <section className={`overview ${className}`} aria-label={heading}>
       <h2>{heading}</h2>
       <p className="dim small">{lead}</p>
-      {group.current.length === 0 && olderHidden ? (
+      {group.current.length === 0 && olderHidden && group.recentHidden === 0 ? (
         <p className="dim small">{NOTHING_RECENT}</p>
       ) : null}
       <ul>
