@@ -89,8 +89,14 @@ export const ALL_RECENT_ACKED = 'Everything shown here is acknowledged.'
 //: was cut. There is no row to carry a `truncated` marker (that flag rides on a
 //: row), and "nothing here" would be a false claim about a window full of rows
 //: that can never render (#10156 round-8 review finding).
+//:
+//: "MAY be full", not "is full": the server reports `scan_saturated` for the
+//: genuine truncation AND for a probe it could not complete (a failed probe must
+//: not read as "complete"), and a bool cannot carry that distinction. "May be" is
+//: true in both cases; "is" would assert a measurement we do not have — the same
+//: defect as the incident this PR removes, one layer down (round-24 review).
 export const SCAN_SATURATED_EMPTY = ("This Organization's newest activity is "
-  + 'entirely routine, and our alert window is full — logs are intact, but '
+  + 'entirely routine, and our alert window may be full — logs are intact, but '
   + 'older alerts may sit outside the window we read.')
 
 //: Shown when the alert read itself FAILED. Distinct from both lines above,

@@ -149,6 +149,21 @@ test('#10156: feedStateOf keeps the three feed states distinct', () => {
     { alerts: [], saturated: false, unavailable: false })
 })
 
+test('#10156: "the window may be full" — unknown is never rendered as measured', () => {
+  // Round-24 review finding. The route reports `scan_saturated` for a genuine
+  // truncation AND for a probe it could NOT complete (a failed probe must not
+  // read as "complete"), and a bool cannot carry that distinction. So the copy
+  // must be true in both cases: "may be full" is, "is full" asserts a
+  // measurement we do not have — the same defect as the incident this PR
+  // removes, one layer down.
+  assert.match(SCAN_SATURATED_EMPTY, /may be full/i)
+  assert.doesNotMatch(SCAN_SATURATED_EMPTY, /\bis full\b/i,
+    'the panel cannot know the window IS full when the probe itself failed')
+  // …and it must still not read as either an all-clear or an incident.
+  assert.doesNotMatch(SCAN_SATURATED_EMPTY, /nothing (?:happened|was changed)/i)
+  assert.doesNotMatch(SCAN_SATURATED_EMPTY, /suspicious/i)
+})
+
 test('#10156: the two registers do not share copy', () => {
   assert.notEqual(ACTIVITY_HEADING, ALERTS_HEADING)
   assert.notEqual(ACTIVITY_LEAD, ALERTS_LEAD)
