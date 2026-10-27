@@ -120,8 +120,8 @@ exact PR head is the review gate, and self-review is not a review).
   the descriptor exists to re-create) → `test_a_direct_edge_repoint_is_still_a_plain_upsert` +
   PGlite cases 1–2 exercising the structural route only.
 - R4 **the record is looser than the fold** on the Source arms (`aboutDocument` on a provenance
-  `:Source`; an `extractedFrom` fan-out) → `test_aboutdocument_stays_resolve_only_and_document_only`
-  + PGlite case 4.
+  `:Source`; an `extractedFrom` fan-out) → `test_aboutdocument_stays_resolve_only_and_document_only` +
+  PGlite case 4.
 - R5 **the restated constants drift** from `live.py` / `projection/edges.py` → the two pin tests.
 - R6 **an id-reuse point loses its own edges** (`_src_is_terminal`) → the terminal gate is asserted
   present in both statements; the #2488 survivor-filter asymmetry is NAMED in the code and in §Gaps
