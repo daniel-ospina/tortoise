@@ -254,7 +254,15 @@ ARCH_LABEL = {
 #: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool deliberately
 #: claims only `ubuntu-latest` and never one of these (`docs/ops/ci-runner-x64.md:25-26`), because
 #: a job that pins a version asks for the GitHub-hosted image specifically.
-VERSION_PINNED_HOSTED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*", re.IGNORECASE)
+#:
+#: The class is bounded by what GitHub's hosted images ANSWER TO, not by a spelling: the same label
+#: table publishes the arm64 variants `ubuntu-24.04-arm` / `ubuntu-22.04-arm` / `ubuntu-26.04-arm`
+#: (`github/docs` `data/reusables/actions/supported-github-runners.md`, checked 2026-10-27), and a
+#: job pinned to one of those is escaping this pool exactly as a bare version pin does — this pool
+#: IS the ARM64 one (`docs/ops/ci-runner-x64.md:30`), so the suffixed shape is the variant most
+#: likely to be attached to it out of band. A custom label that merely starts `ubuntu-<digits>`
+#: (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be preserved.
+VERSION_PINNED_HOSTED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*(?:-arm)?", re.IGNORECASE)
 
 DEFAULT_REPO = "daniel-ospina/tortoise"
 
@@ -1390,7 +1398,8 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     other label (a custom tier, a pool tag, `ubuntu-latest` while the fallback is engaged) is
     PRESERVED, because a workflow targeting it would otherwise queue forever.
 
-    ⛔ A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04`-shaped) is the ONE exception, and it is
+    ⛔ A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04`-shaped, INCLUDING GitHub's arm64 spelling
+    `ubuntu-24.04-arm` — see `VERSION_PINNED_HOSTED_LABEL`) is the ONE exception, and it is
     dropped rather than preserved. The recorded invariant is that the pool claims `ubuntu-latest`
     and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`), and that label is
     precisely what a lane pins to ESCAPE this pool. Preserving it on re-registration is how a label

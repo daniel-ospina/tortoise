@@ -42,6 +42,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "runner_autoscale.py"
 REPO = "daniel-ospina/tortoise"
 
+#: A pool label set carrying BOTH hosted version spellings a repair must DROP (the bare shape and
+#: GitHub's arm64 variant, `data/reusables/actions/supported-github-runners.md`) plus the labels it
+#: must PRESERVE — the fallback, a custom tag, and `ubuntu-2204-tools`, which merely starts
+#: `ubuntu-<digits>` and is not a hosted label. Shared by the test and its mutation fixture so the
+#: two cannot drift into exercising different label sets.
+POOL_LABELS_WITH_VERSION_PINS = "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,ubuntu-24.04-arm,gpu,ubuntu-2204-tools"
+
 # ── fakes ────────────────────────────────────────────────────────────────────────────────────
 GH_FAKE = textwrap.dedent("""\
     #!/usr/bin/env bash
@@ -809,20 +816,29 @@ def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
     see. `_preserve_labels()` kept every non-host-derived label, so one such attachment would be
     re-applied at every repair and every observer pin would silently stop pinning. It is dropped
     now; the custom and fallback labels must still survive (that is the neighbouring test).
+
+    ⛔ The arm64 spelling `ubuntu-24.04-arm` is the same class, not a near-miss: GitHub publishes
+    it as a hosted label (`github/docs` `data/reusables/actions/supported-github-runners.md`), and
+    THIS pool is the ARM64 one (`docs/ops/ci-runner-x64.md:30`), so it is the variant most likely
+    to be attached out of band. A narrower match preserved it forever while the docstring and
+    `docs/ops/ci-runner-x64.md` promised the whole `ubuntu-<version>` family — this arm is what
+    fails when the two disagree again. `ubuntu-2204-tools` is the opposite boundary: a CUSTOM
+    label that merely starts `ubuntu-<digits>` and must NOT be eaten by a widened match.
     """
     e = env(
-        pool=[("r1", "offline", False, "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,gpu")],
+        pool=[("r1", "offline", False, POOL_LABELS_WITH_VERSION_PINS)],
         installs=[("gh-runner-x64-1", "r1")],
         systemctl_rc=1,
     )
     e.record()
     cfg = e.config()
-    assert "ubuntu-24.04" not in cfg, (
-        "the pool kept a VERSION-PINNED hosted label on re-registration — every job pinned to "
-        f"it (the four fleet observers) would be served by the pool it pinned to escape: {cfg}"
-    )
-    assert "--labels self-hosted-x64,ubuntu-latest,gpu" in cfg, (
-        f"dropping the version pin must not cost the custom/fallback labels: {cfg}"
+    for pinned in ("ubuntu-24.04", "ubuntu-24.04-arm"):
+        assert pinned not in cfg, (
+            f"the pool kept a VERSION-PINNED hosted label ({pinned}) on re-registration — every job "
+            f"pinned to it would be served by the pool it pinned to escape: {cfg}"
+        )
+    assert "--labels self-hosted-x64,ubuntu-latest,gpu,ubuntu-2204-tools" in cfg, (
+        f"dropping the version pins must not cost the custom/fallback labels: {cfg}"
     )
 
 
@@ -1528,16 +1544,19 @@ MUTATIONS = {
     "version-pinned-hosted-label-preserved": dict(
         # The pool claims `ubuntu-latest` and never `ubuntu-<version>`; a version pin preserved
         # through re-registration is the 2026-10-24 drift made permanent, and it un-pins every
-        # observer job that names it.
+        # observer job that names it. Both hosted spellings are on the fixture — the bare one and
+        # GitHub's arm64 variant — so a match narrowed back to the bare shape is caught here.
         old="and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)",
         new="and True",
         kwargs=dict(
-            pool=[("r1", "offline", False, "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,gpu")],
+            pool=[("r1", "offline", False, POOL_LABELS_WITH_VERSION_PINS)],
             installs=[("gh-runner-x64-1", "r1")],
             systemctl_rc=1,
         ),
         args=(),
-        wrong=lambda r: "ubuntu-24.04" in r.get("_config", ""),
+        wrong=lambda r: any(
+            p in r.get("_config", "") for p in ("ubuntu-24.04", "ubuntu-24.04-arm")
+        ),
     ),
     "foreign-listener-not-counted": dict(
         old="        live = _live()",

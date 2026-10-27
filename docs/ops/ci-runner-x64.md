@@ -58,9 +58,12 @@ and an unreadable state is a refusal (exit 2), never a guess. The gate's state s
 of truth for when the pool serves CI. What changes is only *which architecture* may serve the
 fallback — which the decision never specified. The separate decision that pins legs to
 `ubuntu-<version>` (the pool is ~2x slower and killed `test-slow` at its watchdog, #6897/#7867)
-is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label — the
-installer cannot emit one, and `tools/runner_autoscale.py::_preserve_labels` now DROPS one rather
-than preserving it on re-registration (so an out-of-band attachment cannot become permanent).
+is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label — including
+the arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`,
+`ubuntu-26.04-arm`), which `_preserve_labels` drops too, so a suffixed pin cannot become permanent
+either — the installer cannot emit one, and `tools/runner_autoscale.py::_preserve_labels` DROPS
+rather than preserves one on re-registration (so an out-of-band attachment cannot become
+permanent).
 Nothing reads the LIVE label set: re-measure `gh api repos/<owner>/<repo>/actions/runners` if a
 runner's labels are re-cut.
 
