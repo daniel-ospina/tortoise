@@ -216,6 +216,30 @@ fi
 # branch surface's "targeted head-ref lookup could not run" path stopped being
 # exercised by the integration fixtures. A stub that answers an endpoint it does
 # not model is a fixture lying about the wire.
+# #10174: the MERGED LEFTOVER note asks the ONE question only GitHub can answer
+# authoritatively — does the remote still hold this branch? (`api
+# repos/<slug>/branches/<name>`; the issue's own measurement on #3524 read a 404
+# there and wrote `branch API 404` in its evidence table). The default is 404:
+# the merged-leftover population is branches whose remote counterpart was deleted
+# at merge, so "gone" is the honest default for a fixture that models one. The
+# other two states are opt-in seams — a fixture body for "still there", and
+# `GH_STUB_REMOTE_BRANCH_FAIL` for an unreadable read (the note must never
+# narrate a failed read as GONE, nor let it undo the demotion).
+if [ "$1" = "api" ] && [[ "$2" =~ ^repos/[^/]+/[^/]+/branches/ ]]; then
+  # ONE line per INVOCATION: the cost bound (#10174) is "only for a ref the merge
+  # history already demoted", and a log is what makes that falsifiable — a
+  # regressed per-branch read would append once per LOCAL BRANCH.
+  printf '%s\n' "$*" >> "$d/remote-branch-calls.log"
+  printf '%s\n' "$@" > "$d/remote-branch-argv.txt"
+  if [ "${GH_STUB_REMOTE_BRANCH_FAIL:-0}" = "1" ]; then
+    echo "gh-stub: could not connect to api.github.com" >&2
+    exit 1
+  fi
+  if [ -f "$d/remote_branch.json" ]; then cat "$d/remote_branch.json"; exit 0; fi
+  echo "gh-stub: HTTP 404: Not Found (https://api.github.com/$2)" >&2
+  exit 1
+fi
+
 if [ "$1" = "api" ] && [[ "$2" =~ ^repos/[^/]+/[^/]+/pulls\?state=open ]]; then
   printf '%s\n' "$@" > "$d/open-prs-rest-argv.txt"
   if [ "${GH_STUB_OPEN_PR_REST_FAIL:-0}" = "1" ]; then
@@ -2339,8 +2363,8 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_closed_pr_without_head_sha_cannot_demote_a_branch(self):
         # ⛔ THE CONTRACT REQUIRED THE HARVEST'S GATE AND NOT ITS DATA.
         # `mergedAt` was required; `headSha` — the field the harvest actually
-        # READS to populate `merged_head_shas` — was not. Absence read as the
-        # empty string, `if _sha:` was False, the set stayed empty, and the
+        # READS to populate `merged_heads` — was not. Absence read as the
+        # empty string, `if _sha:` was False, the map stayed empty, and the
         # squash-merge demotion simply did not run: #5186's resignal died
         # silently while the run reported a clean surface. This is the same
         # class of hole `_merged_pr_fixture`'s docstring records one key over
@@ -2618,11 +2642,11 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_branch_still_blocks_when_the_closed_pr_sample_fails(self):
         # ⛔ THE ONE PLACE THE ADVISORY/BLOCKING SPLIT IS NOT STRUCTURAL, pinned
-        # so it cannot drift. `merged_head_shas` — the squash-merge test's ONLY
+        # so it cannot drift. `merged_heads` — the squash-merge test's ONLY
         # evidence — is harvested from the ADVISORY closed-PR sample and consumed
         # by the BLOCKING branch scan. That is deliberate (D4: the sample is
         # already fetched), and it is safe because it can only ever REMOVE a hit:
-        # when the sample cannot be read, the set stays EMPTY and every branch
+        # when the sample cannot be read, the map stays EMPTY and every branch
         # stays BLOCKING.
         #
         # So the failure direction is fail-CLOSED, and this asserts it: a branch
@@ -2632,7 +2656,7 @@ class CollisionPreflightTest(unittest.TestCase):
         _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         _git(self.repo, "branch", f"fix/{ISSUE}-mine")
         # A malformed element: `_require_pr_dicts` refuses it, so the harvest
-        # never runs and `merged_head_shas` stays empty. Written DIRECTLY,
+        # never runs and `merged_heads` stays empty. Written DIRECTLY,
         # because the fixture normalizer itself rejects a non-object element.
         (self.gh_dir / "closed_prs.json").write_text(json.dumps([None]))
         rc, out = self.run_tool(issue=ISSUE)
@@ -5647,7 +5671,7 @@ class CollisionPreflightTest(unittest.TestCase):
         re-keys the payload — so the only shape the scanner can ever see is the
         projected one. This fixture previously supplied `head: {ref, sha}`, a
         nested object the projection never produces: the harvest read
-        `_pr.get("head")`, always got None, and `merged_head_shas` was ALWAYS
+        `_pr.get("head")`, always got None, and `merged_heads` was ALWAYS
         EMPTY IN PRODUCTION. #5186's primary predicate was therefore dead code,
         and these tests passed anyway because the `gh` stub cats its fixture and
         never executes `--jq`. A fixture must model the wire, not the wish.
@@ -5742,6 +5766,233 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("matched issue-number", out)
+
+    # ── MERGED LEFTOVERS: the ref IS the merged artifact (#10174) ───────────
+    #
+    # #5186/#5485 already demote a squash-merged ref. What was MISSING is the
+    # report a reader needs to act on it: WHICH pull request landed it, and
+    # whether the remote still holds the branch. Without those two data the row
+    # reads as "a branch with a matching number that cannot block" — auditable
+    # by nobody, which is the property that gets a gate overridden.
+
+    def _diverged_squash_merged_ref(self, ref: str,
+                                    pr_number: int = 4242) -> str:
+        """A local ref whose tip is a MERGED PR's head and is NOT an ancestor.
+
+        The shape #10174 measured on the owner's box: the PR was SQUASH-merged,
+        so its commits never entered main, the branch is `diverged` (ahead of
+        main by its own commits, behind by main's), and no ancestry test can see
+        the landing. Returns the tip sha, which the merged-PR fixture must name.
+        """
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / "the-work.txt").write_text("landed by the PR\n")
+        _git(self.repo, "add", "the-work.txt")
+        _git(self.repo, "commit", "-qm", "the work the PR landed")
+        tip = self._git_out("rev-parse", ref)
+        # main moves on WITHOUT this commit — a squash merge's signature. The
+        # branch is therefore DIVERGED, not "behind": no ancestor test can demote it.
+        _git(self.repo, "checkout", "-q", "main")
+        (self.repo / "main-moves.txt").write_text("main moved\n")
+        _git(self.repo, "add", "main-moves.txt")
+        _git(self.repo, "commit", "-qm", "main moves on")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertNotIn(
+            tip, self._git_out("rev-list", "--first-parent", "origin/main").splitlines(),
+        )
+        self.gh_fixtures(closed_prs=[{
+            "number": pr_number, "title": "the PR that landed it", "body": "",
+            "state": "closed", "headRefName": ref, "headSha": tip,
+            "mergedAt": "2026-10-27T04:44:04Z",
+        }])
+        return tip
+
+    @staticmethod
+    def _branch_rows(out: str, ref: str) -> list[str]:
+        return [ln for ln in out.splitlines()
+                if ln.strip().startswith("[local branches]") and ref in ln]
+
+    def test_diverged_squash_merged_leftover_is_advisory_and_names_the_pr(self):
+        # THE EXACT SHAPE #10174 REPRODUCED, asserted end to end: a `diverged`
+        # local ref whose merged PR has the SAME head SHA must not block, must
+        # still be REPORTED, and must NAME the pull request — the datum that
+        # turns "some branch cannot block" into "this ref is the artifact of
+        # PR #4242, which is already in main; clean it up".
+        ref = f"feat/{ISSUE}-consent-token-as-half"
+        self._diverged_squash_merged_ref(ref)
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        rows = self._branch_rows(out, ref)
+        self.assertTrue(rows, out)
+        row = rows[0]
+        # Non-blocking, and reported rather than dropped.
+        self.assertIn("(weak)", row)
+        self.assertNotIn("(number)", row)
+        # …and it says what it is, by name, so a reader can act.
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("PR #4242", row)
+        self.assertIn("squash-merged", row)
+        # The remote counterpart is gone (the stub's default 404), which is the
+        # pair of facts that makes "no lane is live" the strongest reading.
+        self.assertIn("remote counterpart", row)
+        self.assertIn("GONE", row)
+        # ⛔ THE COST BOUND (#10174 item 4): the remote read is paid ONCE for the
+        # one demoted ref — never once per local branch. A per-branch read is the
+        # shape this test exists to refuse: ~1,250 refs before every dispatch.
+        calls = (self.gh_dir / "remote-branch-calls.log").read_text().splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn(f"branches/feat/{ISSUE}-consent-token-as-half", calls[0])
+
+    def _remote_branch_fixture(self, ref: str, sha: str) -> None:
+        """The POST-`--jq` shape the branch API read actually returns.
+
+        ⛔ BOTH KEYS, and `sha` is not decoration: the reader compares the remote tip
+        with the demoted local tip, so a fixture carrying only `name` models a payload
+        the projection cannot produce AND would leave the comparison permanently
+        unverifiable — hiding the reused-name case below behind a passing test.
+        """
+        (self.gh_dir / "remote_branch.json").write_text(
+            json.dumps({"name": ref, "sha": sha}))
+
+    def test_merged_leftover_whose_remote_branch_still_exists_says_so(self):
+        # The OTHER remote state, and the reason the note must read the remote
+        # rather than assume: a leftover whose branch is still on `origin` AT THE
+        # MERGED TIP needs a remote delete as well, and a note that printed "GONE"
+        # unconditionally would send the reader looking for nothing.
+        ref = f"feat/{ISSUE}-still-on-the-remote"
+        tip = self._diverged_squash_merged_ref(ref)
+        self._remote_branch_fixture(ref, tip)
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("remote counterpart", row)
+        self.assertIn("STILL EXISTS", row)
+        self.assertIn("SAME tip", row)
+        self.assertNotIn("GONE", row)
+        # The delete advice is EARNED here: the remote tip IS the merged tip.
+        self.assertIn("delete both", row)
+
+    def test_a_reused_branch_name_on_the_remote_is_never_advised_for_deletion(self):
+        # ⛔ THE REVIEW FINDING ON #10205, and it is the dangerous direction. The
+        # demotion proves the LOCAL tip is a merged PR's head. It says NOTHING about
+        # what `origin/<branch>` holds: a lane can reuse the name and push NEW work
+        # from another machine or a cell, and this clone never fetches. A note built
+        # from the name alone ("STILL EXISTS → delete the remote one too") would tell
+        # a reader to delete the only remaining holder of that lane's unlanded work.
+        # The remote tip is on the same response, so the comparison is free — and the
+        # advice must flip on it.
+        ref = f"feat/{ISSUE}-name-reused-on-the-remote"
+        tip = self._diverged_squash_merged_ref(ref)
+        self._remote_branch_fixture(ref, "b" * 40)  # a DIFFERENT tip
+        self.assertNotEqual("b" * 40, tip)
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("NAME WAS REUSED", row)
+        self.assertIn("do NOT delete the remote ref", row)
+        self.assertNotIn("delete both", row)
+        self.assertNotIn("GONE", row)
+        # The LOCAL demotion is unchanged — only the advice about the REMOTE flips.
+        self.assertIn("(weak)", row)
+
+    def test_a_remote_branch_with_no_comparable_tip_is_unverified_not_a_delete(self):
+        # The third state of the same comparison: the remote branch exists but the
+        # payload carried no tip. UNVERIFIED is its own answer — it may not inherit
+        # the same-tip arm's "delete both" (which would be advice from an absent
+        # measurement) nor the gone arm's corroboration.
+        ref = f"feat/{ISSUE}-remote-tip-unknown"
+        self._diverged_squash_merged_ref(ref)
+        self._remote_branch_fixture(ref, "")
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertEqual(rc, 0, out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("UNVERIFIED", row)
+        self.assertIn("do NOT delete the remote ref", row)
+        self.assertNotIn("delete both", row)
+
+    def test_merged_leftover_with_an_unreadable_remote_read_is_still_advisory(self):
+        # ⛔ THE DEMOTION DOES NOT DEPEND ON THIS READ. Tip equality is the
+        # load-bearing fact (it is the MERGED PR's own record); the remote state
+        # is corroboration. So an unreadable remote read must neither undo the
+        # demotion nor be narrated as "gone" — two opposite failures from one
+        # datum, and the note has to say which one happened.
+        ref = f"feat/{ISSUE}-remote-unreadable"
+        self._diverged_squash_merged_ref(ref)
+        rc, out = self.run_tool(
+            issue=ISSUE, env_extra={"GH_STUB_REMOTE_BRANCH_FAIL": "1"})
+        self.assertEqual(rc, 0, out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("MERGED LEFTOVER", row)
+        self.assertIn("PR #4242", row)
+        self.assertIn("(weak)", row)
+        self.assertIn("could not be read", row)
+        self.assertNotIn("GONE", row)
+
+    def test_branch_advanced_past_its_merged_pr_head_still_blocks(self):
+        # ⛔ THE FALSE NEGATIVE THIS CHANGE INVITES, and the brief names it: a
+        # branch merged at X and then ADVANCED to Y is live-adjacent work. The
+        # naive implementation of the demotion — "a merged PR exists for this
+        # branch name" — demotes it, because the PR lookup is scoped by NAME.
+        # Tip equality is what refuses: the ref no longer holds what landed.
+        ref = f"fix/{ISSUE}-reused-after-merge"
+        tip = self._diverged_squash_merged_ref(ref)
+        # The branch moves PAST the merged head. The PR record still names the
+        # OLD tip (`tip`), and the ref now points at work that landed nowhere.
+        _git(self.repo, "checkout", "-q", ref)
+        (self.repo / "more-work.txt").write_text("work after the merge\n")
+        _git(self.repo, "add", "more-work.txt")
+        _git(self.repo, "commit", "-qm", "work the PR never saw")
+        advanced = self._git_out("rev-parse", ref)
+        self.assertNotEqual(advanced, tip)
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        row = self._branch_rows(out, ref)[0]
+        # ⛔ THE STRENGTH TAG IS THE ASSERTION, not the verdict: a `weak` tag is
+        # what a demoted ref prints, and `(number)` is what a BLOCKING number hit
+        # prints (see `format_report`'s tag map) — so the negative assertion is the
+        # one that carries meaning, and the positive one pins that the row is still
+        # a blocking-strength hit rather than a dropped row.
+        self.assertIn("(number)", row)
+        self.assertNotIn("(weak)", row)
+        self.assertNotIn("MERGED LEFTOVER", row)
+        self.assertNotIn("squash-merged", out)
+        # ⛔ AND THE OTHER HALF OF THE COST BOUND: a run with NO merged leftover
+        # asks the remote about NOTHING. Without this, a read that ran for every
+        # matching ref would still satisfy the test above.
+        self.assertFalse((self.gh_dir / "remote-branch-calls.log").exists())
+
+    def test_squash_merge_witness_unavailable_keeps_blocking_and_says_so(self):
+        # ⛔ FAIL-CLOSED, item 5 of #10174. When the merged-PR history cannot be
+        # read, the demotion DOES NOT APPLY: the branch keeps blocking. And the
+        # inability must be NAMED, because "this ref is a live holder" and "we
+        # could not ask GitHub" are different sentences with different remedies
+        # — the module's oldest measured defect is presenting the second as the
+        # first.
+        ref = f"feat/{ISSUE}-witness-unavailable"
+        self._diverged_squash_merged_ref(ref)
+        # BOTH witnesses die here. (1) The closed-PR sample — predicate 1's
+        # evidence — fails after emitting a body, which is the shape a
+        # rate-limited or half-read response has. (2) The targeted fallback
+        # cannot run either: the stub refuses that endpoint (`unexpected argv`),
+        # which is the real transport's failure mode for an unmodelled request.
+        rc, out = self.run_tool(
+            issue=ISSUE, env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        row = self._branch_rows(out, ref)[0]
+        self.assertIn("(number)", row)
+        self.assertNotIn("(weak)", row)
+        self.assertNotIn("MERGED LEFTOVER", row)
+        # The INABILITY is named on the surface, not the branch presented as a
+        # live holder with no explanation.
+        note = next(ln for ln in out.splitlines()
+                    if ln.strip().startswith("local branches"))
+        self.assertIn("could not be read", note)
+        self.assertIn("fail-closed", note)
 
     def test_branch_merged_into_origin_main_is_terminal(self):
         # The second, independent arm: a branch whose work LANDED and which main
@@ -10260,6 +10511,26 @@ class BranchTerminalLookupTests(unittest.TestCase):
         reason = self._call(self._merged_pr(self.SHA))
         self.assertIsNotNone(reason, "an exact head match must demote")
         self.assertIn("#6156", reason)
+
+    def test_a_branch_advanced_past_its_merged_pr_head_keeps_blocking(self):
+        # ⛔ THE FALSE NEGATIVE THIS ARM INVITES, and the one #10174's brief says
+        # to pin: the lookup is scoped by BRANCH NAME (`head=<owner>:<branch>`),
+        # so "a merged PR exists for this ref" is TRUE for a branch that was
+        # merged at X and has since ADVANCED to Y. Tip equality is what refuses,
+        # and containment cannot rescue it either: Y is a DESCENDANT of the PR
+        # head, so `compare/{tip}...{head}` reports `behind` — the opposite of the
+        # `ahead` containment accepts (see the polarity test above).
+        #
+        # SENSITIVITY: mutation-verified — replacing the tip equality + containment
+        # with "the first MERGED PR this name-scoped request returned" makes this
+        # test fail while every other test in the class stays green.
+        older_tip = "aa" * 20
+        for status in ("behind", "diverged"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    self._call(self._merged_pr(older_tip), status=status),
+                    "a ref that moved PAST its merged head is not the merged artifact",
+                )
 
     def test_containment_demotes_when_the_pr_head_is_not_the_tip(self):
         # ⛔ THE CASE #6151 ACTUALLY HIT, and the reason equality alone does not
