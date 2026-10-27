@@ -603,3 +603,133 @@ def test_validate_window_default_is_unset_so_an_explicit_prs_list_is_authoritati
     assert b.window == 40
     c = parser.parse_args(["validate", "--prs", "1", "2", "3", "--window", "2"])
     assert c.window == 2, "an EXPLICIT --window may still clip"
+
+
+# ---------------------------------------------------------------------------
+# The CLI certification path — the two fixes that shipped without a pin
+#
+# Both were documented in their own fix comments as "measured" defects
+# (`--module --json` exited 0 having written nothing; a window it could not read
+# exited 0 and read as clean), and neither has a pin: the tests above exercise
+# the pure functions, while the defect lived in the CONSUMER. The lesson is the
+# one the absent-junit pin already records — pin the consumer, not the value it
+# was handed. Without these, `validate`'s exit code — the harness's ONLY
+# certification signal — can regress to `0` with every test still green.
+# ---------------------------------------------------------------------------
+def _cli_world():
+    """A synthetic tree: the shim reaches `lazy` ONLY from a function body.
+
+    The shim also carries one genuine MODULE-LEVEL import (`base`), so its
+    closure is non-trivial and the difference between the two readings is
+    attributable to the deferred edge alone (`Closure.modules` holds DEPENDENCY
+    paths only, so a shim with no module-level import would read 0 vs 1 without
+    exercising the flag's effect on a real set).
+    """
+    idx = ModuleIndex(["tortoise/__init__.py", "tortoise/lazy.py",
+                       "tortoise/base.py"])
+    scans = {
+        "tortoise/__init__.py": _scan(
+            idx, "tortoise/__init__.py",
+            "import tortoise.base\n"
+            "def _f():\n    from tortoise.lazy import thing\n    return thing\n"),
+        "tortoise/lazy.py": _scan(idx, "tortoise/lazy.py", ""),
+        "tortoise/base.py": _scan(idx, "tortoise/base.py", ""),
+        "tests/test_t.py": _scan(idx, "tests/test_t.py", "import tortoise.lazy\n"),
+    }
+    closures = compute_closures(scans, idx, ["tests/test_t.py"])
+    return idx, scans, closures
+
+
+def test_closure_module_report_writes_the_json_it_was_asked_for(tmp_path, monkeypatch):
+    """`closure --module X --json out.json` spent its whole life writing no file.
+
+    The JSON block sat after the `--module` early return, so the documented flag
+    combination printed the module report, exited 0, and left no artifact — a
+    documented flag that silently does nothing, which is the failure shape this
+    tool exists to rule out.
+    """
+    import argparse
+    import json as _json
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": ["tests/test_t.py"]}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+
+    out = tmp_path / "closure.json"
+    args = argparse.Namespace(
+        json=str(out), exclude_type_checking=False, import_time_only=False,
+        module="tortoise/lazy.py", limit=25, show_tainted=False,
+    )
+    assert ci.cmd_closure(args) == 0
+    assert out.exists(), "the --json path must be written on the module exit too"
+    assert _json.loads(out.read_text())["summary"]["core_files"] == 1
+
+
+def _stub_selection_module():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        TESTS_DIR=Path(__file__).resolve().parent,
+        select=lambda changed, event, manifest, explain: {
+            "test_files": [], "slow_files": [], "surfaces": [],
+        },
+    )
+
+
+def test_validate_exits_two_when_it_could_not_read_the_window(
+    tmp_path, monkeypatch, capsys,
+):
+    """`0 misses` must not certify a window whose junit was never read.
+
+    An unreadable artifact can only UNDER-count misses, so the exit code — not a
+    parenthetical — is what distinguishes "clean" from "I read nothing". Same
+    defect as `test_ground_truth_records_an_artifact_that_carries_no_junit`, one
+    layer up: there the dict lost the signal, here the exit code did.
+    """
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": []}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
+    monkeypatch.setattr(ci, "changed_files",
+                        lambda repo, pr, cache: ["tortoise/lazy.py"])
+    monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
+        "failed_files": [], "failed_tests": [], "jobs": ["test (a)"],
+        "job_failed_without_test_failure": [], "artifacts": 0,
+        "artifact_errors": ["run 1: no pytest-log-* artifact uploaded"],
+        "junit_missing": [], "ground_truth_complete": False,
+    })
+
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    assert ci.cmd_validate(args) == 2, "an unread window must not exit 0"
+    assert "unreadable" in capsys.readouterr().out
+
+
+def test_validate_exits_two_on_an_empty_window(tmp_path, monkeypatch, capsys):
+    """A window of ZERO PRs used to score as a clean window and exit 0."""
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": []}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [])
+
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    assert ci.cmd_validate(args) == 2
+    assert "no PRs" in capsys.readouterr().out
