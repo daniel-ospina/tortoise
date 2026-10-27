@@ -174,7 +174,10 @@ _COPY_SESSIONS_PAGE_QUERY = (
     "ORDER BY id(s) LIMIT $batch"
 )
 
-#: Columns the copy OWNS — a graph property may never override these.
+#: Columns the copy OWNS — a graph property may never override these. The test
+#: is on `record_projection.snake(prop)`, NOT on the spelling: the record snake-
+#: cases every payload key into its column, so `turnCount` and `turn_count` are
+#: the SAME column there and a raw filter would protect only one spelling.
 _SESSION_DERIVED = ("turn_count", "turn_max_index")
 #: Keys the envelope owns.
 _SESSION_ENVELOPE = ("id", "event_id", "type", "ts", "initiated_by",
@@ -461,9 +464,21 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # default beside it — both keys reach `_split_properties`, which snake-cases
     # them into the SAME column and lets the LAST one win. Defaults first means
     # a graph property always overrides the default, never the other way round.
+    # ⛔ THE OWNERSHIP TEST IS SPELLING-INDEPENDENT, for the same reason the
+    # `created_at` rule below is. The record does not identify a property by its
+    # spelling: `record_projection._split_properties` runs every key through
+    # `snake()` and places it in the column that name resolves to, so a graph
+    # property spelled `turnCount` lands in the SAME `turn_count` column as
+    # `turn_count` does — and with the omission rule active (no attached turns)
+    # there is no derived value to win the max, so a raw spelling filter would
+    # let the payload alone walk the record's count down. Measuring the
+    # snake-cased name is what makes "a graph property may never override these"
+    # true of the record's column and not merely of one of its spellings.
+    from tortoise.record_projection import snake as _record_snake
     event = {"is_episodic": True}
     event.update({k: v for k, v in props.items()
-                  if k not in _SESSION_DERIVED and k not in _SESSION_ENVELOPE})
+                  if _record_snake(k) not in _SESSION_DERIVED
+                  and k not in _SESSION_ENVELOPE})
     event.update({
         "event_id": event_id, "type": "SessionRecorded",
         "initiated_by": "backfill", "projection_version": 2,
@@ -913,7 +928,27 @@ def _commit_or_refuse(write, applied, session_id: str, *,
         if before_commit is not None:
             # INSIDE this transaction: its statements commit or vanish with the
             # write's own (the copy's `cache_tier` stamp, #10017 R2).
-            before_commit(connection)
+            #
+            # A HOOK THAT THROWS IS A REFUSAL, never an escaping traceback. This
+            # hook issues a statement of its own, so it inherits the commit's own
+            # failure modes — `UndefinedColumn` on a target where the tier
+            # migration has not been applied, `InsufficientPrivilege` on a role
+            # without UPDATE on `public.point`, a lost connection — and NONE of
+            # those is `RecordWriteError`, so an unconverted one would leave
+            # `main`'s three-class handler (`census.CensusError`, `CopyRefused`,
+            # `RecordWriteError`) with a traceback and exit 1 ("the tool cannot
+            # START") and NO artifact, on a run that already committed N-1
+            # sessions. Same conversion, same reasoning, as the commit below.
+            try:
+                before_commit(connection)
+            except CopyRefused:
+                raise
+            except Exception as exc:
+                raise CopyRefused(
+                    f"{session_id}: a statement the copy must commit with this "
+                    f"write failed after {statements} statement(s) "
+                    f"({type(exc).__name__}) — nothing may be counted as "
+                    "copied") from exc
         if owns_connection and connection is not None:
             try:
                 connection.commit()

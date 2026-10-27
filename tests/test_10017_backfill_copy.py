@@ -542,6 +542,67 @@ def test_a_commit_failure_is_a_refusal_with_an_artifact_not_a_traceback(
     assert "commit failed" in report["refused"]
 
 
+def test_a_before_commit_statement_failure_is_a_refusal_with_an_artifact(
+        monkeypatch, tmp_path) -> None:
+    """The THIRD statement in the session's transaction had no conversion.
+
+    `before_commit` (the `cache_tier = 'record_only'` stamp, #10017 R2) issues a
+    statement of its own on the seam's connection, so it inherits the commit's
+    failure modes — `UndefinedColumn` where the tier migration has not been
+    applied, `InsufficientPrivilege` on a role without UPDATE on
+    `public.point`, a lost connection — and NONE of them is
+    `RecordWriteError`. Unconverted, one leaves `main`'s three-class handler
+    (`census.CensusError`, `CopyRefused`, `RecordWriteError`) with a traceback
+    and exit `1` ("the tool cannot START") and NO artifact, on a run that
+    already committed N-1 sessions — verbatim the defect the journal append and
+    the commit were each already converted for.
+
+    Driven through the REAL `_commit_or_refuse` and the REAL hook, so what is
+    pinned is the conversion, not a fake that agrees with it: hook throws →
+    `CopyRefused` → `copy_phase` attaches the stats → exit `2`, artifact
+    present, the sessions that landed counted.
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {}), (2, "s2", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"]),
+               (2, "s2_t0", {"id": "s2_t0", "pointKind": "event"}, ["s2"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    outcome = _outcome()
+
+    class _DriverError(Exception):
+        """A driver class, deliberately NOT `RecordWriteError`."""
+
+    class _BoomConn(_Conn):
+        def cursor(self):
+            class _Boom(_Cursor):
+                def execute(self, sql: str, params=()) -> None:
+                    raise _DriverError('column "cache_tier" does not exist')
+            return _Boom(self)
+
+    def _fake_journal_emit(journal_path, dsn, org_id, graph_id):
+        def emit(sid, events):
+            if sid == "s2":                      # s1 commits, s2's stamp throws
+                copy_mod._commit_or_refuse(
+                    _Write(outcome.APPLIED, 1, _BoomConn()), outcome, sid,
+                    before_commit=lambda connection: (
+                        copy_mod._stamp_record_only_tier(
+                            connection, org_id, graph_id, ["s2_t0"], sid)))
+            return 5
+        return emit
+
+    monkeypatch.setattr(copy_mod, "_journal_emit", _fake_journal_emit)
+    out = tmp_path / "summary.json"
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id", "gid",
+                       "--journal", str(journal), "--out", str(out)])
+    assert excinfo.value.code == 2      # REFUSED, not "cannot start" (1)
+    report = json.loads(out.read_text())
+    assert report["sessions"] == 1 and report["turns"] == 1
+    assert "_DriverError" in report["refused"]
+
+
 def test_a_mistyped_journal_is_a_refusal_not_a_traceback(
         monkeypatch, tmp_path) -> None:
     """`_journal_emit` raises while being BUILT, before anything is copied.
@@ -1098,6 +1159,37 @@ def test_a_low_declaration_cannot_walk_the_record_down() -> None:
         "s1", {"turn_count": 6, "turn_max_index": 5}, turn_count=0,
         max_index=-1, event_id="E")
     assert "turn_count" not in event and "turn_max_index" not in event
+
+
+def test_a_camel_case_declaration_cannot_walk_the_record_down() -> None:
+    """The ownership test must be SPELLING-INDEPENDENT, or it protects one key.
+
+    `record_projection._split_properties` runs every payload key through
+    `snake()` and places it in the column that name resolves to, so a graph
+    property spelled `turnCount` lands in the SAME `turn_count` column as
+    `turn_count`. With the omission rule active (no attached turn) there is no
+    derived value to win the max, so a raw-spelling filter would let the payload
+    alone walk the record's count down through
+    `DO UPDATE SET turn_count = EXCLUDED.turn_count` — the exact write the
+    omission rule exists to prevent, reached around it by one letter's case.
+
+    `turnMaxIndex` names no column (it rides the props tail), so it is filtered
+    for the milder reason: under its own spelling it would be duplicated beside
+    `turn_max_index` in `session.props` instead of being the value the copy
+    owns. Both spellings are asserted, and the record's own splitter is used as
+    the oracle rather than a restated rule.
+    """
+    from tortoise.record_projection import snake
+
+    event = copy_mod.build_session_event(
+        "s1", {"turnCount": 20, "turnMaxIndex": 45, "harness": "h"},
+        turn_count=0, max_index=-1, event_id="E")
+    assert "turn_count" not in event and "turn_max_index" not in event
+    assert not [k for k in event if snake(k) in copy_mod._SESSION_DERIVED]
+    # The premise of the test: the record WOULD have read it as the column.
+    assert snake("turnCount") == "turn_count"
+    # …and the provenance the copy must not lose on the way is still carried.
+    assert event["harness"] == "h"
 
 
 def test_the_counts_still_rise_to_an_attached_count_above_the_declaration() -> None:
