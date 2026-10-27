@@ -220,6 +220,17 @@ read_deploy_paths() { # -> globs on stdout, one per line
         # A YAML block scalar (`- >-`, `- |`) is not a glob. Emitting it as one
         # would put a non-path into the pathspec list.
         if (v ~ /^[|>]/) exit 3
+        # YAML NODE DECORATION is not a glob either, and it is the shape that
+        # makes this a SILENT fail-open: `- &a 'x/**'` strips its outer quotes to
+        # the literal `&a 'x/**'`, and `- *a` stays `*a`. Neither matches any
+        # path, so the pathspec count is 0 — `behind_deployable=0`, GREEN, while
+        # a deployable commit waits. (`*a` as a bare word IS a YAML alias; a glob
+        # that legitimately starts with `*` has to be quoted, and refusing that
+        # ambiguity is the fail-CLOSED direction.) Refusing decoration leaves a
+        # NAMED red instead of a wrong number.
+        if (v ~ /^[&!]/) exit 3
+        if (v ~ /^\*[A-Za-z_][A-Za-z0-9_-]*$/) exit 3
+        if (v ~ /[[:space:]]/) exit 3
         print v
         next
       }

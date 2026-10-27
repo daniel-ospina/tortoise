@@ -98,14 +98,14 @@ jobs:
           # named explicitly or the checker is deaf (#2140). STEP-level only: a
           # job-level env is handed to actions/checkout too.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The ONE bound (commits of lag tolerated before the check reds).
-          # Unset → the script's default (2). Must be a PLAIN INTEGER; anything
-          # else warns and falls back (a mangled bound must not disable the
-          # comparison). Raising it trades detection latency for fewer false
-          # alarms; the 2026-10-26 incident (7 behind) fires on the first tick
-          # at the default. Only DEPLOYABLE commits count (the ones touching
-          # `deploy-hosted.yml`'s `on.push.paths`), so a docs-only lag is not
-          # staleness. Must be a PLAIN INTEGER, same rule as below.
+          # BOUND 1 (count): deployable commits of lag tolerated before the
+          # check reds. Unset → the script's default (2). Must be a PLAIN
+          # INTEGER; anything else warns and falls back (a mangled bound must
+          # not disable the comparison). Only DEPLOYABLE commits count (the ones
+          # touching `deploy-hosted.yml`'s `on.push.paths`), so a docs-only lag
+          # is not staleness. Raising it trades detection latency for fewer
+          # false alarms; the 2026-10-26 incident (7 behind) fires on the first
+          # tick at the default.
           DEPLOY_STALENESS_MAX_BEHIND: ${{ vars.DEPLOY_STALENESS_MAX_BEHIND }}
           # The SECOND bound: how long the oldest undeployed DEPLOYABLE commit
           # may wait before the check reds, even when the count is within the

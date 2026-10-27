@@ -159,6 +159,25 @@ on:
       - 'fly.toml'
   workflow_dispatch:
 WF_EOF
+# YAML NODE DECORATION in the list: an ANCHOR defined above and an ALIAS used
+# as an entry. Valid YAML — the real paths are ['tortoise/**', 'packs/**'] — but
+# the alias strips to `*redeploy`, which matches no path. Emitting it makes the
+# pathspec set SMALLER than the trigger's, so a deployable commit can go
+# uncounted and the check reads GREEN while it waits: the fail-open this whole
+# check exists to refuse, arriving silently. Deliberately whitespace-free, so
+# ONLY the alias rule can refuse it and this case discriminates that rule.
+DEPLOY_WF_ANCHOR="$FIX/deploy-hosted.anchor.yml"
+cat > "$DEPLOY_WF_ANCHOR" <<'WF_EOF'
+name: Fixture deploy
+x-redeploy: &redeploy 'tortoise/**'
+on:
+  push:
+    branches: [main]
+    paths:
+      - *redeploy
+      - 'packs/**'
+  workflow_dispatch:
+WF_EOF
 
 BIN="$FIX/bin"
 mkdir -p "$BIN"
@@ -490,7 +509,17 @@ assert_contains "$OUT" "deploy-paths-unreadable" "case 20: reason names the unre
 run_checker_with "$C1" 2 "" "$DEPLOY_WF_PARTIAL" ""
 assert_eq "$RC" 1 "case 20b: partially-parsed deploy paths → exit 1"
 assert_contains "$OUT" "deploy-paths-unreadable" "case 20b: reason names the unreadable filter"
-assert_not_contains "$OUT" "a folded scalar nobody" "case 20b: never emits a non-path as a glob"
+assert_not_contains "$OUT" "behind_deployable=0" "case 20b: a refused parse must never resolve to 0 deployable commits (the green fail-open)"
+
+# ── 20c. YAML node decoration (anchor / alias) in `paths:` ────────────────────
+# Valid YAML whose decoration strips to non-paths. If those were emitted the
+# pathspec count would be 0 → GREEN while a deployable commit waits. The
+# assertion on `behind_deployable=` (not on a literal emitted string) is what
+# makes this discriminating: it fails on the OUTCOME the fail-open produces.
+run_checker_with "$C1" 2 "" "$DEPLOY_WF_ANCHOR" ""
+assert_eq "$RC" 1 "case 20c: anchor/alias in paths: → exit 1"
+assert_contains "$OUT" "deploy-paths-unreadable" "case 20c: reason names the unreadable filter"
+assert_not_contains "$OUT" "behind_deployable=0" "case 20c: never resolves a decorated entry to 0 deployable commits"
 
 # ── 21. PARITY with the REAL deploy-hosted.yml, both directions ─────────────
 # The checker derives the filter at run time instead of duplicating it, and the
