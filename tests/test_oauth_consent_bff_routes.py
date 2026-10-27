@@ -37,6 +37,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -45,6 +46,9 @@ from tests.test_session_bridge_fragment_retention import _require_node
 REPO = Path(__file__).resolve().parent.parent
 FUNCTIONS = REPO / "website/apps/dashboard/functions"
 CONSENT_DIR = FUNCTIONS / "api/consent"
+DASHBOARD = FUNCTIONS.parent
+SIGNUP_HTML = DASHBOARD / "public/signup.html"
+AUTH_BOUNCE = DASHBOARD / "src/authBounce.js"
 
 _TEST_SECRET = "test-consent-secret-0123456789abcdef"
 _ISSUER = "https://app.premiselabs.co"
@@ -206,6 +210,46 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.body = null;
   try { out.body = await res.json(); } catch { out.body = null; }
   out.attempts = e.SESSIONS.tables.consent_attempts;
+} else if (scenario === "redirect_uri_table") {
+  // The ROUTE's own `validate`, so this cannot pass if it ever stops delegating to the mirror.
+  const base = {
+    client_id: "client-abc",
+    code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    code_challenge_method: "S256",
+    state: "state-xyz",
+  };
+  out.verdicts = (opts.uris || []).map((uri) => {
+    const params = new URLSearchParams(Object.assign({}, base, { redirect_uri: uri }));
+    const result = startRoute.validate(params);
+    return { uri, accepted: typeof result !== "string", reason: typeof result === "string" ? result : null };
+  });
+} else if (scenario === "allowlist_check") {
+  // THE PAGE'S OWN ALLOWLIST, read out of the page — not a copy of it. `signup.html` is what
+  // `/auth` serves, and its return-to block DROPS a `next` that its literals do not admit, so
+  // asserting the `Location` string this BFF builds only proves the bounce is well-formed.
+  const { readFileSync } = await import("node:fs");
+  const html = readFileSync(opts.html, "utf8");
+  const grab = (name) => {
+    const m = new RegExp("var " + name + " = \\[([^\\]]*)\\]").exec(html);
+    if (!m) throw new Error("the page no longer declares " + name);
+    return m[1].split(",").map((s) => s.trim()).filter(Boolean)
+      .map((s) => s.replace(/^[\"']|[\"']$/g, ""));
+  };
+  const routes = grab("APP_RETURN_ROUTES");
+  const subtrees = grab("APP_SUBTREE_ROUTES");
+  const path = opts.pathname;
+  // The page's matching rule, reproduced verbatim from signup.html (exact, trailing slash, or
+  // subtree for a subtree route).
+  let pageAllowed = false;
+  for (const route of routes) {
+    if (path === route || path === route + "/") { pageAllowed = true; break; }
+    if (subtrees.includes(route) && path.startsWith(route + "/")) { pageAllowed = true; break; }
+  }
+  const bounce = await import(opts.authBounce);
+  out.routes = routes;
+  out.subtrees = subtrees;
+  out.pageAllowed = pageAllowed;
+  out.moduleAllowed = bounce.isAppReturnPath(path);
 } else {
   throw new Error("unknown scenario " + scenario);
 }
@@ -392,12 +436,112 @@ def test_start_bounces_a_cold_browser_to_sign_in_and_returns_to_this_flow() -> N
     assert "state%3Dstate-xyz" in location or "state=state-xyz" in location
 
 
+def test_the_sign_in_bounce_lands_on_a_path_the_AUTH_PAGE_actually_keeps() -> None:
+    """The bounce is only a bounce if the page it hands the visitor to KEEPS the return target.
+
+    THIS IS THE TEST THAT WAS MISSING. The previous one asserts the `Location` string this route
+    builds — which proves the bounce is well-formed and nothing about whether it survives. It did
+    not: `/auth` serves `public/signup.html`, whose return-to block is allowlist-only and DROPS any
+    `next` it does not admit, so a cold browser signed in and landed on the app root with the
+    consent flow abandoned and `consent_retry=1` never coming back (the terminal-loop guard could
+    therefore never fire). "Verify the artifact, not the send", one layer along.
+
+    So this reads the ALLOWLIST OUT OF THE PAGE (the `var APP_RETURN_ROUTES`/`APP_SUBTREE_ROUTES`
+    literals in `signup.html`, matched by the page's own rule) and asserts the exact pathname this
+    route emits is admitted — plus that the SPA mirror agrees. It reds if the route's return target
+    changes, or if the page's list loses it.
+    """
+    out = _run("start_cold_browser")
+    assert out["status"] == 302, out
+    next_value = parse_qs(urlparse(out["location"]).query)["next"][0]
+    return_path = urlparse(next_value)
+    assert return_path.path.startswith("/api/consent/start"), next_value
+
+    verdict = _run(
+        "allowlist_check",
+        html=str(SIGNUP_HTML),
+        authBounce=str(AUTH_BOUNCE),
+        pathname=return_path.path,
+    )
+    assert verdict["pageAllowed"], (
+        f"`/auth` (public/signup.html) DROPS the return target {return_path.path!r}; its allowlist "
+        f"is {verdict['routes']} (subtrees {verdict['subtrees']}). The visitor signs in and lands "
+        "on the app root with the consent flow abandoned."
+    )
+    assert verdict["moduleAllowed"], (
+        "the SPA mirror (src/authBounce.js) disagrees with the page it mirrors"
+    )
+
+
 def test_start_is_terminal_on_the_return_leg_when_still_unsigned() -> None:
     """A second hop can only bounce, so it stops — terminal 200, never another 302 (#3485)."""
     out = _run("start_terminal_after_retry")
     assert out["status"] == 200, "a signed-out return leg must not bounce again"
     assert out["body"]["action"] == "terminal"
     assert out["body"]["reason"] == "loop"
+
+
+_CROSS_HALF_URIS = [
+    # https — the ordinary case
+    "https://client.example/cb",
+    # RFC 8252 §7.3 loopback, in every form the AS accepts
+    "http://localhost:6277/cb",
+    "http://127.0.0.1:1234/cb",
+    "http://127.0.0.5:9999/cb",          # anywhere in 127.0.0.0/8, not just .0.0.1
+    "http://[::1]:6277/cb",              # WHATWG keeps the brackets: `=== "::1"` is dead code
+    "http://[0:0:0:0:0:0:0:1]:6277/cb",  # expanded IPv6 loopback
+    # the beta's only native-scheme harness (oauth.py::_NATIVE_REDIRECT_SCHEMES)
+    "cursor://anysphere.cursor-mcp/oauth/callback",
+    # refused by both — http on a non-loopback host
+    "http://client.example/cb",
+    # refused by both — schemes that are neither https, loopback http, nor allowlisted native
+    "ftp://client.example/cb",
+    "javascript:alert(1)",
+    "data:text/html,x",
+    "https://",
+    # refused by both — a fragment is never a valid redirect component (RFC 6749 §3.1.2),
+    # including the BARE trailing `#` whose fragment parses as empty
+    "https://client.example/cb#frag",
+    "https://client.example/cb#",
+    # refused by both — bytes we refuse to reason about (a real parser differential)
+    "https://client.example/cb\\x",
+    # refused by both — unspecified, not loopback
+    "http://0.0.0.0:1/cb",
+]
+
+
+def test_the_redirect_uri_rule_agrees_with_the_AS() -> None:
+    """ONE table, BOTH halves. A BFF that refuses what the AS accepts kills a consented flow.
+
+    The BFF's first predicate was an approximation of `tortoise/oauth.py::_valid_redirect_uri`,
+    and every way it differed was silent in the same direction: it refused `cursor://` (so the
+    beta's only native-scheme harness could not use the bridge AT ALL), it was dead code on IPv6
+    loopback (`new URL("http://[::1]:9/cb").hostname` is `"[::1]"`, brackets included), and it
+    dropped the rest of `127.0.0.0/8`. The visitor consents, then the flow dies at the BFF with a
+    message blaming their redirect URI.
+
+    Two copies cannot be prevented — Python cannot import TypeScript — so the pair is pinned HERE:
+    hand the same list to both and require the same verdict. Adding a scheme to one side alone now
+    reds this test instead of producing that silent refusal.
+    """
+    from tortoise.oauth import _valid_redirect_uri
+
+    out = _run("redirect_uri_table", uris=_CROSS_HALF_URIS)
+    disagreements = []
+    for row in out["verdicts"]:
+        as_verdict = _valid_redirect_uri(row["uri"])
+        if bool(row["accepted"]) != as_verdict:
+            disagreements.append((row["uri"], row["accepted"], as_verdict, row["reason"]))
+    assert not disagreements, (
+        "the BFF's redirect_uri rule disagrees with the AS's on: "
+        + ", ".join(
+            f"{uri!r} (BFF accepted={bff}, AS accepted={as_}){'' if bff else f' — {why}'}"
+            for uri, bff, as_, why in disagreements
+        )
+    )
+    # NON-VACUITY: the table must contain both verdicts, or it proves only one direction.
+    accepted = {row["accepted"] for row in out["verdicts"]}
+    assert accepted == {True, False}, f"the table is one-sided: {accepted}"
 
 
 @pytest.mark.parametrize("broken,needle", [

@@ -148,3 +148,13 @@ REVOKE ALL ON FUNCTION public.consume_oauth_consent_ticket(text, timestamptz)
     FROM public, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.consume_oauth_consent_ticket(text, timestamptz)
     TO service_role;
+
+-- The TABLE grants too, not just RLS. RLS alone is functionally sufficient (with no policy for
+-- `anon` a DELETE matches no row), but it is a ROW filter sitting on top of a table-wide GRANT
+-- that Supabase's default privileges hand to `anon` and `authenticated` — so the table would read
+-- as shared and any future `USING (true)` policy would open it. Revoking the grant makes the
+-- boundary the privilege, which `has_table_privilege` can also assert in
+-- `supabase/tests/20261027120001_oauth_consent_tickets.sql` (RLS is invisible to it, so a
+-- RLS-only posture cannot be pinned there).
+REVOKE ALL ON TABLE public.oauth_consent_tickets FROM public, anon, authenticated;
+GRANT ALL ON TABLE public.oauth_consent_tickets TO service_role;
