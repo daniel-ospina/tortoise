@@ -4641,6 +4641,15 @@ surfaces:
   - test_record_backup.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
+  # #10132: the static import-closure derivation and its validation harness. `core`
+  # is what CLASSIFIES the file at all (`--integrity` rglobs `tests/**/test_*.py`
+  # with no wildcard, so an unregistered file reds the required
+  # `manifest-integrity` check) — the placement argument stops there, on purpose.
+  # The file asserts NOTHING about selection: it is pure stdlib (ast + xml), opens
+  # no store, and imports `tools.ci_import_closure` only. It therefore adds no
+  # surface dependency, and moving a file in this manifest cannot silently stop it
+  # running (nothing in `surfaces`/`SOURCE_PATTERNS` is edited by #10132).
+  - test_ci_import_closure.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
   - test_suggest_entry_points.py
   - test_supabase_control.py
