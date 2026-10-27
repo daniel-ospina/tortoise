@@ -1508,7 +1508,21 @@ def _episode_acknowledged(episode: dict, acks,
         # bout never stopped. Measured the same way grouping measures a bout's
         # gaps, so an acknowledgement cannot outlive what grouping would call a
         # different episode.
-        if (e_first - last).total_seconds() <= gap_s:
+        #
+        # ⛔ FORWARD ONLY — `0 <= delta <= gap_s`. The first version wrote just
+        # `delta <= gap_s`, and `delta` is NEGATIVE whenever the episode starts
+        # BEFORE the acknowledged window ends … which is always true for the
+        # older, separately-grouped bouts further down a newest-first feed. The
+        # effect: acknowledging the newest bout also marked every EARLIER bout of
+        # the same identity `acked`, so an untouched incident left the current
+        # list with an "acknowledged" chip and the register could then print
+        # "Everything shown here is acknowledged." over it — the exact
+        # hidden-incident failure this panel exists to prevent, on the register
+        # that means "something happened" (review finding P1). The
+        # overlap arm already covers "starts before the window ends", so the
+        # lower bound costs nothing.
+        delta = (e_first - last).total_seconds()
+        if 0 <= delta <= gap_s:
             return True
     return False
 

@@ -3171,10 +3171,14 @@ function claimIntentInFlight() {
   // list comes from the session-authed /v1/team/alerts.
   const [suspended, setSuspended] = React.useState(null)
   const [alerts, setAlerts] = React.useState([])
-  // #10156: acknowledgement state for ONE row at a time (a single-flight
-  // control, like the session delete above). `ackError` is per-episode and the
-  // row shows it inline: a dismissal that fails silently teaches the customer
-  // the button is broken.
+  // #10156: the pending episode + the per-episode error. ONE row is disabled at
+  // a time via `ackPending`, but that is a UI convention, NOT a single-flight
+  // lock: clicking two rows starts two writes, and the first to finish clears
+  // `ackPending`, re-enabling the other mid-write. Harmless (the server is
+  // idempotent per episode and the list is re-read from the server afterwards) —
+  // the earlier comment claimed enforcement the code does not have.
+  // `ackError` is per-episode and the row shows it inline: a dismissal that
+  // fails silently teaches the customer the button is broken.
   const [ackPending, setAckPending] = React.useState(null)
   const [ackError, setAckError] = React.useState(null)
 

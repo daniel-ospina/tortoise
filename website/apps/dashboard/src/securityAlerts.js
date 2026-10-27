@@ -81,7 +81,6 @@ export const NOTHING_RECENT = 'Nothing in the last two weeks.'
 //: unreturned (review finding). This wording is exactly as wide as the evidence.
 export const ALL_RECENT_ACKED = 'Everything shown here is acknowledged.'
 
-/** Register for one alert row. Unknown → the quiet register (see module note). */
 //: Types that are an incident BY DEFINITION, used as a fallback when a row
 //: arrives with no `register` field at all — i.e. from an API deploy that predates
 //: this change. The dashboard (Cloudflare Pages, `website/**`) and the API (Fly,
@@ -103,7 +102,22 @@ const INCIDENT_BY_DEFINITION = new Set([
   'auth_ip',
 ])
 
+//: The reverse race is NOT covered and cannot be: when the API deploys first,
+//: the OLD dashboard reads the new feed and still renders its own heading and
+//: lead, so a row saying "This is informational; nothing was changed" can sit
+//: under "Revoke any key you don't recognize" until Pages catches up. Stated
+//: rather than hidden — the server copy is the half that can be fixed by
+//: shipping, and the window is self-healing (same merge, minutes).
+
 export function registerOf(alert) {
+  /** Register for one alert row.
+   *
+   *  Order: the SERVER's stamp wins; then, only when the field is absent
+   *  entirely (an API deploy older than this change), the type's own meaning. An
+   *  unknown type with no stamp lands in the quiet register — incident framing
+   *  asserts that something happened, and an unrecognised row cannot support
+   *  that claim.
+   */
   if (!alert) return REGISTER_ACTIVITY
   if (alert.register === REGISTER_ALERT) return REGISTER_ALERT
   if (alert.register === REGISTER_ACTIVITY) return REGISTER_ACTIVITY

@@ -108,10 +108,28 @@ class TestRegisterSplit:
     """An observation must never render as an incident (#10156 step 1)."""
 
     def test_every_alert_type_declares_a_register(self):
-        rows = {t: abuse._alert_dict({"event_type": t, "details": {}})
-                for t in ALERT_TYPES}
-        for etype, row in rows.items():
-            assert row["register"] in (REGISTER_ALERT, REGISTER_ACTIVITY), etype
+        """EVERY member of ``ALERT_TYPES`` must be DECLARED in the map.
+
+        The first version asserted ``row["register"] in (ALERT, ACTIVITY)`` — an
+        assertion that can NEVER fail, because the map's default IS the quiet
+        register (review finding P2). A new incident-grade type would therefore
+        have rendered under "Recent activity — Nothing was changed, disabled or
+        locked … these are measurements" with this test green: the mirror image of
+        #10156, on the register that must be right.
+
+        So the assertion is on the DECLARATION, not on the produced value: adding
+        an ``ALERT_TYPES`` member without deciding its register reds here, which
+        is the decision this map exists to force.
+        """
+        for etype in sorted(ALERT_TYPES):
+            assert etype in abuse.ALERT_REGISTER_OF, (
+                f"{etype} is in ALERT_TYPES but declares no register — an "
+                "undecided type silently defaults to the QUIET register, so a "
+                "new incident-grade event would be rendered as a measurement")
+            assert abuse.ALERT_REGISTER_OF[etype] in (
+                REGISTER_ALERT, REGISTER_ACTIVITY), etype
+        assert not (set(abuse.ALERT_REGISTER_OF) - set(ALERT_TYPES)), (
+            "the map declares registers for types that can never be alerted")
 
     def test_only_facts_get_incident_framing(self):
         """The register is decided by THE FACT, not by how alarming the words
@@ -331,8 +349,13 @@ class TestEpisodeGrouping:
         the panel read "nothing ever happened". The non-alert types are excluded
         SERVER-side now and the budget is 500.
 
-        Pins both halves: the two ``neq`` filters and the depth. Dropping either
-        filter, or lowering the budget back below the noise, reds here.
+        Pins the two ``neq`` filters: dropping either one reds here (verified).
+        It does NOT pin the 500-row budget — with the filters in place, one alert
+        row fits in any budget (review finding; the first docstring claimed it
+        pinned "the depth"). The budget is pinned by the saturation tests
+        (``test_exactly_a_full_scan_is_NOT_reported_as_truncated`` and
+        ``test_the_SUPABASE_store_measures_saturation_BEFORE_filtering``), which
+        assert on row counts rather than on this fixture.
         """
         base = datetime(2026, 9, 25, 17, 19, tzinfo=timezone.utc)  # noqa: UP017
         rows = [{"id": i + 1, "org_id": ORG,
@@ -579,6 +602,56 @@ class TestAcknowledgementPersistence:
             "continuity nothing in the scan can prove")
         assert visible[0]["at"], "the row is still returned — it is not hidden"
 
+    def test_acking_the_newest_bout_does_NOT_ack_an_EARLIER_one(self):
+        """P1 (round-6 review), on the issue's OWN dataset.
+
+        The contiguity arm was written as `delta <= EPISODE_GAP_S`, and `delta`
+        (episode start − acked window end) is NEGATIVE for any episode that
+        starts before the acknowledged window ends — which is every older bout
+        further down a newest-first feed. So acknowledging the newest bout also
+        stamped the older one `acked`, and because an acked row leaves `current`
+        the panel could then print "Everything shown here is acknowledged." over
+        an incident nobody reviewed. That is the hidden-incident failure this
+        whole change exists to remove, in the incident register.
+
+        Both directions were pinned and both were FORWARD; nothing constructed an
+        older un-acknowledged bout of the same identity.
+        """
+        store = MemoryAbuseStore()
+        for ts in REAL_READ_VELOCITY_TS:  # ×13 on 09-25/26, ×3 on 09-16
+            store.record_event(ORG, EVENT_READ_VELOCITY,
+                               details={"scope": "key", "id": KEY},
+                               created_at=datetime.fromisoformat(ts))
+        newest, older = store.recent_alerts(ORG)[:2]
+        assert (newest["count"], older["count"]) == (13, 3), (newest, older)
+        store.record_alert_ack(ORG, newest["episode"], by="u1")
+        feed = store.recent_alerts(ORG)
+        assert feed[0]["acked"] is True, "the acked bout must leave current"
+        assert feed[1]["acked"] is False, (
+            "acknowledging the newest bout also stamped an EARLIER bout of the "
+            "same key as acknowledged — an unreviewed incident marked done")
+
+    def test_acking_the_newest_flag_bout_does_NOT_ack_an_earlier_one(self):
+        """The same failure on the incident register, where it is worst."""
+        store = MemoryAbuseStore()
+        first = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)   # noqa: UP017
+        second = datetime(2026, 9, 13, 9, 0, tzinfo=timezone.utc)  # noqa: UP017
+        store.record_event(ORG, EVENT_FLAG, rule="r1", details={"rule": "r1"},
+                           created_at=first)
+        for i in range(3):
+            store.record_event(ORG, EVENT_FLAG, rule="r1",
+                               details={"rule": "r1"},
+                               created_at=second + timedelta(minutes=5 * i))
+        feed = store.recent_alerts(ORG)
+        assert len(feed) == 2, feed
+        assert feed[0]["first_at"].startswith("2026-09-13")
+        store.record_alert_ack(ORG, feed[0]["episode"], by="u1")
+        feed = store.recent_alerts(ORG)
+        assert feed[0]["acked"] is True
+        assert feed[1]["acked"] is False, (
+            "a 3-day-older flag bout was marked acknowledged by acking the newer "
+            "one — and an acked row leaves the current list")
+
     def test_a_LATER_bout_of_the_same_identity_is_not_acknowledged(self):
         """The other half of overlap matching: the acknowledgement must not leak
         forward forever. Once the acknowledged stretch has slid entirely out of
@@ -809,36 +882,61 @@ class TestCalibration:
     ``ReadVelocityTracker``'s docstring; change one and this reds on purpose.
     """
 
+    #: The docstring table in ``ReadVelocityTracker``, ALL of it: (label, series,
+    #: before, after). "before" is the pre-#10156 detector (the floor alone).
+    #: Review finding (P3): the first version pinned 5 of the 13 rows while the
+    #: PR claimed the whole table was pinned. Every number here is measured, so
+    #: re-measuring is `uv run pytest -k measured_trade` — change one and the
+    #: prose must move with it.
+    TRADE = (
+        ("steady 130 x20", [130] * 20, 20, 1),
+        ("steady 500 x20", [500] * 20, 20, 1),
+        ("steady 20 x20", [20] * 20, 0, 0),
+        ("bursty 20/500 x20", [20, 500] * 10, 10, 4),
+        ("bursty 50/300 x20", [50, 300] * 10, 10, 2),
+        ("geometric x1.5", [min(2000, int(5 * 1.5 ** i))
+                            for i in range(14)], 6, 6),
+        ("geometric x1.3", [min(2000, int(5 * 1.3 ** i))
+                            for i in range(14)], 2, 0),
+        ("linear 100->500 (+40, 11w)", [100 + 40 * i for i in range(11)], 10, 0),
+        ("linear 100->200 (+10, 11w)", [100 + 10 * i for i in range(11)], 10, 0),
+        ("linear 20->540 (+40, 14w)", [20 + 40 * i for i in range(14)], 11, 2),
+        ("linear 5->705 (+100, 8w)", [5 + 100 * i for i in range(8)], 7, 5),
+        ("5 -> 400 spike", [5] * 10 + [400], 1, 1),
+        ("cold start 150", [150], 1, 1),
+    )
+
     def test_the_measured_trade_is_pinned_on_both_sides(self):
-        steady_busy = [130] * 20
-        bursty = [20, 500] * 10
-        geometric = [min(2000, int(5 * 1.5 ** i)) for i in range(14)]
-        # Two linear shapes, because the answer differs by STARTING POINT, not
-        # slope: one begins above the floor (silent), one below it (damped).
-        linear_high = [100 + 40 * i for i in range(11)]
-        linear_low = [20 + 40 * i for i in range(14)]
-        # …and the pre-#10156 detector, for the "before" column.
+        """The docstring's table, row for row — the WINS and the LOSSES.
+
+        A test that only asserted the win would let the loss grow silently, and
+        this branch has already shipped two wrong prose claims about this exact
+        table. Both columns are asserted, including the rows where the detector
+        got WORSE, so a change that moves a number has to update the prose.
+        """
         floor_only = lambda series: sum(1 for c in series if c > 100)  # noqa: E731
+        for label, series, before, after in self.TRADE:
+            assert floor_only(series) == before, (
+                f"{label}: the 'before' column is wrong (measured "
+                f"{floor_only(series)})")
+            assert _firing_windows(series) == after, (
+                f"{label}: measured {_firing_windows(series)} firing windows, "
+                f"docstring says {after} — update ReadVelocityTracker's table and "
+                f"the PR, do not just flip this number")
 
-        assert floor_only(steady_busy) == 20
-        assert _firing_windows(steady_busy) == 1, (
-            "a scope that is simply busy must not be re-reported every window")
-        assert (floor_only(bursty), _firing_windows(bursty)) == (10, 4), (
-            "bursty traffic is the product's ordinary pattern: it must be "
-            "quieter than before, and it must NOT be silenced (that is what "
-            "baseline_factor=2 would do — 10 firing windows, the old noise)")
-        assert (floor_only(geometric), _firing_windows(geometric)) == (6, 6), (
-            "a fast geometric ramp must still fire as often as it did before")
-        assert (floor_only(linear_high), _firing_windows(linear_high)) == (10, 0), (
-            "STATED LOSS: a monotone ramp that STARTS above the floor is now "
-            "invisible. If a future change makes this fire, the docstring table "
-            "and the PR's stated trade are stale — update them with the new "
-            "numbers, do not just flip this assertion")
-        assert (floor_only(linear_low), _firing_windows(linear_low)) == (11, 2), (
-            "a ramp that starts BELOW the floor is damped, not silenced — the "
-            "docstring says so, and the distinction is what the previous "
-            "overstated claim got wrong")
-
+    def test_the_factor_two_trade_is_also_pinned(self):
+        """The docstring's justification for keeping factor=3: at factor 2 a
+        linear ramp is STILL missed, while bursty traffic returns to the old
+        noise. Both halves, because that comparison is the whole argument."""
+        bursty = [20, 500] * 10
+        linear_high = [100 + 40 * i for i in range(11)]
+        assert _firing_windows(bursty, baseline_factor=3) == 4
+        assert _firing_windows(bursty, baseline_factor=2) == 10, (
+            "factor=2 is supposed to return bursty traffic to the pre-#10156 "
+            "noise — that is why the default stays 3")
+        assert _firing_windows(linear_high, baseline_factor=2) == 0, (
+            "factor=2 does NOT recover the linear-ramp loss, so lowering it "
+            "buys noise and no ramp sensitivity")
 
     def test_a_key_at_its_own_normal_rate_does_not_keep_alerting(self):
         """THE DEFECT'S MECHANISM: 130 reads/5min is a normal retrieval-heavy

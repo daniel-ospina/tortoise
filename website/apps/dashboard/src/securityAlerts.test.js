@@ -203,3 +203,47 @@ test('#10156: the panel source never reintroduces the blanket imperative', () =>
   // …and it renders the SERVER's message, not a copy of its own.
   assert.match(panel, /alert\.message/)
 })
+
+// ── The durable write path (main.jsx) ───────────────────────────────────────
+//
+// `acknowledgeAlert` lives inside `App` in main.jsx, which this package cannot
+// import (it is the whole application, and it fetches on mount). So this is a
+// SOURCE PIN — the same tool the module already uses for the panel's copy — and
+// it is here because the write path had NO test of any kind (review finding P2):
+// renaming the endpoint, dropping `org_id`, inverting the role prop or reverting
+// the "re-fetch, never optimistically hide" decision would have left every suite
+// green while the feature 404'd or 403'd in production.
+//
+// Each assertion names the production consequence, so a deliberate change is a
+// deliberate edit here rather than a silent one.
+test('#10156: the ack write path posts to the real route, with org scope', () => {
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  const start = main.indexOf('async function acknowledgeAlert')
+  assert.ok(start !== -1, 'acknowledgeAlert must exist in main.jsx')
+  const body = main.slice(start, start + 2600)
+
+  assert.match(body, /\/v1\/team\/alerts\/ack`/,
+    'the URL must match the declared route (a typo here is a silent 404)')
+  assert.match(body, /org_id:\s*tid/,
+    'the request must carry org_id — the route 422s without it')
+  assert.match(body, /episode:\s*alert\.episode/,
+    'the server resolves the episode and derives its own window; the client '
+    + 'must send the KEY only, never a window it invented')
+  // A dismissal that evaporates is not a dismissal: only a CONFIRMED write may
+  // change what the panel shows, and then by RE-READING the server.
+  assert.match(body, /if \(!res\.ok\)/, 'a refusal must be handled, not ignored')
+  assert.match(body, /await loadAlerts\(/, 'the list must be re-fetched from the '
+    + 'server after a confirmed write')
+  assert.doesNotMatch(body, /setAlerts\((?!\(prev\) => prev\.filter)/,
+    'no optimistic local hide: hiding a row the server did not record reads as a '
+    + 'broken control on the next poll')
+})
+
+test('#10156: the ack control is role-gated at the mount, not just in the panel', () => {
+  const main = readFileSync(join(here, 'main.jsx'), 'utf8')
+  assert.match(main, /canAcknowledge=\{isOwnerAdmin\}/,
+    'the panel defaults to false and main.jsx must pass the real role — a member '
+    + 'who is shown the control gets a permanent 403 rendered as retryable')
+  assert.match(main, /const isOwnerAdmin = roleIsOwnerAdmin\(\)/,
+    'isOwnerAdmin must be derived from the membership role')
+})
