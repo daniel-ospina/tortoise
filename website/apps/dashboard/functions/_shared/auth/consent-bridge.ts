@@ -1,0 +1,272 @@
+/**
+ * The consent bridge's BFF-side mechanics — the attempt record and the mint (#3524 §9 step 3).
+ *
+ * WHY THIS MODULE IS SEPARATE FROM `consent-flow.ts`
+ * --------------------------------------------------
+ * `consent-flow.ts` holds property 4's DECISION and is deliberately PURE: its guard
+ * (`tests/test_oauth_session_flow_properties.py::_assert_consent_flow_is_pure`) fails if that
+ * file's code contains `fetch(`, `D1Database` or `async`, because a decision that performs I/O
+ * can no longer be tested as the guarantee itself. Everything here — the D1 table, the reads
+ * and writes, the HMAC — is exactly that kind of I/O, so it lives beside it and not in it.
+ * The decision module stayed untouched in shape; this module is additive.
+ *
+ * WHAT IT IS FOR (spec §2.1, §2.2, §2.3, §4)
+ * ------------------------------------------
+ * The consent page lives on `api.*` and holds no credential: the dashboard session is
+ * `__Host-session` on `app.*`, host-only (never sent to `api.*`) and HttpOnly (unreadable by
+ * script). Identity must therefore arrive as an ASSERTION about the visitor, minted by the one
+ * origin that holds the session. This module is that assertion's minter, plus the record of
+ * which flow it may speak for.
+ *
+ * ⛔ THE FIELD SET IS THE CONTRACT, NOT A CONVENIENCE. `mintConsentToken` mirrors
+ * `tortoise/consent_token.py::mint_consent_token` field for field and defends each field the
+ * way §2.2 does — see that function. `tests/test_oauth_consent_bff_routes.py` proves the two
+ * halves agree by handing a token minted HERE to the PYTHON verifier, because the failure mode
+ * of a drift is a production flow that answers `invalid_token` with no other symptom.
+ */
+
+// One `Env`, owned by `session.ts` — a second declaration would drift from the runtime's.
+import type { Env } from "./session";
+
+export type { Env };
+
+/**
+ * §2.2 `aud` — deliberately NOT a Supabase audience. A Supabase session token (or any other
+ * JWT signed with a shared key) must never be readable as a consent assertion.
+ */
+export const CONSENT_TOKEN_AUDIENCE = "tortoise-consent";
+
+/** §2.2 — `exp = iat + CONSENT_TOKEN_TTL_S`. Bounds EXPOSURE; `jti` bounds REPLAY. */
+export const CONSENT_TOKEN_TTL_S = 120;
+
+/**
+ * How long a STARTED authorize attempt stays redeemable.
+ *
+ * MUST outlive the sign-in round trip, or a visitor who spends a few minutes at the provider
+ * comes back to `no_authorize_attempt` and has to start over. It is deliberately NOT the
+ * token's TTL: that one bounds a MINTED assertion's exposure, this one bounds an UNMINTED flow.
+ */
+export const CONSENT_ATTEMPT_TTL_S = 15 * 60;
+
+/** The four authorize params §2.2 binds, plus the scope/resource the flow was started with. */
+export interface ConsentAttempt {
+  state: string;
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  scope: string | null;
+  resource: string | null;
+  user_id: string | null;
+  created_at: number;
+  expires_at: number;
+}
+
+/**
+ * Idempotent bootstrap for the attempt table, next to the sessions it belongs to.
+ *
+ * Same argument as `ensureSchema` / `ensurePendingTable`: production gets tables from a
+ * migration, but a database created by the runtime bootstraps alone never receives one — and
+ * `CREATE TABLE IF NOT EXISTS` cannot add an INDEX to a table that already exists, so the index
+ * is created here, with the table.
+ */
+export async function ensureConsentAttemptTable(db: D1Database): Promise<void> {
+  await db.exec(
+    "CREATE TABLE IF NOT EXISTS consent_attempts (" +
+      "state TEXT PRIMARY KEY, " +
+      "client_id TEXT NOT NULL, " +
+      "redirect_uri TEXT NOT NULL, " +
+      "code_challenge TEXT NOT NULL, " +
+      "scope TEXT, " +
+      "resource TEXT, " +
+      "user_id TEXT, " +
+      "created_at INTEGER NOT NULL, " +
+      "expires_at INTEGER NOT NULL);",
+  );
+  await db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_consent_attempts_expires " +
+      "ON consent_attempts(expires_at);",
+  );
+}
+
+/**
+ * Record that an authorize attempt STARTED, and who started it.
+ *
+ * ⛔ `user_id` comes from the SESSION, never from the request: it is what lets the mint route
+ * refuse a flow a different identity began. It is nullable because the first entry to `start`
+ * happens BEFORE sign-in on a cold browser — the very case #3524 was reopened for — and the
+ * return leg re-records the same row (`state` is the key) with the resolved owner.
+ *
+ * Idempotent on `state`: a re-entry must not create a second row for one flow, and must never
+ * overwrite a known owner with `null` (`COALESCE`).
+ */
+export async function recordConsentAttempt(
+  db: D1Database,
+  attempt: Omit<ConsentAttempt, "created_at" | "expires_at">,
+  now = Date.now(),
+): Promise<ConsentAttempt> {
+  await ensureConsentAttemptTable(db);
+  const row: ConsentAttempt = {
+    ...attempt,
+    created_at: now,
+    expires_at: now + CONSENT_ATTEMPT_TTL_S * 1000,
+  };
+  await db
+    .prepare(
+      "INSERT INTO consent_attempts " +
+        "(state,client_id,redirect_uri,code_challenge,scope,resource,user_id,created_at,expires_at) " +
+        "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) " +
+        "ON CONFLICT(state) DO UPDATE SET " +
+        "user_id=COALESCE(excluded.user_id, consent_attempts.user_id), " +
+        "expires_at=excluded.expires_at",
+    )
+    .bind(
+      row.state,
+      row.client_id,
+      row.redirect_uri,
+      row.code_challenge,
+      row.scope,
+      row.resource,
+      row.user_id,
+      row.created_at,
+      row.expires_at,
+    )
+    .run();
+  // Opportunistic bounded collection, exactly like `sweepExpiredFlows`: an ABANDONED flow
+  // reaches no completion, so without this the table only grows. Never throws — collection is
+  // housekeeping on a user path and must not fail the flow.
+  await sweepExpiredConsentAttempts(db, now).catch(() => 0);
+  return row;
+}
+
+/** Delete expired attempts, bounded, never throwing (the `sweepExpiredFlows` contract). */
+export async function sweepExpiredConsentAttempts(
+  db: D1Database,
+  now = Date.now(),
+  limit = 500,
+): Promise<number> {
+  try {
+    const res = await db
+      .prepare(
+        "DELETE FROM consent_attempts WHERE state IN (" +
+          "SELECT state FROM consent_attempts WHERE expires_at < ?1 " +
+          "ORDER BY expires_at LIMIT ?2)",
+      )
+      .bind(now, limit)
+      .run();
+    return res.meta?.changes ?? 0;
+  } catch (e) {
+    console.error("consent_attempts sweep failed", e);
+    return 0;
+  }
+}
+
+/**
+ * Read the recorded attempt for `state`, or `null`.
+ *
+ * An EXPIRED row is `null`: the window for completing the flow has closed, so answering "start
+ * over" one round trip later (after the AS refuses) is strictly worse than answering it now.
+ */
+export async function readConsentAttempt(
+  db: D1Database,
+  state: string,
+  now = Date.now(),
+): Promise<ConsentAttempt | null> {
+  await ensureConsentAttemptTable(db);
+  const row = await db
+    .prepare(
+      "SELECT state,client_id,redirect_uri,code_challenge,scope,resource,user_id," +
+        "created_at,expires_at FROM consent_attempts WHERE state = ?1",
+    )
+    .bind(state)
+    .first<ConsentAttempt>();
+  if (!row) return null;
+  if (row.expires_at <= now) return null;
+  return row;
+}
+
+/** base64url, no padding (§2.1) — the encoding both halves must agree on byte for byte. */
+function b64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function utf8(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function randomHex(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Mint the §2.1 token — the minting half of the contract `tortoise/consent_token.py` verifies.
+ *
+ * ⛔ WHY EACH FIELD EXISTS (§2.2) — this is not a payload shape, it is the security argument:
+ *   - `bind.client_id` — without it a token minted while approving client A redeems into an
+ *     approval for client B;
+ *   - `bind.redirect_uri` — without it THE CODE IS REDIRECTED TO AN ATTACKER ORIGIN (the
+ *     classic mix-up);
+ *   - `bind.code_challenge` — without it the attacker's own verifier completes a flow the
+ *     victim approved;
+ *   - `bind.state` — without it, cross-flow substitution;
+ *   - `jti` — single-use: one consent must not yield N authorization codes;
+ *   - `exp` — bounds exposure if the assertion leaks;
+ *   - `aud`/`iss` — a Supabase-shaped token, or one minted by a look-alike origin, must not
+ *     verify here;
+ *   - `sub` — the identity, and the ONLY thing the AS may take from this token. `email` is
+ *     display-only and never an authorization input.
+ *
+ * `kid` is fixed to `consent-1` here and accepted-for-presence by the verifier, because §2.3
+ * makes rotation `kid`-scoped — a hardcoded acceptance list would make a rotation a code change.
+ */
+export async function mintConsentToken(input: {
+  secret: string;
+  issuer: string;
+  userId: string;
+  email: string | null;
+  bind: { client_id: string; redirect_uri: string; code_challenge: string; state: string };
+  now?: number;
+  jti?: string;
+}): Promise<{ token: string; exp: number }> {
+  if (!input.secret) {
+    // Fail closed and named: an EMPTY key would sign a token anyone could forge, and a
+    // hardcoded default would be a forgeable consent (§2.3). Callers answer 503 instead.
+    throw new Error("CONSENT_TOKEN_SECRET is not set");
+  }
+  const issuedAt = Math.floor((input.now ?? Date.now()) / 1000);
+  const exp = issuedAt + CONSENT_TOKEN_TTL_S;
+  // Key order mirrors `mint_consent_token` exactly; the verifier recomputes the MAC over the
+  // RECEIVED segment, so only the VALUES are its contract — but keeping the order identical is
+  // what makes a cross-language diff of the two tokens readable.
+  const header = { alg: "HS256", typ: "JWT", kid: "consent-1" };
+  const payload = {
+    iss: input.issuer,
+    aud: CONSENT_TOKEN_AUDIENCE,
+    iat: issuedAt,
+    exp,
+    jti: input.jti ?? randomHex(32),
+    sub: input.userId,
+    email: input.email,
+    bind: {
+      client_id: input.bind.client_id,
+      redirect_uri: input.bind.redirect_uri,
+      code_challenge: input.bind.code_challenge,
+      state: input.bind.state,
+    },
+  };
+  const signingInput = `${b64url(utf8(JSON.stringify(header)))}.${b64url(utf8(JSON.stringify(payload)))}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    utf8(input.secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, utf8(signingInput));
+  return { token: `${signingInput}.${b64url(new Uint8Array(mac))}`, exp };
+}
