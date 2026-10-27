@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (32 tests, incl. the harness mutation check)
+- Pins: `tests/test_ci_import_closure.py` (40 tests, incl. the harness mutation check)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
   is **classification only**: a diff that changes *this instrument* and nothing else
   (`tools/ci_import_closure.py`-only) is a non-Python change — `tools/` is in
@@ -35,8 +35,11 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
 - **Measurement basis:** the head of PR #10143 — the commit that adds this line. Two things make a
   re-run differ from these tables: `main` keeps adding `core` registrations (**742** here), and the
   file enumeration has two paths — `git ls-files` (used whenever git is available) and a
-  directory-walk fallback — which differ by about one file, because the walk's `EXCLUDED_DIRS`
-  drops one tracked module.
+  pruning directory walk of the WHOLE repo (the fallback). They enumerate the same package set; a
+  fallback that walked a fixed root list (`tortoise`, `tests`, `battery`, `tools`) used to differ
+  by **150** tracked files and changed one core closure's answer — an import naming a package
+  outside those roots was silently read as third-party, with no `UNKNOWN` recorded (#10143 review
+  P2). The only remaining difference is a file git does not track, which cannot happen in CI.
 
 ## 1. What was derived
 
@@ -121,27 +124,30 @@ a failing test — see §3.3). Two derived mappings are scored:
 
 **Window: the 40 newest merged PRs** (`/pulls?state=closed&merged_at≠null`; `gh pr list --state
 merged` was measured to under-report — it returned 24 PRs while #10102/#10103/#10104/#10106 were
-absent). PRs 10151, 10144, 10140, 10135, 10134, 10129, 10120, 10118, 10111, 10110, 10106, 10104,
-10103, 10102, 10101, 10100, 10098, 10097, 10096, 10094, 10089, 10087, 10086, 10081, 10079, 10078,
-10075, 10071, 10070, 10069, 10068, 10066, 10055, 10053, 10052, 10044, 10031, 10029, 10028, 10027.
-Coverage: **12 PRs carried ≥ 1 test-level failure**, **26 failing test files (21 distinct)**;
-**5 artifacts unreadable** — so the window is **PARTIAL**, and `validate` exits **2** to say so
-rather than reporting a clean window it could not read. An unreadable artifact can only
-UNDER-count misses, so the two miss counts below are lower bounds.
+absent). The window is a MOVING set, so the exact one these numbers come from is listed here:
+10167, 10162, 10153, 10151, 10144, 10140, 10135, 10134, 10129, 10128, 10120, 10118, 10111, 10110,
+10106, 10104, 10103, 10102, 10101, 10100, 10098, 10097, 10096, 10094, 10092, 10091, 10089, 10087,
+10086, 10081, 10079, 10078, 10075, 10071, 10070, 10069, 10068, 10066, 10055, 10053. A re-run
+`--window 40` after further merges reports different totals — that is the window moving, not a
+contradiction. Coverage: **11 PRs carried ≥ 1 test-level failure**, **22 failing test files (17
+distinct)**; **5 PRs carried an artifact the harness could not read**, so this window is
+**PARTIAL** and `validate` exits **2** to say so rather than reporting a clean window it could not
+read. An unreadable artifact can only UNDER-count misses, so the two miss counts below are lower
+bounds (the 40-PR count includes the `init`-level checks only; a green PR contributes nothing here).
 
-| mapping | misses | PRs | median selected tests (today: 1 095) |
+| mapping | misses | PRs | median selected tests (today: 974) |
 |---|---|---|---|
-| naive | **9** | 4 (#10151, #10144, #10070, #10044) | 483 |
-| keep-non-python | **8** | 3 (#10151, #10144, #10044) | 597 |
+| naive | **10** | 4 (#10151, #10144, #10134, #10070) | 482 |
+| keep-non-python | **9** | 3 (#10151, #10144, #10134) | 596 |
 
-**A single miss means the derivation is not safe. There are 8** (9 for the naive reader). They fall
+**A single miss means the derivation is not safe. There are 9** (10 for the naive reader). They fall
 in three classes, and only one of them is an analysis limitation that better parsing would fix:
 
 | class | count | what it is |
 |---|---|---|
 | `non-python-dependency` (naive only) | 1 | the test imports nothing from `tortoise/**`; its subject is a manifest, workflow, doc or a script it runs (#10070 `test_ci_check_repair.py`). **Fixed by the keep-non-python refinement** — this is the one refinement the data *proves* is required. |
-| `tainted-closure` | 2 | the file's own imports are `UNKNOWN` (`importlib` with a computed name / `setattr`-style access), so the derivation could not see the edge (#10044 `test_ci_selection.py` — the selector's own tests load test files dynamically — and #10151 `test_dry_run_preview.py`). |
-| `no-closure-intersection` | 6 | the closure is complete and nothing in it intersects the diff. Two sub-causes, both outside any import graph: a diff that changes **workflows/docs/config only** (#10151 `test_derived_names.py`, #10144 `test_derived_names.py`/`test_embedded_concurrency.py`, #10044 ×3) where the failing test guards that non-Python subject, and a diff that changes **only test files** — today's surface rule is what keeps the rest of the surface running, and no import edge couples one test to another. |
+| `tainted-closure` | 3 | the file's own imports are `UNKNOWN` (`importlib` with a computed name / `setattr`-style access), so the derivation could not see the edge (#10151 `test_dry_run_preview.py`; #10134 `test_9350_capture_provenance_journalled.py` and `test_reaper.py`). |
+| `no-closure-intersection` | 6 | the closure is complete and nothing in it intersects the diff. Two sub-causes, both outside any import graph: a diff that changes **workflows/docs/config only** (#10151 `test_derived_names.py`, #10144 `test_derived_names.py`/`test_embedded_concurrency.py`), where the failing test guards that non-Python subject, and a diff that changes **only test files** — today's surface rule is what keeps the rest of the surface running, and no import edge couples one test to another (most of #10134's five). |
 
 ### 3.1 What the harness would need to be safe
 
@@ -177,7 +183,8 @@ failures**. Scoring the job as a failure would inject phantom misses and condemn
 is fine, so the harness reports `job_failed_without_test_failure` separately and only a
 `<failure>`/`<error>` testcase counts. (Related: `gh api …/check-runs` keeps every attempt, so a
 retried-and-green job exists beside its red attempt — the harness reads every artifact of the
-failed runs and unions the failures.)
+failed runs and unions the failures. A red run it cannot read at all is never scored as clean: it
+is counted and the window exits **2**, see §5.)
 
 ## 4. Prior art, and why the choices above differ from it
 
@@ -219,8 +226,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_ci_import_closure.py -q
 
 `validate` needs `gh` (auth) the first time; it caches every junit artifact and its per-PR ground
 truth under `.ci-selection/closure-cache/` (gitignored), so re-runs are offline and instant. It
-exits **2** when the window is partial (an artifact it could not read, or a window with no PRs),
-**1** when it found a miss, and **0** only for a complete, miss-free window.
+exits **2** when the window is partial — an artifact it could not read, an unparseable or missing
+`junit.xml`, a red leg whose artifact listing was **empty** (artifacts expire after 90 days by
+default, and deleting a run deletes its artifacts, so "nothing uploaded" is an ordinary state, not
+a clean one), or a window with no PRs at all — **1** when it found a miss, and **0** only for a
+complete, miss-free window. A `core` member that resolves to no test file is named on stdout and
+carried in the JSON as `unresolved_core`, because every percentage here is a ratio over that count.
 
 ## 6. Verdict
 

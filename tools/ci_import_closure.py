@@ -106,6 +106,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import ast
 import json
+import os
 import statistics
 import subprocess
 import time
@@ -134,11 +135,10 @@ GROUND_TRUTH_VERSION = 2
 # selector keys on.
 REPORTED_ROOT = "tortoise"
 
-# In-repo roots are discovered from the index, so this is only the anchor that
-# tells us which directories to look at when `git ls-files` is unavailable.
-FALLBACK_ROOTS = ("tortoise", "tests", "battery", "tools")
-
-# Directories a static analysis must never descend into.
+# Directories a static analysis must never descend into, PRUNED (never walked
+# into) by the fallback enumeration. The list is the venv / VCS / dependency
+# trees; everything else in the repo IS part of the index, because a bounded
+# root list silently drops a package an import can legitimately name.
 _SKIP_DIR_PARTS = frozenset({
     ".venv", ".git", ".worktrees", "node_modules", "battery-out", "__pycache__",
     "site-packages", "dist", "build",
@@ -177,7 +177,20 @@ def _git_py_files(repo: Path) -> list[str]:
 
     `git ls-files` is index-bounded (it never walks `.worktrees/`,
     `node_modules/`, or the venv), which is the difference between a 3 s scan and
-    a 60 s one. Falls back to a bounded walk of the in-repo roots.
+    a 60 s one. Falls back to a pruning walk of the WHOLE repo.
+
+    ⛔ THE FALLBACK IS NOT A BOUNDED ROOT LIST. #10143 review P2: it used to walk
+    `("tortoise", "tests", "battery", "tools")` only, so any in-repo package
+    outside those roots was invisible — and an import naming one was silently
+    treated as THIRD-PARTY, with no `UNKNOWN` recorded. MEASURED: the two
+    enumerations differed by 150 tracked files, and exactly one core closure
+    changed answer — `tests/test_8491_cal_attendee_grounding.py` imports
+    `integrations.crm.twenty.bridge`, so the walk reported a 0-module,
+    UNTAINTED closure (187 → 0) and the file would have been re-classed
+    `non-python-dependency`. A different answer to the same question, silently,
+    is the one thing this tool must never produce. Pruning the whole repo makes
+    the two paths enumerate the same package set; the only remaining difference
+    is a file git does not track (absent in CI, where the tree is clean).
     """
     try:
         out = subprocess.run(
@@ -185,17 +198,20 @@ def _git_py_files(repo: Path) -> list[str]:
             capture_output=True, check=True, timeout=120,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        paths: list[str] = []
-        for root in FALLBACK_ROOTS:
-            base = repo / root
-            if not base.is_dir():
-                continue
-            for p in base.rglob("*.py"):
-                rel = p.relative_to(repo)
-                if not (_SKIP_DIR_PARTS & set(rel.parts)):
-                    paths.append(rel.as_posix())
-        return sorted(paths)
+        return _walk_py_files(repo)
     return sorted(p for p in out.decode().split("\0") if p)
+
+
+def _walk_py_files(repo: Path) -> list[str]:
+    """Every `*.py` under `repo`, pruning the trees a static analysis must not
+    descend into (`.git`, `.worktrees`, `node_modules`, the venv, build output)."""
+    paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIR_PARTS)
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                paths.append(Path(dirpath, name).relative_to(repo).as_posix())
+    return sorted(paths)
 
 
 def module_name(rel: str) -> str:
@@ -328,32 +344,43 @@ def _is_type_checking_guard(expr: ast.expr) -> bool:
     return False
 
 
-def _imports_with_context(tree: ast.AST):
-    """Yield `(import_node, in_type_checking, in_function)` for every import node.
+def _nodes_with_context(tree: ast.AST):
+    """Yield `(node, in_type_checking, in_function)` for EVERY node in the tree.
 
     A recursive walk rather than `ast.walk` because both pieces of context are
     what the closure needs: a `TYPE_CHECKING` import is type-only, and a
     function-local import only executes on call — but for a TEST file the call
     happens, and for a module reached through a test the safe direction is to
     count it. Skipping either would under-select.
+
+    EVERY node, not only import nodes, because a dynamic import
+    (`importlib.import_module`, `spec_from_file_location`) is an `ast.Call` and
+    needs the same two axes: hardcoding them (the pre-#10143-review shape) tagged
+    a MODULE-LEVEL dynamic import as function-local, which
+    `--import-time-only` then dropped.
     """
     stack: list[tuple[ast.AST, bool, bool]] = [(tree, False, False)]
     while stack:
         node, in_tc, in_fn = stack.pop()
+        yield node, in_tc, in_fn
         if isinstance(node, ast.If) and _is_type_checking_guard(node.test):
             for child in node.body:
                 stack.append((child, True, in_fn))
             for child in node.orelse:
                 stack.append((child, in_tc, in_fn))
             continue
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            yield node, in_tc, in_fn
-            continue
         child_fn = in_fn or isinstance(
             node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
         )
         for child in ast.iter_child_nodes(node):
             stack.append((child, in_tc, child_fn))
+
+
+def _imports_with_context(tree: ast.AST):
+    """Yield `(import_node, in_type_checking, in_function)` for every import node."""
+    for node, in_tc, in_fn in _nodes_with_context(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node, in_tc, in_fn
 
 
 class Scanner:
@@ -461,14 +488,14 @@ class Scanner:
         collapses the signal, because one unknown in a densely-connected graph
         marks the whole component and the report stops distinguishing anything.
         """
-        for node in ast.walk(tree):
+        for node, in_tc, in_fn in _nodes_with_context(tree):
             if not isinstance(node, ast.Call):
                 continue
             kind, name = _dynamic_callable(node.func)
             if kind == "import":
-                self._scan_import_call(node, scan, pkg_parts, name)
+                self._scan_import_call(node, scan, pkg_parts, name, in_tc, in_fn)
             elif kind == "loader":
-                self._scan_loader_call(node, scan, name)
+                self._scan_loader_call(node, scan, name, in_tc, in_fn)
 
             func = node.func
             if not (isinstance(func, ast.Name) and func.id == "getattr"):
@@ -484,7 +511,7 @@ class Scanner:
                 # submodule (a resolvable edge) or it does not (no edge at all).
                 sub = f"{base.id}.{attr_node.value}"
                 if self.index.exists(sub):
-                    self._add_import(scan, sub, node.lineno, False, False,
+                    self._add_import(scan, sub, node.lineno, in_tc, in_fn,
                                      kind=DYNAMIC_LITERAL)
                 continue
             scan.unknown.append(Unknown(
@@ -495,6 +522,7 @@ class Scanner:
 
     def _scan_import_call(
         self, node: ast.Call, scan: FileScan, pkg_parts: list[str], name: str,
+        in_tc: bool = False, in_fn: bool = True,
     ) -> None:
         if not node.args:
             scan.unknown.append(Unknown(
@@ -506,7 +534,8 @@ class Scanner:
             target = arg.value
             if target.startswith("."):
                 target = _resolve_relative_name(target, pkg_parts)
-            self._add_import(scan, target, node.lineno, False, True, kind=DYNAMIC_LITERAL)
+            self._add_import(scan, target, node.lineno, in_tc, in_fn,
+                             kind=DYNAMIC_LITERAL)
             return
         scan.unknown.append(Unknown(
             UNKNOWN_DYNAMIC_CALL, node.lineno,
@@ -514,7 +543,10 @@ class Scanner:
             f"determined statically",
         ))
 
-    def _scan_loader_call(self, node: ast.Call, scan: FileScan, name: str) -> None:
+    def _scan_loader_call(
+        self, node: ast.Call, scan: FileScan, name: str,
+        in_tc: bool = False, in_fn: bool = True,
+    ) -> None:
         """A module loaded from a PATH (`spec_from_file_location`, loader classes).
 
         `module_from_spec` is skipped: its spec comes from a call already handled
@@ -533,7 +565,7 @@ class Scanner:
             for cand in candidates:
                 if cand in self.index.by_file:
                     self._add_import(scan, self.index.by_file[cand], node.lineno,
-                                     False, True, kind=DYNAMIC_LITERAL)
+                                     in_tc, in_fn, kind=DYNAMIC_LITERAL)
                     return
             if not rel.endswith(".py"):
                 return  # a wheel / tarball / non-python path, not a module load
@@ -601,15 +633,12 @@ def _resolve_relative_name(name: str, pkg_parts: list[str]) -> str:
 def _dedupe_deps(deps: list[Dep]) -> list[Dep]:
     """One edge per (target, kind), keeping the STRONGEST occurrence.
 
-    Strongest = the occurrence that survives the most restrictive reader: a
-    module-level import beats a function-local one, and a runtime import beats a
-    `TYPE_CHECKING` one. This is not cosmetic. The closure is computed ONCE and
-    then filtered per reader (`follow_function_local`, `follow_type_checking`),
-    so if the function-local edge won the dedupe, an `--import-time-only` run
-    would filter it out and lose the module-level edge ENTIRELY — the file would
-    look as if it never imported the target at all, which is exactly the
-    under-selection the naive reader is supposed to demonstrate, not to be
-    produced by a bug.
+    "One edge per (target, kind)" was the original contract and it was WRONG:
+    it made the survivor depend on the reader (see the carriage below). What is
+    deduped now is one edge per (target, kind, type_checking, in_function) —
+    i.e. only exact context duplicates — so a module-level and a function-local
+    occurrence of the same target BOTH survive and each reader filters its own.
+    Ties break on `line` (lowest first) so the reported location is stable.
 
     #10143 review P1: this compared `type_checking` only, and
     `_imports_with_context` is a LIFO stack (`stack.pop()`), so the FUNCTION-LOCAL
@@ -618,12 +647,29 @@ def _dedupe_deps(deps: list[Dep]) -> list[Dep]:
     was `in_function=True`, module-level-only closure came back empty.
     Ties break on `line` (lowest first) so the reported location is stable.
     """
-    best: dict[tuple[str, str], Dep] = {}
+    # ⛔ THE KEY IS (target, kind, type_checking, in_function) — NOT
+    # (target, kind).
+    #
+    # #10143 review P2: collapsing the two CONTEXT axes into one survivor is
+    # reader-DEPENDENT, so no single ordering can be right. `type_checking` and
+    # `in_function` are each a switch a reader filters on, and the cross-axis
+    # pair (a module-level import inside `TYPE_CHECKING` vs a runtime import
+    # inside a function) loses the target under ONE reader whichever edge wins:
+    # keep the module-level TYPE_CHECKING edge and `--exclude-type-checking`
+    # drops it; keep the function-local runtime edge and `--import-time-only`
+    # drops it — the exact "the file looks as if it never imported the target"
+    # failure this function exists to prevent. Keeping one edge per CONTEXT
+    # makes the dedupe reader-independent: each reader filters the edges that
+    # are its own and the surviving set is the same either way.
+    #
+    # Measured at the head this changed: one cross-axis site
+    # (`tortoise/ask_lane.py` → `tortoise.assembly`), and two core closures
+    # under `--import-time-only` were losing 3 modules each before the fix.
+    best: dict[tuple[str, str, bool, bool], Dep] = {}
     for dep in deps:
-        key = (dep.target, dep.kind)
+        key = (dep.target, dep.kind, dep.type_checking, dep.in_function)
         cur = best.get(key)
-        if cur is None or (dep.type_checking, dep.in_function, dep.line) < (
-                cur.type_checking, cur.in_function, cur.line):
+        if cur is None or dep.line < cur.line:
             best[key] = dep
     return sorted(best.values(), key=lambda d: (d.kind, d.target, d.line))
 
@@ -763,12 +809,21 @@ def _selection_module():
     return ci_selection
 
 
-def core_test_files(manifest: dict) -> list[str]:
+def core_test_files(manifest: dict, unresolved: list[str] | None = None) -> list[str]:
     """Repo-relative paths of every `core`-surface member that is a test file.
 
     Members are registered as basenames (with a few subdir paths); resolve them
     against the tree the same way `classify_test_file` does, so a subdir entry
     keeps working.
+
+    ⛔ A MEMBER THIS CANNOT RESOLVE IS REPORTED, NOT DROPPED (#10143 review P2).
+    `out.extend(by_basename.get(member, []))` contributes nothing for a renamed
+    or deleted member and used to say nothing, which contradicts this module's
+    stated contract ("anything the analysis CANNOT resolve is reported … and
+    never dropped") and silently shrinks the denominator every published
+    percentage is a ratio over — `742`, `186/258`, `84.6 %`, the 628-file split
+    ceiling — with no red anywhere. Pass `unresolved` to collect them; the
+    caller surfaces them.
     """
     ci = _selection_module()
     manifest_members = ci._surface_members(manifest["surfaces"].get("core")) if hasattr(
@@ -784,7 +839,10 @@ def core_test_files(manifest: dict) -> list[str]:
         if (REPO / "tests" / member).exists():
             out.append(f"tests/{member}")
         else:
-            out.extend(by_basename.get(member, []))
+            resolved = by_basename.get(member, [])
+            if not resolved and unresolved is not None:
+                unresolved.append(member)
+            out.extend(resolved)
     return sorted(set(out))
 
 
@@ -1071,6 +1129,14 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         if not selected:
             selected = [a for a in arts if str(a.get("name", "")).startswith("pytest-log-")]
         if not selected:
+            # ⛔ A RED run that uploaded NO `pytest-log-*` artifact at all is
+            # NOT "nothing failed" — it is a leg whose ground truth this
+            # harness could not read, and the two round-1 fixes covered only the
+            # layers below this one (artifact present but no junit; junit
+            # unparseable). Dropping it silently let `validate` exit 0 on a
+            # window it never read, which is the false green the PARTIAL exit
+            # code exists to prevent.
+            artifact_errors.append(f"run {rid}: no pytest-log-* artifact uploaded"[:200])
             continue
         pr_found = False
         for art in selected:
@@ -1284,16 +1350,25 @@ def _load_all(follow_type_checking: bool = True,
     files = _git_py_files(REPO)
     index = ModuleIndex(files)
     scans = scan_all(index, files)
-    core = core_test_files(manifest)
+    unresolved_core: list[str] = []
+    core = core_test_files(manifest, unresolved_core)
     closures = compute_closures(scans, index, core,
                                 follow_type_checking=follow_type_checking,
                                 follow_function_local=follow_function_local)
-    return manifest, {"scans": scans, "closures": closures, "core": core}, index
+    return manifest, {"scans": scans, "closures": closures, "core": core,
+                      "unresolved_core": unresolved_core}, index
 
 
 def cmd_closure(args: argparse.Namespace) -> int:
     _manifest, data, index = _load_all(not args.exclude_type_checking,
                                        not getattr(args, "import_time_only", False))
+    if data.get("unresolved_core"):
+        # Printed, not merely carried in the JSON: every percentage in the table
+        # below is a ratio over this denominator, so a member that resolved to
+        # nothing has to be VISIBLE where the numbers are read (#10143 P2).
+        print("::error:: core member(s) resolving to NO test file — the "
+              "denominator below is short by that many: "
+              + ", ".join(data["unresolved_core"][:10]))
     closures = data["closures"]
     summary = summarise(
         closures, index, data["scans"],
@@ -1317,6 +1392,7 @@ def cmd_closure(args: argparse.Namespace) -> int:
             "summary": summary,
             "verdict": verdict,
             "core_files": list(closures),
+            "unresolved_core": data.get("unresolved_core", []),
             "shadowed_modules": index.shadowed,
             "closures": {rel: clo.as_dict() for rel, clo in sorted(closures.items())},
             "unknown_files": {
@@ -1401,6 +1477,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
         truth = pr_ground_truth(args.repo, sha, CACHE_DIR)
         explain: dict = {}
         selection = ci.select(changed, "pull_request", manifest, explain)
+        # ⛔ TODAY'S SELECTION IS EVERY LEG THE WORKFLOW RUNS — and `select()`
+        # models three of them, not one. The carve-out leg is SUBTRACTED from
+        # `test_files` (a carve-out file cannot run in a URI-set docker leg,
+        # ci_selection.py:2992) and reported separately as `carve_out_run`,
+        # which the tier-2 PR path runs whenever a matched surface owns a
+        # carve-out file. Reading only `test_files`/`slow_selected` therefore
+        # scored a carve-out failure as `not_in_current` — i.e. it blamed the
+        # EXISTING selector for a test the existing selector DID run, and the
+        # derivation was absolved of it. MEASURED on the §3 window: #10134's
+        # `test-carve-out (b)`/`(c)` failed 6 files, 5 of them core-registered;
+        # as shipped those 6 landed in `not_in_current` and the totals read
+        # 9/8 instead of 14/13. `not_in_current` is now PRINTED too — the
+        # exclusion was invisible in the console and in the report.
         if selection["test_files"] == "ALL":
             current_rel = {_tests_rel(p) for p in all_tests} | {
                 _tests_rel(p) for p in selection.get("slow_files", [])
@@ -1409,6 +1498,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
             current_rel = {_tests_rel(p) for p in selection["test_files"]} | {
                 _tests_rel(p) for p in selection.get("slow_selected", [])
             }
+        if selection.get("carve_out_run"):
+            current_rel |= {_tests_rel(p) for p in (manifest.get("carve_out") or [])}
         # TWO derived mappings, because the difference between them IS the
         # finding: the naive one (drop every core file whose closure misses the
         # diff) and the one that keeps the provably non-Python-dependency files.
@@ -1485,6 +1576,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
             detail = "naive-only: " + "; ".join(
                 f"{m['file']}[{m['class']}]" for m in row["misses_naive"][:2]
             )
+        elif row["not_in_current"]:
+            # A failing test today's selection did NOT run. This is the ONE
+            # branch that absolves the derivation, so it must never be silent:
+            # a lane the workflow DID run but the model dropped lands here, and
+            # that is how a miss becomes invisible (see the carriage at the
+            # selection above).
+            detail = ("outside today's selection: "
+                      + ", ".join(row["not_in_current"][:2]))
         elif not row["failed_files"]:
             detail = ("job red, no test-level failure: "
                       + (", ".join(row["job_failed_without_test_failure"]) or "none"))
@@ -1508,12 +1607,35 @@ def cmd_validate(args: argparse.Namespace) -> int:
             for miss in row[key]:
                 print(f"  MISS[{label}] pr#{row['pr']} {miss['file']} [{miss['class']}] "
                       f"changed={row['changed_modules'][:4] or row['changed'][:3]}")
-    if errors:
+    # ⛔ A RED PR WHOSE LEGS WERE NEVER READ IS AN UNREAD PR, NOT A CLEAN ONE
+    # (#10143 review P1). `errors` only counts the paths that reached an
+    # artifact and could not use it; a run whose artifact listing was EMPTY (or
+    # carried no `pytest-log-*`) used to be skipped without an entry at all, so
+    # this window condition scored it clean and exited 0. Artifact expiry is
+    # ordinary (90 days by default; deleting a run deletes its artifacts), so
+    # this is a reachable state, and `validate --prs <ids>` accepts runs of any
+    # age.
+    #
+    # ⚠️ THE CONDITION IS `failed_jobs and not artifacts` — NOT `artifacts == 0`.
+    # `artifacts` counts junit blobs read off RED `test*` legs only, so a fully
+    # GREEN PR always has `artifacts == 0`. Measured on the §3 window: 24 of 40
+    # PRs are green and would have been flagged PARTIAL by the broader test,
+    # making `validate` unable to return 0 or 1 on any window — a fail-closed
+    # check that always fires says nothing. A red PR with zero artifacts read is
+    # the real unread state (every drop path now also records an
+    # `artifact_errors` entry, which `errors` catches; this catches the residual
+    # where a red leg yielded no run id at all).
+    unread = [row["pr"] for row in rows if row["failed_jobs"] and not row["artifacts"]]
+    if unread:
+        print(f"::error:: pr(s) {', '.join(str(p) for p in unread[:5])} ran a red leg "
+              "but uploaded no readable artifact — the window is PARTIAL, not clean")
+    if errors or unread:
         # An unreadable artifact can only UNDER-count misses, so a zero-miss
         # window with unreadable artifacts is not a clean window. Say so in the
         # exit code rather than in a parenthetical (#10143 review P2).
-        print(f"::error:: {errors} artifact(s) unreadable — the window is PARTIAL, "
-              "not clean")
+        if errors:
+            print(f"::error:: {errors} artifact(s) unreadable — the window is "
+                  "PARTIAL, not clean")
         return 2
     return 0 if total_naive == 0 and total_safe == 0 else 1
 
@@ -1530,6 +1652,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         "sizes": sorted(len(c.modules) for c in closures.values()),
         "sets": len({c.modules for c in closures.values()}),
         "tainted": sorted(rel for rel, c in closures.items() if c.tainted),
+        "unresolved_core": data.get("unresolved_core", []),
     }
     if args.json:
         Path(args.json).write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n")

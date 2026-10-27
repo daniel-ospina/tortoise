@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.ci_import_closure import (  # noqa: I001
     DIRECT, MISS_NO_PATH, MISS_NOT_PYTHON, MISS_TAINTED, PACKAGE_INIT,
     Closure, ModuleIndex, Scanner, UNKNOWN_DYNAMIC_ATTR, UNKNOWN_DYNAMIC_CALL,
-    UNKNOWN_SYNTAX, UNKNOWN_UNRESOLVED, artifact_names_for_job,
+    UNKNOWN_LOADER, UNKNOWN_SYNTAX, UNKNOWN_UNRESOLVED, artifact_names_for_job,
     classify_miss, compute_closures, core_test_files, derived_core_selection,
     misses_for, module_name, parse_junit_failures, summarise,
 )
@@ -375,7 +375,16 @@ def test_real_suite_core_surface_is_derived(repo_closure):
     manifest, index, scans, core, closures = repo_closure
     del index, scans
     expected = len([f for f in manifest["surfaces"]["core"] if f.endswith(".py")])
-    assert len(core) >= expected * 0.95  # basenames resolve to exactly one path
+    # EXACTLY, not `>= expected * 0.95` (#10143 review P2). The comment claimed
+    # exact basename resolution while the assertion tolerated 5 % — at 742
+    # members that is up to 37 core files silently ceasing to resolve with every
+    # test still green, and every published percentage is a ratio over this
+    # count. Measured today: all 742 resolve. `core_test_files` now reports an
+    # unresolvable member instead of dropping it, so the failure names the file.
+    unresolved: list[str] = []
+    core = core_test_files(manifest, unresolved)
+    assert not unresolved, f"core member(s) resolved to no test file: {unresolved}"
+    assert len(core) == expected
     assert len(closures) == len(core) > 700
     # No file is silently omitted: every core file has a closure entry.
     assert all(rel in closures for rel in core)
@@ -462,17 +471,22 @@ def test_import_time_only_reproduces_the_naive_reader_that_under_selects():
 # next reviewer can see exactly what was wrong and re-verify it.
 # ---------------------------------------------------------------------------
 def test_a_target_imported_both_ways_keeps_the_module_level_edge():
-    """P1: the dedupe kept whichever occurrence was YIELDED first.
+    """P1/P2: the dedupe must not make the survivor depend on the READER.
 
     `_imports_with_context` is a LIFO stack, so for a target imported both at
     module level and inside a function the FUNCTION-LOCAL occurrence is yielded
-    first (verified: linelines (3, True) then (1, False)). The old
-    `_dedupe_deps` compared `type_checking` only, so the function-local edge won
-    and the module-level edge was DISCARDED — and then `--import-time-only`
-    filtered the survivor out, leaving the file looking as if it never imported
-    the target at all. That under-selection is the exact false green this tool
-    exists to expose, so it must be produced by the naive READER, never by a bug
-    in the edge set it is reading.
+    first. The old `_dedupe_deps` keyed on `(target, kind)` and compared
+    `type_checking` only, so the function-local edge won and the module-level
+    edge was DISCARDED — and then `--import-time-only` filtered the survivor
+    out, leaving the file looking as if it never imported the target at all.
+
+    Collapsing the two CONTEXT axes into one survivor is reader-DEPENDENT and no
+    ordering can fix it: keep the module-level `TYPE_CHECKING` edge and
+    `--exclude-type-checking` drops it; keep the function-local runtime edge and
+    `--import-time-only` drops it. So the key is
+    `(target, kind, type_checking, in_function)` — only EXACT duplicates
+    collapse — and every reader filters the edges that are its own. Both
+    occurrences survive here, each with its own context.
     """
     idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
     scans = {
@@ -487,18 +501,21 @@ def test_a_target_imported_both_ways_keeps_the_module_level_edge():
     }
     deps = scans["tests/test_t.py"].deps
     lazy = [d for d in deps if d.target == "tortoise.lazy"]
-    assert len(lazy) == 1, f"one edge per (target, kind), got {lazy}"
-    assert lazy[0].in_function is False, (
-        "the MODULE-LEVEL occurrence must survive the dedupe; the function-local "
-        "one is the weaker edge and is what `--import-time-only` filters out")
-    # and the consequence the bug had: the module-level reader must SEE it
+    assert len(lazy) == 2, f"one edge per CONTEXT, got {lazy}"
+    module_level = [d for d in lazy if d.in_function is False]
+    assert len(module_level) == 1 and module_level[0].line == 1, (
+        "the MODULE-LEVEL occurrence must survive the dedupe as its own edge")
+    # the consequence the bug had: BOTH readers must still see the target
     naive = compute_closures(scans, idx, ["tests/test_t.py"],
                              follow_function_local=False)["tests/test_t.py"]
     assert "tortoise/lazy.py" in naive.modules
+    full = compute_closures(scans, idx, ["tests/test_t.py"],
+                            follow_function_local=True)["tests/test_t.py"]
+    assert "tortoise/lazy.py" in full.modules
 
 
-def test_dedupe_prefers_a_runtime_edge_over_a_type_checking_one():
-    """The other half of the ranking: `TYPE_CHECKING` is the weaker context."""
+def test_dedupe_keeps_a_runtime_edge_beside_a_type_checking_one():
+    """`TYPE_CHECKING` is a separate CONTEXT, not a tiebreak between rivals."""
     idx = _index("tortoise/a.py")
     scan = _scan(
         idx, "tests/test_t.py",
@@ -507,7 +524,10 @@ def test_dedupe_prefers_a_runtime_edge_over_a_type_checking_one():
         "    from tortoise.a import thing\n"
         "from tortoise.a import other\n")
     a = [d for d in scan.deps if d.target == "tortoise.a"]
-    assert len(a) == 1 and a[0].type_checking is False
+    assert len(a) == 2, (
+        "the runtime and type-only occurrences are different contexts and both "
+        "must survive, so neither reader loses the target")
+    assert sorted(d.type_checking for d in a) == [False, True]
 
 
 def test_summarise_reports_the_shim_closure_for_the_reader_that_was_used():
@@ -733,3 +753,193 @@ def test_validate_exits_two_on_an_empty_window(tmp_path, monkeypatch, capsys):
     )
     assert ci.cmd_validate(args) == 2
     assert "no PRs" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# #10143 review round 2 (head `1ef26facd`): the six findings at that head.
+# Each of these fails on the code as it was at `1ef26facd` and passes on the
+# fix, so the defect cannot come back silently. Grouped, not scattered, so the
+# next reviewer can see exactly what was wrong and re-verify it.
+# ---------------------------------------------------------------------------
+def test_a_red_pr_that_uploaded_no_artifact_is_not_a_clean_window(
+    tmp_path, monkeypatch, capsys,
+):
+    """P1 fail-open: the THIRD "could not read the ground truth" path.
+
+    Two drop paths (download failed, no `junit.xml`, unparseable XML) already
+    appended an `artifact_errors` entry; the `if not selected: continue` branch
+    did not. A red leg whose artifact listing is EMPTY — an ordinary state:
+    artifacts expire after 90 days by default and deleting a run deletes its
+    artifacts — therefore produced an empty `artifact_errors`, printed
+    `artifacts unreadable: 0`, and `cmd_validate` returned **0**: the strongest
+    possible false green for a harness whose job is to be unfoolable.
+
+    The stub here deliberately carries `artifact_errors: []` WITH
+    `artifacts: 0`, which is the state the old exit condition scored as clean.
+    """
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": []}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
+    monkeypatch.setattr(ci, "changed_files",
+                        lambda repo, pr, cache: ["tortoise/lazy.py"])
+    monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
+        "failed_files": [], "failed_tests": [], "jobs": ["test (a)"],
+        "job_failed_without_test_failure": [], "artifacts": 0,
+        "artifact_errors": [],          # ← the FAIL-OPEN state: no entry at all
+        "junit_missing": [], "ground_truth_complete": False,
+    })
+
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    assert ci.cmd_validate(args) == 2, (
+        "a red PR whose legs uploaded nothing must not exit 0"
+    )
+    out = capsys.readouterr().out
+    assert "PARTIAL" in out and "no readable artifact" in out
+
+
+def test_a_module_level_dynamic_import_is_not_tagged_function_local():
+    """P2: the two dynamic-import sites hardcoded `in_function=True`.
+
+    `_scan_dynamic` was invoked with no nesting context, so a MODULE-LEVEL
+    `importlib.import_module('tortoise.lazy')` — the shape
+    `test_dynamic_import_with_a_literal_is_resolved_not_tainted` writes — was
+    tagged function-local and then DELETED by `--import-time-only`. That biases
+    the naive-reader figures in the direction the report's argument uses (a
+    smaller naive closure = a sharper reduction). Pinned on the edge's own flag,
+    and again on the closure, because the flag is only observable through it.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
+    scans = {
+        "tests/test_t.py": _scan(
+            idx, "tests/test_t.py",
+            "import importlib\nimportlib.import_module('tortoise.lazy')\n"),
+        "tortoise/__init__.py": _scan(idx, "tortoise/__init__.py", ""),
+        "tortoise/lazy.py": _scan(idx, "tortoise/lazy.py", ""),
+    }
+    lazy_edges = [d for d in scans["tests/test_t.py"].deps
+                  if d.target == "tortoise.lazy"]
+    assert lazy_edges, "the literal dynamic import must resolve to an edge"
+    assert all(d.in_function is False for d in lazy_edges), (
+        "a module-level dynamic import must not be tagged function-local"
+    )
+    naive = compute_closures(scans, idx, ["tests/test_t.py"],
+                             follow_function_local=False)["tests/test_t.py"]
+    assert "tortoise/lazy.py" in naive.modules, (
+        "--import-time-only must not delete a module-level dynamic import"
+    )
+
+
+def test_a_loader_call_with_a_computed_path_is_reported_as_unknown_loader():
+    """P3: `UNKNOWN_LOADER` / `_scan_loader_call` were exercised by nothing.
+
+    The reason is named in the report as one of the five reported UNKNOWN
+    classes and advertised as a shipped decision (§3.2), so a test must hold it
+    or the branch can be inverted with every test still green.
+    """
+    idx = _index("tortoise/__init__.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "import importlib.util\n"
+        "path = 'tortoise/' + 'lazy.py'\n"
+        "importlib.util.spec_from_file_location('m', path)\n",
+    )
+    assert [u.reason for u in scan.unknown] == [UNKNOWN_LOADER], (
+        "a module loaded from a computed path is outside the AST graph"
+    )
+    assert scan.tainted
+
+
+def test_exclude_type_checking_narrows_the_closure_it_is_asked_to_narrow():
+    """P3: `follow_type_checking` was referenced by no test.
+
+    The scan-level `type_checking` flag is pinned; the FILTER that consumes it in
+    `compute_closures` — the branch `--exclude-type-checking` feeds — was not, so
+    inverting it left every test green. DECISION stays "include by default"
+    (safe direction); this pins that the flag actually does something both ways.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/typing_only.py")
+    scans = {
+        "tests/test_t.py": _scan(
+            idx, "tests/test_t.py",
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from tortoise.typing_only import T\n"),
+        "tortoise/__init__.py": _scan(idx, "tortoise/__init__.py", ""),
+        "tortoise/typing_only.py": _scan(idx, "tortoise/typing_only.py", ""),
+    }
+    full = compute_closures(scans, idx, ["tests/test_t.py"],
+                            follow_type_checking=True)["tests/test_t.py"]
+    excluded = compute_closures(scans, idx, ["tests/test_t.py"],
+                                follow_type_checking=False)["tests/test_t.py"]
+    assert "tortoise/typing_only.py" in full.modules, (
+        "TYPE_CHECKING imports are dependencies by DEFAULT (our polarity)"
+    )
+    assert "tortoise/typing_only.py" not in excluded.modules, (
+        "--exclude-type-checking must actually exclude the type-only edge"
+    )
+
+
+def test_core_members_that_do_not_resolve_are_reported_not_dropped():
+    """P2: the denominator could shrink silently.
+
+    `out.extend(by_basename.get(member, []))` contributes nothing for a member
+    that no longer resolves, and said nothing — contradicting this module's
+    contract that an unresolvable input is REPORTED. Every published percentage
+    is a ratio over this count, so the drop has to be visible.
+    """
+    manifest = {"surfaces": {"core": ["test_ci_import_closure.py",
+                                      "test_a_member_that_does_not_exist.py"]}}
+    unresolved: list[str] = []
+    core = core_test_files(manifest, unresolved)
+    assert "tests/test_ci_import_closure.py" in core
+    assert unresolved == ["test_a_member_that_does_not_exist.py"], (
+        "an unresolvable core member must be reported, never silently dropped"
+    )
+
+
+def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys):
+    """The partial-window test must be `red legs && nothing read`, NOT `== 0`.
+
+    `artifacts` counts junit blobs read off RED `test*` legs only, so a fully
+    green PR — most of any window — always has `artifacts == 0`. Measured on the
+    §3 window: 24 of 40 PRs are green. Keying the PARTIAL verdict on
+    `artifacts == 0` therefore reports every window as truncated, and a
+    fail-closed check that ALWAYS fires carries no information. Pinned so the
+    broader (wrong) condition cannot come back.
+    """
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": []}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
+    monkeypatch.setattr(ci, "changed_files",
+                        lambda repo, pr, cache: ["tortoise/lazy.py"])
+    monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
+        "failed_files": [], "failed_tests": [], "jobs": [],   # ← green PR
+        "job_failed_without_test_failure": [], "artifacts": 0,
+        "artifact_errors": [], "junit_missing": [], "ground_truth_complete": True,
+    })
+
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    assert ci.cmd_validate(args) == 0, (
+        "a green PR that uploaded nothing is a clean PR, not a partial window"
+    )
+    assert "PARTIAL" not in capsys.readouterr().out
