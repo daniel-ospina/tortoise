@@ -232,9 +232,11 @@ on:
 # jobs), measured on completed runs 2026-10-27: `packaging-smoke` max 28.2 min
 # (n=27) → 55; `post-deploy-verify` max 0.4 min (n=6) → 15 (the floor).
 # `deploy-api` is the exception, for arithmetic rather than padding: its own
-# retry loop is bounded at 5 × (`--wait-timeout 420` + 45 s) ≈ 39 min, so a 2×
-# cap over its measured 3.5 min would red the fail-safe retry path it exists to
-# allow — 60 bounds the job without ever being the thing that fails it.
+# retry loop is 5 `timeout`-bounded attempts (11 min each, + 4 × 45 s) ≈ 58 min —
+# the per-attempt bound is what makes that a number, because `--wait-timeout 420`
+# bounds only the release wait and not `flyctl deploy`'s remote build — so a 2×
+# cap over its measured maximum would red the fail-safe retry path it exists to
+# allow. 60 bounds the job without ever being the thing that fails it.
 #
 # ⚠️ NOTHING OUTSIDE THIS WORKFLOW IS BOUNDED BY THESE CAPS ALONE: the sum
 # (55 + 60 + 15 = 130 min) is now the worst case a run can HOLD this group for,
@@ -377,9 +379,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: packaging-smoke
     # Bounded ABOVE this job's own arithmetic, not at a multiple of its 3.5 min
-    # measured maximum: the retry loop (5 × 465 s ≈ 39 min) is a legitimate
-    # worst case, and a cap under it would fail the fail-safe path. The ≤6.4 min
-    # DB health gate is NOT in this job (it moved to `post-deploy-verify` in
+    # measured maximum: the retry loop is now 5 × 11-minute attempts + 4 × 45 s
+    # ≈ 58 min (each attempt is `timeout`-bounded — `--wait-timeout 420` bounds
+    # only the release wait, not the remote build), so 60 leaves the fail-safe
+    # path room without ever being the thing that fails it. The ≤6.4 min DB
+    # health gate is NOT in this job (it moved to `post-deploy-verify` in
     # #4538, which is where its budget is counted). See the workflow's
     # `concurrency:` note.
     timeout-minutes: 60
@@ -999,11 +1003,21 @@ jobs:
         # not secrets isolation. The secrets-set step above keeps the
         # full-scope FLY_API_TOKEN for cross-app/org operations.
         run: |
+          # ⛔ Each ATTEMPT is bounded, because `--wait-timeout 420` bounds only
+          # the RELEASE wait — NOT `flyctl deploy`'s remote build — so without
+          # this the loop is 5 × (unbounded build + 420 s), the loop's worst case
+          # is not a number, and `timeout-minutes: 60` can kill attempt 5 of a
+          # deploy that was making progress: that fails the very fail-safe path
+          # the retry exists to rescue (observed: a `deploy-api` job at 55.1 min
+          # without completing, five minutes under the cap). 11 min per attempt
+          # covers a ~4-minute remote build plus the 7-minute release wait, so
+          # the loop is 5 × 11 + 4 × 45 s ≈ 58 min — a DERIVED bound under the
+          # job's 60, not a guess that happens to be above the measurements.
           for attempt in 1 2 3 4 5; do
-            if flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
+            if timeout 11m flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
               exit 0
             fi
-            echo "::warning::deploy attempt $attempt failed — waiting 45s before retry (Fly lease/API race)"
+            echo "::warning::deploy attempt $attempt failed or hit its 11-minute bound — waiting 45s before retry (Fly lease/API race)"
             sleep 45
           done
           exit 1

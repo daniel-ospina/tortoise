@@ -361,18 +361,39 @@ jobs:
           echo "   https://github.com/${REPO_SLUG}/actions/runs/${run_id}"
           watch=(gh run watch "${run_id}" --repo "${REPO_SLUG}" --exit-status)
           # `timeout` is GNU coreutils — the ubuntu runner has it, macOS does not.
-          # ⛔ 275m, not the pre-#10155 45m. With `cancel-in-progress: false` the
-          # flip QUEUES behind a running deploy-hosted run instead of pre-empting
-          # it, so the bound must span a predecessor holding the group for its
-          # own full job caps (55 + 60 + 15 = 130 min) PLUS this run's own caps —
-          # 2 × 130 = 260, + 15 slack. At most ONE run can be ahead: a pending
-          # predecessor is superseded by this (newest) run. A 45-minute bound
-          # killed a HEALTHY queued flip and reported it as "the app did NOT
-          # flip", which is the false red this arithmetic removes.
+          # ⛔ 330m, not the pre-#10155 45m, and the DERIVATION is split in two
+          # because the wait is not execution-dominated:
+          #   • what this workflow can BOUND is execution: a predecessor holds the
+          #     group for at most its job caps (55 + 60 + 15 = 130 min) and this
+          #     run for the same, so 2 × 130 = 260 + slack;
+          #   • what it CANNOT bound is runner-queue latency, and that is now the
+          #     larger term — measured on the newest SUCCESSFUL deploy-hosted run
+          #     (40458809781, 2026-10-27): wall clock 167.3 min against 16.8 min
+          #     of job execution, i.e. 42.5 + 66.2 + 41.8 min spent QUEUED.
+          #     330 is the largest wait that fits inside the `deploy` job's
+          #     ceiling (GitHub's 360-minute default, which this job does not
+          #     override) with room for the apply steps that run before it.
+          # ⛔ So 330 is a POLICY choice against an unbounded term, and the thing
+          # that must be CORRECT is the verdict below, not the constant: only a
+          # non-zero exit from a run that reached a terminal state is evidence
+          # the flip failed. Exhausting the bound is NOT (see the branch below).
           if command -v timeout >/dev/null 2>&1; then
-            watch=(timeout 275m "${watch[@]}")
+            watch=(timeout 330m "${watch[@]}")
           fi
-          if ! "${watch[@]}" >/dev/null; then
+          watch_rc=0
+          "${watch[@]}" >/dev/null || watch_rc=$?
+          # `timeout` exits 124 when the BOUND expired. That says nothing about
+          # the flip: the run may still be QUEUED behind a predecessor or inside
+          # a slow deploy, so reporting "did NOT flip" would be a false claim and
+          # its remediation (re-dispatch / flip by hand) is now WRONG — both
+          # queue behind the very run being given up on. Fail closed, but say
+          # what is actually known (#10155 review round 2: a single healthy run
+          # already measured 167 min of wall clock).
+          if [ "${watch_rc}" -eq 124 ]; then
+            echo "::error::deploy-hosted run ${run_id} did not FINISH within the 330-minute wait — the flip is UNKNOWN, NOT failed, and the schema IS applied. Do NOT re-dispatch and do NOT flip by hand: both queue behind this run and supersede its pending slot. Watch it instead: gh run watch ${run_id} --repo ${REPO_SLUG} (#3627)"
+            exit 1
+          fi
+          if [ "${watch_rc}" -ne 0 ]; then
             echo "::error::deploy-hosted run ${run_id} did not reach success — the app did NOT flip. The schema IS applied, so tenant-scoped reads return 0 rows and provisioning fails until the app is flipped (#3627). A merge to main landing while this flip was still PENDING supersedes it (deploy-hosted.yml's shared `concurrency` group holds one pending run; `cancel-in-progress: false` stops a RUNNING deploy being cancelled but cannot save a pending one); re-run this workflow, or flip by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
             exit 1
           fi
