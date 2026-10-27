@@ -2604,6 +2604,47 @@ def test_mention_stub_rementioned_after_delete_folds_again(env):
         "the reference fold treated a re-mentioned stub as still deleted: "
         f"{r['non_folded_events']}")
     assert r["divergence"] != "non-folded", r["divergence"]
+    # ⛔ `ok`/`divergence`, not just the refusal count (review 11, P3): with
+    # only the two asserts above, DELETING the seeding's `deleted.discard`
+    # still passed — the false red it causes is `divergence="content"`
+    # (hard-deleted-in-journal / present-in-graph), which neither line looks
+    # at. The line is load-bearing; this is what pins it.
+    assert r["ok"] is True, r
+    assert r["divergence"] is None, r["divergence"]
+
+
+def test_renamed_away_stub_supersede_is_named_in_the_report(env):
+    """#10157 review round 11, P1: a rename moves the NAME, not the id.
+
+    FAILS IF: the stub-existence limb intersects the ids alone.
+    `journal_object_surviving_keys` models a rename in its NAMES half — the id
+    survives under a new name — so the OLD name still mapped to a surviving id,
+    `_stub_hit` fired, and a supersede every engine refuses stayed out of the
+    report. It was masked, not fixed, by the rename's own record (the reference
+    fold has no `EntityMutated` arm for a stub, a PRE-EXISTING gap filed
+    separately).
+
+    ⛔ Asserts the SUPERSEDE is among the refused records — asserting only
+    `refused >= 1` would pass on the pre-existing `state-op-miss` alone and pin
+    nothing.
+    """
+    sdk, events = env
+    stub_id = _entity_name_id("Object", "ACME-RN")
+    _raw(events, type="EventRecorded", id="e-rn-1", eventKind="k",
+         object="ACME-RN", event_id="e-rn-rec")
+    _raw(events, type="EntityMutated", op="rename", label="Object",
+         id=stub_id, state={"name": "ACME-RN-NEW"}, event_id="e-rn-mut")
+    _raw(events, type="ObjectSuperseded", name="ACME-RN", supersedes_by="y",
+         event_id="e-rn-sup")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert any("ObjectSuperseded" in e or "supersede matched no" in e
+               for e in r["non_folded_events"]), (
+        "the reference fold still treated the renamed-away stub's OLD name as "
+        f"an address: {r['non_folded_events']}")
 
 
 def test_id_wide_delete_of_a_mention_stub_refuses_on_every_engine(env):

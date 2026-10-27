@@ -2267,10 +2267,21 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # delete, the re-id, the rename — and a re-mention revives the id
             # in it, which is the control this must NOT refuse.
             _surviving_stub_ids = mention_stub_ids & surviving_ids
+            # ⛔ BOTH limbs, and the NAME limb needs its own survival test
+            # (review 11, P1). `journal_object_surviving_keys` models a rename
+            # in its NAMES half alone: a rename moves the node to a new name
+            # and the id survives. So an id-only intersect still called the OLD
+            # name addressable (its id survived) after the stub had been
+            # renamed away, `_stub_hit` fired, and a supersede every engine
+            # refuses stayed out of the report entirely.
+            # `mention_stub_carriers` is the MENTION's name table and no rename
+            # ever updates it, which is why the name half cannot be inferred
+            # from that table alone.
             _stub_hit = (
                 (isinstance(oid, str) and oid in _surviving_stub_ids)
-                or any(_sid in _surviving_stub_ids
-                       for _sid in mention_stub_carriers.get(oname, ())))
+                or (oname in _surviving_names
+                    and any(_sid in _surviving_stub_ids
+                            for _sid in mention_stub_carriers.get(oname, ()))))
             if _stub_hit:
                 continue
             # Genuinely unresolvable: an id no journaled registration leaves
