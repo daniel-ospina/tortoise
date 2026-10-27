@@ -439,6 +439,22 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
     return floor
 
 
+def _column_keys(props: dict, column: str) -> list[str]:
+    """Every key in ``props`` the RECORD would resolve into ``column``.
+
+    THE one definition of "this key names that column", shared by all three of
+    the copy's column guards (the ownership filter, the `created_at` null rule,
+    and the absent-timestamp report). `record_projection._split_properties`
+    resolves a key with `snake()`, so `turnCount`, `createdAt` and `CreatedAt`
+    all land in the same columns their snake spellings do — a guard written
+    against a literal list of spellings protects only the spellings its author
+    thought of, and the three guards drifted apart exactly that way (three
+    review cycles, one key each). Resolving here means they cannot drift again.
+    """
+    from tortoise.record_projection import snake as _record_snake
+    return [k for k in props if _record_snake(k) == column]
+
+
 def _declared(props: dict, column: str) -> int | None:
     """The graph's DECLARED value for one of the copy's own columns.
 
@@ -456,12 +472,9 @@ def _declared(props: dict, column: str) -> int | None:
     exists to prevent. `None` means the graph declared nothing this resolver can
     read.
     """
-    from tortoise.record_projection import snake as _record_snake
     found: int | None = None
-    for prop, value in props.items():
-        if _record_snake(prop) != column:
-            continue
-        measured = census._int_or_none(value)
+    for prop in _column_keys(props, column):
+        measured = census._int_or_none(props[prop])
         if measured is not None and (found is None or measured > found):
             found = measured
     return found
@@ -502,11 +515,13 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # let the payload alone walk the record's count down. Measuring the
     # snake-cased name is what makes "a graph property may never override these"
     # true of the record's column and not merely of one of its spellings.
-    from tortoise.record_projection import snake as _record_snake
+    # Measured through the shared resolver, so this filter and the `created_at`
+    # rule below are the same rule and not two spellings of it.
+    derived = [k for column in _SESSION_DERIVED
+               for k in _column_keys(props, column)]
     event = {"is_episodic": True}
     event.update({k: v for k, v in props.items()
-                  if _record_snake(k) not in _SESSION_DERIVED
-                  and k not in _SESSION_ENVELOPE})
+                  if k not in derived and k not in _SESSION_ENVELOPE})
     event.update({
         "event_id": event_id, "type": "SessionRecorded",
         "initiated_by": "backfill", "projection_version": 2,
@@ -520,16 +535,23 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # leaves an existing value alone and still writes NULL on a first insert.
     #
     # ⛔ The payload above is copied VERBATIM, so the rule is ENFORCED here, not
-    # merely hoped for: a graph property spelled `created_at`/`createdAt` with a
-    # null value would otherwise reach `_split_properties`, which snake-cases it
-    # into `col_values["created_at"] = None` with no value filter
+    # merely hoped for: a graph property naming this column with a null value
+    # would otherwise reach `_split_properties`, which snake-cases it into
+    # `col_values["created_at"] = None` with no value filter
     # (`record_projection.py:1452-1462`) — the blanking write this paragraph
     # forbids, while `copy_phase` reported the same session under
-    # `created_at_absent`. Popping BOTH spellings is what makes the claim true of
-    # a present null and not only of an absent key.
-    for absent in ("created_at", "createdAt"):
-        if absent in event and event[absent] is None:
-            event.pop(absent)
+    # `created_at_absent`. Popping EVERY spelling that names the column is what
+    # makes the claim true of a present null and not only of an absent key.
+    #
+    # ⛔ EVERY SPELLING, not the two literals this started as. The record
+    # resolves a key with `snake()`, so `CreatedAt` names the SAME column as
+    # `created_at` and blanks it exactly as well; a literal tuple is a guard that
+    # protects the spellings someone happened to think of. This is the same rule
+    # the ownership filter above uses, so all three of the copy's column guards
+    # now share one definition of "names the column".
+    for named in _column_keys(event, "created_at"):
+        if event[named] is None:
+            event.pop(named)
     # ⛔ The record's bookkeeping NEVER goes DOWN. `turn_count` is a COLUMN and
     # `turn_max_index` rides the props tail; the record's upsert is
     # `ON CONFLICT … DO UPDATE SET` and its tail merge is
@@ -706,12 +728,15 @@ def copy_phase(graph, emit, *, page_size: int | None = None, event_id,
         bucket = by_session.get(sid, {})
         indexes = sorted(bucket)
         props = sessions.get(sid, {})
-        # BOTH spellings: `build_session_event` drops either, and a report that
-        # named a session as timestamp-absent while the payload carried a real
-        # `createdAt` is a false entry in the list an operator reads before an
-        # irreversible delete.
-        if (props.get("created_at") is None and props.get("createdAt") is None
-                and sid in sessions):
+        # EVERY spelling that names the column: `build_session_event` drops them
+        # all, and a report that named a session as timestamp-absent while the
+        # payload carried a real `CreatedAt` is a false entry in the list an
+        # operator reads before an irreversible delete. Resolved through the
+        # record's own `snake()` rule for the same reason, so the report and the
+        # payload cannot disagree about what counts as a timestamp.
+        if (sid in sessions
+                and all(props.get(k) is None
+                        for k in _column_keys(props, "created_at"))):
             stats["created_at_absent"].append(sid)
         events = [build_session_event(
             sid, props, turn_count=len(indexes),

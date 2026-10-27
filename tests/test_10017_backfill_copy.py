@@ -680,6 +680,37 @@ def test_a_present_null_created_at_never_reaches_the_payload() -> None:
     assert kept["created_at"] == "2026-10-20T00:00:00Z"
 
 
+def test_every_spelling_that_names_created_at_is_null_filtered() -> None:
+    """The rule is the COLUMN, not the two spellings that were listed first.
+
+    The guard started as a literal tuple `("created_at", "createdAt")`, and the
+    record's identity rule is `snake()` — so `CreatedAt` names the same column
+    and blanks it exactly as well, through the same
+    `DO UPDATE SET created_at = EXCLUDED.created_at`. A literal list is a guard
+    that protects the spellings its author thought of; all three of the copy's
+    column guards (ownership, this null rule, the absent report) now resolve
+    through `_column_keys`, so they share one definition and cannot drift apart.
+    """
+    from tortoise.record_projection import snake
+
+    # The spellings the record's rule actually maps onto this column — measured,
+    # not assumed: `snake` folds interior capitals, and it does NOT fold an
+    # all-caps key (`CREATED_AT` → `c_r_e_a_t_e_d__a_t`), so an all-caps
+    # property names NO column and cannot blank one. Asserting the premise is
+    # what keeps this test from claiming a threat the record does not have.
+    for spelling in ("created_at", "createdAt", "CreatedAt"):
+        assert snake(spelling) == "created_at", spelling   # the premise
+        event = copy_mod.build_session_event(
+            "s1", {spelling: None}, turn_count=0, max_index=-1, event_id="E")
+        assert spelling not in event, spelling
+    assert snake("CREATED_AT") != "created_at"    # …and the boundary, stated
+    # …and a non-null value under any of them is still carried verbatim.
+    carried = copy_mod.build_session_event(
+        "s1", {"CreatedAt": "2026-10-20T00:00:00Z"}, turn_count=0,
+        max_index=-1, event_id="E")
+    assert carried["CreatedAt"] == "2026-10-20T00:00:00Z"
+
+
 def test_a_count_without_a_high_water_mark_never_writes_a_negative_one() -> None:
     """The two guards are per-key: a count alone must not invent a `-1` mark.
 
