@@ -21,11 +21,12 @@ The run's verdict table is the sibling index. Read the two together: this file s
 surfaces it drove (the Tortoise dashboard and the real ChatGPT UI), with a dated screenshot or a
 trace for each row, and it names the two remaining blockers — `#8617` (step 2a, graph creation
 refused by the FalkorDB ACL layer) and `#10088` (step 4, the authorize page's sign-in delivers the
-code to the marketing host). Three of this file's claims have been superseded since they were
-written: the status line above, **replaced** with the run's own status rather than annotated; the
-"no addressable form on the connector" paragraph, **marked `SUPERSEDED` in place below**; and row 3's
-"ChatGPT has no dashboard surface at all", also **marked `SUPERSEDED` in place** — #9660 reversed it
-on 2026-10-23, two days after the build this run drove.
+code to the marketing host). The claims this file makes about ChatGPT's surface, and about the
+connector's ugly cases, have been superseded since they were written, and each is marked where it
+lives: the status line above, **replaced** with the run's own status rather than annotated; row 3 and
+its §3 narrative of the same correction, both **marked `SUPERSEDED` in place** — #9660 reversed the
+"no dashboard surface" reading on 2026-10-23, two days after the build this run drove; and the "no
+addressable form on the connector" paragraph, **marked `SUPERSEDED` in place below**.
 
 Issue #9664 defines a *manual, agent-run clickthrough* across three surfaces (Tortoise
 web, the ChatGPT UI, our MCP server). It is deliberately **not** a script and **not** a CI
@@ -74,7 +75,7 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 |---|---|---|---|
 | 1 | sign up, name workspace → `team-named` closes | NOT-COVERED-HERE | premise MEASURED: `team-named` is auto-satisfied at org-create and is never an agent act (`state._NON_AGENT_STEPS`, census row 1). The clickthrough itself needs a browser. |
 | 2 | create graph; Settings → Configured packs, narrow → the chosen set persists; `configured` reflects narrowing | NOT-COVERED-HERE | premise MEASURED (census rows 2a-2e): `GET/PUT /v1/graphs/{graph_id}/packs` returns `configured`, and `false` means *never explicitly configured* — the catalog union only when the graph ALSO has no `:PackInstall` records; with records it resolves to `recorded ∪ data`, narrower than the catalog whenever a catalog namespace has neither a record nor any data in the graph (measured: catalog 7, starter 5, `catalog−resolved = portfolio, venture`). A provisioned default graph is in the records arm — **attribution, not measured here**: the seeding call sites are `hosted_api.py:4981`, `hosted_api.py:11089` and `supabase_control.py:3047`, and the narrowing that follows was measured by #9691's embedded probe; what this census measures is the resolution and the self-heal. A record-less graph narrows again on its FIRST packs READ (census row 2e), so step 2's *"the default is catalog union + core"* is false for the surface the user opens (`docs/EXPANSION_PACKS.md` §"Per-graph pack selection (#2728)", #9691, `pack_state.resolved_pack_set`) — not *no packs* (`website/apps/dashboard/src/packs.js:1-30`). Persistence needs a browser. |
-| 3 | Setup-guide card → choose ChatGPT → the card's steps, as rendered | **WRONG-AS-WRITTEN** | ChatGPT has **no dashboard surface at all**: `#2698` deleted its tab, `#2912`'s families exclude it, and the source says so in terms — *"chatgpt … has NO dashboard surface: … Its live carrier is the public setup docs page (#4836)"* (`harnesses.js:865-867`). MEASURED: the served door is `https://tortoise.premiselabs.co/docs#chatgpt` (HTTP 200, section present, `01` log). **SUPERSEDED in place 2026-10-23 by `#9660`** — the sentence above is exact for the deployed build this run drove (`81f5594dce`, 2026-10-21), and `#9660` (`ebad38f29`) landed two days later, so `chatgpt` is now a first-class chooser family (`harnesses.js:880`) and the served onboarding document says so itself (`run-2026-10-26/skill-tortoise-onboarding.md:138-141`), with the docs page kept as the reference copy. Updating row 3 against the current tree is `#9660`'s remaining work, not this publication's. |
+| 3 | Setup-guide card → choose ChatGPT → the card's steps, as rendered | **WRONG-AS-WRITTEN** | ChatGPT has **no dashboard surface at all**: `#2698` deleted its tab, `#2912`'s families exclude it, and the source says so in terms — *"chatgpt … has NO dashboard surface: … Its live carrier is the public setup docs page (#4836)"* (`harnesses.js:865-867`). MEASURED: the served door is `https://tortoise.premiselabs.co/docs#chatgpt` (HTTP 200, section present, `01` log). **SUPERSEDED in place 2026-10-23 by `#9660`** — the sentence above is exact for the deployed build this run drove (`81f5594dce`, 2026-10-21), and `#9660` (`ebad38f29`) landed two days later, so `chatgpt` is now a first-class chooser family (`harnesses.js:880`) and the served onboarding document says so itself (`run-2026-10-26/skill-tortoise-onboarding.md:138-141`), with the docs page kept as the reference copy. Updating row 3 against the current tree is `#9664`'s remaining work, not this publication's. |
 | 4 | ChatGPT: add custom MCP server = `CANONICAL_MCP_URL` → OAuth; consent shows the right workspace; token issued | NOT-COVERED-HERE | premises MEASURED: PRM + AS metadata are live (DCR `/register`, `/oauth/authorize`, `/oauth/token`, PKCE `S256`, `resource=https://api.premiselabs.co/mcp`), an unauthenticated `POST /mcp` is **challenged** with `resource_metadata` (401, `01` log). The consent chooser is **org**-scoped (`_selectable_orgs`, `oauth.py:845`). The ChatGPT side needs the human Pro auth; the recipe differs from the step — see correction 3. |
 | 5 | `connection-written` + `harness-connected` close **at token issue** | **WRONG-AS-WRITTEN** | MEASURED (census rows 5a-5e): `connection-written` is in **no** completion gate and is a CLIENT checkpoint (`#3451`, `_NON_AGENT_STEPS`, `_CHECKPOINT_STEPS`); `harness-connected` is filed by the server on the **first successful agent write** (`#3784`/`#3913`), i.e. at step 8. Nothing closes at token issue. |
 | 6 | the agent calls `tortoise_load_skill` | **WRONG-AS-WRITTEN** | MEASURED (census rows 6a-6e): no such tool — `0` of the 81 registered tools contains `skill`, and the name occurs in no pre-existing **surface or implementation** — every occurrence is either in a file this PR adds or edits, or in the census probe, its pin and its log, where the probe and the log **measure** its absence and the pin only keeps the row selectable (`git grep tortoise_load_skill`). ChatGPT is *skillless by design* (`HARNESS_SKILLLESS`), and the served onboarding document it is handed names the **advertised** `tortoise_overview(section="health")` for verification (the legacy `tortoise_health` it mentions ×11 is retired — census rows 6b/6c) plus `tortoise_onboarding_state` ×6, `tortoise_create_point` ×3, `tortoise_file_decision` ×1, `load_skill` ×0 (`01` log). Those are whole-document **mention** counts, and they are not the instruction this path follows — measured per section: §3b ×4 (`SKILL.md:249, 343, 499, 508`), §4 ×3 (`:607, 614, 624`), **§7 ×1 (`:908`)**, §5 ×0, plus the frontmatter pair and one retirement disclosure (`:648`). The §7 mention is the one a ChatGPT runner still meets: the document's ChatGPT carve-out is the §4 bullet, and §7's decide protocol (`:907-908`, "Verify the live connection first with `tortoise_health`") is **not** carved out — capstone step 9 runs exactly that protocol, so step 9's trace must be read against the retirement (`#5439` tracks the copy). |
@@ -109,13 +110,19 @@ to the three call sites above, and the row says nothing about it.
 
 ## The three corrections
 
-**3 — the door is the public docs page, not the Setup-guide card.** ChatGPT is key-less
-OAuth with no dashboard surface; the steps live at `website/docs.html#chatgpt` (served at
-`https://tortoise.premiselabs.co/docs#chatgpt`). The declared recipe is also different from
-the step: **Enable Developer mode** (chatgpt.com → Settings → Security and login) → open
+**3 — the door is the public docs page, not the Setup-guide card.** As measured on the deployed
+`81f5594dce`, ChatGPT is key-less OAuth with no dashboard surface, and the steps live at
+`website/docs.html#chatgpt` (served at
+`https://tortoise.premiselabs.co/docs#chatgpt`). The recipe declared there *then* was also different
+from the step: **Enable Developer mode** (chatgpt.com → Settings → Security and login) → open
 `chatgpt.com/plugins` → **+** → create a Developer-mode app → server URL
 `https://api.premiselabs.co/mcp`, no key → **Choose OAuth** → **Scan Tools** → sign in to
-Tortoise → **Authorize** → pick the organization. Corrected observation: *"the docs page's
+Tortoise → **Authorize** → pick the organization. **Both halves of this correction are superseded
+in place, and row 3's SUPERSEDED note above is the marker:** `#9660` (`ebad38f29`, 2026-10-23) gave
+ChatGPT its own chooser family and rewrote the served page's recipe to `chatgpt.com/plugins` →
+**Add** → **Add custom MCP server** — the published onboarding copy carries the same recipe
+(`run-2026-10-26/skill-tortoise-onboarding.md:124-132`). Corrected observation, kept as the dated
+record of what the run saw: *"the docs page's
 ChatGPT section, as served, and ChatGPT's Developer-mode app creation + Scan Tools + OAuth
 consent naming the right organization."*
 
