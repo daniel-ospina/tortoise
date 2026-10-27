@@ -1365,6 +1365,13 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
     (#3019's requirement — a rank-based fusion downstream cannot tolerate an
     unstable tie: it would pick a different pool every call).
 
+    ⚠️ "Total" is true wherever the label CARRIES its key: `:Point`, `:Source`
+    and `:Event` all do. The all-id-less `:Object` population (hosted stubs) is
+    the known residual — there `coalesce(id, '')` is a constant, so the order
+    inside that population is still engine row order (#3019's recorded gap).
+    What the guard changes there is that those rows move from the HEAD of the
+    window to its TAIL, so they stop displacing addressable rows.
+
     ``coalesce(..., '')`` is load-bearing, not defensive. The engine sorts NULL
     as the LARGEST value, so a bare ``updatedAt DESC`` puts every UNDATED row at
     the HEAD of the window — measured: an id-less ``:Object`` outranks every

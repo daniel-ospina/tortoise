@@ -291,6 +291,12 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
     )
 
 
+#: Every way a cypher reaches the graph in this module. `ro_query` is the
+#: read-only verb `cypher_guard` wraps; matching only `query` would let a leg
+#: written against it slip past the census entirely (#10121 round-5 review).
+_QUERY_VERBS = frozenset({"query", "ro_query", "_query"})
+
+
 def test_every_leg_query_carries_a_secondary_sort_key():
     """A CENSUS, not coverage: every ordering leg must use the SHARED tie clause.
 
@@ -501,14 +507,21 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     wandering: list[str] = []
     unresolvable: list[str] = []
     duplicated: list[str] = []
+    seen_clauses: list[str] = []
     resolved_ids: set[int] = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "query"
-                and node.args):
+                and node.func.attr in _QUERY_VERBS):
             continue
-        cypher = node.args[0]
+        # A cypher can also arrive as the first KEYWORD argument (#10121
+        # round-5 review); a leg written that way must not slip past the walk.
+        if node.args:
+            cypher = node.args[0]
+        elif node.keywords:
+            cypher = node.keywords[0].value
+        else:
+            continue
         if isinstance(cypher, ast.Name):
             scope = _scope_of(node.lineno)
             resolved = _resolve(cypher.id, scope, node.lineno)
@@ -519,16 +532,20 @@ def test_every_leg_query_carries_a_secondary_sort_key():
                     unresolvable.append(
                         f"{cypher.id} in {site[0]} from {iterable}")
                 continue
+            # The NAME is kept before the rebind: a textless resolution can be
+            # any expression (a call, an alias), which has no `.id`, and the
+            # branch below must report it rather than raise `AttributeError`.
+            name = cypher.id
             cypher = resolved
             # A resolved expression with NO literal text means the clause was
             # BUILT elsewhere (a helper, a module constant aliased through a
             # Name, a builder call): the census cannot judge it, so it fails
             # closed rather than counting it as clean (round-4 review).
             if not _literal_text(resolved):
-                iterable = _for_target_iterable(scope, cypher.id, node.lineno)
+                iterable = _for_target_iterable(scope, name, node.lineno)
                 if (getattr(scope, "name", "<module>"), iterable) not in DYNAMIC_ALLOWED:
                     unresolvable.append(
-                        f"{cypher.id} in {getattr(scope, 'name', '<module>')} "
+                        f"{name} in {getattr(scope, 'name', '<module>')} "
                         f"resolved to a textless expression")
                 continue
             if id(resolved) in resolved_ids:
@@ -540,12 +557,16 @@ def test_every_leg_query_carries_a_secondary_sort_key():
         if "ORDER BY" not in text:
             continue
         checked += 1
+        seen_clauses.append(_literal_text(cypher).strip()[:120])
         if not _calls_tie(cypher):
             wandering.append(text.strip()[:120])
 
     assert checked >= 6, (
         "FIXTURE NOT REACHED: the query-site census found fewer ordering sites "
         f"than the six legs define ({checked})")
+    assert len(set(seen_clauses)) >= 6, (
+        "the census counted six sites but fewer DISTINCT clauses, so at least "
+        f"one leg was validated against another leg's text: {seen_clauses}")
     assert not duplicated, (
         "two legs resolved to the SAME cypher assignment, so one of them was "
         f"never judged (#10121 review): {duplicated}")
