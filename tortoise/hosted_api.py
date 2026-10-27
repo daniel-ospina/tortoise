@@ -7541,7 +7541,8 @@ def _check_org_limit(org: dict, resource: str, *,
     except QuotaCheckError as e:
         # `quota` already logged the refusal at ERROR level — `_count_resource`
         # for a counting failure (#686), the limit validation for an unreadable
-        # limit (#4051); avoid double-logging — this site only records the HTTP
+        # limit (#4051, on BOTH the generic path and the `documents` derived
+        # branch); avoid double-logging — this site only records the HTTP
         # context.
         _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
@@ -17895,9 +17896,10 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # WHICH lanes hand the gate a raw value — and which do their own
         # `int(...)` and so stay unnamed — is stated ONCE, in
         # `quota.enforce_org_limit`'s SCOPE note. Do not restate the inventory
-        # here: two copies of it drifted apart inside this very change (this one
-        # claimed create_graph / invite reached the gate, which they never do —
-        # they call their own `int(max_graphs)` — while `quota`'s copy denied it
+        # here: copies of it drifted apart repeatedly inside this very change
+        # (this one claimed create_graph / invite reached the gate, which they
+        # never do — create_graph calls its own `int(max_graphs)` and
+        # invite_to_org reads no limit at all — while `quota`'s copy denied it
         # for key-mint, the one lane that really does arrive raw).
         #
         # #4051 — the org points gate. It enforces the org's OWN `max_points`:

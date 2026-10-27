@@ -1087,8 +1087,17 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         except (TypeError, ValueError, OverflowError):
             # OverflowError (#4051 review round 2): a non-finite stored
             # max_points is the SAME unreadable-limit class the generic path
-            # below now refuses — this branch derives the documents cap from
-            # it, so it must not escape as an unmapped 500 either.
+            # below refuses — this branch derives the documents cap from it, so
+            # it must not escape as an unmapped 500 either.
+            # ERROR level for the same reason as the generic path (#686): a
+            # money-gate data fault is not ops-invisible just because it was
+            # caught by the derived branch instead — and `_check_org_limit`'s
+            # own comment states that `quota` logged this refusal, which was
+            # only true of the generic path until now (#4051 review round 3).
+            _logger.error(
+                "quota limit unreadable (fail-closed): team=%s resource=%s "
+                "field=%s value=%r", org_id, "documents", "max_points",
+                max_points)
             raise QuotaCheckError(
                 f"team limits max_points invalid for documents resource "
                 f"({max_points!r})") from None
@@ -1129,19 +1138,23 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
     # ⚠️ SCOPE — this validates the dict the GATE IS GIVEN. It cannot fix a
     # corrupt value that dies EARLIER or is coerced ELSEWHERE (both tracked as
     # #10136). THE LANE INVENTORY LIVES HERE, ONCE — do not restate it at a
-    # caller; two copies drifted apart inside #4051's own commit.
+    # caller or in a test docstring; three copies drifted apart inside #4051's
+    # own change.
     #   • ARRIVES RAW (this refusal owns it): `get_current_org_session` →
     #     `_session_user_org` takes the Org node's `max_api_keys` UNCOERCED
     #     (`_org_limits_from_node` passes `mak` straight through) into
-    #     `_check_org_limit(org, "api_keys")` at the key-mint / rotate sites; and
-    #     the `/v1/index/docs` documents gate hands over a resolver-produced
-    #     `max_points`. So the gate must not assume its input is an int.
-    #   • DOES NOT ARRIVE (fails as an unnamed 500 elsewhere — #10136, NOT
-    #     closed here): the commit/capture lanes' auth resolvers coerce
+    #     `_check_org_limit(org, "api_keys")` at the key-mint / rotate sites. So
+    #     the gate must not assume its input is an int.
+    #   • DOES NOT ARRIVE — `documents`: it is handled by the DERIVED branch
+    #     above, which returns before this code, and its only caller feeds it
+    #     `resolve_org_limits`, which already coerces with `int(mp)` — a corrupt
+    #     stored value therefore dies in that resolver, before any gate.
+    #   • DOES NOT ARRIVE — the commit/capture lanes' auth resolvers coerce
     #     `max_points` with `int(mp)` first, so a corrupt stored value dies in
-    #     AUTH; and create_graph / invite_to_org take `_org_limits_from_node` but
-    #     do their own `int(max_graphs)` / capacity count WITHOUT calling this
-    #     helper.
+    #     AUTH; `create_graph` alone does its own `int(max_graphs)` with no call
+    #     to this helper; and `invite_to_org` reads NO limit at all (its seat
+    #     gate hardcodes the tier's number and refuses with a NAMED message), so
+    #     it has no unreadable-limit class to fail in.
     # OverflowError is the same class as TypeError/ValueError (`int(float('inf'))`).
     try:
         limit = int(limit)

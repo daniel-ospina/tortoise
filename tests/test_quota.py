@@ -167,12 +167,12 @@ class TestEnforceTeamLimit:
         The limit is read from the org's OWN source (here `max_points`), so a
         corrupt value must not degrade into no limit at all. The raw-value
         lanes are real: `get_current_org_session` carries `_org_limits_from_node`'s
-        uncoerced `max_api_keys` into `_check_org_limit(org, "api_keys")`, and the
-        `/v1/index/docs` documents gate passes a resolver-produced dict. (The
-        commit/capture lanes' auth resolvers coerce with `int(mp)` first, and
-        create-graph / key-mint do their own `int(...)` without calling this gate,
-        so a corrupt stored value fails THERE as an unnamed 500 — a separate
-        resolver/writer gap this gate cannot close, #10136.)
+        uncoerced `max_api_keys` into `_check_org_limit(org, "api_keys")` at the
+        key-mint / rotate sites. WHICH lanes arrive raw and which die earlier is
+        stated ONCE, in `quota.enforce_org_limit`'s SCOPE note — not restated
+        here (this docstring used to carry a second copy, and it contradicted
+        both that note and itself: it named key-mint as NOT reaching this gate
+        and then, one clause later, as the lane that reaches it raw).
 
         Mutation REDs this: drop the validation and let the non-numeric value
         reach the comparison — pre-change it raised a bare `TypeError`, refused
@@ -221,6 +221,19 @@ class TestEnforceTeamLimit:
                   if r.levelno >= logging.ERROR]
         assert any("quota limit unreadable (fail-closed)" in m
                    for m in errors), errors
+        # The `documents` branch is a SEPARATE raise site and logs separately —
+        # pin it on its own, by clearing first. Without this, the generic-path
+        # log above satisfies any later assertion and a silent documents
+        # branch would stay green (review round 3 on #4051: `_check_org_limit`
+        # documents the documents surface as logged, and it was not).
+        caplog.clear()
+        with pytest.raises(QuotaCheckError):
+            enforce_org_limit({"org_id": "t", "max_points": float("inf")},
+                              "documents")
+        docs_errors = [r.getMessage() for r in caplog.records
+                       if r.levelno >= logging.ERROR]
+        assert any("quota limit unreadable (fail-closed)" in m
+                   and "documents" in m for m in docs_errors), docs_errors
 
 
 # ── #683: users + graphs enforcement ──────────────────────────────────────
