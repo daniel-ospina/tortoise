@@ -320,21 +320,13 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
-    # #10135 (a504c1987): the SAME two shapes as test_5140_pending_extraction.py
-    # above — a module availability probe over the env URI (construct + close at
-    # import, no DETACH) plus the `graph` fixture's per-test handle. SAFETY IS
-    # NOT "the handle is declared": the fixture's `uri` is built by
-    # `_live_uri(f"test_5140_relabel_{os.urandom(4).hex()}")`, which REPLACES the
-    # env URI's path with that per-run test-prefixed graph, so the fixture's
-    # `MATCH (n) DETACH DELETE n` (setup and teardown) can only clear this
-    # test's own graph and never the shared env-URI handle. The regex is
-    # deliberately narrow to the two call shapes that exist today so a new one
-    # reds instead, and `test_env_uri_assignment_uses_live_uri_helper` pins the
-    # `from_uri(uri)` shape against a raw-env `uri =` assignment.
-    "test_5140_d10_relabel_migration.py": [
-        r"from_uri\(_probe_uri\)",
-        r"from_uri\(\s*uri\s*\)",
-    ],
+    # #10135 review (post-rebase): `test_5140_d10_relabel_migration.py` is
+    # deliberately ABSENT here. Main's #10164 gave both of that file's
+    # `from_uri(` sites an explicit `graph_name=` (`:50` the module probe,
+    # `:104` the fixture), which is the outcome this map exists to demand —
+    # `test_from_uri_sites_resolve_test_prefixed` skips a site whose block
+    # carries `graph_name=`, so a declaration for that file would be inert and
+    # would assert about call shapes the file no longer has.
     # CLI routing unit — from_uri is stubbed by the test (never connects)
     "test_pipeline_cli.py": [r"from_uri\("],
     # #3301: module live-FalkorDB availability probe over candidate URIs
@@ -475,9 +467,10 @@ _ENV_URI_PIN_FILES = (
     # #5140: declares the same `from_uri(uri)` / probe shapes above, so the
     # same loose-net hazard applies and the same invariant must hold.
     "test_5140_pending_extraction.py",
-    # #10135: same declared shapes again (`from_uri(_probe_uri)` +
-    # `from_uri(uri)`), same loose-net hazard, same invariant.
-    "test_5140_d10_relabel_migration.py",
+    # #10135 review (post-rebase): NOT `test_5140_d10_relabel_migration.py` —
+    # main's #10164 gave its `from_uri(` sites an explicit `graph_name=`, so
+    # the loose-net hazard this tuple guards (a declared, un-named site) no
+    # longer exists in that file.
 )
 
 
