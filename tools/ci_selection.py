@@ -1015,6 +1015,25 @@ SOURCE_PATTERNS = {
             # token-flow fix must change. Paired with CORE_ALSO so the
             # core-registered half is not dropped by the named-surface match.
             "tortoise/oauth.py",
+            # #3524 review (P1): the consent identity bridge's VERIFIER,
+            # `tortoise/consent_token.py`. Its guard
+            # (`tests/test_oauth_consent_bridge.py`) is registered `api` +
+            # `onboarding` (config/ci-surfaces.yml) and NOT `core`, and a
+            # named-surface match REPLACES the `core` fallback — so without this
+            # entry a diff that touches the verifier and nothing else selected
+            # `core`, where that guard does not exist. MEASURED before this
+            # entry: `--changed-files tortoise/consent_token.py --event
+            # pull_request` -> surfaces ['core'], 682 test files,
+            # test_oauth_consent_bridge.py ABSENT (with the test file also in the
+            # diff: surfaces ['api', 'core'], guard present). A one-line fix or a
+            # revert of the signature/`alg`/`bind`/`jti` logic — the security
+            # half of the bridge — therefore red nowhere, and would have merged
+            # green, caught only by a later PR that happened to touch
+            # `hosted_api.py`. Same silent-drop class as the #2938/#3154/#4367
+            # entries above. No CORE_ALSO entry: the module has no
+            # core-registered guard. Pinned by tests/test_ci_selection.py::
+            # test_a_consent_token_only_diff_runs_the_bridge_guard.
+            "tortoise/consent_token.py",
             # #3496: the consent page pins its browser auth client to a CDN
             # specifier whose version must equal the VENDORED bundle the
             # behavioural harness executes (test_oauth_consent_pkce.py, api).
@@ -1064,6 +1083,24 @@ SOURCE_PATTERNS = {
             # repo's deliberate docs-PR policy; the required `docs` job runs
             # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
+            # #10044 review F1: `tools/sdk_surface_declaration.py` is the APPROVED-surface
+            # gate (the owner's 40 in `tortoise/__all__.py` vs the owner's document, and
+            # vs the live `TortoiseSDK`). Its proofs are the 17 in
+            # `test_sdk_surface_declaration.py` — registered in `api` AND `core` but
+            # unreachable, because `tools/` is in NON_PYTHON_PREFIXES: a gate-only diff
+            # selected NO surface (`surfaces: []`, `full: false`) and the required job
+            # then executed the PR's own edited gate with zero of its tests having run.
+            # What that file pins is the GATE's contract (`check(contract_only=True)` reds a
+            # doctored or padded declaration) — enough on its own: a neutered `check()`
+            # cannot pass them. The WIRING proof (that the required lint still CALLS the
+            # gate) lives in `tests/test_surface_manifest.py`, which is `core`-registered and
+            # selected by the `tools/surface_manifest.py` diff that could break it — so this
+            # entry does not carry it, and saying it did was wrong (round-6 F3).
+            # Same silent-drop class (#1349/#3332/#3616) as the generators above, and the
+            # one bypass the residual-bypass paragraph in `tools/surface_manifest.py`
+            # does not cover. `test_sdk_surface_declaration.py` is already in `api`, so
+            # this entry is what makes the registration bite.
+            "tools/sdk_surface_declaration.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
             # `test_registry_integrity.py` (dual-registered in `api` AND `core`)

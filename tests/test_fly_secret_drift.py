@@ -1752,6 +1752,21 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
     # hard-blocking the deploy in CI.
     config_names = {
+        # #10093: the ACL layer's declared posture. Undeclared, it is invisible
+        # to check-fly-machine-env.py (which iterates ONLY declared
+        # `fly-toml-env` names and runs after the release — #4568), so a stale
+        # machine can silently revert this lane to `strict` with nothing red.
+        # The cost is the BOUNDARY, not a returned 503: #10094 made a refused
+        # credential non-fatal, and on this lane the credential IS refused (the
+        # runbook's custom ACL omits `+MODULE|LIST`, so the probe is refused and
+        # `ACL SETUSER` is never reached). Declared `off`, the reconcile reports
+        # `absent_by_design` — a deliberate boundary — with zero server contact;
+        # undeclared, every mint probes, is refused, and the reconcile reports
+        # `denied`, the credential-FAULT counter. The report then cannot tell a
+        # boundary from a broken credential, which is the one thing this lane
+        # exists to make tellable.
+        # Its REMOVAL must therefore fail here, in review, not in production.
+        "TORTOISE_ACL_LAYER",
         "TORTOISE_CONTROL_PLANE",
         "TORTOISE_REAUTH_WINDOW_SECONDS",
         "TORTOISE_MANUAL_LINKING_ENABLED",

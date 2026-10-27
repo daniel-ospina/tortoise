@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.30"
+title: "Tortoise — Canonical Ontology v3.31"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-21
+updated: 2026-10-26
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.30
+# Tortoise — Canonical Ontology v3.31
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -700,15 +700,25 @@ window, independent of when Tortoise learned it. Canonical pair:
 > Pinned by `tests/test_validity_windows.py`
 > (`test_a_start_naming_no_instant_leaves_the_window_open`,
 > `test_restore_read_path_treats_falsey_but_present_valid_from_as_present` part b).
-> The END agrees on the **gate** and differs only on the **state**: an
-> unorderable `validTo` bounds nothing either — `_covers` skips the arm, because
-> ordering a value that names no instant answers from a lexicographic comparison
-> rather than from the data, so a probe that itself names no instant is covered
-> too (#9202's coverage half) — and it still reports `end_state: "known"`
-> (the `END_UNKNOWN` marker requires an absent end plus an `"unknown"`
-> declaration), so no reply field says the window is unbounded. Whether that
-> state should instead read `unknown` / `open` is **#9202's owner decision** and
-> is NOT settled by the gate. Pinned by `tests/test_validity_windows.py`
+> The END agrees on the **gate**, and its **state is settled** (#9202, owner
+> ruling 2026-10-25, option B): an unorderable `validTo` bounds nothing —
+> `_covers` skips the arm, because ordering a value that names no instant answers
+> from a lexicographic comparison rather than from the data, so a probe that
+> itself names no instant is covered too (#9202's coverage half, #9408) — **and it
+> reports `end_state: "unknown"`**. An end that is stored but names no instant is
+> an **un-datable END**: the fact ended, at a time we cannot pin — the same state
+> the DECLARED marker (`validToPrecision = "unknown"` with no `validTo`) produces,
+> firing the same reply-level `end_state_unknown` / `indeterminate_end_ids` flags,
+> so a caller learns the window cannot be excluded rather than that it is still
+> true. `END_KNOWN` therefore means **dated**, not **present**, gated by
+> `validity.end_state` on the bound's own orderability so that a bound and the
+> state reported for it cannot contradict each other; the reading depends on the
+> bound, never on how a row spells it. **`END_OPEN` stays reserved for an ABSENT
+> end**: an end column carrying a value is an **asserted** end, so "no end was
+> recorded" is a claim the record contradicts, and reading it as still-true is the
+> fabricated-coverage hazard this vocabulary exists to prevent (#2349/#2350).
+> Rationale and the ruling behind it: `ONTOLOGY-CHANGELOG.md`. Pinned by
+> `tests/test_validity_windows.py`
 > (`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`).
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
@@ -719,8 +729,9 @@ above carries an **additive** precision layer: `validFromPrecision` /
 known** — the stored bound is unchanged, so `_created_sort_key` orders exactly
 what it always did — and a legacy bare-ISO bound with no precision property
 reads as `day` with **no migration**. The END is **three-valued**: `open`
-(`validTo` absent, no precision — still true), `known` (`validTo` present), and
-`unknown` (`validToPrecision = 'unknown'` with **no** `validTo` — the window
+(`validTo` absent, no precision — still true), `known` (`validTo` present and
+**dated**), and `unknown` (the declared `validToPrecision = 'unknown'` with **no**
+`validTo`, or a stored `validTo` that names no instant (§4.7); the window
 ended but at a time we cannot pin, so **no date is fabricated**). Every
 window-consuming read path emits the same `valid_from_precision` /
 `valid_to_precision` / `end_state` block through `validity.window_read_fields`,

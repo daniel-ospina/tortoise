@@ -230,6 +230,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
         "mcp-team": "team-identity", "t-bf-1": "team-identity",
     },
     "test_quota.py": {"registry": "prod-coupled"},
+    # #9567 capstone: D11/D12 drive the SHIPPED quota gate, whose resolver
+    # (`tortoise.quota.resolve_org_limits`) builds its own
+    # `_make_sdk(namespace="registry")`. So the literal IS the namespace PROD
+    # code resolves — the seed and the resolution must read one graph, exactly
+    # the `prod-coupled` class as test_quota.py beside it.
+    "test_9567_record_capstone.py": {"registry": "prod-coupled"},
     "test_sdk_legacy_coverage.py": {"team-beta": "assertion"},
     "test_writer_inventory.py": {"registry": "prod-coupled"},
     "test_ask_sdk.py": {

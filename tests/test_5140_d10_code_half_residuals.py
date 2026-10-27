@@ -32,8 +32,19 @@ anchor), finding 9 (#5236), finding 11 (the ruling-B `:Source` guard).
     the NON-OVER-REACH arm: *"SETTING a genre where none is stored is how a
     document `:Source` is minted through these surfaces at all"*). Closing it is
     a decision about that contract, not a bugfix, so it is left to the owner.
-  * **finding 8** — no label-relabel migration shipped for pre-D10 `:Document`
-    nodes — and **finding 3's backlog-discovery half**, which depends on it.
+  * **finding 8** — CLOSED by `tortoise/migrate_kinds.py::relabel_legacy_documents`
+    (runs first in `_do_migrate`), and with it **finding 3's backlog-discovery
+    half for the foldable part of a LIVE graph**: once the pre-D10 `:Document`
+    population is folded into `:Source {url}`, the `doc_status='captured'` arm
+    the sweep already carries reaches it. Pinned by
+    `tests/test_5140_d10_relabel_migration.py`.
+    ⚠️ Two populations are NOT reached, and neither is a relabel's to fix:
+    (a) a document minted by `_event_plain_merge`'s `objectType='Document'`
+    branch carries NO clock, so the relabel refuses it (`undated`) rather than
+    invent §4.6's `ingestedAt` — an operator asserts the instant and re-runs;
+    (b) the same backlog on a REBUILT graph (the replay scrubs `doc_status` and
+    stamps the old `needs_extraction=false`, which reads as done) — a product
+    decision recorded on #5140.
   * the **`transcript` genre-vocabulary** decision (issue comment
     2026-10-22T00:49; `owner-decision` label).
 

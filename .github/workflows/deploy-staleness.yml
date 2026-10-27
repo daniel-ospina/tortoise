@@ -1,0 +1,118 @@
+# deploy-staleness (#10109) — the positive staleness detector for the hosted
+# API: does the commit production is RUNNING equal origin/main, and how far
+# behind is it?
+#
+# WHY THIS EXISTS
+# ---------------
+# 2026-10-26: production ran 7 commits behind origin/main for ~9 hours while
+# every readiness signal stayed green. `deploy-hosted` was red on every run — 4
+# cancelled by its own `cancel-in-progress: true` as later merges landed, plus a
+# migration-drift gate failing closed before that — but a deploy that cannot
+# land DECLINES NOTHING. Every existing instrument (the /health payload, the
+# availability watchdog, main-health-nightly, ci-queue-health, deploy-api-alert)
+# is a decline channel: it fires when a deploy attempts and fails, or when the
+# service stops answering. None of them reads the one datum that answers the
+# question — the deployed commit vs origin/main. This workflow is the missing
+# POSITIVE reading (see .github/scripts/check-deploy-staleness.sh).
+#
+# WHY IT CANNOT BE STARVED INTO SILENCE (the load-bearing property)
+# -----------------------------------------------------------------
+# The runs that vanished tonight were cancelled by the `deploy-hosted`
+# concurrency group. This workflow:
+#   1. runs on its OWN `schedule` + `workflow_dispatch` — NOT `push: main`, so
+#      no merge creates its run, no merge cancels it, and it never queues
+#      behind the deploy backlog (the failure mode that starved
+#      `ci-queue-health`);
+#   2. has its OWN concurrency group with `cancel-in-progress: false`, so a run
+#      is never superseded mid-flight;
+#   3. detects a STEADY STATE (production stays behind until a deploy lands), so
+#      a GitHub-dropped/delayed scheduled fire is not a loss — the next tick
+#      re-fires the same red;
+#   4. fails closed: an unreadable deployed revision is a RED, never a pass.
+#   Residual (stated, not hidden): a GitHub Actions outage takes the schedule
+#   down with it, so the detector's own absence is the one thing it cannot
+#   observe — the same residual availability-liveness (#4573) already names for
+#   the pager; closing it needs an endpoint external to GitHub and an owner
+#   decision.
+#
+# TWO BOUNDS, BOTH NEEDED (see the script's header)
+# ------------------------------------------------
+#   DEPLOY_STALENESS_MAX_BEHIND     — DEPLOYABLE commits of lag tolerated (2)
+#   DEPLOY_STALENESS_MAX_AGE_HOURS  — hours the oldest undeployed deployable
+#                                     commit may wait (6)
+# Deployable = touching the `on.push.paths` filter of `deploy-hosted.yml`, read
+# from that workflow at run time (never duplicated in the checker). A count
+# bound alone reports a single never-deployed commit as green forever; an age
+# bound alone reports nothing until the clock has run. Both are plain integers;
+# a mangled value warns and falls back rather than disabling the arm.
+name: Deploy staleness (production behind main)
+
+on:
+  schedule:
+    # Every 30 minutes, offset off the hour boundary (GitHub documents that
+    # scheduled events are delayed "especially at the start of each hour").
+    # GitHub's delivery is best-effort; the bound in the script, not this cron,
+    # tolerates jitter, and a dropped fire is not a loss (the next tick repeats).
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+# Never cancel a run: the whole point is a reading that cannot be superseded.
+concurrency:
+  group: deploy-staleness
+  cancel-in-progress: false
+
+# contents: read for actions/checkout + the git fetch of origin/main; issues:
+# write for the alert issue. The repo's default token is restricted (#2140), so
+# the scopes are granted explicitly — without them the detector is deaf while
+# looking green.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0 — the full history, so `git merge-base --is-ancestor` and
+      # `rev-list --count` can resolve the DEPLOYED commit (an ancestor of main,
+      # possibly several commits back) against origin/main in one clone.
+      # persist-credentials: false — this job only READS the repo; the workflow
+      # token carries issues:write and must not be written into .git/config.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
+      # The checker files/updates the alert issue through `gh`. `runs-on:
+      # ubuntu-latest` normally means a hosted image WITH `gh`; the fallback pool
+      # carries that same label on a bare runner whose service PATH is a minimal
+      # non-login one, where `gh` is absent and the call would die `exit 127`,
+      # reading as a runner fault rather than a detector verdict. Provide the
+      # tool or fail NAMING it, before the checker's own logic runs.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+      - name: Check the deployed commit against origin/main (#10109)
+        env:
+          # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be
+          # named explicitly or the checker is deaf (#2140). STEP-level only: a
+          # job-level env is handed to actions/checkout too.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # BOUND 1 (count): deployable commits of lag tolerated before the
+          # check reds. Unset → the script's default (2). Must be a PLAIN
+          # INTEGER; anything else warns and falls back (a mangled bound must
+          # not disable the comparison). Only DEPLOYABLE commits count (the ones
+          # touching `deploy-hosted.yml`'s `on.push.paths`), so a docs-only lag
+          # is not staleness. Raising it trades detection latency for fewer
+          # false alarms; the 2026-10-26 incident (7 behind) fires on the first
+          # tick at the default.
+          DEPLOY_STALENESS_MAX_BEHIND: ${{ vars.DEPLOY_STALENESS_MAX_BEHIND }}
+          # The SECOND bound: how long the oldest undeployed DEPLOYABLE commit
+          # may wait before the check reds, even when the count is within the
+          # bound. Unset → the script's default (6 h). This is the arm that
+          # catches "deploys stopped landing" while only one or two deployable
+          # commits are pending — the state a count bound alone reports green
+          # forever. Default 6 h because deploys land in tens of minutes and
+          # 2026-10-26 ran 9 h; raising it slows detection, it cannot mute it.
+          DEPLOY_STALENESS_MAX_AGE_HOURS: ${{ vars.DEPLOY_STALENESS_MAX_AGE_HOURS }}
+        run: bash .github/scripts/check-deploy-staleness.sh

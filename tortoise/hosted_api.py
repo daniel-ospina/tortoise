@@ -12447,15 +12447,22 @@ def _acl_layer_declared_strict() -> bool:
 _ACL_ABSENCE_ANNOUNCED: set[str] = set()
 
 
-def _announce_acl_absence_once(status: str, graph_id: str, detail: str) -> None:
-    """Log why the per-graph ACL user is missing — once per process per kind.
+def _announce_acl_absence_once(status: str, reason: str, graph_id: str,
+                               detail: str) -> None:
+    """Log why the per-graph ACL user is missing — once per process per KIND.
+
+    Keyed by ``(status, reason)``, not by status alone (#10093): ``absent``
+    covers three different facts — no URI, bare redis, an unreachable server —
+    and a status-only key would print the first one that happened and silently
+    swallow the rest.
 
     ``absent_by_design`` / ``denied`` are WARNINGS (an operator must be able to
     see that this deployment has no database-level second wall); a plain
     ``absent`` (embedded store, bare redis, layer down) is INFO."""
-    if status in _ACL_ABSENCE_ANNOUNCED:
+    key = f"{status}:{reason or 'unknown'}"
+    if key in _ACL_ABSENCE_ANNOUNCED:
         return
-    _ACL_ABSENCE_ANNOUNCED.add(status)
+    _ACL_ABSENCE_ANNOUNCED.add(key)
     if status == "absent":
         _logger.info(
             "per-graph ACL layer absent (%s) — no ACL user for graph %s; "
@@ -12510,7 +12517,8 @@ def _acl_user_create_hook(graph_id: str, org_id: str, *,
         return
     if result.status is AclStatus.PROVISIONED:
         return
-    _announce_acl_absence_once(result.status.value, graph_id, result.detail)
+    _announce_acl_absence_once(result.status.value, result.reason, graph_id,
+                               result.detail)
 
 
 def _acl_user_drop_hook(graph_id: str) -> None:
@@ -37912,6 +37920,7 @@ def _reconcile_acl_users_sync() -> dict:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
         ok = absent_by_design = denied = absent = defaults = 0
+        absent_reasons: dict[str, int] = {}
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37945,11 +37954,18 @@ def _reconcile_acl_users_sync() -> dict:
             elif r.status is AclStatus.DENIED:
                 denied += 1
             else:
+                # #10093: `absent` is a TOTAL, and a total alone cannot tell
+                # "this deployment has no server" from "bare redis" from "the
+                # server vanished mid-op" — three different operator actions.
+                # The kinds ride beside it and sum to it by construction.
                 absent += 1
+                kind = r.reason or "unknown"
+                absent_reasons[kind] = absent_reasons.get(kind, 0) + 1
         results[org_id] = {"status": "reconciled", "provisioned": ok,
                             "absent_by_design": absent_by_design,
                             "denied": denied,
                             "absent": absent,
+                            "absent_reasons": absent_reasons,
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "organizations": len(results), "results": results}
@@ -37957,20 +37973,33 @@ def _reconcile_acl_users_sync() -> dict:
 
 @app.post("/v1/internal/backups/acl-reconcile")
 async def backups_acl_reconcile(request: Request):
-    """Post-restore ACL rebuild/verification (#2313 folded delta): every
-    ACTIVE graph of every org must have its per-graph ACL user.
+    """Post-restore ACL rebuild/verification (#2313 folded delta): on a
+    deployment that provisions the per-graph ACL layer, every ACTIVE graph of
+    every org must have its per-graph ACL user.
+
+    ⛔ On a deployment that DECLARES the layer off (#8617 — the hosted lane,
+    ``TORTOISE_ACL_LAYER=off``) there is nothing to rebuild and this endpoint
+    does not rebuild it: every graph answers ``absent_by_design`` before any
+    server contact, and the honest report IS that absence. Per-graph ACL users
+    are NOT recreated there — isolation on that lane rests on the app-layer
+    ownership check plus the ``org_{tid}_{gid}`` namespace. Read the report,
+    never the HTTP 200: a green reconcile on that lane means "recorded", not
+    "rebuilt".
 
     A full-platform restore (disaster recovery into a fresh FalkorDB server)
     restores graph DATA from R2 — ACL server users do NOT live in the graph
     namespace and are lost with the old server. ``create_acl_user`` is the
-    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
+    idempotent rebuild primitive (full-reset upsert, where the layer is
+    provisionable; registry/selfhost mode
     reuses the stored credential, hosted create-once verifies without
     password churn). This reconcile replays it per ACTIVE graph — the DR
     runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
     is REPORTED, never a 500 — and since #8617 the report says which absence
     it is (`absent_by_design` — this lane declares the layer off, e.g.
     FalkorDB Cloud; `denied` — a reachable server refused the credential;
-    `absent` — no server URI / bare redis / layer down; `provisioned` — the
+    `absent` — no server URI / bare redis / layer down, with `absent_reasons`
+    naming WHICH (#10093: those three imply three different operator actions,
+    and a total alone hides an outage behind a boundary); `provisioned` — the
     user exists), instead of the single pre-#8617 `acl_absent_skipped`
     number that conflated all three. Runs off the
     event loop via ``asyncio.to_thread`` (#2371).
@@ -41090,6 +41119,42 @@ async def oauth_consent(request: Request):
     """Consent confirmation (P2): verifies the browser session JWT via the
     shared JWKS path, resolves the org (RFC 8707, D4), mints a single-use
     PKCE-bound authorization code, returns {code, state} for the redirect.
+
+    #3524 §9 step 2 — IDENTITY HAS TWO ACCEPTED SOURCES, and the bearer is
+    unchanged. A `consent_token` in the JSON body (spec
+    `docs/engineering/auth/consent-identity-bridge.md` §2.1) is a signed,
+    bound, single-use assertion minted on the session origin; when it is
+    present it is the ONLY identity input, and the code is minted with the
+    token's bound params (§9 step 2). When it is absent this function runs
+    exactly as it did before the bridge existed — same order, same errors,
+    same mid-flight state — because it is the path every existing caller takes
+    and this change must not alter it. (Which sources are LIVE is an operator
+    fact, not a property of this function: it depends on the deployed secret,
+    so it is recorded where it is measured, not asserted here.)
+    The arm is unavailable (typed 503, never a 500 and never a silent
+    fall-through) when `CONSENT_TOKEN_SECRET` is unset (§2.3).
+
+    WIRE CONTRACT for §9 steps 3/4 (the spec pins the token's CONTENT, not its
+    transport): the body carries `consent_token`, and the authorize params are
+    presented alongside it in the body exactly as the bearer path presents them.
+    Two sets, deliberately kept apart:
+      * REQUIRED in the request: `client_id`, `redirect_uri`,
+        `response_type=code`, `code_challenge`, `code_challenge_method=S256`,
+        `state`. `validate_authorize_params` refuses anything but
+        `response_type=code`, so a step-3/4 call that omits it is a 400 however
+        valid its token is.
+      * BOUND by the token (§2.1, `BIND_FIELDS`): `client_id`, `redirect_uri`,
+        `code_challenge`, `state` — exactly these four must match the token's
+        `bind`; `response_type` and `code_challenge_method` are checked by the
+        authorize path but are NOT part of the bind set.
+    §2.2 requires every bound param to be PRESENTED at redemption — the token
+    proves the flow, it does not replace the request. The response shape is
+    identical on both arms.
+
+    ⛔ Do NOT read the token on the consent page here or anywhere else yet:
+    a page that half-reads a token and half-reads the old cookie is the
+    "strictly worse than not starting" state §9 records for #3559. The page
+    rewrite is §9 step 4.
     """
     from tortoise.oauth import (
         OAuthError,
@@ -41126,14 +41191,19 @@ async def oauth_consent(request: Request):
                 code_challenge_method=body.get("code_challenge_method") or "S256",
                 scope=body.get("scope") or None),
             op="oauth_consent_params")
-        # #3443: the destination is rebuilt here too — the consent round trip
-        # is where the CODE is minted, so the target it returns is the one the
-        # page navigates to deliver it, computed on the same validated request
-        # (the page's `redirect_target` stays the source for the deny path,
-        # which never reaches this endpoint). Resolved BEFORE the mint: a code
-        # nobody can be sent to must not be issued. `None` is unreachable while
-        # the matcher and this helper agree (same predicate, same list); the
-        # guard is the fail-closed direction if that ever stops being true.
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
+    try:
+        # #3443 — the destination the browser is sent to, rebuilt from the
+        # registered URI (never the raw request string), and resolved BEFORE the
+        # identity check and the mint: "a code nobody can be sent to must not be
+        # issued", and an anonymous request must get the SAME 400 rather than a
+        # 401 that tells it whether a session would have been accepted.
+        # `tests/test_oauth_mcp.py::test_the_consent_handler_never_mints_for_an_
+        # undeliverable_target` pins that order — do NOT move this below the
+        # identity block. The token arm re-derives it from the BOUND value below.
         redirect_target = canonical_redirect_target(client, body.get("redirect_uri"))
         if redirect_target is None:
             raise OAuthError(400, "invalid_request",
@@ -41142,16 +41212,106 @@ async def oauth_consent(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent params")
-    # The browser session JWT — same JWKS/ES256+RS256 verification the session
-    # endpoints use (D2: reuse session_auth verify; no new auth stack).
-    user = await verify_session_jwt(request)
+    # ── identity: the bearer (unchanged) or a consent token (§9 step 2) ──────
+    # `mint` is the identity + the values the code is bound to. `bind`
+    # (`client_id`, `redirect_uri`, `code_challenge`, `state`) is what a consent
+    # token must match (§2.2); the bearer path takes the same four from the
+    # request, exactly as it did before #3524.
+    consent_token = body.get("consent_token")
+    if consent_token is None:
+        # The bearer path, byte-for-byte as it was before #3524: same identity
+        # source, same order, same mint arguments. §9 step 2 is ADDITIVE.
+        user = await verify_session_jwt(request)
+        mint = {
+            "client_id": client["id"],
+            "user_id": user["user_id"],
+            "redirect_uri": body["redirect_uri"],
+            "code_challenge": body["code_challenge"],
+            "state": body.get("state"),
+        }
+    else:
+        # §2.1/§2.2/§9 step 2 — verify, then mint with the BOUND params.
+        from tortoise.consent_token import (
+            _consent_refusal,
+            consume_consent_jti,
+            verify_consent_token,
+        )
+        from tortoise.oauth import parse_resource
+        try:
+            assertion = verify_consent_token(consent_token, presented={
+                "client_id": body.get("client_id") or "",
+                "redirect_uri": body.get("redirect_uri") or None,
+                "code_challenge": body.get("code_challenge") or None,
+                "state": body.get("state"),
+            })
+            # §2.2/§2.3 — the nonce is spent HERE, and the position is the
+            # contract: every refusal that CAN be evaluated first has been (the
+            # request params, the token, the binding, and — below — the pure
+            # resource check), so a request that could never mint does not burn
+            # the token; and it is spent BEFORE the insert, so one consent can
+            # never yield two codes.
+            #
+            # ⚠️ THE RESIDUAL, stated because the comment above used to hide it:
+            # `issue_auth_code` is a callee and CAN still refuse AFTER this line —
+            # `_resolve_org`'s 403 (no active team / not a member), a suspended
+            # org, or a control-plane transport error surfacing as 503. Those
+            # consume the token, and the retry of it answers 401 "already been
+            # redeemed". That is deliberate and fail-closed (the alternative —
+            # spending after the insert — admits two codes for one consent in a
+            # race), and it costs a RE-MINT, not a re-login: the 120 s TTL was
+            # about to expire and step 4's page mints again on load. Only the
+            # pure, caller-fault resource 400 is pre-evaluated, below.
+            #
+            # The destination the page must NAVIGATE to is re-derived from the
+            # token's BOUND `redirect_uri`, not from the presented one the
+            # #3443 guard above used: §2.2 compares the bind through
+            # `_redirect_uri_matches`, whose RFC 8252 §7.3 loopback relaxation
+            # lets the port differ, while `/oauth/token` compares `redirect_uri`
+            # EXACTLY. Pairing the response's `redirect_uri` (the bound value)
+            # with a `redirect_target` rebuilt from the PRESENTED value would
+            # hand the page two destinations, one of which cannot redeem the
+            # code. `None` here means the bind names a URI this client cannot be
+            # delivered to — an assertion fault, so it is a 401 and is
+            # evaluated before the spend (a refusal must not burn the token).
+            bound_target = canonical_redirect_target(client, assertion["bind"]["redirect_uri"])
+            if bound_target is None:
+                raise _consent_refusal(
+                    "consent token is bound to a redirect_uri this client cannot be sent to")
+            resource = body.get("resource") or None
+            if resource:
+                # `_resolve_org` parses the RFC 8707 resource and refuses a
+                # malformed one with 400 invalid_resource. That check is PURE, so
+                # evaluate it before the spend — a caller typo must not consume
+                # the consent.
+                parse_resource(_oauth_base(request), resource)
+            await consume_consent_jti(assertion["jti"], assertion["exp"])
+        except OAuthError as exc:
+            return _oauth_error_response(exc)
+        except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
+            return _oauth_unconverted_failure(exc, where="oauth/consent token")
+        redirect_target = bound_target
+        bound = assertion["bind"]
+        mint = {
+            # The CLIENT is the resolved row — the same authority the bearer
+            # path uses and what /oauth/token compares against. §2.2's
+            # `bind.client_id` equality was checked above, so this row IS the
+            # client the token named; taking the token's raw string instead
+            # would bypass the resolved (revocation-filtered) row.
+            "client_id": client["id"],
+            # §2.2: `sub` is the only thing the token may establish.
+            "user_id": assertion["sub"],
+            # §9 step 2: "issue_auth_code with the *bound* params".
+            "redirect_uri": bound["redirect_uri"],
+            "code_challenge": bound["code_challenge"],
+            "state": bound["state"],
+        }
     try:
         code, _org_id = issue_auth_code(
-            cp, client_id=client["id"], user_id=user["user_id"],
+            cp, client_id=mint["client_id"], user_id=mint["user_id"],
             base=_oauth_base(request),
-            redirect_uri=body["redirect_uri"],
-            code_challenge=body["code_challenge"],
-            state=body.get("state"),
+            redirect_uri=mint["redirect_uri"],
+            code_challenge=mint["code_challenge"],
+            state=mint["state"],
             scope=body.get("scope") or client.get("scope") or "mcp",
             resource=body.get("resource") or None,
         )
@@ -41159,14 +41319,17 @@ async def oauth_consent(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent mint")
-    return {"code": code, "state": body.get("state"),
-            "redirect_uri": body["redirect_uri"],
+    return {"code": code, "state": mint["state"],
+            "redirect_uri": mint["redirect_uri"],
             # #3443: the destination the browser must be sent to, rebuilt from
             # the registered URI — ADDITIVE, so an existing consumer reading
-            # `redirect_uri` (the presented value, still what the code is bound
-            # to) is unaffected. The page prefers this one and falls back to the
-            # page-scoped `redirect_target` for the deny path / mixed-version
-            # deploys; both are server-rebuilt values, never the request string.
+            # `redirect_uri` is unaffected. Both fields now describe the SAME
+            # URI (the one the code is bound to) on BOTH arms; see the
+            # `canonical_redirect_target` call above for why the token arm must
+            # not derive this from the presented value. The page prefers this
+            # one and falls back to the page-scoped `redirect_target` for the
+            # deny path / mixed-version deploys; both are server-rebuilt values,
+            # never the request string.
             "redirect_target": redirect_target}
 
 
