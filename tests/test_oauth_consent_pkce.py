@@ -230,6 +230,13 @@ def _render_shell() -> str:
     would hand the page a request it is supposed to RESTORE, and every assertion
     about the restore would then pass without it (#10088's first draft did exactly
     that and stayed green with the restore deleted).
+
+    `code_challenge_method` is `"S256"`, NOT `""`: the handler defaults it
+    (`hosted_api.py`, `request.query_params.get("code_challenge_method", "S256")`),
+    and a provider return carries no authorize params at all — so the real shell
+    always arrives with `S256`. Rendering `""` here would make any future
+    assertion about the shell's `PARAMS` pass against a value the server never
+    sends, which is the vacuous-fixture shape this file exists to avoid.
     """
     sys.path.insert(0, str(REPO_ROOT))
     from tortoise.oauth import consent_page_html
@@ -238,9 +245,10 @@ def _render_shell() -> str:
         client_name="",
         scope="",
         params={k: "" for k in ("client_id", "redirect_uri", "response_type",
-                                 "code_challenge", "code_challenge_method", "state",
+                                 "code_challenge", "state",
                                  "scope", "resource")}
-              | {"redirect_target": "", "client_name": ""},
+              | {"code_challenge_method": "S256",
+                 "redirect_target": "", "client_name": ""},
         supabase_url="https://proj.supabase.co",
         supabase_anon_key="anon-key",
     )

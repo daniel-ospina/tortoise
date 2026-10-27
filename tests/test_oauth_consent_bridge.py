@@ -398,6 +398,53 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
     )
 
 
+# ── Task 5 / #10088 — §6's refuted premise must not come back ─
+
+
+#: The two strings that CARRY the premise §6 had to retract. The heading is the durable index a
+#: later lane greps for, and the mechanism sentence is the claim the owner directly refuted: the
+#: entry is PRESENT, and GoTrue does not "refuse" an unrecognised `redirect_to` at all — it
+#: silently substitutes the project Site URL and still delivers a live `code` there.
+#:
+#: This is a text pin, not a behavioural one, and deliberately so: nothing in the runtime can
+#: observe which sentence a markdown file carries, and the two failure modes here are both
+#: SILENT. (a) PR #10090 patches this exact paragraph with line numbers derived from a base tree
+#: that predates #10105's rewrite, so a resolution in its favour restores the refuted heading and
+#: mechanism while every anchor/count guard stays green. (b) The #3524 lane DELETES this page, and
+#: a rewrite that copies forward the retracted premise sends the next reader after a cause that
+#: was measured false. Cheap to satisfy — both strings are simply absent — and it fails closed on
+#: the one edit that would re-assert the retraction.
+_REFUTED_6_PREMISES = (
+    "**NOT allowlisted",
+    "GoTrue refuses a `redirect_to` it does not recognise",
+)
+
+
+def test_section_6_does_not_restore_the_refuted_premise() -> None:
+    """§6 must not re-assert what #10088's owner correction retracted.
+
+    The correction is explicit: *"The owner confirms `https://api.premiselabs.co/**` is already in
+    the Supabase redirect allow-list. My 'D2 = the entry is missing' claim above is **refuted**"*.
+    §6 is the record the #3524 rewrite lane reads before deleting this page, so the retracted
+    premise is not allowed back in as a heading, a mechanism, or a merge-resolution accident.
+    """
+    spec = SPEC.read_text()
+    section = spec.split("## 6. Task 5", 1)
+    assert len(section) == 2, (
+        "no '## 6. Task 5' section in the bridge doc — it was renamed or removed, so this guard is "
+        "now scanning nothing. Re-point it rather than deleting it (#10088)."
+    )
+    body = section[1].split("## 7.", 1)[0]
+    for premise in _REFUTED_6_PREMISES:
+        assert premise not in body, (
+            f"§6 of docs/engineering/auth/consent-identity-bridge.md re-asserts {premise!r}, the "
+            "premise #10088's owner correction REFUTED: the allow-list entry is present, and "
+            "GoTrue does not refuse an unrecognised `redirect_to` — it silently falls back to "
+            "the project Site URL and delivers a live `code` there. Restoring the sentence sends "
+            "the next lane after a cause that was measured false (#10105 vs #10090)."
+        )
+
+
 # ── Task 5 / #10088 — the provider-return marker list is ONE list, in two homes ─
 
 

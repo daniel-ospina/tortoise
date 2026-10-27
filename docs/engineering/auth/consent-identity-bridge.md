@@ -255,7 +255,14 @@ the record allows, and depends on neither the query-vs-glob behaviour nor the da
 AS serves the page for that return (`hosted_api.py`, `_PROVIDER_RETURN_MARKERS`): the shell carries empty params
 and grants nothing, so the page either restores the request or says the return lost it.
 
-Two follow-ons this record used to omit. **The store can hold the verifier and still refuse the request** —
+Three follow-ons this record used to omit. **The DENY path has no server round trip.** The approve path is
+re-validated server-side (`/oauth/consent` re-runs `validate_authorize_params` and rebuilds the destination
+from the **registered** `redirect_uri`), so a restored value cannot widen what the grant is bound to. Deny
+does not post anything: `redirectBack` navigates the restored, server-BUILT `redirect_target` as-is, so its
+bound is **not** `/oauth/consent`'s re-validation but the store write itself — reaching that entry already
+means same-origin script, which on this page is already session-fatal (the JS-readable session cookie).
+That is a residual of the store-carried design, recorded here rather than claimed away; the bridge (#3524)
+removes it by removing the inline client. **The store can hold the verifier and still refuse the request** —
 the request is the larger value (~265 bytes vs ~114) — so a per-item cap can sit between them and let the
 exchange complete while the request is lost; that band is why the stash has its own fail-closed gate before
 navigation, and why the gate is not redundant with the verifier's requirement. And **a successful restore
