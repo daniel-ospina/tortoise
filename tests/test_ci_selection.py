@@ -574,6 +574,38 @@ def test_the_capacity_guards_derived_source_selects_the_guard():
     )
 
 
+def test_the_declaration_gate_selects_its_own_proofs():
+    """#10044 review F1: a change to the APPROVED-surface gate must select its proofs.
+
+    `tools/sdk_surface_declaration.py` is executed by the REQUIRED `surface-guard`
+    job (from the PR's own tree) and its proofs live in
+    `tests/test_sdk_surface_declaration.py`, registered `api` + `core`. Both
+    registrations were unreachable for the diff that can neuter the gate: `tools/`
+    is in `NON_PYTHON_PREFIXES` and no `SOURCE_PATTERNS` row claimed this module, so
+    the changed set emptied (`surfaces: []`, `full: false`) and the required job ran
+    an edited gate whose 17 proofs never executed — the #1349/#3332/#3616
+    silent-drop class, and the one bypass the "residual bypass, stated" paragraph in
+    `tools/surface_manifest.py` does not cover.
+
+    Asserted on the SURFACE and on the PROOF FILE, not on non-emptiness: a bare
+    "surfaces is non-empty" check passes for a `tests/`-relative path on its own.
+    Watched RED before the `SOURCE_PATTERNS["api"]` entry (`surfaces == []`),
+    GREEN after.
+    """
+    changed = "tools/sdk_surface_declaration.py"
+    assert (REPO / changed).exists(), f"the declaration gate is gone: {changed}"
+    r = _sel([changed])
+    assert "api" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the gate's own proofs are not "
+        "selected, so a gate-only PR can make `contract_problems()` return [] and "
+        "merge with every required check green and none of its tests run (#10044 F1)"
+    )
+    assert "test_sdk_surface_declaration.py" in r["test_files"], (
+        f"{changed} does not select test_sdk_surface_declaration.py — the gate "
+        "that holds the owner's 40 has no proof on the diff that edits it"
+    )
+
+
 def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
     """#9085 review P1: a revert of the engine pin must run the guard that pins it.
 
@@ -5644,6 +5676,76 @@ def test_the_paren_guard_is_not_vacuous():
     assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
         "test_a.py", "test_b.py"]
     assert _durations_rows_with_unbalanced_parens(legitimate) == []
+
+
+#: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
+_WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
+
+
+def _durations_rows_stating_a_stale_watchdog_floor(text: str, floor: int):
+    """Rows whose OWN note attaches a `WATCHDOG_FLOOR_MIN` that is not the current one.
+
+    The row's own tail only, never its continuation lines: a wrapped continuation can
+    belong to a comment BLOCK that describes the row BELOW it (the `355.0` cap block
+    sits *above* its `test_lane_stash.py` row), so reading continuations here would
+    attribute a neighbour's prose to the wrong key.
+    """
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None:
+            continue
+        for claim in _WATCHDOG_FLOOR_CLAIM_RE.finditer(m.group("tail")):
+            if int(claim.group("minutes")) != floor:
+                out.append((m.group("key"), int(claim.group("minutes"))))
+    return out
+
+
+def test_no_durations_row_states_a_retired_watchdog_floor():
+    """#10044 review F3 (P2): the two cap rows still asserted the 15-min basis.
+
+    `WATCHDOG_FLOOR_MIN` moved 15 -> 19 (#10055, its own 2.9x derivation), which
+    falsifies every clause the `test_calibration.py` and `test_write_path_operator_lane.py`
+    notes were written at 15 min: at 19 min = 1140 s, 1140/390.0 = 2.92x and
+    1140/386.2 = 2.95x CLEAR the 2.5x those rows said they failed, so both readings
+    ARE declarable and the arithmetic ceiling is <456 s, not <360 s. The file's own
+    header rule ("a row's comment is kept only while the value AND its stated basis
+    are unchanged") is what the rows violated; no guard covered prose of this shape.
+
+    Only the mechanically checkable half is pinned — the number a note attaches to the
+    CONSTANT, on the row's own line. A row may still NARRATE the retired floor ("at the
+    15-min floor this cap was chosen under"), because that sentence is history, not a
+    claim about the file today; it must not state the retired number AS the constant's
+    value.
+    """
+    from tools.ci_selection import WATCHDOG_FLOOR_MIN
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_stating_a_stale_watchdog_floor(text, WATCHDOG_FLOOR_MIN)
+    assert offenders == [], (
+        "a durations row states a retired `WATCHDOG_FLOOR_MIN` — the floor moved and "
+        f"the note's stated basis did not (#10044 review F3): {offenders}. Restate the "
+        "row at the current floor, keeping every ⛔ do-not-read-355.0 instruction and "
+        "the #9172 pointer.")
+
+
+def test_the_watchdog_floor_guard_is_not_vacuous():
+    """The guard above must bite on the pre-move rows and stay quiet on the rewrite."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 355.0  # #6133 CEILING, not a reading: `WATCHDOG_FLOOR_MIN` "
+        "(15 min) must clear the largest fast file by 2.5x.\n"
+        "  test_b.py: 1.0  # a row that names no floor at all.\n"
+        "surfaces: []\n")
+    legitimate = (
+        "durations:\n"
+        "  test_c.py: 355.0  # the #6133 rule is that `WATCHDOG_FLOOR_MIN` (19 min) "
+        "must clear the largest fast file by 2.5x. At the 15-min\n"
+        "      # floor this cap was chosen under, 900/360 = 2.5 exactly.\n"
+        "  test_d.py: 0.2\n"
+        "surfaces: []\n")
+    assert [k for k, _ in _durations_rows_stating_a_stale_watchdog_floor(stale, 19)] == [
+        "test_a.py"]
+    assert _durations_rows_stating_a_stale_watchdog_floor(legitimate, 19) == []
 
 
 def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
