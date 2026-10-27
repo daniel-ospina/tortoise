@@ -220,6 +220,13 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.body = null;
   try { out.body = await res.json(); } catch { out.body = null; }
   out.attempts = e.SESSIONS.tables.consent_attempts;
+  if (opts.wantValidated) {
+    // The params `validate()` RETURNS (not just its verdict) — what the route records, binds into
+    // the token and forwards to the AS. The AS matches `redirect_uri` byte-exactly, so the VALUE is
+    // the property under test, not the accept/refuse bit.
+    const v = startRoute.validate(new URLSearchParams(source));
+    out.validated = typeof v === "string" ? null : v;
+  }
 } else if (scenario === "redirect_uri_table") {
   // The ROUTE's own `validate`, so this cannot pass if it ever stops delegating to the mirror.
   const base = {
@@ -550,6 +557,20 @@ _CROSS_HALF_URIS = [
     # them was a real divergence: the AS registers and accepts the uri, and a browser navigates it).
     " https://client.example/cb",
     "http://127.0.0.1:1234/cb ",
+    # the USERINFO/HOST boundary is the LAST `@` (`urlsplit` and WHATWG agree). A single-`@` row
+    # cannot pin that: both choices give the same verdict, so `indexOf("@")` survived the suite
+    # while refusing a registrable loopback redirect.
+    "http://a@b@127.0.0.1:6277/cb",
+    "http://localhost@evil.example/cb",
+    # stray brackets in the authority: `urlsplit` RAISES, so the AS refuses; WHATWG parses it, so an
+    # unguarded mirror ACCEPTED it and 302d to an AS that answers 400.
+    "http://u[ser@127.0.0.1/cb",
+    "https://u[ser:pw@client.example/cb",
+    # a native scheme must NAME a destination, or the consent page navigates an app handler to
+    # nothing. These are refused by both; without them the whole branch could be deleted verbosely.
+    "cursor:",
+    "cursor://",
+    "cursor:?q",
     # the IPv4 guards: leading-zero octets are ambiguous to `ipaddress` (it REFUSES them) while
     # WHATWG reads them as decimal, and an octet above 255 makes WHATWG refuse the parse entirely.
     "http://127.000.000.001/cb",
@@ -706,6 +727,35 @@ def test_the_native_scheme_allowlist_is_the_same_set_on_both_halves() -> None:
     uris = [f"{scheme}://client.example/cb" for scheme in sorted(as_schemes)]
     for row in _run("redirect_uri_table", uris=uris)["verdicts"]:
         assert row["accepted"], f"the BFF refuses the AS's own native scheme: {row}"
+
+
+def test_the_redirect_uri_is_forwarded_BYTE_FOR_BYTE_to_the_AS() -> None:
+    """The AS matches the presented `redirect_uri` against the registered one BYTE-EXACTLY.
+
+    `_valid_redirect_uri` ACCEPTS a registered value carrying whitespace (` https://client.example/cb`,
+    a trailing NBSP), and `_redirect_uri_matches`' exact-string arm then compares the uri the route
+    forwards against that registered string. So trimming before forwarding turns an accepted
+    registration into `400 redirect_uri is not registered for this client` at the AS — the flow dies
+    AFTER the visitor consented, with a message blaming their registration, and no predicate-level
+    test can see it because both predicates say "fine".
+
+    This asserts the VALUE, not the verdict: what `validate()` returns must be the raw input.
+    """
+    from tortoise.oauth import _redirect_uri_matches
+
+    for raw in (" https://client.example/cb", "https://client.example/cb ",
+                "https://client.example/cb\u00a0"):
+        params = dict(_PARAMS, redirect_uri=raw)
+        out = _run("start_validate", params=params, wantValidated=True)
+        # The route ACCEPTS it (the AS accepts it at registration)...
+        assert out.get("validated") is not None, (raw, out)
+        forwarded = out["validated"]["redirect_uri"]
+        assert forwarded == raw, (
+            f"the route forwards {forwarded!r} for a registered {raw!r} — the AS compares "
+            "byte-exactly, so every redemption of this consent answers "
+            "`redirect_uri is not registered for this client`")
+        assert _redirect_uri_matches(raw, forwarded), (
+            f"the forwarded value does not match its own registration: {raw!r} vs {forwarded!r}")
 
 
 @pytest.mark.parametrize("broken,needle", [

@@ -215,6 +215,20 @@ export function redirectUriProblem(uri: string): string | null {
   // and was refused while the AS accepted it. A registered-and-navigable redirect (registrable
   // because the AS accepts it) then died at `/api/consent/start` with a message blaming itself.
   const trimmed = uri.replace(/^ +/, "").replace(/ +$/, "");
+  // ⛔ STRAY BRACKETS IN THE AUTHORITY ARE A PARSER SPLIT. `urlsplit` RAISES on a `[` or `]` anywhere
+  // in the netloc that is not an IPv6 host (`_check_bracketed_netloc`), so the AS refuses such a uri;
+  // WHATWG happily parses `http://u[ser@127.0.0.1/cb`, so an unguarded BFF ACCEPTS it and 302s to an
+  // AS that answers 400. Only a hand-crafted request can reach it (registration runs the same
+  // predicate, so no client can register one), which is why this is not worse — but the direction is
+  // the one `validate()`'s contract forbids.
+  const authorityMatch = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/.exec(trimmed);
+  if (authorityMatch !== null) {
+    const authority = authorityMatch[1];
+    const hostPart = authority.slice(authority.lastIndexOf("@") + 1);
+    if (!hostPart.startsWith("[") && /[[\]]/.test(authority)) {
+      return "redirect_uri must not carry brackets outside an IPv6 host";
+    }
+  }
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
