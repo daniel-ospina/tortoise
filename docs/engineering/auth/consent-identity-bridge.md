@@ -40,9 +40,9 @@ that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-to
 
 | Fact | Evidence |
 |---|---|
-| The page mints session material client-side | `supabaseClient.auth.signInWithOAuth` `oauth.py:2935` / `signInWithPassword` `oauth.py:2955` |
+| The page mints session material client-side | `supabaseClient.auth.signInWithOAuth` `oauth.py:2937` / `signInWithPassword` `oauth.py:2957` |
 | The page reads the session back out of the cookie | `storage: cookieStorage, storageKey: COOKIE_NAME`, `oauth.py:2439-2440` |
-| The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2974-2990`; `/oauth/consent/preview` `oauth.py:2520-2526` |
+| The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2976-2992`; `/oauth/consent/preview` `oauth.py:2520-2526` |
 | The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers.get("Authorization", "")` (`:600`) and nothing else. ⚠️ Measured BEFORE §9 step 2: `POST /oauth/consent` also accepts a bound consent token now — see §10 *Redemption*. `/oauth/consent/preview` remains bearer-only |
 | `/oauth/authorize` carries **no** identity | `GET /oauth/authorize` (`@app.get("/oauth/authorize")` in `hosted_api.py`) — the authorize handler reads query params only |
 
@@ -173,7 +173,7 @@ consolidation dropped their citation block. Confirmed against today's code:
 | 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2551` (`let previewInFlight`), `oauth.py:2664` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2686` (the promise handed back) | `token.ts` — the module-level `inFlightRefreshes` map keyed by handle: concurrent callers for one handle share ONE provider refresh and all await it (same-isolate single-flight); the CAS `… AND refresh_token = ?5` is the cross-isolate half, and its loser **re-reads the winner's token** instead of clobbering it | none |
 | 2 | **refresh-once** — a refresh must not be issued twice concurrently | `oauth.py:2553` (`staleRefreshes`), `:2667` (`staleRefreshes = 0` at flow entry), `:2672` (the `staleRefreshes < 1` cap), `:2677` (the increment) | `token.ts::invalidateCachedToken` (`cooldownMs = 30_000`) bounds invalidations to one per window; the 60 s `REFRESH_SKEW_MS` cache keeps the hot path off the provider; and `inFlightRefreshes` dedupes concurrent refreshes (property 1) | none — **load-bearing assumption:** two racing ISOLATES are safe only because GoTrue tolerates ~10 s of refresh-token reuse. The in-flight map is per isolate and the CAS makes the write safe, but neither can un-spend a token another isolate has already presented. |
 | 3 | **never-sign-out** — a transient failure must never clear the session (the #3485 class) | `oauth.py:2560` (*"NEVER call the auth logout API here"*; function at `:2559`), `:2684` (`showExpiredSignin`, never a refresh-token revoke) | `token.ts` — `getAccessTokenForSession` (`:134`) and `refreshAndPersist` (`:191`) keep `no_session` (401) and `unavailable` (503) distinct: reason returns at `:152`, `:163`, `:200`, `:206`, `:208`; `isRefreshTokenDead(refreshed.status, refreshed.error)` (`:205`) — a `403`/`404`/`400` from the provider is **infrastructure**, not a dead session | none |
-| 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:3257-3265` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2675`) | **implemented, not yet routed** — `decideConsentAdvance` (`website/apps/dashboard/functions/_shared/auth/consent-flow.ts`) | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. **Gap (recorded): the decision is implemented and behaviourally tested; the route that calls it is §9 step 3 and is NOT built, because §9 orders steps 2→4 to land together.** |
+| 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:3259-3267` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2675`) | **implemented, not yet routed** — `decideConsentAdvance` (`website/apps/dashboard/functions/_shared/auth/consent-flow.ts`) | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. **Gap (recorded): the decision is implemented and behaviourally tested; the route that calls it is §9 step 3 and is NOT built, because §9 orders steps 2→4 to land together.** |
 
 **Consequence for the implementation.** Properties 1–3 are already implemented server-side by the BFF
 (#3522/#4054) — the bridge's job for them is to *route the consent page onto that path* and delete the
@@ -227,14 +227,15 @@ claims, and only the second one decides the flow.
 **What GoTrue actually does** (read at `supabase/auth`, `internal/utilities/request.go` `IsRedirectURLValid`,
 `internal/api/external.go` `GetReferrer` / `flow_state.Referrer` / `getExternalRedirectURL`):
 
-- the `redirect_to` is matched **whole** against each allow-list glob (compiled with separators `'.'`, `'/'`, so
-  `**` crosses `/` while `*` does not), so the **query string is part of the string being matched**. The
+- the `redirect_to` is matched **whole** — the query is never stripped — against each allow-list glob (compiled
+  with separators `'.'`, `'/'`, so `**` crosses `/` while `*` does not). The
   **fragment** is cut before matching on `master` (`matchAgainst, _, _ := strings.Cut(redirectURL, "#")`) but
   **not** on the pinned tags examined (`v2.150.0`, `v2.160.0`, `v2.170.0`), which match the raw string — so on
   those the fragment is part of the match too. Either way the fragment does not rescue a query-bearing target;
 - ⛔ **the glob list is not always consulted at all.** `IsRedirectURLValid` returns `true` when the target's
   hostname equals `config.SiteURL`'s (`base.Hostname() == refurl.Hostname()`; on the pinned tags examined —
-  `v2.150.0`, `v2.160.0`, `v2.170.0` — the test is hostname-only, on `master` it also compares scheme and port),
+  `v2.150.0`, `v2.160.0`, `v2.170.0` — the test is hostname-only, on `master` it also compares scheme and port,
+  with the port check skipped for loopback targets),
   and it does so **before** the loop. So a target on the project Site URL's own host is authorised with **no
   entry**, and no allow-list entry can be the control for it. This row's target is `api.premiselabs.co`, which is
   **not** the Site URL's host (`tortoise.premiselabs.co`), so the short-circuit does not apply to the flow in this
@@ -257,8 +258,8 @@ Google), so the decision is only visible at the callback, which needs a real pro
 indeterminacy is the reason for the bare path**, not a settled claim about which string GoTrue rejected.
 
 **Recorded fix (#10088, in the code):** the target is now the **bare path** — `authorizeReturnTo()` returns
-`origin + "/oauth/authorize"` and nothing else (`oauth.py:2755`) — and the authorize request crosses the
-round trip in the page's OWN origin-scoped store (`stashAuthorizeFlow` / `takeAuthorizeFlow`, `oauth.py:2770`),
+`origin + "/oauth/authorize"` and nothing else (`oauth.py:2757`) — and the authorize request crosses the
+round trip in the page's OWN origin-scoped store (`stashAuthorizeFlow` / `takeAuthorizeFlow`, `oauth.py:2772`),
 the same store the PKCE verifier already has to survive in. The bare path is byte-identical to the entry when
 that entry is written out AS the path, and a glob match when it is `/**` — so it is covered under either shape
 the record allows, and depends on neither the query-vs-glob behaviour nor the dashboard's exact wildcard. The
@@ -307,8 +308,8 @@ bridge plus the page rewrite. Deleted by this issue when the bridge lands (not b
 | the inline `cookieStorage` adapter + the aux-store probe chain | `oauth.py:2285-2518` |
 | `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2242-2265` (`:2242`, `:2257`, `:2258`, `:2259`, `:2265`), `:2420`, `:2430` |
 | the supabase-js CDN `<script>` + `createClient` + `flowType: "pkce"` + `detectSessionInUrl` | `oauth.py:2216-2218`, `:2437-2447` |
-| `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2799-3235` |
-| `onAuthStateChange` (property 4's anchor) | `oauth.py:3257` |
+| `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2801-3237` |
+| `onAuthStateChange` (property 4's anchor) | `oauth.py:3259` |
 
 **`SCOPE.md` §10 item:** `oauth.py:2258` hardcodes `COOKIE_DOMAIN = ".premiselabs.co"`, and Gate 4 required
 that scope to be **configuration, not a literal**, so the Python surface and the BFF cannot disagree about

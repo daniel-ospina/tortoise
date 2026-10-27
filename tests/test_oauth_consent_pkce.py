@@ -49,8 +49,9 @@ Invariants pinned here:
    all, which is byte-identical to the entry when the redirect-allowlist record
    writes it out AS the path and a glob match under its `/**` form, so it is
    covered under either shape (`docs/ops/auth-email-flows.md` §3; GoTrue matches
-   the whole url, query included, cuts only the fragment, and answers a mismatch
-   by silently delivering a live code to the Site URL — #10088). The survival
+   the whole url, query included — the fragment is cut on `master` but not on the
+   tags examined — and answers a mismatch by silently delivering a live code to the
+   Site URL, #10088). The survival
    half moved carrier with it: the authorize request
    crosses the round trip in the page's own aux store (inv 25), pinned as the
    params the flow NEEDS, because an over-strip would otherwise stay green
@@ -847,7 +848,8 @@ def test_inv11_return_target_is_bare_with_a_control() -> None:
 
     Why the absence is the contract: GoTrue decides whether to honour a
     `redirect_to` by matching the WHOLE url against the project's redirect
-    allow-list (query included; only the fragment is cut), and a rejected target
+    allow-list (query included; the fragment is cut on `master` but not on the
+    tags examined), and a rejected target
     is silent — GoTrue substitutes the project Site URL and still delivers a live
     code there. The #9664 run measured exactly that
     (`https://tortoise.premiselabs.co/?code=…`, marketing page, code burned), and

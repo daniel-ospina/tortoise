@@ -2712,9 +2712,11 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // #10088: the return target is the BARE path — no query at all.
   //
   // GoTrue decides whether to honour a `redirect_to` by matching the WHOLE url
-  // (query included; only the fragment is cut, `internal/utilities/request.go`
-  // `IsRedirectURLValid`) against the project's redirect allow-list, and a
-  // rejected `redirect_to` is SILENT: GoTrue substitutes the project Site URL
+  // (query included; the fragment is cut on `master` but NOT on the v2.15x/v2.16x/
+  // v2.17x tags examined, `internal/utilities/request.go` `IsRedirectURLValid`)
+  // against the project's redirect allow-list — and it honours a target on the Site
+  // URL's own host BEFORE consulting that list at all, so the list is not the only
+  // gate. A rejected `redirect_to` is SILENT: GoTrue substitutes the project Site URL
   // (`internal/api/external.go` — `flow_state.Referrer`, set from
   // `utilities.GetReferrer`) and still delivers a live `code` there. That is
   // exactly what the #9664 run measured — the code landed on

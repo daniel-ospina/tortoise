@@ -281,16 +281,21 @@ def test_auth_subtree_is_not_a_prefix_false_positive(path: str) -> None:
 
 
 def _auth_branch_comment() -> str:
-    """The contiguous `//` block immediately above the `/auth/` 302 branch, trimmed to the
-    paragraph that justifies THAT branch.
+    """The ONE rationale paragraph above the `/auth/` branch that makes the allow-list claim.
 
-    Scoped to that block rather than the whole file so an unrelated comment elsewhere cannot
-    satisfy — or break — the claim this guard pins. ⛔ And trimmed at the blank `//` separator,
-    because two rationale paragraphs sit in ONE contiguous `//` run: this one, and the
-    `302, NOT 301` / `OVERRIDES` paragraph below it. The un-trimmed walk returned 47 lines and
-    put a paragraph about the status code inside the scope of assertions about the allow-list
-    — so a legitimate "…is not the only control" down there would red an assertion that has
-    nothing to do with it.
+    Scoped rather than file-wide so an unrelated comment elsewhere cannot satisfy — or break —
+    the claim this guard pins. ⛔ And scoped to a single PARAGRAPH, not to the whole `//` run: the
+    run above this branch holds several independent rationale paragraphs separated by blank `//`
+    lines — what moved here, why not a 404 (#4328), this allow-list argument, why 302-not-301
+    (the `OVERRIDES` marker), and the single-hop shape. Policing the whole run put the status-code
+    paragraph inside the scope of assertions about the allow-list, so a legitimate
+    "…is not the only control" down there would red an assertion that has nothing to do with it.
+
+    ⛔ The paragraph is selected by its SUBJECT (it is the one that talks about the allow-list),
+    not by its position or by trimming blank lines off an edge. An earlier cut trimmed from the
+    top, where the run's first line is a section header rather than a blank separator — so the
+    loop never ran, the whole run was returned anyway, and the docstring asserted a trimming the
+    code did not perform.
     """
     lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
     branch = next(
@@ -304,10 +309,27 @@ def _auth_branch_comment() -> str:
     start = branch
     while start > 0 and lines[start - 1].lstrip().startswith("//"):
         start -= 1
-    while start < branch and lines[start].strip() == "//":
-        start += 1
     assert start < branch, "the `/auth/` branch lost its rationale comment entirely"
-    return "\n".join(lines[start:branch])
+
+    paragraphs: list[list[str]] = []
+    current: list[str] = []
+    for line in lines[start:branch]:
+        if line.strip() == "//":
+            if current:
+                paragraphs.append(current)
+                current = []
+        else:
+            current.append(line)
+    if current:
+        paragraphs.append(current)
+
+    allow_list = [p for p in paragraphs if "allow-list" in "\n".join(p)]
+    assert len(allow_list) == 1, (
+        f"expected exactly ONE rationale paragraph above the `/auth/` branch to discuss the "
+        f"allow-list, found {len(allow_list)} of {len(paragraphs)} — the comment was restructured, "
+        "so re-derive which paragraph this guard should police before trusting it"
+    )
+    return "\n".join(allow_list[0])
 
 
 def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None:
@@ -374,12 +396,21 @@ def test_the_auth_comment_names_the_allowlist_record_as_the_open_audit() -> None
         "Site URL for an unrecognised `redirect_to` and still delivers a live `code` there — the "
         "measured fact the 302 exists because of (docs/ops/auth-email-flows.md §1/§3, #10088)"
     )
-    refuted_claim = re.compile(r"(?:refuses?|rejects?) an? unrecogni[sz]ed (?:target|`redirect_to`)")
-    negated_by = re.compile(r"(?:NOT because|does not|doesn't|did not)\s+GoTrue\s*$")
+    refuted_claim = re.compile(
+        r"(?:refuses?|rejects?) (?:an?|any) unrecogni[sz]ed (?:target|`redirect_to`)"
+    )
+    # Accept the negation on EITHER side of the subject — "NOT because GoTrue rejects …" and
+    # "GoTrue does not reject …" are the same claim, and English prefers the second. Requiring
+    # only the pre-subject form reddened the most natural correct phrasing.
+    negated_before = re.compile(
+        r"(?:NOT because|not because|does not|doesn't|did not)\s+GoTrue\s*$"
+    )
+    negated_after = re.compile(r"GoTrue\s+(?:does not|doesn't|did not)\s*$")
     unnegated = [
         m.group(0)
         for m in refuted_claim.finditer(comment)
-        if not negated_by.search(comment[max(0, m.start() - 80) : m.start()])
+        if not negated_before.search(comment[max(0, m.start() - 80) : m.start()])
+        and not negated_after.search(comment[max(0, m.start() - 80) : m.start()])
     ]
     assert not unnegated, (
         "the `/auth/*` rationale is back to arguing from 'GoTrue refuses/rejects an unrecognised "
