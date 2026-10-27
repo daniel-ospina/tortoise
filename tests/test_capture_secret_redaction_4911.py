@@ -1206,7 +1206,8 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
         `{1,}` reds the `apikey_a1b2` prose row; the prose rows are spared by run
         LENGTH and by the `_`/space that stops them (3-4 characters against a floor
         of 24), so the hex-NESS of the class is pinned separately, by a 40-character
-        non-hex word the alnum widening would eat; a FIRST-segment ceiling
+        non-hex word the alnum widening would eat (and, past the separator, a second
+        one for the TAIL class); a FIRST-segment ceiling
         (`{24,48}`) matches nothing on a longer body and leaks it WHOLE, while a
         SECOND-segment ceiling leaks the tail;
     (c) prefix AND body are case-INSENSITIVE — a future uppercase mint must not
@@ -1301,6 +1302,14 @@ def test_the_typesafe_rule_is_pinned_at_its_measured_shape():
     assert word_out == f"key apikey_{word}" and word_counts == {}, (
         "a 40-character NON-HEX run after the prefix was redacted — the body class "
         "is not hex-only")
+    # …and the same for the TAIL class, which the row above cannot constrain: it has
+    # no separator, so widened to `[A-Za-z0-9]{8,}` the tail ate this run and the
+    # whole suite stayed green. Here segment 1 IS redacted and the tail must not be.
+    tail_word_out, tail_word_counts = redact_secrets(f"key apikey_{first}_{word}")
+    assert word in tail_word_out, (
+        "a 40-character NON-HEX run after the separator was redacted — the TAIL "
+        "class is not hex-only")
+    assert tail_word_counts == {"typesafe_api_key": 1}, tail_word_counts
 
     # (c) prefix case-sensitivity, body case-insensitivity — the PREFIX is the
     # vendor's lowercase literal, the HEX is a mint we do not control
