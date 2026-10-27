@@ -1,0 +1,74 @@
+# ci-pool-probe — does a queued job actually land on the self-hosted pool?
+#
+# Throwaway probe for the capacity work (owner ruling 2026-10-27: use the capacity
+# wherever it is, throughput first; untrusted PRs go to the cell pool). It answers
+# three questions that a label read cannot answer:
+#
+#   1. `runs-on: ubuntu-latest` — does a self-hosted runner that CARRIES the custom
+#      `ubuntu-latest` label actually receive such a job while hosted runners are
+#      saturated? (docs/ops/ci-runner-x64.md claims yes.)
+#   2. `runs-on: [self-hosted, self-hosted-x64]` — is an explicit pool pin served by a
+#      cell runner, and how long does a real checkout + run take there?
+#   3. same for the ARM64 half, so the per-test slowdown in python-ci.yml's warning is
+#      measured on the same probe rather than quoted from another run's numbers.
+#
+# Each job prints the runner identity GH gives it (`runner.name`,
+# `runner.environment`), the OS, core count and a wall-clock stamp, so the two classes
+# are comparable from one pair of runs.
+name: CI pool probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - probe/**
+    paths:
+      - .github/workflows/ci-pool-probe.yml
+
+# The repo requires an explicit concurrency mapping with a boolean/expression
+# `cancel-in-progress` on every workflow (an unbounded one can occupy the runner
+# budget and starve the required python-ci-gate). A probe is the last thing that
+# should hold a slot.
+concurrency:
+  group: ci-pool-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hosted:
+    name: probe (ubuntu-latest — hosted or pool?)
+    runs-on: ubuntu-latest
+    steps:
+      - name: identity
+        run: |
+          echo "runner_name=${{ runner.name }}"
+          echo "runner_environment=${{ runner.environment }}"
+          uname -a
+          echo "nproc=$(nproc)"
+          date -u +"started=%Y-%m-%dT%H:%M:%SZ"
+
+  pool-x64:
+    name: probe (self-hosted x64 pin)
+    runs-on: [self-hosted, self-hosted-x64]
+    steps:
+      - name: identity
+        run: |
+          echo "runner_name=${{ runner.name }}"
+          echo "runner_environment=${{ runner.environment }}"
+          uname -a
+          echo "nproc=$(nproc)"
+          date -u +"started=%Y-%m-%dT%H:%M:%SZ"
+
+  pool-arm64:
+    name: probe (self-hosted arm64 pin)
+    runs-on: [self-hosted, self-hosted-arm64]
+    steps:
+      - name: identity
+        run: |
+          echo "runner_name=${{ runner.name }}"
+          echo "runner_environment=${{ runner.environment }}"
+          uname -a
+          echo "nproc=$(nproc)"
+          date -u +"started=%Y-%m-%dT%H:%M:%SZ"
