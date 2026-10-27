@@ -4230,12 +4230,23 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 #      queued one.
 #
 # So a guard whose job is to relieve a full pool must not run ON that pool.
-# `ubuntu-24.04` is the hosted-only pin this repo already uses for
-# `finding-provenance`; it stays hosted-only because the pool is forbidden from
-# claiming it (`tests/test_ci_runner_x64_install.py`), and the measured label
-# set on 2026-10-27 confirmed all nine runners advertise `ubuntu-latest` and
-# none advertises `ubuntu-24.04`. The repo is public, so hosted minutes are
-# free — the pin costs nothing.
+# `ubuntu-24.04` is the version-pinned hosted label this repo already uses for
+# `finding-provenance`, `test-slow`, `workflow-lint` and `mirror-images`.
+#
+# ⛔ OBSERVED, NOT ENFORCED — and the comment in each of the four workflows says
+# the same thing, because an overstated guarantee is how the next lane talks
+# itself out of the pin. As measured 2026-10-27 with the fallback engaged, all
+# nine runners advertised `ubuntu-latest` and none advertised `ubuntu-24.04`
+# (with the fallback disengaged, none carries either). The installer cannot emit
+# it (`tests/test_ci_runner_x64_install.py:127`) and the re-registration path
+# strips it (`tools/runner_autoscale.py::_preserve_labels`, pinned by
+# `tests/test_runner_autoscale.py`), but NO test here reads the LIVE label set,
+# and the pool HAS served this very label: 2026-10-24's `finding-provenance`
+# jobs ran on `pi-runner-vm-*` carrying `ubuntu-24.04`
+# (`tests/test_runner_tool_contract.py:5-12`; the gate's drift arm reads the
+# gate's TEXT, so it could not fire). Re-measure the live label set if a runner
+# is re-cut. The repo is public, so hosted minutes are free — the pin costs
+# nothing.
 HOSTED_ONLY_PIN = "ubuntu-24.04"
 
 #: Workflows whose job is to OBSERVE or GOVERN the fleet rather than to test
@@ -4257,14 +4268,14 @@ def test_a_fleet_observer_runs_on_the_hosted_pin_not_the_pool_it_observes() -> N
         job = doc["jobs"][job_id]
         assert job.get("runs-on") == HOSTED_ONLY_PIN, (
             f"{name}:{job_id} runs on {job.get('runs-on')!r}. An observer or "
-            f"governor of the runner pool must run on the HOSTED-only pin "
-            f"({HOSTED_ONLY_PIN!r}) — `ubuntu-latest` is served by the "
-            f"self-hosted pool this repo fills with test shards, so the "
-            f"arm that FAILS: `ubuntu-latest` is served by both, and the jobs "
-            f"that land on the pool hung in `actions/checkout` (8m40s, 4m41s) "
-            f"until the job's own timeout killed them with the measuring step "
-            f"SKIPPED (measured 2026-10-27; same day ci-queue-health completed 1 "
-            f"of its last 8 scheduled runs). Public repo: hosted is free.")
+            f"governor of the runner pool must run on the version-pinned hosted "
+            f"label ({HOSTED_ONLY_PIN!r}). `ubuntu-latest` is served by both "
+            f"GitHub-hosted and the self-hosted pool this repo fills with test "
+            f"shards (while the fallback is engaged), and the jobs that land on "
+            f"the pool hung in `actions/checkout` (8m40s, 4m41s) until the job's "
+            f"own timeout killed them with the measuring step SKIPPED (measured "
+            f"2026-10-27; same day ci-queue-health completed 1 of its last 8 "
+            f"scheduled runs). Public repo: hosted is free.")
 
 
 def _runs_on_labels(job: dict) -> set[str]:
@@ -4309,10 +4320,15 @@ def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() ->
     removes, however it is spelled.
     """
     pool_fallback_label = "ubuntu-latest"
-    assert pool_fallback_label != HOSTED_ONLY_PIN, (
-        "the observer pin collapsed onto the label the self-hosted pool is "
-        "explicitly allowed to advertise (`self-hosted-x64,ubuntu-latest`) — "
-        "the pin would then be served by the starved pool again"
+    # The pin's whole value is that the POOL cannot be the runner serving it. `ubuntu-latest` is
+    # the label the fallback attaches (`resolve_labels()` → `self-hosted-x64,ubuntu-latest`), so a
+    # pin to it puts the observer straight back on the starved arm; a `ubuntu-<version>` label is
+    # the recorded decision (`docs/ops/ci-runner-x64.md:25-26`). Asserting the SHAPE is the only
+    # check of `HOSTED_ONLY_PIN` itself that can fail — the loop below reads the workflows.
+    assert re.fullmatch(r"ubuntu-\d+\.\d+", HOSTED_ONLY_PIN), (
+        f"HOSTED_ONLY_PIN={HOSTED_ONLY_PIN!r} is not a version-pinned hosted label — "
+        f"`{pool_fallback_label}` (and any other moving alias) is what the pool's fallback "
+        f"attaches, so pinning to it would put the observer back on the starved pool"
     )
     for name in FLEET_OBSERVER_WORKFLOWS:
         doc = _load(WORKFLOW_DIR / name)

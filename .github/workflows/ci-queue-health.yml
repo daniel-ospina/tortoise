@@ -90,15 +90,20 @@ jobs:
   queue-health:
     # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
     # `ubuntu-latest` is served by BOTH GitHub-hosted runners AND this repo's
-    # self-hosted pool (the pool advertises that label), and measured over these
-    # observer workflows' own scheduled runs, 23 of 35 jobs went to hosted and 8
-    # to the pool. So the pin is not "escape a queue that is always the pool";
-    # it removes the arm that FAILS.
+    # self-hosted pool — the pool advertises it WHILE the fallback is engaged
+    # (`scripts/ci_runner_gate.sh`; docs/ops/ci-runner-x64.md:25), so that is a
+    # CONDITIONAL property, not a standing one: measured again on 2026-10-27 with
+    # the fallback disengaged, none of the nine runners carried it. Measured over
+    # these observer workflows' own scheduled runs that day, 23 of 35 jobs went
+    # to hosted and 8 to the pool, where they HANG (below). So the pin is not
+    # "escape a queue that is always the pool"; it removes the arm that FAILS.
     #
     # The pool arm does not starve — it HANGS. Both jobs that landed there died
-    # in `actions/checkout` and were killed at this job's `timeout-minutes: 10`
+    # in `actions/checkout` and were killed at the job's OWN `timeout-minutes`,
     # with the measuring step SKIPPED, which reads as a finished run that
-    # measured nothing:
+    # measured nothing. Both cited runs are `ci-queue-health`'s, whose timeout is
+    # `10`; this block is shared by four workflows with different timeouts
+    # (`repair` is `15`), so it names no single job's number as its own:
     #     run 40456347720 → pi-runner-vm-2: checkout 8m40s, then cancelled
     #     run 40451686065 → pi-runner-vm-4: checkout 4m41s, then cancelled
     # (same day: 9/9 runners busy, 78 runs queued, and `ci-queue-health`
@@ -113,13 +118,23 @@ jobs:
     # hangs and usually serves in minutes; the cadence/concurrency question stays
     # open and is tracked separately.
     #
-    # `ubuntu-24.04` is HOSTED-ONLY here — verified live: all nine runners
-    # advertise `ubuntu-latest` and NONE advertises `ubuntu-24.04`; the
-    # installer's `resolve_labels()` can emit only `self-hosted-x64` or
-    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh, and
-    # docs/ops/ci-runner-x64.md:26 records the same rule), and
-    # `tests/test_ci_runner_x64_install.py:127` asserts it. Public repo, so
-    # hosted minutes are free: this spends nothing.
+    # `ubuntu-24.04` is HOSTED-ONLY **as measured 2026-10-27 with the fallback
+    # engaged**: all nine runners advertised `ubuntu-latest` and none advertised
+    # `ubuntu-24.04` (with the fallback disengaged, none carries either). The
+    # rule is recorded (docs/ops/ci-runner-x64.md:25-26) and honoured by the
+    # installer — `resolve_labels()` can emit only `self-hosted-x64` or
+    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh), asserted
+    # at `tests/test_ci_runner_x64_install.py:127`, and the re-registration path
+    # strips a version-pinned hosted label (`_preserve_labels`,
+    # tools/runner_autoscale.py).
+    # ⛔ BUT the pin is OBSERVED, NOT GUARANTEED: no test in this repo reads the
+    # LIVE label set, and the pool HAS served this very label — 2026-10-24's
+    # `finding-provenance` jobs ran on `pi-runner-vm-*` carrying `ubuntu-24.04`
+    # (tests/test_runner_tool_contract.py:5-12), drift the gate's text-reading arm
+    # could not see. Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a
+    # runner's labels are re-cut: if the pool ever claims it again, this pin
+    # silently stops pinning and the failure mode is exactly the one it removes.
+    # Public repo, so hosted minutes are free: this spends nothing.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

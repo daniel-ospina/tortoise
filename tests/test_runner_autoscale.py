@@ -798,6 +798,34 @@ def test_repair_preserves_the_labels_the_runner_already_has(env):
     )
 
 
+def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
+    """A re-registered runner must not carry `ubuntu-24.04` (or any `ubuntu-<version>`).
+
+    The recorded invariant is that the pool claims `ubuntu-latest` and never an `ubuntu-<version>`
+    (`docs/ops/ci-runner-x64.md:25-26`), and `ubuntu-24.04` is exactly the label four fleet
+    observers are pinned to in order to stay OFF this pool. The pool HAS carried it once, out of
+    band: on 2026-10-24 `finding-provenance` jobs ran on `pi-runner-vm-*` with `ubuntu-24.04`
+    (`tests/test_runner_tool_contract.py:5-12`) — the drift the gate's text-reading arm could not
+    see. `_preserve_labels()` kept every non-host-derived label, so one such attachment would be
+    re-applied at every repair and every observer pin would silently stop pinning. It is dropped
+    now; the custom and fallback labels must still survive (that is the neighbouring test).
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,gpu")],
+        installs=[("gh-runner-x64-1", "r1")],
+        systemctl_rc=1,
+    )
+    e.record()
+    cfg = e.config()
+    assert "ubuntu-24.04" not in cfg, (
+        "the pool kept a VERSION-PINNED hosted label on re-registration — every job pinned to "
+        f"it (the four fleet observers) would be served by the pool it pinned to escape: {cfg}"
+    )
+    assert "--labels self-hosted-x64,ubuntu-latest,gpu" in cfg, (
+        f"dropping the version pin must not cost the custom/fallback labels: {cfg}"
+    )
+
+
 def test_another_repos_listener_still_counts_against_the_boxes_ceiling(env):
     """A foreign listener occupies the box, so it counts in `live` — no over-fill.
 
@@ -1496,6 +1524,20 @@ MUTATIONS = {
         ),
         args=(),
         wrong=lambda r: "self-hosted-arm64" in r.get("_config", ""),
+    ),
+    "version-pinned-hosted-label-preserved": dict(
+        # The pool claims `ubuntu-latest` and never `ubuntu-<version>`; a version pin preserved
+        # through re-registration is the 2026-10-24 drift made permanent, and it un-pins every
+        # observer job that names it.
+        old="and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)",
+        new="and True",
+        kwargs=dict(
+            pool=[("r1", "offline", False, "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,gpu")],
+            installs=[("gh-runner-x64-1", "r1")],
+            systemctl_rc=1,
+        ),
+        args=(),
+        wrong=lambda r: "ubuntu-24.04" in r.get("_config", ""),
     ),
     "foreign-listener-not-counted": dict(
         old="        live = _live()",
