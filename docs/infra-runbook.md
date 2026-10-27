@@ -3523,7 +3523,13 @@ why the two recipes above are the verification and the deploy status is not.
    them as designed residue is the fail-open read this bound exists to close.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
-   deployment can grow `no_tenant` with nothing wrong. So make the capture
+   deployment can grow `no_tenant` with nothing wrong. ⛔ **That excuse covers
+   `no_tenant` and nothing else.** `circuit_open` reads a process-wide breaker
+   and `malformed_dsn` a process-wide setting, so a growth in either is a
+   statement about the PROCESS and not about which caller met it: other traffic
+   cannot excuse it, because that other traffic runs behind the SAME breaker and
+   the same DSN. Only `no_tenant` is per-credential, which is why it is the one
+   arm this bound qualifies. So make the capture
    **graph-bound** — a graph-bound **control-plane** credential cannot land in
    `no_tenant` except when tenant resolution itself faults
    (`hosted_api._resolve_record_tenant` is fail-soft, #5148: the fault is logged

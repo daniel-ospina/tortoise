@@ -2374,14 +2374,20 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         )
     # ... and the check that DOES exist is named: the seam logs every non-write at
     # WARN with its reason (`tortoise/record_writer.py`).
-    assert "the record write did not happen" in section, (
+    # `flat`, not `section`: the phrase is wrappable prose (the ⚠️ `no_tenant`
+    # bound below cites it as "it greps `the record write did not happen`"), and the
+    # repo disables MD013 (`.markdownlint-cli2.jsonc`), so a refill may legally
+    # split it across a line break and red a pin that changed no word — the F3
+    # class, which this pin still carried after every other text pin had moved to
+    # `flat` (#10083 review, P2, measured on the width-76 refill).
+    assert "the record write did not happen" in flat, (
         "the section names no read surface for a refused write — the seam logs "
         "'the record write did not happen (<reason>)' and nothing greps it"
     )
     # The pass bar must state the EXPECTED non-zero baseline instead of "0":
     # a `no_durable_journal` decline is the healthy M2 capture path, and #9264's
     # `DatatypeMismatch` refusals are counted on `write_failed`.
-    assert "must stay **0**" not in section, (
+    assert "must stay **0**" not in flat, (
         "the section sets an absolute `record_write_failures == 0` bar, which a "
         "HEALTHY armed deployment fails: #9264's DatatypeMismatch refusals are "
         "counted on write_failed (and the R1-before-R2 ordering expects them)"
@@ -2532,7 +2538,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # "every other malformation surfaces as `circuit_open` / `write_failed`",
     # which a hostless value no longer does. So pin BOTH refusal causes, or the
     # prose re-stales the moment the predicate grows.
-    assert "not a parseable DSN" not in section, (
+    assert "not a parseable DSN" not in flat, (
         "the section defines `malformed_dsn` as a parse failure — `record_dsn()` "
         "does no parsing, only the scheme + host checks"
     )
@@ -2593,15 +2599,22 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # DESIGNED residue lets an operator excuse real `no_tenant` growth that the only
     # remaining designed sources (#10047's shapes) do not explain — a fail-open read
     # of the very signal this section exists to expose (#10083 review P1). The
-    # control-plane-cannot-name-a-default-row case is the ONLY org-wide one, and the
-    # prose must say so.
+    # control-plane-cannot-name-a-default-row case is ONE of the TWO org-wide ones —
+    # the other is a resolution FAULT, which the fail-soft resolver turns into the
+    # same `no_tenant` — and the prose must say BOTH. ⛔ NOT "the ONLY": a comment
+    # demanding the exhaustive reading its own pin below FORBIDS is the F4 class
+    # (a lane obeying it edits `**or** when the resolution itself faults` out of the
+    # prose and reds the suite), so this comment names the arm the pin protects.
     assert re.search(r"An \*\*org-wide API KEY is NOT one of those sources\*\* since #10025", flat), (
         "the ⚠️ list files org-wide API keys under the DESIGNED `no_tenant` sources, "
         "which since #10025 is false — the key is named from `default_graph_id`"
     )
     assert not re.search(r"an org-wide / session", flat), (
-        "the ⚠️ list still reads an org-wide key as designed residue beside the "
-        "session / OAuth shapes, excusing real growth on a healthy deployment"
+        "REVERT-DETECTOR (one draft's exact wording — the message names a class "
+        "this pin cannot see): the pre-#10025 list is back, reading an org-wide key "
+        "as designed residue beside the session / OAuth shapes. The CLAIM is "
+        "measured by the `NOT one of those sources` pin above; keep this exact, "
+        "cheap, and honestly labelled"
     )
     assert re.search(
         r"So make the capture \*\*graph-bound\*\* — a graph-bound \*\*control-plane\*\* "
@@ -2641,6 +2654,28 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "`public.graphs` FK), so the section tells an operator to read a designed "
         "outcome as a fault; the counter-example that makes the qualifier "
         "checkable is missing or unravelled"
+    )
+    # ⛔ The #9192 declaration is a POLARITY, and only the clause's SHAPE was pinned:
+    # `unless` is what makes a DECLARED self-host single-tenant process stop counting
+    # `no_tenant` (`tortoise/mcp_auth.py:99-110` arms it by declaration;
+    # `record_writer.record_tenant_for` then names the pair), so inverting it to
+    # `when` — i.e. asserting the declaration CAUSES `no_tenant`, the opposite of the
+    # code — left every pin green (#10083 review, P2, measured). Pin the direction
+    # AND forbid the inversion, or F5's correction is unpinned prose.
+    assert re.search(
+        r"counted there\s+\*\*unless the process has declared the single-tenant pair\*\*",
+        flat,
+    ), (
+        "the self-host lane's `unless` is unpinned — the #9192 declaration is what "
+        "CLEARS its `no_tenant`, so a reword that drops or inverts it makes the "
+        "section state the opposite of `mcp_auth.py:99-110`"
+    )
+    assert not re.search(
+        r"counted there\s+\*\*(?:when|if) the process has declared", flat
+    ), (
+        "the self-host arm is INVERTED: a declared single-tenant process is the one "
+        "case #9192 ARMS with the pair (it stops counting `no_tenant`), so 'when "
+        "declared' reads the ruling backwards"
     )
     # The "do not attribute growth per request" ruling is pinned ONCE, below, by a
     # sentence-scoped scan — the narrow negative pin that lived here
@@ -2691,8 +2726,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "default-graph tenant, so a `no_tenant` there is a control-plane fault"
     )
     assert not re.search(r"deliberately NOT bound", flat), (
-        "the pre-#10087 'deliberately NOT bound' claim is back — revert-detector for "
-        "the sentence this PR corrected"
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10087 "
+        "'deliberately NOT bound' claim is back. The claim it stood on is pinned "
+        "positively by the `NOT one of those sources either` assertion above"
     )
     # The ⚠️ list files the self-host registry lane under "a credential that names
     # no graph", while the sentence below calls that same lane "the one graph-bound
@@ -2762,8 +2798,11 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # judgement the ⛔ ruling below ("no request identity") declares impossible
     # (#10083 review cycle 3, P2, measured: inverting it left all 99 green).
     assert not re.search(r"the capture's OWN tenant resolution", flat), (
-        "the third arm is ownership-scoped again — a resolution-fault line carries no "
-        "request identity, so the operator cannot show it was the capture's"
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the ownership-scoped "
+        "third arm is back. A window-scoped reword ('when the capture's tenant "
+        "resolution faulted') stays green here by design — this pin cannot see that "
+        "class; the WINDOW scoping is measured by the `fail-and-fix only when` pin "
+        "above, whose third disjunct names the credential, not a request"
     )
     # The third disjunct must name a command that actually FINDS the fault. Recipe 1
     # greps `the record write did not happen`, and this fault is logged under a
@@ -2841,10 +2880,50 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the remedy does not say what a healthy default row looks like, so "
         "'read the row' is unactionable"
     )
+    # ...and the OTHER half of "healthy": a default row that is present but not
+    # `active` is precisely the no-nameable-default-row case the arm is about, so a
+    # remedy naming only the id form leaves the operator free to read a paused row as
+    # healthy. Measured: inverting it to `inactive` left every pin green (#10083
+    # review, P3).
+    assert re.search(r"its `status` must be `active`", flat), (
+        "the remedy never says the default row must be `active` — the silent arm's "
+        "whole point is a row that exists but names nothing, so an inactive row read "
+        "as healthy clears the growth a control-plane fault produced"
+    )
+    # The BOUND's own asymmetry: `no_tenant` is qualified and the other two reasons
+    # are not, and the section must say WHY rather than leave a reader to infer it
+    # from the process-global sentence above. Without the clause, `circuit_open` /
+    # `malformed_dsn` read as absolute reds on a before/after delta the section has
+    # just conceded covers other traffic — the same contradiction F1 removes one
+    # paragraph up (#10083 review, P3).
+    assert re.search(r"That excuse covers\s+`no_tenant` and nothing else", flat), (
+        "the ⚠️ bound never says the process-global excuse is `no_tenant`-only, so "
+        "item 2's absolute bar for `circuit_open` / `malformed_dsn` reads as the "
+        "same unbounded claim the bound just qualified"
+    )
+    assert re.search(
+        r"`circuit_open` reads a process-wide breaker\s+and `malformed_dsn` a "
+        r"process-wide setting",
+        flat,
+    ), (
+        "the section gives no reason the other two arms are NOT bound — the BREAKER "
+        "and the DSN are process-wide, so other traffic cannot excuse a growth in "
+        "either (it runs behind the same breaker and the same DSN)"
+    )
     assert not re.search(r"not the `default` name sentinel", flat), (
-        "the remedy qualifies on the row's NAME — the minted `kind='default'` row "
-        "IS named `default`, so that rejects the row the operator must find; the "
-        "sentinel is an ID value"
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-fix sentence "
+        "is back. A genuinely name-qualifying rewrite stays green here, so the "
+        "asymmetry is pinned POSITIVELY by the `never a row NAME` assertion below"
+    )
+    # ... and the positive half, so the asymmetry is a claim rather than only the
+    # absence of one draft's sentence (#10083 review, P3: the negative pin above
+    # reds on a revert, not on a rewrite that makes the same false qualification).
+    assert re.search(
+        r"the `default` SENTINEL is a pre-#10025\s+id value, never a row NAME", flat
+    ), (
+        "the remedy no longer says WHICH field the sentinel lives in — the minted "
+        "`kind='default'` row IS named `default` and its id is a real `g_<hex>`, so "
+        "without the id/name asymmetry an operator rejects the healthy row"
     )
     # ⛔ The command must match EVERY message that carries a resolution fault, not
     # just the per-request one. There are three: `hosted_api._resolve_record_tenant`
@@ -2894,11 +2973,19 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     # ⛔ POLARITY, not vocabulary: the negation must GOVERN the attribution verb
     # ("Do not try to attribute…", "cannot attribute", "never assign"), or the
-    # sentence must say the PRACTICE is infeasible ("attribution would be
-    # unexecutable"). An allow-list of bare words was measured evadable — "…is not
-    # impossible: the log line names the request" and "…is impossible to avoid: the
-    # log line names the request" both passed on the word "impossible" alone
-    # (#10083 review cycle 4, P2).
+    # sentence must say the PRACTICE is infeasible ("attribution is impossible",
+    # "attribution would be unexecutable", "no per-request attribution"). An
+    # allow-list of bare words was measured evadable — "…is not impossible: the log
+    # line names the request" and "…is impossible to avoid: the log line names the
+    # request" both passed on the word "impossible" alone (#10083 review cycle 4, P2).
+    # But the reverse failure is the F3 class in assertion form: the first fix pinned
+    # only the `would be unexecutable` SHAPE, so a TRUTHFUL clarification in another
+    # shape — "Per-request attribution is impossible from this log line." or "There is
+    # no per-request attribution in this log line." — red the suite while asserting
+    # exactly the ruling, and the message told the next lane the section "presents
+    # per-request attribution of growth as possible" when it did not (#10083 review,
+    # P2, measured on both). So: accept every shape of the ruling, and reject the two
+    # double-negative evasions explicitly rather than by omission.
     _sentences = [s for s in re.split(r"(?<=\.)\s+", flat)
                   if re.search(r"attribut|assign", s, re.I)
                   and re.search(r"\brequest", s, re.I)]
@@ -2907,10 +2994,21 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "below is the only thing that makes the arm executable"
     )
     for _sentence in _sentences:
+        assert not re.search(
+            r"\b(?:is|are|was|were|remains?)\s+not\s+(?:impossible|infeasible|"
+            r"unexecutable|unavailable)\b|\bimpossible\s+to\s+(?:avoid|prevent)\b",
+            _sentence, re.I,
+        ), (
+            "the section asserts the OPPOSITE of its ruling through a double "
+            "negative — 'attribution is not impossible' / 'impossible to avoid' "
+            "says the log CAN attribute the growth, which is the step the ⛔ ruling "
+            f"forbids: {_sentence.strip()!r}"
+        )
         assert re.search(
             r"(?:(?:\bDo not\b|\bNever\b|\bnot\b|\bmay not\b|\bmust not\b|"
-            r"\bcannot\b|\bcan't\b)\s+(?:try\s+to\s+)?(?:attribut|assign)|"
-            r"attribut\w*\s+would\s+be\s+(?:unexecutable|impossible))",
+            r"\bcannot\b|\bcan't\b|\bno\b)\s+(?:try\s+to\s+)?(?:attribut|assign)|"
+            r"\battribut\w*\s+(?:would\s+be|is|remains)\s+(?:unexecutable|"
+            r"impossible|infeasible|unavailable)|\bno\b[^.]*\battribut\w*)",
             _sentence, re.I,
         ), (
             "the section presents per-request attribution of growth as possible — "
