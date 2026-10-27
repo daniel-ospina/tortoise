@@ -4257,17 +4257,21 @@ class TestSessionDetail:
         """#8447 must not repeal #1591: a graph copy that EXISTS is still served.
 
         The refusal above is for the case the fallback cannot cover — nothing to
-        serve. The other half of that conjunct (`and not turns`) is what keeps
-        the pre-arming copy byte-identical, and without this test a mutant
-        `if _record_read_failed: raise _record_unavailable()` passes the suite:
-        the sibling test DELETES the graph's turn nodes before the call, so the
-        guard is never reached with turns present.
+        serve. Without this test a mutant
+        `if _record_read_failed: raise _record_unavailable()` passes the whole
+        suite: the sibling test DELETES the graph's turn nodes before the call,
+        so the guard is never reached with turns present.
 
         Shape: capture while UNARMED (the graph holds the turns — the pre-arming
         deployment), then arm the record and make its read fail. The caller must
         still get 200 and the SAME turns, not a 503.
 
-        Mutation: drop `and not turns` — this test reds on the 503.
+        Mutation: drop the count comparison entirely, i.e.
+        `if _record_read_failed: raise _record_unavailable()` — this test reds on
+        the 503. (Dropping only an emptiness clause would NOT red here: this
+        session's `turn_count` is 2 and the graph holds 2 nodes, so the count
+        comparison alone keeps it at 200. The test that kills a bare emptiness
+        test is `test_detail_serves_a_known_empty_capture`.)
         """
         sid = "detail-record-down-graph-copy"
         r = client.post("/v1/sessions", json={
@@ -4367,6 +4371,163 @@ class TestSessionDetail:
         assert r.status_code == 503, (
             "the fallback served a 2-turn PREFIX of a 4-turn transcript at "
             f"{r.status_code}: {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_serves_a_known_empty_capture(self, client, monkeypatch):
+        """#8447: `turn_count: 0` is a CAPTURE THAT STORED NO TURNS — an empty
+        graph copy is then the COMPLETE answer, not a truncated one.
+
+        The neighbouring tests pin refuse-on-empty, refuse-on-prefix and
+        serve-on-complete. None exercises the state where the session's OWN count
+        is a known zero, because every capture they use stores two turns.
+        Collapsing the count with `sess[2] or 0` made that state unanswerable: a
+        record outage turned a truthful `200 {"turn_points": [], "turns": 0}`
+        into a 503 — an over-block, the opposite of the silence #8447 forbids and
+        just as wrong.
+
+        Shape: a Session whose `turn_count` is 0 carrying no turn node — what a
+        capture of zero turns leaves. The count is ASSERTED, so this cannot
+        silently degrade into the absent-count case pinned next door.
+
+        Mutation: restore `_expected_turns = sess[2] or 0` with an emptiness
+        clause (`if _record_read_failed and not turns: raise`) — this REDs on the
+        503.
+        """
+        sid = "detail-record-known-empty"
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at=$now, s.turn_count=0, s.is_episodic=true",
+            params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert counts[0][0] == 0, counts
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 200, (
+            "a session whose OWN count is zero has nothing to truncate, and the "
+            f"read refused it anyway: {r.status_code} {r.text[:300]}")
+        assert r.json()["turn_points"] == [], r.json()
+        assert r.json()["turns"] == 0, r.json()
+
+    def test_detail_refuses_a_graph_copy_that_is_a_stale_superset(
+            self, client, monkeypatch):
+        """#8447: the MIRROR of the prefix case — a copy LONGER than the
+        session's own count is a transcript the session no longer has.
+
+        `<` saw only truncation, so the direction the guard could not see is the
+        one that survived: the stale-turn sweep is gated on the write predicate
+        (`sdk.py:2696`), so after a SHORTER re-capture the older, LONGER node set
+        stays in the graph. With the record unreachable the endpoint then served
+        those points at 200 beside its own `turns: 2` — a body that contradicts
+        itself, and a transcript that is not the session's.
+
+        Shape: capture 4 turns, then set the Session's `turn_count` to 2 leaving
+        all four nodes in place — the state a 2-turn re-capture leaves when the
+        sweep is skipped. Both the node count and the count are ASSERTED.
+
+        Mutation: restore `len(turns) < _expected_turns` — this REDs on the 200.
+        """
+        sid = "detail-record-down-stale-superset"
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+                {"role": "user", "content": "And Postgres for the record."},
+                {"role": "assistant", "content": "Agreed."},
+            ],
+            "session_id": sid,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["turns"] == 4, r.json()
+
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) SET s.turn_count=2",
+            params={"sid": sid})
+
+        # The precondition, asserted rather than assumed: FOUR nodes, count TWO.
+        nodes = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)", params={"sid": sid}).result_set
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert nodes[0][0] == 4, nodes
+        assert counts[0][0] == 2, counts
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the fallback served a 4-node SUPERSET as a 2-turn transcript at "
+            f"{r.status_code}: {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_refuses_when_the_session_has_no_turn_count(
+            self, client, monkeypatch):
+        """#8447: an ABSENT count is not a known zero — it is an unknown, and the
+        read refuses rather than assert "no turns" on a session it cannot count.
+
+        The commit path's `MERGE (s:Session)` (`hosted_api.py:16920`) creates
+        Session nodes with no `turn_count` at all, and so does the demo seed; a
+        legacy capture whose count went missing looks identical from here.
+        Collapsing that None into 0 (`sess[2] or 0`) folded it into the emptiness
+        test by accident — this pins the split as deliberate, and pins WHICH way
+        the unknown falls. The cost is the over-block disclosed at the guard: a
+        commit-only session on a journaling deployment is refused while the record
+        is down. That is the fail-closed direction, chosen because the alternative
+        asserts an emptiness this arm cannot verify.
+
+        Shape: a Session created with NO `turn_count` and no turn node — the
+        commit path's node. The ABSENCE is ASSERTED, so this cannot silently
+        become the known-zero case pinned next door.
+
+        Mutation: treat absent as zero (`if _expected_turns is None: pass`) —
+        this REDs on the 200.
+        """
+        sid = "detail-record-no-turn-count"
+        import tortoise.hosted_api as ha
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at=$now, s.is_episodic=true",
+            params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
+        counts = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+            params={"sid": sid}).result_set
+        assert counts[0][0] is None, counts
+
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        assert ha._record_holds_turns() is True, (
+            "the armed read predicate is false — this test would not reach the "
+            "fallback arm at all")
+        monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
+            RuntimeError("the record is unreachable")))
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the session carries no turn_count, so its empty copy is evidence of "
+            f"nothing and must not be served as an answer: {r.status_code} "
+            f"{r.text[:300]}")
         assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
 
     def test_detail_exposes_the_session_source_node(self, client):

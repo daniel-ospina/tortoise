@@ -18441,8 +18441,9 @@ def _record_unavailable() -> HTTPException:
         status_code=503,
         detail={
             "error_code": "record_unavailable",
-            "message": "The record could not answer for this session and there "
-                       "was no copy to fall back to — retry in a moment.",
+            "message": "The record could not answer for this session, and no "
+                       "complete copy could be served in its place — retry; if "
+                       "it persists the record needs an operator.",
         },
     )
 
@@ -18645,24 +18646,49 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     #
     # Completeness is measured against the Session's OWN `turn_count`, which is
     # `sess[2]` here and is written on EVERY capture including the armed one
-    # (`sdk.py`'s `"tc": turn_count`), so it is already the count this endpoint
-    # publishes (`"turns": sess[2]` below) — the fallback must not quietly serve
-    # fewer points than the number it reports. It is 0/None on an uncounted row,
-    # which collapses this to the emptiness test.
+    # (`sdk.py`'s `merge_sets` always carries `s.turn_count=$tc`), so it is
+    # already the count this endpoint publishes (`"turns": sess[2]` below) — the
+    # fallback must not serve a set of points that DISAGREES with it.
     #
-    # ⚠️ KNOWN OVER-BLOCK, stated rather than papered over: `_record_holds_turns`
-    # tests only the DSN, so on an armed-but-NOT-journaling deployment (where the
-    # GRAPH is the store holding the turns — see `sdk.py`'s two-conjunct write
-    # predicate) a record outage plus a session that genuinely has no turns ALSO
-    # lands here, turning a truthful `200 {"turn_points": []}` into a 503. It is
-    # narrow — it needs the record read to FAIL, on that config, for an empty
-    # session — and the *message* is worded not to assert the record held the
-    # transcript, precisely because this arm cannot know that it did. Closing it
-    # is the shared-predicate fix recorded on #10021, not a read rewrite smuggled
+    # ⛔ `!=`, NOT `<`, and the direction matters as much as the emptiness: the
+    # stale-turn sweep is gated on the write predicate (`sdk.py:2696`, `if stale
+    # and not _record_holds_turns`), so a SHORTER re-capture after arming leaves
+    # the older, LONGER node set in place. A superset is then as much "not this
+    # session's transcript" as a prefix is, and a `<` test happily serves it with
+    # more `turn_points` than its own `turns` field reports.
+    #
+    # `turn_count` is NOT collapsed to 0 when absent (`or 0`), because the two
+    # absent states mean different things and only one of them is answerable:
+    #   * KNOWN ZERO — a capture ran and stored no turns (`$tc = len(turns) =
+    #     0`), so an empty graph copy is the COMPLETE answer and is served;
+    #   * ABSENT (None) — no capture ever wrote a count: the commit path's
+    #     `MERGE (s:Session)` (`hosted_api.py:16920`) and the demo seed create
+    #     Session nodes with no `turn_count` at all, and a legacy capture whose
+    #     count went missing is indistinguishable from those. An empty copy there
+    #     is evidence of nothing, so it is REFUSED — fail closed on an unknown
+    #     rather than assert "no turns" about a session we cannot count.
+    #
+    # ⚠️ KNOWN OVER-BLOCK, stated rather than papered over, and it is NOT
+    # confined to one config: `_record_holds_turns` tests only the DSN, so on an
+    # armed-but-NOT-journaling deployment (where the GRAPH is the store holding
+    # the turns — `sdk.py`'s two-conjunct write predicate) a record outage plus a
+    # session that genuinely has no turns lands here and turns a truthful
+    # `200 {"turn_points": []}` into a 503. The ABSENT-count arm widens that to
+    # any session created without a capture — a commit-only or demo session on
+    # the FULLY armed+journaling config (`hosted_api.py:16920`) — because that is
+    # the population this cannot tell from an uncounted legacy capture. It still
+    # needs the record read to FAIL, and the *message* is worded not to assert
+    # the record held the transcript, because this arm cannot know that it did.
+    # Closing it is the shared-predicate fix recorded on #10021 (every
+    # Session-creating path writes `turn_count`), not a read rewrite smuggled
     # into this visibility diff.
-    _expected_turns = sess[2] or 0
-    if _record_read_failed and (not turns or len(turns) < _expected_turns):
-        raise _record_unavailable()
+    _expected_turns = sess[2]
+    if _record_read_failed:
+        if _expected_turns is None:
+            if not turns:
+                raise _record_unavailable()
+        elif len(turns) != _expected_turns:
+            raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
