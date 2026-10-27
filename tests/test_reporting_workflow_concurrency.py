@@ -4260,6 +4260,17 @@ FLEET_OBSERVER_WORKFLOWS = {
     "availability-watchdog.yml": "probe",
 }
 
+#: The step that makes each observer an observer, by the name this repo gives it.
+#: A truncated file loses it silently, and a name is the only handle a reader or a
+#: test has on "the job's actual work" — `actions/checkout` and the tool-contract
+#: step are shared boilerplate that would survive any truncation that keeps a body.
+FLEET_OBSERVER_PAYLOAD_STEP = {
+    "ci-queue-health.yml": "Measure the queue, and unjam a trim-safe flood",
+    "ci-check-repair.yml": "Repair PRs whose required checks never ran",
+    "availability-liveness.yml": "Check the pager's heartbeat (#4573)",
+    "availability-watchdog.yml": "Probe the public endpoint (self-heal + deduplicated alert)",
+}
+
 
 def test_a_fleet_observer_runs_on_the_hosted_pin_not_the_pool_it_observes() -> None:
     """Each observer's job must pin the hosted label, not `ubuntu-latest`."""
@@ -4386,9 +4397,21 @@ def test_a_workflow_edit_keeps_its_steps() -> None:
             f"step(s) — an observer workflow has a checkout/setup step plus the "
             f"step that does its job, so fewer than 2 means the body was cut."
         )
-        # The step that makes each observer an observer, by the name this repo
-        # gives it. A truncated file loses it silently.
-        assert any(
-            isinstance(step, dict) and (step.get("name") or "")
-            for step in steps
-        ), f"{name}:{job_id} has anonymous steps only — its body was cut"
+        # The step that makes each observer an observer, BY NAME. Checking only
+        # that *some* step is named is vacuous the moment `actions/checkout` gains
+        # a `name:`: the assertion would then pass while the measuring step was
+        # gone — the exact truncation this test exists to catch.
+        expected = FLEET_OBSERVER_PAYLOAD_STEP[name]
+        step_names = [s.get("name") for s in steps if isinstance(s, dict)]
+        assert expected in step_names, (
+            f"{name}:{job_id} lost its payload step {expected!r} (has "
+            f"{step_names}) — a comment-only edit ate the job's body"
+        )
+
+
+def test_every_fleet_observer_payload_step_is_name_pinned() -> None:
+    """A roster that drifts to empty would pass the pin above vacuously."""
+    assert set(FLEET_OBSERVER_PAYLOAD_STEP) == set(FLEET_OBSERVER_WORKFLOWS), (
+        "the payload-step roster drifted from the observer roster — add the "
+        "workflow's payload step name rather than deleting its entry"
+    )
