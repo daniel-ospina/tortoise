@@ -512,16 +512,25 @@ _CROSS_HALF_URIS = [
     "http://[::ffff:127.0.0.1]:1234/cb",
     "http://[::ffff:7f00:1]:1234/cb",
     "http://[::ffff:127.1.2.3]/cb",
-    # ── spellings where WHATWG and `urlsplit` see DIFFERENT HOSTS. `new URL` rewrites these into
-    # 127.0.0.1 (or invents an authority for a special scheme); `urlsplit` reports them verbatim,
-    # so the AS refuses. A BFF that accepted one would advance a flow the AS then refuses — the
-    # reverse of the round-3 direction and just as silent, so the BFF refuses them too.
+    # ── spellings where WHATWG and `urlsplit` see DIFFERENT HOSTS. For **http** that changes the
+    # verdict: `new URL` rewrites these into 127.0.0.1, but `urlsplit` reports them verbatim so
+    # `_is_loopback` says no and the AS REFUSES — a BFF that accepted one would advance a flow the
+    # AS then refuses.
     "http://127.1/cb",
     "http://2130706433/cb",
     "http://127.0.0.1./cb",
     "http://0.0.0.0x7f000001/cb",
     "https:client.example/cb",
     "http:localhost:6277/cb",
+    # ⛔ ...but for **https** it does NOT: the AS's https branch only requires a truthy hostname and
+    # never consults `_is_loopback`, so it accepts every normalised spelling. Refusing them here
+    # was a real defect (round 4): a client that registered one could never start the bridge, and
+    # the message blamed its `redirect_uri`. Same family, opposite verdict — so both are pinned.
+    "https://127.1/cb",
+    "https://2130706433/cb",
+    "https://127.0.0.1./cb",
+    "https://client%2Eexample/cb",
+    "https://münchen.example/cb",
     # both accept (case, userinfo and an explicit default port are read the same by both)
     "HTTP://LOCALHOST:6277/cb",
     "https://user:pw@client.example/cb",
@@ -532,7 +541,10 @@ _CROSS_HALF_URIS = [
 # the BFF answers "must be an absolute URI"). Being STRICTER here costs a client a 400 at consent
 # start; being laxer would hand the browser a target it cannot reach. Asserted in the direction that
 # matters (BFF refuses, AS accepts) so the divergence cannot silently grow into a class.
-_BFF_STRICTER_THAN_AS = ["https://client.example:99999/cb"]
+_BFF_STRICTER_THAN_AS = [
+    "https://client.example:99999/cb",
+    "https://client.example:abc/cb",
+]
 
 
 def test_the_redirect_uri_rule_agrees_with_the_AS() -> None:
@@ -572,8 +584,10 @@ def test_the_redirect_uri_rule_agrees_with_the_AS() -> None:
 def test_the_BFF_is_stricter_than_the_AS_only_where_a_parse_differs_hopelessly() -> None:
     """The named, one-directional divergence — pinned so it cannot grow into a class.
 
-    A row exists here only if no browser could navigate the URI either. If a future row needs to be
-    added, this test forces the argument to be made rather than the divergence to be absorbed.
+    A row exists here only if a browser could not navigate the URI either, and the check below
+    proves that CLAIM rather than restating it: the last assertion requires WHATWG (the parser every
+    one of those browsers runs) to refuse the uri outright. Stricter-then costs a client a 400 at
+    start; laxer would hand the browser a target it cannot parse.
     """
     from tortoise.oauth import _valid_redirect_uri
 
@@ -583,6 +597,15 @@ def test_the_BFF_is_stricter_than_the_AS_only_where_a_parse_differs_hopelessly()
         assert _valid_redirect_uri(row["uri"]), (
             f"{row['uri']!r} is no longer accepted by the AS either — remove it from "
             "_BFF_STRICTER_THAN_AS, it is no longer a divergence"
+        )
+        parsed = subprocess.run(
+            ["node", "-e", "try{new URL(process.argv[1]);console.log('PARSED')}"
+             "catch(e){console.log('REFUSED')}", row["uri"]],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert parsed.stdout.strip() == "REFUSED", (
+            f"{row['uri']!r} IS parseable by WHATWG, so a browser can navigate it — refusing it "
+            "is a real divergence, not the tolerated kind"
         )
 
 
