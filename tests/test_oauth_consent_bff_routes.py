@@ -6,7 +6,7 @@ Step 1 (the shared `jti` register) is proved in `tests/test_oauth_consent_jti_st
 file proves the OTHER end of the contract: the dashboard Pages Functions that MINT the
 assertion, and — the point of the whole bridge — that what TypeScript mints is what Python
 verifies. Two unit tests that agree with each other would not prove that; a token minted by
-`consent-flow.ts::mintConsentToken` is fed to `tortoise.consent_token.verify_consent_token`
+`consent-bridge.ts::mintConsentToken` is fed to `tortoise.consent_token.verify_consent_token`
 here, so a drift in the header/payload shape, the base64url encoding, the HMAC or the key
 handling is a red test rather than a dead production flow.
 

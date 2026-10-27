@@ -54,9 +54,6 @@ The `jti` register IS shared (§2.3, DELIVERED)
   leeway runs out, so the prune must not forget the nonce while its token still verifies —
   otherwise the replay deletes its own fence and then re-inserts, for the whole window.
 
-WHAT THIS MODULE DELIBERATELY DOES NOT DO
------------------------------------------
-
 REFUSALS (all typed, all fail-closed)
 -------------------------------------
 ``OAuthError`` so the endpoint renders one RFC 6749 §5.2 body:

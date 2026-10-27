@@ -292,14 +292,16 @@ oversight.**
 
 This document and `tests/test_oauth_consent_bridge.py` deliver tasks **1, 2, 4 and 5** of #3524: the token
 is specified rather than assumed, `authorization_endpoint` stability is verified and guarded, the mint hop
-is costed, and the sign-in fallback origin is settled with its record corrected. Task 3's *implementation*
-(the bridge + the page rewrite) is **not** delivered here, and should not be attempted as one blind pass:
+is costed, and the sign-in fallback origin is settled with its record corrected. The BRIDGE half of task 3
+is **DELIVERED** by this diff (`functions/api/consent/start.ts`, `functions/api/consent/token.ts`,
+`functions/_shared/auth/consent-bridge.ts`); the *page rewrite* (step 4) is what remains, and should not be
+attempted as one blind pass:
 
 | Remaining step | Why it is its own unit |
 |---|---|
 | 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261027120001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3`s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
-| 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED**, see the paragraph after this table | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
+| 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
 | 4. The page rewrite (delete §7's rows, keep the org picker + the #5734 refusal copy, add the mint call and the terminal-loop guard) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. `SCOPE.md` §9 class 4(i) — attested client identity | a product decision (which clients are attested, and what an unattested one may claim), filed separately |
 
@@ -316,8 +318,11 @@ bearer path untouched); step 4 is where the flow changes.
   `SUPABASE_ANON_KEY` — both are in this process's environment, and the anon key is the one the
   consent page publishes — is treated as unprovisioned, and so is a key too short to be one). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
   and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
-- single-use is **per process** until §2.3's shared `jti` store (step 1) lands. The register is the
-  seam step 1 replaces; until then this step is not fit for a multi-instance AS.
+- single-use holds ACROSS MACHINES: §2.3's shared `jti` store (step 1) is DELIVERED and installed at
+  startup from `hosted_api._lifespan` (`ControlPlaneJtiStore` + migration `20261027120001`), so the
+  `ProcessLocalJtiStore` register is the seam's fallback for a bare embed and tests, NOT the deployed
+  posture. The only residual is a typed `503 temporarily_unavailable` when the register cannot answer —
+  never a silent fall-through to per-process state, because the store is installed unconditionally.
 
 Two properties of the arm that a later step must be written against, because they are limits of the
 contract rather than of the implementation:
@@ -340,7 +345,7 @@ contract rather than of the implementation:
   refusals that can be evaluated for free (the assertion, the binding, a malformed `resource`) are
   evaluated first.
 
-Steps 3 → 4 remain, and step 4 still lands last: a page that half-reads a token and half-reads the
+Step 4 remains, and it still lands last: a page that half-reads a token and half-reads the
 old cookie is the "strictly worse than not starting" state.
 
 ## 10. Integration docs
