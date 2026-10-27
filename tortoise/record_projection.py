@@ -470,6 +470,19 @@ NARRATIVE_RECORD_TYPE = "SessionNarrated"
 #: ⛔ NOTHING EMITS IT YET, and that is the change this declaration belongs to:
 #: declaring the carrier is INERT until step 7 emits it, so the capture writer's
 #: per-turn `PointAdded` records are untouched here.
+#:
+#: ⛔ AND STEP 7 INHERITS A THIRD STORE, not just the two this type names. The
+#: per-turn `PointAdded` records it replaces are ALSO the `:GraphEvent` /
+#: claim-transition stream — `sdk._GRAPH_EVENT_TYPES`, `shared_state.events
+#: .CLAIM_EVENT_TYPES`, and `docs/event-catalog.md`'s `PointAdded` row ("one per
+#: `{session_id}_t{i}` turn Point") — which is what `poll_events` serves. A
+#: "move" that simply stops emitting them silently removes one subscriber row per
+#: turn, and NOTHING gates that: the catalog is prose and no test pins it. So
+#: step 7 must EITHER keep a store-only per-turn emission (the two-store split
+#: this same writer already performs for the stale-turn sweep: `PointRetracted`
+#: store-only + `EntityMutated` for JSONL) OR record the decision to drop the
+#: turn rows from `poll_events`. `TurnsRecorded` must NOT be added to
+#: `_GRAPH_EVENT_TYPES` to compensate — that set's shape is a recorded decision.
 TURNS_RECORD_TYPE = "TurnsRecorded"
 
 #: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a

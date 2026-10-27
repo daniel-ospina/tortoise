@@ -262,6 +262,19 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                  So the set's default polarity (a NEW type is REFUSED) stands,
 #                  and this is the one §9.1 carrier that is NOT harmless: the
 #                  two are classified separately, never by family.
+#                  ⚠️ But the OTHER half must be weighed, and it is not free:
+#                  refusing a torn tail does not warn — it makes the WHOLE
+#                  journal unrecoverable. Measured on a torn carrier tail:
+#                  `recover_from_log` returns `recovered=False, nodes=0`, against
+#                  `recovered=True, nodes=3` for the same tear on `SessionNarrated`
+#                  and on `PointAdded`. That is the SIGKILL-mid-append shape
+#                  #9555 added the narrative carrier to stop. So this is a
+#                  PLACEHOLDER decision, not a settled one: step 7 of #10017 owns
+#                  it, and it must be settled against the WRITE ORDER (record
+#                  write vs journal append) and against whether the turns survive
+#                  in the record when the append tears. Refusing is right only if
+#                  losing the journal tail is cheaper than replaying a transcript
+#                  the record already holds.
 #
 # ⛔ ``EventRecorded`` IS NOT IN THE SET, although its loss is the data-LOSS
 # direction for most records. ``_upsert_event`` →
