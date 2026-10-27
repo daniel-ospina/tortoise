@@ -52,9 +52,14 @@ export const OLD_AFTER_DAYS = 14
 // incident register at all when every row is an observation.
 
 export const ACTIVITY_HEADING = 'Recent activity'
+// Scoped to the OBSERVATIONS, deliberately. An absolute "nothing was changed,
+// disabled or locked" is a whole-org-state claim, and the same panel can carry a
+// `suspend` row on an Organization that IS suspended — telling that customer
+// nothing was locked is the one thing the appeal flow exists to contradict
+// (round-23 review finding). "by them" is what makes the clause true.
 export const ACTIVITY_LEAD =
-  'Rate signals from our abuse detectors. Nothing was changed, disabled or ' +
-  'locked — these are measurements, not actions taken on your account.'
+  'Rate signals from our abuse detectors. These are measurements, not actions ' +
+  'taken on your account — nothing was disabled, changed or locked by them.'
 
 export const ALERTS_HEADING = 'Security alerts'
 export const ALERTS_LEAD =
@@ -87,6 +92,14 @@ export const ALL_RECENT_ACKED = 'Everything shown here is acknowledged.'
 export const SCAN_SATURATED_EMPTY = ("This Organization's newest activity is "
   + 'entirely routine, and our alert window is full — logs are intact, but '
   + 'older alerts may sit outside the window we read.')
+
+//: Shown when the alert read itself FAILED. Distinct from both lines above,
+//: which are claims about a feed we successfully read: a failed read is "we could
+//: not look", and rendering nothing there is an all-clear on the one screen whose
+//: job is not to hide incidents (#10156 round-23 review finding — the panel
+//: unmounted, so an outage and a quiet org looked identical).
+export const ALERTS_UNAVAILABLE = "Could not read this Organization's alert "
+  + 'history — reload to try again. This does not mean there were no alerts.'
 
 //: Types that are an incident BY DEFINITION, used as a fallback when a row
 //: arrives with no `register` field at all — i.e. from an API deploy that predates
@@ -239,6 +252,33 @@ function splitByAge(list, now, days) {
     }
   }
   return { current, older, total: list.length, recentHidden }
+}
+
+/** Three distinct facts, parsed in ONE tested place.
+ *
+ *  `GET /v1/team/alerts` answers `{alerts, scan_saturated, unavailable}`, and the
+ *  three states are easy to collapse into two by accident — which is the whole
+ *  defect class this change is about:
+ *
+ *    * rows present            → render them, whatever else the flags say (the
+ *                                rows are evidence; a later failure cannot
+ *                                un-happen them);
+ *    * empty and `saturated`   → "the window was cut, there may be more";
+ *    * empty and `unavailable` → "we could not look" — NOT "nothing happened";
+ *    * empty and neither       → say nothing (the ordinary quiet org).
+ *
+ *  Exists because `main.jsx` is a 12k-line component with no unit coverage: a
+ *  mutant that made it discard `unavailable` survived every test in this file
+ *  (round-23 review). The parse now lives here, where it is asserted, and
+ *  `main.jsx` only assigns the result.
+ */
+export function feedStateOf(payload) {
+  const alerts = (payload && payload.alerts) || []
+  return {
+    alerts,
+    saturated: Boolean(payload && payload.scan_saturated),
+    unavailable: Boolean(payload && payload.unavailable),
+  }
 }
 
 /** True when there is nothing to render at all — the panel stays unmounted. */

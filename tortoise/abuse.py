@@ -1082,7 +1082,7 @@ class SupabaseAbuseStore:
         return {r["country"] for r in rows if r.get("country")}
 
     def alert_scan_saturated(self, org_id: str) -> bool:
-        """Was the last ``recent_alerts`` scan cut by its own budget? (#10156)
+        """Is this Organization's alert scan at its budget right now? (#10156)
 
         `truncated` rides on a ROW, so a scan that its own filters emptied has no
         row to carry it: the newest ``_ALERT_SCAN`` rows can all be non-alert (a
@@ -1091,6 +1091,18 @@ class SupabaseAbuseStore:
         nothing there is a silent "nothing happened" — the failure mode this
         whole change exists to remove (round-8 review finding) — so the route
         reports it and the panel says so.
+
+        Deliberately NOT phrased as "was the previous ``recent_alerts`` scan
+        cut": this issues its own independent query (the memory store computes
+        the count inside the same lock as its slice, so the two stores answer a
+        slightly different question), and rows can arrive between the two reads
+        (round-23 review finding — the old docstring claimed an identity the two
+        stores do not share).
+
+        FAIL-SOFT IN THE SAFE DIRECTION: a probe failure returns True
+        ("saturated / unknown"), never False. False is the positive claim "this
+        feed is complete", which is exactly the false negative the flag exists to
+        remove — and a ``debug`` log would hide it twice over.
         """
         try:
             rows = self._cp.query(
@@ -1102,8 +1114,10 @@ class SupabaseAbuseStore:
                 order="created_at.desc", limit=_ALERT_SCAN + 1,
             )
         except Exception:
-            logger.debug("alert saturation probe failed (%s)", org_id)
-            return False
+            # Unknown, and unknown must not read as "complete".
+            logger.warning("alert saturation probe failed (%s); reporting "
+                           "saturated=unknown", org_id)
+            return True
         return len(rows) > _ALERT_SCAN
 
     def recent_alerts(self, org_id: str, limit: int = 20,

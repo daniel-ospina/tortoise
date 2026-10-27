@@ -28,6 +28,7 @@ import { captureClaimForHarness, captureStatusLabelForHarness } from './captureS
 // (harnessDisclosureDom.test.jsx) can render them; main.jsx cannot be imported
 // by a test (it mounts the whole application at module scope).
 import { HarnessStatusCard } from './harnessStatusCard.jsx'
+import { feedStateOf } from './securityAlerts.js'
 import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
@@ -3172,6 +3173,11 @@ function claimIntentInFlight() {
   const [suspended, setSuspended] = React.useState(null)
   const [alerts, setAlerts] = React.useState([])
   const [alertsSaturated, setAlertsSaturated] = React.useState(false)
+  // #10156: "we could not read the alerts" is a THIRD state, not an empty feed.
+  // The panel unmounts on an empty list, so without this an outage renders as an
+  // all-clear on the one screen whose job is not to hide incidents (round-23
+  // review finding).
+  const [alertsUnavailable, setAlertsUnavailable] = React.useState(false)
   // #10156: the pending episode + the per-episode error. ONE row is disabled at
   // a time via `ackPending`, but that is a UI convention, NOT a single-flight
   // lock: clicking two rows starts two writes, and the first to finish clears
@@ -5433,15 +5439,27 @@ function claimIntentInFlight() {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
       if (res.ok) {
-        const d = await res.json()
-        setAlerts(d.alerts || [])
-        // #10156: the server says whether its scan was CUT. With no rows there is
-        // nothing to carry a per-row `truncated` marker, so an empty feed could
-        // read as "nothing ever happened" when the window was simply full of
-        // non-alert rows (round-8 review finding).
-        setAlertsSaturated(Boolean(d.scan_saturated))
+        // #10156: the three facts the feed can carry — rows, `scan_saturated`
+        // (the server's scan was CUT, so an empty feed may still hide alerts;
+        // round-8 review finding) and `unavailable` (the read itself failed, so
+        // "no alerts" would be an all-clear we cannot back; round-23 finding).
+        // Parsed by `feedStateOf`, which is where they are TESTED — this
+        // component has no unit coverage, so logic kept here is logic that can
+        // regress silently (a mutant that dropped `unavailable` survived the
+        // whole dashboard suite).
+        const feed = feedStateOf(await res.json())
+        setAlerts(feed.alerts)
+        setAlertsSaturated(feed.saturated)
+        setAlertsUnavailable(feed.unavailable)
+      } else {
+        // A non-2xx is a FAILED read, not an empty feed.
+        setAlertsUnavailable(true)
       }
-    } catch { /* best-effort — alert history never blocks the dashboard */ }
+    } catch {
+      // Best-effort — alert history never blocks the dashboard — but the panel
+      // must be able to say it could not look.
+      setAlertsUnavailable(true)
+    }
   }
 
   async function acknowledgeAlert(alert) {
@@ -11155,7 +11173,7 @@ function claimIntentInFlight() {
           </div>
         )}
 
-        {tab === 'overview' && (alerts.length > 0 || alertsSaturated) && (
+        {tab === 'overview' && (alerts.length > 0 || alertsSaturated || alertsUnavailable) && (
           // #10156: TWO REGISTERS, never one list. The old block rendered every
           // entry under "Security alerts / Suspicious activity detected on this
           // Organization. Revoke any key you don't recognize." — including
@@ -11166,6 +11184,7 @@ function claimIntentInFlight() {
           <SecurityAlertsPanel
             alerts={alerts}
             scanSaturated={alertsSaturated}
+            unavailable={alertsUnavailable}
             onAcknowledge={acknowledgeAlert}
             ackPending={ackPending}
             ackError={ackError}

@@ -11081,19 +11081,37 @@ async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # no
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
     saturated = False
+    unavailable = False
     try:
         from tortoise.supabase_control import get_abuse_store
         store = get_abuse_store()
         alerts = store.recent_alerts(org_id, limit=20)
-        # #10156 round-8 review finding: `truncated` rides on a row, so an EMPTY
-        # feed that is empty only because the scan was cut (the newest rows were
-        # all non-alert) would otherwise read as "nothing ever happened" — the
-        # exact false negative this change exists to remove. Reported as a
-        # separate flag so the panel can say "there may be more" without a row.
-        saturated = bool(store.alert_scan_saturated(org_id))
     except Exception:
-        alerts = []  # best-effort — an alert-history failure is not a 500
-    return {"org_id": org_id, "alerts": alerts, "scan_saturated": saturated}
+        # Best-effort — an alert-history failure is not a 500. But it is ALSO not
+        # "nothing happened": the panel unmounts on an empty feed, so a failed
+        # read would render as an all-clear on the one screen whose job is not to
+        # hide incidents (round-23 review finding). `unavailable` says "we could
+        # not look", which is a different fact from "we looked and found none".
+        alerts = []
+        unavailable = True
+    else:
+        # The saturation probe gets its OWN handler: it is a SECONDARY read, and
+        # while it shared the `try` above, a probe failure (a store that does not
+        # implement it, a transient error) discarded an already-successful alert
+        # read and unmounted a live `suspend` row (round-23 review finding).
+        # Fail-soft into "saturated", which is the conservative direction: the
+        # panel then says the window may be full rather than claiming it is not.
+        try:
+            saturated = bool(store.alert_scan_saturated(org_id))
+        except Exception:
+            saturated = True
+    # #10156 round-8 review finding: `truncated` rides on a row, so an EMPTY feed
+    # that is empty only because the scan was cut (the newest rows were all
+    # non-alert) would otherwise read as "nothing ever happened" — the exact
+    # false negative this change exists to remove. Reported as a separate flag so
+    # the panel can say "there may be more" without a row.
+    return {"org_id": org_id, "alerts": alerts, "scan_saturated": saturated,
+            "unavailable": unavailable}
 
 
 @app.post("/v1/team/alerts/ack")

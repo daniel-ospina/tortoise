@@ -716,6 +716,77 @@ class TestAlertRegistersAndAcks:
         finally:
             env["app"].dependency_overrides.clear()
 
+    def test_a_FAILED_saturation_probe_cannot_take_the_alert_feed_with_it(
+            self, env, monkeypatch):
+        """P1 (round-23 review). The probe shared the route's `try` with the read
+        that produces `alerts`, so a probe failure (a store without the method, a
+        transient error) discarded an already-successful read and returned an
+        empty feed — the panel unmounts on empty, so a live `suspend` row
+        disappeared from the dashboard. A SECONDARY read must never destroy the
+        PRIMARY result."""
+        self._owner(env)
+        self._seed_velocity(env["fake"])
+        from tortoise import supabase_control
+
+        class _ProbeBlind:
+            """A real store that fails ONLY its own saturation probe."""
+
+            def __init__(self, fake):
+                from tortoise.abuse import SupabaseAbuseStore
+                self._store = SupabaseAbuseStore(fake)
+
+            def __getattr__(self, name):
+                return getattr(self._store, name)
+
+            def alert_scan_saturated(self, org_id):
+                raise RuntimeError("probe failed")
+
+        monkeypatch.setattr(supabase_control, "get_abuse_store",
+                            lambda *a, **k: _ProbeBlind(env["fake"]))
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert [a["type"] for a in body["alerts"]] == ["read_velocity"], (
+                "a failed saturation probe emptied the alert feed — a secondary "
+                "read took the primary result with it")
+            assert body["scan_saturated"] is True, (
+                "an unreadable probe must fail toward 'the window may be cut', "
+                "never toward 'this feed is complete'")
+            assert body["unavailable"] is False
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_an_UNREADABLE_feed_is_reported_as_unavailable_not_as_empty(
+            self, env, monkeypatch):
+        """P2 (round-23 review). `alerts: []` is the all-clear: the panel unmounts
+        and the customer sees no security section at all, which is
+        indistinguishable from "we looked and found nothing" — on the one screen
+        whose job is not to hide incidents. "We could not look" is a different
+        fact and travels as its own flag."""
+        self._owner(env)
+        from tortoise import supabase_control
+
+        class _Down:
+            def recent_alerts(self, *a, **k):
+                raise RuntimeError("control plane down")
+
+        monkeypatch.setattr(supabase_control, "get_abuse_store",
+                            lambda *a, **k: _Down())
+        try:
+            with verdict_client(env["app"]) as tc:
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
+            assert r.status_code == 200, (
+                "an alert-history failure must not 500 the dashboard")
+            body = r.json()
+            assert body["alerts"] == []
+            assert body["unavailable"] is True, (
+                "a failed read reported itself as an empty feed — the dashboard "
+                "renders that as an all-clear")
+        finally:
+            env["app"].dependency_overrides.clear()
+
     def test_the_acknowledgement_persists_and_the_row_stops_being_current(self, env):
         self._owner(env)
         store = self._seed_velocity(env["fake"])

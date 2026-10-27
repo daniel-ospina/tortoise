@@ -17,13 +17,19 @@
 //
 // Copy for the register headings lives in `securityAlerts.js` (with the
 // decisions and their tests). The per-row sentence is the SERVER's
-// (`/v1/team/alerts` → `message`), so the fact — "nothing was changed" — has
-// one author and cannot drift between the API and the panel.
+// (`/v1/team/alerts` → `message`), and every customer-visible statement that
+// nothing was changed BY THIS ALERT is server-authored. The register leads carry
+// their own, SCOPED version ("nothing was disabled, changed or locked by them") —
+// a lead cannot quote the server's fact, because it describes a whole register
+// rather than one row, and an unscoped copy of that fact is false the moment a
+// `suspend` row renders beside it (round-23 review finding: this comment claimed
+// the fact had one author while `ACTIVITY_LEAD` authored a second, absolute one).
 import React from 'react'
 
 import {
   ACKED_CHIP,
   ALL_RECENT_ACKED,
+  ALERTS_UNAVAILABLE,
   SCAN_SATURATED_EMPTY,
   isEmptyFeed,
   ACK_BUTTON,
@@ -206,11 +212,23 @@ export function SecurityAlertsPanel({
   ackError = null,
   canAcknowledge = false,
   scanSaturated = false,
+  unavailable = false,
 }) {
   // An EMPTY feed whose scan was cut is not "nothing ever happened": the window
   // was full of rows that can never render, and alerts may sit just below it.
   // There is no row to carry the caveat, so it is said once, plainly (#10156
   // round-8 review finding — the silent-empty path).
+  if (unavailable && (!alerts || alerts.length === 0)) {
+    // The read FAILED. Saying anything about the Organization's state here would
+    // be inventing it — including "nothing happened", which is what unmounting
+    // amounts to (#10156 round-23 review finding).
+    return (
+      <section className="overview" aria-label={ALERTS_HEADING}>
+        <h2>{ALERTS_HEADING}</h2>
+        <p className="dim small">{ALERTS_UNAVAILABLE}</p>
+      </section>
+    )
+  }
   if (scanSaturated && (!alerts || alerts.length === 0)) {
     return (
       <section className="overview" aria-label={ALERTS_HEADING}>

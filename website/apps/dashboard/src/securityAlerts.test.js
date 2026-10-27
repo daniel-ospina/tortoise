@@ -20,8 +20,11 @@ import { fileURLToPath } from 'node:url'
 import {
   ACTIVITY_HEADING,
   ACTIVITY_LEAD,
+  ALERTS_UNAVAILABLE,
   ALERTS_HEADING,
   ALERTS_LEAD,
+  SCAN_SATURATED_EMPTY,
+  feedStateOf,
   OLD_AFTER_DAYS,
   REGISTER_ACTIVITY,
   REGISTER_ALERT,
@@ -98,10 +101,52 @@ test('#10156: the activity lead carries no imperative and no incident claim', ()
   ]) {
     assert.doesNotMatch(ACTIVITY_LEAD, forbidden)
   }
-  assert.match(ACTIVITY_LEAD, /nothing was changed/i,
-    'the activity register must state that nothing was changed')
+  assert.match(ACTIVITY_LEAD, /nothing was [^.]*by them\./i,
+    'the activity register must state that nothing was changed — SCOPED to the '
+    + 'observations. The panel renders both registers on one screen, so an '
+    + 'absolute "nothing was changed, disabled or locked" sits beside a `suspend` '
+    + 'row on an Organization that IS suspended: the whole-org-state claim the '
+    + 'copy rule forbids (round-23 review finding).')
+  assert.doesNotMatch(ACTIVITY_LEAD, /nothing was (?:changed, disabled|disabled, changed) or locked\./i,
+    'an UNSCOPED no-change clause is a whole-org-state claim')
   assert.match(ACTIVITY_HEADING, /activity/i)
   assert.doesNotMatch(ACTIVITY_HEADING, /alert/i)
+})
+
+test('#10156: a FAILED read is not an empty feed', () => {
+  // Round-23 review finding: the panel unmounted on an empty list, so an alert
+  // read that FAILED (a 5xx, a network error, an unreadable store) rendered as
+  // an all-clear — on the one screen whose job is not to hide incidents. The
+  // three states must be distinguishable by their copy:
+  assert.match(ALERTS_UNAVAILABLE, /could not read/i)
+  assert.match(ALERTS_UNAVAILABLE, /does not mean there were no alerts/i,
+    'it must refuse the all-clear reading explicitly')
+  assert.notEqual(ALERTS_UNAVAILABLE, SCAN_SATURATED_EMPTY)
+  // …and it must not accidentally claim either of the two things it cannot know.
+  assert.doesNotMatch(ALERTS_UNAVAILABLE, /nothing (?:happened|was changed)/i)
+  assert.doesNotMatch(ALERTS_UNAVAILABLE, /routine/i)
+})
+
+test('#10156: feedStateOf keeps the three feed states distinct', () => {
+  // A mutant that made `main.jsx` discard `unavailable` survived the whole
+  // dashboard suite (round-23 review), because that component has no unit
+  // coverage — so the parse lives here and is asserted here.
+  assert.deepEqual(feedStateOf({ alerts: [], scan_saturated: true }),
+    { alerts: [], saturated: true, unavailable: false })
+  assert.deepEqual(feedStateOf({ alerts: [], unavailable: true }),
+    { alerts: [], saturated: false, unavailable: true })
+  // An ordinary empty feed is NEITHER — it must stay silent.
+  assert.deepEqual(feedStateOf({ alerts: [] }),
+    { alerts: [], saturated: false, unavailable: false })
+  // Rows win: a flag cannot un-happen an alert that was read.
+  const row = { type: 'suspend', register: REGISTER_ALERT }
+  const both = feedStateOf({ alerts: [row], unavailable: true })
+  assert.deepEqual(both.alerts, [row])
+  // Malformed/absent payloads must not throw or invent a state.
+  assert.deepEqual(feedStateOf(null),
+    { alerts: [], saturated: false, unavailable: false })
+  assert.deepEqual(feedStateOf({}),
+    { alerts: [], saturated: false, unavailable: false })
 })
 
 test('#10156: the two registers do not share copy', () => {

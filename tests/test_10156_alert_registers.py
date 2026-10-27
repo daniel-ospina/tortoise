@@ -371,6 +371,21 @@ class TestEpisodeGrouping:
             "an empty feed whose window was full must not read as 'nothing "
             "happened'")
 
+    def test_an_unreadable_saturation_probe_never_claims_the_feed_is_complete(self):
+        """P2 (round-23 review). The probe's job is to stop an empty feed reading as
+        "nothing ever happened"; returning False on its OWN failure asserts the
+        opposite fact ("this feed is complete") on the strength of a read that
+        never happened — the exact false negative the flag exists to remove, and a
+        `debug` log hid it twice over. Unknown must fail toward "may be cut"."""
+        class _Broken:
+            def query(self, table, **kw):
+                raise RuntimeError("control plane down")
+
+        store = SupabaseAbuseStore(_Broken())
+        assert store.alert_scan_saturated(ORG) is True, (
+            "a failed probe reported the feed as COMPLETE — unknown must never "
+            "read as 'nothing is missing'")
+
     def test_the_acks_this_feature_writes_do_not_consume_the_scan_budget(self):
         """A dismissal can never render, so it must not push real alerts out of
         the window — and before this fix the type this PR writes was NOT excluded

@@ -53,6 +53,7 @@ import {
   ACKED_CHIP,
   ALL_RECENT_ACKED,
   SCAN_SATURATED_EMPTY,
+  ALERTS_UNAVAILABLE,
 } from './securityAlerts.js'
 
 afterEach(cleanup)
@@ -116,7 +117,10 @@ test('#10156: a velocity row renders under Recent activity, never under Security
 
 test('#10156: the activity register says nothing was changed, and the panel never prints the blanket imperative', () => {
   const { container } = renderPanel({ alerts: [velocity] })
-  assert.match(text(container), /nothing was changed/i)
+  // SCOPED (round-23 review finding): "nothing was changed, disabled or locked"
+  // absolute is a whole-org-state claim, and the panel can render this lead right
+  // beside a `suspend` row.
+  assert.match(text(container), /nothing was [^.]*by them\./i)
   assert.doesNotMatch(text(container), /revoke any key/i)
   assert.doesNotMatch(text(container), /suspicious activity detected/i)
 })
@@ -276,6 +280,32 @@ test('#10156: an EMPTY feed whose scan was cut says so instead of rendering noth
     'it must not claim something happened either')
   // …and the ordinary empty feed still renders nothing at all.
   assert.equal(text(renderPanel({ alerts: [] }).container), '')
+})
+
+test('#10156: a FAILED alert read renders an unreadable line, not an all-clear', () => {
+  // Round-23 review finding: on a failed read the panel unmounted, so an outage
+  // and a quiet Organization looked identical — the same false negative the
+  // saturation flag was added for, one state over.
+  const { container } = renderPanel({ alerts: [], unavailable: true })
+  assert.ok(text(container).includes(ALERTS_UNAVAILABLE), text(container))
+  // It must not borrow either claim it cannot back.
+  assert.ok(!text(container).includes(SCAN_SATURATED_EMPTY),
+    'an unreadable feed is not a full window')
+  assert.ok(!text(container).includes(ALERTS_LEAD),
+    'and it must not claim something happened')
+  assert.ok(!text(container).includes(ACTIVITY_LEAD),
+    'nor that nothing happened')
+  // An ordinary empty feed still renders nothing (the three states stay distinct).
+  assert.equal(text(renderPanel({ alerts: [] }).container), '')
+})
+
+test('#10156: a live row survives an unreadable follow-up, and vice versa', () => {
+  // `unavailable` only governs the EMPTY case: rows that did render must never be
+  // replaced by a "could not read" line, because they are evidence.
+  const { container } = renderPanel({ alerts: [velocity], unavailable: true })
+  const t = text(container)
+  assert.ok(!t.includes(ALERTS_UNAVAILABLE), t)
+  assert.ok(t.includes(ACTIVITY_HEADING), t)
 })
 
 test('#10156: a register that gains its FIRST row renders it', () => {
