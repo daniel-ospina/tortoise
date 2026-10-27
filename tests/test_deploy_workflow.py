@@ -2789,18 +2789,25 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # The LEAD-IN is pinned with it: "read BOTH" over two causes is what makes
     # the silent second reading executable — "read ONE" restores the fail-open
     # the bullet exists to remove.
+    # ⛔ These two pins anchor the RULING and stop short of the rest of the
+    # sentence (#10083 review cycle 5, P3, measured): the parenthetical is an
+    # ENUMERATION (`absent, inactive, or the `default` sentinel`) and the tail of
+    # the lead-in is prose, neither of which carries the verdict — so a strictly
+    # IMPROVING edit, e.g. adding `tombstoned` (the word the code's own docstring
+    # uses, `hosted_api._bind_record_tenant`), reddened a verdict pin that was
+    # still intact and told the next lane to restore a verdict it never removed.
+    # A pin must red on the class its message names.
     assert re.search(
         r"TWO readings, because it has two causes; read BOTH before you call the "
-        r"growth other traffic",
+        r"growth",
         flat,
     ), (
         "the no-nameable-row lead-in no longer says to read BOTH causes, so the "
         "SILENT reading can be skipped and an empty grep read as 'no fault'"
     )
     assert re.search(
-        r"\*\*No nameable default row\*\* \(absent, inactive, or the `default` "
-        r"sentinel\) is also a refusal of a tenant the record CAN key on, so it "
-        r"is a fail-and-fix as well",
+        r"\*\*No nameable default row\*\* \(absent[^)]*\) is also a refusal of a "
+        r"tenant the record CAN key on, so it is a fail-and-fix as well",
         flat,
     ), (
         "the no-nameable-row arm's VERDICT is unpinned — it must be a refusal of "
