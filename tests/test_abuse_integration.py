@@ -837,14 +837,27 @@ class TestAlertRegistersAndAcks:
         import re
 
         from tortoise.abuse import ALERT_TYPES, _alert_dict
-        # Claims about what WE / an operator did, are doing, or will do. A
-        # second-person IMPERATIVE ("review your API keys") is the customer's
-        # own action and is exactly what this copy is FOR, so it must not match —
-        # the first version of this regex did, and that is why it is spelled out.
+        # TWO mechanisms, because one cannot cover both shapes:
+        #
+        # (a) A HUMAN SUBJECT BOUND TO AN AUXILIARY — any actor, then any
+        #     auxiliary within a few words. This is the property, not a
+        #     phrase list: "an operator has been asked", "an operator is
+        #     looking into it", "an operator will review this", "our on-call
+        #     engineer was paged" all match. The round-10 version enumerated
+        #     phrasings and let every one of those through while claiming the
+        #     property in this docstring (round-11 review finding).
+        # (b) A SUBJECTLESS FOLLOW-UP PROMISE, where the actor is elided
+        #     ("…, and will be in touch"), which (a) cannot see.
+        actor = (r"(an?\s+operator|operators?|our\s+team|a\s+human|we\b|"
+                 r"our\s+[\w-]+\s+(?:engineer|team|staff|sre|developer)|"
+                 r"support|on-?call)")
+        auxiliary = (r"(has|have|had|is|are|was|were|will|would|can|"
+                     r"should|must|'ll|been|being)")
         human = re.compile(
-            r"(our team|an operator has|has been asked|we are|we will|we'll|"
-            r"under review|(is|are) reviewing|being reviewed|"
-            r"will be in touch|investigat(e|ing))", re.I)
+            rf"\b{actor}\b(?:\s+\S+){{0,3}}?\s+{auxiliary}\b", re.I)
+        promise = re.compile(
+            r"(will be in touch|reach(?:ing)? out|get back to you|"
+            r"follow(?:ing)? up with you)", re.I)
         for etype in ALERT_TYPES:
             row = _alert_dict({"event_type": etype,
                                "details": {"scope": "key", "id": "k-1",
@@ -853,13 +866,36 @@ class TestAlertRegistersAndAcks:
             for field in ("label", "message"):
                 text = str(row.get(field) or "")
                 assert not human.search(text), (
-                    f"{etype}.{field} claims what a human is doing: {text!r} — "
+                    f"{etype}.{field} commits a human to an act: {text!r} — "
                     "the operator signal is best-effort, so we cannot know")
-        # …and the review row still says the two things it CAN know.
+                assert not promise.search(text), (
+                    f"{etype}.{field} promises a follow-up: {text!r}")
+        # The two documented exclusions hold BY CONSTRUCTION, which is why they
+        # need no exception list: `suspend`'s "by an operator" binds no
+        # auxiliary (the row's EXISTENCE is the proof — `suspend_org()` is the
+        # only writer), and an imperative addresses the customer, not us.
+        suspended = _alert_dict({"event_type": "suspend", "details": {},
+                                 "created_at": "2026-09-25T17:19:05+00:00"})
+        assert "by an operator" in suspended["message"], suspended["message"]
+        assert not human.search(suspended["message"]), suspended["message"]
+        velocity = _alert_dict({"event_type": "read_velocity",
+                                "details": {"scope": "key"},
+                                "created_at": "2026-09-25T17:19:05+00:00"})
+        assert "review your API keys" in velocity["message"], velocity["message"]
+        assert not human.search(velocity["message"]), velocity["message"]
+        # …and the review row still says what it CAN know: what this alert did.
         msg = _alert_dict({"event_type": "review_needed", "details": {},
                            "created_at": "2026-09-25T17:19:05+00:00"})["message"]
-        assert "Nothing has been disabled" in msg, msg
+        assert "it did not disable anything" in msg, msg
         assert "support@premiselabs.co" in msg, msg
+        # The WHOLE-STATE claim is gone from every string: the same panel can
+        # carry a suspension row, so "nothing has been disabled" contradicts it.
+        for etype in ALERT_TYPES:
+            m = str(_alert_dict({"event_type": etype, "details": {},
+                                 "created_at": "2026-09-25T17:19:05+00:00"}
+                                ).get("message") or "")
+            assert "nothing has been disabled" not in m.lower(), (etype, m)
+            assert "nothing was changed" not in m.lower(), (etype, m)
 
     def test_only_owner_or_admin_may_acknowledge(self, env):
         """An ack hides a security row from the whole org — that is a

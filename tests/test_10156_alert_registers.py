@@ -896,7 +896,11 @@ class TestVelocityCopy:
     def test_the_message_states_the_fact_and_the_consequence(self):
         message = _velocity_message()
         assert "informational" in message.lower(), message
-        assert "nothing was changed" in message.lower(), message
+        # Round 11 (review finding): the reassurance is scoped to THE ALERT, not
+        # to the org's whole state — the same panel can carry a suspension row,
+        # so "nothing was changed" was a claim this row cannot make.
+        assert "it did not change anything" in message.lower(), message
+        assert "nothing was changed" not in message.lower(), message
         assert "read volume" in message.lower(), message
 
     def test_the_message_names_NO_identifier_the_customer_cannot_find(self):
@@ -927,7 +931,7 @@ class TestVelocityCopy:
             "details": {"scope": "team", "id": ORG},
         })["message"]
         assert not re.search(r"revoke", message, re.IGNORECASE), message
-        assert "nothing was changed" in message.lower(), message
+        assert "it did not change anything" in message.lower(), message
 
     def test_the_label_is_not_an_incident_word(self):
         label = abuse._alert_dict({

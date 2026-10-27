@@ -1267,13 +1267,14 @@ def _read_velocity_message(details: dict) -> str:
     scope = details.get("scope")
     if scope == "key":
         return ("Read volume on one of this Organization's API keys crossed "
-                "our unusual-activity threshold. This is informational; "
-                "nothing was changed. If you don't recognise this activity, "
+                "our unusual-activity threshold. This is informational; it "
+                "did not change anything. If you don't recognise this activity, "
                 "review your API keys in Keys — an unrecognised key should be "
                 "revoked there.")
     return ("Total read volume for this Organization crossed our "
-            "unusual-activity threshold. This is informational; nothing was "
-            "changed — a retrieval-heavy agent routinely reads at this rate.")
+            "unusual-activity threshold. This is informational; it did not "
+            "change anything — a retrieval-heavy agent routinely reads at this "
+            "rate.")
 
 
 def _alert_dict(row: dict) -> dict:
@@ -1336,9 +1337,9 @@ def _alert_dict(row: dict) -> dict:
         # rule threshold was crossed), what was NOT changed (nothing is
         # disabled), and how to reach us. A human's involvement is not one of
         # the facts this row can know.
-        EVENT_REVIEW: ("Unusually high activity on this team. Nothing has been "
-                       "disabled. If you need a higher limit, contact "
-                       "support@premiselabs.co."),
+        EVENT_REVIEW: ("Unusually high activity on this team. This is "
+                       "informational; it did not disable anything. If you need "
+                       "a higher limit, contact support@premiselabs.co."),
         EVENT_SUSPEND: "Organization suspended by an operator",
         # Round 6 (reviewer C): `recovery_velocity` is in ALERT_TYPES and is
         # really returned by `recent_alerts`, so without a message here the
