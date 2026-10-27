@@ -277,7 +277,9 @@ def bm25_rank(
     dict order), and it must not fall through to OLDEST-first either (#10121).
 
     ``recency`` is supplied by the caller because the arm cannot derive it from
-    text: ``run_bm25_query`` reads ``coalesce(n.updatedAt, n.createdAt, '')``
+    text: ``run_bm25_query`` projects the shared
+    ``search_engine.recency_key_expr`` (the CASE — not a bare ``coalesce``,
+    which would let an empty ``updatedAt`` suppress a valid ``createdAt``)
     alongside each document and hands it over. A doc missing from the map sorts
     as ``''`` — OLDEST — which is exactly how
     :func:`tortoise.search_engine.recency_tie_clause` treats an undated row.
@@ -288,11 +290,16 @@ def bm25_rank(
     ``run_bm25_query(limit=5)``. Sorting the corpus window newest-first and then
     ranking it oldest-first is how that survived the first pass at this fix.
     """
+    from .search_engine import recency_tie_key
+
     scores = bm25_scores(query, docs, k1=k1, b=b, keep_numeric=keep_numeric)
     timestamp = recency or {}
+    # The secondary keys come from the ONE Python-side twin of the cypher
+    # clause (#10121 review): a hand-written tuple here was the third
+    # implementation of the same rule.
     ranked = sorted(
         scores.items(),
-        key=lambda kv: (kv[1], timestamp.get(kv[0], ""), kv[0]),
+        key=lambda kv: (kv[1], *recency_tie_key(timestamp.get(kv[0]), kv[0])),
         reverse=True,
     )
     if limit is not None:

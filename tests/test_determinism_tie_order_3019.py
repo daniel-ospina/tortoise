@@ -382,16 +382,101 @@ def test_every_leg_query_carries_a_secondary_sort_key():
             if isinstance(child, ast.Constant) and isinstance(child.value, str))
 
     # These legs build the cypher into a local first (`cypher = (...)` then
-    # `graph.query(cypher, ...)`), so a Name argument must be resolved to its
-    # assignment — otherwise the census sees nothing and passes vacuously.
-    assigned: dict[str, ast.expr] = {}
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)):
-            assigned.setdefault(node.targets[0].id, node.value)
+    # `graph.query(cypher, ...)`), so a Name argument must be resolved to ITS
+    # OWN assignment. The resolution is PER FUNCTION (#10121 review): a single
+    # module-wide map keyed by variable name collapsed all nine `cypher` locals
+    # onto whichever assignment traversal saw first, so a new leg was validated
+    # against another leg's clause and the census stayed green. A name that
+    # cannot be resolved in its own scope is an OFFENDER, not a skip — failing
+    # closed is the only useful direction here.
+    funcs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+    def _scope_of(line: int) -> ast.AST:
+        containing = [f for f in funcs if f.lineno <= line <= (f.end_lineno or f.lineno)]
+        return min(containing, key=lambda f: (f.end_lineno or 0) - f.lineno) \
+            if containing else tree
+
+    def _assignments(scope: ast.AST) -> list[tuple[int, str, ast.expr]]:
+        """(lineno, name, value) for each single-Name assignment IN this scope.
+
+        Nested function bodies are excluded: their locals are not visible here,
+        and walking them is what collapsed the census onto another leg's clause.
+        """
+        out: list[tuple[int, str, ast.expr]] = []
+        own = list(scope.body) if hasattr(scope, "body") else []
+        seen_ids: set[int] = set()
+        while own:
+            node = own.pop()
+            if id(node) in seen_ids:
+                continue
+            seen_ids.add(id(node))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.Lambda)):
+                continue  # a nested scope owns its own names
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)):
+                out.append((node.lineno, node.targets[0].id, node.value))
+            own.extend(ast.iter_child_nodes(node))
+        return out
+
+    def _for_target_iterable(scope: ast.AST, name: str, line: int) -> str:
+        """The callable a ``for <name> in <callable>(...)`` loop draws from."""
+        for node in ast.walk(scope):
+            if not (isinstance(node, ast.For)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == name
+                    and node.lineno <= line
+                    and isinstance(node.iter, ast.Call)):
+                continue
+            func = node.iter.func
+            if isinstance(func, ast.Name):
+                return func.id
+            if isinstance(func, ast.Attribute):
+                return func.attr
+        return "<unresolved>"
+
+    def _resolve(name: str, scope: ast.AST, line: int) -> ast.expr | None:
+        """The assignment that DOMINATES the call: latest one at or before it."""
+        candidates = [
+            (assign_line, value) for assign_line, assign_name, value
+            in _assignments(scope)
+            if assign_name == name and assign_line <= line
+        ]
+        if candidates:
+            return max(candidates, key=lambda pair: pair[0])[1]
+        if scope is tree:      # module-level site: only module-level names apply
+            return None
+        # A function-level site may use a MODULE constant — but not another
+        # function's local and not a name it never assigns (a parameter, a
+        # for-target, an AnnAssign): those stay UNRESOLVABLE, i.e. fail closed.
+        module_level = [
+            (assign_line, value) for assign_line, assign_name, value
+            in _assignments(tree) if assign_name == name
+        ]
+        return max(module_level, key=lambda pair: pair[0])[1] if module_level else None
+
+    # Names whose cypher genuinely CANNOT be resolved statically, each with the
+    # reason it is not an ordering leg. Deliberately a dict, not a silent skip:
+    # adding an entry is a visible act in review, and the size assertion below
+    # keeps the hole from growing unnoticed.
+    DYNAMIC_ALLOWED = {
+        # (enclosing function, the ITERABLE the name comes from) — the cypher
+        # here is a FOR-TARGET over ``epistemic_label_queries(template)``, whose
+        # template carries no ORDER BY (an id-anchored read). Keyed by the
+        # SOURCE, not by name or line: a new ``cypher`` loop in another leg must
+        # not inherit the exemption, and a line shift must not break it.
+        ("get_relationships", "epistemic_label_queries"):
+            "for cypher in epistemic_label_queries(template) — no ORDER BY",
+    }
 
     checked = 0
     wandering: list[str] = []
+    unresolvable: list[str] = []
+    duplicated: list[str] = []
+    resolved_ids: set[int] = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
@@ -400,7 +485,21 @@ def test_every_leg_query_carries_a_secondary_sort_key():
             continue
         cypher = node.args[0]
         if isinstance(cypher, ast.Name):
-            cypher = assigned.get(cypher.id, cypher)
+            scope = _scope_of(node.lineno)
+            resolved = _resolve(cypher.id, scope, node.lineno)
+            if resolved is None:
+                iterable = _for_target_iterable(scope, cypher.id, node.lineno)
+                site = (getattr(scope, "name", "<module>"), iterable)
+                if site not in DYNAMIC_ALLOWED:
+                    unresolvable.append(
+                        f"{cypher.id} in {site[0]} from {iterable}")
+                continue
+            cypher = resolved
+            if id(resolved) in resolved_ids:
+                # Two legs must not be judged by the SAME clause — that is the
+                # collapse this census exists to avoid.
+                duplicated.append(getattr(_scope_of(node.lineno), "name", "?"))
+            resolved_ids.add(id(resolved))
         text = _literal_text(cypher)
         if "ORDER BY" not in text:
             continue
@@ -411,6 +510,15 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     assert checked >= 6, (
         "FIXTURE NOT REACHED: the query-site census found fewer ordering sites "
         f"than the six legs define ({checked})")
+    assert not duplicated, (
+        "two legs resolved to the SAME cypher assignment, so one of them was "
+        f"never judged (#10121 review): {duplicated}")
+    assert len(DYNAMIC_ALLOWED) == 1, (
+        "the unresolvable-name allow-list grew — every entry is a leg the "
+        f"census cannot see: {DYNAMIC_ALLOWED}")
+    assert not unresolvable, (
+        "the census could not resolve these cypher variables in their own "
+        f"function scope, so it cannot judge them: {unresolvable}")
     assert not wandering, (
         "an ORDER BY reached the graph without the shared recency tie. This is "
         "the shape the f-string scan cannot see (a plain string, a "
