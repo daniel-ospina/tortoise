@@ -376,9 +376,10 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # (#10170: `"test_finding_provenance.py": []` lived here. An EMPTY shape list
     # in this table is not inert in the strict direction — it says "this file may
     # have NO site", so any new site there reds. That negative is worth keeping,
-    # so it moved to `_MUST_HAVE_NO_SITES` below and is asserted to hold rather
-    # than left as a bare `[]` that reads as "declared" to anything checking only
-    # for the key's presence.)
+    # so it moved to `_MUST_HAVE_NO_SITES` below, where
+    # `test_no_declared_route_or_pin_is_inert` asserts it holds (and that the
+    # module exists), rather than left as a bare `[]` that reads as "declared" to
+    # anything checking only for the key's presence.)
     # #1423: the same module live-FalkorDB availability probe shape as #3301
     # above — `_probe(candidates)` constructs, issues `RETURN 1`, and closes,
     # over candidate URIs (the env URI plus _live_utils docker/legacy
@@ -530,35 +531,35 @@ def _from_uri_sites(root=None):
             yield f.name, line_no, block
 
 
-def test_from_uri_sites_resolve_test_prefixed():
-    """Cycle-5 P1-6 census: every no-graph_name from_uri( call in a migrated
-    file either passes graph_name=, carries a literal test-prefixed URI path,
-    or is declared in _ROUTED_FROM_URI_SITES. A new no-graph-name site that
-    could bulk-DETACH the shared env-URI graph reds (the cross-file DETACH
-    clobber regression: test_search_engine's bulk DETACH destroyed
-    test_projection's live writes pre-fix)."""
+def _from_uri_violations(root=None):
+    """Un-declared, un-named `from_uri(` sites — the census's VERDICT, extracted so
+    a fixture can make it fire. Inline in the test it only ran over the real tests
+    root, which contains no violation, so deleting the append (or `continue`-ing
+    unconditionally) kept every test green (#10170 review round 4).
+    """
     import urllib.parse
     violations = []
-    for fname, lineno, block in _from_uri_sites():
+    for fname, lineno, block in _from_uri_sites(root=root):
         if "graph_name=" in block:
             continue  # explicit per-test graph
-        # literal first argument → parse the URI path
         m = re.match(r"\w+\.from_uri\(\s*\"([^\"]+)\"", block)
         if m:
             path = urllib.parse.urlparse(m.group(1)).path.lstrip("/")
-            # ⚠️ DIVERGENCE (#7795 review P2): deliberately NARROWER than
-            # tests/_embedded.py's `_SWEEP_OWNED_PREFIXES` (which also owns
-            # `team_`/`org_`). That set's input is the ownership JOURNAL; this
-            # gate accepts a literal URI path as a stand-in for "an isolated
-            # test graph", and a product-namespace path is exactly the
-            # shared/dev graph this census exists to keep tests off. Do not
-            # dedupe the two sets.
             if path.startswith(("test_", "tortoise_test")):
                 continue
         declared = _ROUTED_FROM_URI_SITES.get(fname, [])
         if any(re.search(p, block) for p in declared):
             continue
         violations.append(f"{fname}:{lineno}: {block[:110]}")
+    return violations
+
+
+def test_from_uri_sites_resolve_test_prefixed():
+    """Cycle-5 P1-6: an un-declared no-graph_name site that could bulk-DETACH the
+    shared env-URI graph reds (the cross-file DETACH clobber regression:
+    test_search_engine's bulk DETACH destroyed test_projection's live writes).
+    The verdict itself lives in `_from_uri_violations`."""
+    violations = _from_uri_violations()
     assert not violations, (
         "un-declared no-graph_name from_uri site(s) — pass an explicit "
         "graph_name=test_<file>_<uuid> or declare in _ROUTED_FROM_URI_SITES:\n"
@@ -656,26 +657,36 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
 
 
 def _enclosing_block(src: str, pos: int) -> str:
-    """The nearest enclosing def block containing `pos` (review P1: the
-    per-site raw-client scan needs the site's block, not the module)."""
-    head = src[:pos]
-    last_def = max(head.rfind("\ndef "), head.rfind("\n    def "))
-    if last_def < 0 and src.startswith("def "):
-        # A `def` at offset 0 has no PRECEDING newline, so both searches miss it.
-        start = 0
-    elif last_def < 0:
-        # Module-level site: the block is the text AFTER it, so a following bulk
-        # DETACH is visible. Returning `head` (the text before) could never
-        # contain it and every import-time wipe was silently skipped.
-        start = pos
-    else:
-        start = last_def + 1
-    tail = src[start:]
-    # Bound at the next column-0 statement, for EVERY branch: a block that runs to
-    # EOF makes a later journaled site launder an earlier unjournaled one and
-    # blames a later DETACH on an earlier construction (#10170 review round 3).
-    end = re.search(r"\n(?=\S)", tail)
-    return tail[:end.start()] if end else tail
+    """The def body (or module-level statement run) that contains `pos`.
+
+    Resolved by INDENTATION, not by a fixed "newline + def" search: that form
+    mis-answers whenever module-level code follows a def (the block became that
+    unrelated def's header) and whenever the file opens with a def. The END bound
+    is computed on the MASKED source — same length, so the index transfers —
+    because a column-0 comment or docstring line inside a function is legal and
+    would otherwise truncate the block before the bulk DETACH it must contain
+    (#10170 review round 4).
+    """
+    masked = _mask_strings_and_comments(src)
+    line_start = masked.rfind("\n", 0, pos) + 1
+    indent = len(masked[line_start:]) - len(masked[line_start:].lstrip(" "))
+    if indent == 0:
+        # module-level: this statement run, up to the next top-level def/class/
+        # decorator — so a following bulk DETACH is visible, and a later
+        # function's journal cannot launder it.
+        nxt = re.search(r"\n(?=(?:async )?(?:def |class |@))", masked[pos:])
+        return src[line_start:pos + nxt.start() if nxt else len(src)]
+    block_start, block_indent = 0, 0
+    for m in re.finditer(r"(?m)^([ ]*)(?:async )?def ", masked[:line_start]):
+        ind = len(m.group(1))
+        if ind < indent:
+            block_start, block_indent = m.start(), ind
+    for m in re.finditer(r"(?m)^([ ]*)\S", masked[block_start:]):
+        if m.start() == 0:
+            continue
+        if len(m.group(1)) <= block_indent:
+            return src[block_start:block_start + m.start()]
+    return src[block_start:]
 
 
 def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
@@ -755,6 +766,9 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
     scanned = [name for name, _ln, _blk in _from_uri_sites(root=tmp_path)]
     assert scanned == ["test_zz_not_exempt.py"], (
         f"the from_uri census did not skip {exempt_stem!r}: {scanned}")
+    flagged = _from_uri_violations(root=tmp_path)
+    assert len(flagged) == 1 and flagged[0].startswith("test_zz_not_exempt.py:"), (
+        f"the from_uri VERDICT did not fire on the peer: {flagged}")
 
     bad = _raw_detach_violations(root=tmp_path)
     assert len(bad) == 1, (
@@ -829,7 +843,14 @@ def test_no_declared_route_or_pin_is_inert():
         if not path.exists():
             gone.append(f"{name}: file missing")
             continue
-        blocks = [b for _ln, b in _sites_in_file(path)]
+        # only the sites the census would otherwise flag: `graph_name=` short-
+        # circuits before the declared lookup, so a pattern matching only those is
+        # inert (#10170 review round 4).
+        blocks = [b for _ln, b in _sites_in_file(path) if "graph_name=" not in b]
+        if not patterns:
+            gone.append(f"{name}: empty pattern list is only legal in "
+                        "_MUST_HAVE_NO_SITES")
+            continue
         if not blocks:
             gone.append(f"{name}: declares {patterns} but has no live from_uri( call")
             continue
