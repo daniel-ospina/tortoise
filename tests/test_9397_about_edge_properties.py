@@ -2317,18 +2317,22 @@ def test_the_document_population_counts_match_the_census():
         f"§13's causal split {originating} + {rematerializing} does not add up "
         f"to the census population of {total}"
     )
-    # §11.1 states the same two numbers in a DIFFERENT spelling — "ORIGINATED by two
-    # sites and written by three in the named form" — and that spelling was pinned by
-    # nothing: measured at `#9403` review, editing it to "three sites" left the suite
-    # green while the paragraph above contradicted it. Words, not digits, so both
-    # spellings are checked against the tables.
+    # The document states the same two numbers in a DIFFERENT spelling, in §13:
+    # "ORIGINATED by two sites and written by three in the named form". (At this head
+    # §11.1 spells them differently again — "the two that ORIGINATE it" and "a third
+    # NAMED-form writer" — so §11.1 is not where those numerals live; an earlier
+    # revision of this comment said it was, and the leg passed anyway because it
+    # searches the whole flattened document.) That spelling was pinned by nothing:
+    # measured at `#9403` review, editing it to "three sites" left the suite green
+    # while the paragraph above contradicted it. Words, not digits, so both spellings
+    # are checked against the tables.
     words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
     assert f"ORIGINATED by {words[originating]} sites" in storage, (
-        f"§11.1 no longer states 'ORIGINATED by {words[originating]} sites', which is the "
+        f"the document no longer states 'ORIGINATED by {words[originating]} sites', which is the "
         f"ORIGINATING count {originating} the census split implies"
     )
     assert f"written by {words[named]} in the named form" in storage, (
-        f"§11.1 no longer states 'written by {words[named]} in the named form', which is "
+        f"the document no longer states 'written by {words[named]} in the named form', which is "
         f"what `RECORDED_WRITERS` holds ({named})"
     )
     ordinals = {2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
