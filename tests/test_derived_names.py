@@ -369,10 +369,12 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # construction — the finding-provenance gate opens no graph (hermetic temp
     # git repo, subprocess git only); test_from_uri_routing_table_keys_exist
     # pins that the module really exists.
-    # (#10170: `"test_finding_provenance.py": []` lived here — an EMPTY row for a
-    # file with zero `from_uri(` sites. Same defect as the session-capture row
-    # below it: a declaration that can never fail, and an empty list reads as
-    # "declared" to anything that only checks for the key's presence.)
+    # (#10170: `"test_finding_provenance.py": []` lived here. An EMPTY shape list
+    # in this table is not inert in the strict direction — it says "this file may
+    # have NO site", so any new site there reds. That negative is worth keeping,
+    # so it moved to `_MUST_HAVE_NO_SITES` below and is asserted to hold rather
+    # than left as a bare `[]` that reads as "declared" to anything checking only
+    # for the key's presence.)
     # #1423: the same module live-FalkorDB availability probe shape as #3301
     # above — `_probe(candidates)` constructs, issues `RETURN 1`, and closes,
     # over candidate URIs (the env URI plus _live_utils docker/legacy
@@ -423,6 +425,13 @@ def _exempt_stems() -> set[str]:
         | set(TEST_NO_REDIRECT_STEMS)
 
 
+# Exempt entries that the censuses' own glob CANNOT yield (`glob("test_*.py")`):
+# they are seam helpers, not test modules. Pinned rather than silently inert —
+# an entry that can never match is the same defect class as the bare stems
+# (#10170): a declaration that reads as coverage and cannot fail.
+_NON_TEST_FILE_EXEMPTIONS = {"_embedded.py"}
+
+
 def _is_exempt(path) -> bool:
     """The census's ONE skip decision (#10170).
 
@@ -434,12 +443,12 @@ def _is_exempt(path) -> bool:
     return path.stem in _exempt_stems()
 
 
-def _from_uri_sites():
+def _from_uri_sites(root=None):
     """Yield (file_name, line_number, call_block) for every from_uri( call
     (FalkorProjection or any module-level alias like _FP — review P2: an
     aliased construction must not evade the census) in a migrated file."""
     call_re = re.compile(r"\b(\w+)\.from_uri\s*\(")
-    for f in sorted(_TESTS_ROOT.glob("test_*.py")):
+    for f in sorted((root or _TESTS_ROOT).glob("test_*.py")):
         if _is_exempt(f):
             continue
         src = f.read_text(encoding="utf-8")
@@ -540,26 +549,21 @@ def test_from_uri_routing_table_keys_exist():
 # ── raw falkordb-client census (cycle-6 P1-3 / cycle-8 P2-2) ────────────────
 
 
-def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
-    """Cycle-6 P1-3: every raw `from falkordb import FalkorDB` bulk-DETACH
-    site in a migrated test file must (a) resolve its graph handle to a
-    per-test-unique name (never a FIXED shared literal — concurrent sessions
-    would DETACH each other's live writes) and (b) journal the name via
-    tests/_embedded._journal_append so the session-end sweep drops it (the
-    raw client bypasses _assert_test_graph AND the per-test wipe scope —
-    cycle-8 P2-2: a per-test-unique name alone leaks one empty graph per run;
-    the journal closes the leak).
+def _raw_detach_violations(root=None):
+    """Every raw-client bulk-DETACH site that lacks a per-test-unique
+    handle + journal in its own block, over `root` (default: the tests
+    root).
 
-    Per-SITE scan (review P1): a module-level presence sniff ("the module
-    contains _journal_append AND os.urandom") trusts a file after ONE fixed
-    site and lets a SECOND raw-DETACH site on a fixed shared name in the
-    same file evade. Each raw-construction site's own enclosing block must
-    carry the per-test-unique handle + journal append.
+    Extracted from the test so the SKIP decision is behaviourally testable:
+    a violation list over a fixture root proves what the census does, where
+    introspecting `_is_exempt` only proves what a helper returns (#10170
+    review: the two censuses shared a helper but nothing exercised that the
+    SECOND one actually used it).
     """
     # The SAME skip decision as `_from_uri_sites` — one helper, so the two
     # censuses cannot exempt different files (#10170).
     violations = []
-    for f in sorted(_TESTS_ROOT.glob("test_*.py")):
+    for f in sorted((root or _TESTS_ROOT).glob("test_*.py")):
         if _is_exempt(f):
             continue
         src = f.read_text(encoding="utf-8")
@@ -578,6 +582,26 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
                     f"L{src.count(chr(10), 0, m.start()) + 1} without a "
                     f"per-test-unique handle + _journal_append in the same "
                     f"block (cycle-6 P1-3 / cycle-8 P2-2)")
+    return violations
+
+
+def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
+    """Cycle-6 P1-3: every raw `from falkordb import FalkorDB` bulk-DETACH
+    site in a migrated test file must (a) resolve its graph handle to a
+    per-test-unique name (never a FIXED shared literal — concurrent sessions
+    would DETACH each other's live writes) and (b) journal the name via
+    tests/_embedded._journal_append so the session-end sweep drops it (the
+    raw client bypasses _assert_test_graph AND the per-test wipe scope —
+    cycle-8 P2-2: a per-test-unique name alone leaks one empty graph per run;
+    the journal closes the leak).
+
+    Per-SITE scan (review P1): a module-level presence sniff ("the module
+    contains _journal_append AND os.urandom") trusts a file after ONE fixed
+    site and lets a SECOND raw-DETACH site on a fixed shared name in the
+    same file evade. Each raw-construction site's own enclosing block must
+    carry the per-test-unique handle + journal append.
+    """
+    violations = _raw_detach_violations()
     assert not violations, "\n".join(violations)
 
 
@@ -585,10 +609,17 @@ def _enclosing_block(src: str, pos: int) -> str:
     """The nearest enclosing def block containing `pos` (review P1: the
     per-site raw-client scan needs the site's block, not the module)."""
     head = src[:pos]
-    last_def = head.rfind("\ndef ")
     last_def = max(head.rfind("\ndef "), head.rfind("\n    def "))
+    if last_def < 0 and src.startswith("def "):
+        # A `def` at offset 0 has no PRECEDING newline, so the two searches above
+        # both miss it and the site was treated as module-level: `head` (the text
+        # BEFORE the site) became the "block", which cannot contain the bulk
+        # DETACH that follows. A raw-client site inside the FIRST function of a
+        # file was therefore never flagged (#10170 review — found because the
+        # behavioural fixture starts with `def` on line 1).
+        last_def = 0
     if last_def < 0:
-        return head  # module-level site — the whole head is the block
+        return head  # genuinely module-level site — the whole head is the block
     return src[last_def:]
 
 
@@ -607,86 +638,117 @@ def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
     assert names == [gname]
 
 
-def test_the_no_redirect_exemption_is_keyed_in_the_SAME_space_it_filters():
-    """#10170: the exemption matched ZERO files and read as coverage.
+# A file that must keep ZERO `from_uri(` sites: a census declaration in the strict
+# direction. Kept as its own registry because an empty shape list in
+# `_ROUTED_FROM_URI_SITES` is indistinguishable from a key whose presence alone is
+# checked (#10170 review P2-1).
+_MUST_HAVE_NO_SITES = ("test_finding_provenance.py",)
 
-    `TEST_NO_REDIRECT_STEMS` holds bare stems, `_FROM_URI_EXEMPT_FILES` holds
-    filenames, and both census sites compared the union against ``f.name`` — which
-    always ends ``.py``. Every bare stem therefore matched nothing, so the 53
-    embedded carve-out files were never exempt and were silently held to the
-    migration census they exist to be excused from. This test pins the KEY SPACE,
-    which is the thing that was wrong: it cannot pass against the old comparison
-    (see the discrimination assertion at the end).
+
+def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path):
+    """#10170 review (P1): the skip decision, tested BEHAVIOURALLY, per census.
+
+    The first version asserted `probe.stem in exempt` — introspection, which
+    proves what the helper RETURNS, not what either census DOES. It was also
+    vacuously weak: the carve-out files carry no `from_uri(` call at all, so a
+    census with the comparison re-keyed to `f.name` was still green.
+
+    This builds a fixture root where an EXEMPT-NAMED file and a peer carry the
+    SAME offending content (a `from_uri(` call and a raw-client bulk DETACH with
+    no journal). The only thing that can separate them is the skip decision, and
+    it has to separate them in BOTH censuses.
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+
+    exempt_stem = sorted(TEST_NO_REDIRECT_STEMS)[0]
+    offending = (
+        "def test_fixture():\n"
+        "    proj = _FP.from_uri(\"bolt://localhost:6379\")\n"
+        "    from falkordb import FalkorDB\n"
+        "    client = FalkorDB(host=\"h\")\n"
+        "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
+    )
+    (tmp_path / f"{exempt_stem}.py").write_text(offending, encoding="utf-8")
+    (tmp_path / "test_zz_not_exempt.py").write_text(offending, encoding="utf-8")
+
+    scanned = [name for name, _ln, _blk in _from_uri_sites(root=tmp_path)]
+    assert scanned == ["test_zz_not_exempt.py"], (
+        f"the from_uri census did not skip {exempt_stem!r}: {scanned}")
+
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad, "the raw-client census flagged nothing, so the fixture proves nothing"
+    assert all(v.startswith("test_zz_not_exempt.py:") for v in bad), (
+        f"the raw-client census did not skip {exempt_stem!r}: {bad}")
+
+
+def test_the_exemption_key_space_is_UNIFORM_and_nothing_is_inert():
+    """#10170: the key space is the thing that was wrong, so it is what is pinned.
+
+    `TEST_NO_REDIRECT_STEMS` holds bare stems and `_FROM_URI_EXEMPT_FILES` holds
+    filenames; both censuses compared the union against `f.name` (always `*.py`),
+    so every bare stem matched nothing and the exemption exempted ZERO of the 53
+    carve-out files.
     """
     from tests._embedded import TEST_NO_REDIRECT_STEMS
 
     exempt = _exempt_stems()
 
-    # (a) one key space: stems, no suffixes — so `f.stem in exempt` can match.
+    # One key space, no suffixes — so `f.stem in exempt` can match at all.
     assert not [e for e in exempt if e.endswith(".py")], (
         f"the exemption still carries filenames: {sorted(e for e in exempt if e.endswith('.py'))}")
 
-    # (b) every declared stem names a REAL file (a registry entry that matches
-    # nothing is an inert claim — the same defect as the `from_uri` row this
-    # issue deleted).
-    # A stem that names no file is an inert carve-out — the same defect as the
-    # `from_uri` rows above, one registry over. `test_smoke_embedded` is the one
-    # such entry today: it resolves under neither `tests/` nor `bench/` (the
-    # latter is what `config/ci-surfaces.yml`'s carve_out names, and that file is
-    # gone too). Pinned as an ALLOWLIST rather than silently tolerated, so a NEW
-    # inert stem reds here, and removing this entry is tracked separately — it
-    # belongs to the carve-out mirror in `config/ci-surfaces.yml`, not to this
-    # census (#10170 is scoped to the from_uri census; reported rather than
-    # widened).
+    # Every declared stem names a REAL file. One entry resolves under neither
+    # `tests/` nor `bench/` today; it is ALLOWLISTED rather than tolerated so a
+    # NEW inert stem reds here. `<=` (not `==`) so removing the stale entry —
+    # which belongs to the `config/ci-surfaces.yml` carve-out mirror, not to this
+    # census — shows up as a removal instead of reddening with an empty diff.
     stale = {s for s in TEST_NO_REDIRECT_STEMS
              if not (_TESTS_ROOT / f"{s}.py").exists()
              and not (_TESTS_ROOT.parent / "bench" / f"{s}.py").exists()}
-    assert stale == {"test_smoke_embedded"}, (
-        f"TEST_NO_REDIRECT_STEMS gained a stem that names no file: "
-        f"{sorted(stale - {'test_smoke_embedded'})} — an inert carve-out entry")
+    newly_inert = stale - {"test_smoke_embedded"}
+    assert not newly_inert, (
+        f"TEST_NO_REDIRECT_STEMS gained a stem that names no file: {sorted(newly_inert)}")
 
-    # (c) the union covers BOTH registries, from either spelling.
-    assert set(TEST_NO_REDIRECT_STEMS) <= exempt
-    assert {p.removesuffix(".py") for p in _FROM_URI_EXEMPT_FILES} <= exempt
-
-    # (d) DISCRIMINATION — the exact comparison the census makes now matches a
-    # carve-out file, and the one it made before does not. Without this, the test
-    # above would pass on a union that still never matched `f.name`.
-    sample = sorted(TEST_NO_REDIRECT_STEMS)[0]
-    probe = _TESTS_ROOT / f"{sample}.py"
-    assert probe.exists(), sample
-    assert probe.stem in exempt, "the census would scan an exempt file"
-    assert probe.name not in exempt, (
-        "regression: the exemption is being compared to a FILENAME again — the "
-        "bare stems cannot match, and the exemption silently exempts nothing")
-
-    # (e) BEHAVIOURAL, not introspection: whatever key space the helper uses, the
-    # CENSUS must not actually scan an exempt file. This is the assertion that
-    # reds if the skip decision is keyed on `f.name` again, which (d) alone
-    # cannot see.
-    assert _is_exempt(probe) is True
-    assert _is_exempt(_TESTS_ROOT / "test_ingest.py") is False, (
-        "a routed, non-exempt file was exempted")
-    scanned = {name for name, _ln, _blk in _from_uri_sites()}
-    leaked = sorted(scanned & {f"{s}.py" for s in exempt
-                              if (_TESTS_ROOT / f"{s}.py").exists()})
-    assert not leaked, f"the census scanned exempt file(s): {leaked}"
+    # Entries the censuses' own glob can never yield are seam helpers, not tests —
+    # pinned, because an exemption that cannot match is the same defect class as
+    # the bare stems (#10170 review P2-4).
+    non_test = {e for e in _FROM_URI_EXEMPT_FILES if not e.startswith("test_")}
+    assert non_test == _NON_TEST_FILE_EXEMPTIONS, (
+        f"unpinned non-test exemption(s): {sorted(non_test - _NON_TEST_FILE_EXEMPTIONS)}")
 
 
-def test_no_routed_from_uri_row_describes_a_call_the_file_no_longer_has():
-    """#10170 (second defect): an inert `_ROUTED_FROM_URI_SITES` row.
+def test_no_declared_route_or_pin_is_inert():
+    """#10170 (second defect): declarations that name a call the file does not have.
 
-    `test_session_capture_e2e.py` carried a declared shape while having zero
-    `from_uri(` sites, so the row could never fail and proved nothing. A routed
-    row is a claim about a LIVE call; this pins every row to one.
+    `test_session_capture_e2e.py` carried a routed shape while having ZERO
+    `from_uri(` sites, so the row could never fail and proved nothing. A raw
+    substring test would keep that hole open — a mention in a comment or a
+    docstring satisfies it — so this uses the census's OWN detector, with the same
+    comment-skipping rule (review P1).
     """
+    call_re = re.compile(r"\b\w+\.from_uri\s*\(")
     gone = []
     for name in _ROUTED_FROM_URI_SITES:
         path = _TESTS_ROOT / name
         if not path.exists():
             gone.append(f"{name}: file missing")
             continue
-        if "from_uri(" not in path.read_text(encoding="utf-8"):
+        live = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if call_re.search(ln) and not ln.strip().startswith("#")]
+        if not live:
             gone.append(f"{name}: declares {_ROUTED_FROM_URI_SITES[name]} but has "
-                        "no from_uri( site")
+                        "no live from_uri( site (a comment mention does not count)")
+    for name in _MUST_HAVE_NO_SITES:
+        path = _TESTS_ROOT / name
+        if not path.exists():
+            gone.append(f"{name}: must-have-no-sites file is missing")
+            continue
+        live = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if call_re.search(ln) and not ln.strip().startswith("#")]
+        assert not live, (
+            f"{name} is declared site-free but has {len(live)} live from_uri( "
+            f"site(s): {live[:2]}")
+    for name in _ENV_URI_PIN_FILES:
+        if not (_TESTS_ROOT / name).exists():
+            gone.append(f"{name}: _ENV_URI_PIN_FILES entry is not a test module")
     assert not gone, "\n".join(gone)
