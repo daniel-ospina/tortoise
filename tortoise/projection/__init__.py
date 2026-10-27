@@ -9029,7 +9029,21 @@ def journal_object_established(events) -> JournalObjectEstablished:
     carries an id the journal established IS addressable, even if the name it
     also carries is one nothing established (a collapsed-away carrier, #5285
     cycle-4 FIX 2) — so such a record must keep refusing rather than being
-    exempted on the name alone (#10107 review P1).
+    exempted on the name alone (#10107 review P1). Its THREE id sources mirror
+    the name sources for the same reason — each is a route by which the id
+    reaches a live node, so missing one exempts a supersede the journal COULD
+    have addressed:
+
+    * ``ObjectRegistered``'s ``id``.
+    * an ``EventRecorded`` mention stub's DETERMINISTIC id —
+      ``_event_plain_merge`` writes it ``ON CREATE``, and a later registration
+      re-ids that node, so the stub id is addressable at the stub's own seq
+      (#10107 review P1).
+    * an ``EntityMutated`` state op's TARGET ``id`` — the record names an
+      Object the journal could address by id, so referring to that id is not
+      "established by nothing". Counting only the state-op NAME exempted a
+      supersede carrying the id of the very object the journal had just
+      mutated (#10107 review round 6).
     """
     names: set[str] = set()
     ids: set[str] = set()
@@ -9050,6 +9064,13 @@ def journal_object_established(events) -> JournalObjectEstablished:
                     and label in _CANONICAL_ENTITY_LABELS
                     and label != "Object"):
                 continue
+            # The mutation's TARGET id is established: this record addresses an
+            # Object by id, so a supersede carrying the same id describes a
+            # carrier the journal could reach. Counting only the state NAME
+            # exempted it as "established by nothing at all" (#10107 review 6).
+            mid = ev.get("id")
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
             state = ev.get("state")
             name = state.get("name") if isinstance(state, dict) else None
         elif t == "EventRecorded":

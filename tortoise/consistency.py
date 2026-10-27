@@ -1846,7 +1846,9 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         # #3590 D2: exempt ONLY a record the journal cannot ADDRESS, so this
         # fold agrees with `rebuild_all`'s sweep. BOTH limbs are required: the
         # NAME must be unestablished (no `ObjectRegistered`, no `EntityMutated`
-        # state-op name, no `EventRecorded` mention stub) AND the id, if the
+        # state-op name carried into the Object MERGE key — the canonical-label
+        # gate applies, a Point rename is not an Object name — no
+        # `EventRecorded` mention stub) AND the id, if the
         # record carries one, must not be an established id. Either one
         # established — or a record carrying no name at all — stays
         # `object-superseded-miss` and refuses (#10107 review P2: this comment
