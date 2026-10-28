@@ -40,7 +40,6 @@ all seven are captured here.
 from __future__ import annotations
 
 import contextlib
-import logging
 import shutil
 import sys
 from pathlib import Path

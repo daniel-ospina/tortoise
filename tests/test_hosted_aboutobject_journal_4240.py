@@ -102,8 +102,6 @@ from types import SimpleNamespace
 import pytest
 
 from tortoise import hosted_api as ha
-from tortoise import monitoring
-from tortoise.sdk import TortoiseSDK
 
 # A conversation whose turn text carries a resolvable GitHub issue URL — the
 # `session_link` trigger the capture's entity-linking pass reads.

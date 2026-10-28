@@ -46,13 +46,11 @@ import pytest
 from tortoise import capture_spool
 from tortoise.sdk import (
     TortoiseSDK,
-    _capture_turn_role_text,
     _capture_turn_texts,
-    _content_hash,
     _redact_summary_strings,
     _redact_turn_contents,
 )
-from tortoise.security import CREDENTIAL_KINDS, redact_secrets
+from tortoise.security import redact_secrets
 
 _REPO = Path(__file__).resolve().parent.parent
 

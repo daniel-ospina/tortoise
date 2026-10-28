@@ -9,9 +9,7 @@ ONLY the LLM extraction into memory points (receipt ``extraction_mode``
 (TORTOISE_SESSION_LLM_MOCK=1 seam) so no provider key or network is needed.
 """
 import json
-import logging
 import os
-import re
 from urllib.parse import urlparse
 
 import pytest

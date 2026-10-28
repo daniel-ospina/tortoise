@@ -43,7 +43,6 @@ import pytest
 # hosted parity suites do — the offline MockModel seam keeps it network-free.
 from tests.test_hosted_api import client as client
 from tortoise.log import EventLog
-from tortoise.projection import _CACHE_WRITE_AUTHORIZED, _live_write_scope
 from tortoise.sdk import _CAPTURE_PROVENANCE_LANE, TortoiseSDK
 
 PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
@@ -397,7 +396,6 @@ def test_the_hosted_capture_journals_and_replays_the_same_provenance(
     """
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import TEST_ORG_ID
-    from tortoise.log import EventLog
 
     log_path = str(tmp_path / "hosted.jsonl")
     monkeypatch.setattr(

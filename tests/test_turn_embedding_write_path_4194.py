@@ -39,9 +39,8 @@ import pytest
 # no provider/network call.
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
-from tortoise.embeddings import EmbeddingModel, compute_embedding
+from tortoise.embeddings import EmbeddingModel
 from tortoise.sdk import TortoiseSDK
-from tortoise.search_engine import run_vector_query
 
 
 class _FakeEmbedder:
