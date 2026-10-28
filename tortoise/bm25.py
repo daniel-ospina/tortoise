@@ -137,9 +137,13 @@ LEXICAL_WEIGHT_MAX = 1.0
 #: ``no`` / ``off`` disables it, and an unset, blank or GARBAGE value keeps the
 #: DEFAULT — a typo must never silently change which scorer a read uses.
 #:
-#: ⛔ ORDERING: enable is only correct ON TOP OF the arm's own tie fix (#10121,
-#: PR #10150 — ``bm25_rank`` ties oldest-first, so it truncates the NEWEST match
-#: at ``limit``). This PR must not merge before #10150.
+#: ⛔ ORDERING, now SATISFIED: enabling the arm was only correct ON TOP OF
+#: the arm's own tie fix — ``bm25_rank`` used to tie ``(-score, id)`` ASCENDING
+#: (oldest-first), which truncated the NEWEST match at ``limit``. #10121 / PR
+#: #10150 carries that fix and it is PRESENT in this tree (``bm25_rank`` sorts
+#: through ``search_engine.recency_tie_key``, newest-first, id last), so the
+#: default may be ON. Do not re-tie ``bm25_rank`` oldest-first without also
+#: reverting this default.
 BM25_DEFAULT_ENABLED = True
 
 
@@ -270,22 +274,35 @@ def bm25_rank(
 ) -> list[tuple[str, float]]:
     """``[(doc_id, score), ...]`` ranked descending — the shape a leg returns.
 
-    The sort key is ``(-score, doc_id)``, not ``-score``: a score tie must not
-    fall through to insertion order (#3019 — every other leg in
-    ``search_engine`` makes the same pair, because RRF is rank-based and an
-    unstable tie makes the fused order a function of dict order).
+    The sort key is ``(score, recency, doc_id)`` — all descending — not
+    ``-score``: a score tie must not fall through to insertion order (#3019 —
+    RRF is rank-based and an unstable tie makes the fused order a function of
+    dict order), and it must not fall through to OLDEST-first either (#10121).
+
+    ``recency`` is supplied by the caller because the arm cannot derive it from
+    text: ``run_bm25_query`` projects the shared
+    ``search_engine.recency_key_expr`` (the CASE — not a bare ``coalesce``,
+    which would let an empty ``updatedAt`` suppress a valid ``createdAt``)
+    alongside each document and hands it over. A doc missing from the map sorts
+    as ``''`` — OLDEST — which is exactly how
+    :func:`tortoise.search_engine.recency_tie_clause` treats an undated row.
+
+    Why the direction matters (measured, #10121): an arm that ranks a tie
+    oldest-first returns the newest match LAST, and with a ``limit`` it drops
+    it: on a 21-row tie the just-created point was absent from
+    ``run_bm25_query(limit=5)``. Sorting the corpus window newest-first and then
+    ranking it oldest-first is how that survived the first pass at this fix.
     """
+    from .search_engine import recency_tie_key
+
     scores = bm25_scores(query, docs, k1=k1, b=b, keep_numeric=keep_numeric)
-    # ⛔ The arm ranks its OWN corpus, so it must resolve a tie like every other
-    # ranking leg (#10121): recency first, then the id — both DESCENDING. The
-    # previous key was ``(-score, id)`` ASCENDING, i.e. OLDEST-first on this
-    # tree's timestamp-minted ULIDs, so on a tie the arm dropped the NEWEST
-    # match at ``limit`` (measured: absent from ``run_bm25_query(limit=5)`` on a
-    # 21-row tie, rank 20/21).
-    stamp = recency or {}
+    timestamp = recency or {}
+    # The secondary keys come from the ONE Python-side twin of the cypher
+    # clause (#10121 review): a hand-written tuple here was the third
+    # implementation of the same rule.
     ranked = sorted(
         scores.items(),
-        key=lambda kv: (kv[1], stamp.get(kv[0]) or "", kv[0]),
+        key=lambda kv: (kv[1], *recency_tie_key(timestamp.get(kv[0]), kv[0])),
         reverse=True,
     )
     if limit is not None:

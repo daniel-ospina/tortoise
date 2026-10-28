@@ -182,6 +182,16 @@ def test_docs_scanning_gates_stay_in_tier1():
         "red on main (#4309/#3616 class, same dual registration as the six "
         "sibling test_extractor_v4_* doc guards)"
     )
+    assert "test_7949_e5_section10_writeback.py" in tier1, (
+        "#10108 review (P1): the E5 write-back pin binds "
+        "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md §10's replicated-run "
+        "table to a fresh run of the registered scorer — `docs/` is in "
+        "NON_PYTHON_PREFIXES and that document matches no SOURCE_PATTERNS "
+        "entry, so a docs-only edit of §10 runs tier1 only; registered in "
+        "`core` alone, retyping one digit or deleting the subsection merged "
+        "green while #7949/#7947 went on citing it (#4309 class, same dual "
+        "registration as the sibling capstone rows above)"
+    )
 
 
 def test_v4_membership_gate_runs_on_both_architecture_docs():
@@ -207,6 +217,35 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+
+def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
+    """#10108 review (P1): pin the SELECTION, not just the manifest string.
+
+    `tests/test_7949_e5_section10_writeback.py` compares §10's published
+    replicated-run figures against a fresh run of the registered scorer. The one
+    change that can red it is a docs-only edit of
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — the diff class on which
+    `docs/` is filtered out by NON_PYTHON_PREFIXES, the document matches no
+    SOURCE_PATTERNS entry, `changed` empties and `select()` takes the docs-only
+    early return, so tier1 is the ONLY surface that runs.
+
+    Measured before the fix: the document's plan was `surfaces=[]`, the tier-1
+    set (64 files) did not contain this file, and the pin was registered in
+    `core` alone — asleep on the exact change it exists to catch. The manifest
+    assertion in :func:`test_docs_scanning_gates_stay_in_tier1` catches a deleted
+    row; this catches a row that is present but no longer reaches the file
+    (#9778 review P2 made the same point for the declared-mechanism gate).
+    """
+    r = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_7949_e5_section10_writeback.py" in r["test_files"], (
+        "a docs-only edit of §10's replicated-run passage must select the pin "
+        "that binds it to the scorer — otherwise the table can be retyped, "
+        "edited one digit, or deleted and merge green (#10108 review P1, "
+        "#4309 class)"
+    )
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -2422,6 +2461,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_worktree_report_tool_change_selects_core_not_tier1():
+    """A change to the lane report must run the rules it pins (#10220).
+
+    `tests/test_worktree_report.py` is registered on the `core` surface and owns the
+    report's anti-fabrication guarantees — the counts are derived from a log that is
+    re-hashed and re-parsed, a red suite exits 3 and never 0, an unfinished suite is
+    refused. That registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/worktree_report.py`, so `select()` returns NO surface, takes the
+    docs-only early return and falls back to the tier-1 smoke set, which does not
+    contain the file. Weakening a rule would then be the one PR that never ran the
+    cases pinning it — and that tool is what the merge path reads as a lane's test
+    evidence (`agent-infra#2977`), so the drop would be invisible where it matters most.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/worktree_report.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_worktree_report.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ax_write_eval_tool_change_selects_core_not_tier1():
     """A change to the eval instrument must run the rules it pins (#9695 review).
 
@@ -3046,6 +3109,33 @@ def test_backfill_graph_turns_tool_change_selects_core_not_tier1():
     r = _sel(["tools/backfill_graph_turns.py"])
     assert "core" in r["surfaces"], r
     assert "test_10017_backfill_census.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_backfill_copy_turns_tool_change_selects_core_not_tier1():
+    # #10017 review P1 (the third time this class was measured on this chain):
+    # tools/backfill_copy_turns.py is the COPY phase — the write whose turns the
+    # parity gate then certifies before an IRREVERSIBLE delete — and it owns
+    # tests/test_10017_backfill_copy.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a copy-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, so the
+    # file's own suite — and its #5128 interpreter guard, the repo gate that DID
+    # red this tool at 4cdad4be7 — never ran on the PR editing the copy.
+    # Registering the test under `core` does not help: a name in a
+    # surface's test_files only runs when that surface is ALREADY selected.
+    #
+    # Measured before the CORE_ALSO entry: `--changed-files
+    # tools/backfill_copy_turns.py` -> surfaces=[], full=False,
+    # test_10017_backfill_copy.py ABSENT. Same #1349/#3332/#3616 silent-drop
+    # class as tools/backfill_graph_turns.py above. CORE_ALSO (not
+    # TOOL_CARVEOUTS) because the suite is hermetic (a fake graph + a fake
+    # journal, no DB). Mutation check: removing the CORE_ALSO entry fails the
+    # second assert below.
+    r = _sel(["tools/backfill_copy_turns.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_10017_backfill_copy.py" in r["test_files"], r
     assert r["full"] is False, r
 
 

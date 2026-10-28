@@ -1892,10 +1892,13 @@ def docker_resolver_port(sdk) -> ResolverPort:
             proj.g, term, entity_type="object", limit=limit,
             excluded_statuses=tuple(sorted(
                 _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)))
-        # ``run_fts_query`` already returns index order (score DESC, id ASC)
-        # and omits nothing this port must re-admit; an id-less Object (the
+        # ``run_fts_query`` already returns a data-determined order (score DESC,
+        # then the shared recency-then-id tie — #3019, #10121) and omits nothing
+        # this port must re-admit; an id-less Object (the
         # #3019 MERGE-by-name shape) can never be a candidate, so it is
-        # dropped rather than returned as the string "None".
+        # dropped rather than returned as the string "None".  The recency key's
+        # ``coalesce(..., '')`` is what keeps those id-less rows at the TAIL of
+        # the leg's window instead of at its head.
         ids = [str(oid) for oid, _score in hits if oid]
         if not ids:
             return []
