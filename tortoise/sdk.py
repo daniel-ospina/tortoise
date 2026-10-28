@@ -5675,6 +5675,44 @@ def _step_embed_counts(block) -> dict[str, int]:
     return {k: len(block.get(k) or []) for k in _STEP_EMBED_KINDS}
 
 
+def _step_vet_counts(block) -> dict:
+    """Counts-only projection of a VET pass block ({} when the pass did not run).
+
+    ``_run_vet_pass`` returns ``{"stats", "batch", "decisions"}``, and
+    ``decisions`` is one entry PER CANDIDATE carrying that candidate's FULL
+    text: ``vet_gate.vet_candidates`` writes ``"text": _item_text(...)`` and a
+    ``counterfactual`` quoting 120 more characters of it. Forwarding that block
+    verbatim would put extraction-proportional content on the receipt every SDK
+    caller receives and on the hosted ``/v1/sessions`` body — the opposite of
+    what this seam's bound permits. So the witness keeps the pass's own COUNTS
+    (``stats``: candidates / by_outcome / discarded / arbiter) and its batch
+    accounting (``vet_gate.check_batch`` — counts, one ratio, a per-section
+    split), plus the NUMBER of withheld decisions so a reader can still tell a
+    pass that produced verdicts from one that produced none. ``decisions``
+    itself stays on the extractor's own return, where the audit that needs it
+    reads it.
+
+    An empty projection is deliberately NOT an activity claim: it fails CLOSED
+    (``{}``), which is what ``capstone_measure._pass_ran`` requires — a pass is
+    witnessed only by evidence that it did work.
+    """
+    if not isinstance(block, dict) or not block:
+        return {}
+    counted: dict = {}
+    stats = block.get("stats")
+    if isinstance(stats, dict):
+        for key in ("candidates", "by_outcome", "discarded", "arbiter"):
+            if key in stats:
+                counted[key] = stats[key]
+    batch = block.get("batch")
+    if isinstance(batch, dict) and batch:
+        counted["batch"] = batch
+    decisions = block.get("decisions")
+    if isinstance(decisions, dict) and decisions:
+        counted["decisions_dropped"] = len(decisions)
+    return counted
+
+
 def _capture_step_witness(out: dict, *, committed: int) -> dict:
     """#9116: the facts that let a caller witness each extractor step in ONE pass.
 
@@ -5701,7 +5739,12 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
     observed.
 
     Bounded by construction: counts and the stage's OWN small stats dicts only
-    — never ``payload``, ``embed_list`` or the search rows.
+    — never ``payload``, ``embed_list`` or the search rows. The VET surface is
+    the one stage whose own block also carries per-candidate CONTENT
+    (``decisions``: every candidate's full text plus a counterfactual quoting
+    120 characters of it), so it is PROJECTED to its counts by
+    :func:`_step_vet_counts` rather than copied — the decisions stay on the
+    extractor's own return, where the audit that reads them already looks.
     """
     stats = out.get("stats") or {}
     llm = stats.get("llm") or {}
@@ -5726,7 +5769,8 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
         # S2.2 — the VET gate's own evidence surface (#5005). ``enabled`` False
         # is a real answer: a flag-off pass ran no S2.2.
         "vet": {"enabled": bool(vet.get("enabled")),
-                "s2": vet.get("s2") or {}, "union": vet.get("union") or {}},
+                "s2": _step_vet_counts(vet.get("s2")),
+                "union": _step_vet_counts(vet.get("union"))},
         # S2.3 — the classify passes' own evidence surface (#1695 Task 5).
         "classify_later": {"enabled": bool(classify.get("enabled")),
                            "s2": classify.get("s2") or {},

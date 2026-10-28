@@ -909,7 +909,17 @@ def test_the_seam_witnesses_eight_of_eight_with_no_probe_edit_to_the_rule():
         "story_arc": "A narrative.",
         "s2_embed": {"entities": [1], "events": [1], "points": [1],
                      "operators": []},
-        "vet": {"enabled": True, "s2": {"kept": 3}, "union": {}},
+        # ``_run_vet_pass``'s REAL shape (``{"stats", "batch", "decisions"}``):
+        # the seam projects it to the counts, so the fixture carries that shape
+        # rather than a made-up ``{"kept": 3}`` — a fixture the seam would
+        # silently project to ``{}`` cannot pin anything.
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3,
+                                 "by_outcome": {"KEEP": 3}, "discarded": 0,
+                                 "arbiter": "none"},
+                       "batch": {"candidates": 3},
+                       "decisions": {"pt_1": {"text": "A candidate."}}},
+                "union": {}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3},
                            "union": {}},
         "search": {"mode": "docker", "degraded": False, "queries_run": 15,
