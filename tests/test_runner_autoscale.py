@@ -820,9 +820,12 @@ def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
     now; the custom and fallback labels must still survive (that is the neighbouring test).
 
     ⛔ The arm64 spelling `ubuntu-24.04-arm` is the same class, not a near-miss: GitHub publishes
-    it as a hosted label (`github/docs` `data/reusables/actions/supported-github-runners.md`), and
-    THIS pool is the ARM64 one (`docs/ops/ci-runner-x64.md:34`), so it is the variant most likely
-    to be attached out of band. A narrower match preserved it forever while the docstring and
+    it as a hosted label (`github/docs` `data/reusables/actions/supported-github-runners.md`), so a
+    job naming it escapes this pool exactly as a bare pin does. The whole family is dropped
+    together as defence in depth — NOT because an `-arm` label is the likeliest here: this runbook
+    is the x64 pool (`docs/ops/ci-runner-x64.md:13`) and the ARM64 VMs register their own markers
+    (`:33-34`), so `-arm` is the least likely attachment on this box and is still in the class. A
+    narrower match preserved it forever while the docstring and
     `docs/ops/ci-runner-x64.md` promised the whole `ubuntu-<version>` family — this arm is what
     fails when the two disagree again. `ubuntu-2204-tools` is the opposite boundary: a CUSTOM
     label that merely starts `ubuntu-<digits>` and must NOT be eaten by a widened match.

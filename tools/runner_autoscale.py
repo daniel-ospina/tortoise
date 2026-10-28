@@ -260,10 +260,13 @@ ARCH_LABEL = {
 #: The class is bounded by what GitHub's hosted images ANSWER TO, not by a spelling: the same label
 #: table publishes the arm64 variants `ubuntu-24.04-arm` / `ubuntu-22.04-arm` / `ubuntu-26.04-arm`
 #: (`github/docs` `data/reusables/actions/supported-github-runners.md`, checked 2026-10-27), and a
-#: job pinned to one of those is escaping this pool exactly as a bare version pin does — this pool
-#: IS the ARM64 one (`docs/ops/ci-runner-x64.md:34` — the label paragraph), so the suffixed shape
-#: is the variant most likely to be attached to it out of band. A custom label that merely starts
-#: `ubuntu-<digits>` (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be preserved.
+#: job pinned to one of those is escaping this pool exactly as a bare version pin does. The suffixed
+#: shape is in the class as defence in depth over the WHOLE hosted version family, NOT because it is
+#: the likeliest one to be attached here: this runbook is the x64 pool
+#: (`docs/ops/ci-runner-x64.md:13`), and the ARM64 VMs register their own markers (`:33-34`), so an
+#: `-arm` pin on this box is the LEAST likely — and it is dropped anyway. A custom label that merely
+#: starts `ubuntu-<digits>` (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be
+#: preserved.
 VERSION_PINNED_HOSTED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*(?:-arm)?", re.IGNORECASE)
 
 DEFAULT_REPO = "daniel-ospina/tortoise"

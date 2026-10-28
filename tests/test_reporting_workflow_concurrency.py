@@ -4326,7 +4326,7 @@ def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() ->
     test cannot express: it reads ``runs-on`` through a flattening helper, so a
     job written ``runs-on: [self-hosted, ubuntu-latest]`` (legal, satisfies
     nothing this PR wants, and equal to no single string) is reported by name
-    here instead of crashing the other test's set comprehension.
+    here instead of crashing this test's own set comprehension.
 
     The pool's fallback label is ``ubuntu-latest`` — the installer's
     ``resolve_labels()`` attaches it deliberately (``self-hosted-x64,ubuntu-
@@ -4384,7 +4384,7 @@ def test_a_workflow_edit_keeps_its_steps() -> None:
     observers (which is where the splice happened), not on all 40 files — a
     step-count floor and the presence of the keys every job in this repo needs.
     """
-    required_job_keys = {"runs-on", "steps"}
+    required_job_keys = {"runs-on", "timeout-minutes", "steps"}
     for name, job_id in FLEET_OBSERVER_WORKFLOWS.items():
         doc = _load(WORKFLOW_DIR / name)
         job = doc["jobs"][job_id]
@@ -4420,5 +4420,7 @@ def test_every_fleet_observer_payload_step_is_name_pinned() -> None:
     """
     assert set(FLEET_OBSERVER_PAYLOAD_STEP) == set(FLEET_OBSERVER_WORKFLOWS), (
         "the payload-step roster drifted from the observer roster — add the "
-        "workflow's payload step name rather than deleting its entry"
+        "workflow's payload step name rather than deleting its entry "
+        f"(missing={sorted(set(FLEET_OBSERVER_WORKFLOWS) - set(FLEET_OBSERVER_PAYLOAD_STEP))}, "
+        f"extra={sorted(set(FLEET_OBSERVER_PAYLOAD_STEP) - set(FLEET_OBSERVER_WORKFLOWS))})"
     )
