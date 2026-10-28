@@ -7,10 +7,15 @@ together because they are two routes to ONE resurrection:
 already refuses to mint turn nodes (#10000) but still journalled each turn as
 ``PointAdded``, a NODE-CREATING record. So a journal rebuild produced a graph
 the running deployment did not have, and it re-created every turn #10017's purge
-had removed. The carrier is ``TurnRecorded``: ``PointAdded``'s record effect (the
-same ``public.point`` row, the same ``record_read`` turn read) and NO graph fold,
-with ``cache_tier = 'record_only'`` on the row so ``rebuild_from_record`` skips it
-too. Two rebuild routes, one graph.
+had removed. The carrier is ``TurnsRecorded`` — ONE record per capture holding the
+writer's per-turn snapshots — with NO graph fold and a RECORD effect of one
+``public.point`` row per turn at ``cache_tier = 'record_only'``, so
+``rebuild_from_record`` skips them too. Two rebuild routes, one graph.
+
+⚠️ ``TurnsRecorded``'s declaration (and its payload pin) is main's, from #10129;
+this file pins STEP 7, the producer turnover, on top of it: the journal carries
+the carrier, the record carries the rows, the graph carries no turn, and the
+change feed carries neither the creation nor the stale-sweep deletion.
 
 **R1 — the delete is journaled.** Deleting a legacy turn from the graph emits
 ``EntityMutated`` with ``op=delete`` through the EXISTING seam
@@ -57,7 +62,7 @@ EXPECTED_TURN_IDS = [f"{SESSION_ID}_t{i}" for i in range(len(CONV))]
 #: agrees with any key set, including a wrong one.
 TURN_SNAPSHOT_KEYS = frozenset({
     "id", "content", "pointKind", "speaker", "is_episodic", "status",
-    "createdAt", "embedding", "cache_tier",
+    "createdAt", "embedding",
 })
 
 
@@ -113,8 +118,13 @@ def test_the_record_held_lane_journals_the_carrier_not_point_added(
     _capture_with_record_armed(armed_sdk, monkeypatch)
     records = _records(_journal_of(armed_sdk))
     types = [r["type"] for r in records]
-    assert "TurnRecorded" in types, types
-    assert types.count("TurnRecorded") == len(CONV), types
+    assert rp.TURNS_RECORD_TYPE in types, types
+    carriers = [r for r in records if r["type"] == rp.TURNS_RECORD_TYPE]
+    assert len(carriers) == 1, (
+        "the carrier is ONE record per capture (#10129's declaration): "
+        f"{len(carriers)} found for one capture")
+    assert [s["id"] for s in carriers[0]["turns"]] == EXPECTED_TURN_IDS, (
+        "the carrier's turn set is not the writer's")
     # ⚠️ `PointAdded` is still the right record for the EXTRACTION lane's claim
     # Points (they ARE graph nodes), so the assertion is on the TURNS: no turn
     # id may be journalled as a node-creating record.
@@ -134,27 +144,135 @@ def _journal_of(sdk) -> str:
     return sdk._get_event_log().path
 
 
-def test_the_carrier_carries_the_tier_and_the_writers_own_keys(
-        armed_sdk, monkeypatch):
-    """R2's second half: the ROW declares which store it is for.
+def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
+    """The payload is the WRITER'S, verbatim — the contract step 7 inherits.
 
-    Two things are pinned here, both because they are silent when wrong: the
-    snapshot's key set is EXACTLY the writer's (a `Point`-shaped key the writer
-    never emits becomes a phantom node property on replay, and a key it emits
-    but the record drops loses data), and `cache_tier` is `record_only`.
+    Pinned because it is silent when wrong: a `Point`-shaped key the writer never
+    emits becomes a phantom node property on replay, and a key it emits but the
+    record drops loses data. `cache_tier` is deliberately NOT here — it cannot
+    ride a payload (`_RECORD_ONLY_KEYS` strips it) and the ROW states it as its
+    own column (see `test_the_record_rows_...` in the tier suite).
     """
     _capture_with_record_armed(armed_sdk, monkeypatch)
-    carriers = [r for r in _records(_journal_of(armed_sdk))
-                if r["type"] == "TurnRecorded"]
-    assert len(carriers) == len(CONV)
-    for record in carriers:
-        snapshot = record["point"]
+    carrier = next(r for r in _records(_journal_of(armed_sdk))
+                   if r["type"] == rp.TURNS_RECORD_TYPE)
+    assert len(carrier["turns"]) == len(CONV)
+    for snapshot in carrier["turns"]:
         assert frozenset(snapshot) == TURN_SNAPSHOT_KEYS, (
             f"the carrier's snapshot drifted from the writer's payload: "
             f"missing={sorted(TURN_SNAPSHOT_KEYS - set(snapshot))} "
             f"extra={sorted(set(snapshot) - TURN_SNAPSHOT_KEYS)}")
-        assert snapshot["cache_tier"] == rp.RECORD_ONLY_TIER
+        assert "cache_tier" not in snapshot
         assert snapshot["is_episodic"] is True
+    # The session link rides the ENVELOPE, exactly as it does for `PointAdded`
+    # (#3947) — never a per-turn key the live write does not set.
+    assert carrier["contains_session"] == SESSION_ID
+
+
+def test_the_record_writes_one_ROW_per_turn_and_the_tier_goes_to_the_COLUMN():
+    """R2's record half: THE ROWS EXIST, and each declares its placement.
+
+    The per-turn `PointAdded` records this carrier replaces ARE the record's
+    turn-row write (the writer issues no row statement of its own), so a
+    producer turnover without this statement would leave a capture's turns in NO
+    store — measured, not inferred: `mutations_for` on the carrier is what
+    `write_live_record` and `replay_plan` both run.
+    """
+    carrier = {
+        "type": rp.TURNS_RECORD_TYPE, "sessionId": SESSION_ID,
+        "contains_session": SESSION_ID,
+        "turns": [{"id": f"{SESSION_ID}_t{i}", "content": f"turn {i}",
+                   "pointKind": "event", "speaker": "user",
+                   "is_episodic": True, "status": "draft",
+                   "createdAt": "2026-10-25T00:00:00Z", "embedding": None}
+                  for i in range(3)],
+    }
+    statements = rp.mutations_for(carrier, org_id="o", graph_id="g")
+    inserts = [s for s in statements
+               if s.sql.startswith("INSERT INTO public.point")]
+    assert len(inserts) == 3, [s.sql[:60] for s in statements]
+    for insert in inserts:
+        assert "cache_tier" in insert.sql, insert.sql
+        assert rp.RECORD_ONLY_TIER in insert.params, insert.params
+        # …on the COLUMN, never through the props tail (the passthrough a
+        # public write could reach).
+        assert "cache_tier" not in str(insert.params[-1]), insert.params[-1]
+    # One CONTAINS relation per turn — the same `relation` rows the per-turn
+    # `PointAdded` lane wrote, so the record's edge graph is unchanged.
+    contains = [s for s in statements
+                if s.sql.startswith("INSERT INTO public.relation")]
+    assert len(contains) == 3, [s.sql[:60] for s in statements]
+    # The `node_identity` rows are PRESENT, deliberately: they are the record's
+    # identity registry (the composite FK `relation.src_key`/`tgt_key` point at),
+    # not a node table — `cache_projection.read_record_view` builds nodes from
+    # the node TABLES and reads `node_identity` only for the key contract. The
+    # per-turn `PointAdded` lane wrote them too, so keeping them is what makes
+    # the record's shape unchanged by the producer turnover; what changed is the
+    # TIER on the row, which is what makes the reader skip it.
+    assert any("node_identity" in s.sql for s in statements), (
+        "no `node_identity` row — the CONTAINS relation rows below cannot "
+        "satisfy their composite FK")
+
+
+def test_a_carrier_with_no_turns_is_REFUSED():
+    """A carrier that carries no turn reports a capture as filed while the
+    record holds none of its transcript — refuse rather than emit nothing."""
+    with pytest.raises(rp.RecordProjectionError, match="turns"):
+        rp.mutations_for({"type": rp.TURNS_RECORD_TYPE,
+                          "turns": []}, org_id="o", graph_id="g")
+
+
+def test_an_armed_capture_writes_NO_graph_event_for_its_turns(
+        armed_sdk, monkeypatch):
+    """THE CHANGE-FEED DECISION, pinned (#10017 step 7; required by the issue's
+    own instruction of 2026-10-27T03:21:55Z).
+
+    On this lane the writer deliberately stores no turn NODE, so a `:GraphEvent`
+    about a turn would advertise an entity no graph read can return. Turns
+    therefore LEAVE `poll_events` — at BOTH ends: no creation row (the carrier is
+    not in `_GRAPH_EVENT_TYPES`) and no stale-sweep `PointRetracted` row (gated on
+    the same capability), which a previous head emitted for a turn the feed never
+    saw created.
+
+    The second capture is SHORTER, so it runs the stale sweep over turn `_t2` —
+    that is the leg a creation-only assertion would miss.
+    """
+    _capture_with_record_armed(armed_sdk, monkeypatch)
+    _capture_with_record_armed(armed_sdk, monkeypatch, turns=CONV[:1])
+    proj = armed_sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (e:GraphEvent) WHERE e.payload CONTAINS $sid "
+        "RETURN e.type, e.payload", params={"sid": SESSION_ID}).result_set
+    turn_payloads = [row for row in rows
+                     if any(tid in str(row[1]) for tid in EXPECTED_TURN_IDS)]
+    assert turn_payloads == [], (
+        "the change feed gained an event about a turn the graph does not hold: "
+        f"{turn_payloads}")
+    # `poll_events` is the subscriber surface the drop is visible on.
+    served = armed_sdk.poll_events()
+    assert not [e for e in served["events"]
+                if any(tid in str(e) for tid in EXPECTED_TURN_IDS)], (
+        "poll_events still serves a turn event on the record-held lane")
+
+
+def test_the_GRAPH_held_lane_still_announces_its_turns(tmp_path, monkeypatch):
+    """The NEGATIVE CONTROL for the drop above: with no record armed the graph
+    holds the turns, so the per-turn `PointAdded` — and its `:GraphEvent` — must
+    still exist. Without this leg the "no turn event" assertion would pass on a
+    lane that emits no events at all."""
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=_journal(tmp_path))
+    try:
+        sdk.capture_session(CONV, session_id=SESSION_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload"
+        ).result_set
+        served = " ".join(str(r[0]) for r in rows)
+        assert SESSION_ID in served, (
+            "the graph-held lane emitted no PointAdded event for the capture — "
+            "the negative control for the change-feed drop is vacuous")
+    finally:
+        sdk.close()
 
 
 def test_a_rebuild_from_the_carrier_journal_creates_no_turn_nodes(
@@ -177,7 +295,8 @@ def test_the_carrier_folds_NOWHERE_in_the_graph():
     """`_NO_PROJECTION_FOLD` is the ONE declaration both engines read
     (`apply()` and `rebuild_all` pass 1b), so one entry covers both — and a
     second, per-engine list is how the two engines come to disagree."""
-    assert rp.TURN_RECORD_TYPE in projection_mod._NO_PROJECTION_FOLD
+    assert rp.TURNS_RECORD_TYPE in projection_mod._NO_PROJECTION_FOLD
+    assert rp.TURNS_RECORD_TYPE in projection_mod._NO_POINT_FOLD
 
 
 def test_a_torn_tail_carrying_the_carrier_does_not_block_recovery():
@@ -185,11 +304,18 @@ def test_a_torn_tail_carrying_the_carrier_does_not_block_recovery():
 
     Its polarity is deliberate — a NEW type defaults to REFUSED — so omitting
     the carrier would make `rebuild`/`recover_from_log`/`backup.restore` refuse
-    an intact journal whose last append was a capture cut off mid-line. The R1
+    an intact journal whose last append was a capture cut off mid-line. #10129
+    left this classification as a PLACEHOLDER for step 7; it is settled here:
+    `_emit_event` returns on an append failure BEFORE the record write, so a torn
+    carrier means that capture reached no store either way — refusing would make
+    the whole journal unrecoverable for a loss it cannot recover. The R1
     REMOVAL record must stay OUT of it: a tolerated torn delete is a
     resurrection.
     """
-    assert rp.TURN_RECORD_TYPE in log_mod.TORN_TAIL_HARMLESS_EVENT_TYPES
+    assert rp.TURNS_RECORD_TYPE in log_mod.TORN_TAIL_HARMLESS_EVENT_TYPES
+    # …while the R1 removal record stays refused, so the asymmetry is pinned in
+    # the same leg that pins the tolerance.
+    assert "EntityMutated" not in log_mod.TORN_TAIL_HARMLESS_EVENT_TYPES
 
 
 # ════════════════════════════════════════════════════════════════════════════

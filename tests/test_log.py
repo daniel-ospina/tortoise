@@ -26,7 +26,7 @@ from tortoise.record_projection import (
     NARRATIVE_RECORD_TYPE as _NARRATIVE_RECORD_TYPE,
 )
 from tortoise.record_projection import (
-    TURN_RECORD_TYPE as _TURN_RECORD_TYPE,
+    TURNS_RECORD_TYPE as _TURNS_RECORD_TYPE,
 )
 
 
@@ -590,7 +590,7 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         # default: the polarity here is "a NEW type defaults to REFUSED", so a
         # capture cut off mid-line would otherwise block `rebuild`,
         # `recover_from_log` and `backup.restore` on an intact journal.
-        _TURN_RECORD_TYPE,
+        _TURNS_RECORD_TYPE,
     }) == TORN_TAIL_HARMLESS_EVENT_TYPES
     # Named terminal / removal / CLEARING types that would resurrect state if
     # tolerated. PointInvalidated / PointSuperseded are EP-terminal (a dropped

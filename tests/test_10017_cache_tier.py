@@ -26,7 +26,8 @@ draft carried it through the payload straight into the column. Keeping only
 (`create_point(cache_tier=...)`, measured); keeping only #10070's strip silently
 killed R2's record half. Both are kept here: the strip stays, and R2's tier
 reaches the COLUMN through one explicit statement that only the CARRIER may
-issue (`record_projection._declared_mutations`). The property pinned is
+issue (`record_projection._turn_row_statements`, the carrier-keyed projection
+that writes one `public.point` row per turn in `turns`). The property pinned is
 unchanged — a turn row is `record_only` and never a node — and it is pinned from
 one more direction (a forged `PointAdded` cannot move it).
 """
@@ -114,9 +115,11 @@ def test_the_carrier_writes_the_tier_to_the_column_not_the_props_tail() -> None:
     COLUMN and the props tail does not carry the key at all.
     """
     statements = rp.mutations_for(
-        {"type": rp.TURN_RECORD_TYPE,
-         "point": {"id": "s1_t0", "content": "c", "is_episodic": True,
-                   "cache_tier": RECORD_ONLY_TIER}},
+        {"type": rp.TURNS_RECORD_TYPE, "contains_session": "s1",
+         "turns": [{"id": "s1_t0", "content": "c", "is_episodic": True,
+                    "pointKind": "event", "speaker": "user",
+                    "status": "draft", "createdAt": "2026-10-25T00:00:00Z",
+                    "embedding": None}]},
         org_id="o", graph_id="g")
     insert = next(s for s in statements
                   if s.sql.startswith("INSERT INTO public.point"))
@@ -127,13 +130,13 @@ def test_the_carrier_writes_the_tier_to_the_column_not_the_props_tail() -> None:
     assert "cache_tier" not in str(insert.params[-1]), insert.params[-1]
 
 
-def test_a_carrier_that_does_not_declare_its_tier_is_REFUSED() -> None:
-    """A `TurnRecorded` without the tier is not a turn row — it is a graph node
-    waiting to be materialised. Refuse rather than fall back to the DEFAULT."""
-    with pytest.raises(rp.RecordProjectionError, match="declare the row's tier"):
+def test_a_carrier_with_no_turns_is_REFUSED() -> None:
+    """A `TurnsRecorded` with an empty turn list is not a turn row — it reports a
+    capture as filed while the record holds none of it. Refuse rather than fall
+    back to an empty statement set (the DEFAULT-tier bug's silent cousin)."""
+    with pytest.raises(rp.RecordProjectionError, match="turns"):
         rp.mutations_for(
-            {"type": rp.TURN_RECORD_TYPE,
-             "point": {"id": "s1_t0", "content": "c", "is_episodic": True}},
+            {"type": rp.TURNS_RECORD_TYPE, "turns": []},
             org_id="o", graph_id="g")
 
 

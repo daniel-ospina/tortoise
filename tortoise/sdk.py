@@ -8941,7 +8941,10 @@ class TortoiseSDK:
                         "degraded state failed too (#9208)", type_)
 
         # ── JSONL event log (#548) ─────────────────────────────────
-        if point is None and id is None:
+        # `turns` is a payload like `point` is (#10017 step 7): a carrier with no
+        # point and no id is still the ONLY record of a capture's transcript, so
+        # treating it as "nothing meaningful to log" silently dropped it.
+        if point is None and id is None and not extra.get("turns"):
             return None  # nothing meaningful to log
         log = self._get_event_log()
         if log is None:
