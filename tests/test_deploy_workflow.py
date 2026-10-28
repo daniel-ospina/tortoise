@@ -3170,9 +3170,11 @@ def test_the_readiness_request_bound_clears_the_servers_own_bound() -> None:
     gate shipped a shared 5 s knob, so a healthy-but-slow release answering
     between 5 s and 11.6 s was cut off, curl printed `000`, and phase 3 reported
     it as "no response from the app" — the indistinguishable-failure class the
-    gate exists to avoid. `_READY_PROBE` is `fresh_only=True` and the polls are
-    15 s apart, so EVERY poll re-probes and a sustained slow data plane fails the
-    whole phase.
+    gate exists to avoid. `_READY_PROBE` is `fresh_only=True`, so a completed
+    result is served only while it is younger than its own read budget
+    (``monitoring.HealthProbe._view_locked``: ``max_age = self._timeout``), and
+    the polls are ``READY_SLEEP`` (10 s) apart — older than that budget — so
+    EVERY poll re-probes and a sustained slow data plane fails the whole phase.
     """
     gate = (_REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh").read_text(
         encoding="utf-8")
@@ -3218,6 +3220,73 @@ def _gate_knob(gate: str, name: str) -> int:
     match = re.search(rf'{name}="\$\{{{name}:-(\d+)\}}"', gate)
     assert match, f"{name} is not a numeric default in deploy-health-gate.sh"
     return int(match.group(1))
+
+
+def test_the_deploy_retry_loop_fits_under_the_cap_that_kills_it() -> None:
+    """`deploy-api`'s cap is derived ABOVE its retry loop, and nothing pinned it.
+
+    The loop is the reason that cap is hand-derived rather than a round multiple
+    of a measured duration: ``5 x (attempt bound + kill grace) + 4 x retry
+    sleep`` is a worst case nobody re-derives by eye. The health gate has a pin
+    of exactly this shape (`test_the_health_gate_budget_stays_under_the_cap_that
+    _kills_it`); this job had none, so `timeout -k 30s 11m` could be edited to
+    `15m` — making the loop's worst case 80.5 min against a 65-minute cap — with
+    every test still green.
+
+    Why it matters more here than anywhere else: a `timeout-minutes` kill ends
+    the job BEFORE `if: failure()` is evaluated, so the #2240 out-of-band alert
+    never runs and a LIVE, unhealthy release reports only as a red run. If the cap
+    is what kills attempt 5, the per-attempt bound — the whole point of the loop —
+    is no longer the bound, and the alert goes with it.
+
+    Read off the SHIPPED workflow rather than restated: the attempt count, the
+    per-attempt `timeout -k <grace> <bound>`, the retry sleep, and the cap.
+    """
+    raw = _WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(raw)
+
+    loop = re.search(
+        r"for attempt in ([0-9 ]+); do\n.*?timeout -k ([0-9]+)s ([0-9]+)m .*?\n"
+        r".*?sleep ([0-9]+)\n",
+        raw,
+        re.S,
+    )
+    assert loop, (
+        "the deploy-api retry loop is no longer a `for attempt in …; do` block with "
+        "`timeout -k <grace>s <bound>m` followed by a retry `sleep <n>` — the "
+        "arithmetic this pin recomputes has nothing to read. Restate the derivation "
+        "here if the loop is reshaped."
+    )
+    attempts = len(loop.group(1).split())
+    grace_min = int(loop.group(2)) / 60
+    bound_min = int(loop.group(3))
+    sleep_min = int(loop.group(4)) / 60
+
+    # No sleep is charged after the LAST attempt — the loop exits immediately, so
+    # only `attempts - 1` retries are paid for.
+    worst = attempts * (bound_min + grace_min) + (attempts - 1) * sleep_min
+
+    cap = workflow["jobs"]["deploy-api"].get("timeout-minutes")
+    assert isinstance(cap, int), (
+        f"deploy-api has no integer timeout-minutes ({cap!r}) — the retry loop's "
+        "worst case would be bounded by GitHub's 360-minute default, and a kill at "
+        "that point still skips if: failure() and silences the #2240 alert"
+    )
+    assert worst < cap, (
+        f"the deploy retry loop's worst case is {worst:g} min "
+        f"({attempts} x ({bound_min:g} + {grace_min:g}) + {attempts - 1} x "
+        f"{sleep_min:g}) but deploy-api is capped at {cap} min — the CAP would be "
+        "what kills the last attempt, so the per-attempt bound stops being the "
+        "bound and the `if: failure()` alert never runs. Either tighten the attempt "
+        "bound or raise the cap in the same commit."
+    )
+    # The other direction is a defect too: a cap that only BARELY clears the loop
+    # leaves nothing for the job's other steps, and one of those raises the alert.
+    assert worst + 0.5 < cap, (
+        f"deploy-api's {cap}-minute cap leaves {cap - worst:g} min over the retry "
+        "loop's worst case for the job's other thirteen steps (one of which raises "
+        "the #2240 alert) — the headroom is the point, not padding"
+    )
 
 
 def test_the_health_gate_budget_stays_under_the_cap_that_kills_it() -> None:

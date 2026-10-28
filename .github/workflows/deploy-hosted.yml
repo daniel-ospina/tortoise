@@ -1132,8 +1132,10 @@ jobs:
       #   cannot file.
       # RESIDUAL, named rather than papered over
       #   This is an IN-JOB notifier, so it cannot report a job that never reached
-      #   its last step: a runner loss, a `timeout-minutes` kill or a cancellation
-      #   (`cancel-in-progress`) ends the job before `if: failure()` is evaluated.
+      #   its last step: a runner loss, a `timeout-minutes` kill, or a run
+      #   superseded while it was still PENDING (`cancel-in-progress: false` stops
+      #   a RUNNING deploy being cancelled but cannot save a pending one) ends the
+      #   job before `if: failure()` is evaluated.
       #   A 4th job with `needs: [all three]` + `if: failure()` would cover those,
       #   but cross-job `steps.*.outcome` is not available, so it would lose the
       #   per-step attribution this design exists for — and it still would not

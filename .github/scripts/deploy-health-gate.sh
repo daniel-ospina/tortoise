@@ -121,13 +121,23 @@ READY_SLEEP="${READY_SLEEP:-10}"
 # reported only as a red run with a truncated log. Measured: the caller's cap
 # (deploy-hosted.yml `post-deploy-verify`) was justified as 2× a “≤ 6.4 min”
 # worst case that assumed every curl returned INSTANTLY.
-# ⛔ ONE KNOB PER SERVER-SIDE BOUND, never one knob for both probed endpoints.
-# They cost different things on the SERVER, so a single figure is too tight for
-# one of them — and a client bound below the server's own bound reds a HEALTHY
-# but slow release (the 200 arrives after curl gave up, curl prints 000, and
-# phase 3 reports it as "no response from the app", the indistinguishable-
-# failure class this file exists to avoid).
-#   • `/health` is an in-memory snapshot — no I/O — so 5 s is generous.
+# ⛔ ONE KNOB PER REQUEST, never one knob for every request. The unit is the
+# REQUEST, not the endpoint: two requests to the SAME path can cost the caller
+# different things, and a client bound below the server's own bound reds a
+# HEALTHY but slow release (the 200 arrives after curl gave up, curl prints
+# 000, and phase 3 reports it as "no response from the app", the
+# indistinguishable-failure class this file exists to avoid).
+#   • phase 1 hits `/health` — an in-memory snapshot, no I/O — as the FIRST
+#     request of the run, against a container that has only just started. The
+#     cold-start cost of that first request (DNS/TLS, runtime warm-up, first
+#     touch of the code path) is NOT the endpoint's own I/O, and it is the one
+#     request whose failure aborts the whole gate, so it gets the LOOSER bound:
+#     `CURL_MAX_TIME_APP` = 10 s.
+#   • phase 2 hits the SAME `/health` with a TIGHTER bound
+#     (`CURL_MAX_TIME_HEALTH` = 5 s), because it runs only after phase 1 has
+#     already proven reachability and it is a bounded POLL: 18 × (5 + 10) = 270 s
+#     is the budget that has to hold, and a slack per-request bound is what
+#     would make it not hold.
 #   • `/health/ready` runs BOTH plane coordinators SEQUENTIALLY in Supabase mode
 #     (`hosted_api.health_ready`: `_READY_PROBE` then `_CONTROL_PLANE_PROBE`),
 #     and each enforces its OWN hard bound:
@@ -140,9 +150,12 @@ READY_SLEEP="${READY_SLEEP:-10}"
 #     → the server's declared worst case is 11.6 s, so the client bound is
 #     derived ABOVE it (11.6 → 13, ~1.12×): a bound must bind the REQUEST, and
 #     the request is the whole two-plane call. Re-derive it if either constant
-#     moves. `_READY_PROBE` is `fresh_only=True` and the polls are 15 s apart,
-#     so EVERY poll re-probes — a sustained slow data plane must not be read as
-#     a dead one, which is exactly what a 5 s bound did.
+#     moves. `_READY_PROBE` is `fresh_only=True`, so a completed result is
+#     served only while it is younger than its OWN read budget
+#     (`monitoring.HealthProbe._view_locked` → `max_age = self._timeout` =
+#     5.6 s); the polls are `READY_SLEEP` = 10 s apart, i.e. older than that
+#     budget, so EVERY poll re-probes. A sustained slow data plane must not be
+#     read as a dead one, which is exactly what a 5 s bound did.
 # With these bounds the worst case IS a number:
 #   phase 1  5 × (10 + 5)  = 75 s
 #   phase 2 18 × ( 5 + 10) = 270 s
