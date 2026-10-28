@@ -556,6 +556,42 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 - PRs auto-merge by default (no staging hold unless `deploy:staging` label)
 - Pre-commit hook enforces agent-infra version sync via `.husky/pre-commit`
 
+### ⛔ HARD RULE: Every lane leaves a `WORKTREE-REPORT.md` — silence is not a result
+
+**Owner ruling, 2026-10-28 (#10220, relayed verbatim):** *"every lane writes
+`WORKTREE-REPORT.md` before it exits: worktree + branch, files changed, each suite run with
+pass/fail/skip counts, the commands used, and anything it could not do … name the file exactly
+`WORKTREE-REPORT.md`, put it at the worktree root, and include the suite commands verbatim (the
+verifier has no other way to tell 'ran 37 tests' from 'wrote 37')."*
+
+The reason it is a rule and not advice: a lane's outcome used to live **only in its reply**. Two
+measured lanes (#8933 stage 1, #10122) finished complete and green, ran past the 660-second
+silence threshold, returned *nothing at all*, and were recovered only because a human guessed to
+run `git status` inside `.worktrees/`. A file on disk survives a truncated reply; a message does
+not.
+
+```bash
+uv run python tools/worktree_report.py init --issue <N>          # FIRST, before any test run
+uv run python tools/worktree_report.py run --cmd '<the exact command you would type>'
+uv run python tools/worktree_report.py note --not-done '<what you could not do, and why>'
+uv run python tools/worktree_report.py check                     # 0 green · 3 red-but-valid · 1 invalid
+```
+
+- ⛔ **Never hand-write the report, and never assert a count.** The tool derives pass/fail/skip
+  from the output it captured, and has no flag that could accept a number from you — that is the
+  whole point of the artifact, and `check` re-parses the log to enforce it. A hand-written report
+  fails `state-missing`.
+- `init` is written BEFORE the first suite, so a lane that is killed mid-run still leaves its
+  worktree, branch and file list behind — that is the recovery artifact, not the final summary.
+- A **red** suite is recorded honestly and is valid evidence (`check` exits `3`, never `0`), so
+  never drop a failing suite from the report to make it look green.
+- Its files (`WORKTREE-REPORT.md`, `.worktree-report/`) are gitignored and never committed: they
+  describe the working tree, not the product.
+
+**Scope, so this is not duplicated:** this rule is the *producer*. The merge-path refusal to merge
+a lane whose report is missing/empty/unevidenced is `agent-infra#2977` (`merge-one.sh`), which
+calls `worktree_report.py check` rather than re-implementing the format.
+
 ### Testing
 
 > Epic #1647 (P4): `pytest` now defaults to the DOCKER lane — a URI-less

@@ -2422,6 +2422,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_worktree_report_tool_change_selects_core_not_tier1():
+    """A change to the lane report must run the rules it pins (#10220).
+
+    `tests/test_worktree_report.py` is registered on the `core` surface and owns the
+    report's anti-fabrication guarantees — the counts are derived from a log that is
+    re-hashed and re-parsed, a red suite exits 3 and never 0, an unfinished suite is
+    refused. That registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/worktree_report.py`, so `select()` returns NO surface, takes the
+    docs-only early return and falls back to the tier-1 smoke set, which does not
+    contain the file. Weakening a rule would then be the one PR that never ran the
+    cases pinning it — and that tool is what the merge path reads as a lane's test
+    evidence (`agent-infra#2977`), so the drop would be invisible where it matters most.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/worktree_report.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_worktree_report.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ax_write_eval_tool_change_selects_core_not_tier1():
     """A change to the eval instrument must run the rules it pins (#9695 review).
 
