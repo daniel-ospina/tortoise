@@ -40,8 +40,10 @@ vendor documents ``questions`` as a map, every question's ``type`` and
 of 2-10 levels** for ``score``, and ``state`` as a string, object or array. A
 caller that has been live on the vendor endpoint since the migration
 (``agent-infra/scripts/turn-classify.py``) additionally corroborates the
-``choice`` criteria map and the ``model`` field in the envelope — the pin
-:func:`_decide` enforces.
+``choice`` criteria map and the ``model`` field in the envelope — the field
+:func:`_decide` READS to record which version answered. :data:`MODEL` is the
+vendor ALIAS by owner ruling, so that echo is a receipt, never an accept/reject
+gate (see the :data:`MODEL` note).
 
 **What is not documented is the element attribution, and it is the one that
 fails SILENTLY.** ``state`` is sent as an array of ``{id, text}`` and each
@@ -64,7 +66,7 @@ label, which is the one direction that is unsafe under every policy:
 
 ===========================  =========================================  ==========================================
 step                         capability unavailable (no key / 429 /      answer unparseable or out of schema
-                             timeout / 5xx / model-pin mismatch)
+                             timeout / 5xx)
 ===========================  =========================================  ==========================================
 **S2.2 VET**                 **no verdict** for the candidate — it keeps    **no verdict**, and the failing
                              whatever the gate already decided           question is NAMED in
@@ -120,13 +122,24 @@ from typing import Any
 
 from .env_truthy import is_truthy
 
-# ── The capability (pinned, exactly as the fleet's deployed callers pin it) ──
+# ── The capability (the vendor's endpoint + the fleet's request shape) ──
 
-#: The pinned model. The endpoint resolves and returns a ``model`` on every
-#: response; a response that omits it or names another one is rejected
-#: (:func:`_decide`) — otherwise a drifting service would be trusted under this
-#: pin's identity, forever, in whatever artifact recorded the decision.
-MODEL = "jev-1.13.0"
+#: The model the fleet SENDS — the vendor ALIAS, by owner ruling 2026-10-27
+#: ("let's use jev latest"), recorded with its reason on ``agent-infra#2915``
+#: and restated in this repo at ``.env.example`` (the TypeSafe block) and
+#: ``AGENTS.md``. The alias resolves to whatever version the vendor ships
+#: (``jev-1.14.0`` in the 2026-10-26/27 measurements). That is a deliberate,
+#: recorded departure from the vendor's own recommendation (send a version ID,
+#: not an alias, when thresholds are tuned), so this seam sends the alias too and
+#: :func:`_decide` RECORDS the concrete version the response echoes instead of
+#: asserting it (:func:`_record_served` → ``stats["model_served"]``).
+#: ⛔ Asserting the echo would make an ARMED seam inert on the vendor's next
+#: release: every call would raise :class:`Unavailable`, VET would keep
+#: everything and the classify tail would fall back to kNN — the inert-enforcer
+#: class this module exists to avoid. The echo is the receipt that makes a
+#: shifted verdict visible instead of inferred, and it rides into the gate and
+#: classifier records beside ``prompt`` and ``cost_usd``.
+MODEL = "jev-latest"
 
 #: The VENDOR's endpoint — ``api.typesafe.ai``, never ``jevtypesafeai.com``.
 #: The fleet billed the lookalike host until 2026-10-26 (``tortoise#7864`` paid
@@ -140,11 +153,14 @@ MODEL = "jev-1.13.0"
 #: Verified live rather than quoted: ``GET https://api.typesafe.ai/v1/systemone``
 #: answers ``405`` and a ``POST`` with no key answers ``403
 #: {"error_type":"authentication_error"}`` — the host is the vendor's and the
-#: path exists. The MODEL pin and the request's outer shape are corroborated by
-#: a caller that has been live on this endpoint since the migration
-#: (``agent-infra/scripts/turn-classify.py``, ``JEV_URL = api.typesafe.ai…``,
-#: ``JEV_MODEL = jev-1.13.0``); see ``docs/architecture/S2-DECISION-SEAM.md`` §2
-#: for exactly which parts that corroborates and which are still unexercised.
+#: path exists. The request's outer shape is corroborated by a caller that has
+#: been live on this endpoint since the migration
+#: (``agent-infra/scripts/turn-classify.py``, ``JEV_URL = api.typesafe.ai…``);
+#: that caller sends the same vendor ALIAS (``JEV_MODEL = jev-latest``, settled
+#: into agent-infra ``main`` by ``agent-infra#2914`` the day after the ruling),
+#: which is why :data:`MODEL` is the alias and not a version pin. See
+#: ``docs/architecture/S2-DECISION-SEAM.md`` §2 for exactly which parts that
+#: corroborates and which are still unexercised.
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 #: OFF by default — and the reason: the seam puts a NETWORK CALL and a SPEND on
@@ -468,28 +484,59 @@ def _http_post(payload: dict, *, timeout: float) -> Any:
 
 
 def _decide(payload: dict, *, transport: Callable[[dict], Any] | None,
-            timeout: float) -> tuple[Mapping, dict]:
-    """One decision round trip → ``(answers, usage)``.
+            timeout: float) -> tuple[Mapping, dict, str | None]:
+    """One decision round trip → ``(answers, usage, served_model)``.
 
     Validates the envelope, not the answers: the answer-level schema lives in
     the three parsers, because *which* validation applies depends on the
     question that was asked.
+
+    ``served_model`` is the ``model`` the response echoed, handed to the caller
+    so it can RECORD it (:func:`_record_served`) — it is never compared to
+    :data:`MODEL`. :data:`MODEL` is the vendor ALIAS by owner ruling, so the echo
+    is EXPECTED to name a concrete version the alias resolved to; refusing a
+    different name would make every armed pass inert on the vendor's next
+    release. A response that omits the field (or echoes a non-string) still
+    answers — nothing about the decision depends on the name — and the absence is
+    recorded as ``None``, so the artifact says "unknown version", never
+    "the pin".
     """
     raw = transport(payload) if transport is not None else _http_post(
         payload, timeout=timeout)
     if not isinstance(raw, Mapping):
         raise Unavailable("response is not an object")
     served = raw.get("model")
-    if not (isinstance(served, str) and served == MODEL):
-        # The endpoint is a pinned-version service and its contract returns the
-        # resolved model. Omitted or different ⇒ malformed ⇒ fail closed; a
-        # decision from an unverified model must never be recorded as this pin's.
-        raise Unavailable(f"model mismatch: {_one_line(served, 40)!r}")
+    if not isinstance(served, str) or not served.strip():
+        served = None
     answers = raw.get("answers")
     if not isinstance(answers, Mapping):
         raise Unavailable("response has no answers map")
     usage = raw.get("usage")
-    return answers, (dict(usage) if isinstance(usage, Mapping) else {})
+    return answers, (dict(usage) if isinstance(usage, Mapping) else {}), served
+
+
+def _record_served(stats: dict, served: str | None) -> None:
+    """Fold the concrete version that answered into ``stats["model_served"]``.
+
+    :data:`MODEL` is the vendor ALIAS (owner ruling 2026-10-27), so the echoed
+    version is the only receipt of WHICH model's bands decided an item — and the
+    one fact that makes a threshold shift visible instead of inferred
+    (``.env.example``: "The response echoes the concrete version that answered —
+    record it"). One version stays a string; versions that differ across the
+    pass's calls become a sorted list, so a roll mid-pass is visible rather than
+    silently showing the last one; an omitted echo stays ``None``.
+    """
+    seen = stats.get("model_served")
+    if seen is None:
+        stats["model_served"] = served
+    elif served is None or seen == served:
+        return
+    elif isinstance(seen, list):
+        if served not in seen:
+            seen.append(served)
+            seen.sort()
+    else:
+        stats["model_served"] = sorted([seen, served])
 
 
 # ── The parser: validate, never trust ──────────────────────────────────────
@@ -693,6 +740,7 @@ def vet_verdicts(
     stats: dict = {
         "prompt": VET_PROMPT,
         "model": MODEL,
+        "model_served": None,
         "bands": bands.as_record(),
         "items": 0,
         "calls": 0,
@@ -719,7 +767,8 @@ def vet_verdicts(
             questions.update(_vet_questions(pos, f"c{pos}"))
         payload = {"model": MODEL, "state": state, "questions": questions}
         try:
-            answers, usage = _decide(payload, transport=transport, timeout=timeout)
+            answers, usage, served = _decide(payload, transport=transport,
+                                             timeout=timeout)
         except Unavailable as exc:
             # The whole chunk degrades together: the answers of a failed call do
             # not exist, so a per-item guess would be an invention — and no
@@ -727,8 +776,8 @@ def vet_verdicts(
             #
             # The PASS ends here rather than retrying the next chunk:
             # ``Unavailable`` is the step-level "capability unavailable" state
-            # of the docstring's table (no key / 429 / timeout / 5xx / pin
-            # mismatch), the module declares no retry ladder, and a per-chunk
+            # of the docstring's table (no key / 429 / timeout / 5xx), the
+            # module declares no retry ladder, and a per-chunk
             # continuation would be one — serially, at up to ``timeout`` each, on
             # the synchronous write path. The remaining items are recorded
             # degraded with the same reason instead of being left unnamed, so the
@@ -741,6 +790,7 @@ def vet_verdicts(
             break
         stats["calls"] += 1
         _add_cost(stats, usage)
+        _record_served(stats, served)
         if _answers_are_identical_across_chunk(answers, len(chunk)):
             # ⛔ ELEMENT ATTRIBUTION is the one request shape the vendor's
             # reference page does not document (design record §2, "the one that
@@ -854,6 +904,7 @@ def classify_tail(
     stats: dict = {
         "prompt": CLASSIFY_PROMPT,
         "model": MODEL,
+        "model_served": None,
         "items": 0,
         "calls": 0,
         "cost_usd": 0.0,
@@ -891,7 +942,8 @@ def classify_tail(
             }
         payload = {"model": MODEL, "state": state, "questions": questions}
         try:
-            answers, usage = _decide(payload, transport=transport, timeout=timeout)
+            answers, usage, served = _decide(payload, transport=transport,
+                                             timeout=timeout)
         except Unavailable:
             # Same short-circuit as the VET side: one unavailable call is the
             # step-level state, and continuing would be a serial retry ladder on
@@ -902,6 +954,7 @@ def classify_tail(
             break
         stats["calls"] += 1
         _add_cost(stats, usage)
+        _record_served(stats, served)
         for pos, (iid, _text, offered) in enumerate(chunk):
             try:
                 assignments[iid] = _choice(answers, f"kind_c{pos}", offered)

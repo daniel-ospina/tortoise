@@ -30,7 +30,7 @@ accepts), the atomicity veto on a fused candidate, and — see the unpinned-mode
 assertion — an envelope floor asserted against an empty answer map, which fails
 at ``_answer`` rather than at the pin it claims to test. The fifth and sixth
 tests supply the input each guard exists to refuse: the parsers' guards, and then
-``Bands``' ordering, ``_add_cost``'s non-negativity, ``classify_tail``'s
+``_Bands``' ordering, ``_add_cost``'s non-negativity, ``classify_tail``'s
 empty-offer filter, and — added by the round-7 review — the three guards that are
 not about answers at all: the request never goes through a redirect-following
 ``urlopen`` (which would replay the bearer key to a 3xx target), the arming read is
@@ -60,10 +60,16 @@ from tortoise.kind_index import KindIndex, _clear_index_cache  # noqa: E402, RUF
 
 # ── stubs ──────────────────────────────────────────────────────────────────
 
-def _envelope(answers: dict) -> dict:
-    """The endpoint's response envelope — the pinned model and an answers map,
-    which is what ``_decide`` validates before any answer is read."""
-    return {"model": seam.MODEL, "answers": answers,
+def _envelope(answers: dict, *, model: str | None = "jev-1.14.0") -> dict:
+    """The endpoint's response envelope — the model ECHO and an answers map.
+
+    The echo is a CONCRETE version, deliberately not :data:`seam.MODEL`: the
+    fleet sends the vendor ALIAS (owner ruling 2026-10-27), so the alias is what a
+    request carries and the resolved version is what a response names. A stub
+    that echoed our own constant back would make the recording self-referential
+    and could never red a seam that refused a legitimate version echo.
+    """
+    return {"model": model, "answers": answers,
             "usage": {"input_tokens": 100, "cost_usd": 0.00004}}
 
 
@@ -171,9 +177,12 @@ def test_a_valid_typed_answer_produces_the_expected_verdict():
 def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch):
     """Three malformed answers, both steps: wrong primitive, a score off the
     declared scale, and a choice outside the offered set. None may become a
-    verdict, and the record must name the question that failed. The two
-    envelope-level floors ride along, one line each: the seam is not consulted
-    unless it is ARMED, and an answer from an unpinned model is not an answer.
+    nothing may become a
+    verdict, and the record must name the question that failed. Two envelope-level
+    facts ride along, one line each: the seam is not consulted unless it is ARMED,
+    and the response's model echo is RECORDED rather than asserted (the fleet
+    sends the vendor alias, so the echo is a concrete version; a refusal here
+    would make an armed seam inert on the vendor's next release).
 
     Mutants this reddens, each breaking one guard:
       * ``_score`` dropping its ``0..hi`` range check — 9.0 on a 0..3 scale reads
@@ -246,10 +255,12 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
         "first line of defence, or the seam is trusting whatever comes back")
     assert any("kind_c0" in r for r in classified["stats"]["seam"]["rejected"])
 
-    # The two envelope-level floors: OFF is the production default, and an answer
-    # from a model that is not the pin is not an answer. The flag is DELETED
-    # first — an operator shell with it exported is the documented armed state,
-    # and reading the ambient environment here would red the suite for it.
+    # The two envelope-level facts: OFF is the production default, and the
+    # model a response ECHOES is recorded, never compared to the alias we sent
+    # (the fleet sends `jev-latest` by owner ruling 2026-10-27 — agent-infra#2915,
+    # restated in `.env.example` and AGENTS.md). The flag is DELETED first — an
+    # operator shell with it exported is the documented armed state, and reading
+    # the ambient environment here would red the suite for it.
     monkeypatch.delenv(seam.ENV_FLAG, raising=False)
     assert seam.seam_enabled() is False
     monkeypatch.setenv(seam.ENV_FLAG, "1")
@@ -269,24 +280,48 @@ def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch
     injected = object()
     assert v2._s2_seam_arbiter(injected) is injected, "an injected arbiter always wins"
 
-    # A FULLY VALID, in-schema answer pair served under the WRONG model. The
-    # answers must be well-formed or this assertion passes for the wrong reason:
-    # an empty `answers` map fails at `_answer` ("missing answer"), not at the
-    # pin, and the check stays green with the pin deleted. `unavailable` is what
-    # pins the CAUSE — the envelope floor, not the parser.
-    unpinned_verdicts, unpinned_stats = seam.vet_verdicts(
+    # The ALIAS is a recorded owner decision (2026-10-27, "let's use jev
+    # latest"), and the literal is pinned the way ENDPOINT is: reintroducing a
+    # version pin here silently voids every armed pass, because the vendor's alias
+    # resolves to a version that is not the one we would name. No stub that echoes
+    # `seam.MODEL` back can red that, so the constant itself is asserted.
+    assert seam.MODEL == "jev-latest", (
+        "the fleet sends the vendor ALIAS by owner ruling 2026-10-27 "
+        f"(agent-infra#2915) — got {seam.MODEL!r}")
+
+    # A FULLY VALID, in-schema answer pair served under a CONCRETE version the
+    # alias resolved to — which is the NORMAL case, not an anomaly. It must
+    # produce a verdict AND record the version that answered: a seam that refused
+    # it would report itself armed while keeping everything and falling back to
+    # kNN forever (the inert-enforcer class this module argues against).
+    served_verdicts, served_stats = seam.vet_verdicts(
         [{"id": "p0", "text": "a claim"}],
-        transport=lambda _payload: {"model": "jev-2", "answers": {
+        transport=lambda _payload: _envelope({
             "keep_c0": {"type": "noul", "noul": 0.93},
             "atomic_c0": {"type": "score", "score": 3.0},
-        }},
+        }),
     )
-    assert [(v["outcome"], v["rule_id"]) for v in unpinned_verdicts] == [], (
-        "an unverified model's answer is no verdict at all, not a NOOP one")
-    assert unpinned_stats["unavailable"] == 1, (
-        "the pin must be what refused it — got a schema reject instead: "
-        f"{unpinned_stats['schema_rejects']!r}")
-    assert unpinned_stats["schema_rejects"] == []
+    assert [(v["outcome"], v["rule_id"]) for v in served_verdicts] == [
+        ("KEEP", seam.RULE_SEAM)], (
+        "a version echo other than the alias is the NORMAL case and must be "
+        "decided, not refused")
+    assert served_stats["unavailable"] == 0
+    assert served_stats["model"] == seam.MODEL, "the record names what was ASKED"
+    assert served_stats["model_served"] == "jev-1.14.0", (
+        "the record must name the CONCRETE version that ANSWERED — that echo is "
+        "what makes a shifted threshold visible instead of inferred")
+
+    # …and an OMITTED echo answers too, recorded as None ("unknown version"),
+    # never as "the pin": the name is provenance, not the decision's premise.
+    absent_verdicts, absent_stats = seam.vet_verdicts(
+        [{"id": "p0", "text": "a claim"}],
+        transport=lambda _payload: _envelope({
+            "keep_c0": {"type": "noul", "noul": 0.93},
+            "atomic_c0": {"type": "score", "score": 3.0},
+        }, model=None),
+    )
+    assert len(absent_verdicts) == 1 and absent_stats["unavailable"] == 0
+    assert absent_stats["model_served"] is None
 
     # ⛔ THE COMPOSITION FLOOR (regression: an armed seam with no usable answer
     # must not RESCIND the mechanical #4899 predicate). `vet_candidates` applies
@@ -422,6 +457,9 @@ def test_the_seam_record_reaches_the_gate_stats():
     record = out["stats"]["seam"]
     assert record["prompt"] == seam.VET_PROMPT
     assert record["model"] == seam.MODEL
+    assert record["model_served"] == "jev-1.14.0", (
+        "the gate record carries the version that ANSWERED beside the alias that "
+        "was asked for — without it a rolled model is invisible in the artifact")
     assert record["bands"] == {"keep_min": seam.DEFAULT_BANDS.keep_min,
                                "discard_max": seam.DEFAULT_BANDS.discard_max,
                                "atomic_min": seam.DEFAULT_BANDS.atomic_min}
@@ -565,7 +603,8 @@ def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
     """
     clf = _classifier(lambda _rows: ({"i0": "core:workflow"}, {
         "calls": 1, "cost_usd": 10 ** 400, "prompt": seam.CLASSIFY_PROMPT,
-        "model": seam.MODEL, "unavailable": 1, "schema_rejects": ["kind_c0"],
+        "model": seam.MODEL, "model_served": "jev-1.14.0",
+        "unavailable": 1, "schema_rejects": ["kind_c0"],
     }))
     classified = clf.classify_items(
         [{"id": "i0", "type": "entity", "text": "the plan workflow"}])
@@ -575,8 +614,11 @@ def test_an_absurd_reported_cost_cannot_abort_the_classify_pass():
     assert seam_stats["prompt"] == seam.CLASSIFY_PROMPT, (
         "the armed-but-unavailable state has to be readable from the artifact")
     assert seam_stats["model"] == seam.MODEL, (
-        "the pin that answered belongs in the record — it is the provenance the "
-        "seam enforces but the classify artifact used to drop")
+        "the alias that was ASKED FOR belongs in the record — the classify "
+        "artifact used to drop it")
+    assert seam_stats["model_served"] == "jev-1.14.0", (
+        "the concrete version that ANSWERED belongs beside it — with a vendor "
+        "alias that moves, this is the only receipt of which model decided")
     assert seam_stats["unavailable"] == 1
     assert "kind_c0" in seam_stats["rejected"]
 
@@ -888,8 +930,8 @@ def test_the_module_guards_the_suite_never_proved_redden_when_removed(monkeypatc
     # nothing to a host nobody named: an armed seam would hand a billable key to
     # whoever answered.
     assert seam.ENDPOINT == "https://api.typesafe.ai/v1/systemone", (
-        "the seam must post to the VENDOR endpoint, model-pinned beside it — "
-        f"got {seam.ENDPOINT!r}")
+        "the seam must post to the VENDOR endpoint, with the fleet's model "
+        f"alias — got {seam.ENDPOINT!r}")
     assert "jevtypesafeai" not in seam.ENDPOINT, (
         "the lookalike host is forbidden in this repo (tortoise#7864/#10095) — "
         f"got {seam.ENDPOINT!r}")

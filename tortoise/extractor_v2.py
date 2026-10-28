@@ -1058,10 +1058,10 @@ def _vet_enabled() -> bool:
     """#5005: the call-time S2.2 VET toggle.
 
     Unset/0 (no #5087 seam flag) → THIS toggle is off — and it is one of three
-    terms ``vet_enabled`` (:8504) ORs, so "off-path" is decided there, not
-    here: ``TORTOISE_VALUE_GATE`` arms the pass too (its ``#4899`` predicate
-    runs inside it). Truthy per #4097. #5087 adds a SECOND contributor:
-    ``TORTOISE_S2_DECISION_SEAM`` arms the arbiter, so it arms VET even vs 0."""
+    terms ``vet_enabled`` ORs (by NAME: a line goes stale), so "off-path" is
+    decided there, not here: ``TORTOISE_VALUE_GATE`` arms the pass too (its
+    ``#4899`` predicate runs inside it). Truthy per #4097. #5087 adds a SECOND
+    contributor: ``TORTOISE_S2_DECISION_SEAM`` arms the arbiter, even vs 0."""
     return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()
 
 

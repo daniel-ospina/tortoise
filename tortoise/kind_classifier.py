@@ -699,11 +699,17 @@ class KindClassifier:
                 seam["prompt"] = prompt
             model = seam_stats.get("model")
             if isinstance(model, str) and model:
-                # The pin that answered — the same provenance `_decide` enforces
-                # (a mismatched envelope is Unavailable, so an unverified model's
-                # answer never becomes a kind). Dropped here it would leave the
-                # classify artifact unable to say WHICH model produced the kinds.
+                # What the seam SENT — the vendor ALIAS (:attr:`s2_decision_seam.MODEL`),
+                # never a version. Dropped here it would leave the classify
+                # artifact unable to say what was asked for.
                 seam["model"] = model
+            served = seam_stats.get("model_served")
+            if isinstance(served, (str, list)) and served:
+                # The concrete version the response ECHOED — the receipt that makes
+                # a threshold shift visible instead of inferred (the alias resolves
+                # to whatever the vendor ships, by owner ruling 2026-10-27). A str
+                # for one version, a sorted list when a roll happened mid-pass.
+                seam["model_served"] = served
             unavailable = seam_stats.get("unavailable")
             if isinstance(unavailable, int) and not isinstance(unavailable, bool):
                 seam["unavailable"] = seam.get("unavailable", 0) + unavailable

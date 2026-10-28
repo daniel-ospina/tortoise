@@ -57,9 +57,20 @@ the forms below, so it is not the page that misleads):
   the lookalike's page — a residual of the same pre-migration source the endpoint
   fix removed.)
 
-The envelope is validated before any answer is read: `model` must equal the pin
-(`jev-1.13.0`) and `answers` must be a map. An answer attributed to an unverified
-model is not an answer.
+The envelope is validated before any answer is read: `answers` must be a map. The
+`model` the response echoes is **recorded, never asserted** (`stats["model_served"]`).
+The fleet sends the vendor **alias** `jev-latest` by owner ruling 2026-10-27 (*"let's
+use jev latest"*, recorded with its reason on `agent-infra#2915`; restated in
+`.env.example` and `AGENTS.md`), so the echo names the **concrete version** the
+alias resolved to (`jev-1.14.0` in the 2026-10-26/27 measurements) — a seam that
+refused a differing echo would be **inert the moment the vendor shipped**: every
+call `Unavailable`, VET keeping everything, the classify tail on kNN forever.
+That is a deliberate departure from the vendor's own advice (send a version ID
+when thresholds are tuned) and it is a **recorded decision**: the alias is not a
+default to be "corrected" here — changing it is a reopen of that ruling, argued in
+its own home. The echo is the receipt that makes a shifted threshold visible
+instead of inferred, and it rides into `stats["seam"]["model_served"]` beside
+`prompt` and `cost_usd`.
 
 **What the vendor's own documentation settles, and what it does not.**
 `docs.typesafe.ai` is reachable and is the primary source (fetched 2026-10-27; an
@@ -72,9 +83,10 @@ as a string, object or **array**; and element addressing as a **backticked
 dot-and-index path** into the state (`` `support.tickets[0].message` ``,
 `concepts/how-to-build-with-system-one.md`). A caller that has been live on the
 vendor endpoint since the 2026-10-26 migration (`agent-infra/scripts/turn-classify.py`:
-`JEV_URL = https://api.typesafe.ai/v1/systemone`, `JEV_MODEL = jev-1.13.0`)
-corroborates two more: the `choice` `criteria` **map** and the `model` field in
-the envelope.
+`JEV_URL = https://api.typesafe.ai/v1/systemone`, `JEV_MODEL = jev-latest` — the
+alias, settled into agent-infra `main` by `agent-infra#2914` the day after the
+ruling) corroborates two more: the `choice` `criteria` **map** and the `model`
+field in the envelope.
 
 **What is NOT verified — and it is the one that fails silently.** The
 **element-attribution convention** used here is the PRE-migration host's idiom,
@@ -161,7 +173,7 @@ Each is a **recorded decision**, not an omission:
 
 ## 5. Degradation is explicit, and its direction is the step's (§4.4)
 
-| step | capability unavailable (no key, 429, timeout, 5xx, pin mismatch) | answer unparseable / out of schema | answers not attributable to their element |
+| step | capability unavailable (no key, 429, timeout, 5xx) | answer unparseable / out of schema | answers not attributable to their element |
 |---|---|---|---|
 | **S2.2** | **no verdict** for the candidate — it keeps whatever the gate already decided (the mechanical `#4899` `DISCARD` included); the failure is counted in `result["vet"][*]["stats"]["seam"]` (`unavailable`, `degraded`) | **no verdict**, and the **failing question is named** in `stats["seam"]["degraded"][item]` / `["schema_rejects"]` | **no verdict** for the whole chunk — `stats["seam"]["attribution_rejects"]` counts it and every item is named `seam.attribution_unverified` in `["degraded"]` (§2) |
 | **S2.3** | no assignment → the caller's **kNN top-1** fallback (the design's named mechanical fast path), counted in `stats["seam"]["unavailable"]` | same; the kind is never minted, `stats["seam"]["rejected"]` names the question | n/a by construction — not checked at S2.3: a wrong kind is a wrong label (the offered-set guard still bounds it), not a dropped memory |
@@ -188,8 +200,8 @@ is that a homogeneous chunk is left to the gate, which is the fail-open directio
 the cost of the false negative it prevents is a 40-item silent drop.
 
 **An unavailable call ends the PASS, not just the chunk.** `Unavailable` is the
-step-level state in the table's first column (no key / 429 / timeout / 5xx / pin
-mismatch), and the module declares no retry ladder — so continuing to the next
+step-level state in the table's first column (no key / 429 / timeout / 5xx), and
+the module declares no retry ladder — so continuing to the next
 chunk would be exactly that ladder, serially, at up to `TIMEOUT` (30 s) per chunk on
 the synchronous write path. The VET pass therefore records **every remaining
 candidate** as degraded with the same reason and stops (no accounting is lost: each
@@ -309,7 +321,12 @@ Derivation, so it can be re-checked rather than believed:
   Mtok for `jev-1.13.0`** — i.e. **`4.2e-8 \$` per input token, `\$0.042` per 1M** —
   and states plainly that *"you pay per input token; output tokens are free"*
   (`docs.typesafe.ai/models`, read 2026-10-27). Prices here are that rate applied to
-  the token counts, input-only.
+  the token counts, input-only. ⚠️ That is the rate documented for **`jev-1.13.0`**, and
+the fleet now sends the **alias** (§2): it resolved to `jev-1.14.0` at measurement, so
+the rate is the one that applied to the calibration model, not a promise about what
+the alias bills today — `stats["model_served"]` is what tells an armed run which
+version a figure belongs to, and the first real calibration on `api.typesafe.ai` is
+owed (`agent-infra#2918`).
 
   ⚠️ **This section previously said `4.19e-7 \$/token` — ten times the vendor's rate —
   and cited "the vendor's documented example: `\$0.000026` for 62 input tokens". That
@@ -391,7 +408,7 @@ different failures, and only the latter reddens a pure-logic test.
 |---|---|
 | `test_a_valid_typed_answer_produces_the_expected_verdict` | a real `noul`+`score` pair decides `KEEP`/`DISCARD` **through `vet_gate`**, and a real `choice` decides the kind **through `KindClassifier`**. The stub answers the kNN's **second** candidate, so the assertion is the model's answer and not the fast path's. |
 | `test_an_out_of_schema_answer_fails_closed_and_names_the_question` | a wrong primitive, a score off the declared scale, and a choice outside the offered set all produce **no verdict** — and the record names the question, with the prompt version on every degraded line. The seam rejects the out-of-set choice **before** the classifier's own closed-vocab guard sees it (`closed_vocab_rejects == 0`), which is the difference between a validating seam and one that trusts whatever comes back. The **degraded items themselves survive the fold** into `stats["seam"]["degraded"]` on the VET path — the failing question named, the prompt version stamped on every degraded line. On the classify path the built-in seam does **not** report per-item degradation: `classify_tail` carries no `degraded` key, and the classifier degrades per **batch** (`unavailable`) and per **question** (`rejected`, with the version once beside it under `prompt`), so `_decide_tail_seam` fills `stats["seam"]["degraded"]` only from a custom injected decider — the same split §1 states. It also holds the **composition floor**: an armed seam whose transport raises leaves the mechanical `#4899` `DISCARD` standing (§5). |
-| `test_an_unpinned_model_is_not_an_answer` (assertion inside the above) | an answer from a model that is not the pin is refused by the **envelope** floor, not by the parser — asserted via `unavailable == 1` **and** `schema_rejects == []`, so a stub that merely omits the answers cannot make it pass for the wrong reason. |
+| the model-alias assertions (inside `test_an_out_of_schema_answer_fails_closed_and_names_the_question`) | `MODEL` is pinned to the vendor alias `jev-latest` **by literal**, the way `ENDPOINT` is — the alias is a recorded owner ruling, and a version pin reintroduced here silently voids every armed pass. A response that echoes a concrete version the alias resolved to (`jev-1.14.0`) is the **normal** case and produces a verdict, with the version recorded in `stats["model_served"]` beside the alias in `stats["model"]`; an **omitted** echo answers too and records `None` ("unknown version") rather than pretending the pin held. |
 | `test_the_seam_record_reaches_the_gate_stats` | the seam's `prompt`, `model`, `bands`, `cost_usd` and `by_outcome` all survive the fold into `stats["seam"]`, and the seam's own tally agrees with the gate's (`stats["by_outcome"]`) over the same two candidates — a spend recorded nowhere is the inert-enforcer class one layer out. |
 | `test_an_absurd_reported_cost_cannot_abort_the_classify_pass` | an injected decider's unrepresentable spend (`float(10**400)`) degrades to "spend not counted" (`cost_usd == 0.0`) instead of escaping the fail-open classify pass, which is documented *never raises*. |
 | `test_the_two_numeric_bounds_and_the_fused_veto_redden_when_removed` | `_noul`'s probability guard on **every** side of it (`1.5`, `-0.2`, and a JSON `true`, which `isinstance(x, int)` accepts), and the atomicity veto on a fused candidate: `noul` 0.02 with atomicity 1.0 is a `NOOP`, never a `DISCARD`. |
@@ -414,13 +431,16 @@ later commit inserted lines above it.
 | `_noul` replaces its `_finite(...)` call with `float(... or 0.0)` **while keeping** the `[0, 1]` band (the band is not part of this mutant — dropping it is row 11) | ✅ a JSON `true` reads as a probability of `1.0` (the coercion bypasses `_finite`'s `bool` rejection), reddening `test_the_two_numeric_bounds_and_the_fused_veto_redden_when_removed`. ⚠️ **Not** `1.5`: the intact `[0, 1]` band still refuses it, which is why row 11 exists to redden that side. It does **not** redden the out-of-schema test either: `_answer` refuses the echoed-`type` mismatch *before* any value is read, so the fixture that carries a `noul` cannot reach the coercion. |
 | `_score` drops its `0..hi` range check | ✅ `9.0` on a `0..3` scale licenses the discard |
 | `_choice` returns `answer.get("choice")` unvalidated | ✅ **red on the seam's own refusal**, which is what the test pins: the minted `core:invented` is caught by `_decide_tail_seam`'s write-site re-validation (the per-item resolution loop in `kind_classifier.py`; cited by NAME, not by line — a line number here went stale the first time anything was inserted above it), so `closed_vocab_rejects == 1` and the seam's `rejected` list no longer names `kind_c0` — the kind assertion itself still passes (`mode: knn`), which is precisely why the row must not claim the mint *reaches* the classifier |
-| a degraded item emits a `NOOP` **verdict** instead of no verdict | ✅ measured on a `/tmp` copy, two variants so the row states the red the test OBSERVES: with **both** degraded paths emitting `NOOP`, `test_an_out_of_schema_answer_fails_closed_and_names_the_question` reddens first at its inherited **degraded-item** assertion — `assert 'NOOP' == 'KEEP'` (plus `RULE_FAIL_OPEN`); with the **`Unavailable` path alone**, the unpinned-model assertion fails on `[('NOOP', 'seam.arbiter')] == []` and the guards test on "a stopped pass still produces no verdicts". ⚠️ The **composition floor is not what fires**, and it can never print `KEEP`/`vet.fail_open` for this mutant — but it also no longer FAILS: since the gate refuses a `NOOP` over a standing `DISCARD` (`vet_gate.vet_candidates`), the floor pair stays `DISCARD`/`value.identifier_only.hash` and that assertion remains GREEN under this mutant (it is `test_a_NOOP_verdict_does_not_rescind_a_mechanical_discard`'s subject, not this row's). What actually reddens is the degraded-item assertion above. |
+| a degraded item emits a `NOOP` **verdict** instead of no verdict | ✅ measured on a `/tmp` copy, two variants so the row states the red the test OBSERVES: with **both** degraded paths emitting `NOOP`, `test_an_out_of_schema_answer_fails_closed_and_names_the_question` reddens first at its inherited **degraded-item** assertion — `assert 'NOOP' == 'KEEP'` (plus `RULE_FAIL_OPEN`); with the **`Unavailable` path alone**, the served-version assertion fails on `[('NOOP', 'seam.arbiter')] == [('KEEP', 'seam.arbiter')]` and the guards test on "a stopped pass still produces no verdicts". ⚠️ The **composition floor is not what fires**, and it can never print `KEEP`/`vet.fail_open` for this mutant — but it also no longer FAILS: since the gate refuses a `NOOP` over a standing `DISCARD` (`vet_gate.vet_candidates`), the floor pair stays `DISCARD`/`value.identifier_only.hash` and that assertion remains GREEN under this mutant (it is `test_a_NOOP_verdict_does_not_rescind_a_mechanical_discard`'s subject, not this row's). What actually reddens is the degraded-item assertion above. |
 | `vet_arbiter` returns `{"batch": {}}` — the accumulator itself is gone | ✅ **both**: the record assertions find no `stats["seam"]` |
 | the classify record loses its `prompt` | ✅ a `KeyError` on `stats["seam"]["prompt"]` in `test_a_valid_typed_answer_produces_the_expected_verdict` — the classifier sets the key only when the decider reports a `str`, so it is absent rather than `None` |
 | `classify_tail` assigns the offered top-1 instead of the model's choice | ✅ **both**: the kind assertion reads `core:plan` instead of `core:workflow`, and the out-of-set answer stops being rejected because nothing is validated |
 | `vet_candidates` stops folding an arbiter's `seam` key into the gate stats (a `seam`-bearing return is still produced) | ✅ the gate stats carry no `prompt`/`bands`/`cost_usd` |
 | the cost accumulator takes `float(cost)` unbounded | ✅ `OverflowError` escapes `classify_items` on `10**400` |
-| `_decide`'s model pin is deleted | ✅ an unpinned model's **valid** answer pair becomes a `KEEP` verdict, so the "no verdict at all" assertion fires while `schema_rejects` stays `[]` — the distinction between the envelope floor and the parser |
+| `_decide`'s caller stops recording the served model (both `_record_served` calls removed) | ✅ **2 failed / 11 passed** on a `/tmp` copy, restored `diff`-identically: `test_the_seam_record_reaches_the_gate_stats` and the guards test redden on `stats["model_served"]` (`None` where the stub echoed `jev-1.14.0`) — the armed artifact stops naming WHICH version decided, which is the receipt the alias decision depends on |
+| the classify fold drops `model_served` | ✅ `test_an_absurd_reported_cost_cannot_abort_the_classify_pass` reddens with a `KeyError` on `stats["seam"]["model_served"]` — 1 failed / 12 passed, measured the same way; the VET half folds the seam's whole stats dict, so only this half can lose it |
+| `MODEL` reverts to a version pin (`jev-1.13.0`) | ✅ the guards test reddens on `seam.MODEL == "jev-latest"` (1 failed / 12 passed) — and that state is not cosmetic: the vendor's alias resolves past the pin, so an armed seam would refuse every call and read as "armed" while deciding nothing |
+| `_decide` refuses an echoed version that differs from `MODEL` | ✅ **5 failed / 8 passed**: the served-version verdict is `[]` where `[('KEEP', 'seam.arbiter')]` is required, and every test whose stub echoes the resolved version degrades — the inert-enforcer failure, reached by arming |
 | `_noul` drops its `[0, 1]` bound | ✅ `1.5` reads as a confident KEEP and `-0.2` as a confident **DISCARD** |
 | `_finite` stops rejecting `bool` | ✅ a JSON `true` reads as a probability of 1.0 |
 | `vet_verdict` drops its `atomic < atomic_min` veto | ✅ a low-validity **fused** candidate is `DISCARD`ed instead of vetoed to `NOOP` |
