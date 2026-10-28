@@ -8278,6 +8278,34 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, (
                 f"the verdict job must be NAMED as the refusing leg; got {out!r}")
 
+        # (b2) `timed_out` is DELEGATED exactly like `failure` (#9984 review). The
+        #      delegating case is `failure|timed_out`, and the two halves must agree:
+        #      the aggregate delegates a timed-out shard, AND the verdict job's own
+        #      step runs for it (pinned structurally by
+        #      tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_
+        #      every_class_the_aggregate_delegates — a `success` from a verdict job
+        #      whose step never ran is not a certification).
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 0, (
+                f"a `timed_out` for `{leg}` must be delegated exactly like `failure` — "
+                "an exit 1 here means the delegating case lost its `timed_out` half; "
+                f"got {out!r}")
+            assert "certified every failing id" in out and leg in out, out
+        #      ... and, like `failure`, it is NEVER delegable on a non-test arm.
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 1, (
+                f"a `timed_out` for `{leg}` must never be excused by the test-failure "
+                f"verdict — it is not a test arm (#9984); got {out!r}")
+            assert "not a test arm" in out, out
+
         # (c) the verdict job is the ONE failure that can never be deferred: deferring
         #     it would make the verdict ask itself (a red verdict, excused by itself).
         bad = dict(green)
@@ -8424,6 +8452,19 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         assert "no leg row named it" in out, (
             "the unrowed-need red must come from the identity-blind sweep, i.e. "
             f"the sweep must be reachable; got {out!r}")
+
+        # That sweep's `cancelled` half must be reachable even while ANOTHER leg is
+        # delegated (#9984 review). Gating the whole sweep on `RED_LEGS` being empty
+        # disabled the `cancelled` half too — and `cancelled` can never be delegated
+        # (the leg loop reds on it by name), so all the gate did was let a leg that
+        # never ran pass the required check once a deferrable leg was adjudicated.
+        delegated_plus_lost = dict(green)
+        delegated_plus_lost["test"] = "failure"
+        rc, out = _verdict(delegated_plus_lost, extra=("cancelled",))
+        assert rc == 1, (
+            "a `cancelled` need with no leg row must red the required check even while "
+            f"a delegable `failure` is being adjudicated; got {out!r}")
+        assert "no leg row named it" in out, out
 
 
 def test_required_gate_covers_the_long_legs():

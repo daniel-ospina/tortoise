@@ -525,6 +525,56 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
         "runs it exists for")
 
 
+def test_the_verdict_step_is_gated_on_every_class_the_aggregate_delegates():
+    """#9984 review: a delegated class with NO adjudicator is a false PASS.
+
+    The aggregate delegates `failure` AND `timed_out` for a deferrable leg, and it
+    reads the verdict JOB's result as the certification. `contains()` over
+    `needs.*.result` is exact-element membership, so a step gate naming only `failure`
+    leaves a `timed_out` delegation with a job that still RUNS (`always()`), SKIPS its
+    predicate step, and concludes `success` because every remaining step passed. The
+    aggregate then prints "certified every failing id" and the required check goes
+    GREEN on a PR whose shard timed out — with nothing compared against main.
+
+    Measured pre-fix on the rendered aggregate (`test=timed_out`,
+    `ci-introduced-failure=success`): rc=0, leg reported as delegated. The module was
+    already correct (`_FAILED_CONCLUSIONS` holds `timed_out`); the hole was purely the
+    step gate, which is why the two halves are pinned to each other here.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    aggregate = "\n".join(str(s.get("run") or "")
+                          for s in workflow["jobs"]["python-ci-gate"]["steps"])
+    verdict = workflow["jobs"]["ci-introduced-failure"]
+
+    # The classes the aggregate delegates, read from its own `case` arm: that arm is the
+    # authority, and it is ONE arm so the two halves cannot drift apart silently.
+    assert "failure|timed_out)" in aggregate, (
+        "the aggregate must delegate `failure|timed_out` test arms in one case arm; if "
+        "that set changed, this pin and the verdict step's `if:` must be re-cut "
+        "together — a class delegated with no adjudicating step is a false PASS")
+    classes = ["failure", "timed_out"]
+
+    steps = [s for s in (verdict.get("steps") or [])
+             if "new-failure-gate.py" in str(s.get("run") or "")]
+    assert len(steps) == 1, (
+        f"the verdict job must run the predicate in exactly ONE step, found {len(steps)}"
+        " — a second step makes the one that actually adjudicates unidentifiable")
+    gate_if = str(steps[0].get("if") or "")
+    assert "always()" in gate_if, (
+        "the predicate step must be `always()`-guarded or the default `success()` "
+        "skips it on exactly the red runs it exists for; got "
+        f"{gate_if!r}")
+    missing = [c for c in classes if f"'{c}'" not in gate_if]
+    assert not missing, (
+        f"the predicate step's `if:` must name EVERY class the aggregate delegates; "
+        f"missing {missing} — a `{missing[0]}` leg would be delegated to a step that "
+        "never runs, and this job's `success` would certify it (#9984 review); got "
+        f"{gate_if!r}")
+
+
 def test_the_verdict_job_is_pinned_and_bounded():
     """The two properties that keep this job from becoming a new single point of red."""
     import yaml
