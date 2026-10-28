@@ -260,11 +260,19 @@ def summarize_belief_activation(
       and ``inert_by_reason`` for the counts. This is the input any fix needs;
       ``no_operators`` is STRUCTURAL (nothing EP can do will help), the rest
       are arm/pass causes.
-    * ``neutral_questions`` — the measured-but-NEUTRAL population: EP state
-      exists on every claim, yet every posterior is the uniform ``Beta(1,1)``
-      mean ``0.50``, i.e. the belief layer ran and moved nothing (an IMPL-only
-      graph with no source prior is a fixed point). Coverage alone reports
-      these as measured; they are the reason ``questions_off_neutral`` exists.
+    * ``neutral_questions`` — the measured-but-NEUTRAL population: AT LEAST
+      ONE claim carries a persisted posterior and NONE of those reports a mean
+      off the uniform ``Beta(1,1)`` ``0.50`` — i.e. the belief layer ran and
+      moved nothing (an IMPL-only graph with no source prior is a fixed
+      point). Coverage may be PARTIAL: this is a per-QUESTION verdict
+      (``points_off_neutral == 0`` with ``points_with_ep > 0``), so a question
+      whose 1 of 50 claims is covered belongs here exactly like a fully
+      covered one — the enumerated entry carries the ``question_id`` and
+      ``question_type`` (this population is a count of questions, and
+      ``questions_neutral`` is its size); the per-question coverage figures
+      stay on the manifest's ``points_with_ep`` / ``points_unmeasured`` cells.
+      Coverage alone reports these as measured; they are the reason
+      ``questions_off_neutral`` exists.
     * ``questions_off_neutral`` / ``points_off_neutral`` — the STATE
       population: questions (and claims) whose persisted posterior is not the
       neutral mean. It is NOT the contribution — a claim given a non-uniform

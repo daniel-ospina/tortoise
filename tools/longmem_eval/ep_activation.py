@@ -300,8 +300,12 @@ def points_off_neutral(rows) -> int:
     at least :data:`NEUTRAL_EPS` away from :data:`NEUTRAL_MEAN`.
 
     A row whose state is absent/malformed (``read_confidence`` returns
-    ``None``) is NOT counted: unmeasured is not a contribution, and it is
-    already visible as ``points_unmeasured``. A NON-FINITE mean is excluded
+    ``None``) is NOT counted: unmeasured is not a contribution. It is NOT
+    counted in ``points_unmeasured`` either — every row of
+    :data:`_SELECT_CLAIM_EP_STATES` satisfies the SAME predicate as
+    :data:`_COUNT_POINTS_WITH_EP`, so such a claim is counted as COVERED by
+    ``points_with_ep`` and appears in NEITHER population; the RESIDUAL below
+    is the cell that would surface it. A NON-FINITE mean is excluded
     explicitly (#10137 review 3, P2): ``abs(nan - 0.5) > 1e-6`` is ``False``,
     so before the guard an undefined posterior was kept out of the
     CONTRIBUTION population only by floating-point accident — a silent
