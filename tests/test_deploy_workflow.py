@@ -3059,9 +3059,21 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     #     this PR spent cycles 7-16 removing.
     # So parse the numerals out of the lead-in and compare them to the members that
     # actually follow it. An honest FOUR is green; a silent fourth member is not.
+    # The LEAD-IN's casing is not part of its claim, so all three numerals are
+    # read case-insensitively (#10083 review cycle 18, P3, measured). The middle
+    # group alone was `([a-z]+)` while the two around it were `([A-Z]+)` and the
+    # very next line `.upper()`ed every group for the `_NUMERALS` lookup — i.e.
+    # any-casing was the intent and the pattern said otherwise. An honest relabel
+    # in the section's OWN count style (`FOUR readings, because it has FOUR
+    # causes; read all FOUR`) therefore missed `([a-z]+) causes`, and the pin
+    # reddened on a strict strengthening with a message accusing the lead-in of
+    # dropping the very clause it had just added — the F2 casing false-red this
+    # PR spent cycle 17 removing ten lines below. Casing is not the claim: the
+    # agreement of the three numerals with each other and with the member count
+    # below is, and that is untouched by this widening.
     _lead_in = re.search(
-        r"That last arm has ([A-Z]+) readings, because it has ([a-z]+) causes; "
-        r"read all ([A-Z]+) before you call the growth other traffic:",
+        r"That last arm has ([A-Za-z]+) readings, because it has ([A-Za-z]+) causes; "
+        r"read all ([A-Za-z]+) before you call the growth other traffic:",
         flat,
     )
     assert _lead_in, (
@@ -3271,6 +3283,46 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     if not _closed:
         _excl_c = _excl_c[:2500]
+    # ⛔ The label's COUNT is DERIVED from the members it counts, not compared as
+    # two test constants against the doc's literal (#10083 review cycle 18, P3,
+    # measured). `len(_msgs) == 4` is THIS file's own tuple and `four MESSAGES`
+    # was the doc's own word, so neither side was read from the section — the
+    # exact F1 shape cycle 17 removed from the bound's bullets
+    # (`_lead_nums == {len(_bound_bullets)}`) and from the exclusion list's
+    # markers (`_NUMERALS[...] == len(_members)`). Both directions were wrong:
+    #   - a TRUTHFUL fifth message plus an honest `four`→`five` relabel red the
+    #     suite (here and at the member-presence pin below, and again on the two
+    #     inversion pins, which also hard-coded the word `four`), accusing a
+    #     section of disagreeing with a count it had just corrected — the
+    #     false-red class this PR spent cycles 7-17 removing;
+    #   - a SILENT fifth message (label untouched) stayed GREEN, so `four
+    #     MESSAGES` counted four over five members — the fail-open the exclusion
+    #     list exists to close, since an operator reads an "exhaustive" list that
+    #     is not exhaustive and skips a cause.
+    # What a MEMBER is, mechanically: a backticked log message followed by the
+    # parenthetical naming the emitter that logs it (`_resolve_record_tenant`,
+    # `_bind_default_graph_record_tenant`, `default_graph_id_for`, `_cp_offload`).
+    # That shape is what distinguishes a member from the identifiers sharing this
+    # paragraph (`None`, `grep -E`, `no_journal`, `tortoise.hosted_api`), and it is
+    # read off `flat`, so a word-preserving refill cannot move it.
+    _c_label = re.search(
+        r"\(c\) The tenant-RESOLUTION faults — ([A-Za-z]+) MESSAGES", flat
+    )
+    assert _c_label and _c_label.group(1).upper() in _NUMERALS, (
+        "the exclusion (c) label no longer counts its emitted messages, so a "
+        "reader cannot tell how many fault lines to look for"
+    )
+    _c_count_word = re.escape(_c_label.group(1))
+    _c_msgs = re.findall(r"`([^`]+)` \(", _excl_c)
+    assert _NUMERALS[_c_label.group(1).upper()] == len(_c_msgs), (
+        f"the exclusion (c) is labelled {_c_label.group(1).upper()} MESSAGES but "
+        f"enumerates {len(_c_msgs)} ({_c_msgs!r}) — a label that says FOUR over "
+        "five members is the same self-contradiction class this section exists "
+        "to remove, so a reader takes an exhaustive enumeration that is not "
+        "exhaustive and skips a cause"
+    )
+    # Deletion of any ONE member still reds on its own literal, independently of
+    # the count above.
     _msgs = (r"could not resolve the record tenant for this request",
              r"could not resolve the DEFAULT-graph record tenant for org",
              r"graphs default-row read failed — the record tenant stays unnamed",
@@ -3278,12 +3330,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     for _msg in _msgs:
         assert re.search(re.escape(_msg), _excl_c), (
             f"recipe 1's exclusion (c) does not name {_msg!r} among the resolution "
-            "faults, so its 'four MESSAGES' count and its members disagree"
+            "faults, so a fault line an operator must grep is missing from the "
+            "list that claims to enumerate them"
         )
-    assert len(_msgs) == 4 and re.search(r"four MESSAGES", _excl_c), (
-        "the exclusion (c) no longer presents exactly the three emitted messages "
-        "under a matching count"
-    )
     # ⛔ The ENUMERATION is not the ARGUMENT. Measured (#10083 review P2): the
     # count and the three literals were pinned, but the two sentences that make
     # the enumeration do any work were not — `none of which this grep matches` →
@@ -3299,17 +3348,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # had just kept (measured, #10083 review P2 — the F3 class again). The
     # inversion is caught by the `(?:all|each) of which` detector below, so
     # accepting the class costs no discrimination.
+    # The COUNT WORD is taken from the label that is there (`_c_count_word`), not
+    # hard-coded `four`: the inversion these two pins measure is a property of the
+    # sentence, not of the numeral, and a literal numeral reddened an honest
+    # relabel for no claim change (#10083 review cycle 18, P3).
     assert re.search(
-        r"four MESSAGES,?\s+(?:none of which\s+this grep\s+matches"
+        _c_count_word + r" MESSAGES,?\s+(?:none of which\s+this grep\s+matches"
         r"|which\s+this grep\s+does not match"
         r"|of which\s+this grep\s+matches none"
         r"|none of which\s+are matched by this grep)",
         _excl_c,
     ), (
-        "exclusion (c) no longer says these three faults are OUTSIDE recipe 1's "
+        "exclusion (c) no longer says these faults are OUTSIDE recipe 1's "
         "grep — inverted, it tells the reader an empty recipe-1 read clears them"
     )
-    assert not re.search(r"four MESSAGES, (?:all|each) of which this grep", _excl_c), (
+    assert not re.search(
+        _c_count_word + r" MESSAGES, (?:all|each) of which this grep", _excl_c
+    ), (
         "exclusion (c) claims the three resolution faults ARE in recipe 1's grep, "
         "which is false — recipe 1 greps `the record write did not happen`"
     )
@@ -3495,7 +3550,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "recipe 1's exclusion list's exhaustive label is gone, so a reader takes "
         "the `no_tenant` bound's extra readings as covered by the fault grep"
     )
-    assert re.search(r"\(c\) The tenant-RESOLUTION faults — four MESSAGES", flat), (
+    # Member presence only — the label's NUMERAL is derived at the (c) paragraph
+    # above, so a literal `four` here would red an honest `five` relabel for no
+    # claim change (#10083 review cycle 18, P3).
+    assert re.search(
+        r"\(c\) The tenant-RESOLUTION faults — [A-Za-z]+ MESSAGES", flat
+    ), (
         "the exclusion list does not name the resolution-fault member, so the "
         "count and the members disagree"
     )
