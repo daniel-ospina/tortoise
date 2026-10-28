@@ -1580,14 +1580,25 @@ def test_the_fold_ref_selector_is_the_records_own():
     for payload in payloads:
         assert rp._point_all_source_refs(payload) == list(
             fold_selector(payload)), payload
-    # ONE documented difference, in the SAFE direction. A non-series
-    # `extractedFrom` (a dict) is `list()`-ed into its KEYS by the fold-side
-    # helper, and #8171 measured what that mints: one `:Source` per key, i.e.
-    # invented provenance. The record's selector keeps `_point_raw_refs`'
-    # container gate, so it fans out to NOTHING and lands no row rather than a
-    # row for a key nobody named as a source. Pinned so the divergence is a
-    # stated property of this lane instead of a drift discovered later.
+    # NO divergence, including on the case #8171 measured. A non-series
+    # `extractedFrom` (a dict) is `list()`-ed into its KEYS by a bare `list()`
+    # call, and #8171 measured what that minted: one `:Source` per key, i.e.
+    # invented provenance. BOTH selectors now carry the same CONTAINER gate —
+    # the fold side in `_point_source_refs` (`projection/entities.py:1079-1086`:
+    # `str` is one ref, `list`/`tuple` is that series, anything else `[]`), the
+    # record side in `_point_raw_refs` (`record_projection.py:2694`). So the
+    # dict fans out to NOTHING on either lane and lands no row rather than a row
+    # for a key nobody named as a source. The assertion below is the pin that it
+    # STAYS that way on both — a reader who believed the fold side still
+    # `list()`-es a mapping would have a stated reason to delete the record's
+    # gate "to match the fold", re-opening the #8171 path.
     assert rp._point_all_source_refs({"extractedFrom": {"a": "b"}}) == []
+    # ...and the SAME on the fold lane, asserted rather than merely described:
+    # the comment above is only worth reading if the two answers agree. At
+    # `6b1f151db` this line reds — `fold_selector` returned `['a', 'b']` there
+    # (one invented `:Source` per key), which is the regression the container
+    # gate in `_point_source_refs` closed.
+    assert list(fold_selector({"extractedFrom": {"a": "b"}})) == []
     # Non-vacuity: the table must reach BOTH branches of the fallback.
     assert rp._point_all_source_refs({"extractedFrom": "s",
                                       "extractedFromAll": ["s", "t"]}) == ["s", "t"]
