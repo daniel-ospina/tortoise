@@ -2408,7 +2408,11 @@ class TestARenderedCodeElementGetsAMonoFace:
        asking whether the page defines `--mono` at all, or whether the value it
        defines is a mono face (`--mono: Georgia, serif` passed). The declaration is
        now resolved through the page's own definitions, two hops, and must land on a
-       mono face.
+       mono face — and a `var()` **fallback** is read only when the token is missing,
+       so `--mono: Georgia, serif` with `font-family: var(--mono, Menlo)` is REFUSED
+       instead of being credited through fallback text CSS never substitutes
+       (`var(--mono, …Menlo…)` ships 4x in
+       `website/apps/dashboard/src/index.css:583,753,919,996`).
     3. **A rule that styles the element only in context.** `.art-body pre code` — and
        `pre.anything code` — says nothing about an inline `<code>` in a paragraph, so
        that pairing is skipped; everything else is the cascade.
@@ -2419,10 +2423,23 @@ class TestARenderedCodeElementGetsAMonoFace:
     indirection resolves, a `font:` shorthand naming a mono face is accepted, and the
     last compound may carry a class/id/attribute/pseudo.
 
-    Known residual, deliberately not modelled: a page rendering `<code>` **only**
+    Known residuals, deliberately not modelled: a page rendering `<code>` **only**
     inside `<pre>` is refused, because the `pre code` pairing is skipped
-    unconditionally. No page in this tree is shaped that way.
+    unconditionally; and a `var()` nested inside a fallback (`var(--a, var(--b))`) is
+    refused rather than resolved, because the reference regex stops at the first `)`.
+    Both fail RED, never green, and no page in this tree is shaped either way.
     """
+
+    #: the trees this guard scans. `apps/` yields no self-contained page today, but it
+    #: is a declared subject: dropping it must be a deliberate edit, not a silent
+    #: narrowing (see `_sources`).
+    ROOTS = ("website", "apps")
+    #: measured 2026-10-28 at this tree: 9 self-contained pages carry `<code>`/`<pre>`
+    #: (faq, privacy, 404, self-hosted, security, docs, license,
+    #: apps/dashboard/public/404.html, and the blog renderer `_lib.ts`). The floor sits
+    #: ON the measurement on purpose: a gap between the floor and the count is what lets
+    #: the scan narrow without a red, so removing a page must move this number.
+    MIN_PAGES = 9
 
     SUFFIXES = (".html", ".css", ".js", ".ts", ".jsx", ".tsx")
     RENDERS_CODE = re.compile(r"<(code|pre)\b", re.IGNORECASE)
@@ -2441,9 +2458,8 @@ class TestARenderedCodeElementGetsAMonoFace:
     VAR_DEF = re.compile(r"(--[\w-]+)\s*:\s*([^;}]*)")
     VAR_REF = re.compile(r"var\(\s*(--[\w-]+)\s*(?:,([^)]*))?\)", re.IGNORECASE)
     #: the selector's LAST compound must be the element itself — `.code{}` is the big
-    #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets
-    ELEMENT = re.compile(r"(?:code|pre|kbd|samp)", re.IGNORECASE)
-    #: the element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
+    #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets.
+    #: The element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
     #: `<code>`, so only a following TAG character disqualifies the compound
     ELEMENT_LAST = re.compile(r"(?:code|pre|kbd|samp)(?![a-zA-Z0-9_-])", re.IGNORECASE)
     TAG = re.compile(r"([a-zA-Z][\w-]*)")
@@ -2454,22 +2470,46 @@ class TestARenderedCodeElementGetsAMonoFace:
     MONO = ("menlo", "sfmono", "sf mono")
 
     def _is_mono(self, value, defined, depth=0):
-        """Does `value` name a mono face, once the page's own tokens are resolved?"""
-        v = value.strip().lower()
-        if v in ("inherit", "unset", "initial", "revert"):
+        """Does `value` name a mono face, once the page's own tokens are substituted?"""
+        # substitute BEFORE reading any face: a `var()` reference names no family of
+        # its own, so a keyword found in the un-substituted text is not a decision
+        # about what the element computes to. Reading the raw string first is how
+        # `var(--mono, Menlo)` was credited while `--mono: Georgia, serif` — the face
+        # Chrome actually used — went unread (PR #10254 review, round 3).
+        v = self._substitute(value, defined, depth).strip().lower()
+        if not v or v in ("inherit", "unset", "initial", "revert"):
             # inheriting is the failing case for an element with no author rule: the
             # UA `monospace` sheet would win. A parent that IS mono is out of scope.
             return False
-        if any(m in v for m in self.MONO):
-            return True
-        if depth < 2:
-            for name, fallback in self.VAR_REF.findall(v):
-                resolved = defined.get(name.lower())
-                if resolved is not None and self._is_mono(resolved, defined, depth + 1):
-                    return True
-                if fallback and self._is_mono(fallback, defined, depth + 1):
-                    return True
-        return False
+        return any(m in v for m in self.MONO)
+
+    def _substitute(self, value, defined, depth=0):
+        """`value` with its `var()` references replaced the way CSS replaces them.
+
+        A **defined** custom property is substituted and its fallback is *dead text*:
+        css-variables-1 §"Using Cascading Variables" makes the second argument the
+        substitution value only "when the value of the referenced custom property is
+        the guaranteed-invalid value", i.e. missing or invalid. Crediting a fallback
+        regardless is a false green and not a hypothetical one: the live idiom
+        `font-family: var(--mono, ui-monospace, …Menlo…)` ships 4x in
+        `website/apps/dashboard/src/index.css` (583, 753, 919, 996), so any page that
+        also defined `--mono` as a serif would pass this guard while macOS Chrome
+        rendered the serif.
+
+        A missing token falls back. A token defined as something that itself resolves
+        to nothing substitutes to nothing, so the declaration is invalid at
+        computed-value time, the element inherits, and the guard goes RED — the safe
+        direction (over-detection, never a false green).
+        """
+        def replace(match):
+            name, fallback = match.group(1).lower(), match.group(2)
+            resolved = defined.get(name)
+            chosen = resolved if resolved is not None else (fallback or "")
+            if not chosen.strip() or depth >= 2:
+                return ""
+            return self._substitute(chosen, defined, depth + 1)
+
+        return self.VAR_REF.sub(replace, value)
 
     def _elements_styled_mono(self, css):
         """The element names (`code`, `pre`) that some rule gives a mono family."""
@@ -2520,8 +2560,12 @@ class TestARenderedCodeElementGetsAMonoFace:
             missing = sorted(rendered - self._elements_styled_mono(css))
             if missing:
                 offenders.append(f"{path.relative_to(repo)} ({', '.join('<' + m + '>' for m in missing)})")
-        assert checked >= 3, (
-            f"only {checked} self-contained page(s) found — the scan is not looking at the right tree")
+        # the floor is the MEASURED count (9 self-contained pages today), not a guess: it
+        # has no slack, so deleting or moving a page is a deliberate act that moves this
+        # number with it, instead of narrowing the scan silently (PR #10254 review).
+        assert checked >= self.MIN_PAGES, (
+            f"only {checked} self-contained page(s) found under "
+            f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
         assert not offenders, (
             "these pages render these elements but no rule in their own <style> gives the ELEMENT "
             "a mono family, so the user-agent's `monospace` applies and macOS Chrome renders Courier "
@@ -2535,13 +2579,53 @@ class TestARenderedCodeElementGetsAMonoFace:
         # tree, `node_modules` included, before any filter can run (see the sibling
         # class's note — it is the same walk, and the same cost).
         skip = {"node_modules", "dist"}
-        for root_name in ("website", "apps"):
+        for root_name in TestARenderedCodeElementGetsAMonoFace.ROOTS:
             root = repo / root_name
             # fail closed: a missing root would narrow the scan silently
-            assert root.is_dir(), f"{root_name}/ is gone — update ROOTS in this guard"
+            assert root.is_dir(), (
+                f"{root_name}/ is gone — update ROOTS in "
+                f"{TestARenderedCodeElementGetsAMonoFace.__name__}")
             for dirpath, dirnames, filenames in os.walk(root):
                 dirnames[:] = [d for d in dirnames if d not in skip]
                 for name in filenames:
                     if Path(name).suffix not in TestARenderedCodeElementGetsAMonoFace.SUFFIXES:
                         continue
                     yield Path(dirpath) / name
+
+    def test_a_var_fallback_is_dead_text_when_the_token_is_defined(self):
+        """The resolver's own cases, pinned so the guard cannot silently un-fix (#10254 review).
+
+        Probes, not pages: each `css` string is a whole sheet handed to the resolver, and the
+        expectation is what CSS would compute for a `<code>` under it. The third and fourth rows
+        are the false greens the review measured — a mono face named ONLY in a fallback that the
+        browser never substitutes, because `--mono` is defined to a serif.
+        """
+        cases = [
+            # (why, css, is `code` given a mono face?)
+            ("defined serif, mono fallback — fallback is dead text (css-variables §3)",
+             ":root{--mono:Georgia,serif} code{font-family:var(--mono, Menlo)}", False),
+            ("same, quoted face)",
+             ":root{--mono:Georgia,serif} code{font-family:var(--mono, 'SF Mono')}", False),
+            ("same, the live dashboard idiom",
+             ":root{--mono:Georgia,serif} "
+             "code{font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace)}", False),
+            ("defined mono, fallback unused",
+             ":root{--mono:Menlo,monospace} code{font-family:var(--mono, Georgia)}", True),
+            ("missing token — the fallback IS substituted",
+             "code{font-family:var(--mono, Menlo)}", True),
+            ("defined serif, no fallback to rescue it",
+             ":root{--mono:Georgia,serif} code{font-family:var(--mono)}", False),
+            ("token defined as an unresolvable var() → RED, never green",
+             ":root{--mono:var(--nope)} code{font-family:var(--mono, Menlo)}", False),
+            ("a later `font:` shorthand resets the family",
+             ":root{--mono:Menlo} code{font-family:var(--mono)} code{font:12px Georgia}", False),
+            ("`inherit` is the failing case, not a pass",
+             "code{font-family:inherit}", False),
+            ("bare `monospace` IS Courier on macOS Chrome — not a mono face here",
+             "code{font-family:var(--mono, monospace)}", False),
+        ]
+        for why, css, expect in cases:
+            got = "code" in self._elements_styled_mono(css)
+            assert got == expect, (
+                f"{'false green' if got else 'false red'}: {why}\n  css: {css}\n"
+                f"  guard says mono={got}, CSS computes mono={expect}")
