@@ -17518,7 +17518,8 @@ class FalkorProjection(
 
         # #10198: the record's EVENT STREAM derives the connector/pack lifecycle
         # onto the Objects it names. `read_record_view` already applied it, and
-        # the application is idempotent ("last writer by seq"); it runs here as
+        # the application is idempotent (a pure replay of the stream in `seq`
+        # order, with the live fold's per-event terminal guard); it runs here as
         # well because a caller may hand this method a view it assembled from
         # rows WITHOUT a connection, and such a view must fold by the events it
         # carries rather than materialize a connector-tracked Object with no
