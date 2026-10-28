@@ -4059,23 +4059,32 @@ DENIAL_MARKERS: tuple[str, ...] = (
     # counted writer may not be called **an exemption** or said to **drop** /
     # carry no property"*). Neither appeared in any tuple, so the exact
     # contradiction the decision names was green while the phrase the documents
-    # happened to use was caught (`#10200` review, measured). The noun is pinned as
-    # the bare stem `exempt`, MEASURED safe: it reds 0 sentences in either document
-    # and leaves all four `#10149` legs green (`#10200` review cycle 2), whereas
-    # `an exemption` alone left `is exempt` / `is exempted` / `the exemption`
-    # green. `drop` is NOT added bare: `drop`/`dropped` appears 20+ times in
-    # unrelated prose, and a markdown TABLE row merges into one "sentence" here
-    # (`_claim_sentences`), so a bare `drop` reds 3 rows whose sentence never
-    # mentions it — that measurement stands, and the property-verb forms
-    # (`drops the`, `drops confidence`) are pinned instead.
-    "exempt",
+    # happened to use was caught (`#10200` review, measured).
+    # ⛔ The NOUN is pinned as the DENIAL PHRASES — the predicate and articled
+    # forms — NOT the bare stem `exempt`. The bare stem was measured "safe"
+    # (`#10200` review cycle 2, 0 red sentences in either document), but the reason
+    # it red nothing is that the only `exempt*` spellings the documents write are
+    # `exempts`, `exemptions` and `exempting` — the one spelling that is NOT a
+    # denial — so its liveness was an ARTIFACT and its only live effect was a FALSE
+    # RED: the documents' own §13 sentence *"the guard pins the shapes that make
+    # both exemptions true instead of merely exempting them"* reds as `'exempt'`
+    # the moment any census key is named in it (`#10200` review, cycle 5,
+    # executed). A denial the documents' plural noun can satisfy is not a denial.
+    # ⚠️ `is exempted` is listed although `is exempt` is a substring of it: the
+    # POST-positioned-negation read (`_MARKER_NEGATION_AFTER_RE`) anchors at the
+    # match END, so *"is exempted from the census no longer"* is only seen when the
+    # longer spelling is matched. It is not decoration.
+    "is exempt",
+    "is exempted",
+    "an exemption",
+    "the exemption",
     "carries nothing",
     "writes nothing",
 )
 
 #: What makes a denial a statement about HISTORY rather than about HEAD — read in
 #: the CLAUSE that carries the denial, never across the whole sentence (see
-#: `_history_in_denial_clause`). ⛔ `#10139` is deliberately NOT a member: it is an
+#: `_history_in_clause`). ⛔ `#10139` is deliberately NOT a member: it is an
 #: OPEN defect reference (*"The REBUILD half is still bare"*), not a statement that
 #: the state changed, and it ends the very paragraph this leg guards — so an
 #: editor restoring the retracted sentence in the same breath as the rebuild note
@@ -4089,17 +4098,20 @@ HISTORY_MARKERS: tuple[str, ...] = (
     "was a declared",
 )
 
-#: NEGATORS. A class marker under one of these does not STATE the class, it DENIES
-#: it — and a negation of the class is precisely the claim `#10149` exists to
-#: forbid. Measured on `#10200`'s review: leg 1 counted *"`sdk.supersede_point` is
-#: not a re-materializing writer"* as a stated verdict (it contains
-#: `re-materializ`) while leg 2 had no marker for it, so the ONE-WORD paraphrase of
-#: the retracted cycle-3 sentence was green on BOTH legs. Polarity is therefore
-#: read rather than assumed: token existence is not a claim.
-_NEGATOR_RE = re.compile(
-    r"\b(?:not|never|neither|nor|cannot|no\s+longer|fails\s+to|stops)\b|n't\b",
-    re.I,
-)
+#: POLARITY IS READ, NOT ASSUMED. A class marker under a negator does not STATE the
+#: class, it DENIES it — and a negation of the class is precisely the claim `#10149`
+#: exists to forbid. Measured on `#10200`'s review: leg 1 counted *"`sdk.
+#: supersede_point` is not a re-materializing writer"* as a stated verdict (it
+#: contains `re-materializ`) while leg 2 had no marker for it, so the ONE-WORD
+#: paraphrase of the retracted cycle-3 sentence was green on BOTH legs.
+#: ⛔ The negator vocabulary is `_MARKER_NEGATION_BEFORE_RE` / `_POST_NEGATION_RE`
+#: below — the scan `_marker_itself_negated` actually runs. The constant that used
+#: to sit here (`_NEGATOR_RE`, which additionally listed `fails to`, `stops` and
+#: `n't`) was deleted with the window machinery in `#10200` review cycle 5: nothing
+#: reached it. ⚠️ STATED LIMIT, not coverage: `fails to` / `stops` / `n't` / a
+#: BEFORE-positioned `no longer` are therefore NOT read as class negators today.
+#: They are recorded here so a lane that widens the live scan knows what the dead
+#: one claimed, rather than rediscovering it.
 
 #: Where a CLAUSE ends. A history marker outside the denial's own clause says
 #: nothing about that denial — the sentence-wide reading is what let a trailing
@@ -4112,36 +4124,28 @@ _NEGATOR_RE = re.compile(
 #: sentence boundary.
 _CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|", ",")
 
-#: ⛔ BUT THE NEGATOR SCAN GETS ITS OWN BREAK SET, WITHOUT THE COMMA. A comma is
-#: NOT a boundary for negation scope: a parenthetical sits between the auxiliaries
-#: and the class, so `,` in this set hid the negator and re-opened round 1's
-#: polarity finding — *"`sdk.supersede_point` is not, however, a re-materializing
-#: writer"* was green on BOTH legs (`#10200` review, measured). The history escape
-#: needs the comma; the negator does not.
-_NEGATOR_BREAKS: tuple[str, ...] = tuple(b for b in _CLAUSE_BREAKS if b != ",")
-
-#: ⛔ …BUT A COMMA BEFORE A COORDINATOR *IS* A BOUNDARY, WHICH THE PLAIN COMMA IS NOT.
-#: Dropping `,` from the negator's break set fixed the comma-set parenthetical
-#: (*"is not, however, a re-materializing writer"*) and thereby let a negator in
-#: the FIRST conjunct govern a marker in the SECOND: *"`projection._fold_entity_
-#: linked_reason` does not originate it, but `hosted_backup.restore_graph`
-#: re-materializes the set by property MAP"* red as *"not property MAP"* on TRUE
-#: prose (`#10200` review). The two comma shapes need opposite treatment and both
-#: are ordinary English: a comma before a coordinating conjunction delimits a
-#: second CONJUNCT — Universal Dependencies attaches it as `punct(took, ,-4)` in
-#: *"He came home, took a shower and immediately went to bed"*
-#: (https://universaldependencies.org/u/overview/specific-syntax.html, §
-#: Coordination) — while the appositive comma sits INSIDE one conjunct and does
-#: not remove the negator's scope. So this pattern, not `,`, is what ends a
-#: negator's clause; `_CLAUSE_BREAKS` keeps the plain comma because the HISTORY
-#: escape needs the wider split.
-#: ⛔ `while`/`whereas` are NOT members: they are SUBORDINATORS, so a comma-set
-#: subordinate clause is still one predicate — *"`sdk.supersede_point` is not,
-#: while the census says otherwise, a re-materializing writer"* — and counting it
-#: as a conjunct boundary cleared the class negation on BOTH legs, a spelling the
-#: previous head caught (`#10200` review, cycle 2, measured). Only the four
-#: coordinators that CAN introduce an independent conjunct are listed.
-_COORDINATING_COMMA_RE = re.compile(r",\s*(?:and|but|so|yet)\b", re.I)
+#: ⛔ SUPERSEDED — this block used to define the NEGATOR's break set
+#: (`_NEGATOR_BREAKS`, `_CLAUSE_BREAKS` minus `,`) and a coordinating-comma
+#: exception, consumed by `_clause_before` + `_has_class_negator`, plus their
+#: negator vocabulary (`_NEGATOR_RE`). All of it is GONE, because the
+#: punctuation-window form it implemented is wrong in BOTH directions, measured
+#: (`#10200` review cycles 2 and 3): it CLEARED a real class negation whenever an
+#: unrelated clause carried a negator (*"Unlike `create_direct_edge`, which cannot
+#: name an about edge, `sdk.supersede_point` re-materializes the set by property
+#: MAP"*), and it CLEARED the exemption direction's own contradiction.
+#: `_marker_itself_negated` replaced it (see `_class_marker_negated`).
+#: ⛔ THE DEFECT THIS DELETION CLOSES: once `_clause_before` stopped being called,
+#: the window machinery became UNREACHABLE but still read as coverage — and
+#: `_QUANTIFIER_NEGATION_RE`'s exclusion of *"not only"* / *"not solely"* ran only
+#: inside `_has_class_negator`, i.e. never. The round-2 fix was RECORDED as done
+#: while the false red it prevents was live on BOTH legs: *"`cache_projection.
+#: relation_statement` is not only a MAP form writer but the canonical one"* red as
+#: `not MAP form` (`#10200` review, cycle 5, executed). That rule now lives in
+#: `_marker_itself_negated`, where it is actually reached. A rule that exists only
+#: in dead code is not a rule.
+#: The two facts worth keeping from the block: the HISTORY escape keeps the plain
+#: comma in `_CLAUSE_BREAKS` (a comma-joined run is not one clause — round 2's
+#: fix), and `while`/`whereas` are SUBORDINATORS, not conjunct boundaries.
 
 #: A POST-positioned negator is still a negation of its predicate — English
 #: negates from behind as well as from in front, and these documents use that voice
@@ -4161,22 +4165,20 @@ _POST_NEGATION_RE = re.compile(r"\bno\s+(?:longer|more|further)\b", re.I)
 #: *"Not only X but also Y carries it by property MAP"* affirms both. Reading them
 #: as class negations red a TRUE sentence on BOTH legs, and the cheapest way for an
 #: editor to clear that red is to weaken true prose — the failure mode the legs
-#: exist to prevent, pointed the other way. Stripped before `_NEGATOR_RE` runs.
+#: exist to prevent, pointed the other way. Stripped by `_marker_itself_negated`
+#: — the LIVE negator scan — before `_MARKER_NEGATION_BEFORE_RE` runs. ⛔ It sat
+#: in `_has_class_negator` until `#10200` review cycle 5, i.e. in dead code, so
+#: this exclusion never ran; see the SUPERSEDED note above.
 _QUANTIFIER_NEGATION_RE = re.compile(
     r"\bnot\s+(?:the\s+)?only\b|\bnot\s+solely\b", re.I
 )
-
-
-def _has_class_negator(prefix: str) -> bool:
-    """Does this clause prefix carry a negator of the CLASS (not of a quantity)?"""
-    return bool(_NEGATOR_RE.search(_QUANTIFIER_NEGATION_RE.sub(" ", prefix)))
 
 
 def _class_marker_negated(sentence: str, match) -> bool:
     """Does a NEGATOR govern the class marker at `match` — in front or behind?
 
     The BEFORE half is predicate-scoped (`_marker_itself_negated`), not the
-    punctuation-window `_has_class_negator(_clause_before(...))` it used to be.
+    punctuation-window form it used to be (see the SUPERSEDED note above).
     ⛔ The window form is wrong in BOTH directions, measured at `#10200` review
     cycle 3: it CLEARED a class negation whenever an unrelated clause carried a
     negator (*"Unlike `create_direct_edge`, which cannot name an about edge,
@@ -4292,21 +4294,6 @@ def _claim_sentences(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", flat) if part.strip()]
 
 
-def _clause_before(sentence: str, index: int) -> str:
-    """The text of the clause that ENDS at `index` — a negator's neighbourhood.
-
-    Uses `_NEGATOR_BREAKS`, NOT `_CLAUSE_BREAKS`: a comma separates coordinated
-    predicates for the history escape, but a parenthetical after a comma does not
-    remove a negator's scope (`#10200` review). A comma BEFORE a coordinating
-    conjunction is the exception — it ends the conjunct, so a negator in the
-    previous one does not govern this one (`_COORDINATING_COMMA_RE`).
-    """
-    head = sentence[:index]
-    cut = max((head.rfind(brk) for brk in _NEGATOR_BREAKS), default=-1)
-    cut = max([cut] + [m.end() - 1 for m in _COORDINATING_COMMA_RE.finditer(head)])
-    return head[cut + 1:]
-
-
 def _clause_at(sentence: str, index: int) -> str:
     """The whole clause CONTAINING `index`, both sides, up to the breaks."""
     lo = max((sentence.rfind(brk, 0, index) for brk in _CLAUSE_BREAKS), default=-1)
@@ -4351,19 +4338,47 @@ def _denied_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
     return found
 
 
-def _history_in_denial_clause(low: str, marker: str) -> bool:
-    """Is THIS denial — in the clause that carries it — about HISTORY?
+def _history_in_clause(low: str, match) -> bool:
+    """Is THIS occurrence's clause about HISTORY rather than about HEAD?
 
     A sentence-wide test excused EVERY denial in the sentence, so one trailing
     reference to an open defect made the retracted cycle-3 sentence green again
     (`#10200` review). A history marker says the state CHANGED, and the clause
     that carries the denial is the clause that says so.
+    ⛔ PER OCCURRENCE, not per marker. Quantifying per marker (`any` over the
+    marker's occurrences, which is what this function did) let ONE history-marked
+    occurrence excuse a second, present-tense denial of the same marker in the
+    same sentence — *"`sdk.supersede_point` was a declared false positive before
+    `#9417`, and the guard still declares it a false positive at HEAD"* was green,
+    and it is exactly the `#10149` class this leg exists for: history kept, the
+    denial NOT corrected (`#10200` review, cycle 5, executed).
     """
+    clause = _clause_at(low, match.start())
+    return any(history.lower() in clause for history in HISTORY_MARKERS)
+
+
+def _denies_the_class(sentence: str, marker: str) -> bool:
+    """Does this sentence DENY the class with `marker` — decided PER OCCURRENCE?
+
+    ⛔ BOTH escapes are quantified per OCCURRENCE here, because quantifying per
+    MARKER is fail-OPEN in both directions and each direction was measured
+    (`#10200` review, cycle 5):
+
+      * ONE history-marked occurrence cancelled a second, present-tense denial of
+        the same marker in the same sentence (`_history_in_clause`);
+      * ONE negated occurrence cancelled a second, un-negated denial — *"`sdk.
+        supersede_point` is not exempt from the census, and it is exempt"* was
+        green, because `_denied_markers` answers "is ANY occurrence negated?".
+
+    The sibling EXEMPT branch below is fail-CLOSED for the same reason and has
+    always been (`any(not _marker_itself_negated(...))`: any un-suppressed
+    occurrence flags it). The counted branch had inverted the quantifier; this
+    restores the direction that reds.
+    """
+    low = sentence.lower()
     return any(
-        any(
-            history.lower() in _clause_at(low, match.start())
-            for history in HISTORY_MARKERS
-        )
+        not _history_in_clause(low, match)
+        and not _class_marker_negated(low, match)
         for match in re.finditer(re.escape(marker.lower()), low)
     )
 
@@ -4392,9 +4407,19 @@ _MARKER_NEGATION_AFTER_RE = re.compile(
 
 
 def _marker_itself_negated(low: str, match) -> bool:
-    """Is THIS occurrence of a marker denied by the predicate that governs it?"""
+    """Is THIS occurrence of a marker denied by the predicate that governs it?
+
+    ⛔ `_QUANTIFIER_NEGATION_RE` is applied HERE, in the LIVE path. It used to sit
+    in `_has_class_negator` — a helper the punctuation-window rewrite left
+    unreferenced — so its exclusion of *"not the ONLY writer that carries the set
+    by property MAP"* and *"not only X but also Y"* never ran: round 2 recorded
+    the fix, and the false red it prevents was live on BOTH legs (`#10200`
+    review, cycle 5, executed). A rule that only exists in dead code is not a
+    rule.
+    """
+    prefix = _QUANTIFIER_NEGATION_RE.sub(" ", low[: match.start()])
     return bool(
-        _MARKER_NEGATION_BEFORE_RE.search(low[: match.start()])
+        _MARKER_NEGATION_BEFORE_RE.search(prefix)
     ) or bool(_MARKER_NEGATION_AFTER_RE.match(low[match.end():]))
 
 
@@ -4459,21 +4484,19 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                             )
                         ]
                     else:
+                        # ⛔ PER OCCURRENCE — see `_denies_the_class`. Both
+                        # escapes (history, and the marker being itself negated)
+                        # are decided there. One excused occurrence used to
+                        # cancel a second, present-tense denial of the same
+                        # marker in the same sentence (`#10200` review, cycle 5).
+                        # A marker that is ITSELF negated still denies the
+                        # denial, not the class: *"it is not an exemption, it
+                        # re-materializes the set by property MAP"* is TRUE prose
+                        # about a counted writer.
                         hits = [
                             marker
                             for marker in DENIAL_MARKERS
-                            if marker.lower() in low
-                            and not _history_in_denial_clause(low, marker)
-                            # ⛔ A marker that is ITSELF negated denies the
-                            # denial, not the class: *"it is not an exemption,
-                            # it re-materializes the set by property MAP"* is
-                            # TRUE prose about a counted writer, and reading it
-                            # as a denial reds it (`#10200` review). The scope is
-                            # the MARKER'S OWN predicate — a negator elsewhere in
-                            # the run must not excuse the denial (see
-                            # `_marker_itself_negated`) — which is now the rule
-                            # in every branch, via `_class_marker_negated`.
-                            and not _denied_markers(sentence, (marker,))
+                            if _denies_the_class(sentence, marker)
                         ]
                         # ⛔ POLARITY: a NEGATED class marker denies the very
                         # class it names, and no `DENIAL_MARKERS` entry spells
@@ -4574,8 +4597,10 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     # is still a negation of it, so the affirmative half must NOT count it.
     # Round 2 put `,` into the shared break set to stop the history escape
     # spanning a conjunction, and that silently re-opened round 1's polarity
-    # finding for ordinary English; the negator scan therefore has its own break
-    # set (`_NEGATOR_BREAKS`). `#10200` review.
+    # finding for ordinary English. The mechanism that closes it is the
+    # parenthetical alternation in `_MARKER_NEGATION_BEFORE_RE` — a negator-aware
+    # break set (`_NEGATOR_BREAKS`) was tried and DELETED, it belonged to the
+    # window form `_marker_itself_negated` replaced. `#10200` review, cycle 5.
     appositive = (
         (
             "probe",
@@ -4889,7 +4914,8 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # still a negation of it. Round 2 put `,` into the shared break set to stop the
     # history escape spanning a conjunction, and that silently re-opened round 1's
     # polarity finding for ordinary English (`#10200` review: green on BOTH legs).
-    # The negator scan therefore has its own break set (`_NEGATOR_BREAKS`).
+    # Closed by the parenthetical alternation in `_MARKER_NEGATION_BEFORE_RE`; the
+    # negator-aware break set (`_NEGATOR_BREAKS`) was deleted with the window form.
     appositive = (
         (
             "probe",
@@ -5018,10 +5044,13 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "counted writer can be denied in the decision's own words"
     )
     # … and the NEGATION of that noun is TRUE prose about a counted writer, so
-    # the marker must not fire on it. ⛔ This is why the trigger is the phrase
-    # `an exemption` rather than a bare `exempt` substring: the documents' own
-    # *"make both exemptions true instead of merely exempting them"* sentence
-    # sits in a run that names counted writers.
+    # the marker must not fire on it. ⛔ This is why the trigger is the DEMONSTRATIVE
+    # AND PREDICATE PHRASES (`an exemption`, `the exemption`, `is exempt`) rather
+    # than a bare `exempt` substring: the documents' own *"make both exemptions
+    # true instead of merely exempting them"* sentence sits in a run that names
+    # counted writers, and it contains `exemptions` / `exempting` — the non-denial
+    # spellings a stem match cannot tell from a denial (`#10200` review, cycle 5,
+    # executed: the bare stem red that very sentence).
     not_an_exemption = (
         (
             "probe",
@@ -5064,8 +5093,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     )
     # … and the inflected forms of the decision's noun, not just the articled one
     # (`is exempt`, `the exemption`). `#10200` review cycle 2 measured `an
-    # exemption` leaving all three green while the stem `exempt` reds 0 sentences
-    # in either document.
+    # exemption` alone leaving all three green; cycle 5 measured that the stem
+    # `exempt` which replaced it reds 0 sentences only because the documents'
+    # `exempt*` spellings are all NON-denial (`exemptions`, `exempting`) — i.e. it
+    # was an artifact, and it false-red the documents' own §13 sentence (the
+    # `not_only_affirms` and `documents_own_exemption_prose` probes below pin that
+    # direction). The three denials are pinned as PHRASES.
     inflected_exemption = (
         (
             "probe",
@@ -5124,6 +5157,93 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "a counted writer said to carry/write NOTHING on an about edge is not "
         "seen, so the decision's 'carry no property' is pinned only in its "
         "articled spelling"
+    )
+    # ⛔ Probe 14 (`#10200` review, cycle 5): the HISTORY escape is quantified per
+    # OCCURRENCE, not per marker. One history-marked occurrence used to excuse a
+    # second, present-tense denial of the SAME marker in the SAME sentence — the
+    # exact `#10149` class (history kept, the denial NOT corrected), green.
+    history_then_present_denial = (
+        (
+            "probe",
+            "`sdk.supersede_point` was a declared false positive before `#9417`, "
+            "and the guard still declares it a false positive at HEAD.",
+        ),
+    )
+    assert all(
+        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        for sentence in history_then_present_denial
+    ), (
+        "a history-marked occurrence excuses a SECOND, present-tense denial of the "
+        "same marker in the same sentence, so keeping the `#9417` record while "
+        "leaving the retracted claim standing is green"
+    )
+    # … and the same asymmetry on the OTHER escape: one NEGATED occurrence used to
+    # cancel an un-negated denial of the same marker. The sibling EXEMPT branch has
+    # always been fail-closed (`any(not ...)`); the counted branch had inverted it.
+    # ⚠️ The marker must be one that genuinely occurs TWICE, one negated and one
+    # not. `is exempt` does NOT qualify — *"is not exempt"* does not contain it —
+    # so a probe written with it stays green under the per-marker mutation and
+    # pins nothing (measured: cycle 5's first draft of this probe did exactly that).
+    # `false positive` does, which is why it is the one used here.
+    negated_then_real_denial = (
+        (
+            "probe",
+            "`sdk.supersede_point` is not a false positive, and it is a false "
+            "positive.",
+        ),
+    )
+    assert all(
+        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        for sentence in negated_then_real_denial
+    ), (
+        "one negated occurrence cancels a second, un-negated denial of the same "
+        "marker, so 'it is not a false positive …, and it is a false positive' is "
+        "green"
+    )
+    # ⛔ Probe 15 (`#10200` review, cycle 5): a QUANTIFIER negation AFFIRMS the
+    # class, so it must not read as a class negation. This is the round-2 rule that
+    # lived only in dead code (`_QUANTIFIER_NEGATION_RE` inside the unreferenced
+    # `_has_class_negator`), so the fix was recorded and the false red was live on
+    # BOTH legs. The probe REDS if the exclusion stops being reached.
+    not_only_affirms = (
+        (
+            "probe",
+            "`cache_projection.relation_statement` is not only a MAP form writer "
+            "but the canonical one.",
+        ),
+        (
+            "probe",
+            "`cache_projection.relation_statement` is not the only writer that "
+            "carries the set by property MAP.",
+        ),
+    )
+    assert not any(
+        "relation_statement" in item
+        for item in _denied_verdicts(list(not_only_affirms))
+    ), (
+        "a QUANTIFIER negation ('not only X but also Y', 'not the only writer that "
+        "carries it by property MAP') is read as a class negation, so the "
+        "documents' own affirmative idiom reds and the cheapest way out is to "
+        "weaken true prose"
+    )
+    # ⛔ Probe 16 (`#10200` review, cycle 5): the documents' OWN sentence about the
+    # exemptions is TRUE, and must stay green even when it names a counted writer.
+    # The bare stem `exempt` red it (it matches `exemptions` / `exempting`), which
+    # is why the denial vocabulary is the predicate and articled PHRASES.
+    documents_own_exemption_prose = (
+        (
+            "probe",
+            "`sdk.supersede_point` counts now, and the guard pins the shapes that "
+            "make both exemptions true instead of merely exempting them.",
+        ),
+    )
+    assert not any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(documents_own_exemption_prose))
+    ), (
+        "the documents' own TRUE sentence about the exemptions reds when it names "
+        "a counted writer, so the corpus's own wording is the trigger and the red "
+        "can only be cleared by deleting the correction"
     )
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
@@ -5385,6 +5505,29 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     "no longer exempt": (
         "contradiction vocabulary — the exemption denied rather than replaced, "
         "absent until someone writes it"
+    ),
+    "is exempt": (
+        "contradiction vocabulary — the predicate form of 'called an exemption'. "
+        "Absent from both documents until someone writes it; it replaced the bare "
+        "stem `exempt`, whose only actual `exempt*` matches were the NON-denial "
+        "spellings `exempts` / `exemptions` / `exempting` (`#10200` review, "
+        "cycle 5)"
+    ),
+    "is exempted": (
+        "contradiction vocabulary — the same claim in its past-participle form. "
+        "Absent until someone writes it, and NOT redundant with `is exempt`: the "
+        "post-positioned-negation read anchors at the match END, so "
+        "'is exempted from the census no longer' is only seen by this spelling"
+    ),
+    "an exemption": (
+        "contradiction vocabulary — the indefinite-articled form the owner's "
+        "decision quotes verbatim ('called an exemption'). Absent from both "
+        "documents until someone writes it"
+    ),
+    "the exemption": (
+        "contradiction vocabulary — the definite-articled form. Absent from both "
+        "documents until someone writes it; the documents write `both exemptions` "
+        "and `merely exempting` instead, neither of which is a denial"
     ),
 }
 
