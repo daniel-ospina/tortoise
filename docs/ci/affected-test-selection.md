@@ -134,7 +134,7 @@ but are deliberately not a merge gate:
 | lane entry | files | its runner |
 |---|---|---|
 | `eval/**` + `longmem_eval/**` (the subtree form, expanded against disk) | 42 | `.github/workflows/eval-suite-manual.yml` — `workflow_dispatch` only (#10194) |
-| `eval/retrieval/test_integration.py` (already inside `eval/**`) | 0 extra | `.github/workflows/evals-on-demand.yml` |
+| `eval/retrieval/test_integration.py` (already inside `eval/**`, so it runs in BOTH shapes — and it is the most expensive of the 42: 1 523.4 s of their 2 604.3 s) | 0 extra | `.github/workflows/evals-on-demand.yml` — its own literal lane entry, embedded shape (#4711) · and `.github/workflows/eval-suite-manual.yml`, docker shape, as one of the 42 |
 | `test_perf_lane_volunteer_context.py` | 1 | `.github/workflows/perf-lane.yml` (#3992) |
 
 So a diff under `tests/eval/` or `tests/longmem_eval/`, or one that selects the `eval` surface (an

@@ -8929,10 +8929,11 @@ durations:
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
-# out). It runs from the on-demand RUNNERS — `.github/workflows/
-# evals-on-demand.yml` and, for the perf lane, `.github/workflows/perf-lane.yml`
-# (both `workflow_dispatch`; the perf lane is also nightly) — and that is the
-# point.
+# out). It runs from the on-demand RUNNERS: `.github/workflows/
+# evals-on-demand.yml` for the lane's LITERAL entries,
+# `.github/workflows/eval-suite-manual.yml` for the two `dir/**` eval subtrees
+# (#10194), and `.github/workflows/perf-lane.yml` for the perf lane (all three
+# `workflow_dispatch`; the perf lane is also nightly) — and that is the point.
 #
 # KNOWN AND DELIBERATE, recorded because it is a real surface: `post-merge-
 # validation.yml` ignores only `slow_files` + `tests/e2e`, so it COLLECTS this
@@ -9209,7 +9210,13 @@ durations:
 # A runner must exist for every entry (`leg_coverage_issues` cannot see a runner,
 # so this comment is the record): `test_perf_lane_volunteer_context.py` →
 # `.github/workflows/perf-lane.yml`; `eval/retrieval/test_integration.py` →
-# `evals-on-demand.yml`; the two eval subtrees → `eval-suite-manual.yml`.
+# BOTH `.github/workflows/evals-on-demand.yml` (its own literal entry: blank
+# dispatch, embedded shape) and `.github/workflows/eval-suite-manual.yml` (it is
+# also inside `eval/**` below); the two eval subtrees → `eval-suite-manual.yml`.
+# ⛔ Not `evals-on-demand.yml` for the subtrees: that workflow resolves
+# `on_demand_literal_runner_files()` and runs 2 of these 43, so pointing a human
+# at it for an `eval/**` file sends them to a green run over a file it never
+# touched.
 on_demand:
   # #4711: 24.9% of ALL measured test time in one file; its own docstring says it
   # asserts report SHAPE, never absolute quality. Also covered by `eval/**` below.
