@@ -969,7 +969,25 @@ def _extractor_result(**over) -> dict:
         "story_arc": "A narrative.",
         "embed_list": {"entities": [1], "events": [1], "points": [1],
                        "operators": [1]},
-        "vet": {"enabled": True, "s2": {"kept": 3}},
+        # The VET surface as ``_run_vet_pass`` really shapes it: its counts
+        # under ``stats``, plus a ``decisions`` block that mirrors the embed
+        # list's own text PER CANDIDATE (``vet_gate.vet_candidates``). The seam
+        # must forward the first and never the second (#10214 review, P1) — the
+        # text is here so a leak reds instead of passing on a thin fixture.
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3, "discarded": 0,
+                                  "by_outcome": {"KEEP": 3},
+                                  "arbiter": "none"},
+                       "batch": {"size": 3},
+                       "decisions": {"pt_0": {"section": "points",
+                                               "index": 0,
+                                               "text": "Ana Ruiz owns the "
+                                                       "rollout of the "
+                                                       "Postgres record",
+                                               "outcome": "KEEP",
+                                               "rule_id": None,
+                                               "reason": None}}},
+                "union": {}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3}, "union": {}},
         "search": {"mode": "docker", "degraded": False, "reason": None,
                    "queries_run": 15, "entities": [{"id": "o_1"}],
@@ -1126,6 +1144,43 @@ def test_every_witness_block_observe_steps_reads_is_produced_by_the_seam():
     assert "queries_run" in produced["search"]
 
 
+def test_the_witness_forwards_the_vet_counts_and_never_its_candidate_text():
+    """The seam's stated bound, held against the surface's real shape (#10214).
+
+    ``_run_vet_pass`` returns ``{"stats", "batch", "decisions"}`` and
+    ``decisions`` carries one row PER CANDIDATE with that candidate's own
+    ``text`` (plus a ``counterfactual`` quoting it on a discard). The receipt is
+    the object ``capture_session`` returns and the hosted response body, so a
+    witness that forwards the surface grows with candidate count × text length —
+    the exact content ``payload``/``embed_list`` were kept off it to avoid, and
+    the opposite of the docstring's "counts and the stage's OWN small stats".
+
+    Mutation that reds it: forward the surface (``"s2": vet.get("s2") or {}``),
+    which is what the pre-fix helper did — the fixture's candidate text then
+    appears inside ``stats["step_witness"]``.
+    """
+    import json
+
+    from tortoise.sdk import _capture_step_witness
+
+    out = _extractor_result()
+    assert out["vet"]["s2"]["decisions"], "the fixture must carry the leak"
+    witness = _capture_step_witness(out, committed=15)
+    assert witness["vet"]["enabled"] is True
+    # the COUNTS are forwarded — a witness still says the pass did work
+    assert witness["vet"]["s2"]["candidates"] == 3, witness["vet"]
+    assert "decisions" not in witness["vet"]["s2"], witness["vet"]
+    rendered = json.dumps(witness)
+    assert "Ana Ruiz owns the rollout" not in rendered, (
+        "the witness carried extracted candidate text — a per-candidate surface "
+        f"was forwarded instead of its counts: {witness['vet']}")
+    # a projection of the surface, not merely "smaller today": the witness's
+    # vet block is measured against the surface it projects
+    assert len(json.dumps(witness["vet"])) < len(json.dumps(out["vet"])), (
+        "the witness is not a projection of the Vet surface: "
+        f"{len(json.dumps(witness['vet']))} >= {len(json.dumps(out['vet']))}")
+
+
 def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch):
     """#9116, the WIRING: the real ``capture_session`` returns the seam's record.
 
@@ -1144,6 +1199,23 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
     witnessed — and must not be. Claiming it would be the "OFF population under an
     ON label" failure the bundle already paid for once (#9823). What S2.3 needs is
     a run whose classify pass assigns kinds, not a looser rule here.
+
+    ⚠️ Two properties of the LANE it runs in are handled here rather than
+    assumed, because this file is a `core` fast-surface member and NOT
+    `uri_requiring:` (and that list is re-derived from COLLECTION aborts, so a
+    test-level skip/failure is never subtracted from a URI-empty leg):
+
+      * **the graph is `test`-prefixed** — `graph_name=` binds verbatim, and
+        only `test_`/`tortoise_test_*` names are DETACH-DELETEd by the
+        session-end sweep (`tests/_embedded.py::wipe_server`). A
+        `capstone_…` name is outside every sweep, i.e. one stray graph per run
+        on the shared instance (the #5084 class).
+      * **S3 is asserted only where the backend can search** — over
+        embedded/no URI the extractor's own `search_graph` short-circuits
+        (`queries_run=0`, `degraded=True`), so S3 is unwitnessed by the
+        BACKEND's answer, not by a seam defect. The wiring claim this test
+        exists for does not need S3, so it is stated for the arm it is in
+        rather than reding a leg that never promised a searchable backend.
     """
     import uuid as _uuid
 
@@ -1152,7 +1224,7 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.setenv("TORTOISE_VET", "1")
     monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
-    graph = f"capstone_9116_e2e_{_uuid.uuid4().hex[:10]}"
+    graph = f"test_capstone_9116_{_uuid.uuid4().hex[:10]}"
     sdk = TortoiseSDK(graph_name=graph)
     try:
         receipt = sdk.capture_session(
@@ -1175,11 +1247,17 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
         sorted(set(probe.WITNESS_KEYS) ^ set(witness)))
 
     seen = probe.observe_steps(receipt)
-    assert set(seen) == set(cvc.STEPS) - {"S2.3"}, sorted(set(cvc.STEPS) - set(seen))
+    searchable, why = probe.backend_is_searchable()
+    expected = set(cvc.STEPS) - {"S2.3"} - (set() if searchable else {"S3"})
+    assert set(seen) == expected, (sorted(set(cvc.STEPS) - set(seen)), why)
     # S2.3's absence is the PASS's own answer, quoted from its block
     assert witness["classify_later"]["s2"] == {}, witness["classify_later"]
     assert witness["vet"]["s2"], witness["vet"]
-    assert witness["search"]["queries_run"], witness["search"]
+    if searchable:
+        assert witness["search"]["queries_run"], witness["search"]
+    else:
+        # the backend's own skip answer, NOT a seam defect — stated, not elided
+        assert witness["search"]["queries_run"] == 0, (witness["search"], why)
     assert witness["commit"]["payload_produced"] is True, witness["commit"]
 
 

@@ -336,11 +336,18 @@ def observe_steps(result: dict) -> dict[str, str]:
         seen["S5"] = (f"S5 merged {merge.get('merged_items')} item(s) "
                       f"into the commit list")
     if commit.get("payload_produced"):
-        seen["S6"] = ("the Layer-1 payload was produced and committed "
+        # ``committed`` is the count the write loop RESOLVED (created or folded
+        # onto an existing canonical) — never a minted-only count, so the
+        # message states it as such rather than as a second condition the
+        # branch does not test (#10214 review, P3). Gating on it would score a
+        # payload with nothing to commit as unwitnessed, which is a different
+        # claim; the honest fix is to say what the value is.
+        seen["S6"] = ("the Layer-1 payload was produced and its points went "
+                      "through the commit loop "
                       f"(step_witness['commit']: entities={commit.get('entities')}, "
                       f"points={commit.get('points')}, "
                       f"operators={commit.get('operators')}, "
-                      f"committed={commit.get('committed')})")
+                      f"resolved={commit.get('committed')})")
     return seen
 
 

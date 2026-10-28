@@ -1293,7 +1293,6 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     receipt_keys = sorted({key for run in runs
                            for key in (run.get("receipt_keys") or ())})
     stats_key_total = sum(len(run.get("stats") or {}) for run in runs)
-    ran = sorted({run["session_id"] for run in runs})
 
     if edus and chunks:
         observed["S0"] = (f"the reader segmented the corpus: stats.edus={edus} "

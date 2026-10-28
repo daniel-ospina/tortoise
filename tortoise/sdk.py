@@ -5856,6 +5856,29 @@ def _step_embed_counts(block) -> dict[str, int]:
     return {k: len(block.get(k) or []) for k in _STEP_EMBED_KINDS}
 
 
+def _gate_counts(surface) -> dict:
+    """The COUNTS out of a VET / classify pass surface (``{}`` when nothing ran).
+
+    ``_run_vet_pass`` returns ``{"stats": …, "batch": …, "decisions": …}`` and
+    the classify passes return their stats dict directly. ``decisions`` is NOT a
+    stats block: ``vet_gate.vet_candidates`` builds one row PER CANDIDATE
+    carrying that candidate's own ``text`` (and, on a discard, a
+    ``counterfactual`` quoting it) — so forwarding the surface whole would put
+    extraction-proportional content on a receipt that is serialized on the
+    hosted lane and returned to every SDK caller, which is exactly what this
+    seam's bound forbids.
+
+    ``stats`` is the pass's own counts and is non-empty exactly when the pass
+    did work, which is the whole question a witness asks it. The raw decisions
+    stay on the extractor's own return (``result["vet"]``), where the eval lane
+    already reads them.
+    """
+    if not isinstance(surface, dict):
+        return {}
+    stats = surface.get("stats")
+    return stats if isinstance(stats, dict) else {}
+
+
 def _capture_step_witness(out: dict, *, committed: int) -> dict:
     """#9116: the facts that let a caller witness each extractor step in ONE pass.
 
@@ -5874,15 +5897,18 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
 
     It carries FACTS, not a verdict: no step id is graded here. Each block
     names the values that prove its stage ran (``vet.s2``/``vet.union`` — the
-    VET gate's own stats; ``classify_later`` — the classify passes' own stats;
+    VET gate's own COUNTS; ``classify_later`` — the classify passes' own stats;
     ``search.queries_run``/``degraded`` — S3's own report;
     ``commit.payload_produced``/``committed`` — the Layer-1 payload's presence
-    plus the count the write loop actually committed). The caller decides what
-    it witnessed, which is what keeps the observation independent of the thing
-    observed.
+    plus the count of points the write loop RESOLVED, i.e. created or folded
+    onto an existing canonical, never a minted-only count). The caller decides
+    what it witnessed, which is what keeps the observation independent of the
+    thing observed.
 
-    Bounded by construction: counts and the stage's OWN small stats dicts only
-    — never ``payload``, ``embed_list`` or the search rows.
+    Bounded by construction: counts, and the stages' own stats dicts taken
+    through :func:`_gate_counts` — never ``payload``, ``embed_list``, the
+    search rows, or a gate's per-candidate ``decisions`` (which carries the
+    candidates' own text).
     """
     stats = out.get("stats") or {}
     llm = stats.get("llm") or {}
@@ -5904,10 +5930,13 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
         "map": {"items": _step_embed_counts(
             out.get("s2_embed") if out.get("s2_embed") is not None
             else out.get("embed_list"))},
-        # S2.2 — the VET gate's own evidence surface (#5005). ``enabled`` False
-        # is a real answer: a flag-off pass ran no S2.2.
+        # S2.2 — the VET gate's own COUNTS (#5005), projected through
+        # ``_gate_counts``: the surface's ``decisions`` block mirrors the embed
+        # list's text per candidate and stays on the extractor's return.
+        # ``enabled`` False is a real answer: a flag-off pass ran no S2.2.
         "vet": {"enabled": bool(vet.get("enabled")),
-                "s2": vet.get("s2") or {}, "union": vet.get("union") or {}},
+                "s2": _gate_counts(vet.get("s2")),
+                "union": _gate_counts(vet.get("union"))},
         # S2.3 — the classify passes' own evidence surface (#1695 Task 5).
         "classify_later": {"enabled": bool(classify.get("enabled")),
                            "s2": classify.get("s2") or {},
@@ -5928,9 +5957,12 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
                   "s2_items": s4.get("s2_items"),
                   "s4_items": s4.get("s4_items")},
         # S6 — the Layer-1 payload was produced AND its points went through the
-        # commit loop (``committed`` is what the write loop actually resolved —
-        # 0 when every point folded onto an existing canonical, which is a
-        # commit, not a skip).
+        # commit loop. ``committed`` is what the write loop RESOLVED, never a
+        # minted-only count: ``extracted`` is appended on a dedup hit and on
+        # every surfaced consolidation fold as well as on a create, so a capture
+        # in which every point folded onto an existing canonical reports the
+        # folded count (the #2949 review F3 note on the fold path says why a
+        # consolidation fold IS a dedup hit).
         "commit": {"payload_produced": payload is not None,
                    "entities": len((payload or {}).get("entities") or []),
                    "events": len((payload or {}).get("events") or []),

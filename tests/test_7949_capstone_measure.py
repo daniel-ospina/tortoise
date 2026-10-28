@@ -663,7 +663,8 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
     receipt carries the surface and all eight steps come back witnessed.
     """
     runs = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
-                 surfaces={"vet": {"enabled": True, "s2": {"kept": 3}},
+                 surfaces={"vet": {"enabled": True,
+                                    "s2": {"stats": {"candidates": 3}}},
                            "classify_later": {"enabled": True,
                                               "s2": {"kept": 2}}})]
     observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
@@ -678,7 +679,8 @@ def test_a_stats_home_for_the_classify_surface_also_counts():
     stats = {**_FULL_STATS, "classify_later": {"enabled": True,
                                               "s2": {"kept": 2}}}
     runs = [_run(stats=stats, stats_keys=sorted(stats),
-                 surfaces={"vet": {"enabled": True, "s2": {"kept": 1}},
+                 surfaces={"vet": {"enabled": True,
+                                    "s2": {"stats": {"candidates": 1}}},
                            "classify_later": {}})]
     observed, _unobserved = measure.observe_steps(runs, _FULL_CENSUS)
     assert "S2.3" in observed, observed
@@ -909,7 +911,13 @@ def test_the_seam_witnesses_eight_of_eight_with_no_probe_edit_to_the_rule():
         "story_arc": "A narrative.",
         "s2_embed": {"entities": [1], "events": [1], "points": [1],
                      "operators": []},
-        "vet": {"enabled": True, "s2": {"kept": 3}, "union": {}},
+        # The real VET surface shape (``_run_vet_pass``): counts under
+        # ``stats``, the raw per-candidate ``decisions`` beside it. The seam
+        # forwards the counts only (#10214 review, P1).
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3, "discarded": 0},
+                       "decisions": {"pt_0": {"text": "a candidate"}}},
+                "union": {}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3},
                            "union": {}},
         "search": {"mode": "docker", "degraded": False, "queries_run": 15,
