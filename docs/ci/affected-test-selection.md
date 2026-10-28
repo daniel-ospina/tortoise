@@ -139,7 +139,7 @@ but are deliberately not a merge gate:
 
 So a diff under `tests/eval/` or `tests/longmem_eval/`, or one that selects the `eval` surface (an
 `eval`-registered test file, `tools/longmem_eval/…`, `tortoise/embeddings.py`), will select **none of
-those 42** — a green PR there says nothing about them. That is the owner's decision (#10194, evals
+those files** — a green PR there says nothing about them. That is the owner's decision (#10194, evals
 paused), not a tool defect: run the manual workflow, or `--run` with the paths yourself.
 
 `--run` otherwise runs the fast set only — the same files the PR's shard legs run. Without that

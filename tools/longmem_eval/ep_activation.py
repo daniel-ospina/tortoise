@@ -506,12 +506,21 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # case (the only case that needs it), against the same WHERE clause as the
     # row read, so a MEASURED empty graph (all-neutral, no EP state) stays a
     # legitimate baseline.
+    before_cov = None
+    if off_neutral_before is not None and off_neutral_before[1] == 0:
+        before_cov = _census(g, _COUNT_POINTS_WITH_EP)
     if (off_neutral_before is not None and off_neutral_before[1] == 0
-            and _census(g, _COUNT_POINTS_WITH_EP)):
+            and (before_cov is None or before_cov)):
+        # ``before_cov is None`` takes the SAME verdict as a disagreement: the
+        # census that would prove the baseline empty could not be read at all,
+        # so an empty row set is UNPROVEN — and an unproven empty baseline is
+        # precisely what credits this pass with a prior it did not create. Fail
+        # closed (#10137 review 5, P3).
         logger.warning(
             "activate_beliefs: PRE-pass claim-state census returned 0 rows "
-            "while claims carry EP state — broken read, publishing UNKNOWN "
-            "contribution instead of crediting the pass with a prior")
+            "with no usable coverage count (%s) — broken read, publishing "
+            "UNKNOWN contribution instead of crediting the pass with a prior",
+            "unread" if before_cov is None else f"points_with_ep={before_cov}")
         off_neutral_before = None
 
     # ── 2. Run EP — whole-graph stabilization, posteriors persisted ───
@@ -555,12 +564,16 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # broken read, not a measured zero (#10137 review 3, P2). `_scalar_or_none`
     # closes this for the count cells; a row-set read needs its own check,
     # because an empty set is also the legitimate answer for an all-neutral
-    # graph and those two must not be published as one number.
-    if after is not None and with_ep and after[1] == 0:
+    # graph and those two must not be published as one number. An UNREAD
+    # ``with_ep`` is the same verdict: the count that would prove the read saw
+    # an empty population could not be read, so zero rows is unproven — the
+    # cell is UNKNOWN, never a measured 0 (#10137 review 5, P3).
+    if after is not None and after[1] == 0 and (with_ep is None or with_ep):
         logger.warning(
-            "activate_beliefs: claim-state census returned 0 rows while "
-            "points_with_ep=%d — broken read, reporting UNKNOWN instead of a "
-            "fabricated off-neutral 0", with_ep)
+            "activate_beliefs: claim-state census returned 0 rows with no "
+            "usable coverage count (%s) — broken read, reporting UNKNOWN "
+            "instead of a fabricated off-neutral 0",
+            "unread" if with_ep is None else f"points_with_ep={with_ep}")
         after = None
     off_neutral = (len(after[0]) if after is not None else None)
     # The CONTRIBUTION proper: claims NEWLY off the neutral mean. UNKNOWN when
