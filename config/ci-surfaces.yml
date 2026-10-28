@@ -3900,9 +3900,13 @@ surfaces:
   # measured: delete it and `classify_test_file()` returns None, so
   # `tools/ci_selection.py --integrity` reds naming this file. It is NOT what
   # selects the pin on a scorer diff: every tier-2 selection is `tier1 ∪ surfaces`
-  # (`tools/ci_selection.py:2983` `files = set(tier1)`), so `tier1` alone selects
-  # this pin on an instrument change, and adding/removing this row changes that
-  # 734-file selection by nothing (#10108 review P3). `core` is also NOT what
+  # (`tools/ci_selection.py`, the `files = set(tier1)` statement — cited WITHOUT a
+  # line number on purpose: `:2983` was correct when this comment was written and
+  # had rotted to `:3009` by the next merge, the same `.py:line` rot this PR's own
+  # evidence doc names), so `tier1` alone selects this pin on an instrument change,
+  # and adding/removing this row changes that 706-file selection by nothing
+  # (#10108 review P3; 734 until `#10206` took `tests/eval/**` out of the gating
+  # shard set). `core` is also NOT what
   # reaches the docs-only diff: measured,
   # `select(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])` → surfaces `[]`, and
   # only `tier1` runs. That is why the row below exists, and the `tier1` comment
