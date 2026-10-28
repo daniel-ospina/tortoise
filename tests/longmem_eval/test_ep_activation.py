@@ -445,6 +445,33 @@ def test_an_unread_coverage_count_is_not_consent_for_an_empty_baseline():
     assert manifest["points_moved_off_neutral"] is None  # NOT credited
 
 
+def test_an_unread_coverage_count_is_not_consent_for_an_empty_state_read():
+    """The POST-pass arm of the rule above, pinned SEPARATELY because it is a
+    separate expression: an UNREAD ``with_ep`` is falsy, so a guard spelled
+    ``and with_ep`` reads "could not read the coverage" as "there is no
+    coverage" and publishes a fabricated off-neutral 0 for a state read that
+    saw no rows — the same silent zero, on the read that DRIVES the
+    per-question verdict.
+
+    Both contribution cells go UNKNOWN. Reverting the guard to ``and with_ep``
+    reds this test with ``assert 0 is None`` on ``points_off_neutral``.
+    """
+    sdk, graph = _make(["c1"], with_ep=3, ep_rows=[])
+    real_query = graph.query
+
+    def _query(cypher, params=None):
+        flat = " ".join(cypher.split())
+        if "count(n)" in flat and "posterior_alpha IS NOT NULL" in flat:
+            raise RuntimeError("connection reset")   # unread on EVERY read
+        return real_query(cypher, params)
+
+    graph.query = _query
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["points_with_ep"] is None          # the coverage was NOT read
+    assert manifest["points_off_neutral"] is None      # 0 rows is therefore unproven
+    assert manifest["points_moved_off_neutral"] is None
+
+
 def test_a_measured_empty_graph_still_baselines_at_zero():
     """The control for both guards above: a graph with NO EP state at all has a
     legitimately empty baseline, and the pass moving nothing is a MEASURED 0 —
