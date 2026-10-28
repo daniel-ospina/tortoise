@@ -64,8 +64,9 @@ the arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`, `ubuntu-22.04-arm
 either — the installer cannot emit one, and `tools/runner_autoscale.py::_preserve_labels` DROPS
 rather than preserves one on re-registration (so an out-of-band attachment cannot become
 permanent).
-Nothing reads the LIVE label set: re-measure `gh api repos/<owner>/<repo>/actions/runners` if a
-runner's labels are re-cut.
+Nothing ASSERTS the LIVE label set: `read_pool()` reads it on every autoscale pass and
+`_preserve_labels` drops a pin from it, but no test and no gate compares it to the invariant above.
+Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a runner's labels are re-cut.
 
 ## What is installed
 

@@ -60,15 +60,19 @@ jobs:
     # CONDITIONAL property, not a standing one: measured again on 2026-10-27 with
     # the fallback disengaged, none of the nine runners carried it. Measured over
     # these four workflows' own SCHEDULED runs on 2026-10-27 (115 runs, 00:00-12:00
-    # UTC, jobs classified by `runner_name`): 83 created a job - 81 served by a
-    # GitHub-hosted runner, 2 by the pool - and 32 never got a runner at all.
+    # UTC, jobs classified by `runner_name`): 83 created a job - 72 served by a
+    # GitHub-hosted runner, 11 by this repo's self-hosted runners (10 of them
+    # `pi-runner-*`, 1 `cmux`) - and 32 never got a runner at all.
     # So the pin is not "escape a queue that is always the pool"; it removes
     # the arm that FAILS.
     #
-    # The pool arm does not starve — it HANGS. Both jobs that landed there died
-    # in `actions/checkout` and were killed at the job's OWN `timeout-minutes`,
-    # with the measuring step SKIPPED, which reads as a finished run that
-    # measured nothing. Both cited runs are `ci-queue-health`'s, whose timeout is
+    # The pool arm does not starve — it HANGS, and it also fails fast. Of those
+    # 11 self-hosted jobs, TWO hung in `actions/checkout` and were killed at the
+    # job's OWN `timeout-minutes`, with the measuring step SKIPPED, which reads
+    # as a finished run that measured nothing; TWO failed in 9s/36s with the
+    # payload step actually run; SEVEN completed normally (10-26s). So the pin
+    # does not say "the pool never works" — it says the pool cannot be relied on
+    # to MEASURE. Both cited runs are `ci-queue-health`'s, whose timeout is
     # `10`; this block is shared by four workflows with different timeouts
     # (`repair` is `15`), so it names no single job's number as its own:
     #     run 40456347720 → pi-runner-vm-2: checkout 8m40s, then cancelled

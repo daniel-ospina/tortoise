@@ -25,9 +25,10 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   LABEL stays gate-following (see `resolve_labels`), and nothing here relabels, removes, or
   re-ranks an existing runner -- with ONE exception, a version-pinned hosted label
   (`VERSION_PINNED_HOSTED_LABEL`), which re-registration DROPS, so a pin attached out of band cannot
-  survive the next repair. The invariant stays OBSERVED, not enforced: nothing reads the LIVE label
-  set (`docs/ops/ci-runner-x64.md:67`), so re-measure it after any runner is registered (see
-  `_preserve_labels`).
+  survive the next RE-REGISTRATION (a repair that only restarts a healthy runner never re-registers
+  it). The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label set on every
+  pass and `_preserve_labels` drops a pin from it, but no test and no gate compares the live set to
+  the invariant (`docs/ops/ci-runner-x64.md:67`), so re-measure it after any runner is registered.
 
 THE CEILING IS A PREDICATE, NOT A NUMBER
     ceiling = min(core_ceiling, runners_live + headroom_by_memory)

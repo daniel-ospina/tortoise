@@ -4225,8 +4225,8 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 #   1. `runs-on: ubuntu-latest` is served by BOTH GitHub-hosted and this repo's
 #      self-hosted pool (the pool advertises it while the fallback is engaged), so a
 #      tick CAN land on the pool and queue behind every test shard in the fleet —
-#      measured 2026-10-27: of the 83 jobs these four workflows created, 81 were
-#      served by a GitHub-hosted runner and 2 by the pool;
+#      measured 2026-10-27: of the 83 jobs these four workflows created, 72 were
+#      served by a GitHub-hosted runner and 11 by this repo's self-hosted runners;
 #   2. GitHub keeps ONE pending run per concurrency group, so each 10-minute
 #      tick cancels the previous PENDING tick while it waits — `cancel-in-progress:
 #      false` prevents cancelling a RUNNING governor and does nothing for a
@@ -4285,11 +4285,11 @@ def test_a_fleet_observer_runs_on_the_hosted_pin_not_the_pool_it_observes() -> N
             f"governor of the runner pool must run on the version-pinned hosted "
             f"label ({HOSTED_ONLY_PIN!r}). `ubuntu-latest` is served by both "
             f"GitHub-hosted and the self-hosted pool this repo fills with test "
-            f"shards (while the fallback is engaged), and the jobs that land on "
-            f"the pool hung in `actions/checkout` (8m40s, 4m41s) until the job's "
-            f"own timeout killed them with the measuring step SKIPPED (measured "
-            f"2026-10-27; same day ci-queue-health completed 1 of its last 8 "
-            f"scheduled runs). Public repo: hosted is free.")
+            f"shards (while the fallback is engaged). The pool arm can hang in "
+            f"`actions/checkout` (8m40s, 4m41s) until the job's own timeout kills "
+            f"it with the measuring step SKIPPED — 2 of the 11 pool-served jobs "
+            f"measured 2026-10-27, same day ci-queue-health completed 1 of its "
+            f"last 8 scheduled runs. Public repo: hosted is free.")
 
 
 def _runs_on_labels(job: dict) -> set[str]:
