@@ -3367,9 +3367,11 @@ def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
             _gate_knob(gate, "READY_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_READY")),
     ]
 
-    # `strict=True` is the searchable half of this pin: `len(phases) == 4` is asserted above and
-    # `windows` is built with exactly three entries, so a phase added to the header WITHOUT a
-    # window of its own must raise here rather than silently going unchecked.
+    # `strict=True` guards the WINDOW side, which nothing else does: `len(phases) == 4` above
+    # already reds a header that gains a numbered phase (the assert fires before the zip runs), but a
+    # fourth entry added to `windows` — a new phase's window written while its header bullet was
+    # forgotten — would make a plain `zip` stop at the three phases it has and leave that window
+    # unchecked, silently. With `strict=True` the two sides cannot be edited apart.
     for segment, seconds in zip(phases[1:], windows, strict=True):
         stated = f"up to {seconds} s ({seconds / 60:.1f} min)"
         assert stated in segment, (
