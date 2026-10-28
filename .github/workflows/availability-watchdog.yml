@@ -103,7 +103,7 @@ jobs:
     # 11 self-hosted jobs, TWO hung in `actions/checkout` and were killed at the
     # job's OWN `timeout-minutes`, with the measuring step SKIPPED, which reads
     # as a finished run that measured nothing; TWO failed in 9s/36s with the
-    # payload step actually run; SEVEN completed normally (10-26s). So the pin
+    # payload step actually run; SEVEN completed normally (10-46s). So the pin
     # does not say "the pool never works" — it says the pool cannot be relied on
     # to MEASURE. Both cited runs are `ci-queue-health`'s, whose timeout is
     # `10`; this block is shared by four workflows with different timeouts

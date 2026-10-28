@@ -60,10 +60,13 @@ fallback — which the decision never specified. The separate decision that pins
 `ubuntu-<version>` (the pool is ~2x slower and killed `test-slow` at its watchdog, #6897/#7867)
 is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label — including
 the arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`,
-`ubuntu-26.04-arm`), which `_preserve_labels` drops too, so a suffixed pin cannot become permanent
-either — the installer cannot emit one, and `tools/runner_autoscale.py::_preserve_labels` DROPS
-rather than preserves one on re-registration (so an out-of-band attachment cannot become
-permanent).
+`ubuntu-26.04-arm`), which `_preserve_labels` drops too — the installer cannot emit one, and
+`tools/runner_autoscale.py::_preserve_labels` DROPS rather than preserves one on re-registration,
+so an out-of-band attachment cannot survive a re-registration or
+`tools/install-ci-runner-x64.sh --repair-labels`. That is NOT the same as "cannot become
+permanent": `scripts/ci_runner_gate.sh` treats any non-auto label as `extra` (`:222`) and re-emits
+it in its whole-set `PUT` body on every fallback transition (`:232`), and a runner nobody
+re-registers keeps whatever label it was given — so re-measure.
 Nothing ASSERTS the LIVE label set: `read_pool()` reads it on every autoscale pass and
 `_preserve_labels` drops a pin from it, but no test and no gate compares it to the invariant above.
 Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a runner's labels are re-cut.
