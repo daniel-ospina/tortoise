@@ -2513,12 +2513,17 @@ def _structural_repoint_statements(
     2. `INSERT` the same row at `_final(src)`, the TERMINAL endpoint of the
        `superseded_by` chain (a recursive CTE, so a 3-link chain resolves to the
        last link and to nothing in between). `ON CONFLICT … DO NOTHING`, not
-       `DO UPDATE`: the graph's transfer is a BARE `MERGE (s)-[:rel]->(t)` with no
-       attribute `SET`, and #9417's rule is that a successor's OWN live value
-       wins — a `DO UPDATE` would overwrite it with the descriptor's absent
-       attributes. The no-self-edge predicate (`destination != resolved target`)
-       mirrors the fold's `E2E-11.6` guard: a chain that collapses the endpoints
-       onto one node must not mint `(X)-[:aboutPoint]->(X)`.
+       `DO UPDATE`: the graph's transfer is a BARE `MERGE (s)-[:<rel>]->(t)` with
+       no attribute `SET` (`projection/__init__.py`, the pass-2b structural
+       replay leg), and #9417's rule is that a successor's OWN live value wins
+       — a `DO UPDATE` would overwrite it with the descriptor's absent
+       attributes. `<rel>` is the INTERPOLATED `etype`, not a parameter: Cypher
+       refuses a parameter as a relationship type (`-[:$param]->` is invalid —
+       Neo4j Cypher Manual, Syntax → Parameters), which is why the writer
+       f-string-formats the type into the pattern. The no-self-edge predicate
+       (`destination != resolved target`) mirrors the fold's `E2E-11.6` guard:
+       a chain that collapses the endpoints onto one node must not mint
+       `(X)-[:aboutPoint]->(X)`.
 
     ⚠️ NAMED RESIDUALS, not fixed here: (a) the descriptor carries no edge
     `attrs` (`#10139`), so a moved row lands with `props = '{}'` while the LIVE
