@@ -699,6 +699,9 @@ def test_the_workflow_annotations_carry_the_state_line_in_the_message():
     # every state the tool can report has an annotation branch
     assert 'verdict" = "PR-STARVED"' in wf
     assert 'verdict" = "PR-UNWITNESSED"' in wf
+    # ... including the sixth state this PR added: an arm that is dropped would
+    # otherwise leave every one of these assertions green (PR #10253 review, P3).
+    assert 'verdict" = "PR-BACKLOGGED"' in wf
 
 
 # ── PR-STARVED through the CLI ────────────────────────────────────────────
@@ -778,10 +781,17 @@ def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
 def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
     """Same reasoning as PR-STARVED: measured, real, and nothing may be cancelled.
 
-    The governor's whole action surface is a trim-safe OFFENDER's queued runs, and
-    a backlogged queue is BY DEFINITION made of the PR work the governor exists to
-    protect. A red run nobody can clear by acting is not an alarm, it is noise, so
-    the alarm is the state line and the workflow's annotation.
+    The bound is the CLAUSE ORDER, not the trim scope. `PR-BACKLOGGED` requires
+    `pr_running > 0`, and the governor's block sits BELOW the `pr_running != 0`
+    clause, so it is unreachable from here and no trim was ever considered. The
+    governor's candidates are a trim-safe OFFENDER's queued runs in any case — a
+    queued PR run is never one — but this queue's leader MAY be a trim-safe
+    offender that the scope would license trims on (measured: the same queue with
+    no PR run executing is a FLOOD whose `trimmable` is non-empty), which is why
+    the reason line reports the leader as a FACT instead of asserting the queue is
+    made of PR work (the #9118 P2-2 class). A red run nobody can clear by acting
+    is not an alarm, it is noise, so the alarm is the state line and the
+    workflow's annotation.
     """
     health = classify(starving_pr_runs(20, age_seconds=9000),
                       in_progress=serving_pr_runs(1))
@@ -887,6 +897,38 @@ def test_a_backlogged_queue_reports_its_leader_as_a_fact_not_a_composition():
     assert "being served" not in joined
     # ... and the no-action clause names what actually bounds the governor.
     assert "a queued PR run is never a candidate" in joined
+
+
+def test_the_no_action_clause_names_the_bound_that_actually_binds():
+    """PR #10253 review P3-2: the bound is the CLAUSE ORDER, not the trim scope.
+
+    In the trim-safe-leader shape the reason line used to end "no run was trimmed:
+    the governor only cancels a trim-safe OFFENDER's queued runs" — but the scope
+    does NOT bind here, it LICENSES: this exact queue with no PR run executing is a
+    FLOOD whose governor trims 5 of the 10 `finding-provenance` runs. What bounds
+    it is the clause order (`pr_running != 0` returns above the governor's block).
+    Both halves are asserted, so the reason can neither name the wrong bound nor
+    go back to claiming nothing was trimmable.
+    """
+    queued = flood_queued(10) + starving_pr_runs(4, age_seconds=9000)
+
+    # the same queue, no PR run executing: the governor DOES act on this offender,
+    # so "the trim scope is the bound" would be a false claim in the state above.
+    flood = classify(queued)
+    assert flood.verdict == Q.FLOOD
+    assert len(flood.trimmable) == 5
+    assert all(run.name == "finding-provenance" for run in flood.trimmable)
+
+    # one PR run executing: PR-BACKLOGGED, nothing trimmed, and the reason names
+    # the clause order — not the scope — as what bounded it.
+    health = classify(queued, in_progress=serving_pr_runs(1))
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.trimmable == ()
+    joined = " ".join(health.reasons)
+    assert "the governor's block sits BELOW that clause" in joined
+    assert "no trim was ever considered" in joined
+    # the scope is described as the candidate rule, never as the bound
+    assert "its candidates are a trim-safe OFFENDER's queued runs" in joined
 
 
 def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
