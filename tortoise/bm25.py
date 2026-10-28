@@ -86,7 +86,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from collections.abc import Mapping, Sequence
 
 from .env_truthy import env_flag
