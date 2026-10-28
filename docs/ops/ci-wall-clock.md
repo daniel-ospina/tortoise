@@ -180,7 +180,7 @@ remaining cold saves are small — most of these jobs install the same torch/emb
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
 SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
 watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
-`python3 tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
+`uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
 moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
