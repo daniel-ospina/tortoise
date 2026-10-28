@@ -1528,6 +1528,15 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           (`test-record-postgres|…|-`), so the new armed record leg fails closed by name instead of
 #:           certifying a `skipped` shard. No `$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
 #:           swallowing, no early-return added; the sweep's marker words are unchanged.
+#:   #10228 — `Tiered selection` + `Emit push matrix (#1472/#6135)` re-cut, and `Non-gating lanes —
+#:           what this gate does NOT run (#10194)` added, from #10206: the selector now derives the
+#:           gating slow pool as `slow_gating_files()` (slow_files − carve-out − the non-gating
+#:           eval/longmem lane). The new step runs `python3 tools/ci_selection.py
+#:           --non-gating-report`, which is REPORT-ONLY (`action="store_true"`, prints and exits 0) —
+#:           no `$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code swallowing, no early return. It sits
+#:           BEFORE the gate sentinel, and its whole definition is pinned here precisely because of
+#:           that position: it cannot be rewritten into a tree edit without reding this allow-list.
+#:           The gate step itself is unchanged (sentinel) and keeps its position.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1538,9 +1547,11 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Install pyyaml",
          "f3950abdebf4f38e23e27bdc3a983fe91bafd42478e7ec5e5a36d8718ff6d516"),
         ("Tiered selection",
-         "6117c2a5b9988a212d952aa88ab48ee0104d40a72fb87969a670a7b5298c6e8b"),
+         "3e532b44ae1d76d09b0557c32139fdc8f0546fe5ed92bd11d1d4130f0a8d6ce8"),
         ("Emit push matrix (#1472/#6135)",
-         "749418a766ab2daf0a0f3d04b2003033ac3c16481dd333c6f0fa71e0a0c340b7"),
+         "5eaa5f4c9689065433fd32f251d1fd1ba18d4e166660889dba19f338a3ad5e33"),
+        ("Non-gating lanes — what this gate does NOT run (#10194)",
+         "9b6ec88d732ebef44f83fa29380ed9f73d8d9daa01cc61964939db0a1bd26bc7"),
         ("Tier-2 duration split (#1473)",
          "b91b712a641bfdae0b02064ecdbee016bf40c87b4f02a06c34d28f3d3dfd29cb"),
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),
