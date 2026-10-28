@@ -465,7 +465,8 @@ def _values_equal(a, b) -> bool:
     return False
 
 
-def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
+def _canonical_point_fields(props: dict, skip: frozenset = frozenset(), *,
+                            derive_identifier_aliases: bool = True) -> dict:
     """The projection's declared content view of ONE point (side-agnostic).
 
     Applied to both the journal fold and the graph read, so the two views are
@@ -501,17 +502,41 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     compared: a journal list with NO graph value reports the key, which is the
     coverage the pre-#8006 ``uncarried`` classification did not have.
 
-    #8933 Stage 2: the SAME rule for the derived IDENTIFIER ALIASES the writer
-    appends to ``search_keys`` (``_upsert_point_props``). The alias is a pure
-    function of the payload's own ``content``/``search_keys`` and is never
-    recorded in the journal, so a checker that compared the WRITER'S form
-    without applying the SAME derivation would report a FALSE content
-    divergence on ``search_keys`` for every faithfully replayed Point whose
-    text carries an identifier — the #8317/#10053 class (a writer-side
-    derivation the reference fold does not mirror), in its false-FAIL direction.
-    Applying it on both sides is idempotent where the graph already holds it
-    (the append is a set difference) and correct where it does not: a DERIVED
-    value cannot diverge from a journal that never recorded it.
+    #8933 Stage 2: the derived IDENTIFIER ALIASES the writer appends to
+    ``search_keys`` (``_upsert_point_props``). The alias is a pure function of
+    the payload's own ``content``/``search_keys`` and is never recorded in the
+    journal, so a checker that compared the payload's form without applying the
+    SAME derivation would report a FALSE content divergence on ``search_keys``
+    for every faithfully replayed Point whose text carries an identifier — the
+    #8317/#10053 class (a writer-side derivation the reference fold does not
+    mirror), in its false-FAIL direction.
+
+    ⛔ It is applied to the JOURNAL (reference) view ONLY — never to the graph
+    view or to :func:`_graph_fingerprint`; those pass
+    ``derive_identifier_aliases=False``. Deriving on the graph side too
+    over-corrects from "false red on a faithful graph" into a **false PASS**:
+
+      * the graph side must be the node's OWN content, because the comparison
+        target is ``replay(journal)``. Deriving there makes a node that is
+        MISSING the alias canonicalise to the same view as one that holds it,
+        so a graph-only strip of the alias, and the whole pre-#8933 backfill
+        state, become indistinguishable from a fully replayed graph — the
+        checker would certify a graph that is not what a replay produces,
+        which is the one thing it exists to refuse. With the asymmetry, a
+        missing alias is a TRUE, clearable divergence (its action, **replay
+        the journal**, is exactly the documented backfill) — the signal that
+        otherwise has no instrument at all (#8933 has no separate backfill).
+      * ``_graph_fingerprint`` feeds ``db_hash``, so deriving there would move
+        every stored baseline whose graph carries an identifier-shaped span.
+        The first post-upgrade run then reads a healthy graph as
+        ``unrecorded-mutation`` with ``state_recorded`` false — a false red
+        whose action sends the operator hunting an unjournalled writer that
+        does not exist, exactly the class ``_PROJECTION_STATE_FORMAT_HISTORY``
+        exists to prevent (which is why a value change there requires
+        appending a format; not moving the value avoids needing one).
+
+    Idempotent where the journal already carries the alias (the append is a set
+    difference), and skipped when the fold declared ``search_keys`` uncarried.
 
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
@@ -529,8 +554,10 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     # to the flattened copy the same way. Skipped when the fold declared
     # ``search_keys`` uncarried for this point, so the append cannot re-add a
     # key the uncarried classification deliberately excluded.
+    #
+    # Journal/reference view only: see the asymmetry note in the docstring.
     flatten_search_keys_prop(out)
-    if "search_keys" not in skip:
+    if derive_identifier_aliases and "search_keys" not in skip:
         append_identifier_aliases(out, point_identifier_aliases(props))
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
@@ -684,8 +711,13 @@ def _compare_views(journal_by_id: dict, graph_by_id: dict,
             if k in _EXCLUSION_REASONS:
                 excluded_seen.setdefault(k, _EXCLUSION_REASONS[k])
         skip = frozenset(uncarried.get(pid, {}))
+        # The JOURNAL side is the reference: it is what ``replay(journal)``
+        # produces, so it carries the writer's derived alias. The GRAPH side is
+        # the node's own content and must NOT — see the docstring's asymmetry
+        # note (deriving there would mask a missing alias and move db_hash).
         jf = _canonical_point_fields(jprops, skip)
-        gf = _canonical_point_fields(gprops, skip)
+        gf = _canonical_point_fields(
+            gprops, skip, derive_identifier_aliases=False)
         is_operator = bool(jf.get("is_operator") or gf.get("is_operator"))
         fields: list[str] = []
         for k in sorted(set(jf) | set(gf)):
@@ -895,7 +927,8 @@ def _graph_fingerprint(graph_view: dict,
             continue
         skip = set(_ONE_SIDED_REASONS) | set(_GRAPH_DEFAULTED_PROPS)
         skip |= set(uncarried.get(nid, {}))
-        view = _canonical_point_fields(props, frozenset(skip))
+        view = _canonical_point_fields(
+            props, frozenset(skip), derive_identifier_aliases=False)
         if props.get("is_operator"):
             for k in _OPERATOR_ABSENT_PROPS:
                 view.pop(k, None)
