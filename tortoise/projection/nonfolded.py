@@ -259,15 +259,18 @@ EXEMPT_SHAPES: dict[str, str] = {
         "that record keeps REFUSING — but ⛔ the cause is a DISJUNCTION, and "
         "`object-superseded-miss` is NOT a synonym for \"a genuine "
         "divergence\" (#10211 review rounds 5-7). An ESTABLISHED address does "
-        "not imply a creation (a state op's target id, a rename `SET`'s name "
-        "with a target that never existed, and a mention stub's deterministic "
-        "id are addresses the journal holds without creating a node), and one "
+        "not imply a creation (a state op's target id, and a rename `SET`'s "
+        "name with a target that never existed, are addresses the journal holds "
+        "without creating a node; ⚠️ a mention stub's deterministic id is NOT "
+        "one of these — the stub is MERGEd `ON CREATE SET s.id=$id`, so it DOES "
+        "create the node, and a later registration re-ids it, which is the "
+        "collapse/rename limb), and one "
         "class diverges on NEITHER side: a target the journal registered and "
         "then HARD-DELETED, superseded by NAME (no `id`), refuses here because "
         "the anchored `supersede-target-deleted` bound reads the record's own "
         "id — live folded nothing either, so the refusal is conservative rather "
-        "than a divergence. Name-keyed delete recognition is filed separately: "
-        "it would exempt on duplicate names. "
+        "than a divergence. Name-keyed delete recognition is `#10224` (it must "
+        "not exempt on duplicate names). "
         "Because nothing could have produced the address, live folded nothing "
         "either and live/replay end in the SAME state — so this is NOT the tier "
         "of the neighbouring `edge-message-miss` exemption, which still "
@@ -542,7 +545,7 @@ def refusal_remedy(refused) -> str:
     `unknown-event-type`, `unimplemented-op` and `unknown-op` also receive the
     reconcile sentence, and nothing in them is reconcilable — the repair is to
     upgrade the replayer or the writer. That is a PRE-EXISTING AX gap on a
-    different axis, filed rather than absorbed by this split.
+    different axis, filed as `#10225` rather than absorbed by this split.
 
     ``refused`` is any iterable of :class:`NonFoldedEvent` (the caller passes
     the REFUSED subset, never the exempt one: an exempt record prescribes no

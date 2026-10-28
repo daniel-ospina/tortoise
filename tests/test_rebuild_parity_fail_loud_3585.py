@@ -607,7 +607,7 @@ class TestReReviewRoundTwo:
         assert r["divergence"] != "non-folded", r["divergence"]
 
     def test_name_only_supersede_of_registered_then_deleted_name_still_refuses(
-            self, env):
+            self, env, caplog):
         """#3590 D2's BOUND: the exemption covers ONLY the never-registered
         case.
 
@@ -626,9 +626,21 @@ class TestReReviewRoundTwo:
         _raw(events, type="ObjectSuperseded", name="GONE",
              supersedes_by="other", event_id="e-gone")
         proj = sdk._get_proj()
-        with pytest.raises(NonFoldedEventsError) as ei:
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+                pytest.raises(NonFoldedEventsError) as ei:
             proj.rebuild_all(str(events), confirm_destructive=True)
         assert "object-superseded-miss" in str(ei.value), str(ei.value)
+        # ⛔ THE HARD-DELETE LIMB (#10211 review round 8). This record is NOT a
+        # divergence — live folded nothing either, because the delete is folded
+        # by id before the deferred sweep — and the only reason it misses is
+        # that this record carries no `id` for the anchored bound to read. The
+        # message must say so, or it sends the operator after a merge/rename or
+        # an unjournaled producer, neither of which exists here.
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "HARD-DELETED and this record carries no `id`" in report, (
+            f"the miss arm does not name the hard-delete-no-id limb: {report}")
+        assert "CONSERVATIVE refusal" in report, (
+            f"the miss arm calls a conservative refusal a divergence: {report}")
         assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
         r = check_consistency(str(events / "events.jsonl"), proj)
         assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]

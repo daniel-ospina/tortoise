@@ -15322,10 +15322,12 @@ class FalkorProjection(
                 )
                 # #10204 / #10183: this log line is a SECOND message for the
                 # same record, so it must not prescribe a cause the in-band
-                # receipt denies. Every shape but a genuine miss now names its
-                # own diagnosed cause, and the `else` is that genuine miss, so
-                # an unclassified shape still gets a warning rather than
-                # silence. ⚠️ The diagnosed cause is NOT the same as what the
+                # receipt denies. EVERY shape this sweep can record now names
+                # its own diagnosed cause, the miss included; the `else` is an
+                # UNREACHABLE fail-safe for a shape added without an arm, so it
+                # is loud rather than silent (#10211 review round 8: this
+                # comment still described the pre-split arrangement).
+                # ⚠️ The diagnosed cause is NOT the same as what the
                 # predicate can PROVE: for the unregistered shape it cannot
                 # tell "never established" from "never journaled" (an
                 # unjournaled/legacy producer — see the RESIDUAL in
@@ -15374,18 +15376,35 @@ class FalkorProjection(
                     # {name: RENAMED-GHOST}, ObjectSuperseded {name:
                     # RENAMED-GHOST}] establishes that name and no id, holds no
                     # `ObjectRegistered`, and lands here.
+                    # ⛔ NO VERDICT WORD (#10211 review round 8). Successive
+                    # rounds appended limbs to a sentence whose HEAD still
+                    # verdicted the whole population ("a genuine divergence"),
+                    # so the hard-deleted limb below was asserted to be
+                    # something it is not. It is an ENUMERATION of causes, with
+                    # the conservative case stated as such.
+                    #
+                    # ⚠️ A mention stub's deterministic id is in the
+                    # CARRIER limb, not the created-nothing limb: the stub is
+                    # MERGEd `ON CREATE SET s.id=$id`, so it DOES create a node
+                    # carrying that id — the miss comes from a later
+                    # registration re-iding it (the "renamed" half).
                     _sup_why = ("the journal DID establish this record's "
                                 "address, but no Object carries it on this "
-                                "replay — a genuine divergence: either the "
-                                "carrier was collapsed or renamed, or the "
+                                "replay. Cause is one of: (1) the carrier was "
+                                "collapsed onto one merge key or renamed — "
+                                "including a mention stub's deterministic id "
+                                "that a later registration re-ided; (2) the "
                                 "journal holds the address from a write that "
                                 "created nothing — a state op's target id, or "
                                 "the NAME a rename's `SET` carries when its "
-                                "target never existed; or a mention stub's "
-                                "deterministic id; or the target was "
+                                "target never existed; (3) the target was "
                                 "HARD-DELETED and this record carries no `id`, "
                                 "so the anchored delete bound could not "
-                                "recognise it")
+                                "recognise it — a CONSERVATIVE refusal, not a "
+                                "divergence: live folded nothing either, and "
+                                "the repair for it is to carry the target's "
+                                "`id`, not to reconcile the journal (see "
+                                "#10224)")
                 else:
                     # Unreachable fail-safe: every shape this sweep can record
                     # has an arm above. Named so an added shape is LOUD here
