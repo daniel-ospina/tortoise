@@ -3367,7 +3367,10 @@ def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
             _gate_knob(gate, "READY_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_READY")),
     ]
 
-    for segment, seconds in zip(phases[1:], windows):
+    # `strict=True` is the searchable half of this pin: `len(phases) == 4` is asserted above and
+    # `windows` is built with exactly three entries, so a phase added to the header WITHOUT a
+    # window of its own must raise here rather than silently going unchecked.
+    for segment, seconds in zip(phases[1:], windows, strict=True):
         stated = f"up to {seconds} s ({seconds / 60:.1f} min)"
         assert stated in segment, (
             f"the gate's BEHAVIOUR header does not state {stated!r} — the window "
