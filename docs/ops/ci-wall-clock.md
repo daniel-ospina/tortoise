@@ -159,16 +159,18 @@ read the cap against the SUM of the job's caps, not against its median.
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
-SUM. `test` clears it with room to spare (10 m last-failed pre-phase + 19 m shard watchdog + 6 m
-embedder + ~1 m setup + ~9 m save = 45 m against 90), and `test-record-postgres` is outside the
-class altogether (above). THREE rows do NOT clear it, and all three are recorded here rather than
-moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
-cap from a measurement instead of on suspicion. `test-slow` sits exactly AT its cap (10 m embedder +
-40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and `test-carve-out` is 9 m past
-it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against 30). The third has the least
-headroom of all: **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the
-run plus a `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip`
-save** — ≈ 30 m —
+SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
+watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
+`python3 tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
+clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
+is how a constant goes stale. `test-record-postgres` is outside the class altogether (above). THREE
+rows do NOT clear it, and all three are recorded here rather than moved: nothing has measured any
+of them being cancelled, and this document's own rule is to move a cap from a measurement instead
+of on suspicion. `test-slow` sits exactly AT its cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m
+against 60 — no headroom at all) and `test-carve-out` is 9 m past it (10 m embedder + 19 m shard
+watchdog + ~1 m + ~9 m = 39 m against 30). The third has the least headroom of all:
+**`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
+`timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
 because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
@@ -195,10 +197,14 @@ document exists to remove.
 
 **Rule used.** ONE rule with two arms, and every moved row follows its arm:
 
-- **No cold `actions/cache` save in the job** — cap = **2 × measured max**, rounded to the nearest
-  5 minutes, floored at 15 m, for a job whose failure reds a required context (`docs` 20.5 → 20;
-  `legal-e2e` 18.5 → 20; `test-record-postgres` 15.43 × 2 → 30; the rest floor at 15).
-- **A cold `actions/cache` save in the job** — `2 × max` cannot see the POST-step at all, so the
+- **The job's cold save is NOT the 3.6 GB torch/embeddings archive** — cap = **2 × measured max**,
+  rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
+  context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; `test-record-postgres` 15.43 × 2 → 30; the
+  rest floor at 15). ⚠ That predicate is deliberately narrower than "no cache step": postgres DOES
+  mount `~/.cache/pip` on a writable key (`python-ci.yml:3624-3631`); it simply writes its own
+  `.[test,postgres]` downloads (`:3635`) and never the archive, so its save cannot be the binding
+  term.
+- **The job's cold save IS that archive** — `2 × max` cannot see the POST-step at all, so the
   binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
   the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
   killed at the cap reds a required check (#5219), while 10 m of extra exposure costs only a held
