@@ -6275,12 +6275,15 @@ surfaces:
   - longmem_eval/test_measurement_posture.py  # #8486: the run's measurement posture — ingest mode + belief-layer activation; the completed-receipt disclosure gate (hermetic, no DB/network)
   # #10137: the CONTRIBUTION census against a REAL graph — `operators` /
   # `points_off_neutral` / `factors` / `no_op_reason` are new Cypher reads, and a
-  # broken read FAILS SILENTLY (`_scalar` maps an absent result set to 0, which
-  # is indistinguishable from "this graph has no operators"). Registering it
-  # against `tools/longmem_eval/` means a change to the census query must run
-  # the file that can tell a real zero from a broken query. Not embedded-only:
-  # a URI lane redirects the by-path SDK construction to the server and the
-  # assertions hold either way.
+  # broken read FAILS SILENTLY (an absent result set must be told apart from a
+  # MEASURED 0 — `_census` / `_census_ids` do exactly that, which is why the
+  # lossy "absent → 0" helper is gone). Registering it against
+  # `tools/longmem_eval/` means a change to the census query SELECTS the file
+  # that can tell a real zero from a broken query; as a `longmem_eval/**` path it
+  # then runs in the NON-GATING eval lane (`on_demand`, #10194/#10206), not on the
+  # merge gate — the registration is surface OWNERSHIP, not shard membership.
+  # Not embedded-only: a URI lane redirects the by-path SDK construction to the
+  # server and the assertions hold either way.
   - longmem_eval/test_ep_census_10137.py
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
