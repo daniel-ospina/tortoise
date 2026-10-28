@@ -118,10 +118,11 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   with no such row still refuses (`no_tenant`) rather than guessing. The
   hosted REST lane carries the SAME pair by value rather than through this
   `ContextVar` — `hosted_api._data_sdk` → `sdk._bind_record_tenant` — which is
-  the seam its `TortoiseSDK` reads. Unwired still: a SESSION/JWT credential and
-  an OAuth `oat_` token, neither of which carries a `default_graph_id` (#10046).
-  The lanes that build their OWN SDK — the background indexing jobs and the
-  seed runners — are wired since #10047
+  the seam its `TortoiseSDK` reads. Since #10046 every request credential is
+  named on that lane too (`hosted_api._session_user_org` and
+  `tortoise.oauth.resolve_oauth_access_token` stamp the same
+  `default_graph_id`). The lanes that build their OWN SDK — the background
+  indexing jobs and the seed runners — are wired since #10047
   (`hosted_api._bind_default_graph_record_tenant`, same `record_tenant_for`
   answer, org default graph by construction).
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
