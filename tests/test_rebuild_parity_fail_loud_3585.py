@@ -692,8 +692,12 @@ class TestReReviewRoundTwo:
         assert "nothing was lost" not in report.lower(), (
             "the receipt asserts a loss verdict the predicate cannot prove and "
             f"the shape's own DEGRADED GUARANTEE contradicts: {report}")
-        assert "no repair to make" in report, (
+        assert "applies no supersede here" in report, (
             f"the receipt was not rendered for the exempt record: {report}")
+        assert "no repair to make" not in report.lower(), (
+            "the receipt asserts the absence of a repair, which the shape's "
+            f"DEGRADED GUARANTEE contradicts (a repair DOES exist for that "
+            f"class): {report}")
         # ⛔ The SECOND message must not name a cause the receipt denies: the
         # genuine-miss arm's causes ("unjournaled capture SDK", "delete race")
         # are exactly what an operator must not be sent to look for on an
@@ -741,7 +745,7 @@ class TestReReviewRoundTwo:
                 f"{engine} did not record the exempt miss at its own run "
                 f"boundary (#5380): {boundary}")
             assert "[object-superseded-unregistered]" in boundary, boundary
-            assert "no repair to make" in boundary, boundary
+            assert "applies no supersede here" in boundary, boundary
 
     def test_pointsmerged_then_supersede_is_exempt_in_both_engines(
             self, env, tmp_path):
@@ -3231,7 +3235,12 @@ def test_exempt_receipt_says_the_target_was_never_established(env):
     assert receipts, r["non_folded_events"]
     receipt = receipts[0]
     assert "never established" in receipt, receipt
-    assert "no repair" in receipt.lower(), receipt
+    assert "applies no supersede here" in receipt, receipt
+    # ⛔ NO "there is no repair" VERDICT (#10211 review round 7): the same
+    # unprovable inference the loss verdict was, one clause over — for the
+    # shape's own RESIDUAL class (an establishing line never written) the
+    # supersede IS lost and the repair (journal the creation) DOES exist.
+    assert "no repair" not in receipt.lower(), receipt
     # The loss verdict is gone by design (#10211 review round 3): this receipt
     # shares a line with the shape's DEGRADED GUARANTEE, which says a supersede
     # IS lost when the establishing line was never written.

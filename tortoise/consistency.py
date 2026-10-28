@@ -2882,7 +2882,13 @@ def check_consistency(log_path: str, projection, *,
         "non-folded": ("the journal contains event(s) the reference fold "
                        "could not resolve to exactly one node, so both "
                        "projections are equally incomplete (R8/#3585) and "
-                       "re-baselining would bake in the loss: "
+                       # ⛔ NOT "the loss" (#10211 review round 7): a refused
+                       # set that is SOLELY the no-address shape lost nothing
+                       # observable — the record names no target at all — so a
+                       # loss verdict would be the same unprovable claim the
+                       # receipt dropped. Scoped to the incompleteness, which
+                       # is true of every refused set.
+                       "re-baselining would bake in the incompleteness: "
                        # #10204/#10183: the SAME remedy home the raised error
                        # uses, so one record cannot get contradictory
                        # instructions from the two surfaces. A refusal whose

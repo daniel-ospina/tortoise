@@ -9199,8 +9199,8 @@ def _object_supersede_miss_detail(shape: str, *, prefix: str = "") -> str:
         # and stops there.
         return (f"{prefix}supersede matched no Object — the journal never "
                 "established the target this record addresses, so this replay "
-                "applies no supersede here and there is no repair to make for "
-                "this record (recorded, not hidden: #3590 D2 exempt)")
+                "applies no supersede here (recorded, not hidden: #3590 D2 "
+                "exempt)")
     if shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
         # ⛔ "NO address" alone would be false for a record that CARRIES one
         # that cannot be an address (`{"id": ""}`, `{"name": 123}`,
@@ -12326,9 +12326,12 @@ class FalkorProjection(
                                     and _oname else (_oid,)),
                         # #10204 / #10183: the exempt record's receipt says the
                         # journal never established the target's address and
-                        # that there is no repair to make for this record, so a
-                        # caller does not hunt one. It makes NO loss verdict —
-                        # see the DEGRADED GUARANTEE on this shape.
+                        # that this replay applies no supersede, so a caller does
+                        # not go hunting a journal repair. It makes NO loss
+                        # verdict and NO "there is no repair" verdict — the
+                        # DEGRADED GUARANTEE on this shape is the class where
+                        # the supersede IS lost and the repair (journal the
+                        # missing creation) does exist.
                         detail=_object_supersede_miss_detail(
                             _sup_shape, prefix="graph fold: "),
                     )
@@ -15331,8 +15334,8 @@ class FalkorProjection(
                 # was lost" contradicted that shape's own DEGRADED GUARANTEE).
                 if _sup_shape == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED:
                     _sup_why = ("the journal establishes no address for the "
-                                "target this record names — the supersede is "
-                                "skipped here and recorded")
+                                "target this record ADDRESSES — the supersede "
+                                "is skipped here and recorded")
                 elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
                     _sup_why = ("neither `name` nor `id` on the record is a "
                                 "non-empty string, so there is nothing to "
@@ -15379,7 +15382,10 @@ class FalkorProjection(
                                 "created nothing — a state op's target id, or "
                                 "the NAME a rename's `SET` carries when its "
                                 "target never existed; or a mention stub's "
-                                "deterministic id")
+                                "deterministic id; or the target was "
+                                "HARD-DELETED and this record carries no `id`, "
+                                "so the anchored delete bound could not "
+                                "recognise it")
                 else:
                     # Unreachable fail-safe: every shape this sweep can record
                     # has an arm above. Named so an added shape is LOUD here
