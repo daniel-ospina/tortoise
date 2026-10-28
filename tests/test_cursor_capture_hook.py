@@ -36,7 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh"
 SESSION_START_HOOK = (REPO_ROOT / "tortoise" / "cursor-hooks"
                       / "session-start.sh")
-VERSION_MARKER = "# tortoise-hook-version: 4"
+VERSION_MARKER = "# tortoise-hook-version: 5"
 
 #: The machine's REAL home, resolved from the password database — NOT from
 #: ``$HOME``, which tests monkeypatch.  ``~/.cursor`` under this path is the
@@ -164,7 +164,7 @@ def test_hook_artifact_carries_the_version_marker():
     """The install contract is one marker, column-0, one per file, and ONE
     generation for the whole Cursor seam.
 
-    Mutation: delete ``# tortoise-hook-version: 4`` from the shipped hook — the
+    Mutation: delete ``# tortoise-hook-version: 5`` from the shipped hook — the
     install then has no generation to compare and this REDs; give the two
     script files different numbers — ``contract_version`` collapses to ``None``
     and the generation pin REDs."""
@@ -172,12 +172,12 @@ def test_hook_artifact_carries_the_version_marker():
         text = path.read_text(encoding="utf-8")
         assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), (
             path, text[:120])
-        assert read_hook_version(path) == 4, path
+        assert read_hook_version(path) == 5, path
         assert count_canonical_markers(path) == 1, (
             "exactly one column-0 marker (an in-body mention is not a "
             f"declaration): {path}")
     assert hook_install.contract_version(
-        hook_install.get_layout("cursor")) == 4, (
+        hook_install.get_layout("cursor")) == 5, (
         "Cursor grades its seam as ONE generation — both scripts must agree")
 
 
@@ -1167,7 +1167,7 @@ def test_upgrade_from_a_generation_3_install_adds_the_injection_half(tmp_path):
     (root / "hooks.json").write_text(json.dumps(doc))
     stale = root / "hooks" / "tortoise-session-end.sh"
     stale.write_text(stale.read_text(encoding="utf-8").replace(
-        "# tortoise-hook-version: 4", "# tortoise-hook-version: 3"))
+        "# tortoise-hook-version: 5", "# tortoise-hook-version: 3"))
 
     kinds = {f.kind for f in hook_install.detect_install(root, "cursor")}
     assert {"stale-script", "missing-script", "missing-hook-entry"} <= kinds, kinds
