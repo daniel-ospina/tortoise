@@ -1544,6 +1544,20 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           half of the same review — the verdict STEP's `if:` naming `timed_out` — is in the
 #:           `ci-introduced-failure` job and is pinned (step key allow-list) by
 #:           `tests/test_ci_new_failure_gate.py`, not by this digest.
+#:   #10206 (re-cut on rebase of #10202) — `changes`: three entries, all from #10206
+#:           (`646d30f9e1ef`), which edited the `changes` job without re-cutting this allow-list and
+#:           so left `main` red on this pin (measured: 46 failures of `test_the_ci_pin_*` at
+#:           `origin/main`, reproduced on a clean main worktree).
+#:             • `Non-gating lanes — what this gate does NOT run (#10194)` — a NEW step, `{name, run}`
+#:               only, no `uses:`/`env:`/`$GITHUB_ENV`/`$GITHUB_PATH` write and no exit-code
+#:               swallowing; it prints the non-gating lane and exits 0 on every path, and its POSITION
+#:               is pinned where the workflow declares it (between `Emit push matrix` and `Tier-2
+#:               duration split`).
+#:             • `Tiered selection` + `Emit push matrix (#1472/#6135)` — digest-only movement, and it
+#:               is COMMENT-only: `_code()` is byte-identical before and after #10206 and the key
+#:               set is unchanged (`id`/`name`/`run`), because the edit only rewrote the prose
+#:               (`slow_files - carve_out` → `slow_gating_files()`). Verified by diffing `_code()`
+#:               at `646d30f9e1ef^` against `origin/main`, not by reading the patch.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1554,9 +1568,11 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Install pyyaml",
          "f3950abdebf4f38e23e27bdc3a983fe91bafd42478e7ec5e5a36d8718ff6d516"),
         ("Tiered selection",
-         "6117c2a5b9988a212d952aa88ab48ee0104d40a72fb87969a670a7b5298c6e8b"),
+         "3e532b44ae1d76d09b0557c32139fdc8f0546fe5ed92bd11d1d4130f0a8d6ce8"),
         ("Emit push matrix (#1472/#6135)",
-         "749418a766ab2daf0a0f3d04b2003033ac3c16481dd333c6f0fa71e0a0c340b7"),
+         "5eaa5f4c9689065433fd32f251d1fd1ba18d4e166660889dba19f338a3ad5e33"),
+        ("Non-gating lanes — what this gate does NOT run (#10194)",
+         "9b6ec88d732ebef44f83fa29380ed9f73d8d9daa01cc61964939db0a1bd26bc7"),
         ("Tier-2 duration split (#1473)",
          "b91b712a641bfdae0b02064ecdbee016bf40c87b4f02a06c34d28f3d3dfd29cb"),
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),
