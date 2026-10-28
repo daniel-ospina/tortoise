@@ -141,16 +141,29 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 
 ⚠ `test-record-postgres` is the one pre-existing cap that sits closest to its work (15.43 m
 against a 20 m cap). Left unchanged — a measured max under its cap is not a defect — but if it
-ever false-kills, the number to move is 20 → 30 from a fresh measurement, not on suspicion.
+ever false-kills, the number to move is 20 → 30 from a fresh measurement, not on suspicion. It is
+NOT exposed to the post-step class below, and that is a fact about what it INSTALLS rather than
+about its timing: the `actions/cache` key is shared, but a hit saves nothing, and a miss writes
+only its own `.[test,postgres]` downloads (`python-ci.yml:3635` — `[embeddings]`/torch are
+deliberately absent), so its cold save is not the 3.6 GB archive.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
 itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
-killed at its own cap — conclusion `cancelled` — is **invisible here by construction**. A run at
-`a898363ea~1` passed its marker selection, then spent the remaining budget uploading a 3.6 GB
-`~/.cache/pip` archive in the `actions/cache` save POST-step and was cancelled at 20 m, which
-`python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The binding term is
-the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm — read the cap
-against the SUM of the job's caps, not against its median.
+killed at its own cap — conclusion `cancelled` — is **invisible here by construction**. Run
+40587081433 / job 122533023160 passed its marker selection, then spent the remaining budget
+uploading a 3.6 GB `~/.cache/pip` archive in the `actions/cache` save POST-step and was cancelled
+at 20 m, which `python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The
+binding term is the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm —
+read the cap against the SUM of the job's caps, not against its median.
+
+Every other row was checked against that rule and needed no move: their cold saves are small or
+absent. ONE row is knowingly left inside the rule rather than fixed on suspicion —
+**`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
+`timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save**, because it
+installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so writes
+the same 3.6 GB class of archive as d14 on a cold key. It is recorded here rather than raised
+because nothing has measured it being cancelled, and this document's own rule is to move a cap
+from a measurement instead of on suspicion; if it does false-kill, the number to move is 15 → 25.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
@@ -174,10 +187,14 @@ document exists to remove.
 
 **Rule used.** cap = **2 × measured max, rounded to the nearest 5 minutes, floored at 15 m** for
 a job whose failure reds a required context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest
-floor at 15). No cap was raised and no existing cap was lowered: `test` 90, `test-slow` 60 and
-`test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase + the shard's
-in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode — a
-runner-level kill that loses the pass/fail summary.
+floor at 15). ⚠ That formula is a LOWER bound, not the only term: a job that ends with an
+`actions/cache` save POST-step is sized on the SUM of its in-step caps plus that save, which
+`2 × max` cannot see at all — the derivation for `test-d14-hosted-api` above is the worked
+example. At the time of the first pass no cap was raised and none was lowered: `test` 90,
+`test-slow` 60 and `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase
++ the shard's in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode —
+a runner-level kill that loses the pass/fail summary. The one cap moved since is
+`test-d14-hosted-api` 20 → 40 (#10182), on the post-step term.
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit
