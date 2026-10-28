@@ -347,8 +347,20 @@ Derivation, so it can be re-checked rather than believed:
   do, not this seam's.
 - **Two questions per item is not free.** The `score` question's four-level
   `criteria` is repeated **per item**; that is the dominant term in `vet-v1`'s
-  request, and it is why this row costs more per item than the architecture doc's
-  recorded `$0.000144/item at 1 question`.
+  request — **232 tokens/item** here (9,265 / 40), against the ≈**343 tokens/item**
+  the architecture doc's measured `$0.000144 at 1 question`
+  (`EXTRACTOR-V4-ARCHITECTURE.md:823`) implies once the lookalike rate this section
+  splits out is divided by ten — ≈`$0.0000144/item` at the vendor's rate. On that
+  basis this row is ≈**1.5× cheaper**, not dearer.
+
+  ⚠️ **This paragraph previously claimed the opposite** — that two questions per
+  item is *"why this row costs more per item than"* the `$0.000144` figure. It is
+  refuted by this section's own table (`$0.0000097/item`, ~15× below `$0.000144`)
+  and by the sentence four lines down that calls the comparator lookalike-priced at
+  ≈10× the vendor's rate. Read the correction as a **token-basis** comparison and
+  not as a saving: the two figures are different prompts (a `score` over 4 levels
+  vs a `choice` over the offered kinds) measured on different hosts, so neither is
+  a measurement of the other until both are re-measured on `api.typesafe.ai`.
 - **A month, by arithmetic** (§4.2's own projection: 25k items, ~20% tail):
   classify's 5,000 tail items = 125 round trips ≈ **\$0.032/month** at the vendor's
   rate. The architecture doc's `$0.72/month` estimate for the same tail is a
