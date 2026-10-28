@@ -333,3 +333,45 @@ def test_a_name_only_update_on_a_point_without_its_tokens_still_warns(sdk, caplo
     assert len(_advisories(caplog)) == 1, (
         "the stored text carries none of the name's tokens, so the advisory is "
         f"correct here: {[r.message for r in caplog.records]}")
+
+
+def test_an_identifier_shaped_name_with_no_tokens_still_warns(sdk, caplog):
+    """`R&D`-shaped names ARE findable via the raw-literal fallback — so warn.
+
+    #10122 round-3 review P2: the previous round silenced a name whose token
+    list came out empty, on the reasoning that the query would "tokenize to
+    nothing". Measured false: `build_or_query` falls back to the ESCAPED RAW
+    literal (#1791), so `build_or_query("R&D") == "R&D"`, and a point whose
+    content says "the brand R&D handles the audit" IS returned by
+    `run_fts_query("R&D")` at 1.0. The advice would have been actionable and
+    correct, so the advisory must speak.
+
+    FAIL VALUE: restore the `if not name_tokens: return` guard and this reds.
+    """
+    with caplog.at_level(logging.WARNING):
+        created = sdk.create_point("statement", "an unrelated body about curtains",
+                                   name="R&D")
+    assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
+    assert len(_advisories(caplog)) == 1, (
+        "an R&D-shaped name contributes no token to OUR list but the engine "
+        "still matches the escaped raw literal, so the advisory is correct: "
+        f"{[r.message for r in caplog.records]}")
+
+
+def test_a_refused_update_does_not_warn(sdk, caplog):
+    """The advisory must sit after EVERY refusal this door can raise from.
+
+    #10122 round-3 review P3: a name-carrying update that then fails
+    `validate_span` / the validity window / the draft→live status guard wrote
+    nothing, yet advised — the crying-wolf class this whole change exists to
+    avoid.
+
+    FAIL VALUE: move the advisory back above the status guard and this reds.
+    """
+    created = sdk.create_point("statement", "an unrelated body about curtains")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError):
+        sdk.update_point(pid, name="capstone-9664", status="retracted")
+    assert not _advisories(caplog), (
+        "the update was REFUSED, so nothing was written and there is nothing "
+        f"to advise: {[r.message for r in caplog.records]}")

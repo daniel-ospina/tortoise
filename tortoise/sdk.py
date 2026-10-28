@@ -4895,12 +4895,16 @@ def _warn_point_name_not_lexically_indexed(
     #10122). This advisory has ZERO ranking effect — it reads the caller's own
     payload, does no graph read and writes nothing.
 
-    SILENCE ON THE COMMON SHAPE. A name already carried by the text this write
-    supplies for an indexed field does not warn (the identifier IS findable, so
-    there is nothing to advise). A PARTIAL write — an update that sets ``name``
-    without touching ``content``/``search_keys`` — can only be compared with its
-    own payload, so its warning says so rather than asserting what the stored
-    node holds: no graph read is added to a write door for an advisory.
+    SILENCE ON THE COMMON SHAPE. A name whose tokens already appear in the
+    text the index will hold does not warn — the identifier IS reachable, so
+    there is nothing to advise. WHICH text that is depends on the door:
+    ``create_point`` compares against the payload it is about to write (the
+    whole write), while ``update_point`` compares against the STORED
+    ``content``/``search_keys`` it reads in its own probe, because a name-only
+    update carries no indexed text of its own. ``update_entity``'s Point branch
+    still compares payload-only — an asymmetry that is deliberate for now
+    (threading the same read there is its own change) and named in
+    ``test_10122_point_name_not_indexed.py``.
 
     ``content`` is the DOOR's own content argument, supplied only where the
     payload does not carry it: ``create_point`` takes ``content`` as a required
@@ -4954,16 +4958,31 @@ def _warn_point_name_not_lexically_indexed(
     if stored_text:
         indexed_tokens.update(tokenize_sparse_query(
             _lexical_text(stored_text), keep_numeric=True))
-    if not name_tokens:
-        # A name that yields NO token at all (stopwords only, or one-character
-        # segments like "R&D") is unfindable lexically for a different reason —
-        # the QUERY tokenizes to nothing, so it cannot be found however the
-        # index is built. Deliberately silent: advising to move such a name
-        # into `content` would not make it findable, so the advice would be
-        # wrong. Documented rather than implied.
+    if not any(ch.isalnum() for ch in str(name)):
+        # Silent only when the name carries NO alphanumeric character at all
+        # (pure punctuation/whitespace): then there is nothing to index and the
+        # advice would be meaningless. ⛔ NOT "when our token list is empty":
+        # ``build_or_query`` does not drop a degenerate query, it falls back to
+        # the ESCAPED RAW literal (#1791), so ``build_or_query("R&D") == "R&D"``
+        # and the engine still tokenizes it — measured: a point whose content
+        # says "the brand R&D handles the audit" IS returned by
+        # ``run_fts_query("R&D")`` at 1.0. So an `R&D`-shaped name (or a
+        # stopwords-only one, since our stopword list is not the engine's) is
+        # genuinely findable once its literal sits in an indexed field, and the
+        # advisory must speak rather than stay silent. That was a false negative
+        # in the previous round (#10122 review P2).
         return
-    if name_tokens & indexed_tokens:
-        return
+    if name_tokens:
+        if name_tokens & indexed_tokens:
+            return
+    else:
+        # No token on our side (e.g. a one-character literal) but the name DOES
+        # carry alphanumerics: fall back to a casefolded literal containment
+        # test, which is what the engine's raw-literal path matches.
+        folded = _lexical_text(name)
+        if any(folded in _lexical_text(_indexed_value(f)) for f in fields) or (
+                stored_text and folded in _lexical_text(stored_text)):
+            return
     # The roster is DERIVED from the same table, so a label that gains (or
     # loses) a ``name`` index changes this sentence with the index.
     other_labels = sorted(
@@ -14474,29 +14493,6 @@ class TortoiseSDK:
         # the same merge, so a one-sided update cannot leave a marker beside a
         # bound it contradicts.
         _refuse_inconsistent_validity_precision(proj.g, props, point_id=id)
-        # #10122: the advisory, AFTER the refusal gates above (a refused update
-        # writes nothing, so advising about it is crying wolf — the discipline
-        # `create_point` and `update_entity` already follow) and reading the
-        # STORED text, because the verdict must be about the index, not about
-        # the payload a name-only update does not carry (round-1 + round-2 P2).
-        # Fires only when the update carries a string `name`, so a plain update
-        # pays nothing.
-        if isinstance(props.get("name"), str):
-            # Aggregations ONLY, so this is one row on a hit AND on a miss —
-            # a mixed ``count(n), n.content`` projection groups implicitly and
-            # returned an EMPTY result set on the miss (the round-2 pin caught
-            # it as an IndexError).
-            _name_row = proj.g.query(
-                "OPTIONAL MATCH (n:Point {id:$id}) "
-                "RETURN count(n), "
-                "coalesce(head(collect(n.content)), ''), "
-                "coalesce(head(collect(n.search_keys)), '')",
-                params={"id": id},
-            ).result_set[0]
-            if _name_row[0]:
-                _warn_point_name_not_lexically_indexed(
-                    props, door="update_point",
-                    stored_text=f"{_name_row[1]} {_name_row[2]}")
         # #5240: `content`'s None boundary is decided ONCE, here, before any
         # consumer reads the key — because the consumers disagreed. The
         # derived-hash line below tested KEY PRESENCE (``"content" in props``)
@@ -14662,6 +14658,34 @@ class TortoiseSDK:
                     "update_point only promotes draft→live — use "
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
+
+        # #10122: the advisory sits here — after EVERY refusal this door can
+        # raise from (kinds, sanitisation, span, validity window, precision, the
+        # draft→live status ValueError above), so it can never advise about a
+        # write that was refused (#10122 review round-3 P3).
+        # #10122: the advisory, AFTER the refusal gates above (a refused update
+        # writes nothing, so advising about it is crying wolf — the discipline
+        # `create_point` and `update_entity` already follow) and reading the
+        # STORED text, because the verdict must be about the index, not about
+        # the payload a name-only update does not carry (round-1 + round-2 P2).
+        # Fires only when the update carries a string `name`, so a plain update
+        # pays nothing.
+        if isinstance(props.get("name"), str):
+            # Aggregations ONLY, so this is one row on a hit AND on a miss —
+            # a mixed ``count(n), n.content`` projection groups implicitly and
+            # returned an EMPTY result set on the miss (the round-2 pin caught
+            # it as an IndexError).
+            _name_row = proj.g.query(
+                "OPTIONAL MATCH (n:Point {id:$id}) "
+                "RETURN count(n), "
+                "coalesce(head(collect(n.content)), ''), "
+                "coalesce(head(collect(n.search_keys)), '')",
+                params={"id": id},
+            ).result_set[0]
+            if _name_row[0]:
+                _warn_point_name_not_lexically_indexed(
+                    props, door="update_point",
+                    stored_text=f"{_name_row[1]} {_name_row[2]}")
 
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an
