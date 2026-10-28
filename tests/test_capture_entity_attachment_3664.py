@@ -47,6 +47,8 @@ def journal_sdk(tmp_path):
     sdk.close()
 
 
+
+
 def _about_edges(g) -> set:
     """The full aboutObject scope — (source_label, source_id, target_key) for
     every edge. Not a count: a count cannot tell a Session edge from a turn
@@ -119,10 +121,19 @@ def _session_props(g, sid: str) -> dict:
 # ── SCOPE: the SDK capture writes the attachment at all ───────────────────
 
 
+
+
+
 # ── DURABILITY: live == rebuild for the captured attachment ───────────────
 
 
+
+
+
+
+
 # ── DURABILITY: the attempt outcome is journaled, not live-only ───────────
+
 
 
 # ── HARD-DELETE awareness: a deleted link is not resurrected on replay ────
@@ -919,6 +930,10 @@ def _patch_extractor_payload(monkeypatch, points):
                 "errors": [], "warnings": []}
 
     monkeypatch.setattr(_ex, "extract_session_v2", _fake)
+
+
+
+
 
 
 # ── MALFORMED journal input is a NO-OP, never a raise ─────────────────────

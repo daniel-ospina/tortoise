@@ -233,6 +233,8 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
     assert ids_mod.session_id_refusal("a\x00b") is None
 
 
+
+
 def test_the_wire_normaliser_agrees_with_the_doors():
     """The helper itself: blank -> None, padded-but-real passes through."""
     from tortoise.capture_spool import _normalise_session_id
@@ -312,6 +314,9 @@ def test_the_skip_report_names_a_blank_identity_as_blank():
 # ── enforcement point 1: the SDK capture doors ───────────────────────────
 
 
+
+
+
 # ── enforcement point 2: the hosted boundary ─────────────────────────────
 
 def test_the_hosted_boundary_refuses_a_blank_session_id(client):
@@ -340,6 +345,8 @@ def test_the_hosted_boundary_validator_reds_without_the_network():
     # ...and the shapes that must still be accepted:
     for ok_value in (None, "", "  s1  ", "s1"):
         SessionRequest(conversation=CONV, session_id=ok_value)
+
+
 
 
 # ── the replay half: a journal written before the doors refused ────
@@ -531,6 +538,8 @@ def test_a_blank_session_id_flag_still_keeps_session_continuity(tmp_path):
     flush_spool(root, _post, now=1000.0)
     assert seen and seen[0]["session_id"] == stable, seen
     assert read_spool_meta(root, stable).get("filed_key")
+
+
 
 
 # ── the THIRD writer: the `rebuild_all` pre-wipe sidecar ─────────────────

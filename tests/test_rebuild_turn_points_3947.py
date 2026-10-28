@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+from unittest import mock
 
 import pytest
 
@@ -68,6 +69,10 @@ def _offline_extractor(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
+
+
+
+
 def _turn_ids(proj):
     rows = proj.g.query(
         "MATCH (t:Point) WHERE t.is_episodic = true "
@@ -87,6 +92,10 @@ def _contains(proj):
 
 
 # ── (a)+(b): the turn write is replayable ────────────────────────────────
+
+
+
+
 
 
 # ── (b): live/replay parity for the quota discriminator ──────────────────
@@ -114,6 +123,10 @@ def test_replayed_point_keeps_is_episodic(tmp_path):
 
 
 # ── (c): the invariant — it must be able to RED ──────────────────────────
+
+
+
+
 
 
 def test_every_node_creating_journal_type_counts_as_recreatable(tmp_path):
@@ -192,6 +205,10 @@ def test_capture_gate_refuses_before_the_coverage_proof(tmp_path):
         assert _turn_ids(proj) == [pid]
     finally:
         sdk.close()
+
+
+
+
 
 
 def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):
@@ -336,6 +353,8 @@ def test_sdk_rejects_contains_session_prop():
     with pytest.raises(ValueError, match="contains_session"):
         from tortoise.sdk import _sanitize_props
         _sanitize_props({"contains_session": "sess_x"})
+
+
 
 
 def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):

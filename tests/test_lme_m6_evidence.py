@@ -1064,6 +1064,7 @@ def test_report_answer_string_absent_keys_noop():
 # ── OWNER VALIDATION: session_id on both capture paths ─────────────────────
 
 
+
 def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
     """The HOSTED commit path (POST /v1/sessions/commit) writes session_id on
     the committed points — M6 owner validation found this path missing it

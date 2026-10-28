@@ -46,11 +46,13 @@ import pytest
 from tortoise import capture_spool
 from tortoise.sdk import (
     TortoiseSDK,
+    _capture_turn_role_text,
     _capture_turn_texts,
+    _content_hash,
     _redact_summary_strings,
     _redact_turn_contents,
 )
-from tortoise.security import redact_secrets
+from tortoise.security import CREDENTIAL_KINDS, redact_secrets
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -246,6 +248,19 @@ def _session_redactions(sdk: TortoiseSDK, session_id: str):
 
 
 # ── AC1: every shape, end to end, marker in / value out ────────────────────
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_the_truncation_marker_is_never_in_the_scanned_text(monkeypatch):
@@ -561,7 +576,12 @@ def test_a_marker_lookalike_cannot_hide_a_credential_tail():
         "absent by accident")
 
 
+
+
 # ── AC3: count recorded per session AND surfaced ───────────────────────────
+
+
+
 
 
 # ── AC4: one control site, at the shared stored-text definition ────────────

@@ -662,9 +662,13 @@ def test_the_schema_resolves_without_the_repo_checkout(monkeypatch, tmp_path):
 # ════════════════════════════════════════════════════════════════════════════
 
 
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 3. Armed but unattributed — refused, counted, never guessed (#9192)
 # ════════════════════════════════════════════════════════════════════════════
+
+
 
 
 def test_the_single_tenant_environment_pair_resolves_a_tenant(capture_sdk,
@@ -766,6 +770,8 @@ def test_env_example_declares_the_record_tenant_pair():
     assert "sets no\n# timeout of its own" not in env, (
         ".env.example claims the seam sets no timeout of its own; it sets "
         "record_writer.CONNECT_TIMEOUT_SECONDS")
+
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1088,6 +1094,8 @@ def test_the_seam_writes_nothing_from_a_scratch_buffer(monkeypatch):
     assert failures_after == failures_before, (
         "a DECLINE on a no-journal-by-design lane was counted as a FAILURE — "
         f"`record_write_failures` must stay zero-meaningful: {failures_after}")
+
+
 
 
 def test_the_m2_capture_lane_never_files_a_row_its_journal_never_carried(        capture_sdk, monkeypatch):
@@ -1774,6 +1782,8 @@ def test_the_record_connection_is_bounded(monkeypatch):
         "a similarly-spelled query key is not `connect_timeout`")
 
 
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 7. The four-layer proof — a real Postgres, the PUBLIC capture path
 # ════════════════════════════════════════════════════════════════════════════
@@ -1994,6 +2004,12 @@ def _engine_refusal(message: str) -> str | None:
 def _journal_records(journal_path: Path) -> list[dict]:
     return [json.loads(line) for line in
             journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+
+
+
+
 
 
 def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
@@ -2276,12 +2292,10 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
                           "default_graph_id": "g_default"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], bound
 
-    # A credential that carries NO such field stays refused: session/PAT
-    # (`_session_user_org` resolves `org_id` + tier only) and OAuth `oat_`
-    # (`resolve_oauth_access_token` never calls `resolve_api_key`). Naming those
-    # is #10046's scope (a RESOLUTION gap at the credential), and until it is
-    # wired the write is refused `no_tenant` rather than filed under a tenant
-    # nobody named.
+    # A credential that carries NO such field stays refused. Since #10046 the
+    # RESOLVERS stamp it for every class (session/JWT and OAuth too), so a
+    # dict without it is a credential whose org had no nameable default row —
+    # the fail-closed direction, not a class left unwired.
     hosted_api._data_sdk({"org_id": "org-a"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], (
         f"a field-less request bound a tenant nobody named: {bound}")

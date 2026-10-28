@@ -457,6 +457,22 @@ def _label_stamp_state(sdk, session_id: str) -> tuple:
     return tuple(rows[0]) if rows else (0, 0, [], [])
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ── 6. the residual SDK write surfaces (the increment after #8698) ───────────
 #
 # Each surface below was named in ``tortoise/retry.py``'s ``⛔ NOT covered``

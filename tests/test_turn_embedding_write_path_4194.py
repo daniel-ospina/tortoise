@@ -39,8 +39,9 @@ import pytest
 # no provider/network call.
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
-from tortoise.embeddings import EmbeddingModel
+from tortoise.embeddings import EmbeddingModel, compute_embedding
 from tortoise.sdk import TortoiseSDK
+from tortoise.search_engine import run_vector_query
 
 
 class _FakeEmbedder:
@@ -131,10 +132,23 @@ def _turn_rows(sdk: TortoiseSDK, session_id: str):
 # ── 1. The write path stores the encoder's own vector ─────────────────────
 
 
+
 # ── 2. The dense leg now actually returns the captured turn ───────────────
 
 
+
 # ── 3. Negative control: no embedder ⇒ turn stored, leg DECLARED impaired ──
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_required_embedding_dim_follows_the_index_not_the_mode(sdk, monkeypatch):

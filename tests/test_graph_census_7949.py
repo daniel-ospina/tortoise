@@ -21,7 +21,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.eval.write_path import runner
+from tests.eval.write_path import runner, schema
+from tortoise.sdk import TortoiseSDK
 
 CONV = [
     {"role": "user", "content": "I think the auth dead-end is the top issue. "
@@ -32,10 +33,22 @@ CONV = [
 ]
 
 
+
+
 def _point_ids(snap: dict) -> list[str]:
     """The session's memory layer: claims AND reified operator Points."""
     return [p["point_id"]
             for p in snap.get("points", []) + snap.get("operator_nodes", [])]
+
+
+
+
+
+
+
+
+
+
 
 
 def test_the_census_uses_the_same_instrument_as_the_e1_probe():
@@ -68,6 +81,16 @@ def test_the_census_uses_the_same_instrument_as_the_e1_probe():
         [bool(probe.THE_PREFIX.match(n)) for n in boundary], boundary
 
 
+
+
+
+
+
+
+
+
+
+
 def test_a_graph_error_is_reported_never_zeroed():
     """FAILS IF `census_or_error` swallows a graph failure into zeros — a
     measured empty session and an unreadable graph must not be the same
@@ -95,6 +118,10 @@ def test_a_graph_error_is_reported_never_zeroed():
     assert aggregate["sessions_errored"] == ["session-x"]
     assert aggregate["objects"]["total"] == 0
     assert aggregate["objects"]["the_share"] is None  # never 0.0
+
+
+
+
 
 
 def test_the_aggregate_is_a_ratio_of_sums_not_a_mean_of_shares():
@@ -128,6 +155,12 @@ def test_the_aggregate_is_a_ratio_of_sums_not_a_mean_of_shares():
         "containment_excluded": 3, "identity_excluded": 4}
     assert aggregate["sessions_with_objects"] == 2
     assert aggregate["sessions_errored"] == []
+
+
+
+
+
+
 
 
 # ── the retracted claim in the epic's own E1/E2 bundle ─────────────────────

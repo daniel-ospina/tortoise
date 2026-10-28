@@ -113,6 +113,16 @@ def _differs(live, rebuilt):
     return {k for k in set(live) | set(rebuilt) if live.get(k) != rebuilt.get(k)}
 
 
+
+
+
+
+
+
+
+
+
+
 def test_a_legacy_capture_record_does_not_move_a_journalled_instant(prov):
     """#9451 review round 3, ISSUE 2 — a PRE-#9451 capture line must stay the
     NO-OP it was, on both engines.

@@ -37,7 +37,9 @@ from tortoise.supabase_control import (
     graph_metadata,
     insert_api_key,
     insert_graph,
+    invitation_accept,
     invitation_accept_by_id,
+    invitation_expire,
     invitation_mint,
     invitation_otp_mint,
     invitation_otp_verify,
@@ -48,6 +50,7 @@ from tortoise.supabase_control import (
     membership_count_since,
     membership_for_user_org,
     membership_role,
+    pending_invitations,
     provision_org,
     resolve_api_key,
     revoke_api_key,
@@ -944,6 +947,20 @@ class TestTeamByID:
         with pytest.raises(RuntimeError):
             org_by_id(ErrorControlPlane(), "team-free-001")
 
+    def test_invitation_accept_410_under_0015_drift(self, fake):
+        """#1096: the deletion kill-switch fires at the CONSUMER level under
+        0015 drift — a soft-deleted team still 410s invitation_accept (the
+        deleted_at-carried test proves the mechanism; this proves the
+        contract the Architecture section claims)."""
+        inv = invitation_mint(fake, "team-free-001", "bob@example.com",
+                              "member", "owner-1")
+        fake.tables["organizations"][0]["deleted_at"] = \
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2)
+        assert ei.value.status == 410
+
 
 # ── update_last_used (#685 write-through) ───────────────────────────────────
 
@@ -1161,6 +1178,14 @@ class TestInvitationSeam:
         assert ei.value.status == 409
         assert len(fake.tables["invitations"]) == 1
 
+    def test_mint_reinvite_allowed_after_consumed(self, fake):
+        """Dedup is on PENDING only — a consumed invite doesn't block a
+        fresh re-invite (NULLs are distinct; the partial index enforces)."""
+        inv1 = invitation_mint(fake, "team-1", "bob@example.com", "admin", "u1")
+        invitation_accept(fake, inv1["token"], _U2)
+        inv2 = invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        assert inv2["token"] != inv1["token"]
+        assert len(fake.tables["invitations"]) == 2
 
     def test_mint_validates_role_and_email(self, fake):
         """0008 CHECK closes role to admin|member (owner is NOT invitable)."""
@@ -1172,6 +1197,153 @@ class TestInvitationSeam:
 
     # ── accept ──────────────────────────────────────────────────────────
 
+    def test_accept_creates_membership_with_invited_role(self, fake):
+        """E2E-3 core: mint → lookup_hash verify → accept → REAL membership
+        carrying the INVITED role; pending invite consumed."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "owner-1")
+        result = invitation_accept(fake, inv["token"], _U2)
+        assert result == {"org_id": "team-1", "role": "admin"}
+
+        mem = fake.tables["org_memberships"]
+        assert len(mem) == 1
+        assert mem[0]["user_id"] == _U2
+        assert mem[0]["org_id"] == "team-1"
+        assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
+        assert mem[0]["status"] == "active"
+        assert mem[0]["invited_email"] == "bob@example.com"
+
+        inv_row = fake.tables["invitations"][0]
+        assert inv_row["status"] == "accepted"  # pending invite consumed
+        assert inv_row["accepted_at"] is not None
+
+    def test_accept_role_member_preserved(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], _U2)
+        assert fake.tables["org_memberships"][0]["role"] == "member"
+
+    def test_accept_unknown_token_rejected(self, fake):
+        invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        with pytest.raises(InvitationError, match="Invalid or expired"):
+            invitation_accept(fake, "not-the-token", _U2)
+
+    def test_accept_expired_rejected(self, fake):
+        """E2E-3: expiry enforced (expires_at <= now → rejected)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()  # noqa: UP017
+        fake.tables["invitations"][0]["expires_at"] = past
+        with pytest.raises(InvitationError, match="expired"):
+            invitation_accept(fake, inv["token"], _U2)
+        assert fake.tables["org_memberships"] == []
+
+    def test_accept_used_invite_rejected(self, fake):
+        """E2E-3: a used invite cannot be re-accepted."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], _U2)
+        with pytest.raises(InvitationError, match="accepted"):
+            invitation_accept(fake, inv["token"], _U5)
+        assert len(fake.tables["org_memberships"]) == 1  # no double join
+
+    def test_accept_revoked_invite_rejected(self, fake):
+        """E2E-3: a revoked invite cannot be accepted."""
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_rescind(fake, inv["id"], "team-1", _U3)
+        with pytest.raises(InvitationError, match="revoked"):
+            invitation_accept(fake, inv["token"], _U2)
+        # no membership created for the invitee (owner-1's row is the actor)
+        assert all(m["user_id"] != _U2
+                   for m in fake.tables["org_memberships"])
+
+    def test_accept_rejects_when_already_active_member(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        fake.seed("org_memberships", [{
+            "user_id": _U2, "org_id": "team-1",
+            "role": "member", "status": "active"}])
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2)
+        assert ei.value.status == 409
+
+    def test_accept_resurrects_removed_membership(self, fake):
+        """A previously removed member re-joining is resurrected in place
+        (registry MERGE semantics — uq_member_team would reject a second
+        row)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "owner-1")
+        fake.seed("org_memberships", [{
+            "id": "mem-1", "user_id": _U2, "org_id": "team-1",
+            "role": "member", "status": "removed"}])
+        invitation_accept(fake, inv["token"], _U2)
+        rows = fake.tables["org_memberships"]
+        assert len(rows) == 1
+        assert rows[0]["status"] == "active"
+        assert rows[0]["role"] == "admin"  # invited role wins
+
+    def test_accept_email_mismatch_403(self, fake):
+        """Invitee must be the invitee's account (JWT email guard, #574)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="mallory@example.com")
+        assert ei.value.status == 403
+        assert fake.tables["org_memberships"] == []
+
+    def test_accept_email_guard_skipped_without_jwt_email(self, fake):
+        """No email claim in the JWT → no guard (mirrors registry path)."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], _U2, user_email=None)
+        assert len(fake.tables["org_memberships"]) == 1
+
+    def test_accept_402_when_team_at_member_cap(self, fake):
+        """Quota/tier gate parity with the registry accept path (code-review
+        P2, PR #864): a free-tier team at its 1-user cap rejects with 402."""
+        # free tier: max_users=1; the owner already occupies the slot
+        for t in fake.tables["organizations"]:
+            if t["id"] == "team-1":
+                t.update({"tier": "free", "max_users": 1})
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2)
+        assert ei.value.status == 402
+        # invite still pending — the gate fires BEFORE consumption
+        assert fake.tables["invitations"][0]["status"] == "pending"
+
+    def test_accept_compensates_invite_when_membership_write_fails(self, fake):
+        """Burn-window fix (code-review P2, PR #864): if the membership write
+        fails after the invite was consumed, the invite rolls back to pending
+        so the invitee can retry."""
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        fake.seed("organizations", [{"id": "team-1", "name": "T", "tier": "free",
+                              "max_users": 10, "graph_name": "team_team-1"}])
+        # Fail the membership POST only (first failing call after accept)
+        class _FlakyAfterAccept(FakeControlPlane):
+            def __init__(self, base):
+                self._base = base
+                self._fail_next_membership = False
+
+            def query(self, table, **kw):
+                if table == "org_memberships" and kw.get("method") == "POST":
+                    self._fail_next_membership = True
+                    raise RuntimeError("simulated membership write failure")
+                return self._base.query(table, **kw)
+
+        flaky = _FlakyAfterAccept(fake)
+        with pytest.raises(RuntimeError):
+            invitation_accept(flaky, inv["token"], _U2)
+        # compensating rollback: invite is pending again, not burned
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "pending"
+        assert row["accepted_at"] is None
 
     def test_rescind_loses_race_to_concurrent_accept_409(self, fake):
         """Race fix (code-review P2, PR #864): a rescind racing a concurrent
@@ -1249,6 +1421,15 @@ class TestInvitationSeam:
         again = invitation_rescind(fake, inv["id"], "team-1", _U3)
         assert again["already"] is True
 
+    def test_rescind_rejects_accepted_invite(self, fake):
+        """A used invite cannot be rescinded — the membership already exists."""
+        self._owner(fake)
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                              "owner-1")
+        invitation_accept(fake, inv["token"], _U2)
+        with pytest.raises(InvitationError) as ei:
+            invitation_rescind(fake, inv["id"], "team-1", _U3)
+        assert ei.value.status == 409
 
     def test_rescind_unknown_or_other_team_404(self, fake):
         self._owner(fake)
@@ -1266,8 +1447,31 @@ class TestInvitationSeam:
 
     # ── list ────────────────────────────────────────────────────────────
 
+    def test_pending_invitations_lists_only_pending(self, fake):
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
+                              "u1")
+        invitation_mint(fake, "team-1", "carol@example.com", "member", "u1")
+        invitation_mint(fake, "team-2", "other@example.com", "member", "u1")
+        used = invitation_mint(fake, "team-1", "dave@example.com", "member",
+                               "u1")
+        invitation_accept(fake, used["token"], _U2)
+        rows = pending_invitations(fake, "team-1")
+        assert [r["email"] for r in rows] == ["bob@example.com", "carol@example.com"]
+        assert all(r["status"] == "pending" for r in rows)
+        assert inv["id"] in [r["id"] for r in rows]
 
     # ── fail-closed ─────────────────────────────────────────────────────
+
+    def test_invitation_seam_fail_closed_on_query_error(self):
+        """P1-3: a control-plane error RAISES (RuntimeError) — mint/accept
+        must never silently succeed or fall back to the registry."""
+        cp = ErrorControlPlane()
+        with pytest.raises(RuntimeError):
+            invitation_mint(cp, "team-1", "bob@example.com", "member", "u1")
+        with pytest.raises(RuntimeError):
+            invitation_accept(cp, "some-token", _U2)
+        with pytest.raises(RuntimeError):
+            invitation_rescind(cp, "inv-1", "team-1", _U3)
 
 
 # ── #8089: clock-expiry must stop blocking a re-invite ─────────────────────
@@ -1380,6 +1584,19 @@ class TestExpiredInvitationRemint:
         assert expire_stale_invitations(fake) == 0
         assert fake.tables["invitations"][0]["status"] == "expired"
 
+    def test_sweep_leaves_terminal_and_null_expiry_rows_alone(self, fake):
+        """Only PENDING rows are swept, and only those with a real deadline."""
+        accepted = invitation_mint(fake, "team-1", "bob@example.com", "member",
+                                   "u1")
+        invitation_accept(fake, accepted["token"], _U2)
+        forever = invitation_mint(fake, "team-1", "carol@example.com", "member",
+                                 "u1")
+        fake.tables["invitations"][-1]["expires_at"] = None
+
+        assert expire_stale_invitations(fake) == 0
+        by_id = {r["id"]: r for r in fake.tables["invitations"]}
+        assert by_id[accepted["id"]]["status"] == "accepted"
+        assert by_id[forever["id"]]["status"] == "pending"
 
     def test_sweep_honours_the_supplied_clock(self, fake):
         """``now`` is injectable, so the sweep is testable without waiting."""
@@ -1389,6 +1606,31 @@ class TestExpiredInvitationRemint:
         assert fake.tables["invitations"][0]["status"] == "expired"
         assert inv["status"] == "pending"  # the mint's own return is historical
 
+    def test_a_materialised_expired_row_reads_as_expired_on_both_accept_paths(
+            self, fake):
+        """A row the SWEEP retired must still tell the invitee it expired.
+
+        'expired' used to be reachable only via the admin expire-now action, so
+        both accept paths lumped it into "Invitation is not pending" — a 400
+        with nothing actionable in it. The sweep makes it the COMMON shape for
+        a dead link, and the answer must not depend on WHICH mechanism retired
+        the row: the derived-expiry branch and the materialised-status branch
+        say the same thing.
+        """
+        inv = invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
+        # The sweep-won order (a background sweep landing before the accept).
+        expire_stale_invitations(
+            fake, now=(datetime.now(UTC) + timedelta(days=30)).isoformat())
+        assert fake.tables["invitations"][0]["status"] == "expired"
+
+        with pytest.raises(InvitationError, match="expired") as ei:
+            invitation_accept(fake, inv["token"], _U2)
+        assert ei.value.status == 400
+        with pytest.raises(InvitationError, match="expired") as ei:
+            invitation_accept_by_id(fake, inv["id"], _U2,
+                                    user_email="bob@example.com")
+        assert ei.value.status == 400
+        assert fake.tables["org_memberships"] == []
 
     def test_rescind_of_a_materialised_expired_row_is_idempotent(self, fake):
         """The THIRD reader of this status must not 409 on a retired row.
@@ -3167,6 +3409,16 @@ class TestInviteFusionV2Seam:
         row = fake.tables["invitations"][0]
         assert row["otp_attempts"] == 0
 
+    def test_otp_mint_on_consumed_invite_returns_false(self, fake):
+        inv = self._pending_invite(fake)
+        invitation_accept(fake, inv["token"], _U2, user_email="bob@example.com")
+        from datetime import timedelta
+        ok = invitation_otp_mint(
+            fake, inv["id"], code_hash="x",
+            expires_at=(datetime.now(UTC)
+                        + timedelta(minutes=10)).isoformat(),
+            sent_at=datetime.now(UTC).isoformat())
+        assert ok is False
 
     def test_otp_verify_ok_non_consuming(self, fake):
         """Verify is NON-consuming: ok leaves the code outstanding — it is
@@ -3209,6 +3461,117 @@ class TestInviteFusionV2Seam:
 
     # ── mismatch-override accept (both paths OTP-gated) ────────────────
 
+    def test_mismatch_override_without_code_blocked(self, fake):
+        """The seam verifies the code itself — a mismatch-override accept
+        without a code is a 403 (invite-hijack closed on BOTH paths)."""
+        inv = self._pending_invite(fake)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse")
+        assert ei.value.status == 403
+        assert "Verification code required" in str(ei.value)
+
+    def test_wrong_code_blocked_at_accept(self, fake):
+        """A wrong code at the mismatch-override accept is a 403 — nothing
+        is accepted and no code is consumed."""
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse", otp_code="000000")
+        assert ei.value.status == 403
+        assert "Invalid or expired verification code" in str(ei.value)
+        assert fake.tables["invitations"][0].get("accepted_at") is None
+        assert fake.tables["invitations"][0]["otp_hash"] is not None
+
+    def test_legacy_mismatch_still_403(self, fake):
+        """No mismatch_override → the pre-W7 403 message (byte-unchanged)."""
+        inv = self._pending_invite(fake)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com")
+        assert ei.value.status == 403
+        assert str(ei.value) == "Invite email does not match this account"
+
+    def test_invalid_override_path_422(self, fake):
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="hijack", otp_code="123456")
+        assert ei.value.status == 422
+
+    def test_fuse_override_accepts_under_current_account(self, fake):
+        """fuse + OTP → membership under the CURRENT account, the invitation
+        records accepted_via/accepted_mismatch/fused_from_email, and the code
+        is consumed atomically at the accept commit."""
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        res = invitation_accept(fake, inv["token"], _U2,
+                                user_email="alice@example.com",
+                                mismatch_override="fuse", otp_code="123456")
+        assert res["org_id"] == "team-1"
+        assert res["role"] == "member"
+        assert res["accepted_via"] == "fuse"
+        assert res["mismatch"] == {"invited_email": "bob@example.com",
+                                   "recorded": True}
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "accepted"
+        assert row["accepted_mismatch"] is True
+        assert row["fused_from_email"] == "bob@example.com"
+        # code consumed at commit (single-use) + proof recorded
+        assert row["otp_hash"] is None
+        assert row["otp_verified_at"] is not None
+        assert row["otp_verified_by"] == _U2
+        # membership row under the CURRENT user (not bob)
+        mem = [m for m in fake.tables["org_memberships"]
+               if m.get("user_id") == _U2 and m.get("org_id") == "team-1"]
+        assert len(mem) == 1 and mem[0]["role"] == "member"
+        # single-use token consumed
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse", otp_code="123456")
+        assert ei.value.status == 400
+
+    def test_accept_mismatch_override_path(self, fake):
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        res = invitation_accept(fake, inv["token"], _U2,
+                                user_email="alice@example.com",
+                                mismatch_override="accept-mismatch",
+                                otp_code="123456")
+        assert res["accepted_via"] == "accept-mismatch"
+        assert fake.tables["invitations"][0]["accepted_mismatch"] is True
+
+    def test_capacity_402_does_not_burn_code(self, fake):
+        """The quota/capacity 402s fire BEFORE the conditional commit — a
+        legit user who proved email control keeps their code (retryable with
+        the SAME code once a seat frees)."""
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        for t in fake.tables["organizations"]:          # cap at current members
+            if t.get("id") == "team-1":
+                t["max_users"] = 1
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse", otp_code="123456")
+        assert ei.value.status == 402
+        row = fake.tables["invitations"][0]
+        assert row.get("accepted_at") is None  # invite NOT consumed
+        assert row["otp_hash"] is not None     # code NOT burned
+        # free the seat → the SAME code accepts
+        for t in fake.tables["organizations"]:
+            if t.get("id") == "team-1":
+                t["max_users"] = 100
+        res = invitation_accept(fake, inv["token"], _U2,
+                                user_email="alice@example.com",
+                                mismatch_override="fuse", otp_code="123456")
+        assert res["org_id"] == "team-1"
 
     # ── admin resend / expire ──────────────────────────────────────────
 
@@ -3227,6 +3590,36 @@ class TestInviteFusionV2Seam:
         self._otp_for(fake, inv["id"], "123456")
         invitation_resend(fake, inv["id"], "team-1", actor_user_id=_U3)
         assert fake.tables["invitations"][0]["otp_hash"] is None
+
+    def test_resend_accepted_409(self, fake):
+        inv = self._pending_invite(fake)
+        invitation_accept(fake, inv["token"], _U2, user_email="bob@example.com")
+        with pytest.raises(InvitationError) as ei:
+            invitation_resend(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert ei.value.status == 409
+
+    def test_expire_marks_pending_and_blocks_accept(self, fake):
+        inv = self._pending_invite(fake)
+        res = invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert res["expired"] is True
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "expired"
+        assert row["expires_at"]
+        # the expired invite cannot be accepted (token or by-id)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="bob@example.com")
+        assert ei.value.status == 400
+        # expire is idempotent for already-expired
+        res2 = invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert res2.get("already") is True
+
+    def test_expire_accepted_409(self, fake):
+        inv = self._pending_invite(fake)
+        invitation_accept(fake, inv["token"], _U2, user_email="bob@example.com")
+        with pytest.raises(InvitationError) as ei:
+            invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert ei.value.status == 409
 
 
 class _InterleaveLoserFake(FakeControlPlane):
@@ -3372,6 +3765,53 @@ class TestConcurrentAcceptSingleUseSupabase:
         assert ok is True
         return code
 
+    def test_loser_claim_before_membership_write(self):
+        """Carol races alice on one token (both control the invitee mailbox
+        — same code). Alice's accept commits at the boundary of Carol's own
+        claim PATCH (the interleaving window a real deploy has). Carol's
+        conditional PATCH returns [] → she raises before ANY membership
+        write. Pre-fix Carol's post-PATCH re-read saw alice's
+        status='accepted' and minted a SECOND membership — assert she did
+        NOT."""
+        base = FakeControlPlane({"api_keys": [], "org_memberships": [],
+                                 "invitations": [], "organizations": []})
+        fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
+                                    winner_email="alice@example.com")
+        inv = self._seed(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        # Carol's single accept: all pre-checks pass (invite still pending),
+        # then at HER claim PATCH the fake commits alice's win first.
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U4,
+                              user_email="carol@example.com",
+                              mismatch_override="fuse", otp_code="123456")
+        assert "already been accepted" in str(ei.value)
+        # Carol (_U4, the loser) has NO membership — the claim gated the write
+        mems = [m for m in fake.tables["org_memberships"]
+                if m.get("org_id") == "team-race-sb"]
+        uids = [m["user_id"] for m in mems]
+        assert uids.count(_U3) == 1   # owner
+        assert uids.count(_U2) == 1   # winner alice
+        assert _U4 not in uids        # loser carol never written
+        # invite is accepted exactly once, by the winner
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "accepted"
+        assert row["otp_verified_by"] == _U2
+
+    def test_sequential_replay_never_second_membership(self, fake):
+        """Replay after a normal accept (the pre-existing sequential guard):
+        the second accept 400s at the status gate — never a dup."""
+        inv = self._pending_invite_team1(fake)
+        invitation_accept(fake, inv["token"], _U2,
+                          user_email="bob@example.com")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U4,
+                              user_email="bob@example.com")
+        assert ei.value.status == 400
+        mems = [m for m in fake.tables["org_memberships"]
+                if m.get("org_id") == "team-1"
+                and m.get("user_id") in (_U2, _U4)]
+        assert len(mems) == 1 and mems[0]["user_id"] == _U2
 
     def test_by_id_loser_claim_before_membership_write(self):
         """P2-1 by-id twin (same race, token-less accept): the invitee's

@@ -102,6 +102,8 @@ from types import SimpleNamespace
 import pytest
 
 from tortoise import hosted_api as ha
+from tortoise import monitoring
+from tortoise.sdk import TortoiseSDK
 
 # A conversation whose turn text carries a resolvable GitHub issue URL — the
 # `session_link` trigger the capture's entity-linking pass reads.
@@ -276,13 +278,17 @@ def test_journal_key_matches_the_graph_the_sdk_opens(hosted_lane):
 # ── the capture path: aboutObject edges survive rebuild_all ────────────────
 
 
+
 # ── the index-completion re-link path ──────────────────────────────────────
+
 
 
 # ── the honest RED for the drift: mutate ONLY the wiring ───────────────────
 
 
+
 # ── F1: a failed append on a CONFIGURED journal is not silent ──────────────
+
 
 
 @pytest.mark.skipif(os.geteuid() == 0,
@@ -337,6 +343,7 @@ def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch)
 
 
 # ── #5632: the disclosed count is THIS capture's delta, not the lifetime one ──
+
 
 
 @pytest.mark.skipif(os.geteuid() == 0,

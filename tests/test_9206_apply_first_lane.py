@@ -231,6 +231,8 @@ def test_delete_point_and_delete_entity_write_and_record_under_the_armed_guard(
     assert _records_since(sdk).count("EntityMutated") == before + 1
 
 
+
+
 def test_the_lane_is_not_a_bypass(armed_sdk, enforced):
     """A raw write outside every lane is STILL refused with the guard armed.
 

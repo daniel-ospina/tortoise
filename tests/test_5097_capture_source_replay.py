@@ -77,6 +77,7 @@ extractor — zero network, zero provider spend.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -121,6 +122,8 @@ def _offline_extractor(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
+
+
 def _bag_diff(before, after):
     """Every property that differs between the live and the rebuilt node.
 
@@ -155,6 +158,16 @@ def _carrier(log_path):
         "the session :Source materialization emitted no journal record — a raw "
         "capture-path SET with no carrier is silently reverted by a rebuild")
     return recs[-1]
+
+
+
+
+
+
+
+
+
+
 
 
 def test_an_empty_transcript_capture_replays_the_stamp_live_set(tmp_path):

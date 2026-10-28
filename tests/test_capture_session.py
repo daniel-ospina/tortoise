@@ -9,7 +9,9 @@ ONLY the LLM extraction into memory points (receipt ``extraction_mode``
 (TORTOISE_SESSION_LLM_MOCK=1 seam) so no provider key or network is needed.
 """
 import json
+import logging
 import os
+import re
 from urllib.parse import urlparse
 
 import pytest
@@ -33,6 +35,8 @@ def _server_uri_set() -> bool:
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     scheme = uri.split("://", 1)[0]
     return scheme in _SUPPORTED and bool(urlparse(uri).hostname)
+
+
 
 
 # ── #3662: the SDK transmission path requires explicit consent ────────────
@@ -118,6 +122,10 @@ def _extract_with_payload(payload: dict, extracted: list):
     return _fake
 
 
+
+
+
+
 def test_capture_session_module_isolates_real_home(tmp_path):
     """#3662 review (P2): pin the HOME isolation the refusal test depends on.
 
@@ -201,6 +209,10 @@ CONV = [
 ]
 
 
+
+
+
+
 def _money_payload(content: str, *, quote: str = "",
                    pid: str = "pt_2817_money") -> dict:
     """One v2 payload point carrying ``content``; ``quote`` is the E3 excerpt."""
@@ -230,6 +242,14 @@ def _read_money_row(sdk, pid: str) -> list:
         "n.verbatim, n.asOf",
         params={"id": pid},
     ).result_set[0])
+
+
+
+
+
+
+
+
 
 
 # ── #2817 review F1/F2: the money abstention CHANNEL at the capture seam ───
@@ -267,6 +287,16 @@ def _money_channel(*contents: str) -> dict:
 def _money_warnings(res: dict) -> list[str]:
     return [w for w in res.get("warnings") or []
             if "value-normalizer" in w]
+
+
+
+
+
+
+
+
+
+
 
 
 def _passthrough_payload(content: str) -> dict:
@@ -312,6 +342,12 @@ def _read_passthrough_props(sdk, pid: str) -> list:
         "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
         params={"id": pid},
     ).result_set[0])
+
+
+
+
+
+
 
 
 def test_capture_passthrough_read_clause_covers_whitelist():
@@ -365,6 +401,10 @@ def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
     }, stored
 
 
+
+
+
+    
 def test_capture_promotes_a_multi_labelled_endpoint_operator_once(
         tmp_path, monkeypatch):
     """#7853 review P2-1: the per-label sweep must journal ONE promotion per
@@ -416,6 +456,58 @@ def test_capture_promotes_a_multi_labelled_endpoint_operator_once(
         f"exactly one OperatorPromoted for the operator, got {promos}")
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ── E2E-6: Semantic connections (Event→Object) ──────────────────────────
 #
 # ONTOLOGY v3.2 §3.2 (issue #214) removed the INSTANTIATES predicate from
@@ -427,6 +519,8 @@ def test_capture_promotes_a_multi_labelled_endpoint_operator_once(
 # legacy INSTANTIATES producer (_connect_issue_objects, sdk.py) is still
 # pending #281's swap on origin/main; its compliance with #214 is #281's
 # test scope, not asserted here.
+
+
 
 
 def test_create_event_wires_about_object_by_name(sdk):
@@ -517,6 +611,13 @@ def test_session_relation_flood_capped_estimate_is_true_ceiling():
 
 
 # ── #1350: v2 capture (the default since this wiring) ─────────────────
+
+
+
+
+
+
+
 
 
 # ── #1530 P2: provider routing through the capture path (E2E-8) ─────────────
@@ -613,6 +714,14 @@ def test_no_provider_keys_fixture_scrubs_every_ambient_key(
     monkeypatch.setenv("GEMINI_API_KEY", "ambient-gemini")
     from tortoise.sdk import _session_llm_provider
     assert _session_llm_provider() == "gemini"
+
+
+
+
+
+
+
+
 
 
 def test_capture_session_failover_meta_flags(sdk, monkeypatch, no_provider_keys):
@@ -2712,6 +2821,35 @@ def test_extract_session_llm_in_tree_lane_advertises_nothing_unstored(
 # ── capture_session fail-closed assembly (both branches) ──────────────────
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ── #1532 P4: capture-path parity (window / role / quota / MITIGATES / id) ──
 
 def test_capture_turn_window_truncates_content(sdk):
@@ -2814,6 +2952,8 @@ def test_shared_extraction_window_blanks_a_clipped_turn_with_nothing_to_say():
     assert kept[0]["content"].startswith("a real sentence here. ")
 
 
+
+
 # ── #4897: a cut turn is MARKED, never silently shortened ──────────────────
 #
 # The READER's contract, stated as a literal rather than imported: this is what
@@ -2879,6 +3019,10 @@ def test_clip_capture_turn_content_cuts_mid_word_without_splitting_a_character()
     assert f"original length {len(emoji)}" in clipped
 
 
+
+
+
+
 def test_an_expanding_redaction_keeps_stored_and_extraction_markers_in_parity():
     """#721 parity must hold WITH a credential — the case the marker is for.
 
@@ -2908,6 +3052,10 @@ def test_an_expanding_redaction_keeps_stored_and_extraction_markers_in_parity():
         "must be the same text")
     assert f"original length {len(content)}" in transcript
     assert f"original length {len(content)}" in stored
+
+
+
+
 
 
 def test_the_marker_survives_the_servers_cap_reapplication():
@@ -2956,6 +3104,8 @@ def test_normalize_turn_role_matches_sdk_loop(sdk):
     assert _normalize_turn_role(123) == "123"
     assert _normalize_turn_role({"a": 1}) == "{'a': 1}"
     assert _normalize_turn_role(False) == "False"   # falsy non-string, not swallowed
+
+
 
 
 def test_extraction_estimate_v2_shape(sdk):
@@ -3197,6 +3347,12 @@ def test_the_gate_strips_a_lookalike_with_trailing_whitespace(sdk, monkeypatch):
         assert extracted == []
 
 
+
+
+
+
+
+
 def test_the_default_v2_lane_cannot_mint_a_claim_from_a_marker_only_turn():
     """#4897 round 18 P2: the sibling lane must not disagree with the transcript.
 
@@ -3322,6 +3478,12 @@ def test_the_clippers_blank_set_is_explicit():
     assert _CAPTURE_NONBLANK_RE.search("\u200b" * 10)
     out = _clip_capture_turn_content("\u200b" * (_CAPTURE_TURN_CAP + 1))
     assert _CAPTURE_TRUNCATION_SENTINEL in out
+
+
+
+
+
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4208,6 +4370,10 @@ def test_mcp_capture_no_actor_leaves_session_unattributed(tmp_path, monkeypatch)
     assert stamped is None
 
 
+
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # W5 Phase E (#2104, S11) — ingestion-toggle disclosure marker data.
 # The S11 409 gate / per-harness last-error / toggle read-write contract were
@@ -4277,6 +4443,10 @@ def test_phase_e_surfaced_empty_on_replay(consent_client):
     assert b2["extracted"] == 0, b2
     assert b2["surfaced"] == [], \
         "a replay adds zero memory items — surfaced must be empty"
+
+
+
+
 
 
 def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
@@ -4363,6 +4533,9 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
             _current_org_id.reset(tok_t)
             _current_org_limits.reset(tok_l)
             _transport_mode.reset(tok_m)
+
+
+
 
 
 # ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
@@ -4605,13 +4778,34 @@ def test_extract_session_v2_meta_carries_stats(sdk, monkeypatch):
     assert isinstance(meta.get("stats", {}).get("llm"), dict)
 
 
+
+
+
+
 # ── #2335 WI-1d: the observation leg (structured per-capture log line) ────
+
+
+
 
 
 # ── #2335 WI-2: the customer-facing error contract (headline + diagnostics) ─
 
 
+
+
+
+
+
+
+
 # ── #2335 WI-2b: TRUE retry — a FAILED session's re-capture re-attempts ──
+
+
+
+
+
+
+
 
 
 def test_apply_supersessions_concurrent_divergent_fold_one_wins(

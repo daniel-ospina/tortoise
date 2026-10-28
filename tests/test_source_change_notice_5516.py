@@ -298,6 +298,8 @@ def test_previous_version_label_is_best_effort(sdk):
     assert NOTICE_KEY not in third
 
 
+
+
 def test_capture_receipt_notice_helper_is_additive_only():
     """The shared receipt helper is silent unless a Source changed.
 

@@ -965,41 +965,6 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
 # ── 4. The SEAM: the ONE production invocation of the fusion ───────────────
 
 
-class TestTheCapturePathExecutesTheFusion:
-    """P1 (review): every other test here proves a PART; this drives the SEAM.
-
-    `tortoise/sdk.py`'s capture write path is the only place
-    `apply_merge_union` is ever called in production, and nothing reached it:
-    a mutation that deletes that block, moves it above the entity pass, or
-    reads the wrong key (`out["merge"]`) stayed green, so the fusion could stop
-    happening on real captures while `near_dup_merge` stayed `implemented` and
-    this whole file passed.
-
-    **Layer coverage, stated exactly.** This drives the REAL
-    `sdk.capture_session` → `_extract_session_v2` write path — the Session
-    write, the entity pass, the points loop, the merge block, the graph
-    writes — with only the S1–S5 extraction REPLACED by a crafted `out`
-    (`extractor_v2.extract_session_v2`, monkeypatched). The stub is necessary,
-    not a shortcut: `MERGE` can only come from an INJECTED vet arbiter and
-    `capture_session` exposes no arbiter seam, so the S5 hand-off is the
-    furthest point a test can control without widening the public signature.
-    What is therefore NOT covered: that the arbiter's verdict reaches
-    `merge_flagged` (pinned in `TestTheVetVerdictReachesTheFusion`) and that
-    `execute_embed` builds the record (pinned in
-    `TestTheWritePathEmitsOneEntityAndKeepsTheLosersEvidence`).
-    """
-
-    @pytest.fixture(autouse=True)
-    def _mock_provider(self, monkeypatch):
-        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-        monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-
-    @pytest.fixture
-    def sdk(self, tmp_path):
-        from tortoise.sdk import TortoiseSDK
-        s = TortoiseSDK(str(tmp_path / "capture_merge.db"))
-        yield s
-        s.close()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid

@@ -80,6 +80,9 @@ def _scan(sdk, limit=100):
 # ── capture_session: provenance surface, no content edge ──────────────────
 
 
+
+
+
 # ── mining: DE2E-1 session-occurrence anchor, provenance not content ──────
 
 def test_mining_no_about_event_provenance(mining_sdk):

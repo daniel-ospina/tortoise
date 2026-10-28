@@ -119,6 +119,8 @@ def embedder(monkeypatch):
     EmbeddingModel._reset()
 
 
+
+
 def _vector_entries(legs: list[dict]) -> list[dict]:
     """Every vector entry in a ``recall_state`` trace.
 
@@ -141,7 +143,19 @@ def _vector_entry(trace: list[dict]) -> dict:
 # ── 1. The falsifier: a partially-embedded corpus reads DEGRADED ───────────
 
 
+
+
+
+
+
+
+
 # ── 2. Anti-overfix guards: the fix is scope-precise, not a blanket degrade ─
+
+
+
+
+
 
 
 # ── 3. The guard, hermetically: scope-aware counts, fail-closed probe ──────

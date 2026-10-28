@@ -28,6 +28,7 @@ import pytest
 from tortoise.sdk import (
     _CAPTURE_TURN_CAP,
     TortoiseSDK,
+    _capture_turn_role_text,
     _capture_turn_window,
     _redact_summary_strings,
     _redact_turn_contents,
@@ -96,6 +97,7 @@ def _source_blob(sdk: TortoiseSDK, session_id: str) -> str:
 
 
 # ── #5445: a credential in `role` must not reach ANY of the three sinks ────
+
 
 
 def test_role_is_scrubbed_and_counted_at_the_chokepoint():

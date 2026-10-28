@@ -30,6 +30,8 @@ from tests.test_hosted_api import (
 from tortoise.sdk import TortoiseSDK
 from tortoise.write_verb import (
     DEDUP_CONTENT_HASH_HIT,
+    DEDUP_NEW,
+    DEDUP_REPHRASE_LINKED,
 )
 
 
@@ -66,7 +68,23 @@ def _stamped_claim_ids(proj) -> list[str]:
 # ── m2 lane: in-capture content-hash + paraphrase fold ──────────────────────
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ── v2 lane: content-addressed re-ingest idempotency ───────────────────────
+
+
 
 
 # ── v2 seam via a stubbed extractor (S3-bypass coverage) ────────────────────
@@ -94,6 +112,14 @@ def _stub_extractor(payload_points, noops=None, operators=None):
         }
 
     return _fake
+
+
+
+
+
+
+
+
 
 
 # ── EP pass targeting (first-time calibration of folded canonicals) ─────────
@@ -130,6 +156,12 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     assert _capture_ep_target_ids([{"id": live["id"]}], proj) == [live["id"]]
 
 
+
+
+
+
+
+
 # ── Pure classifier ─────────────────────────────────────────────────────────
 
 
@@ -159,6 +191,10 @@ class TestDedupClassifyPure:
 
 
 # ── Hosted surface byte-parity + verb preservation ─────────────────────────
+
+
+
+
 
 
 def test_hosted_capture_promotes_operator_with_no_ep_target(client, monkeypatch):

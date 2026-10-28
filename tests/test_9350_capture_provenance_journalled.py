@@ -43,6 +43,7 @@ import pytest
 # hosted parity suites do — the offline MockModel seam keeps it network-free.
 from tests.test_hosted_api import client as client
 from tortoise.log import EventLog
+from tortoise.projection import _CACHE_WRITE_AUTHORIZED, _live_write_scope
 from tortoise.sdk import _CAPTURE_PROVENANCE_LANE, TortoiseSDK
 
 PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
@@ -76,6 +77,8 @@ def _offline_extractor(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
+
+
 def _records(log_path):
     with open(log_path, encoding="utf-8") as fh:
         return [r for r in map(json.loads, (ln for ln in fh if ln.strip()))]
@@ -95,6 +98,12 @@ def _point_props(proj, pid):
     return rows[0][0] or {}
 
 
+
+
+
+
+
+
 def test_the_stamp_lane_literal_is_pinned():
     """The module constant IS the pinned literal — a rename reddens here.
 
@@ -111,6 +120,8 @@ def test_the_stamp_lane_literal_is_pinned():
         f"{_CAPTURE_PROVENANCE_LANE!r}, but the pinned literal is "
         f"{CAPTURE_LANE!r} — a renamed lane is a silent relabelling for every "
         "operator reading a DirectCacheWriteRefused message (#9350)")
+
+
 
 
 # ── the write is narrowed to the JOURNALLED set (#9350) ───────────────────
@@ -163,6 +174,7 @@ def test_the_stamp_write_cannot_touch_an_id_that_has_no_record(
 
 
 # ── a REFUSED record must not be followed by the cache write ──
+
 
 
 # ── the pure fold's creation arm (#9350: parity with the graph fold) ──────
@@ -253,6 +265,8 @@ def test_a_re_creation_does_not_inherit_a_dead_incarnations_provenance():
     for key in PROVENANCE:
         assert key not in points["p1"], (
             f"a re-created node inherited {key!r} from the dead incarnation")
+
+
 
 
 def test_a_value_the_store_cannot_hold_is_not_carried():
@@ -383,6 +397,7 @@ def test_the_hosted_capture_journals_and_replays_the_same_provenance(
     """
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import TEST_ORG_ID
+    from tortoise.log import EventLog
 
     log_path = str(tmp_path / "hosted.jsonl")
     monkeypatch.setattr(
@@ -545,7 +560,7 @@ def test_the_id_pre_read_rides_the_write_retry_funnel(tmp_path):
         sdk.close()
 
 
-@pytest.mark.parametrize("module", ["tortoise/hosted_api.py"])
+@pytest.mark.parametrize("module", ["tortoise/sdk.py", "tortoise/hosted_api.py"])
 def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module):
     """EVERY guarded call site, both lanes — the narrowing is checked in source.
 

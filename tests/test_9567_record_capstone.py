@@ -46,12 +46,18 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import uuid
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tortoise import cache_projection as cp
+from tortoise import monitoring, record_writer
+from tortoise import record_projection as rp
+from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -111,10 +117,29 @@ class Armed:
     failures_lost: int
 
 
+
+
 # ── D1 — armed, and every record table present ─────────────────────────────
 
 
+
+
+def test_D1_an_unset_dsn_reports_NOT_ARMED_and_writes_nothing(monkeypatch):
+    """D1's second half: unset DSN ⇒ `NOT_ARMED`, never a silent pass.
+
+    Falsifier: report `armed` unconditionally → this reds.
+    """
+    monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
+    writer = record_writer.RecordWriter()
+    assert writer.armed is False
+    result = writer.write([{"type": "SessionRecorded", "id": "s"}], org_id="o", graph_id="g")
+    assert result.outcome is record_writer.RecordWriteOutcome.NOT_ARMED
+    assert result.last_seq == 0, "an unarmed write must not advance the watermark"
+
+
 # ── D2 — one capture, rows, zero write failures ────────────────────────────
+
+
 
 
 # ── D3 — no write path bypasses the record ─────────────────────────────────
@@ -150,7 +175,65 @@ class Restored:
     conn: Any
 
 
+@pytest.fixture(scope="module")
+def restored(armed, tmp_path_factory):
+    """Rebuild a FRESH graph from the record, with the journal GONE.
+
+    D4's measurement and D5's input: the journal file is renamed away and
+    `TORTOISE_JOURNAL` is unset, so a restore that reached for it could not
+    silently fall back. The view comes from `read_record_view` — the
+    production read door of the SAME DSN (`scope_connection` installs the
+    tenant on it) — and the composition is `restore_from_record_view`, which
+    is what `python -m tortoise record-restore` runs.
+    """
+    from tortoise import record_restore as rrestore
+    from tortoise.projection import FalkorProjection
+
+    mp = pytest.MonkeyPatch()
+    try:
+        # ── D4: the journal is UNAVAILABLE ──
+        if armed.journal.exists():
+            armed.journal.rename(armed.journal.with_suffix(".jsonl.gone"))
+        mp.delenv("TORTOISE_JOURNAL", raising=False)
+
+        from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+        _, psycopg2 = _driver()
+        # NOT autocommit: `scope_connection` sets the tenant GUC
+        # transaction-locally and reads it back before the first SELECT.
+        conn = psycopg2.connect(_app_role_dsn(armed.dsn))
+        view = cp.read_record_view(conn, org_id=armed.tenant[0], graph_id=armed.tenant[1])
+        # The view is materialized; end the read transaction so this fixture
+        # does not hold a lock on the record's tables for the whole module
+        # (a later DDL drill — D10's DROP POLICY — needs ACCESS EXCLUSIVE).
+        conn.rollback()
+        assert view.nodes, (
+            "the record has no nodes for this tenant — a rebuild from an "
+            "empty view would prove nothing (D4's own refusal class)"
+        )
+
+        project = FalkorProjection(str(tmp_path_factory.mktemp("cache") / "cache.db"))
+        outcome = rrestore.restore_from_record_view(
+            view,
+            org_id=armed.tenant[0],
+            graph_id=armed.tenant[1],
+            cache_graph=project.g.name,
+            project=project,
+        )
+        yield Restored(outcome=outcome, view=view, project=project, conn=conn)
+        conn.close()
+        project.close()
+    finally:
+        mp.undo()
+
+
+
+
+
+
 # ── D7 — the raw turn text comes back, from the record only ────────────────
+
+
 
 
 # ── D9/D10 — tenancy ───────────────────────────────────────────────────────
@@ -161,6 +244,10 @@ def _app_conn(dsn: str):
     from tests.test_9078_record_written_by_production_path import _app_role_dsn
 
     return psycopg2.connect(_app_role_dsn(dsn))
+
+
+
+
 
 
 # ── D11/D12 — the quota gate ───────────────────────────────────────────────

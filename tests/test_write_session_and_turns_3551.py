@@ -391,7 +391,9 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
 # ── neither caller holds independent MERGE text ────────────────────────────
 
 
+
 # ── behaviour equivalence (the refactor's real gate) ───────────────────────
+
 
 
 def test_hosted_writer_is_behaviour_equivalent_and_parity(client):

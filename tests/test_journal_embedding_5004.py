@@ -478,6 +478,8 @@ def test_a_refused_width_is_not_resurrected_by_the_prewipe_snapshot(tmp_path):
             fresh.close()
 
 
+
+
 def test_identity_keys_cannot_be_set_through_props(tmp_path):
     """The journal identity keys are server-managed — reject them fail-closed.
 
@@ -577,6 +579,7 @@ def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
 # PRESENCE-IS-OWNERSHIP rule: a producer that owns the field always writes the
 # key (the vector, or an explicit `None`), and the replay restores-or-leaves-
 # unset, never invents.
+
 
 
 def test_point_created_with_the_embedder_down_gains_no_vector_on_replay(tmp_path):
@@ -753,6 +756,8 @@ def test_content_that_cannot_be_hashed_does_not_raise_on_replay():
         set())
 
 
+
+
 # ── 11. round-5 review findings — regression pins ────────────────────────
 #
 # Round 4 made the verbatim marker a NODE property, which put it on the same
@@ -845,6 +850,7 @@ def test_update_point_with_a_caller_vector_marks_the_node(tmp_path):
 
 
 # ── 12. round-6 review findings — regression pins ────────────────────────
+
 
 
 def test_a_wrong_width_caller_vector_is_not_written_on_either_side(tmp_path):
