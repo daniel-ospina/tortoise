@@ -332,10 +332,10 @@ def test_off_neutral_agrees_with_read_confidence_over_a_population():
 
 def test_a_non_finite_posterior_is_never_a_contribution():
     """``abs(nan - 0.5) > 1e-6`` is ``False``, so an undefined mean is kept out
-    of the CONTRIBUTION population only by the shape of that comparison. The
-    explicit finiteness guard makes the exclusion a property of the VALUE, so a
-    change to ``NEUTRAL_MEAN``/``NEUTRAL_EPS`` cannot silently reclassify a
-    malformed posterior as a contribution.
+    of the off-neutral (STATE) population only by the shape of that comparison.
+    The explicit finiteness guard makes the exclusion a property of the VALUE,
+    so a change to ``NEUTRAL_MEAN``/``NEUTRAL_EPS`` cannot silently reclassify a
+    malformed posterior as an off-neutral claim.
 
     Reachable through the canonical read: ``inf/inf`` is ``nan``.
 
@@ -409,6 +409,51 @@ def test_a_broken_pre_pass_baseline_never_credits_the_pass_with_a_prior():
     assert broken["points_with_ep"] == 1              # coverage WAS read
     assert broken["points_off_neutral"] == 1          # post-pass read intact
     assert broken["points_moved_off_neutral"] is None  # baseline UNKNOWN
+
+
+def test_an_unread_coverage_count_is_not_consent_for_an_empty_baseline():
+    """RED: the baseline guard's cross-check read could itself fail, and an
+    UNKNOWN count is falsy — so ``and _census(...)`` read "could not read the
+    coverage" as "there is no coverage", the guard did not fire, and the empty
+    baseline stood. The published ``points_moved_off_neutral`` then credited
+    this pass with EVERY pre-existing off-neutral claim.
+
+    A census that cannot be read proves NOTHING, so it is the same verdict as a
+    disagreement — the baseline is unproven and the contribution is UNKNOWN.
+    The post-pass read applies the same rule for an unread ``with_ep``.
+    """
+    rows = [["pre", 6.0, 2.0, None, None]]    # off-neutral BEFORE the pass
+    sdk, graph = _make(["pre"], with_ep=1, ep_rows=rows)
+    real_query = graph.query
+    state = {"rows": 0, "cov": 0}
+
+    def _query(cypher, params=None):
+        flat = " ".join(cypher.split())
+        if "n.posterior_alpha, n.posterior_beta" in flat:
+            state["rows"] += 1
+            if state["rows"] == 1:            # the PRE-pass baseline only
+                return _Result([])            # empty WITHOUT raising
+        if "count(n)" in flat and "posterior_alpha IS NOT NULL" in flat:
+            state["cov"] += 1
+            if state["cov"] == 1:             # the baseline's own cross-check
+                raise RuntimeError("connection reset")
+        return real_query(cypher, params)
+
+    graph.query = _query
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["points_off_neutral"] == 1          # post-pass read intact
+    assert manifest["points_moved_off_neutral"] is None  # NOT credited
+
+
+def test_a_measured_empty_graph_still_baselines_at_zero():
+    """The control for both guards above: a graph with NO EP state at all has a
+    legitimately empty baseline, and the pass moving nothing is a MEASURED 0 —
+    the guards must not turn every empty read into UNKNOWN."""
+    sdk, _graph = _make(["c1"], with_ep=0, ep_rows=[])
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["points_with_ep"] == 0
+    assert manifest["points_off_neutral"] == 0
+    assert manifest["points_moved_off_neutral"] == 0
 
 
 def test_manifest_carries_the_contribution_cells():
