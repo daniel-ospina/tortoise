@@ -249,6 +249,44 @@ def test_a_hybrid_op_type_claim_reads_operator_shaped_not_structural(sdk):
     assert mp.INERT_NO_EP_FACTORS not in mp.INERT_REASONS_STRUCTURAL
 
 
+def test_an_outdated_endpoint_edge_still_counts_as_a_shape_factor(sdk):
+    """The `factor_edges` census deliberately counts SHAPE, not consumability.
+
+    It does not carry `ep.py`'s direct-edge conjuncts `epistemic_disjunction()`
+    and `_live_only(status)` (`ep.py:1939-1947`), so an `IMPL` whose endpoint is
+    `outdated` — an edge EP correctly refuses to consume — still counts. The
+    consequence is pinned here because it is the SAFE direction, not an
+    oversight: `no_operators` is a PERMANENT verdict ("nothing EP does can ever
+    help"), and reviving an outdated claim makes this edge a factor again, so
+    the graph must not be called structural. It reads `no_ep_factors` ("operators
+    exist, none reached the window") — true today, and non-structural.
+
+    If someone later adds the liveness conjuncts to the census, this test reds
+    and forces the `stale_factor` decision (a new reason + its own cell) rather
+    than silently re-routing the population at extraction.
+    """
+    conclusion = _claim(sdk, "conclusion A")
+    premise = _claim(sdk, "premise B", status="outdated")
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$premise}), (c:Point {id:$conclusion}) "
+        "CREATE (p)-[:IMPL]->(c)",
+        params={"premise": premise, "conclusion": conclusion},
+    )
+
+    manifest = _manifest_of(sdk)
+
+    assert manifest["operators"] == 0     # no operator node
+    assert manifest["factor_edges"] == 1  # the edge EXISTS, even though EP
+                                          # cannot consume an outdated premise
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": manifest}],
+        requested=True)
+    reason = summary["inert_questions"][0]["reason"]
+    assert reason == mp.INERT_NO_EP_FACTORS
+    assert reason not in mp.INERT_REASONS_STRUCTURAL   # never "for ever"
+
+
 def test_the_census_agrees_with_the_canonical_read(sdk):
     """The off-neutral count is derived FROM ``read_confidence`` over the
     graph's own rows, so the two surfaces cannot disagree.

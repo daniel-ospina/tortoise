@@ -1103,12 +1103,27 @@ def test_a_resumed_manifest_without_contribution_cells_is_never_neutral():
 def test_an_unread_coverage_census_does_not_decide_the_posture():
     """A coverage census that could not be read is UNKNOWN — it must not be
     published as ``points_with_ep == 0``, which drives the per-question verdict
-    and the run's ``partial`` posture."""
+    and the run's ``partial`` posture.
+
+    RED: the manifest below is the shape that MAKES THE ARM LOAD-BEARING. With
+    ``operators`` and ``factor_edges`` both a MEASURED ``0``, the only thing
+    standing between an unread coverage census and the STRUCTURAL verdict is
+    the ``with_ep is None`` arm — collapse it to ``_as_int`` (so ``None`` reads
+    as ``0``) and this question is published as ``no_operators``, "nothing EP
+    can do will help", for a census that was never read. The earlier version of
+    this test fed ``{"ep_ran": True}`` alone, which reaches ``unmeasured``
+    through the operators-UNKNOWN fall-through under BOTH the real code and
+    the mutant, so it could not fail (measured: the mutant stayed green).
+    """
     summary = mp.summarize_belief_activation(
-        [{"question_id": "q1", "belief_activation": {"ep_ran": True}}],
+        [{"question_id": "q1", "belief_activation": {
+            "ep_ran": True, "operators": 0, "factor_edges": 0}}],
         requested=True)
     assert summary["inert_questions"][0]["reason"] == mp.INERT_UNMEASURED
     assert summary["neutral_questions"] == []
+    # the coverage cell itself is UNKNOWN, not a fabricated 0
+    assert summary["points_with_ep"] is None
+    assert summary["points_with_ep_unread"] == 1
 
 
 def test_an_all_inert_run_never_publishes_a_measured_zero_contribution():

@@ -177,6 +177,27 @@ _COUNT_OPERATORS = (
 #: ones (#10137 review 2, P2). The endpoint predicate mirrors `ep.py`'s direct-
 #: edge arms (a non-operator claim is ``is_operator`` false/absent AND
 #: ``op_type IS NULL``).
+#:
+#: ⚠️ It deliberately does NOT carry the other conjuncts those arms carry —
+#: ``epistemic_disjunction(a/b)`` and ``_live_only(a.status/b.status)``
+#: (`ep.py:1939-1947`), which exclude draft AND terminal endpoints such as
+#: ``outdated``. That is a SHAPE census, not a CONSUMABILITY census, and the
+#: over-count is the safe direction, for a reason specific to the verdict it
+#: feeds: ``no_operators`` claims the graph is structurally EP-inert — "no
+#: factor reaches a claim, so nothing EP does can ever help" — a PERMANENT
+#: claim. An edge whose endpoint is ``outdated`` is not consumable TODAY, but
+#: reviving that claim makes it a factor again, so counting it keeps the reason
+#: at ``no_ep_factors`` ("operators exist, none reached the window" — true)
+#: instead of the structural verdict (false). Failing toward the NON-structural
+#: reason is the same discipline the classifier applies to an UNKNOWN census
+#: ("a fabricated structural cause is worse than an unclassified one"), and it
+#: is why `_COUNT_OPERATORS` likewise counts draft/terminal operator nodes.
+#:
+#: Residual, tracked in #10223: a `stale_factor`-style reason ("a factor
+#: exists but no endpoint is live") would need a LIVENESS-FILTERED census beside
+#: this one. That is a new cell with its own vocabulary, not a predicate tweak
+#: here — the shape cell must keep its over-count for `no_operators` to stay
+#: truthful.
 _COUNT_FACTOR_EDGES = (
     "MATCH (a)-[r:IMPL|NAND]->(b) "
     "WHERE (a.is_operator IS NULL OR a.is_operator = false) "

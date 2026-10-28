@@ -353,6 +353,26 @@ def test_a_non_finite_posterior_is_never_a_contribution():
     assert epa.points_off_neutral(rows) == 0
 
 
+def test_the_finiteness_guard_is_load_bearing_for_an_infinite_mean(
+        monkeypatch):
+    """RED for the GUARD, not for NaN's comparison shape.
+
+    ``abs(nan - 0.5) > eps`` is already ``False``, so the NaN rows above are
+    excluded whether or not ``math.isfinite`` is there — deleting the guard
+    left every test green (measured). An INFINITE mean is the case that
+    discriminates: ``abs(inf - 0.5) > eps`` is ``True``, so only the guard keeps
+    it out of the CONTRIBUTION population. ``read_confidence`` cannot return
+    ``inf`` for a reachable stored state today (``a/(a+b)`` with ``a+b > 0``;
+    ``inf/inf`` is NaN), which is exactly why the guard needs a pinned case
+    rather than an argument: it is the invariant against a future numeric
+    change, and an unobservable guard is one a refactor deletes.
+    """
+    monkeypatch.setattr(epa, "read_confidence", lambda _props: float("inf"))
+    rows = [["c1", 6.0, 2.0, None, None]]     # would read off-neutral at ±inf
+    assert epa.off_neutral_ids(rows) == set()
+    assert epa.points_off_neutral(rows) == 0
+
+
 def test_a_claim_state_read_that_saw_no_rows_is_unknown_not_a_zero():
     """RED: a state read that matched NOTHING published "the belief layer ran
     and moved nothing" on every graph.
