@@ -2548,8 +2548,89 @@ try {
       + 'which a cycle satisfies, while the INSERT found no `next_id IS NULL` row');
   }
 
-  console.log('✓ #9972: a structural repoint resolves its NAME-keyed target to the '
-    + 'target row, and a name held by 2+ carriers lands nothing (#5509)');
+  // (7) `aboutPoint` — the target is a POINT named through `props ->> 'name'`,
+  //     because `public.point` has no `name` COLUMN while the graph addresses a
+  //     Point PROPERTY (`MATCH (x:Point {name:$key})`). Cases 1-6 all take the
+  //     `aboutObject` default, so without this one the JSON path never reaches
+  //     Postgres — and the operator precedence it depends on
+  //     (`t.props ->> 'name' = $n`, never `t.props ->> ('name' = $n)`) is
+  //     unchecked by the pytest leg, which only substring-matches the SQL.
+  const targetPoint = {
+    type: 'PointAdded', ts: '2026-10-25T00:06:01Z', id: 'tp-9972',
+    point: { id: 'tp-9972', content: 'the target', status: 'live',
+             name: 'Target Point' },
+  };
+  const pointMoved = await run('9972-about-point',
+    supersedeRecords('p1', 'p2', 'Target Point', {
+      preamble: [targetPoint],
+      edgeType: 'aboutPoint',
+      targetLabel: 'Point',
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:06:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Point',
+        target_id: 'tp-9972', edge_type: 'aboutPoint' },
+    }));
+  if (pointMoved.length !== 1 || pointMoved[0].src_key !== 'p2'
+      || pointMoved[0].tgt_key !== 'tp-9972') {
+    throw new Error('aboutPoint: the descriptor names the target by its PROPS '
+      + `name and the move must resolve it to the point KEY; rows = `
+      + `${JSON.stringify(pointMoved)}. 0 rows is the #9972 failure mode on `
+      + 'this arm — the name was compared against a column that cannot hold it');
+  }
+
+  // (8) `aboutSubject` — `name` IS a primary column on this table, so this is
+  //     the `t.name = %s` branch against Postgres. It also pins that the row is
+  //     filed by the Subject's STABLE id (#9881), never by the mutable name.
+  const subjectMoved = await run('9972-about-subject',
+    supersedeRecords('p1', 'p2', 'Alice', {
+      preamble: [{ type: 'SubjectAdded', ts: '2026-10-25T00:07:01Z',
+        id: 'sub-9972', name: 'Alice', subjectKind: 'person' }],
+      edgeType: 'aboutSubject',
+      targetLabel: 'Subject',
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:07:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Subject',
+        target_id: 'sub-9972', edge_type: 'aboutSubject' },
+    }));
+  if (subjectMoved.length !== 1 || subjectMoved[0].src_key !== 'p2'
+      || subjectMoved[0].tgt_key !== 'sub-9972') {
+    throw new Error('aboutSubject: rows = ' + JSON.stringify(subjectMoved)
+      + ' — the descriptor names the Subject by `name`; the move must file the '
+      + 'row by its stable id, not by the name it was resolved through');
+  }
+
+  // (9) `extractedFrom` — the SIX-bind arm, and the only case that executes it
+  //     against Postgres at all. The name-keyed arms bind 3 params (`org`,
+  //     `graph`, `key`); this one goes through `_endpoint_resolution`
+  //     (match · prefer · ORDER BY) and binds 6, so a call-shape mistake in this
+  //     branch is a different class from the other four and no other case can
+  //     see it. The descriptor here names a URL VARIANT (`HTTPS://…/`, wrong
+  //     case, trailing slash) while the registered Source carries the CANONICAL
+  //     url, so the case pins the arm's actual semantics: resolve through the
+  //     canonical triple, then file the row by the canonical key — never by the
+  //     spelling the descriptor happened to carry.
+  const canonicalUrl = 'https://example.test/doc/a';
+  const variantUrl = 'HTTPS://Example.test/doc/a/';
+  const extracted = await run('9972-extracted-from',
+    supersedeRecords('p1', 'p2', variantUrl, {
+      preamble: [{ type: 'SourceCreated', ts: '2026-10-25T00:08:01Z',
+        id: canonicalUrl, url: canonicalUrl, sourceKind: 'web' }],
+      edgeType: 'extractedFrom',
+      targetLabel: 'Source',
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:08:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Source',
+        target_id: canonicalUrl, edge_type: 'extractedFrom' },
+    }));
+  if (extracted.length !== 1 || extracted[0].src_key !== 'p2'
+      || extracted[0].tgt_key !== canonicalUrl) {
+    throw new Error('extractedFrom: rows = ' + JSON.stringify(extracted)
+      + ' — the six-bind canonical-triple arm must resolve the URL VARIANT to '
+      + 'the registered Source and file the row by the CANONICAL key; 0 rows is '
+      + 'the arm resolving by the raw spelling only, and a tgt_key holding the '
+      + 'variant is the record holding an identity the fold does not');
+  }
+
+  console.log('✓ #9972: the FOUR resolution arms resolve — Object and Subject by '
+    + '`name`, Point by `props->>\'name\'`, Source+extractedFrom by the '
+    + 'canonical triple — and a name held by 2+ carriers lands nothing (#5509)');
   console.log('✓ #9973: a supersede TRANSFERS the edge — the row leaves the '
     + 'superseded point, lands on the final successor, and re-replays idempotently');
 } catch (e) {

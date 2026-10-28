@@ -52,7 +52,7 @@ already claimed to carry. Domain: `code` (record projection) — no surface chan
 | surface | layer | proof |
 |---|---|---|
 | `record_projection.replay_plan` / `mutations_for` | unit (exact SQL) | `tests/test_record_projection.py` (8 new tests) |
-| the plan executed against the shipped schema | integration (real Postgres) | `supabase/tests/pglite/validate.mjs` (5 cases) |
+| the plan executed against the shipped schema | integration (real Postgres) | `supabase/tests/pglite/validate.mjs` (9 cases) |
 | `cache_projection.relation_statement` (record → graph) | mechanical MERGE of stored endpoints | follows from the rows; `cache_projection`'s own suite |
 | the graph's own replay (oracle) | docker lane (unavailable on this cell) | `tests/test_pointsuperseded_rebuild.py` — unchanged, still the oracle |
 
@@ -78,7 +78,7 @@ adopted over a decision.
 | `_declared_mutations` (`RelationUpsert` arm) | NEW branch: `record_type == "DirectEdgeRepoint"` → `_structural_repoint_statements`; `None` falls through to the old upsert |
 | `_structural_repoint_statements` (new) | routes on `edge_type` membership in `_STRUCTURAL_REL_LABELS`; emits `[DELETE at src, INSERT at terminal]` |
 | `_supersede_chain_cte` (new) | `WITH RECURSIVE succ…` — `_final(src)` as a `superseded_by` walk, `path`-guarded, depth-bounded, carrying `terminal` |
-| `_structural_target_resolution` (new) | `resolve_structural_target` in SQL: `name` (Subject/Object/Event), `props->>'name'` (Point), `url` + `document_kind IS NOT NULL` (aboutDocument), the canonical triple (extractedFrom); `HAVING count(*) = 1` everywhere |
+| `_structural_target_resolution` (new) | `resolve_structural_target` in SQL: `name` (Subject/Object/Event), `props->>'name'` (Point), `url` + `document_kind IS NOT NULL` (aboutDocument), the canonical triple (extractedFrom); `HAVING count(*) = 1` on those FIVE arms, and the resolver's own `prefer`/byte-order `LIMIT 1` on `extractedFrom` — a deliberate single-carrier PICK (the fold's `resolve_source_key` parity), NOT an ambiguity refusal |
 | `_terminal_point_sql` (new) + `_TERMINAL_POINT_STATUSES` | `live.is_terminal_status` for the `_src_is_terminal` gate, restated for the STANDALONE load |
 | `_relation_delete_statement` | unchanged — the `delete_only` guard keeps its own leg |
 | `_relation_upsert_statement` | unchanged — 2a direct + `DirectEdgeCreated` + every other family keep byte-identical SQL |
@@ -139,8 +139,15 @@ pre-existing on this branch).
   the terminal + successor + destination gate; deleting that gate reds
   `test_a_structural_repoint_moves_its_edge_to_the_final_successor`.
 - R2 **a move lands on an arbitrary carrier** when a name is held twice (#5509) → `HAVING count(*) =
-  1` in every arm; PGlite case 3 asserts the ONE row survives untouched at the superseded point;
+  1` on the four name-keyed labels and on `aboutDocument`; PGlite case 3 asserts the ONE row
+  survives untouched at the superseded point;
   `test_a_name_held_by_two_carriers_resolves_to_nothing`.
+  ⚠️ The `extractedFrom` arm is the exception, stated rather than implied: it resolves through
+  `_endpoint_resolution`'s `ORDER BY … LIMIT 1`, i.e. it deliberately PICKS one carrier among
+  Sources sharing a canonical form — exactly what the fold's `resolve_source_key` does
+  (`ORDER BY s.url LIMIT 1`), because two Sources with the same canonical identity are the same
+  identity, not an ambiguity. The refusal discipline belongs to the name-keyed arms, where two
+  carriers holding one `name` really are two different nodes.
 - R3 **the 2a direct family regresses** (its `src` is the successor; a delete there removes the edge
   the descriptor exists to re-create) → `test_a_direct_edge_repoint_is_still_a_plain_upsert` +
   PGlite cases 1–2 exercising the structural route only.
