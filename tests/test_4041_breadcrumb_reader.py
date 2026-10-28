@@ -703,10 +703,20 @@ def test_the_second_inert_branch_also_renders_the_breadcrumb(tmp_path):
     # not python (unknown is not refused). The RESOLVED module dir is therefore
     # this dir, and the branch under test is still "resolved, but no
     # interpreter", which is the state its payload must describe.
-    console = src / ".venv" / "bin" / "tortoise"
+    #
+    # #4848 REVIEW ROUND 2: the entry point is now the `pyvenv.cfg` OWNING-venv
+    # one (`bin/tortoise`), not `.venv/bin/tortoise`. A `.venv` console script is
+    # resolved into `TORTOISE_BIN` and EXECUTED by this seam — acceptance and
+    # execution must agree — so that fixture would no longer describe "no
+    # interpreter". The owning-venv script is accepted by the walk-up but is not
+    # reachable from `$TORTOISE_MODULE/.venv`, and with no `bin/python` beside it
+    # there is still nothing to run the module with: the exact state this branch's
+    # payload describes.
+    console = src / "bin" / "tortoise"
     console.parent.mkdir(parents=True)
     console.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     console.chmod(0o755)
+    (src / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
 
     proc = _run_hook(home, path=str(bindir), src=src)
 

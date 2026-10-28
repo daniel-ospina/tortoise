@@ -1477,3 +1477,233 @@ def test_every_breadcrumb_writer_escapes_through_the_shared_helper(hook):
             f"{hook.name} interpolates `harness` without the shared escaper")
     assert text.index('_tortoise_json_escape "$detail"') < text.rindex(
         '"detail": "%s"'), f"{hook.name}: the escaper must run BEFORE the writer"
+
+
+# ── The second review round ───────────────────────────────────────────────
+#
+# Each test below pins one seam-level hole the first fix left open. All four were
+# reproduced against the shipped artifacts before the fix.
+
+def _guard_functions(tmp_path: Path, script: str) -> Path:
+    """The guard block extracted to a sourceable file, plus ``script`` appended.
+
+    The block is pure function definitions (plus the floor literal), so sourcing
+    it exercises the REAL shipped bytes without running a seam — which is how a
+    guard-block helper (the escaper, the interpreter precedence) gets a direct
+    unit test rather than only an end-to-end one."""
+    block = _guard_block(REPO_ROOT / "tortoise" / "claude-hooks" / "session-end.sh")
+    f = tmp_path / "guard.sh"
+    f.write_text(block + "\n" + script, encoding="utf-8")
+    return f
+
+
+def test_the_escaper_round_trips_json_escapes_and_names_its_c0_policy(tmp_path):
+    """`_tortoise_json_escape` is the ONE writer-side guarantee that a breadcrumb
+    stays parseable, so it is pinned directly:
+
+    * quote, backslash, LF, CR, TAB, BS and FF must survive a JSON round-trip
+      BYTE-FOR-BYTE (the field is a filesystem path in #4848's refusals — a
+      mangled path sends the user to a directory that does not exist);
+    * the rest of the C0 class has no JSON escape and IS discarded — the
+      function's own comment says so, and this pins it so the "lossless" reading
+      cannot come back (#4848 review: the comment claimed losslessness while the
+      sweep deleted those bytes)."""
+    script = r'''
+case "$1" in
+  roundtrip) _tortoise_json_escape "$INPUT" ;;
+  c0) _tortoise_json_escape "$(printf 'A\001B\013C\016D')" ;;
+esac
+'''
+    guard = _guard_functions(tmp_path, script)
+
+    # A path that needs every escape JSON has: backslash, quote, LF, TAB, BS, FF.
+    hostile = 'a\\b"c\nd\te' + "\b" + "\f"
+    got = subprocess.run(["/bin/bash", str(guard), "roundtrip"], text=True,
+                         capture_output=True, timeout=20,
+                         env={**os.environ, "INPUT": hostile})
+    assert got.returncode == 0, got.stderr
+    assert json.loads(f'{{"detail": "{got.stdout}"}}')["detail"] == hostile, (
+        "the escaper is not round-trip safe — a path with a quote, a backslash "
+        f"or a control escape comes back mangled: {got.stdout!r}")
+
+    dropped = subprocess.run(["/bin/bash", str(guard), "c0"], text=True,
+                             capture_output=True, timeout=20)
+    assert dropped.returncode == 0, dropped.stderr
+    body = json.loads(f'{{"detail": "{dropped.stdout}"}}')
+    assert body["detail"] == "ABCD", (
+        "the C0 sweep changed: either those bytes are now ESCAPED (then the "
+        f"comment is wrong again) or something else moved: {body['detail']!r}")
+
+
+def test_the_python_floor_is_tied_to_pyproject_requires_python():
+    """The floor is a literal in the byte-identical block, and the ONLY thing
+    that keeps it true is a test: #4848's own research comment warned that a
+    hard-coded floor "re-stales the next time the floor moves — the same failure
+    mode this issue is about". When ``requires-python`` moves, every seam would
+    keep accepting the old floor and the ImportError comes back silently.
+
+    Mutation: bump `requires-python` in pyproject.toml and not the block (or the
+    reverse) — this REDs."""
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^requires-python\s*=\s*">=\s*(\d+)\.(\d+)', pyproject, re.M)
+    assert m, "pyproject.toml no longer declares requires-python >= X.Y"
+    expected = f"{m.group(1)}.{m.group(2)}"
+    block = _guard_block(REPO_ROOT / "tortoise" / "claude-hooks" / "session-end.sh")
+    floor = re.findall(r'^_TORTOISE_MIN_PY="([^"]+)"$', block, re.M)
+    assert floor == [expected], (
+        f"the guard's floor {floor} has drifted from pyproject's "
+        f"requires-python {expected}")
+
+
+def test_a_record_with_a_non_utf8_byte_still_reads_as_evidence(tmp_path):
+    """#4848 splices filesystem PATHS into ``detail``, and a directory name may
+    carry a byte that is not valid UTF-8 (legal on Linux). The pure-shell writer
+    cannot transcode it, so the record's bytes are not decodable as UTF-8 — and
+    ``_local_capture_error`` used a STRICT decode, whose ``UnicodeDecodeError`` is
+    a ``ValueError``, so it returned ``None``: an unreadable record read exactly
+    like NO record and the inert install reported PROVEN.
+
+    Mutation: read the record with a strict ``encoding="utf-8"`` — this REDs."""
+    from tortoise import session_verify
+
+    home = tmp_path / "home"
+    crumb_dir = home / ".tortoise" / "capture-errors"
+    crumb_dir.mkdir(parents=True)
+    # The bytes are written DIRECTLY: `json.dumps` would escape the offending
+    # byte as `\ufffd`/`\udcff` (ensure_ascii) and the test would then prove
+    # nothing about a real undecodable record. 0xff is not valid UTF-8 anywhere.
+    (crumb_dir / "claude-install.json").write_bytes(
+        b'{"harness": "claude", "detail": "resolved a tortoise source dir at '
+        b'/tmp/we' + bytes([0xFF]) + b'ird but could not run it",'
+        b' "recorded_at": "2026-10-28T00:00:00Z",'
+        b' "kind": "install-inert"}')
+
+    got = session_verify._local_capture_error("claude", {"HOME": str(home)})
+    assert got is not None, (
+        "a record whose bytes are not valid UTF-8 was read as NO record — the "
+        "inert install reports PROVEN and the evidence is invisible")
+    assert got["kind"] == "install-inert", got
+
+
+def test_the_per_turn_seam_refuses_a_binary_it_cannot_run(tmp_path):
+    """``session-turn.sh`` fires on EVERY prompt, and it runs the `tortoise` it
+    finds on PATH. That leg was the one the first round left unprobed: a stale
+    console script whose `#!` interpreter is gone made ``session spool`` fail and
+    the seam's `|| exit 0` swallowed it — nothing captured, NO record — which
+    `session verify` reads as PROVEN. The other six seams probe this leg.
+
+    Mutation: drop the ``_tortoise_bin_qualifies`` probe (and its refusal) from
+    ``session-turn.sh`` — no breadcrumb is written and this REDs."""
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    hook = home / ".claude" / "hooks" / "session-turn.sh"
+    shutil.copy(REPO_ROOT / "tortoise" / "claude-hooks" / "session-turn.sh", hook)
+    hook.chmod(0o755)
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+    # A console script whose interpreter does not exist: `bad interpreter`.
+    stale = bindir / "tortoise"
+    stale.write_text("#!/nonexistent/python3\n", encoding="utf-8")
+    stale.chmod(0o755)
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = subprocess.run(
+        ["/bin/bash", str(hook)], input=json.dumps({
+            "session_id": "sid-4848-turn", "transcript_path": str(transcript),
+            "cwd": str(home)}), text=True, capture_output=True, timeout=30,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path)})
+
+    assert proc.returncode == 0, proc.stderr
+    body = _breadcrumb(home, "claude")
+    assert body["kind"] == "install-inert", body
+    assert str(stale) in body["detail"], body
+    assert "cannot run it" in body["detail"], body
+    assert "could not resolve" not in body["detail"], (
+        f"the binary WAS found; the refusal must say why it was not run: {body}")
+
+
+def test_a_checkout_accepted_on_its_console_script_is_the_one_that_runs(tmp_path):
+    """``_tortoise_dir_runnable`` accepts a candidate whose ``.venv/bin/tortoise``
+    has a NON-python `#!` (an unknown interpreter is never refused). The three
+    Claude seams then resolved `TORTOISE_BIN` only from `command -v tortoise` and
+    otherwise ran an interpreter — so the leg the loop had just ACCEPTED was
+    never executed, the loop did not skip to the later runnable candidate, and
+    the seam refused a candidate it had blessed. ``test_4041``'s own fixture
+    builds exactly this shape (`#!/bin/sh` console script), so it is supported.
+
+    Mutation: drop the `TORTOISE_BIN` resolution from ``$TORTOISE_MODULE/.venv``
+    in the Claude seam — the wrapper never runs, the refusal comes back, RED."""
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    hook = home / ".claude" / "hooks" / "session-end.sh"
+    shutil.copy(CLAUDE_HOOK, hook)
+    hook.chmod(0o755)
+
+    # Candidate 1: the package plus a NON-python console script — accepted, and
+    # the only thing this seam could run.
+    first = _module_dir(tmp_path / "first")
+    log = tmp_path / "capture.log"
+    wrapper = first / ".venv" / "bin" / "tortoise"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'printf "WRAPPER %s\\n" "$*" >> {log}\n'
+        "exit 0\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = _run_claude_hook(
+        hook, home, transcript=transcript,
+        path=f"{bindir}:/usr/bin:/bin",
+        extra_env={"TORTOISE_SRC_DIR": str(first)})
+
+    assert proc.returncode == 0, proc.stderr
+    # The wrapper is invoked for the reindex sweep AND for the capture; either
+    # proves the accepted leg is the executed one, so wait for the capture.
+    assert _wait_for(lambda: log.is_file()), (
+        "the console script the guard ACCEPTED was never run — the seam refused "
+        "a candidate it had just blessed instead of running it")
+    assert _wait_for(lambda: "capture" in log.read_text(encoding="utf-8")), (
+        f"the wrapper ran but never for the capture leg: {log.read_text(encoding='utf-8')}")
+    crumbs = home / ".tortoise" / "capture-errors"
+    assert not crumbs.exists(), (
+        f"a refusal was recorded for a candidate the guard accepted: "
+        f"{[p.read_text(encoding='utf-8') for p in crumbs.iterdir()]}")
+
+
+def test_the_claude_refusal_naming_a_hostile_path_is_valid_json(tmp_path):
+    """The escaping behaviour test covered the two WORKER seams; this covers a
+    Claude seam — the family that was raw before the first fix (F1 of the first
+    review round). Same property, different stdin contract, so the structural pin
+    is not the only coverage for these five."""
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    hook = home / ".claude" / "hooks" / "session-end.sh"
+    shutil.copy(CLAUDE_HOOK, hook)
+    hook.chmod(0o755)
+
+    stale = tmp_path / 'weird\\dir "quoted"' / "stale"
+    _module_dir(stale)
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = _run_claude_hook(
+        hook, home, transcript=transcript,
+        path=f"{bindir}:/usr/bin:/bin",
+        extra_env={"TORTOISE_SRC_DIR": str(stale)})
+
+    assert proc.returncode == 0, proc.stderr
+    crumb = home / ".tortoise" / "capture-errors" / "claude-install.json"
+    assert _wait_for(lambda: crumb.is_file()), "the refusal was not recorded"
+    body = json.loads(crumb.read_text(encoding="utf-8"))  # RED if unescaped
+    assert str(stale) in body["detail"], body

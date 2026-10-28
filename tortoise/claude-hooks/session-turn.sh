@@ -242,9 +242,16 @@ _tortoise_dir_runnable() {
 # on its own failure branches, so an unescaped tab or CR here would REPLACE a
 # valid breadcrumb with an unparseable one and destroy the evidence this change
 # exists to preserve (#4714). BS and FF use their JSON escapes rather than being
-# dropped — escaping is lossless, and a discarded byte is evidence lost. PURE
-# SHELL: this must run where python3 does not exist, which is precisely the
-# branch it reports on.
+# dropped, and those two ARE lossless. The remaining C0 bytes (0x01-0x07, VT,
+# 0x0E-0x1F) have NO JSON escape and are DELIBERATELY DISCARDED by the sweep
+# below: a per-byte `\u00XX` rewrite is not expressible in pure shell (this
+# function is also the evidence path reached BECAUSE python3 is missing), and a
+# raw ESC or VT inside a path is a hostile-byte signal, not something a user
+# reads. The consequence is named here so it is not mistaken for losslessness:
+# a path carrying one of those bytes is recorded with that byte REMOVED, so the
+# remedy text can name a slightly different path. Everything else round-trips
+# exactly and the record is always parseable — which is what makes it evidence.
+# PURE SHELL: this must run where python3 does not exist.
 _tortoise_json_escape() {
   local esc="${1:-}"
   esc="${esc//\\/\\\\}"
@@ -399,7 +406,70 @@ fi
 SPOOL_ARGS=(--file "$TMP" --harness claude)
 [ -n "$SESSION_ID" ] && SPOOL_ARGS+=(--session-id "$SESSION_ID")
 
+# The breadcrumb writer is defined here, OUTSIDE the `else` branch: the
+# binary leg below is now subject to the same #4848 refusal, and a refusal
+# it cannot record is no evidence at all.
+# ── The local capture-error breadcrumb ──────────────────────────────────
+# Mirrors `tortoise.__main__._record_capture_error` (same file layout, same
+# `TORTOISE_IMPORT_RECEIPT_DIR` override) for the one case that helper cannot
+# cover: the module dir did not resolve, so the Python helper is unreachable.
+# A hook that captures nothing must leave EVIDENCE, never silence (#4314).
+# Best-effort: a breadcrumb write can never break the exit-0 contract.
+_record_breadcrumb() {
+  # PURE SHELL, no python3: this is also the evidence path for the "resolved a
+  # module dir but found no interpreter" branch, which is reached BECAUSE
+  # python3 is missing — a python3-written breadcrumb could never run there.
+  # The record is INSTALL-leg evidence (``kind: install-inert``), kept
+  # distinguishable from a ``sessions import`` capture failure (#4314).
+  # #5838: the two kinds occupy SEPARATE slots, so this writer never touches
+  # the ``capture-failure`` file and cannot destroy a live quota/network
+  # refusal. NOTE this hook's stdout MUST stay empty (see the header); the
+  # slot split adds no output here, unlike `session-start.sh`.
+  local harness="$1" detail="$2"
+  local receipt_dir crumb_dir stamp
+  # #4848: the refusal now splices a FILESYSTEM PATH into `detail`, so an
+  # unescaped backslash or quote would make the record unparseable — and an
+  # unparseable breadcrumb reads as NO breadcrumb, i.e. as a healthy install.
+  # One escaper, shared by every seam (it lives in the guard block above).
+  harness="$(_tortoise_json_escape "$harness")"
+  detail="$(_tortoise_json_escape "$detail")"
+  receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  # Normalize to pathlib's `.parent` semantics (#4373 review): `Path(x).parent`
+  # DROPS trailing slashes, `${x%/*}` does not — a trailing slash would make
+  # the shell write `…/import-receipts/capture-errors/` while `session verify`
+  # reads `…/capture-errors/`, hiding the breadcrumb and reading an inert
+  # install as PROVEN.
+  while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
+    receipt_dir="${receipt_dir%/}"
+  done
+  case "$receipt_dir" in
+    */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
+    *) crumb_dir="capture-errors" ;;
+  esac
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  mkdir -p "$crumb_dir" 2>/dev/null || true
+  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+    "$harness" "$detail" "$stamp" \
+    > "$crumb_dir/$harness-install.json" 2>/dev/null || true
+}
+
 TORTOISE_BIN="$(command -v tortoise || true)"
+# #4848 review: the PATH binary is EXECUTED, so it is PROBED like every
+# other entry point. A stale `bin/tortoise` names an interpreter that may be
+# gone (`bad interpreter`), and the `|| exit 0` below turns that into a
+# silent no-capture — for THIS seam that means every prompt, with no record
+# at all, which `session verify` reads as PROVEN (the #4314 inversion).
+TORTOISE_UNUSABLE_BIN=""
+if [ -n "$TORTOISE_BIN" ] && ! _tortoise_bin_qualifies "$TORTOISE_BIN"; then
+  TORTOISE_UNUSABLE_BIN="$TORTOISE_BIN"
+  TORTOISE_BIN=""
+fi
+if [ -n "$TORTOISE_UNUSABLE_BIN" ]; then
+  _record_breadcrumb "claude" \
+    "the installed per-turn hook found a tortoise binary at $TORTOISE_UNUSABLE_BIN but the interpreter on its #! line cannot run it (tortoise needs Python $_TORTOISE_MIN_PY+), and captured nothing. Remedy: reinstall it (uv tool install --force .) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
+    || true
+  exit 0
+fi
 if [ -n "$TORTOISE_BIN" ]; then
   # stdout MUST stay empty (UserPromptSubmit injects it into the user's prompt),
   # but stderr is NOT swallowed: this is the mechanism of record, and a silent
@@ -407,49 +477,6 @@ if [ -n "$TORTOISE_BIN" ]; then
   # "losing sessions silently" failure #3963 exists to remove.
   "$TORTOISE_BIN" session spool "${SPOOL_ARGS[@]}" >/dev/null || exit 0
 else
-  # ── The local capture-error breadcrumb ──────────────────────────────────
-  # Mirrors `tortoise.__main__._record_capture_error` (same file layout, same
-  # `TORTOISE_IMPORT_RECEIPT_DIR` override) for the one case that helper cannot
-  # cover: the module dir did not resolve, so the Python helper is unreachable.
-  # A hook that captures nothing must leave EVIDENCE, never silence (#4314).
-  # Best-effort: a breadcrumb write can never break the exit-0 contract.
-  _record_breadcrumb() {
-    # PURE SHELL, no python3: this is also the evidence path for the "resolved a
-    # module dir but found no interpreter" branch, which is reached BECAUSE
-    # python3 is missing — a python3-written breadcrumb could never run there.
-    # The record is INSTALL-leg evidence (``kind: install-inert``), kept
-    # distinguishable from a ``sessions import`` capture failure (#4314).
-    # #5838: the two kinds occupy SEPARATE slots, so this writer never touches
-    # the ``capture-failure`` file and cannot destroy a live quota/network
-    # refusal. NOTE this hook's stdout MUST stay empty (see the header); the
-    # slot split adds no output here, unlike `session-start.sh`.
-    local harness="$1" detail="$2"
-    local receipt_dir crumb_dir stamp
-    # #4848: the refusal now splices a FILESYSTEM PATH into `detail`, so an
-    # unescaped backslash or quote would make the record unparseable — and an
-    # unparseable breadcrumb reads as NO breadcrumb, i.e. as a healthy install.
-    # One escaper, shared by every seam (it lives in the guard block above).
-    harness="$(_tortoise_json_escape "$harness")"
-    detail="$(_tortoise_json_escape "$detail")"
-    receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
-    # Normalize to pathlib's `.parent` semantics (#4373 review): `Path(x).parent`
-    # DROPS trailing slashes, `${x%/*}` does not — a trailing slash would make
-    # the shell write `…/import-receipts/capture-errors/` while `session verify`
-    # reads `…/capture-errors/`, hiding the breadcrumb and reading an inert
-    # install as PROVEN.
-    while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
-      receipt_dir="${receipt_dir%/}"
-    done
-    case "$receipt_dir" in
-      */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
-      *) crumb_dir="capture-errors" ;;
-    esac
-    stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-    mkdir -p "$crumb_dir" 2>/dev/null || true
-    printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
-      "$harness" "$detail" "$stamp" \
-      > "$crumb_dir/$harness-install.json" 2>/dev/null || true
-  }
 
   # Resolve a candidate module dir — accepted ONLY when it actually holds a
   # `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
@@ -471,6 +498,18 @@ else
       [ -n "$TORTOISE_UNUSABLE_DIR" ] || TORTOISE_UNUSABLE_DIR="$CANDIDATE"
     fi
   done
+  # #4848 review: a candidate the loop just ACCEPTED on its console script must be
+  # the thing this seam RUNS. `_tortoise_dir_runnable` accepts `$dir/.venv/bin/
+  # tortoise` even when its `#!` is not python (an UNKNOWN interpreter is never
+  # refused), so resolving only `command -v tortoise` + an interpreter left that
+  # leg unexecuted: the loop broke on the accepted candidate and the seam then
+  # refused it — instead of running it, or skipping to a later candidate. The
+  # other seams (codex/cursor session-end, volunteer-turn, cursor session-start)
+  # already resolve from the module dir; these three did not.
+  if [ -z "$TORTOISE_BIN" ] && [ -n "${TORTOISE_MODULE:-}" ] \
+     && _tortoise_bin_qualifies "$TORTOISE_MODULE/.venv/bin/tortoise"; then
+    TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
+  fi
   if [ -z "$TORTOISE_MODULE" ]; then
     # A hook that captures nothing must leave EVIDENCE, never silence (#4314):
     # from a HOME-scoped install `../..` is `$HOME`, so the old expression

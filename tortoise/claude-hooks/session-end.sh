@@ -266,9 +266,16 @@ _tortoise_dir_runnable() {
 # on its own failure branches, so an unescaped tab or CR here would REPLACE a
 # valid breadcrumb with an unparseable one and destroy the evidence this change
 # exists to preserve (#4714). BS and FF use their JSON escapes rather than being
-# dropped — escaping is lossless, and a discarded byte is evidence lost. PURE
-# SHELL: this must run where python3 does not exist, which is precisely the
-# branch it reports on.
+# dropped, and those two ARE lossless. The remaining C0 bytes (0x01-0x07, VT,
+# 0x0E-0x1F) have NO JSON escape and are DELIBERATELY DISCARDED by the sweep
+# below: a per-byte `\u00XX` rewrite is not expressible in pure shell (this
+# function is also the evidence path reached BECAUSE python3 is missing), and a
+# raw ESC or VT inside a path is a hostile-byte signal, not something a user
+# reads. The consequence is named here so it is not mistaken for losslessness:
+# a path carrying one of those bytes is recorded with that byte REMOVED, so the
+# remedy text can name a slightly different path. Everything else round-trips
+# exactly and the record is always parseable — which is what makes it evidence.
+# PURE SHELL: this must run where python3 does not exist.
 _tortoise_json_escape() {
   local esc="${1:-}"
   esc="${esc//\\/\\\\}"
@@ -561,6 +568,18 @@ for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
     [ -n "$TORTOISE_UNUSABLE_DIR" ] || TORTOISE_UNUSABLE_DIR="$CANDIDATE"
   fi
 done
+# #4848 review: a candidate the loop just ACCEPTED on its console script must be
+# the thing this seam RUNS. `_tortoise_dir_runnable` accepts `$dir/.venv/bin/
+# tortoise` even when its `#!` is not python (an UNKNOWN interpreter is never
+# refused), so resolving only `command -v tortoise` + an interpreter left that
+# leg unexecuted: the loop broke on the accepted candidate and the seam then
+# refused it — instead of running it, or skipping to a later candidate. The
+# other seams (codex/cursor session-end, volunteer-turn, cursor session-start)
+# already resolve from the module dir; these three did not.
+if [ -z "$TORTOISE_BIN" ] && [ -n "${TORTOISE_MODULE:-}" ] \
+   && _tortoise_bin_qualifies "$TORTOISE_MODULE/.venv/bin/tortoise"; then
+  TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
+fi
 if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
   # No binary and no module dir: record the breadcrumb (the SAME shape and
   # location `session capture` writes) and exit 0 — an inert install must
@@ -713,6 +732,10 @@ print(session_corpus_dir())' 2>/dev/null || true)"
     # source the saved-backlog ledger must record is Claude's project transcript.
     [ -n "$TRANSCRIPT_PATH" ] && CAPTURE_ARGS+=(--transcript-path "$TRANSCRIPT_PATH")
     [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
-    tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
+    # #4848 review: run the RESOLVED binary, never a bare `tortoise` — the
+    # resolution can now land on a checkout's own `.venv/bin/tortoise` (a leg the
+    # guard accepts), which is NOT on PATH, so a bare name would silently find
+    # nothing and the `|| exit 0` would drop the capture with no record.
+    "$TORTOISE_BIN" session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
   fi
 fi
