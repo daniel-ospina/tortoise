@@ -754,7 +754,11 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
         "    c.query(\"MATCH (n) DETACH DELETE n\")\n"
         "\n"
         "def test_fixture():\n"
-        "    proj = _FP.from_uri(\"bolt://localhost:6379\")\n"
+        # SAMPLE TEXT, not a dial target: this file is a #6673 seam file, so
+        # spelling a docker-lane port here (even inside fixture content) is a
+        # literal the split-brain guard refuses. The census only needs the
+        # `from_uri(` CALL SHAPE — the URI itself is incidental, hence portless.
+        "    proj = _FP.from_uri(\"bolt://localhost\")\n"
         "    from falkordb import FalkorDB\n"
         "    client = FalkorDB(host=\"h\")\n"
         "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
