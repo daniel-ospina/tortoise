@@ -496,6 +496,23 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # EP never having run. The CONTRIBUTION is the claims NEWLY off-neutral,
     # so the set is captured BEFORE the pass and differenced after it.
     off_neutral_before = _census_ids(g, _SELECT_CLAIM_EP_STATES)
+    # The SAME "0 rows while claims carry EP state is a broken read" rule the
+    # post-pass read applies (#10137 review 4, P3). `_census_ids` returns the
+    # row count for exactly this, and the baseline is the read where a silent
+    # zero is WORST: an empty baseline makes every off-neutral claim look NEWLY
+    # off-neutral, so a broken pre-pass read credits THIS pass with a prior it
+    # did not create — the defect `points_moved_off_neutral` exists to prevent,
+    # in the opposite direction. The coverage count is issued only in the empty
+    # case (the only case that needs it), against the same WHERE clause as the
+    # row read, so a MEASURED empty graph (all-neutral, no EP state) stays a
+    # legitimate baseline.
+    if (off_neutral_before is not None and off_neutral_before[1] == 0
+            and _census(g, _COUNT_POINTS_WITH_EP)):
+        logger.warning(
+            "activate_beliefs: PRE-pass claim-state census returned 0 rows "
+            "while claims carry EP state — broken read, publishing UNKNOWN "
+            "contribution instead of crediting the pass with a prior")
+        off_neutral_before = None
 
     # ── 2. Run EP — whole-graph stabilization, posteriors persisted ───
     ep_ran = False

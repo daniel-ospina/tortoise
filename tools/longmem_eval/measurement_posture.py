@@ -265,9 +265,11 @@ def summarize_belief_activation(
       mean ``0.50``, i.e. the belief layer ran and moved nothing (an IMPL-only
       graph with no source prior is a fixed point). Coverage alone reports
       these as measured; they are the reason ``questions_off_neutral`` exists.
-    * ``questions_off_neutral`` / ``points_off_neutral`` — the CONTRIBUTION
-      population: questions (and claims) whose posterior is not the neutral
-      mean.
+    * ``questions_off_neutral`` / ``points_off_neutral`` — the STATE
+      population: questions (and claims) whose persisted posterior is not the
+      neutral mean. It is NOT the contribution — a claim given a non-uniform
+      baseline sits here with EP never having run — which is why
+      ``points_moved_off_neutral`` narrows it to what THIS pass created.
     * ``points_moved_off_neutral`` — the subset of ``points_off_neutral`` that
       was NOT off-neutral before the pass, i.e. what this pass actually moved.
       ``operators`` / ``factor_edges`` — the graph-shape census, ``None``

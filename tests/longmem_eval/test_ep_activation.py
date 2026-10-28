@@ -371,6 +371,46 @@ def test_a_claim_state_read_that_saw_no_rows_is_unknown_not_a_zero():
     assert manifest["points_moved_off_neutral"] is None
 
 
+def test_a_broken_pre_pass_baseline_never_credits_the_pass_with_a_prior():
+    """RED: the PRE-pass baseline read had no coverage cross-check, so a
+    non-raising EMPTY result set there made every off-neutral claim look NEWLY
+    off-neutral — publishing ``points_moved_off_neutral: 1`` for a claim that
+    was already off the neutral mean before the pass ran.
+
+    That is the defect the cell exists to prevent ("a bare off-neutral count
+    would credit the pass with a prior it did not create") in the opposite
+    direction, and it is invisible downstream: the post-pass guard cannot see
+    it, because the post-pass read is intact. The baseline is the read where a
+    silent zero is worst, so it gets the same rule.
+
+    Measured on the previous head: honest reads → ``(1, 0)``; broken first read
+    → ``(1, 1)``.
+    """
+    rows = [["pre", 6.0, 2.0, None, None]]   # off-neutral BEFORE the pass
+    sdk, graph = _make(["pre"], with_ep=1, ep_rows=rows)
+    honest = epa.activate_beliefs(sdk)
+    assert honest["points_off_neutral"] == 1
+    assert honest["points_moved_off_neutral"] == 0
+
+    sdk, graph = _make(["pre"], with_ep=1, ep_rows=rows)
+    real_query = graph.query
+    calls = {"n": 0}
+
+    def _query(cypher, params=None):
+        flat = " ".join(cypher.split())
+        if "n.posterior_alpha, n.posterior_beta" in flat:
+            calls["n"] += 1
+            if calls["n"] == 1:            # the PRE-pass baseline only
+                return _Result([])          # empty WITHOUT raising
+        return real_query(cypher, params)
+
+    graph.query = _query
+    broken = epa.activate_beliefs(sdk)
+    assert broken["points_with_ep"] == 1              # coverage WAS read
+    assert broken["points_off_neutral"] == 1          # post-pass read intact
+    assert broken["points_moved_off_neutral"] is None  # baseline UNKNOWN
+
+
 def test_manifest_carries_the_contribution_cells():
     """A COVERED graph that moved nothing: every claim has EP state and every
     posterior is the neutral mean — the exact shape that could otherwise be
