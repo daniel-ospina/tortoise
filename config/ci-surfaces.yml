@@ -1696,6 +1696,7 @@ surfaces:
   # test leg selected the suite at all.
   - test_10156_alert_registers.py
   - test_10194_eval_suite_non_gating.py
+  - test_10017_backfill_copy.py
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
@@ -1900,6 +1901,15 @@ surfaces:
   # exits 1 with `manifest drift: ['test_9391_replay_window_raw_query_width.py']`,
   # and `fast_pool()` is manifest-derived, so the pins would run in NO leg.
   - test_9391_replay_window_raw_query_width.py
+  # #10121: the recency tie every ranking leg shares. `core` is the right arm
+  # for the same reason the rows above state — the file pins
+  # `tortoise/search_engine.py` (a SHARED_MODULE, so a diff to it already runs
+  # the full matrix) and `tortoise/bm25.py`; both fall through to `core`, and
+  # the subject is the read funnel every surface uses. Without this row
+  # `python3 tools/ci_selection.py --integrity` exits 1 with
+  # `manifest drift: ['test_10121_recency_tie.py']`, and `fast_pool()` is
+  # manifest-derived, so the pins would run in NO leg.
+  - test_10121_recency_tie.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -2847,6 +2857,14 @@ surfaces:
   # default surface — is where it runs when nothing else matched. Registered here
   # because `integrity()` requires every `tests/**/test_*.py` to be classified.
   - test_pytest_attribution.py
+  # #9984: the required check's introduced-failure predicate
+  # (`.github/scripts/new-failure-gate.py`, called from `python-ci-gate`). It reads the
+  # workflow, the gate script and the rail's decision module
+  # (`scripts/ci_exemption.py` + `scripts/ci-failure-set.sh`, reached through the
+  # machine-local pointer), and needs no DB — so `core`, the default surface, is where
+  # it runs when nothing else matched. Registered here because `integrity()` requires
+  # every `tests/**/test_*.py` to be classified.
+  - test_ci_new_failure_gate.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -2948,6 +2966,16 @@ surfaces:
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
+  # #10220: the durable lane report (WORKTREE-REPORT.md) and its anti-fabrication
+  # checker — `tools/worktree_report.py`. Hermetic (a throwaway git repo in
+  # `tmp_path`; no DB, no network), so it pins no api/engine surface and `core`
+  # carries it. `tools/` is a flat NON_PYTHON_PREFIXES entry with no matching
+  # SOURCE_PATTERNS row, so a TOOL-ONLY diff would select NO surface and fall back
+  # to tier-1 smoke, which does not carry this file — the neighbouring `CORE_ALSO`
+  # entry for the tool closes that half (same #1349/#3332/#3616 class as
+  # `test_work_claim.py` above). Pinned by
+  # `tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1`.
+  - test_worktree_report.py
   - test_work_claim.py  # #5052: the dispatch-time claim CAS on the graph (tools/work_claim.py) — `core` here covers edits to THIS test file; the tool's own edits are covered by the `tools/work_claim` (PREFIX) TOOL_CARVEOUTS entry in tools/ci_selection.py, which covers the whole `work_claim*` family — the tool plus any store split (a `tools/` source has NO named surface and is filtered out before the `core` fallback, so the registration alone would not select this suite for a tool-only PR)
   # RETIRED 2026-10-19: test_orchestrator_harness.py drove operations/orchestrator-harness/,
   # which moved to agent-infra/scripts/orchestrator-harness/. The suite was retired with the copy,
@@ -3887,6 +3915,32 @@ surfaces:
   # *docs-only* diff, where NO surface is selected at all (#9089 review).
   - test_7949_capstone_measure.py
   - test_7949_capstone_verdict_check.py
+  # #7949 E5: the WRITE-BACK half of E5's criterion — a fresh run of the registered
+  # raw-vs-narrative scorer over the committed arm receipts, compared cell by cell
+  # against the table §10 publishes. The run half was pinned
+  # (`tests/eval/write_path/test_score_qualifiers.py::
+  # test_the_committed_score_artifact_regenerates_byte_identically`); the write-back
+  # half had NO pin, so the architecture doc's decisive table could be retyped or
+  # deleted while every gate stayed green and #7949/#7947 kept citing it. Stdlib
+  # only, no DB/network/model, ~2.4 s.
+  #
+  # ⚠️ This `core` row is required for manifest INTEGRITY, not for selection —
+  # measured: delete it and `classify_test_file()` returns None, so
+  # `tools/ci_selection.py --integrity` reds naming this file. It is NOT what
+  # selects the pin on a scorer diff: every tier-2 selection is `tier1 ∪ surfaces`
+  # (`tools/ci_selection.py`, the `files = set(tier1)` statement — cited WITHOUT a
+  # line number on purpose: `:2983` was correct when this comment was written and
+  # had rotted to `:3009` by the next merge, the same `.py:line` rot this PR's own
+  # evidence doc names), so `tier1` alone selects this pin on an instrument change,
+  # and adding/removing this row changes that 706-file selection by nothing
+  # (#10108 review P3; 734 until `#10206` took `tests/eval/**` out of the gating
+  # shard set). `core` is also NOT what
+  # reaches the docs-only diff: measured,
+  # `select(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])` → surfaces `[]`, and
+  # only `tier1` runs. That is why the row below exists, and the `tier1` comment
+  # states the same thing — reading this comment as "`core` covers the docs edit"
+  # would let the next lane delete the `tier1` row believing the pin still fires.
+  - test_7949_e5_section10_writeback.py
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),
   # the shared-hub tree state at measurement time must be recorded as un-recorded,
@@ -4462,6 +4516,16 @@ surfaces:
   # — a `core`-only registration would leave the manifest green and the file
   # never executed.
   - test_bm25_lexical_8488.py
+  # #10122: a Point's `name` is STORED but not lexically indexed — the
+  # warn-not-block advisory at the three Point write doors, and the gap kept
+  # visible (name-only point absent from the FTS leg, with a positive control).
+  # `tortoise/sdk.py` matches no SOURCE_PATTERNS entry, so a diff to it takes the
+  # `core` fallback and would otherwise never run these pins. The file is ALSO
+  # in `carve_out:`: its module-level `pytestmark` is `embedded_only` (the lane
+  # the defect was measured on), so under a docker URI the D-2 hook SKIPS it — a
+  # `core`-only registration would leave the manifest green and the file never
+  # executed (the #8488 trap recorded two rows above).
+  - test_10122_point_name_not_indexed.py
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
@@ -6641,6 +6705,19 @@ tier1:
 # is the one it covers. The `core` half is what `--integrity` reads.
 - test_7949_capstone_measure.py
 - test_7949_capstone_verdict_check.py
+# #10108 review (P1): the SAME document's E5 *write-back* pin (`core` above) —
+# `test_7949_e5_section10_writeback.py` binds §10's replicated-run table to a
+# fresh run of the registered scorer (`tests/eval/write_path/score_qualifiers.py`).
+# It is a pure, no-DB file/JSON read, and the diff class that can red it is a
+# docs-only edit of `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — exactly
+# the diff on which `docs/` takes NON_PYTHON_PREFIXES → `changed == []` →
+# `select()`'s early return → tier1 ONLY. Registered in `core` alone it was
+# asleep on the one change it exists to catch (retype a digit, or delete the
+# subsection, and it merged green), which is the same #4309/#3332/#3616
+# silent-drop class as the sibling rows above. Pinned behaviourally by
+# tests/test_ci_selection.py::test_7949_e5_section10_writeback_runs_on_a_docs_only_diff
+# and ::test_docs_scanning_gates_stay_in_tier1.
+- test_7949_e5_section10_writeback.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 # WHY THIS BLOCK EXISTS. `test-slow (b)` was reported as the CI critical path
@@ -6951,6 +7028,13 @@ carve_out:
 # Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
 # test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_bm25_lexical_8488.py
+# #10122: module-level `embedded_only` (the Point `name` advisory and the
+# FTS-gap evidence, measured on the embedded lane), so the stem is routed to the
+# URI-unset carve-out job exactly as #8488 above — a `core`-only registration
+# would make the manifest green and run NOTHING on a docker leg. Mirrored in
+# tests/_embedded.TEST_NO_REDIRECT_STEMS and declared in the test_markers.py pin
+# (the same three-way mirror the rows above document).
+- test_10122_point_name_not_indexed.py
 - test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
@@ -7142,6 +7226,20 @@ carve_out:
 # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
 # DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
 - test_cli_extraction.py
+# #10121: the recency-tie pins (the acceptance sweep at N ∈ {10, 50, 119, 130,
+# 200}, the id-less `:Object` and legacy-id regressions, the `updatedAt`-beats-
+# `createdAt` ordering). The module is `pytestmark = pytest.mark.embedded_only`
+# and its fixture builds per-test embedded `TortoiseSDK(<tmpfile>)` stores, so on
+# a URI-set lane it would be collected and SKIPPED in full — a permanently green,
+# permanently unexecuted gate (the #4047/#4524 shape) — and a redirected
+# construction would assert tie order against the shared server instead of the
+# lane the sweep was measured on. Routed here so the URI-unset carve-out job runs
+# it as designed; the stem is mirrored in
+# `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
+# The `core` surface row above is KEPT: a file legitimately sits in both.
+- test_10121_recency_tie.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`

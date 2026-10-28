@@ -2750,8 +2750,11 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    - **wait for the deploy job, not the run, then unset** — a `deploy-hosted`
      **run** can end RED with `[env]` already applied: since #4538 the separate,
      fail-closed `post-deploy-verify` job can leave the run red *after*
-     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and
-     `concurrency: cancel-in-progress` can cancel a run after that step too.
+     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and a newer push
+     landing while a `deploy-hosted` run is still **pending** supersedes it —
+     `cancel-in-progress: false` (since #10155) stops a RUNNING deploy being
+     cancelled, but a shared group holds one pending run and the newest push
+     takes it.
      Require the `deploy-api` job's Deploy step to succeed — unsetting against a
      deploy that did **not** apply `[env]` drops the value. Only then run
      `flyctl secrets unset <NAME> --app tortoise-y4mjjq`;

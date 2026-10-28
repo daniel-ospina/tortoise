@@ -158,6 +158,11 @@ from .projection.entities import (  # #3998: the declared :Source surface
 from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
 )
+# #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
+# The Point `name` advisory below reads the Point's fields OFF it rather than
+# re-typing `content`/`search_keys` — so the advisory cannot drift from the
+# index, and an index change that adds a field retires it with no second edit.
+from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
@@ -4834,6 +4839,182 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # because the SHARED projection writer (`_upsert_point_props`) is the door every
 # write reaches and it needs the same rule (#8006). `create_point`,
 # `update_point` and `update_entity` still call it here, under this name.
+
+
+def _point_fts_indexed_fields() -> list[str]:
+    """#10122: the fields the Point FULLTEXT index actually HOLDS.
+
+    Read off ``projection._FULLTEXT_INDEX_LABEL_FIELDS`` — the table that
+    CREATES the indexes — never a second hand-written copy of the field list.
+    So the advisory below cannot drift from the index, and an index change that
+    adds a field (``name`` being the one #10122 is about) silences it by
+    construction rather than needing a second edit.
+    """
+    for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:
+        if label == "Point":
+            return list(fields)
+    return []
+
+
+def _lexical_text(value) -> str:
+    """#10122: the coverage-comparison key — whitespace-collapsed, casefolded.
+
+    Accepts a list/tuple as well as a str: the doors flatten ``search_keys``
+    before this runs, but the generic ``update_entity`` payload is the caller's
+    own dict and a raw array is the #5482 shape, not a crash here.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = " ".join(str(v) for v in value)
+    return " ".join(str(value).split()).casefold()
+
+
+def _warn_point_name_not_lexically_indexed(
+    props: dict, *, door: str, content: str | None = None,
+    stored: dict | None = None,
+) -> None:
+    """#10122: advise, at the write door, that a Point's ``name`` is NOT
+    lexically indexed. Warn, never block (#1934's precedent for a declaration
+    gap) — and never mutates ``props``, because the node still stores it.
+
+    THE DEFECT. The Point FULLTEXT index holds ``content`` + ``search_keys``
+    only, while the write doors ACCEPT ``name`` on a Point and the node stores
+    it. The stored name is therefore invisible to the lexical leg: a query for
+    the point's OWN exact name returns nothing — MEASURED on the embedded and
+    the docker lane (#10122: the name-only point is absent from
+    ``run_fts_query`` while the content-carrying one is found). ``Event`` /
+    ``Subject`` / ``Object`` DO index ``name`` (``_FULLTEXT_INDEX_LABEL_FIELDS``
+    above), so a Point is the one label where an ACCEPTED write mints a
+    silently un-findable record — the #5482 class, which this repo fixed rather
+    than tolerated.
+
+    ⛔ NOT the fix: adding ``name`` to the index. That is a RANKING change (it
+    moves collection statistics and every Point's field length) and it is gated
+    on the #8486 measurement, which is postponed (the ruling recorded on
+    #10122). This advisory has ZERO ranking effect — it reads no score, and it
+    writes nothing. The HELPER does no graph read of its own: the only
+    non-payload input is the stored text the ``update_point`` door has already
+    read and hands over, which is why that door's verdict covers the text the
+    index WILL hold rather than only the fields the caller supplied.
+
+    SILENCE ON THE COMMON SHAPE. A name whose tokens already appear in the
+    text the index will hold does not warn — the identifier IS reachable, so
+    there is nothing to advise. WHICH text that is depends on the door:
+    ``create_point`` compares against the payload it is about to write (the
+    whole write), while ``update_point`` compares against the STORED
+    ``content``/``search_keys`` it reads in its own probe, because a name-only
+    update carries no indexed text of its own. ``update_entity``'s Point branch
+    still compares payload-only — an asymmetry that is deliberate for now
+    (threading the same read there is its own change) and named in
+    ``test_10122_point_name_not_indexed.py``.
+
+    ``content`` is the DOOR's own content argument, supplied only where the
+    payload does not carry it: ``create_point`` takes ``content`` as a required
+    positional (it is not part of the ``**props`` passthrough), so without this
+    a point whose title is plainly in its ``content`` would warn — the exact
+    false positive the coverage check exists to avoid. ``update_point`` /
+    ``update_entity`` pass ``content`` inside the props dict and need not set
+    it.
+    """
+    name = props.get("name")
+    if not isinstance(name, str):
+        return
+    needle = _lexical_text(name)
+    if not needle:
+        return
+    fields = _point_fts_indexed_fields()
+    if "name" in fields:
+        return  # the index holds `name` after all — nothing to advise
+    if not fields:
+        return  # no Point index on this engine — a different (visible) state
+
+
+    # ⛔ TOKEN-LEVEL, NOT SUBSTRING (#10122 review P2). The lexical leg answers
+    # with an OR-UNION of the query's tokens (``build_or_query``), so a name
+    # whose tokens are SCATTERED through ``content`` is findable — a substring
+    # test called that uncovered and the message then asserted an absence that
+    # does not hold (measured: content "the probe was a write for capstone and
+    # 9664 rows" answers a query for name "capstone-9664 write probe"). The
+    # honest condition is DISJOINT token sets: not one token of the name appears
+    # in the text this write indexes. Anything short of that only costs RANK,
+    # which is not what an advisory may promise.
+    from tortoise.sparse import tokenize_sparse_query
+
+    name_tokens = set(tokenize_sparse_query(str(name), keep_numeric=True))
+    indexed_tokens: set[str] = set()
+    # ⛔ PER FIELD, and the STORED component is used only where the payload
+    # does NOT set that field (#10122 rounds 2-4). Two earlier versions got
+    # this wrong in opposite directions: a payload-only comparison fired on
+    # every name-only update, and a single UNIONED stored blob then silenced an
+    # update that REPLACES content (measured: stored content carrying the name,
+    # then `update_point(name=…, content="unrelated curtains here")` → silent,
+    # although the tokens were only in the text being overwritten). The text
+    # the index will hold after this write is therefore: the payload value
+    # where the payload sets the field, else the stored component.
+    effective: dict[str, object] = {}
+    for field in fields:
+        if field == "content" and content is not None:
+            effective[field] = content
+        elif field in props:
+            effective[field] = props.get(field)
+        elif stored:
+            effective[field] = stored.get(field)
+        else:
+            effective[field] = None
+    for field in fields:
+        indexed_tokens.update(tokenize_sparse_query(
+            _lexical_text(effective[field]), keep_numeric=True))
+    if not any(ch.isalnum() for ch in str(name)):
+        # Silent only when the name carries NO alphanumeric character at all
+        # (pure punctuation/whitespace): then there is nothing to index and the
+        # advice would be meaningless. ⛔ NOT "when our token list is empty":
+        # ``build_or_query`` does not drop a degenerate query, it falls back to
+        # the ESCAPED RAW literal (#1791), so ``build_or_query("R&D") == "R&D"``
+        # and the engine still tokenizes it — measured: a point whose content
+        # says "the brand R&D handles the audit" IS returned by
+        # ``run_fts_query("R&D")`` at 1.0. So an `R&D`-shaped name (or a
+        # stopwords-only one, since our stopword list is not the engine's) is
+        # genuinely findable once its literal sits in an indexed field, and the
+        # advisory must speak rather than stay silent. That was a false negative
+        # in the previous round (#10122 review P2).
+        return
+    if name_tokens:
+        if name_tokens & indexed_tokens:
+            return
+    else:
+        # No token on our side (e.g. a one-character literal) but the name DOES
+        # carry alphanumerics: fall back to a casefolded literal containment
+        # test, which is what the engine's raw-literal path matches.
+        folded = _lexical_text(name)
+        if any(folded in _lexical_text(effective[f]) for f in fields):
+            return
+    # The roster is DERIVED from the same table, so a label that gains (or
+    # loses) a ``name`` index changes this sentence with the index.
+    other_labels = sorted(
+        label for label, label_fields in _FULLTEXT_INDEX_LABEL_FIELDS
+        if label != "Point" and "name" in label_fields)
+    if not other_labels:
+        label_clause = "no other label indexes it"
+    elif len(other_labels) == 1:
+        label_clause = f"{other_labels[0]} indexes it"
+    else:
+        label_clause = f"{'/'.join(other_labels)} index it"
+    where = ("the text the Point fulltext index will hold after this write"
+             if stored else
+             "the text THIS write supplies for those fields (this door has no "
+             "stored text to compare against)")
+    basis = ("none of the name's tokens" if name_tokens
+             else "the name's literal")
+    _logger.warning(
+        "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
+        "lexical query for the name can only reach this point through other "
+        "evidence, and will not rank on the name itself (#10122). Put the "
+        "identifier in `content` or in `search_keys`: `name` is not lexically "
+        "indexed on a Point (%s). The write is accepted as-is — "
+        "warn-not-block, #1934.",
+        door, name, basis, where, "/".join(fields), label_clause,
+    )
 
 
 def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
@@ -9596,6 +9777,10 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #10122: a `name` the index does not hold is a stored-but-unfindable
+        # identifier — advise here, at the door that accepted it (after the
+        # flatten, so the coverage check sees the stored `search_keys` form).
+        # ⛔ Advisory only: it never refuses and never touches `props`.
         # E4 (#5007): the span is an ADDRESS — enforce the all-or-nothing /
         # ordered / in-range rule HERE as well as on the `Point` model. These
         # two props ride the generic passthrough, so without this a caller
@@ -9620,6 +9805,12 @@ class TortoiseSDK:
         # #2350 (E-prec): the per-end precision declaration is validated by the
         # same fresh-create rule (no stored opposite to merge).
         _refuse_inconsistent_validity_precision(self._get_proj().g, props)
+        # #10122 review P3: the advisory runs AFTER the refusal gates above —
+        # a create that these refuse writes nothing, and advising about a write
+        # that never happened is crying wolf (the same discipline
+        # ``update_entity`` documents for its own door).
+        _warn_point_name_not_lexically_indexed(props, door="create_point",
+                                               content=content)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -14595,6 +14786,39 @@ class TortoiseSDK:
                     "update_point only promotes draft→live — use "
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
+
+        # #10122: the advisory sits here, after the refusals that run BEFORE
+        # the write (kinds, sanitisation, span, validity window, precision, the
+        # draft→live status ValueError above). Named residuals it does NOT
+        # cover, all measured: `_assert_lifecycle_guard` (further down) and the
+        # promote arm's guarded-SET miss (`_raise_update_point_status_error`)
+        # can still raise after this line, so a refused transition can advise.
+        # Moving it past those is its own change — they are inside the write
+        # arm, not before it (#10122 review rounds 3-4).
+        # #10122: the advisory, AFTER the refusal gates above (a refused update
+        # writes nothing, so advising about it is crying wolf — the discipline
+        # `create_point` and `update_entity` already follow) and reading the
+        # STORED text, because the verdict must be about the index, not about
+        # the payload a name-only update does not carry (round-1 + round-2 P2).
+        # Fires only when the update carries a string `name`, so a plain update
+        # pays nothing.
+        if isinstance(props.get("name"), str):
+            # Aggregations ONLY, so this is one row on a hit AND on a miss —
+            # a mixed ``count(n), n.content`` projection groups implicitly and
+            # returned an EMPTY result set on the miss (the round-2 pin caught
+            # it as an IndexError).
+            _name_row = proj.g.query(
+                "OPTIONAL MATCH (n:Point {id:$id}) "
+                "RETURN count(n), "
+                "coalesce(head(collect(n.content)), ''), "
+                "coalesce(head(collect(n.search_keys)), '')",
+                params={"id": id},
+            ).result_set[0]
+            if _name_row[0]:
+                _warn_point_name_not_lexically_indexed(
+                    props, door="update_point",
+                    stored={"content": _name_row[1],
+                            "search_keys": _name_row[2]})
 
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an
@@ -36831,6 +37055,19 @@ class TortoiseSDK:
                     )
                     if res.result_set and res.result_set[0][0]:
                         break
+                # #10122: POINT-gated, and only once the write LANDED. This
+                # surface reaches every label, and `name` IS indexed on
+                # Subject/Object/Event — warning before the match would both
+                # inflate the count for sibling labels and cry wolf on a miss
+                # (`update_entity("no-such-id", name=...)`), the two things the
+                # #3377 arm below is careful about. The advisory is the same one
+                # `create_point`/`update_point` call: this live `SET n += $p` is
+                # a THIRD Point write seam and it does not pass through
+                # `_upsert_point_props` (which is why it is not covered from
+                # there).
+                if res.result_set and res.result_set[0][0]:
+                    _warn_point_name_not_lexically_indexed(
+                        point_props, door="update_entity")
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
                 # leaves a phantom record).
