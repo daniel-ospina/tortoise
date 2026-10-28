@@ -91,17 +91,23 @@ const NOW = Date.now();
 
 // A D1 stand-in: the tables these two routes touch, over in-memory rows. `meta.changes`
 // counts what the WHERE matched, as D1 does (a CAS that matches nothing must report 0).
-const CONSENT_SCHEMA = `CREATE TABLE consent_attempts (
-  state TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,
-  code_challenge TEXT NOT NULL, scope TEXT, resource TEXT, user_id TEXT,
-  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, attempt_key_hash TEXT);`;
-
 class FakeD1 {
   constructor(tables) {
     this.tables = tables || { sessions: [], consent_attempts: [] };
     this._sqlite = null;
+    this._seeded = false;
   }
-  exec() { return Promise.resolve(); }
+  // ⛔ `exec()` RUNS the statement. It used to be a no-op, which meant the shipped
+  // `ensureConsentAttemptTable` DDL — the ONLY definition of this table, there is no migration for
+  // it — never executed in any test, while the double carried its own hand-written copy of the
+  // schema. Measured: renaming a column in the shipped CREATE left all route tests green and
+  // production answering 503 on every `/api/consent/start`. The table is now created by the code
+  // under test, including the `ALTER … ADD COLUMN` path for a database an earlier build bootstrapped.
+  exec(sql) {
+    this._db().exec(sql);
+    this._maybeSeed();
+    return Promise.resolve();
+  }
   // ⛔ `consent_attempts` runs on REAL SQLite (node:sqlite), not a hand-written interpreter.
   // The interpreter this replaced restated the SQL's owner rule in JavaScript, and when the two
   // drifted the suite stayed green while the shipped statement was last-writer-wins — a whole
@@ -111,17 +117,41 @@ class FakeD1 {
   _db() {
     if (this._sqlite) return this._sqlite;
     const db = new DatabaseSync(":memory:");
-    db.exec(CONSENT_SCHEMA);
-    const ins = db.prepare(
-      "INSERT INTO consent_attempts (state,client_id,redirect_uri,code_challenge,scope,resource," +
-      "user_id,created_at,expires_at,attempt_key_hash) VALUES (?,?,?,?,?,?,?,?,?,?)");
-    for (const r of this.tables.consent_attempts || []) {
-      ins.run(r.state, r.client_id, r.redirect_uri, r.code_challenge, r.scope ?? null,
-              r.resource ?? null, r.user_id ?? null, r.created_at ?? 0, r.expires_at ?? 0,
-              r.attempt_key_hash ?? null);
-    }
     this._sqlite = db;
     return db;
+  }
+  _hasTable() {
+    const row = this._db().prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='consent_attempts'").get();
+    return row !== undefined;
+  }
+  // Seeds are imported AFTER the shipped DDL created the table, and only once — a test that seeds a
+  // row must still see IT, not a row the route wrote first.
+  _maybeSeed() {
+    if (this._seeded || !this._hasTable()) return;
+    this._seeded = true;
+    const db = this._db();
+    const cols = db.prepare("PRAGMA table_info(consent_attempts)").all().map((c) => c.name);
+    const ins = db.prepare(
+      "INSERT INTO consent_attempts (state,client_id,redirect_uri,code_challenge,scope,resource," +
+      "user_id,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)");
+    for (const r of this.tables.consent_attempts || []) {
+      // A seeded row may deliberately predate the column (`attempt_key_hash: null` means "written
+      // by an older build"), and the column may not exist yet at this point.
+      ins.run(r.state, r.client_id, r.redirect_uri, r.code_challenge, r.scope ?? null,
+              r.resource ?? null, r.user_id ?? null, r.created_at ?? 0, r.expires_at ?? 0);
+      if (cols.includes("attempt_key_hash") && r.attempt_key_hash != null) {
+        db.prepare("UPDATE consent_attempts SET attempt_key_hash = ? WHERE state = ?")
+          .run(r.attempt_key_hash, r.state);
+      }
+    }
+  }
+  /** Create the table the way an EARLIER build did — no `attempt_key_hash` — for the ALTER path. */
+  _legacySchema() {
+    this._db().exec("CREATE TABLE consent_attempts (state TEXT PRIMARY KEY, client_id TEXT NOT NULL, "
+      + "redirect_uri TEXT NOT NULL, code_challenge TEXT NOT NULL, scope TEXT, resource TEXT, "
+      + "user_id TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);");
+    this._maybeSeed();
   }
   _mirror() {
     this.tables.consent_attempts = this._db().prepare("SELECT * FROM consent_attempts").all()
@@ -137,6 +167,7 @@ class FakeD1 {
   }
   _isConsent(sql) { return /consent_attempts/.test(sql) && !/FROM sessions/.test(sql); }
   _consent(sql, args) {
+    this._maybeSeed();
     const stmt = this._db().prepare(sql);
     const out = /^\s*(SELECT|INSERT|DELETE|UPDATE)/i.test(sql) && /RETURNING|^\s*SELECT/i.test(sql)
       ? { rows: stmt.all(...args) }
@@ -200,7 +231,8 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   const e = env({
     noSecret: scenario === "mint_no_secret",
     SESSIONS: new FakeD1({
-      sessions: scenario === "mint_no_session" ? [] : [sessionRow()],
+      sessions: scenario === "mint_no_session" ? []
+        : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)],
       consent_attempts: seeded.includes(scenario)
         ? [{ state: "state-xyz", client_id: "client-abc", redirect_uri: "https://client.example/cb",
              code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", scope: "mcp",
@@ -232,7 +264,9 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
   const seeded = opts.seededAttempts || [];
-  const e = env({ SESSIONS: new FakeD1({ sessions, consent_attempts: seeded }) });
+  const store = new FakeD1({ sessions, consent_attempts: seeded });
+  if (opts.wantLegacySchema) store._legacySchema();
+  const e = env({ SESSIONS: store });
   const source = opts.params || {
     client_id: "client-abc", redirect_uri: "https://client.example/cb",
     code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
@@ -366,6 +400,21 @@ def test_the_mint_route_refuses_a_flow_a_DIFFERENT_identity_started() -> None:
     out = _run("mint_foreign_attempt")
     assert out["status"] == 403, out
     assert out["body"]["error"] == "no_authorize_attempt"
+
+
+def test_the_mint_scenario_actually_runs_as_the_identity_it_is_given() -> None:
+    """The refusal above is only meaningful if the caller really IS somebody else.
+
+    The mint scenarios ignored `sessionUserId` and always ran as `user-1`, so "B is refused" was
+    measured with B replaced by the legitimate owner — an assertion that passes for the wrong
+    reason (and would hide a threading regression). The SAME seeded row, owned by `user-2`, mints
+    when the caller IS `user-2`: that is the positive half that proves the identity is threaded.
+    """
+    as_owner = _run("mint_foreign_attempt", sessionUserId="user-2")
+    assert as_owner["status"] == 200, (
+        "the owner of the flow was refused its own mint — the scenario is not running as the "
+        f"identity it was given: {as_owner}")
+    assert _run("mint_foreign_attempt", sessionUserId="user-1")["status"] == 403
 
 
 def test_the_mint_route_allows_an_attempt_row_with_NO_owner_yet() -> None:
@@ -1000,23 +1049,83 @@ def test_a_second_identity_cannot_take_over_a_flow_by_re_entering_it() -> None:
     code_challenge / state, redeemed into a code delivered to A's client carrying B's identity.
     A's own mint started answering 403 on A's own flow.
 
-    The owner is now the FIRST one recorded. This test drives that with a SESSION for a second
-    identity — not a signed-out leg, which both orders satisfy.
+    The owner is now the FIRST one recorded, AND the attempt key decides who may write it at all.
+    This test drives both with a SESSION for a second identity — not a signed-out leg, which both
+    COALESCE orders satisfy.
+
+    ⚠️ The row is seeded WITH a key hash on purpose. Seeding it without one (as this test first
+    did) let it pass while a foreign caller's key was written into the row: the `user_id` CASE
+    happened to preserve the already-set owner, so the assertion held even though the row's KEY had
+    been taken over — which is the precondition for the next write to succeed. Hence the hash
+    assertion below.
     """
-    seeded = [{
+    owned = [{
         "state": "state-xyz", "client_id": "client-abc",
         "redirect_uri": "https://client.example/cb",
         "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
         "scope": "mcp", "resource": None, "user_id": "user-1",
-        "created_at": 0, "expires_at": 0,
+        "created_at": 0, "expires_at": 0, "attempt_key_hash": "a" * 64,
     }]
-    out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-2")
+    out = _run("start_signed_in", seededAttempts=owned, sessionUserId="user-2",
+               params=dict(_PARAMS, attempt_key="b-attempt-key"))
     rows = [r for r in out["attempts"] if r["state"] == "state-xyz"]
     assert len(rows) == 1, rows
     assert rows[0]["user_id"] == "user-1", (
         f"a second identity (user-2) TOOK OVER a flow user-1 began — the row now says "
         f"{rows[0]['user_id']!r}, so user-2 can mint an assertion into user-1's consent "
         "(identity injection: the foreign-owner refusal at token.ts becomes unreachable by one GET)")
+    assert rows[0]["attempt_key_hash"] == "a" * 64, (
+        "the attempt KEY was overwritten by a caller that does not hold it — the takeover is one "
+        "step away: whoever owns the hash owns every later write to this row")
+    assert out["status"] == 403, f"a foreign key was ADVANCED into the flow: {out}"
+
+
+def test_a_row_from_an_OLD_BUILD_is_dead_rather_than_adoptable() -> None:
+    """#10208, the rollout window: rows written BEFORE the key column existed have `NULL` there.
+
+    `COALESCE(consent_attempts.attempt_key_hash, excluded.attempt_key_hash)` ADOPTED a caller's key
+    into such a row, and `owns_flow` then compared against the value it had just installed — so the
+    first caller to name the `state` OWNED the flow, while `token.ts` read the same NULL-hash row as
+    nobody's. The two legs disagreed about one row, and the invariant this commit exists to
+    establish did not hold for every attempt in flight during a deploy (≤15 min, extended by each
+    re-entry). Such a row is now dead: the key column is written ONLY on insert, and a NULL hash
+    fails the fill's `IS NOT NULL` guard, which is exactly the mint's verdict.
+
+    The table here is the LEGACY one (no `attempt_key_hash`), so this also exercises the shipped
+    `ALTER … ADD COLUMN` bootstrap path.
+    """
+    legacy = [{
+        "state": "state-xyz", "client_id": "client-abc",
+        "redirect_uri": "https://client.example/cb",
+        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "scope": "mcp", "resource": None, "user_id": None,
+        "created_at": 0, "expires_at": 0,
+    }]
+    out = _run("start_signed_in", seededAttempts=legacy, sessionUserId="user-2",
+               wantLegacySchema=True, params=dict(_PARAMS, attempt_key="b-attempt-key"))
+    rows = [r for r in out["attempts"] if r["state"] == "state-xyz"]
+    assert len(rows) == 1, rows
+    assert rows[0]["attempt_key_hash"] is None, (
+        "a caller ADOPTED a pre-column row by presenting its own key — from that moment `owns_flow` "
+        "is true for it and the row's ownership is decided by whoever asked first")
+    assert rows[0]["user_id"] is None, f"a pre-column row was filled by {rows[0]['user_id']!r}"
+    assert out["status"] == 403, f"a dead pre-column flow was advanced instead of refused: {out}"
+
+
+def test_the_shipped_DDL_is_what_creates_the_table() -> None:
+    """The fakes substitute the STORE and the PROVIDER only — never the schema.
+
+    `FakeD1.exec()` used to be a no-op while the double carried its own copy of the CREATE TABLE,
+    so the shipped DDL never ran in any test: renaming a column in it left every route test green
+    while production answered 503 on every `/api/consent/start`. Here the table is created by the
+    code under test, and the assertion is on a column only that DDL defines.
+    """
+    out = _run("start_cold_browser")
+    assert out["status"] == 302, out
+    row = out["attempts"][0]
+    assert row.get("attempt_key_hash"), (
+        "the shipped CREATE TABLE did not define `attempt_key_hash` — the double must not supply "
+        f"the schema: {sorted(row)}")
 
 
 def test_start_forwards_the_opaque_state_RAW_so_the_clients_csrf_check_survives() -> None:

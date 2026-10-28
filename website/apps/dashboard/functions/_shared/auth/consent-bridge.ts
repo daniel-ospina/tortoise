@@ -353,8 +353,15 @@ export async function recordConsentAttempt(
   };
   // ONE statement decides both properties, so neither can be lost to a refactor of the other:
   //
-  //   * `attempt_key_hash` is INSERT-ONLY (`COALESCE(existing, excluded)` — a later caller cannot
-  //     rotate it, which is what would let B take a flow over merely by naming its `state`);
+  //   * `attempt_key_hash` is written ONLY on INSERT. On conflict it is assigned to ITSELF, so a
+  //     later caller can never rotate it — rotation is the takeover — and a row that predates the
+  //     column (hash NULL) can never be ADOPTED either. COALESCE-ing a NULL here was a real hole:
+  //     any caller could write its key into an old-build row and `owns_flow` would then be true
+  //     against the value it had just installed, while the mint reads a NULL-hash row as nobody's
+  //     — so the two legs disagreed about the same row and the flow was claimable for as long as
+  //     old-build rows live (≤ the 15-minute attempt TTL, extended by each re-entry). Such a row
+  //     is now simply DEAD (fail closed; the visitor restarts the flow), which is the same verdict
+  //     the mint already gives it;
   //   * `user_id` is filled ONLY when the presented key hashes to the stored one. `excluded` first
   //     would be last-writer-wins (identity injection); the CASE is what makes a foreign caller's
   //     write a no-op on the owner column rather than a refusal — a refusal here would tell an
@@ -366,7 +373,7 @@ export async function recordConsentAttempt(
         "expires_at,attempt_key_hash) " +
         "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) " +
         "ON CONFLICT(state) DO UPDATE SET " +
-        "attempt_key_hash=COALESCE(consent_attempts.attempt_key_hash, excluded.attempt_key_hash), " +
+        "attempt_key_hash=consent_attempts.attempt_key_hash, " +
         "user_id=CASE " +
         "WHEN consent_attempts.attempt_key_hash IS NOT NULL " +
         "AND consent_attempts.attempt_key_hash = excluded.attempt_key_hash " +

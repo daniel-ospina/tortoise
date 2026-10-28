@@ -132,9 +132,13 @@ both bypassable, which is worth recording because each looked complete:
 The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
 `/api/consent/start` mints a per-attempt key on the entry leg (32 random bytes), stores **only its
 SHA-256** on the row, and carries the raw key in the `selfPath` **return target**; the owner fill and the
-mint both require it. The key is INSERT-ONLY — a later caller can never rotate it, because rotation *is*
-the takeover — and a missing, wrong, or pre-column key answers the SAME `403 no_authorize_attempt` as an
-unrecorded flow, so the route is not an oracle for guessing a `state`.
+mint both require it. The key is INSERT-ONLY — written only when the row is created, never on a
+re-entry, so a later caller can never rotate it, because rotation *is* the takeover. A row that predates
+the column (its hash is `NULL`) is therefore **dead, never adoptable**: COALESCE-ing a key into it let the
+first caller to name the `state` own the flow while the mint read the same row as nobody's — the two legs
+disagreeing about one row — so such an attempt is refused and the visitor restarts. A missing, wrong, or
+pre-column key answers the SAME `403 no_authorize_attempt` as an unrecorded flow, so the route is not an
+oracle for guessing a `state`.
 ⛔ A scoped cookie holding the nonce is **not** available here: the bridge's rule is that the two origins
 are reconciled **by the token, never by a second cookie**. The return target is the only carrier that
 keeps that rule.
