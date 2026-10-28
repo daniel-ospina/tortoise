@@ -32,9 +32,10 @@ So this file pins four things, and the reasons differ:
   #8486-gated index change lands, this test reds on purpose and must be
   flipped DELIBERATELY — that is the point of keeping it.
 
-Zero ranking effect is part of the contract: the advisory reads the caller's
-own payload, does no graph read and writes nothing, so the sum over the
-index's fields and collection statistics is unchanged.
+Zero ranking effect is part of the contract: the advisory writes nothing and
+moves no score, so the index's fields and collection statistics are unchanged.
+The helper does no graph read of its own — the one non-payload input is the
+stored text the `update_point` door reads and hands over.
 
 LANE NOTE. Module-level ``pytestmark = pytest.mark.embedded_only`` — the lane
 this defect was measured on. The file is therefore routed to the URI-unset
@@ -375,3 +376,45 @@ def test_a_refused_update_does_not_warn(sdk, caplog):
     assert not _advisories(caplog), (
         "the update was REFUSED, so nothing was written and there is nothing "
         f"to advise: {[r.message for r in caplog.records]}")
+
+
+def test_an_update_that_replaces_the_covering_content_still_warns(sdk, caplog):
+    """Per-FIELD: stored text counts only where the payload does not set it.
+
+    #10122 round-4 review P2: with the stored text UNIONED in, this update was
+    silent — although the name's tokens lived only in the content being
+    overwritten, so after the write the name is exactly as unreachable as the
+    issue describes. Measured before the fix: stored content "the capstone
+    audit body mentions 9664", then
+    `update_point(pid, name="capstone-9664", content="unrelated curtains")` →
+    silent, with the tokens gone.
+
+    FAIL VALUE: union the stored text unconditionally (the previous version)
+    and this reds.
+    """
+    created = sdk.create_point(
+        "statement", "the capstone audit body mentions 9664")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING):
+        sdk.update_point(pid, name="capstone-9664",
+                         content="unrelated curtains here")
+    assert len(_advisories(caplog)) == 1, (
+        "the update REPLACED the only text that carried the name's tokens, so "
+        "after this write the name is unreachable — the advisory is correct "
+        f"here: {[r.message for r in caplog.records]}")
+
+
+def test_a_search_keys_replacement_also_counts_per_field(sdk, caplog):
+    """The same rule for the other indexed field.
+
+    FAIL VALUE: as above, unioned stored text reds this.
+    """
+    created = sdk.create_point("statement", "an audit body",
+                               search_keys="capstone 9664")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING):
+        sdk.update_point(pid, name="capstone-9664",
+                         search_keys="unrelated alias")
+    assert len(_advisories(caplog)) == 1, (
+        "the replacement dropped the only aliases that carried the name: "
+        f"{[r.message for r in caplog.records]}")

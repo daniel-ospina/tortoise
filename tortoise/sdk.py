@@ -4872,7 +4872,7 @@ def _lexical_text(value) -> str:
 
 def _warn_point_name_not_lexically_indexed(
     props: dict, *, door: str, content: str | None = None,
-    stored_text: str | None = None,
+    stored: dict | None = None,
 ) -> None:
     """#10122: advise, at the write door, that a Point's ``name`` is NOT
     lexically indexed. Warn, never block (#1934's precedent for a declaration
@@ -4892,8 +4892,11 @@ def _warn_point_name_not_lexically_indexed(
     ⛔ NOT the fix: adding ``name`` to the index. That is a RANKING change (it
     moves collection statistics and every Point's field length) and it is gated
     on the #8486 measurement, which is postponed (the ruling recorded on
-    #10122). This advisory has ZERO ranking effect — it reads the caller's own
-    payload, does no graph read and writes nothing.
+    #10122). This advisory has ZERO ranking effect — it reads no score, and it
+    writes nothing. The HELPER does no graph read of its own: the only
+    non-payload input is the stored text the ``update_point`` door has already
+    read and hands over, which is why that door's verdict covers the text the
+    index WILL hold rather than only the fields the caller supplied.
 
     SILENCE ON THE COMMON SHAPE. A name whose tokens already appear in the
     text the index will hold does not warn — the identifier IS reachable, so
@@ -4926,10 +4929,6 @@ def _warn_point_name_not_lexically_indexed(
     if not fields:
         return  # no Point index on this engine — a different (visible) state
 
-    def _indexed_value(field: str):
-        if field == "content" and content is not None:
-            return content
-        return props.get(field)
 
     # ⛔ TOKEN-LEVEL, NOT SUBSTRING (#10122 review P2). The lexical leg answers
     # with an OR-UNION of the query's tokens (``build_or_query``), so a name
@@ -4944,20 +4943,28 @@ def _warn_point_name_not_lexically_indexed(
 
     name_tokens = set(tokenize_sparse_query(str(name), keep_numeric=True))
     indexed_tokens: set[str] = set()
+    # ⛔ PER FIELD, and the STORED component is used only where the payload
+    # does NOT set that field (#10122 rounds 2-4). Two earlier versions got
+    # this wrong in opposite directions: a payload-only comparison fired on
+    # every name-only update, and a single UNIONED stored blob then silenced an
+    # update that REPLACES content (measured: stored content carrying the name,
+    # then `update_point(name=…, content="unrelated curtains here")` → silent,
+    # although the tokens were only in the text being overwritten). The text
+    # the index will hold after this write is therefore: the payload value
+    # where the payload sets the field, else the stored component.
+    effective: dict[str, object] = {}
+    for field in fields:
+        if field == "content" and content is not None:
+            effective[field] = content
+        elif field in props:
+            effective[field] = props.get(field)
+        elif stored:
+            effective[field] = stored.get(field)
+        else:
+            effective[field] = None
     for field in fields:
         indexed_tokens.update(tokenize_sparse_query(
-            _lexical_text(_indexed_value(field)), keep_numeric=True))
-    # ⛔ THE STORED TEXT IS PART OF THE COMPARISON when the door could read it
-    # (#10122 round-2 review P2). An UPDATE that carries only ``name`` supplies
-    # no indexed text at all, so a payload-only comparison fired on EVERY such
-    # update — while the sentence claimed something about the index it had not
-    # looked at (measured: stored content "the body mentions capstone heavily",
-    # `update_point(pid, name="capstone-9664")` warned, and the sentence was
-    # false). With ``stored_text`` threaded in, both the verdict and the
-    # sentence are about the same thing.
-    if stored_text:
-        indexed_tokens.update(tokenize_sparse_query(
-            _lexical_text(stored_text), keep_numeric=True))
+            _lexical_text(effective[field]), keep_numeric=True))
     if not any(ch.isalnum() for ch in str(name)):
         # Silent only when the name carries NO alphanumeric character at all
         # (pure punctuation/whitespace): then there is nothing to index and the
@@ -4980,8 +4987,7 @@ def _warn_point_name_not_lexically_indexed(
         # carry alphanumerics: fall back to a casefolded literal containment
         # test, which is what the engine's raw-literal path matches.
         folded = _lexical_text(name)
-        if any(folded in _lexical_text(_indexed_value(f)) for f in fields) or (
-                stored_text and folded in _lexical_text(stored_text)):
+        if any(folded in _lexical_text(effective[f]) for f in fields):
             return
     # The roster is DERIVED from the same table, so a label that gains (or
     # loses) a ``name`` index changes this sentence with the index.
@@ -4994,18 +5000,20 @@ def _warn_point_name_not_lexically_indexed(
         label_clause = f"{other_labels[0]} indexes it"
     else:
         label_clause = f"{'/'.join(other_labels)} index it"
-    where = ("the text the Point fulltext index holds" if stored_text
-             else "the text THIS write supplies for those fields (it carries "
-                  "the other fields' text, so this cannot see what the node "
-                  "already stores)")
+    where = ("the text the Point fulltext index will hold after this write"
+             if stored else
+             "the text THIS write supplies for those fields (this door has no "
+             "stored text to compare against)")
+    basis = ("none of the name's tokens" if name_tokens
+             else "the name's literal")
     _logger.warning(
-        "%s: this Point stores name=%r, but NONE of that name's tokens appear "
-        "in %s (%s) — so a lexical query for the name can only reach this "
-        "point through other evidence, and will not rank on the name itself "
-        "(#10122). Put the identifier in `content` or in `search_keys`: "
-        "`name` is not lexically indexed on a Point (%s). The write is "
-        "accepted as-is — warn-not-block, #1934.",
-        door, name, where, "/".join(fields), label_clause,
+        "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
+        "lexical query for the name can only reach this point through other "
+        "evidence, and will not rank on the name itself (#10122). Put the "
+        "identifier in `content` or in `search_keys`: `name` is not lexically "
+        "indexed on a Point (%s). The write is accepted as-is — "
+        "warn-not-block, #1934.",
+        door, name, basis, where, "/".join(fields), label_clause,
     )
 
 
@@ -14659,10 +14667,14 @@ class TortoiseSDK:
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
 
-        # #10122: the advisory sits here — after EVERY refusal this door can
-        # raise from (kinds, sanitisation, span, validity window, precision, the
-        # draft→live status ValueError above), so it can never advise about a
-        # write that was refused (#10122 review round-3 P3).
+        # #10122: the advisory sits here, after the refusals that run BEFORE
+        # the write (kinds, sanitisation, span, validity window, precision, the
+        # draft→live status ValueError above). Named residuals it does NOT
+        # cover, all measured: `_assert_lifecycle_guard` (further down) and the
+        # promote arm's guarded-SET miss (`_raise_update_point_status_error`)
+        # can still raise after this line, so a refused transition can advise.
+        # Moving it past those is its own change — they are inside the write
+        # arm, not before it (#10122 review rounds 3-4).
         # #10122: the advisory, AFTER the refusal gates above (a refused update
         # writes nothing, so advising about it is crying wolf — the discipline
         # `create_point` and `update_entity` already follow) and reading the
@@ -14685,7 +14697,8 @@ class TortoiseSDK:
             if _name_row[0]:
                 _warn_point_name_not_lexically_indexed(
                     props, door="update_point",
-                    stored_text=f"{_name_row[1]} {_name_row[2]}")
+                    stored={"content": _name_row[1],
+                            "search_keys": _name_row[2]})
 
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an
