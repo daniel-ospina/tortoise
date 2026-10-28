@@ -1285,13 +1285,10 @@ surfaces:
   - test_telegram_push.py
   - test_turnstile_signup.py
   # W3-a (#2099): the hermetic harness contract layer (tests/eval/harness/).
-  # Its real-replay gate is GONE with `sdk.capture_session` (#4282) — see the
-  # note in `tests/eval/harness/runner.py`; the corpus and receipt-schema
-  # contracts these files pin survive and still run. `test_harness_benchmark.py`
-  # SURVIVES with the receipt-driven `run` leg removed, so it stays registered:
-  # dropping the entry would leave a live test file selected by no surface
-  # (`--integrity` red).
-  - eval/harness/test_harness_benchmark.py
+  # Its real-replay gate is GONE with `sdk.capture_session` (#4282): the `run`
+  # leg and the probe file that drove it (`test_harness_benchmark.py`) were
+  # removed with the SDK door, per the note in `tests/eval/harness/runner.py`.
+  # The corpus and receipt-schema contracts these two files pin survive.
   - eval/harness/test_harness_schema.py
   - eval/harness/test_harness_corpus.py
   # W3-b (#2100): the why-layer suite gate — seeds the shared E2E-1
@@ -4752,10 +4749,9 @@ surfaces:
   - test_framework_middleware.py
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
-  # `test_write_path_benchmark.py` SURVIVES with the receipt-driven `run` leg
-  # and its #4860 failover arm removed (#4282); the deterministic replay gate
-  # it still carries is live, so the entry stays.
-  - eval/write_path/test_write_path_benchmark.py
+  # `test_write_path_benchmark.py` is GONE with the receipt-driven `run` leg it
+  # drove (#4282): every one of its surviving tests called `run_benchmark`, so it
+  # was deleted with the leg rather than left registered and red.
   # #2121: the Hermes seam — the shipped plugin template
   # (tortoise/hermes-plugin/) and the session-store parser
   # (tortoise/session_import/parsers.py) name no SOURCE_PATTERNS surface, so a
@@ -6629,7 +6625,6 @@ slow_files:
 - test_about_edges.py
 - test_billing.py
 - test_cli_context.py
-- eval/harness/test_harness_benchmark.py
 - test_dream.py
 - test_embedded_concurrency.py
 - test_enumeration_surfaces.py
@@ -7426,7 +7421,6 @@ durations:
   test_redirect_seam.py: 3.3
   eval/retrieval/test_gate_1349.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 26.7 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (13.6s) is a LOWER bound; kept 25.9
   eval/why_suite/test_why_suite_benchmark.py: 46.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 66.3
-  eval/harness/test_harness_benchmark.py: 38.8  # #4282: this file SURVIVES — its receipt-driven `run` leg and the #4860-style failover arm went with `sdk.capture_session`, and the contract half remains — so the reading below is the LAST PRE-REMOVAL one and is kept deliberately. Removing tests can only shrink a file, so 38.8 is an UPPER bound on its current work, never a lower one: the safe direction for the `test-slow` watchdog floor, which fails CLOSED on a slow-leg file with no row at all (`test_slow_leg_bounds_clear_the_committed_work`). ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 59.1. Refresh from the first post-merge sweep.
   test_commit_schema.py: 4.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.3
   test_onboarding_seed_endpoint.py: 46.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.0
   test_battery_r1_seed.py: 38.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 28.2 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (27.0s) is a LOWER bound; kept 38.5

@@ -148,8 +148,8 @@ uv run python tests/eval/harness/generate_corpus.py --validate
 
 # tests
 uv run pytest tests/eval/harness/ -q          # schema+corpus+grading 52 hermetic
-TORTOISE_SESSION_LLM_MOCK=1 TORTOISE_SESSION_EXTRACTOR=m2 \
-  uv run pytest tests/eval/harness/test_harness_benchmark.py -q   # real replay (9)
+# The real-replay probe (`test_harness_benchmark.py`) went with `run_benchmark`: both
+# drove `capture_session`, and #4282 left no SDK door to replay through.
 ```
 
 ## Failure classes (fix-wave protocol)
