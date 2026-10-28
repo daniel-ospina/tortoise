@@ -4117,29 +4117,184 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "no longer writes the",
 )
 
-#: Denials whose spelling VARIES too much for a literal: the TRANSFER-BARE form.
-#: ⛔ A literal cannot pin this one, and `#10200` review cycle 7 measured the gap:
-#: *"`sdk.supersede_point` transfers the about edge bare"* was GREEN while
-#: `transferred bare` — the PAST-tense tripwire for the retracted sentence — was a
-#: member, so the live denial and the retracted one were pinned in different
-#: tenses and only ONE of the two was pinned at all. The words between the verb
-#: and `bare` are the writer's OBJECT and they vary (`it` / `the edge` / `the
-#: about edge`), so the rule reads the FRAME — a transfer predicate, then `bare`
-#: inside the same clause — instead of enumerating determiner spellings, for the
-#: same reason `_HYPHENATED_MARKER` is a pattern rather than four literals.
-#: ⚠️ Bounded to the clause: `[^.;,]{0,40}?` cannot cross punctuation, so
-#: *"its about/structural transfer is a separate BARE `MERGE`"* in a NEIGHBOURING
-#: clause is not read as a denial of this writer (and that sentence belongs to the
-#: EXEMPT row anyway, which `DENIAL_MARKERS` never governs).
-#: ⚠️ STATED LIMIT: the VERB forms only (`transfers` / `transferred`). The NOUN
-#: form (*"the transfer is still bare"*) is deliberately NOT read: the REBUILD
-#: note `#10139` requires — *"the REBUILD half of the supersede transfer is still
-#: bare"* — is TRUE prose about a counted writer, so a noun-matching pattern reds
-#: a sentence the documents are required to carry, and the only way an editor
-#: could clear it is to delete that note. A verb-form rule costs one paraphrase
-#: and does not touch the record.
-DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\btransfer(?:s|red)\b[^.;,]{0,40}?\bbare\b"),
+#: Denials whose spelling VARIES too much for a literal: one FRAME per VOICE.
+#: ⛔ A literal cannot pin these, and `#10200` review cycle 7 measured the gap the
+#: transfer-bare frame was added for: *"`sdk.supersede_point` transfers the about
+#: edge bare"* was GREEN while `transferred bare` — the PAST-tense tripwire for
+#: the retracted sentence — was a member, so the live denial and the retracted one
+#: were pinned in different tenses and only ONE of the two was pinned at all. The
+#: words between the verb and `bare` are the writer's OBJECT and they vary (`it` /
+#: `the edge` / `the about edge`), so the rule reads the FRAME — a transfer
+#: predicate, then `bare` inside the same clause — instead of enumerating
+#: determiner spellings, for the same reason `_HYPHENATED_MARKER` is a pattern
+#: rather than four literals.
+#:
+#: ⛔ THE NEXT ROUND MEASURED FIVE MORE, AND ALL FIVE ARE ONE DEFECT: the
+#: vocabulary was a list of SPELLINGS, so it knew only the spellings in it. Each of
+#: these was GREEN against a counted MAP row at `a03951455b` (executed by splicing
+#: the sentence into §13 and running this leg's own functions, with a control that
+#: reds):
+#:   * the BASE/INFINITIVE form of a denial verb the literals spell in the third
+#:     person — *"is said to **drop** the property"* — including the exact wording
+#:     of the owner's own decision (*"said to **drop** / carry no property"*,
+#:     `#10149` scoping comment). The literals hold `drops the` / `carries no
+#:     property`; a frame is what covers a verb whose INFLECTION is not pinned.
+#:   * the property named by its own NAME — *"carries no `confidence`"* — which is
+#:     the ONE spelling the guarded passages actually use (§13: *"keeps the
+#:     binder's `confidence`"*), so the vocabulary missed the documents' house noun
+#:     while pinning the generic word `property`.
+#:   * the OBJECT voice — *"the guard **exempts** `supersede_point`"*, *"Rule 2
+#:     **keeps** `supersede_point` **out of** the counted rows"*, *"the census
+#:     **does not count** `supersede_point`"* — every literal puts the writer in
+#:     SUBJECT position, and English puts the same claim's argument in `obj` as
+#:     readily as in `nsubj` (UD encodes the role as a RELATION, not a surface
+#:     order), so subject-position matching is a dialect, not a rule.
+#:   * the PASSIVE — *"No property **is written by** `supersede_point`"*.
+#:   * the ADJECTIVE — *"leaves its about edge **property free**"* — which is the
+#:     retracted §11.1 claim itself, in the one part of speech no verb list holds.
+#:
+#: ⚠️ Bounded to the clause: `[^.;,]{0,40}?` cannot cross punctuation, so *"its
+#: about/structural transfer is a separate BARE `MERGE`"* in a NEIGHBOURING clause
+#: is not read as a denial of this writer (and that sentence belongs to the EXEMPT
+#: row anyway, which `DENIAL_MARKERS` never governs). The VOICE frames use
+#: `[^;,]` instead, because a census KEY contains a period (`sdk.supersede_point`)
+#: and a period-bounded class cannot reach across its own subject — measured: the
+#: first draft's `[^.;,]` left *"the guard exempts `sdk.supersede_point` from the
+#: census"* and *"Rule 2 keeps `sdk.supersede_point` out of the counted rows"*
+#: GREEN, i.e. the frame was dead on arrival against its own probe.
+#: ⚠️ STATED LIMIT: the TRANSFER-bare frame reads the VERB forms only (`transfers`
+#: / `transferred`). The NOUN form (*"the transfer is still bare"*) is deliberately
+#: NOT read: the REBUILD note `#10139` requires — *"the REBUILD half of the
+#: supersede transfer is still bare"* — is TRUE prose about a counted writer, so a
+#: noun-matching pattern reds a sentence the documents are required to carry, and
+#: the only way an editor could clear it is to delete that note. A verb-form rule
+#: costs one paraphrase and does not touch the record.
+#:
+#: ⛔ EVERY ENTRY DECLARES ITS OWN PROBE PAIR — `(pattern, must_see, must_not_see)`.
+#: A frame that cannot see the denial it was written for is the same DEAD
+#: instrument as a hyphenated literal (leg 36), and `must_not_see` is the TRUE
+#: prose the frame has to stay out of. The table used to be patterns alone with the
+#: transfer-bare probes hard-coded in the leg, which meant a NEW frame got no probe
+#: unless someone remembered to add one — the width belonged to the leg, not to the
+#: entry. A frame with no control is a frame nobody measured.
+_PROPERTY_NOUN = r"(?:propert(?:y|ies)|confidence|attributes?)"
+DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
+    # ── the transfer-bare form (`#10200` review, cycle 7) ──────────────────────
+    (
+        re.compile(r"\btransfer(?:s|red)\b[^.;,]{0,40}?\bbare\b"),
+        ("transfers the about edge bare", "it transfers it bare"),
+        "The REBUILD half of the supersede transfer is still bare (`#10139`)",
+    ),
+    # ── the BASE / INFINITIVE spelling of a denial verb ────────────────────────
+    (
+        re.compile(rf"\b(?:drop|drops)\b[^.;,]{{0,30}}?\b{_PROPERTY_NOUN}\b"),
+        (
+            "`sdk.supersede_point` is said to drop the property.",
+            "`sdk.supersede_point` will drop the binder's `confidence`.",
+        ),
+        "`sdk.supersede_point` does not drop the property.",
+    ),
+    (
+        re.compile(rf"\b(?:carry|carries)\s+(?:no\s+{_PROPERTY_NOUN}|nothing)\b"),
+        (
+            "`sdk.supersede_point` is said to carry no property.",
+            "`sdk.supersede_point` carries no `confidence` on an about edge.",
+            "`sdk.supersede_point` is said to carry nothing.",
+        ),
+        # ⛔ NOT the bare prefix `carry no` / `carries no`: measured, that reds at
+        # least four TRUE §13 sentences that name a counted KEY (`DirectEdgeRepoint`
+        # carries no `attrs`, *"carries none of direction/…"*, *"§13 carries no
+        # line numbers"*, *"carries no recorded version read at all"*). The OBJECT
+        # is what separates a denial from the record, so the object is what the
+        # frame reads.
+        "`DirectEdgeRepoint` carries no `attrs`.",
+    ),
+    (
+        re.compile(r"\b(?:write|writes)\s+nothing\b"),
+        ("`sdk.supersede_point` is said to write nothing.",),
+        "The guard pins every shape that writes the binder's `confidence`.",
+    ),
+    # ── a POSITIVE predicate under negation, over the property/attribute object ─
+    (
+        re.compile(
+            rf"\b(?:does\s+not|do\s+not|never|no\s+longer)\s+"
+            rf"(?:count|counts|set|sets|write|writes|carry|carries)\b"
+            rf"[^.;,]{{0,40}}?\b(?:{_PROPERTY_NOUN}|writers?|census|counted)\b"
+        ),
+        (
+            "`sdk.supersede_point` never sets a property on the about edge.",
+            "`sdk.supersede_point` does not count as a writer.",
+        ),
+        "`sdk.supersede_point` keeps the binder's `confidence` and never loses "
+        "it on replay.",
+    ),
+    # ── the OBJECT voice: the writer is the verb's object, not its subject ─────
+    (
+        re.compile(r"\b(?:does\s+not|do\s+not|never)\s+count\b"),
+        ("The census does not count `sdk.supersede_point`.",),
+        "`sdk.supersede_point` counts as a writer of the attribute set.",
+    ),
+    (
+        re.compile(
+            r"\b(?:is|are)\s+not\s+(?:a\s+|one\s+of\s+the\s+)?"
+            r"(?:writers?|counted|members?)\b"
+        ),
+        (
+            "`sdk.supersede_point` and `hosted_backup.restore_graph` are not "
+            "writers of the attribute set.",
+        ),
+        # `the ONLY writer` is quantified-out by `_QUANTIFIER_NEGATION_RE` on the
+        # class-marker half; the object frame must leave it alone for the same
+        # reason ("not the only writer" does not deny that it is a writer).
+        "`sdk.supersede_point` is not the only writer that carries the set by "
+        "property MAP.",
+    ),
+    (
+        re.compile(
+            r"\b(?:is|are)\s+excluded\s+from\s+the\s+(?:census|counted|writer)"
+        ),
+        ("`sdk.supersede_point` is excluded from the census of writers.",),
+        "`sdk.supersede_point` is counted among the writers.",
+    ),
+    (
+        # ⛔ `exempts` — the third-person VERB only. The bare stem `exempt` is NOT
+        # a denial in this record: the documents write `exempts` / `exemptions` /
+        # `exempting`, and §13's *"make both exemptions true instead of merely
+        # exempting them"* is TRUE prose (`#10200` review, cycle 5).
+        re.compile(r"\bexempts\b[^;,]{0,80}?\b(?:census|counted)\b"),
+        ("The guard exempts `sdk.supersede_point` from the census.",),
+        "The guard makes both exemptions true instead of merely exempting them, "
+        "and `sdk.supersede_point` re-materializes the set by property MAP.",
+    ),
+    (
+        re.compile(
+            r"\b(?:keeps?|leaves?)\b[^;,]{0,80}?\bout\s+of\s+the\s+"
+            r"(?:census|counted)\b"
+        ),
+        ("Rule 2 keeps `sdk.supersede_point` out of the counted rows.",),
+        "`sdk.supersede_point` keeps the binder's `confidence` on the about edge.",
+    ),
+    # ── the PASSIVE ────────────────────────────────────────────────────────────
+    (
+        re.compile(
+            rf"\bno\s+{_PROPERTY_NOUN}\s+(?:is|are|gets?)\s+"
+            rf"(?:written|carried|set|stored)\b"
+        ),
+        ("No property is written by `sdk.supersede_point` on an about edge.",),
+        "`sdk.supersede_point` carries the binder's `confidence` on the about edge.",
+    ),
+    # ── the ADJECTIVE / PREPOSITIONAL forms ────────────────────────────────────
+    (
+        re.compile(rf"\bwithout\s+(?:any\s+)?{_PROPERTY_NOUN}\b"),
+        ("`sdk.supersede_point` writes the edge without properties.",),
+        "`sdk.supersede_point` writes the edge with the binder's `confidence` "
+        "and without a second name.",
+    ),
+    (
+        re.compile(r"\bproperty\s+free\b"),
+        ("`sdk.supersede_point` leaves its about edge property free.",),
+        "`sdk.supersede_point` carries the binder's `confidence` on the about edge.",
+    ),
 )
 
 #: What makes a denial a statement about HISTORY rather than about HEAD — read in
@@ -4328,7 +4483,22 @@ EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
 #: defect in the documents' house spelling, so both the numeral and the word must be
 #: read, attached to the count they belong to.
 _COUNT_NUMBER_TOKEN = re.compile(
-    r"\b(one|two|three|four|five|six|both|\d{1,2})\b", re.I
+    # ⛔ GROUP 1 is the NUMBER (`_declared_false_positive_counts` reads it), so the
+    # alternation is a capturing group, not a `(?:…)`.
+    r"\b("
+    # ⛔ DERIVED FROM THE TABLE, not typed. The reader stopped at `six` while
+    # `NUMBER_WORDS` and `ORDINAL_WORDS` both reach twelve, so a count written in
+    # WORDS above six was silently unread — and the failure message for it
+    # (*"no corrected passage states how many declared false positives there
+    # are"*) names a passage that plainly does state it (`#10200` review, cycle 7,
+    # executed: `seven` … `twelve` all returned `[]`). Today `len(
+    # NOT_AN_ABOUT_WRITER) == 1`, so this is a LATENT fail-open — and the width
+    # guard one leg up says "the tables already cover it" at 7–12, which is what
+    # made the gap invisible instead of loud. Building the alternation from
+    # `NUMBER_WORDS` makes the reader unable to be narrower than the table.
+    + "|".join(NUMBER_WORDS[index] for index in sorted(NUMBER_WORDS))
+    + r"|both|\d{1,2})\b",
+    re.I,
 )
 _DECLARED_FALSE_POSITIVE_PHRASE = re.compile(r"\b(?:false positives?|positives)\b", re.I)
 #: How far before the phrase a count may sit, and never across a sentence end.
@@ -4506,7 +4676,7 @@ def _denies_the_class_by_pattern(sentence: str) -> list[str]:
     """
     low = sentence.lower()
     hits: list[str] = []
-    for pattern in DENIAL_PATTERNS:
+    for pattern, _must_see, _must_not_see in DENIAL_PATTERNS:
         for match in pattern.finditer(low):
             if not _history_in_clause(low, match) and not _class_marker_negated(
                 low, match
@@ -4599,7 +4769,7 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     A denial is excused only when the CLAUSE carrying it is about HISTORY — see
     `HISTORY_MARKERS`; the exemption row gets no such escape.
 
-    ⚠️ STATED LIMITS — two, both measured, and neither is an implied promise:
+    ⚠️ STATED LIMITS — three, all measured, and none is an implied promise:
     1. **The denial is attributed to EVERY census key named in the SENTENCE.** The
        class-marker half is predicate-scoped (`_marker_itself_negated`), the
        denial half is not, so a sentence that names TWO keys and denies the class
@@ -4623,6 +4793,17 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
        the derived-numerals leg reads. Recorded here rather than in the issue that
        scoped the work (`#10149` out-of-scope (b)), because a bound that lives
        only in a tracker comment is invisible to the lane that must rely on it.
+    3. **The denial vocabulary is a set of FRAMES AND MARKERS, not a parser.** It
+       now reads the inflections and voices that were MEASURED green
+       (`DENIAL_PATTERNS`: base/infinitive, object, passive, adjective, and the
+       property named as `confidence`), and the literal list holds the
+       third-person spellings the documents write — but a denial phrased with a
+       verb, a noun or a construction in NEITHER place stays green. That is the
+       same open vocabulary this leg has always had, and it is listed here because
+       the limit enumeration above asserts it is COMPLETE: *"two"* was itself a
+       coverage claim, and the round that closed the five measured spellings found
+       it still said two (`#10200` review, cycle 7). A bound left out of this list
+       is a bound a lane will rely on.
     """
     offenders: list[str] = []
     for label, text in sections:
@@ -4977,6 +5158,58 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "a NEGATED class statement about a counted writer is not seen as a "
         "denial, so `#10149`'s claim restated in the class's own vocabulary "
         "is green"
+    )
+    # Probe 4b: THE VOICE AND INFLECTION. The literal vocabulary is written in the
+    # third person and in SUBJECT position, so the same claim in the base form, in
+    # the object voice, in the passive, or with the property named as `confidence`
+    # was GREEN — five measured spellings, one defect (`#10200` review, cycle 7).
+    # ⛔ This probe is the END-TO-END half; `DENIAL_PATTERNS`' own declared
+    # `must_see`/`must_not_see` pairs are the frame-level half.
+    other_voices = (
+        ("probe", "`sdk.supersede_point` is said to drop the property."),
+        ("probe", "`sdk.supersede_point` carries no `confidence` on an about edge."),
+        ("probe", "The guard exempts `sdk.supersede_point` from the census."),
+        (
+            "probe",
+            "No property is written by `sdk.supersede_point` on an about edge.",
+        ),
+        ("probe", "`sdk.supersede_point` leaves its about edge property free."),
+    )
+    missed_voices = [
+        sentence
+        for sentence in other_voices
+        if not any("supersede_point" in item for item in _denied_verdicts([sentence]))
+    ]
+    assert not missed_voices, (
+        "the rule reads only the third-person, subject-position spelling, so the "
+        "same denial in the base form / object voice / passive / under the "
+        "property's own name is green — the owner's own wording (*said to drop*) "
+        "is in that set: " + repr([sentence[:80] for _l, sentence in missed_voices])
+    )
+    # … and the mirror, as in every other probe above: the NEGATED form of the same
+    # predicates is TRUE prose about a counted writer and must NOT red, or the only
+    # way to clear the red is to weaken the record.
+    negated_voices = (
+        (
+            "probe",
+            "`sdk.supersede_point` does not drop the property: it re-materializes "
+            "it by property MAP.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` is not the only writer that carries the set by "
+            "property MAP.",
+        ),
+    )
+    false_reds = [
+        offender
+        for sentence in negated_voices
+        for offender in _denied_verdicts([sentence])
+    ]
+    assert not false_reds, (
+        "the widened vocabulary reds TRUE prose (`does not drop …`, `not the ONLY "
+        "writer`), so an editor clearing it must weaken the record: "
+        + repr(false_reds)
     )
     # Probe 5: the MEASURED cycle-3 denial with a bare open-defect reference
     # appended. `#10139` is NOT a history marker (`#10200` review): it excused
@@ -5776,6 +6009,20 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
         "positives'), so the stale count it exists for stays green whenever it "
         "is written in digits"
     )
+    # … and a count written in WORDS above SIX. The reader stopped at `six` while
+    # `NUMBER_WORDS`/`ORDINAL_WORDS` reach twelve, so a population that grows to
+    # seven exemptions would report *"no corrected passage states how many"* about
+    # a passage that plainly does — and the width guard above would say the tables
+    # already cover it (`#10200` review, cycle 7, executed: `seven` … `twelve`
+    # all returned `[]`).
+    wide_word_probe = (("probe", "the census holds seven declared FALSE POSITIVES"),)
+    assert _declared_false_positive_counts(list(wide_word_probe)) == [
+        ("probe: 'seven declared FALSE POSITIVES'", 7)
+    ], (
+        "the count rule stops at 'six' in words while the word tables reach "
+        "twelve, so a count above six is silently unread and the failure message "
+        "blames a passage that does state it"
+    )
     # … and the count is the token NEAREST the phrase, not the leftmost number in
     # a window: the guarded paragraph states three OTHER counts as numerals before
     # this one, so a window rule reads the population (`#10200` review, cycle 2,
@@ -6062,23 +6309,40 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
     # or it is the same DEAD instrument as a hyphenated literal — plus one
     # sentence it must NOT read, because the REBUILD note (`#10139`) is TRUE prose
     # that a counted writer's sentence may legitimately carry.
-    for pattern in DENIAL_PATTERNS:
-        assert pattern.search("transfers the about edge bare"), (
-            f"DENIAL_PATTERNS entry {pattern.pattern!r} cannot see the denial it "
-            "was written for (measured green at `#10200` review cycle 7)"
-        )
-        assert pattern.search("it transfers it bare"), (
-            f"DENIAL_PATTERNS entry {pattern.pattern!r} needs a fixed object "
-            "('the about edge'), so the rule is a spelling list in disguise"
-        )
-        assert not pattern.search(
-            "The REBUILD half of the supersede transfer is still bare (`#10139`)"
-        ), (
-            f"DENIAL_PATTERNS entry {pattern.pattern!r} reads the NOUN 'transfer' "
-            "(\"the transfer is still bare\"), so the true REBUILD note reds "
-            "whenever a counted writer is named in its sentence — that note is "
-            "required by `#10139`, so the only way to clear the red is to "
-            "delete it"
+    # ⛔ THE TABLE CARRIES ITS OWN PROBES, so a NEW frame cannot ship unmeasured:
+    # each entry declares the denials it MUST see, and the TRUE prose it must stay
+    # out of. Every `must_see` below is a sentence measured GREEN at `a03951455b`
+    # (`#10200` review), and every `must_not_see` is a sentence from this record
+    # that the same widening could have reddened — so the pair is the frame's own
+    # falsifier in both directions.
+    # ⚠️ THREE ASSERTIONS PER DIRECTION, because they prove different halves:
+    #   * `pattern.search` on the FLATTENED spelling — the FRAME can see the
+    #     spelling. Flattened because that is the text the RULE is handed
+    #     (`_claim_sentences` → `_flat`): measured, the raw `carries no
+    #     `confidence`` does not match the frame while its flattened form does, so
+    #     probing the raw sentence tests the probe, not the frame;
+    #   * `_denies_the_class_by_pattern` — the RULE (frame + the history and
+    #     polarity escapes) reaches it. A must_see/must_not_see pair checked at the
+    #     frame alone cannot express the escapes at all: *"does not drop the
+    #     property"* MATCHES the drop frame and is still correct true prose,
+    #     because `_class_marker_negated` suppresses it. Measured — the frame-only
+    #     form of this probe failed on exactly that sentence.
+    for pattern, must_see, must_not_see in DENIAL_PATTERNS:
+        for denial in must_see:
+            assert pattern.search(_flat(denial).lower()), (
+                f"DENIAL_PATTERNS entry {pattern.pattern!r} cannot see the denial "
+                f"it was written for: {denial!r}"
+            )
+            assert _denies_the_class_by_pattern(_flat(denial)), (
+                f"DENIAL_PATTERNS entry {pattern.pattern!r} matches {denial!r} at "
+                "the frame, but the RULE does not reach it — an escape is "
+                "suppressing the denial it was written for"
+            )
+        assert not _denies_the_class_by_pattern(_flat(must_not_see)), (
+            f"DENIAL_PATTERNS entry {pattern.pattern!r} reads TRUE prose it must "
+            f"stay out of: {must_not_see!r} — clearing that red means weakening "
+            "the record, which is the failure mode every round of this review "
+            "has filed"
         )
     # … and must NOT flag the live flattened spelling of the same words.
     for spelling in ("MAP form", "NAMED form", "re materializ", "pre-#9417"):
