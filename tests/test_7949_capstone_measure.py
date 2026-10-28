@@ -856,7 +856,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8883-8887) and `result["classify_later"]` (:8873-8879). The
-    drop is the meta fold at `tortoise/sdk.py:13217` — **re-derived from the tree at
+    drop is the meta fold at `tortoise/sdk.py:13282` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
@@ -1148,7 +1148,8 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 #
 # ⚠️ Coverage is every cite that NAMES ITS FILE (`sdk.py`, `edges.py`,
 # `extractor_v2.py` — the three sources the bundle prints numbers for), in all
-# FIVE documents a reader is sent into: the README, both probes, the
+# SIX documents a reader is sent into: the README, both probes, the E-row audit
+# (`E1-E5-PROOFS.md`, the sixth and newest — `#10108`), the
 # `docs/00_index.md` row that is the entry point to this bundle, and the
 # extractor's shared design doc `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
@@ -1166,6 +1167,12 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    # #10108 review (P2): the E-row audit's own `file:line` cites (the gate's
+    # step list, the two extractor surfaces, the receipt fold) were read by no
+    # sweep at all — a document whose thesis is "a claim nothing re-checks can
+    # rot silently" cannot leave its own claims unwatched.
+    ("E1-E5-PROOFS.md",
+     _REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md"),
     ("probes/capstone_measure.py", PROBE),
     ("probes/capstone_run.py",
      _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
@@ -1212,7 +1219,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13217`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
+# `tortoise/sdk.py:13282`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8883-8887``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1444,10 +1451,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     """Every live `file.py:line` cite that names its file → the code it names there.
 
     Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
-    `extractor_v2.py`) across `README.md`, both probes, the `docs/00_index.md` row
-    that is the bundle's entry point, and the `docs/architecture/
-    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 45 cites at
-    this head.
+    `extractor_v2.py`) across `README.md`, both probes, the E-row audit
+    (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
+    point, and the `docs/architecture/
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 50 cites at
+    this head (`#10108` added the sixth document; the count is MEASURED, and it
+    moves with the documents, so re-read `checked` rather than trusting this line).
 
     The architecture doc was the LAST unread one, and it hid a false PASS: its D3
     cite (`run_s2(...)` passing `edus=edus`) was re-derived onto `:7804` — a
@@ -1480,7 +1489,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13217` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:13282` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]

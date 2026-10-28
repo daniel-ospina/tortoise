@@ -150,6 +150,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
+    # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
+    # never rides a shared server graph. The delenv IS the point; the
+    # fixture-param monkeypatch auto-restores (no lane leak).
+    "test_9567_record_capstone.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
@@ -318,6 +324,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # subdirectory twin is not authorized).
     "e2e/test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
+    # #10164: the per-test `graph` fixture has TWO handles on one database — it
+    # seeds a `:Document` through `proj` and then runs the migration through a
+    # `TortoiseSDK`. `TortoiseSDK` resolves its target from TORTOISE_DB_URI
+    # (`tortoise/sdk.py:7481`) and falls back to the EMBEDDED path (`:7502`),
+    # while the fixture's `_live_uri()` fell back to the provisioned legacy
+    # service — so on a URI-less lane (every tier-2 leg) the seed and the
+    # migration landed in two DIFFERENT databases and 19 cases reported "0
+    # node(s) relabelled" on a migration that is green. The setenv IS the fix:
+    # it makes the SDK FOLLOW the graph the fixture seeds (the `test_ingest.py`
+    # shape), so the cases still RUN on both lanes instead of skipping. The
+    # fixture-param monkeypatch auto-restores at teardown — no lane leaks.
+    "test_5140_d10_relabel_migration.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #3065 (bounded-socket resolver): the indexer case FORCES the docker lane

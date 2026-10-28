@@ -57,7 +57,14 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    constant the live fold would have written (#9634). Named honestly, including
    its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
    plan against the VIEW, so it cannot see a property the VIEW carries — the
-   bound on the exception is the drift pin, not that test.
+   bound on the exception is the drift pin, not that test. A **second** declared
+   exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half, #9974): a
+   property the record is FORBIDDEN to store and the cache must COMPUTE from the
+   columns it does carry — `status` from a supersession carrier
+   (`supersededBy`/`supersededAt`). Same bound, same pin shape; the divergences
+   from the record's own `public.*_current_status` views (their `ELSE 'live'`
+   branch, and their `IS NOT NULL` reading of an empty carrier) are measured and
+   named at that table, as is the residue it deliberately does NOT derive.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -102,6 +109,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "DERIVED_FROM_RECORD",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
@@ -249,9 +257,13 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
 #: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
-#:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
-#:   so nothing a record row carries could contradict this table, and the cache
-#:   seeds it through the fold.
+#:   `record_projection.OpDispatch.never_store`); the schema has no column for it.
+#:   It is NOT a constant this table may fill, because it is not a DEFAULT here:
+#:   it is DERIVED from another column the record does hold, and that derivation
+#:   is :data:`DERIVED_FROM_RECORD`'s job (below). Filling `'live'` from this
+#:   table would *fabricate* a positive claim over a value the record carries —
+#:   the one thing a fold-derived default must never do (#9634's own rule:
+#:   a default stands in where the record is SILENT).
 #: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
 #:   REBUILD INSTANT, so there is nothing for a table to pin.
 #: * `Source.sourceKind` — ONTOLOGY §4.6 REQUIRED, `public.source.source_kind`
@@ -313,6 +325,123 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
     "Subject": {"subjectKind": "other"},
     "Object": {"objectKind": "other", "title": ""},
+}
+
+#: The CACHE-owned lifecycle properties, DERIVED from record COLUMNS — the
+#: *other half* of §2.6's split, and the half the CACHE had no owner for (#9974).
+#:
+#: WHY THIS TABLE EXISTS. §2.6 (`02-identity-and-placement.md`) classifies
+#: `Object.status` / `Subject.status` as **DERIVED (a cache)** — *"the journal
+#: value is not the record"* — and both schemas refuse the name in `props`
+#: (`chk_object_props_no_derived` #8179, `chk_subject_props_no_derived` #8263),
+#: so the record must not store it. The record layer DOES define the fold —
+#: `public.object_current_status` / `public.subject_current_status`
+#: (`20261012000004_record_procedural.sql`) compute it as
+#: `superseded_by IS NOT NULL OR superseded_at IS NOT NULL → 'superseded' ELSE
+#: 'live'` — but the CACHE projection invoked no fold, so a **record-sourced
+#: rebuild** materialized every `:Object` with no `status`. And
+#: `live._terminal_excluded` reads an ABSENT status as LIVE *by design* (the
+#: legacy-node rule), so a superseded Object came back LIVE and
+#: `entity_identity.resolve_entity_id` resolved a name to it. That is #9974,
+#: measured: superseded live → rebuild → `status` NULL → the name resolves to
+#: the superseded id.
+#:
+#: WHY DERIVATION AND NOT A FILL. `status` is not a constant: the fold derives
+#: it from the event stream (`_fold_object_superseded` → `'superseded'`;
+#: `status_folds` / `_fold_object_status` → the connector and pack-declared
+#: vocabularies; `EntityMutated op=restatus` → a caller's explicit lifecycle
+#: write). `FOLD_ON_CREATE_DEFAULTS` above may NOT fill it, because filling
+#: `'live'` where the record names a supersession would replace a carried value
+#: with a fabricated one.
+#:
+#: WHAT THIS TABLE CAN AND CANNOT DERIVE — stated, because "a cache owns it" is
+#: only true where the record carries the signal, and the residue is a decision
+#: rather than an omission (#9974):
+#:
+#: * **DERIVED — a supersession, from EITHER PRIMARY carrier.** §2.6 makes
+#:   `supersededBy` AND `supersededAt` PRIMARY, and the record's own views read
+#:   them with `OR`. Both carriers are needed because the record genuinely
+#:   produces rows with only one of them: an id-only (legacy §6b)
+#:   `ObjectSuperseded` writes `superseded_at` ALONE and replays through the
+#:   fold as `status='superseded'` with `supersededBy=''`
+#:   (`test_status_projection.py::test_rebuild_all_legacy_6b_id_only_shape_supersedes`,
+#:   #2164/#2193), while an `op=supersede` mutation may write `superseded_by`
+#:   with no instant. Deriving from `supersededBy` alone left the id-only shape
+#:   resurrected — #9974's own measured defect, still open on a shape the record
+#:   still emits.
+#:   ⚠️ TWO deliberate divergences from those views, both measured, so neither is
+#:   a guess:
+#:   (a) The views' `ELSE 'live'` branch is NOT mirrored. An absent status
+#:   already reads LIVE to `live._terminal_excluded` (its documented legacy-node
+#:   rule), so the branch changes no terminal decision — while WRITING `'live'`
+#:   would assert a positive lifecycle claim about a row whose real status the
+#:   record may carry elsewhere (a `restatus`, below) and this table cannot
+#:   read. Same no-fabrication rule `FOLD_ON_CREATE_DEFAULTS` obeys.
+#:   (b) A carrier must be PRESENT AND NON-EMPTY, which is narrower than the
+#:   views' `IS NOT NULL` — and it is the views, not this table, that are wrong
+#:   on that edge. Measured on a live engine:
+#:   `update_entity(obj, supersededBy="")` leaves the node
+#:   `status='live', supersededBy=''`, so `'' IS NOT NULL` makes
+#:   `public.object_current_status` answer `'superseded'` for a node the graph
+#:   holds LIVE. Truthiness agrees with the graph here, so it is what this table
+#:   uses; `tests/test_cache_projection.py`'s
+#:   `test_an_empty_carrier_is_not_a_supersession` pins the measured edge.
+#: * **NOT MONOTONE — the carriers CAN be cleared, and the record writes that.**
+#:   An explicit `sdk.update_entity(obj, status='live', supersededBy=None,
+#:   supersededAt=None)` journals `EntityMutated op=supersede` with null state and
+#:   the record mutation is `UPDATE public.object SET superseded_by = %s,
+#:   superseded_at = %s` bound to `(None, None)` — measured, carriers cleared, and
+#:   a rebuild then correctly derives nothing. Only the STATUS-ONLY
+#:   `update_entity(status='live')` shape is a record no-op (`never_store` yields
+#:   a literal `SET node_key = node_key`), so only that shape leaves an
+#:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
+#:   express un-superseded"; it can, via the carriers.
+#: * **⚠️ NOT SOUND FOR A CARRIER SET WITHOUT THE STATUS FOLD — a LIVE-WRITER
+#:   divergence, measured and OWNED BY #10192.** A carrier present does NOT imply
+#:   the node's `status` is `'superseded'`. Measured on a live engine at this
+#:   head, all three ACCEPTED by `update_entity`:
+#:
+#:       update_entity(obj, supersededBy='v2')                  -> status='live', supersededBy='v2'
+#:       update_entity(obj, supersededAt='2026-01-01T00:00:00Z') -> status='live', supersededAt='…'
+#:       update_entity(obj, supersededBy='')                    -> status='live', supersededBy=''
+#:       update_entity(obj, status='superseded', supersededBy='p-v2') -> status='superseded'  (the coherent pair)
+#:
+#:   The record writes the carrier (`op=supersede` is the classifier's reading of
+#:   that write), so a rebuild would materialize a TERMINAL node for an entity
+#:   the live graph holds LIVE — `live._terminal_excluded` drops it from recall
+#:   and `entity_identity.resolve_entity_id` refuses its name. BOTH carriers are
+#:   exposed; the empty-carrier case is the one this table escapes (see (b)
+#:   above), and the non-empty cases are #10192's, which owns the fix (a write-door
+#:   coherence guard vs a change to the record's fold — its decision, not this
+#:   table's). This table does not try to compensate: it cannot see the graph, and
+#:   inventing a second rule here would give the cache and the record two
+#:   different folds — the defect #9974 is about.
+#: * **NOT DERIVED — `superseded`, and every other `restatus` value
+#:   (`deprecated`/`archived`/`retracted`/`draft`), plus the event-kind
+#:   vocabularies.** `superseded` is named FIRST because it is the value this
+#:   table exists to derive and it too can be reached WITHOUT a carrier: measured,
+#:   `update_entity(subject, status='superseded')` leaves `status='superseded'`
+#:   with `supersededBy`/`supersededAt` both absent, and the record mutation is
+#:   the `never_store` no-op. An explicit `update_entity(status=…)` journals
+#:   `EntityMutated op=restatus`, whose ONLY carrier of the value is
+#:   `public.journal_event.payload` (`state.status`) — `public.object` has no
+#:   row-level trace, and the props tail refuses the name. So #9974 stays open on
+#:   every `restatus` shape, `superseded` included; it is NOT closed by the
+#:   carrier derivation. Those values are NOT recoverable from the record's
+#:   LAYER tables, which is what this projection reads. Recovering them means
+#:   changing what a record-sourced rebuild READS (the journal, or a schema
+#:   column) — an ownership decision on #9974, not a silent default here. Naming
+#:   it is the bound on this table: it narrows #9974's window, it does not close
+#:   it.
+#:
+#: `(property, source properties, value)`, applied in :func:`node_from_row` only
+#: where the record is SILENT about the target property — which, for a name the
+#: schema refuses, is always. The value is derived when ANY declared source is
+#: present and non-empty; the sources are alternatives (the record emits each
+#: alone), never a preference order.
+DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
+    "Object": (("status", ("supersededBy", "supersededAt"), "superseded"),),
+    "Subject": (("status", ("supersededBy", "supersededAt"), "superseded"),),
 }
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
@@ -723,6 +852,23 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
         if props.get(prop) is None:
             props[prop] = default
+    # §2.6's DERIVED half (#9974): the cache COMPUTES a projection-owned
+    # property from the columns the record does carry. Applied AFTER the
+    # defaults and only where the record is silent about the target, so a record
+    # that ever states the value wins over the derivation. `_props_from_row`
+    # cannot state it for `status` (the schema refuses the name), which is why
+    # this is the only path that can put a lifecycle value on a rebuilt node.
+    #
+    # ANY declared source suffices, and it must be non-empty — the sources are
+    # alternatives (the record emits each alone: an id-only legacy supersession
+    # carries `supersededAt` and NOT `supersededBy`), never a preference order.
+    # A single-source reading left the id-only shape underived and therefore
+    # LIVE on rebuild, which is #9974 itself. Truthiness (not the record views'
+    # `IS NOT NULL`) is deliberate: an empty carrier is measured to coexist with
+    # a LIVE node; see DERIVED_FROM_RECORD's bound.
+    for prop, sources, value in DERIVED_FROM_RECORD.get(label, ()):
+        if props.get(prop) is None and any(props.get(src) for src in sources):
+            props[prop] = value
     return RecordNode(label=label, key=raw, props=props)
 
 
@@ -786,13 +932,55 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     cur = _rp.scope_connection(conn, org_id)
     for label in labels:
         table = NODE_TABLES[label]
+        # #10017 R2: the tier is a COLUMN, not a reader's opinion. A turn row is
+        # `record_only` — §9.1 keeps raw turns outside the graph — and the cache
+        # must not materialise it, or `rebuild_from_record` would re-create the
+        # turn nodes the journal rebuild correctly skips: two rebuild routes,
+        # two different graphs. An "except turns" predicate here would be
+        # inherited by nobody; the next export or sibling projection reading
+        # this table would node-ify the row again.
+        # ⚠️ Spelled `= 'graph'`, NOT the `<> 'record_only'` a reader might
+        # prefer while there are only two tiers: the migration declares the
+        # partial index `WHERE cache_tier = 'graph'`, and PostgreSQL uses a
+        # partial index only when the query's predicate IMPLIES the index
+        # predicate. Measured on postgres:16 over one tenant's rows —
+        # `= 'graph'` plans as `Index Scan using idx_point_graph_tier` with no
+        # filter, `<> 'record_only'` as `idx_point_scope` plus `Filter:
+        # (cache_tier <> 'record_only')`, i.e. every row of the record's
+        # highest-volume table read and thrown away. A third tier added later
+        # must therefore be a place someone LOOKS, which is the point.
+        tier = " AND cache_tier = 'graph'" if table == "point" else ""
         for row in _rows(cur, f"SELECT * FROM public.{table} "
-                              "WHERE org_id = %s AND graph_id = %s",
+                              "WHERE org_id = %s AND graph_id = %s" + tier,
                          (org_id, graph_id)):
             nodes.append(node_from_row(label, row))
+    # …and its EDGES go with it (#10017 R2 review): a CONTAINS edge to a
+    # `record_only` turn is planned against a node this view deliberately does
+    # not project, so `rebuild_from_record` records it in
+    # `relations_not_written` — which makes the operator-facing "declared
+    # partial" signal permanently non-empty for every tenant with tiered turns,
+    # and therefore worthless. The endpoint subquery is label-agnostic on
+    # purpose: `point` is the only tiered table, and a key that is not a point
+    # simply never matches it.
+    # ⚠️ `<> 'graph'` is the COMPLEMENT and it is deliberately unindexed: a
+    # partial index is only used where the predicate implies it, so this scans
+    # `idx_point_scope` + filter. Acceptable here and nowhere else — this is the
+    # rebuild path, and the node read above keeps the `= 'graph'` spelling that
+    # its index can serve.
+    record_only = ("SELECT node_key FROM public.point "
+                   "WHERE org_id = %s AND graph_id = %s "
+                   "AND cache_tier <> 'graph'")
+    # ⚠️ The exclusion is scoped to `Point` ENDPOINTS: `node_identity` is keyed
+    # `(org_id, graph_id, node_label, node_key)`, so another label may legally
+    # carry the same key STRING as a record-only point — an unscoped `NOT IN`
+    # would drop that edge from the view AND from `relations_not_written`
+    # (whose denominator excludes it): a silent edge loss with no signal.
     for row in _rows(cur, f"SELECT * FROM public.{RELATION_TABLE} "
-                          "WHERE org_id = %s AND graph_id = %s",
-                     (org_id, graph_id)):
+                          "WHERE org_id = %s AND graph_id = %s "
+                          f"AND NOT (src_label = 'Point' AND src_key IN ({record_only})) "
+                          f"AND NOT (tgt_label = 'Point' AND tgt_key IN ({record_only}))",
+                     (org_id, graph_id,
+                      org_id, graph_id, org_id, graph_id)):
         relations.append(relation_from_row(row))
     return RecordView(nodes=tuple(nodes), relations=tuple(relations))
 

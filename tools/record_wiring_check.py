@@ -327,11 +327,6 @@ def layer_writers() -> tuple[dict[str, list[str]], list[str]]:
 _IMPLICIT_TABLES: dict[str, tuple[str, ...]] = {
     "RelationUpsert": ("relation",),
     "RelationDelete": ("relation",),
-    # #9973: the repoint family's own effect — a MOVE (one DELETE at the pre-move
-    # endpoint + one upsert at the successor), so it writes the same layer as the
-    # two above. Missing from this map the check CANNOT-ANSWER (exit 2) on
-    # `DirectEdgeRepoint`, which is how the omission was caught.
-    "RelationMove": ("relation",),
     # The refusal STAYS in the event stream: it writes no layer row by design
     # (NoRecordEffect, #9187/#9200 row 4).
     "NoRecordEffect": (),

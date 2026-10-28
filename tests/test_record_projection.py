@@ -237,6 +237,18 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "SessionNarrated": {"id": "e1", "sessionId": "sess1",
                        "story_arc": "the session, told as prose",
                        "summary": "one line"},
+    # #10017: the raw-TURN carrier. Its producer is step 7, so this is the shape
+    # that producer will emit: the capture writer's own per-turn snapshots
+    # (`record_projection.TURNS_SNAPSHOT_KEYS`) under `turns`, with the
+    # `contains_session` link on the ENVELOPE (#3947) — not an invented shape.
+    # It declares `NoRecordEffect`, so it must produce NO statement at all.
+    "TurnsRecorded": {"id": "e1", "sessionId": "sess1",
+                      "contains_session": "sess1",
+                      "turns": [{"id": "sess1_t0", "content": "hi",
+                                 "pointKind": "event", "speaker": "user",
+                                 "is_episodic": True, "status": "draft",
+                                 "createdAt": "2026-10-25T00:00:00Z",
+                                 "embedding": None}]},
     "SessionDeleted": {"id": "sess1"},
     "EntityLinked": {"id": "p1", "source_label": "Point", "source_id": "p1",
                      "target_label": "Object", "target_id": "o1",
@@ -2166,141 +2178,305 @@ def test_direct_edge_repoint_delete_only_deletes_rather_than_upserts():
     assert params == ("o", "g", "aboutPoint", "p1", "p2", 0)
 
 
-# ── #9972 / #9973: the transfer descriptor is a MOVE, with a NAME-keyed target ─
-#
-# Two independent defects in the SAME descriptor, which is why they are pinned
-# separately: the record resolved the target by the label's ID column (#9972,
-# the successor's edge landed 0 rows) and applied the descriptor as an upsert at
-# its own `src` (#9973, the superseded point kept the edge and the successor
-# never got it). Both are measured at the plan seam — the emitted statement set —
-# because that is what the replay executor runs.
+# ════════════════════════════════════════════════════════════════════════════
+# §4.4 pass-2b — a STRUCTURAL `DirectEdgeRepoint` is a MOVE (#9972 + #9973)
+# ════════════════════════════════════════════════════════════════════════════
 
 
-def _structural_repoint(**overrides):
-    """The 2b transfer descriptor EXACTLY as `sdk.supersede_point` journals it.
+def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",
+                       **extra):
+    """The 2b descriptor `sdk.supersede_point` journals (sdk.py:16657)."""
+    return {"type": "DirectEdgeRepoint", "ts": "T",
+            "id": f"{src}->p2:{edge_type}:{tgt}",
+            "src": src, "tgt": tgt, "target_label": "Object",
+            "edge_type": edge_type, **extra}
 
-    `tgt` is the graph's replay key (`stub_key`): a NAME for the about* family,
-    a url for the two Source rels. `new_id` is the direct successor (#9973).
+
+def test_the_structural_repoint_map_is_the_folds_own():
+    """The restated rel→label map IS the fold's, and it is the ROUTER.
+
+    Two failure modes are pinned, not one: a label that drifted from
+    `projection/edges.py::STRUCTURAL_REL_LABELS` would resolve the target in the
+    wrong table, and a rel this map lists that the fold does NOT consider
+    derivable would route a descriptor through the move path that the graph
+    never re-creates (`DERIVABLE_STRUCTURAL_RELS`).
     """
-    record = {"type": "DirectEdgeRepoint", "ts": "T2",
-              "id": "P1->P2:aboutObject:Acme Corp", "src": "P1",
-              "tgt": "Acme Corp", "target_label": "Object",
-              "edge_type": "aboutObject", "new_id": "P2"}
-    record.update(overrides)
-    return record
+    from tortoise.projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS
+
+    assert rp._STRUCTURAL_REL_LABELS == STRUCTURAL_REL_LABELS, (
+        rp._STRUCTURAL_REL_LABELS, STRUCTURAL_REL_LABELS)
+    assert set(rp._STRUCTURAL_REL_LABELS) == set(DERIVABLE_STRUCTURAL_RELS), (
+        sorted(rp._STRUCTURAL_REL_LABELS), sorted(DERIVABLE_STRUCTURAL_RELS))
 
 
-def test_a_structural_repoint_moves_its_edge_to_the_successor():
-    """#9973: the descriptor means MOVE — remove at old, create at the successor.
+def test_the_terminal_status_set_is_the_canonical_ones():
+    """The move's `_src_is_terminal` gate uses the canonical status partition.
 
-    The graph's pass-2b deletes the edge at the pre-supersede point and MERGEs it
-    at `_final(src)` (`projection/__init__.py`). The record upserted at the
-    descriptor's own `src`, so the SUPERSEDED point kept the edge the graph
-    deleted and the successor never received it — the exact inverse of
-    `test_about_edge_follows_successor_after_second_rebuild`, and a violation of
-    E2E-11.6 (`sdk.py`: zero direct edges incident to a superseded point, live AND
-    post-rebuild).
+    Restated for the STANDALONE load (the PGlite harness loads this module by
+    file path, so `tortoise.live` is not importable there), and pinned here: a
+    status added to the vocabulary without being classified in `live.py` would
+    otherwise silently make the record's gate looser than the fold's.
+
+    The pin is `TERMINAL_EXCLUDED_STATUSES`, NOT `TERMINAL_STATUS_VALUES`: the
+    graph's gate is `_terminal_excluded`, whose vocabulary is the point set PLUS
+    the legacy `deprecated` member (`live.py` — no writer emits it, legacy graphs
+    carry it, and it must never be served as current). Pinning to
+    `TERMINAL_STATUS_VALUES` alone let the record's gate be narrower than the
+    fold's by exactly that member, so the test certified a drift it existed to
+    catch.
     """
-    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
-    assert [s.sql.split()[0] for s in statements] == ["DELETE", "INSERT"], \
-        [s.sql for s in statements]
-    delete, insert = statements
-    # 1. the pre-move row is REMOVED (a move with no delete is an upsert)
-    assert delete.sql.startswith("DELETE FROM public.relation"), delete.sql
-    assert "P1" in delete.params, delete.params
-    assert "Acme Corp" in delete.params, delete.params
-    # 2. the row is CREATED at the SUCCESSOR — not at the descriptor's own src
-    assert "P2" in insert.params, (
-        "the successor's row is never written — the descriptor's src is the OLD "
-        f"point: {insert.params}")
-    assert "P1" not in insert.params, (
-        "the edge is still written at the superseded point: "
-        f"{insert.params}")
+    from tortoise.live import TERMINAL_EXCLUDED_STATUSES
+
+    assert frozenset(rp._TERMINAL_POINT_STATUSES) == TERMINAL_EXCLUDED_STATUSES, (
+        rp._TERMINAL_POINT_STATUSES, TERMINAL_EXCLUDED_STATUSES)
+    predicate = rp._terminal_point_sql("p")
+    for status in TERMINAL_EXCLUDED_STATUSES:
+        assert f"'{status}'" in predicate, (status, predicate)
+    assert "'deprecated'" in predicate, predicate
+    # The legacy flag is the partition's second leg (`live._terminal_excluded`)
+    # and it lives in the `outdated` COLUMN — the record writes it there (a
+    # `NodePatch` literal / a `point` payload key routed to the column by
+    # `_split_properties`), so the old `props ->> 'outdated'` form was always
+    # NULL and `PointInvalidated` (flag set, status untouched) read as LIVE here
+    # while the fold read it as terminal. Assert BOTH directions so a regression
+    # to the dead form reds instead of passing quietly.
+    assert "coalesce(p.outdated, false) = true" in predicate, predicate
+    assert "props ->> 'outdated'" not in predicate, predicate
 
 
 def test_a_structural_repoint_descriptor_resolves_its_name_keyed_target():
-    """#9972: the target is a NAME; the record matched it as an ID.
+    """#9972 indicator 1 — the target is resolved by NAME, never by id.
 
-    `stub_key` emits `target["name"]` for the about* family, and the graph
-    resolves it with `MATCH (x:{label} {{name:$key}})` (`edges.py`). The record
-    used `_ENTITY_MATCH_COLUMNS`, which is `id` for Object/Subject since #9881 —
-    a column a minted id (`label[:3]-<sha256[:26]>`) can never equal, so EVERY
-    such descriptor landed 0 rows in silence.
+    The descriptor's `tgt` is the target's REPLAY KEY, which `stub_key`
+    (`projection/edges.py`) mints as a `name` for the about* family — while
+    `_ENTITY_MATCH_COLUMNS` files an Object/Subject by its ID. Resolving the
+    descriptor against `id` matched `object.id = 'Acme Corp'`: a successful
+    0-row `INSERT … SELECT`, no error, nothing on `record_write_failures`.
     """
     statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
-    for statement in statements:
-        assert "Acme Corp" in statement.params, statement.params
-        # the TARGET predicate specifically — `graph_id = %s` also contains the
-        # substring `id = %s`, so a bare search cannot tell the two apart.
-        assert "public.object WHERE org_id = %s AND graph_id = %s AND id = %s" \
-            not in statement.sql, statement.sql
-        assert "public.object WHERE org_id = %s AND graph_id = %s AND name = %s" \
-            in statement.sql, statement.sql
+    assert statements, "the descriptor emitted nothing at all"
+    joined = "\n".join(s.sql for s in statements)
+    params = [p for s in statements for p in s.params]
+    assert "Acme Corp" in params, params          # the descriptor's replay key
+    # ⛔ The predicate, not the bare substring: `graph_id = %s` contains "id = %s",
+    # so an unqualified assertion passes over the very bug it names.
+    assert "t.id = %s" not in joined, joined      # an id can never carry that value
+    assert "t.name = %s" in joined, joined        # edges.py resolves by NAME
+    # The row is filed under the label the FOLD resolves, which it derives from
+    # the REL — the descriptor's own `target_label` is not the router.
+    assert "tgt_label = %s" in joined
+    assert "Object" in params, params             # the label the fold resolves
 
 
-def test_an_ambiguous_name_keyed_target_lands_no_row_at_all():
-    """#5509 in SQL: a name held by 2+ carriers has no single target.
+def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
+    """#9973 indicator 1 — the move has TWO halves: remove at old, create at final.
 
-    The graph refuses (`_refuse_ambiguous_target`): a name that does not name ONE
-    identity is not resolved, and picking an arbitrary holder is what #5509
-    removes. The record must REFUSE the same way — both halves of the move resolve
-    to zero rows, so neither the delete nor the insert lands.
+    The descriptor's `src` is the point being SUPERSEDED (`sdk.py` 2b emission,
+    `src=old_id`), so an upsert at `src` both kept the row the graph deleted and
+    never wrote the successor's. #9972 alone is unobservable: a target-only fix
+    re-writes the same wrong row (and erases its attributes through the
+    `ON CONFLICT` path), which is why the two land as ONE change.
     """
-    for statement in rp.mutations_for(_structural_repoint(), org_id="o",
-                                      graph_id="g"):
-        assert "count(*) FROM public.object" in statement.sql, statement.sql
-        assert ") = 1" in statement.sql, statement.sql
+    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
+    assert len(statements) == 2, statements   # the two halves of ONE mutation
+    delete = next((s.sql for s in statements
+                   if "DELETE FROM public.relation" in s.sql), "")
+    inserts = [s for s in statements if "INSERT INTO public.relation" in s.sql]
+    assert delete, "a supersede's transferred edge is never removed from the old point"
+    assert inserts, "the successor's row is never written"
+    # The delete keys the SUPERSEDED point (`depth = 1` is the chain's root) and
+    # the row's resolved target — the fold's own re-query.
+    assert "src_key = (SELECT node_key FROM succ WHERE depth = 1)" in delete, delete
+    assert "src_label = 'Point'" in delete, delete
+    # The insert files the chain's TERMINAL row (`next_id IS NULL`), not `src`.
+    insert = inserts[0].sql
+    assert "succ WHERE next_id IS NULL" in insert, insert
+    assert "'Point', dest.node_key" in insert, insert
+    # `_final(src) == src` is a clean NO-OP, not a delete-then-reinsert: a
+    # re-created LIVE incarnation owns its edges (`_src_is_terminal`).
+    for sql in (delete, insert):
+        assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
+        assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL)" in sql, sql
+        # ⛔ The DESTINATION conjunct, on BOTH halves. Without it the pair is not
+        # one mutation: a cyclic or >32-hop chain satisfies the two conjuncts
+        # above (src is terminal and HAS a successor) while the INSERT's `dest`
+        # subquery is empty, so the DELETE ran and wrote no replacement — the row
+        # left the superseded point and landed nowhere.
+        assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NULL)" in sql, sql
+    # NO SELF-EDGE (E2E-11.6): a chain that collapses the endpoints onto one node
+    # must not mint `(X)-[:aboutPoint]->(X)`.
+    assert "dest.node_key <> tgt.node_key" in insert, insert
+    # A bare MERGE is what the fold's transfer is: no attribute SET, so an
+    # existing successor row keeps its own value (#9417) — `DO UPDATE` would
+    # overwrite it with the descriptor's absent attributes.
+    assert insert.rstrip().endswith("DO NOTHING"), insert
 
 
-def test_a_repoint_without_a_successor_keeps_the_upsert_it_can_place():
-    """A journal appended BEFORE `new_id` existed must not lose its edge.
+_DOC_MOVE_ANCHORS = {
+    "docs/ONTOLOGY.md": "applies a 2b descriptor as the same MOVE",
+    "docs/INGEST_CONTRACT.md": "applies the SAME descriptor as a MOVE",
+}
 
-    The record is allowed to be wrong-but-inert on a legacy descriptor; it is not
-    allowed to DELETE an edge it has no destination for. So a descriptor with no
-    `new_id` emits exactly the pre-#9973 upsert (one statement, no delete) — while
-    still resolving the target by the graph's replay key (#9972 applies to every
-    descriptor, legacy or not).
+
+def test_the_documented_record_side_move_is_the_move_the_record_emits():
+    """ONTOLOGY §4.4 and the supersede row describe the RECORD's half of the move.
+
+    #10191 landed that half and left both artifacts describing pass-2b only, so a
+    lane had to read `_structural_repoint_statements` to learn what the record
+    does with a 2b descriptor — and #10244 was spent re-deriving it. A doc is
+    only a fix if it stays true, so every clause below is asserted TWICE: the
+    artifact states it, and the emitted plan has the property it names. A
+    statement deleted from the doc, or a plan that stops doing it, reds here
+    instead of misinforming the next reader.
     """
-    legacy = _structural_repoint()
-    legacy.pop("new_id")
-    statements = rp.mutations_for(legacy, org_id="o", graph_id="g")
-    assert len(statements) == 1, [s.sql for s in statements]
-    assert statements[0].sql.startswith("INSERT INTO public.relation")
-    assert "name = %s" in statements[0].sql
+    root = Path(__file__).resolve().parents[1]
+    lines: dict[str, str] = {}
+    for path, anchor in _DOC_MOVE_ANCHORS.items():
+        text = (root / path).read_text(encoding="utf-8")
+        at = text.find(anchor)
+        assert at != -1, (
+            f"{path} no longer says what the RECORD does with a 2b "
+            "`DirectEdgeRepoint` (#9972/#9973/#10191) — the gap #10244 closed")
+        # The WHOLE line the anchor sits on: the clauses are stated across it, in
+        # both directions from the anchor (a table row, or one blockquote line).
+        start = text.rfind("\n", 0, at) + 1
+        lines[path] = text[start:].split("\n", 1)[0]
+
+    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
+    assert len(statements) == 2, statements             # the move, in two halves
+    delete, insert = statements[0].sql, statements[1].sql
+    assert "DELETE FROM public.relation" in delete, delete   # first half
+    assert "INSERT INTO public.relation" in insert, insert   # second half
+    point_arm = rp._structural_target_resolution(
+        "o", "g", "Point", "aboutPoint", "N", "")[0]
+
+    for path, line in lines.items():
+        # A MOVE spelled out — remove at the superseded point, then create.
+        assert "MOVE" in line and "`DELETE`" in line and "INSERT" in line, (path, line)
+        # The destination is the record's OWN successor chain (Interface A: the
+        # journal alone is sufficient — the descriptor carries no successor).
+        assert "superseded_by" in line, (path, line)
+        assert "superseded_by" in delete and "WITH RECURSIVE succ" in delete, delete
+        assert "no successor field" in line, (path, line)
+        assert "new_id" not in delete + insert, (delete, insert)
+        # ... and it lands at the chain's TERMINAL row, not at `src`.
+        assert "terminal" in line, (path, line)
+        assert "succ WHERE next_id IS NULL" in insert, insert
+        # The successor's own live value wins (#9417 / §11.1) — never `DO UPDATE`.
+        assert "DO NOTHING" in line and "§11.1" in line, (path, line)
+        assert insert.rstrip().endswith("DO NOTHING"), insert
+        assert "DO UPDATE" not in insert, insert
+        # #5509: a name held by two carriers is a refusal, not a pick.
+        assert "#5509" in line, (path, line)
+        assert "HAVING count(*) = 1" in point_arm, point_arm
+
+    # The full resolution table is stated in the ontology, so it is pinned there:
+    # a Point has no `name` column and resolves by `props ->> 'name'` (the
+    # property the fold's `MATCH (x:Point {name:$key})` reads); `aboutDocument`
+    # additionally needs the kind test, which is load-bearing on this route.
+    ontology = lines["docs/ONTOLOGY.md"]
+    assert "props->>'name'" in ontology, ontology
+    assert "props ->> 'name'" in point_arm, point_arm
+    assert "document_kind IS NOT NULL" in ontology, ontology
+    source_arm = rp._structural_target_resolution(
+        "o", "g", "Source", "aboutDocument", "https://x", "")[0]
+    assert "document_kind IS NOT NULL" in source_arm, source_arm
+    # Both halves carry the `_src_is_terminal` gate (an id-reuse point that was
+    # re-created LIVE owns its edges; moving them clobbers a live point).
+    assert "_src_is_terminal" in ontology, ontology
+    for sql in (delete, insert):
+        assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
 
 
-def test_a_repoint_chain_moves_the_edge_to_the_final_successor():
-    """A 3-link chain leaves the edge on the FINAL successor and nowhere else.
+def test_the_structural_move_reads_the_records_own_successor_chain():
+    """`_final(src)` is a `superseded_by` walk over `public.point` — no graph read.
 
-    The producer journals ONE descriptor per supersede step (X→Y transfers X's
-    edges; a later Y→Z transfers Y's), each carrying its own direct successor, so
-    replaying the moves in order composes to the graph's transitive `_final()`
-    result: the edge ends on Z, and the deletes at X and Y leave no row behind on
-    an intermediate point.
+    The record already holds the successor link (the `PointSuperseded` patch
+    writes `props->>'superseded_by'`), which is what makes the move derivable
+    from the journal alone (Interface A). The walk is depth-bounded AND
+    `path`-guarded: a cycle has no terminal, so nothing moves.
     """
-    journal = [
-        {"type": "PointAdded", "ts": "T1", "id": "X",
-         "point": {"content": "old claim", "status": "superseded"}},
-        {"type": "PointAdded", "ts": "T1", "id": "Y",
-         "point": {"content": "middle claim", "status": "superseded"}},
-        {"type": "PointAdded", "ts": "T1", "id": "Z",
-         "point": {"content": "final claim", "status": "live"}},
-        _structural_repoint(id="X->Y:aboutObject:Acme Corp", src="X", new_id="Y"),
-        _structural_repoint(id="Y->Z:aboutObject:Acme Corp", src="Y", new_id="Z"),
-    ]
-    plan = rp.replay_plan(journal, org_id="o", graph_id="g")
-    relation = [s for s in plan if "public.relation" in s.sql]
-    inserts = [s for s in relation if s.sql.startswith("INSERT")]
-    deletes = [s for s in relation if s.sql.startswith("DELETE")]
-    assert len(inserts) == 2 and len(deletes) == 2, (
-        [s.render() for s in relation])
-    # the edge is created at each step's successor …
-    assert ["Y" in s.params and "Z" not in s.params for s in inserts] == [True, False]
-    assert "Z" in inserts[1].params, inserts[1].params
-    # … and never re-created at the point it was moved OFF
-    assert "X" not in inserts[0].params, inserts[0].params
-    assert "X" not in inserts[1].params and "Y" not in inserts[1].params, \
-        inserts[1].params
+    cte, params = rp._supersede_chain_cte("o", "g", "p1")
+    assert cte.startswith("WITH RECURSIVE succ("), cte
+    assert "NULLIF(p.props ->> 'superseded_by', '')" in cte, cte
+    assert "s.path || n.node_key" in cte, cte
+    assert "NOT (n.node_key = ANY (s.path))" in cte, cte
+    assert params == ["o", "g", "p1", "o", "g", rp._SUPERSEDE_CHAIN_DEPTH], params
+
+
+def test_a_name_held_by_two_carriers_resolves_to_nothing():
+    """#5509 — the record refuses an ambiguous name instead of picking one.
+
+    The graph's `_refuse_ambiguous_target` records the non-folded entry and
+    skips the descriptor; `LIMIT 1` here would land the edge on a carrier the
+    graph never addressed (and, with the move, at a DIFFERENT point than the
+    graph's).
+    """
+    for label, rel in (("Object", "aboutObject"), ("Subject", "aboutSubject"),
+                       ("Event", "aboutEvent"), ("Point", "aboutPoint")):
+        select, params = rp._structural_target_resolution("o", "g", label, rel,
+                                                          "Acme Corp", "tgt")
+        assert "HAVING count(*) = 1" in select, select
+        assert "LIMIT 1" not in select, select
+        assert params == ["o", "g", "Acme Corp"], params
+    # `public.point` has NO `name` column — a Point's name is a PROPERTY, which is
+    # where the record stores it (and what the fold's `MATCH (x:Point {name:$key})`
+    # reads). An id match here would silently resolve nothing.
+    point_select, _ = rp._structural_target_resolution(
+        "o", "g", "Point", "aboutPoint", "N", "tgt")
+    assert "props ->> 'name'" in point_select, point_select
+
+
+def test_aboutdocument_stays_resolve_only_and_document_only():
+    """D10/#5206 — a document target is a `:Source` carrying `document_kind`.
+
+    `resolve_structural_target`'s `aboutDocument` arm resolves ONLY a document
+    (never mints, never mis-points); `extractedFrom` keeps the canonical
+    Source identity triple. A descriptor keyed on `url` alone cannot tell a
+    document from a provenance `:Source`, so the kind test is load-bearing on
+    the descriptor route — the record must not be looser than the fold.
+    """
+    document, _ = rp._structural_target_resolution(
+        "o", "g", "Source", "aboutDocument", "https://x/doc", "tgt")
+    assert "document_kind IS NOT NULL" in document, document
+    assert "HAVING count(*) = 1" in document, document
+    extracted, params = rp._structural_target_resolution(
+        "o", "g", "Source", "extractedFrom", "https://EXAMPLE.com/a", "tgt")
+    # The SAME canonical precedence the point-property family passes — one rule
+    # for one identity, so the create arm and the repoint arm cannot disagree.
+    assert "canonical_url" in extracted, extracted
+    assert 'COLLATE "C"' in extracted, extracted
+    assert params == ["o", "g", "https://EXAMPLE.com/a",
+                      "https://example.com/a", "https://example.com/a",
+                      "https://example.com/a"], params
+
+
+def test_a_direct_edge_repoint_is_still_a_plain_upsert():
+    """The 2a DIRECT shape is NOT a move — its `src` is already the successor.
+
+    `sdk.py`'s 2a emission passes `src=new_id`, so deleting at `src` would delete
+    the edge the descriptor exists to re-create. The routing key is the rel: only
+    the structural set moves.
+    """
+    statements = rp.mutations_for(
+        {"type": "DirectEdgeRepoint", "ts": "T", "id": "p1->p2:IMPL",
+         "src": "p2", "tgt": "p3", "edge_type": "IMPL"},
+        org_id="o", graph_id="g",
+    )
+    assert len(statements) == 1, statements
+    sql = statements[0].sql
+    assert sql.startswith("INSERT INTO public.relation"), sql
+    assert "DELETE" not in sql, sql
+    # …and the STRUCTURAL `DirectEdgeCreated` create arm is untouched too.
+    created = rp.mutations_for(
+        {"type": "DirectEdgeCreated", "ts": "T",
+         "id": "p1->s1:aboutSubject", "src": "p1", "tgt": "s1",
+         "source_label": "Point", "target_label": "Subject",
+         "edge_type": "aboutSubject"},
+        org_id="o", graph_id="g",
+    )
+    assert len(created) == 1 and created[0].sql.startswith("INSERT"), created
+    assert "succ" not in created[0].sql, created[0].sql
 
 
 def test_a_node_upsert_merges_the_props_tail_rather_than_replacing_it():

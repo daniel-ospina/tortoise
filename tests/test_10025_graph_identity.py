@@ -1075,12 +1075,13 @@ def test_an_org_wide_key_carries_its_default_tenant_to_the_dream_drain(
     assert _dream_tenant_or_skip(org, None) == ("org-wide", DEFAULT_ROW_ID)
 
 
-def test_a_session_or_oauth_credential_still_carries_no_tenant(
+def test_an_unresolved_credential_still_carries_no_tenant(
         _control_plane_ids) -> None:
     """Unbound is the right answer for a shape that names no default graph.
 
-    A SESSION/PAT or OAuth `oat_` credential carries no `default_graph_id`
-    (#10046), so the refusal is NAMED (`no_tenant`) rather than a guess — and
+    A dict with no `default_graph_id` is a credential whose org had no
+    nameable default row (the resolvers stamp the field for every class since
+    #10046), so the refusal is NAMED (`no_tenant`) rather than a guess — and
     the wiring above must not have turned that refusal into a wildcard.
     """
     assert _dream_tenant_or_skip({"org_id": "org-session", "graph_id": None},

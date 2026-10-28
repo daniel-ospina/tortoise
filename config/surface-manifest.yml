@@ -5,8 +5,13 @@
 # because the required `surface-guard` job compares the live class against them and is run
 # from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The
 # APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row
-# with `approved: false` is migration backlog, not consent. An unapproved addition reds
-# `tools/sdk_surface_declaration.py check` and the `approved` flag on a re-cut row.
+# with `approved: false` is migration backlog, not consent. `approved` is a DERIVED row
+# key, so a re-cut over a grown surface writes `approved: false` for the new method and
+# property 12 compares two identical derived values — green by construction. What reds an
+# unapproved addition in required CI is the `high_water_counts` growth pin below, enforced
+# INDEPENDENTLY by the BASE-REF-pinned `tools/surface-guard.py` (its step 7); the full
+# `tools/sdk_surface_declaration.py check` names the addition too, but its gap half is
+# report-only in the required job.
 #
 # The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by
 # `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.
@@ -542,6 +547,28 @@ response_fields:
     only, NOT byte-identical (the hard-delete `deleted` marker, see below). The same two qualifications as the `tortoise_events_poll`
     row above apply, for the same reason — the WRITE side (the `PointRevised` store half, and the hard-delete `deleted`
     marker) is not scoped to the reader
+- response: tortoise_create_point
+  field: valid_to_shaped
+  emitted_when: '#9202 — emitted ONLY when the caller''s validTo DECLARED NO DATE (blank, or an uncertainty marker:
+    TBD, TBA, TBC, unknown, N/A, NA, -, --, —, ?) and was therefore shaped into the canonical un-datable end (no
+    validTo plus validToPrecision=''unknown''). Its value is {sent, validTo: null, validToPrecision: ''unknown''}
+    — the in-band receipt that keeps shaping honest, since a typo meant as a dash otherwise merges into ''the author
+    did not know'' with no trace. Absent on every other write: an accepted instant, a normalised format variant
+    (2024-3-1, 2024/03/01) and a refusal (ValueError) all return the pre-#9202 reply shape.'
+  unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
+    returns byte-identical to before this field existed
+- response: tortoise_update_point
+  field: valid_to_shaped
+  emitted_when: 'same field, same condition, on the UPDATE door (#9202): the caller''s validTo declared no date
+    and was shaped into the canonical un-datable end. Emitted on every reply path of the door that WROTE the shaped
+    end; a `status` that was already applied does not suppress it, because the props write still applies the shaping.
+    The status-only and promote NO-OP replies write nothing and carry none. ⛔ ONE further exception, and it is the
+    rule rather than a hole: a reply for an id that does not exist returns {} and carries NO receipt, because nothing
+    was stored — the receipt reports an end that reached the record, and that path writes nothing (it is also the
+    documented absent-id contract). A downstream lane may therefore index reply["valid_to_shaped"] only after
+    confirming the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
+  unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
+    returns byte-identical to before this field existed
 approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
@@ -920,7 +947,12 @@ rows:
   job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent —
     returns existing Point if content matches. Declaring extractedFrom materializes that :Source and links it (#8171);
     a fresh write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}]
-    — advisory only, never a block).'
+    — advisory only, never a block). validTo accepts an ISO-8601 instant (representational variance such as ''2024-3-1''
+    or ''2024/03/01'' is normalised silently), or a DECLARED no-date value — ''unknown'', TBD, TBA, TBC, N/A, NA,
+    -, --, an em dash, or ''?'' — which is stored as the canonical un-datable end (no end plus validToPrecision=''unknown'',
+    reading end_state=''unknown'') and echoed back as valid_to_shaped; None or omitted means the end is OPEN. An
+    impossible calendar day, a month outside 01-12, an epoch passed as a string, or prose with no recoverable date
+    is REFUSED, naming the fault and the accepted forms (#9202).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
   used_by: agents, tooling, docs
@@ -1048,7 +1080,11 @@ rows:
   keyword_rank: 3
   cluster: update
   canonical: false
-  job: Update properties on a Point. Safe — modifies one Point only.
+  job: 'Update properties on a Point. Safe — modifies one Point only. validTo takes the same forms as tortoise_create_point:
+    an ISO-8601 instant, a declared no-date value (''unknown'', TBD, TBA, TBC, N/A, NA, -, --, — or ? — stored as
+    no end plus validToPrecision=''unknown'' and echoed back as valid_to_shaped), or None for an OPEN end; an impossible
+    date, a month outside 01-12, an epoch as a string or unreadable prose is refused naming the repair. Existing
+    rows are never re-validated or migrated (#9202).'
   dependency: declares TortoiseSDK.update_point (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.30"
+title: "Tortoise — Canonical Ontology v3.31"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-21
+updated: 2026-10-26
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.30
+# Tortoise — Canonical Ontology v3.31
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -119,7 +119,7 @@ The `:Subject`/`:Object` operator endpoints are live (`#7902`); the write path a
 
 > **Supersession / invalidation semantics (the shared `CORRECTS` edge):** `CORRECTS` is the structural replacement edge — both writes below create it, and only `status='superseded'` separates them (§4.7). `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy**. `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 >
-> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type, new_id=<direct successor>}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, Sources **and `aboutDocument`** by `url`; never `target.id`). **⚠️ A predicate's label and its key are one unit: a retargeted label with a stale key resolves to nothing and silently mis-points the rebuilt edge.** `aboutDocument` targets a `:Source` (§4.4), so it resolves by `url` — the same key a `:Source` resolves by. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **`new_id` is carried for the RECORD, not the graph (#9973):** pass-2b derives its destination itself (`_final(src)`), but the record is written LIVE — `record_writer.write_live_record` applies one record at a time and this descriptor precedes the `PointSuperseded` patch, so there is no `superseded_by` to chase yet; without the successor in the journal the record keeps the edge on the superseded point and the successor never receives it. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
+> **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects MERGE by `name`, Sources **and `aboutDocument`** by `url`; never `target.id`). **⚠️ A predicate's label and its key are one unit: a retargeted label with a stale key resolves to nothing and silently mis-points the rebuilt edge.** `aboutDocument` targets a `:Source` (§4.4), so it resolves by `url` — the same key a `:Source` resolves by. Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **The RECORD applies a 2b descriptor as the same MOVE (#9972, #9973, #10191):** `DELETE` the row at the superseded point, then `INSERT` it at the **terminal** endpoint of the `superseded_by` chain (a `WITH RECURSIVE` walk over `public.point.props->>'superseded_by'`, `path`-guarded and depth-bounded, so a 3-link chain lands on the last link and on nothing in between) — resolving the target by the label's own REPLAY key (`name` for Subject/Object/Event, `props->>'name'` for Point, `url` **with** `document_kind IS NOT NULL` for `aboutDocument`, the canonical identity triple for `extractedFrom`) and landing NOTHING when a name is held by two or more carriers (#5509). Both halves are gated on `src` being terminal AND a destination being reachable (`_src_is_terminal`, restated in SQL), so a live re-created incarnation is a clean no-op rather than delete-then-insert churn; and the insert is `ON CONFLICT … DO NOTHING`, **never `DO UPDATE`**, because the graph's transfer is a bare `MERGE` and a successor that already holds the edge keeps its OWN live value (§11.1, #9417). The descriptor carries **no successor field**: the record derives the destination from the `superseded_by` its own `PointSuperseded` record already wrote — the same `_final(src)` answer pass-2b computes, so the journal alone remains sufficient (Interface A). The record never MINTS an endpoint (no stub), unlike the fold. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
 >
 > **Restatement-vs-correction policy:** two supersede cases look alike but demand opposite edge handling, so edge disposition is decided **per edge at write time** (never silently bulk-transferred):
 >
@@ -700,15 +700,25 @@ window, independent of when Tortoise learned it. Canonical pair:
 > Pinned by `tests/test_validity_windows.py`
 > (`test_a_start_naming_no_instant_leaves_the_window_open`,
 > `test_restore_read_path_treats_falsey_but_present_valid_from_as_present` part b).
-> The END agrees on the **gate** and differs only on the **state**: an
-> unorderable `validTo` bounds nothing either — `_covers` skips the arm, because
-> ordering a value that names no instant answers from a lexicographic comparison
-> rather than from the data, so a probe that itself names no instant is covered
-> too (#9202's coverage half) — and it still reports `end_state: "known"`
-> (the `END_UNKNOWN` marker requires an absent end plus an `"unknown"`
-> declaration), so no reply field says the window is unbounded. Whether that
-> state should instead read `unknown` / `open` is **#9202's owner decision** and
-> is NOT settled by the gate. Pinned by `tests/test_validity_windows.py`
+> The END agrees on the **gate**, and its **state is settled** (#9202, owner
+> ruling 2026-10-25, option B): an unorderable `validTo` bounds nothing —
+> `_covers` skips the arm, because ordering a value that names no instant answers
+> from a lexicographic comparison rather than from the data, so a probe that
+> itself names no instant is covered too (#9202's coverage half, #9408) — **and it
+> reports `end_state: "unknown"`**. An end that is stored but names no instant is
+> an **un-datable END**: the fact ended, at a time we cannot pin — the same state
+> the DECLARED marker (`validToPrecision = "unknown"` with no `validTo`) produces,
+> firing the same reply-level `end_state_unknown` / `indeterminate_end_ids` flags,
+> so a caller learns the window cannot be excluded rather than that it is still
+> true. `END_KNOWN` therefore means **dated**, not **present**, gated by
+> `validity.end_state` on the bound's own orderability so that a bound and the
+> state reported for it cannot contradict each other; the reading depends on the
+> bound, never on how a row spells it. **`END_OPEN` stays reserved for an ABSENT
+> end**: an end column carrying a value is an **asserted** end, so "no end was
+> recorded" is a claim the record contradicts, and reading it as still-true is the
+> fabricated-coverage hazard this vocabulary exists to prevent (#2349/#2350).
+> Rationale and the ruling behind it: `ONTOLOGY-CHANGELOG.md`. Pinned by
+> `tests/test_validity_windows.py`
 > (`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`).
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
@@ -719,8 +729,9 @@ above carries an **additive** precision layer: `validFromPrecision` /
 known** — the stored bound is unchanged, so `_created_sort_key` orders exactly
 what it always did — and a legacy bare-ISO bound with no precision property
 reads as `day` with **no migration**. The END is **three-valued**: `open`
-(`validTo` absent, no precision — still true), `known` (`validTo` present), and
-`unknown` (`validToPrecision = 'unknown'` with **no** `validTo` — the window
+(`validTo` absent, no precision — still true), `known` (`validTo` present and
+**dated**), and `unknown` (the declared `validToPrecision = 'unknown'` with **no**
+`validTo`, or a stored `validTo` that names no instant (§4.7); the window
 ended but at a time we cannot pin, so **no date is fabricated**). Every
 window-consuming read path emits the same `valid_from_precision` /
 `valid_to_precision` / `end_state` block through `validity.window_read_fields`,
@@ -921,6 +932,21 @@ doc home:
   count would destroy what the runs reported. The audit compares the recorded
   counter against the live edge count and reports the per-session under-count.
   **Recorded gap.**
+- **`turn_count` with no turn member at all — the store, not a shortfall
+  (#10000)** — after `#10011` the capture writer stores a turn's text and
+  vector in the **record** and writes **no turn node** whenever the record can
+  hold them, so on an armed deployment `turn_count` is truth about Postgres and
+  the graph has no episodic turn member to compare it against. A session with
+  **zero** turn nodes is therefore **ambiguous graph-side** — a correctly-stored
+  armed capture, or a genuine loss — and no query the graph can answer
+  separates them. Such sessions are reported in their own `turns_record_held`
+  bucket with `retro_quantifiable: False` (ids included, so the record can be
+  asked) rather than as a shortfall: the shortfall class is what a
+  retrofit/backfill acts on, and counting every armed capture into it would
+  read as a mandate to write the transcript back into the graph — the placement
+  §9.1/D1 of `STORAGE-ARCHITECTURE.md` forbids. Only the **partial** shortfall
+  (`0 < stored turns < turn_count`, which the graph does witness) stays in the
+  short class. **Not graph-quantifiable.**
 
 Each verdict's `where_recorded` field in `RETROFIT_VERDICTS` points at this
 section and at the `#3554 amendment` in

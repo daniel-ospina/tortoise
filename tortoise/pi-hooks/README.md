@@ -284,8 +284,16 @@ The spool lives at `~/.tortoise/capture-spool/` (override
 `TORTOISE_CAPTURE_SPOOL_DIR`): per session a small meta file plus an
 **append-only** `*.turns.jsonl`. It is bounded by **count and bytes** — never a
 TTL: #3870 (owner) ruled the spool is kept until the user deletes it, so a
-count/byte ceiling evicts the oldest entry and **records the reason** in
-`discarded.jsonl`.
+count/byte ceiling evicts and **records the reason** in `discarded.jsonl`. The
+victim is the **safe** loss first: an entry whose content is already on the wire
+(`filed_key == capture_key`, same lane and stamp) is reaped before any unfiled
+entry, which is the only copy of an undelivered conversation (#6388). Within a
+class the order is oldest-first, and the entry just written is never evicted. A
+quarantined turn log (`*.turns.jsonl.orphan[N]`) goes first even among those: a
+corrupt meta moved it out of every scan, so no drain can file it and no reader
+can list it — the safest loss of the three — and its record says `UNREACHABLE`,
+with the class it cannot know left as `unknown` (the corrupt meta, the only copy of
+the filing stamp, is removed when the log is quarantined).
 
 Idempotency is `session_id` (the server's upsert key) plus a content-addressed
 client key `sha256(session_id \0 sha256(turns))`, so replaying the same spool

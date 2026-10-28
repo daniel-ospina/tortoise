@@ -176,32 +176,6 @@ def test_create_about_edge_journals_too(edge_sdk):
     assert rec["target_label"] == "Object"
 
 
-def test_a_supersede_transfer_journals_its_direct_successor(edge_sdk):
-    """#9973: the 2b transfer descriptor carries the successor it moves TO.
-
-    The graph's pass-2b derives the destination itself (`_final(src)`), so the
-    descriptor never needed to name it. The RECORD cannot derive it the same way:
-    `record_writer.write_live_record` applies one record at a time, and this
-    descriptor is emitted BEFORE the `PointSuperseded` patch that would make
-    `public.point.superseded_by` readable — a chase at that moment resolves to
-    `src` and re-creates the dead-source edge on the production path. The
-    producer already knows the successor, so it journals it. Additive: every
-    pre-#9973 reader ignores it.
-    """
-    sdk, journal = edge_sdk
-    ids = _world(sdk)
-    assert sdk._get_proj().create_about_edge(
-        ids["p1"], ids["object"], "aboutObject") is True
-    sdk.supersede_point(ids["p1"], ids["p2"])
-
-    [rec] = [r for r in _records(journal) if r.get("type") == "DirectEdgeRepoint"]
-    # the descriptor still names the OLD point as `src` (the graph resolves it)
-    assert rec["src"] == ids["p1"], rec
-    assert rec["target_label"] == "Object" and rec["edge_type"] == "aboutObject"
-    # …and now names the destination explicitly
-    assert rec["new_id"] == ids["p2"], rec
-
-
 def test_the_descriptor_is_the_canonical_flat_shape(edge_sdk):
     """§4.4's shape, shared with `DirectEdgeRepoint` — nothing invented.
 

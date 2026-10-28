@@ -1356,6 +1356,165 @@ def require_hybrid_read(leg_trace: list[dict] | None,
     raise HybridReadUnavailableError(marker, lane=lane)
 
 
+# ── #10121: the tie-break every ranking leg shares ─────────────────
+def recency_tie_clause(alias: str, id_field: str) -> str:
+    """The secondary sort every ranking leg appends after its own primary key.
+
+    Three keys, three jobs: the leg's score orders, **recency** breaks the tie
+    toward the most recently written row, and the id makes the order TOTAL
+    (#3019's requirement — a rank-based fusion downstream cannot tolerate an
+    unstable tie: it would pick a different pool every call).
+
+    ⚠️ "Total" is NOT the same claim as "recency decides", and nowhere is the
+    difference easier to lose than here. Where a stamp is CARRIED the recency
+    key is real and the order is total. Where it is NOT, the key is the
+    constant `''`, the engine silently defers to the next key (FalkorDB:
+    "for equal values, it will go to the next property in the ORDER BY
+    clause"), and the leg is ordered by `coalesce(<id_field>, '') DESC` —
+    total, but recency-free. Which population you are in is a **per-WRITER**
+    fact, not a per-label one (read off the writers, round-10 review):
+
+    * `:Point` — carries both: `createdAt`/`updatedAt` are seeded by
+      `create_point`'s `_create_map`, and a revision bumps `updatedAt`.
+    * `:Object` / `:Subject` — `createdAt` stamped ON CREATE by
+      `_upsert_object` / `_upsert_subject` (`coalesce($ca, $now)`).
+    * `:Event` — **the exception, and the one to get right**: stamping is a
+      per-DOOR fact, and ONLY the RECORD door stamps.
+      `TortoiseSDK._apply_and_journal` (pre-built records — the provenance /
+      indexer writes) synthesizes `createdAt` under
+      `type in _JOURNALED_ENTITY_EVENT_TYPES` before the fold, and
+      `_EVENT_HANDLED` omits the key on purpose so `_persist_extra_props`
+      carries it onto the node (#2788,
+      `tests/test_event_state_carrier_2788.py`);
+      `tests/test_github_indexer.py::test_7951_indexer_journals_createdAt_for_events`
+      pins the RECORD, and the node half was measured in round 10.
+      `_create_entity` (the public `create_event` /
+      `create_entity(type='event')`) does NOT: its only `createdAt` synthesis
+      is gated on the Object/Subject REGISTRATION probes and is "provably
+      Object/Event-inert" in its own words, so a `create_event` node carries
+      NEITHER stamp (measured). `EventAPI.add_event` builds its payload
+      without `createdAt` as well, and the session-indexer / connector writers
+      set `startedAt` only. On the PRIMARY public Event door, therefore, the
+      recency key is the constant `''` and the order falls to
+      `eventId DESC` — which for `session_<id>` ids is not a clock.
+    * `:Source` — `ingestedAt` is what these writers always stamp; a document
+      `:Source` carries `createdAt` only when its producer emits one (an
+      allowed extra prop, `_SOURCE_HANDLED`), and the structural stub
+      (`projection/edges.py`) carries `ingestedAt` alone.
+    * `:Object` stubs (hosted) — neither stamp AND no id: the original #3019
+      residual. `coalesce(id, '')` is a constant there too, so the order
+      inside that population is still engine row order; what the guard changes
+      is that those rows move from the HEAD of the window to its TAIL, so they
+      stop displacing addressable rows.
+
+    ⛔ Widening the key to the stamp the undated families DO carry
+    (`startedAt` for session/connector Events, `ingestedAt` for `:Source`)
+    would change the DECIDED expression on #10121 and is therefore NOT part of
+    this change — it is a reopen on that issue. Nothing here claims more than
+    the table above.
+
+    ``coalesce(..., '')`` is load-bearing, not defensive. The engine sorts NULL
+    as the LARGEST value, so a bare ``updatedAt DESC`` puts every UNDATED row at
+    the HEAD of the window — measured: an id-less ``:Object`` outranks every
+    dated one, and the leg's ``LIMIT`` then spends the whole pool on rows the
+    caller discards. ``''`` is the smallest string, so an undated row sorts as
+    OLDEST — which is what "no timestamp" means — and a dated match keeps its
+    slot.
+
+    **Why recency, and not the id direction** (#10121's measured defect): the
+    graph-side lexical scorer returns ONE score for a whole corpus of look-alike
+    documents (2.0 across 131 documents, both engines), so the tie IS the
+    ranking. #3019's ``id ASC`` resolved it oldest-first, and because ``id`` is
+    minted from a millisecond timestamp (``ids.ulid()`` -> ``<ts-hex>-<uuid>``)
+    the row created LAST took the last pool slot and was truncated out of the
+    leg entirely — past the pool depth it carried no score at all, so no fusion
+    weight, reranker or MMR could recover it. ``updatedAt`` before
+    ``createdAt``: a tie should surface the LATEST REVISION (a dedup hit or
+    ``update_point`` bumps ``updatedAt``; a fresh row stamps both), so one
+    expression serves every family that carries EITHER stamp — and only those
+    (see the per-writer table above). Live operators
+    carry NEITHER property (``projection/__init__.py``: "probe: None"), so they
+    fall through to the id key — which for minted ids is creation order.
+
+    The id key is ``DESC`` on EVERY label. It is only the determinism key, so
+    its direction carries no meaning; branching it per label is precisely how
+    the first attempt at this fix got the id-less ``:Object`` case wrong.
+    """
+    # ``coalesce(<id>, '')`` on the id key, for the same reason the recency key
+    # has one: the engine sorts NULL as the LARGEST value, so a BARE
+    # ``<id> DESC`` puts every ID-LESS row at the HEAD of the window — and
+    # ``:Object`` stubs are minted id-less (``MERGE (o:Object {name:$name})``),
+    # so those head slots are spent on rows the resolver then discards
+    # (``assembly.py``: ``if oid``). Measured on BOTH engines: bare
+    # ``ORDER BY n.id DESC`` → ``[None, None, 'obj-aaa']``; with the coalesce →
+    # ``['obj-aaa', None, None]``. This is also what makes the cypher half and
+    # the Python half (:func:`recency_tie_key`) agree — both send an absent
+    # identity to the TAIL.
+    return (
+        f"{recency_key_expr(alias)} DESC, "
+        f"coalesce({alias}.{id_field}, '') DESC"
+    )
+
+
+def recency_tie_key(recency: object, ident: object) -> tuple[str, str]:
+    """The PYTHON-side twin of :func:`recency_tie_clause`'s secondary keys.
+
+    Two legs sort in Python rather than in cypher — this one's vector index
+    branch and ``bm25.bm25_rank`` — and #10121's review found them re-expressing
+    the rule by hand (a three-pass sort here, a tuple key there), i.e. the same
+    drift seam the cypher helper was created to close. Both use THIS, sorted
+    DESCENDING.
+
+    ⚠️ Scope, stated with its DIRECTION rather than as "not our problem": the
+    comparison is STRING-based, as the cypher clause's is. A non-string stamp (a
+    numeric epoch) sorts as the NEWEST here: ``str(20261201)`` is
+    ``'20261201'`` and the discriminating character is the fifth one — ``'1'``
+    against every ISO stamp's ``'-'`` — so it wins under ``DESC``. What the
+    ENGINE does with a numeric stamp is type-precedence-dependent and is NOT
+    asserted here (no measurement in this repo); the two sides are therefore
+    known to agree for every string stamp and unverified for a numeric one. No writer emits one today (the
+    writer test pins the stamps of ``create_point``; a props passthrough could
+    still carry one), and making that impossible is its own change, not a silent
+    guess made here.
+
+    ``None`` is normalised to ``''`` on both components: ``''`` sorts as the
+    OLDEST stamp and as the LAST identity, which is what the clause means by an
+    undated or id-less row — and it makes the tuple comparable, which the raw
+    values are not (``sorted([None, None])`` raises, and an id-less ``:Object``
+    is a live population — that TypeError was swallowed by the index branch's
+    ``except Exception`` and silently demoted every such read to a full scan).
+    """
+    return (
+        "" if recency is None else str(recency),
+        "" if ident is None else str(ident),
+    )
+
+
+def recency_key_expr(alias: str) -> str:
+    """The recency EXPRESSION alone — the one a projection must RETURN.
+
+    Split out of :func:`recency_tie_clause` because #10121's review found the
+    window and the ranking disagreeing: the ORDER BY used the CASE below while
+    the BM25 arm's corpus read and both vector index signatures projected a
+    plain ``coalesce``, so a row stamped ``updatedAt: ''`` was admitted as the
+    NEWEST by the window and then sorted as OLDEST — or dropped — by the
+    ranking. One expression now decides both for every string stamp. (A
+    non-string stamp is out of scope and stays that way: no writer emits one,
+    and mixing engine type precedence with ``str()`` would need its own
+    decision — see :func:`recency_tie_key`.)
+
+    The CASE (not a plain ``coalesce``) is load-bearing: ``coalesce`` stops at
+    the first NON-NULL, so ``updatedAt: ''`` would SUPPRESS a valid
+    ``createdAt``. Measured on both engines, the CASE falls through and orders
+    ``['2026-09-01', '2026-01-01', '']``. (``nullif`` is not registered on
+    FalkorDB 4.20.6, hence the explicit comparison.)
+    """
+    return (
+        f"CASE WHEN coalesce({alias}.updatedAt, '') = '' "
+        f"THEN coalesce({alias}.createdAt, '') ELSE {alias}.updatedAt END"
+    )
+
+
 def run_fts_query(
     graph, query: str, entity_type: str = "point", limit: int = 20,
     timeout_ms: int = 500, excluded_statuses: tuple | None = None,
@@ -1434,7 +1593,8 @@ def run_fts_query(
                 # #3019: every row scores a constant 1.0, so this leg is ONE giant
                 # tie and DB row order would otherwise decide each operator's RRF
                 # rank. The secondary key makes the order a function of the data.
-                "ORDER BY score DESC, n.id ASC "
+                # #10121: the shared recency tie — the newest operator first.
+                f"ORDER BY score DESC, {recency_tie_clause('n', 'id')} "
                 "LIMIT $limit"
             )
             rows = graph.query(
@@ -1469,13 +1629,19 @@ def run_fts_query(
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id. D10: a document Source resolves by url too.
     #
-    # #3019 KNOWN RESIDUAL (sibling gap, NOT a regression): `object` has the
-    # same NULL-key shape and is not closed here. A :Object is merged by its
-    # `name`, and the live write path mints it id-less (`MERGE (o:Object
-    # {name:$name})`, hosted_api), so the `else` below orders those rows on a
-    # NULL `id`. Out of this change's scope: the remedy is a coalesce KEY, not
-    # a field rename, so it changes the ORDER BY expression shape in all three
-    # legs. Evidence recorded on #3019.
+    # #3019 KNOWN RESIDUAL — NARROWED by #10121, and closed exactly this far.
+    # `object` has the same NULL-key shape: a :Object is merged by its `name`,
+    # and the live write path mints it id-less (`MERGE (o:Object {name:$name})`,
+    # hosted_api), so the `else` below resolves `id` and every :Object row sorts
+    # on a NULL identity there. #10121 APPLIED that coalesce KEY — #3019's own
+    # named remedy, not the field rename it ruled out — because
+    # `recency_tie_clause` emits `coalesce(<alias>.<id_field>, '') DESC` at
+    # every site, so those rows no longer take the HEAD of the window from a
+    # NULL-as-largest sort; they land at its TAIL (pinned by
+    # `test_10121_recency_tie.py::test_an_id_less_row_does_not_lead_a_tie_group
+    # _without_timestamps`). What REMAINS residual is the order INSIDE that
+    # population: `coalesce(id, '')` is a constant for all-id-less rows, so
+    # their relative order is still engine row order. Evidence on #3019.
     if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
@@ -1528,8 +1694,9 @@ def run_fts_query(
             + status_filter +
             f"RETURN node.{id_field}, score "
             # #3019: rank alone does not order a tie, and RRF is rank-based — see
-            # the operator path above.
-            f"ORDER BY score DESC, node.{id_field} ASC "
+            # the operator path above. #10121: shared recency tie (the newest
+            # match keeps its slot instead of being truncated oldest-last).
+            f"ORDER BY score DESC, {recency_tie_clause('node', id_field)} "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -1578,13 +1745,21 @@ def run_fts_query(
 #: and on a WINDOW it returns NO rows at all, recording ``declined=True``
 #: (NOT ``degraded`` — see below). The
 #: shipped graph-side leg answers over the whole label (it is index-backed), so
-#: replacing its rows with a ranking over the first ``cap`` ids in id order —
-#: oldest-first on this tree's ULID ids, i.e. blind to the newest documents,
-#: which are the likeliest lexical answer — would make the read lexically
-#: WEAKER than the leg it replaced, silently, on a store the operator never
-#: measured. Declining keeps the shipped rows (the same fail-safe the empty
-#: arm gets) and leaves the signal in the trace. Raise the cap (or add an
-#: id-descending window) before enabling the arm on a store that large.
+#: replacing its rows with a ranking over only ``cap`` of the label's rows
+#: would make the read a WINDOW masquerading as a complete ranking — silently,
+#: on a store the operator never measured. Declining keeps the shipped rows
+#: (the same fail-safe the empty arm gets) and leaves the signal in the trace.
+#: Raise the cap before enabling the arm on a store that large.
+#:
+#: #10121 fixed the half that made this decline look like a ranking verdict:
+#: the window used to be the first ``cap`` ids in id order — OLDEST-first on
+#: this tree's ULID ids, blind to the newest documents, which are the likeliest
+#: lexical answer. It is now the shared recency order
+#: (:func:`recency_tie_clause`), so the rows that survive the cap are the
+#: NEWEST ones. The decline itself stands, and for a narrower reason than
+#: before: a window is still not the whole-label answer the shipped leg gave,
+#: so the arm still declines rather than silently answering over a subset. The
+#: cap's remaining job is purely a memory/latency bound.
 #:
 #: ⛔ What the decline must NOT cost the read (#8488 follow-up). The decline
 #: used to record ``degraded=True`` so that a measurement could not read a
@@ -1865,16 +2040,21 @@ def run_bm25_query(
 
     try:
         start = time.monotonic()
-        # Order by the id key so the corpus read is DETERMINISTIC (the cap
-        # contract in DEFAULT_BM25_CORPUS_CAP); ``coalesce`` lets a node family
-        # whose text lives on ``_searchText`` (the multi-field FTS index's
-        # field) be scored rather than skipped. One row over the cap is
-        # requested on purpose — see ``truncated`` below.
+        # #10121: the ORDER BY is the SHARED recency tie — newest first, id last
+        # as the determinism key. This read used to be `n.<id> ASC`, which is
+        # OLDEST-first on ULID ids, so the `cap` window dropped the NEWEST
+        # documents first (the #10121 defect at its cap variant). What the cap
+        # contract in DEFAULT_BM25_CORPUS_CAP requires is DETERMINISM, not that
+        # direction; ``coalesce`` lets a node family whose text lives on
+        # ``_searchText`` (the multi-field FTS index's field) be scored rather
+        # than skipped. One row over the cap is requested on purpose — see
+        # ``truncated`` below.
         cypher = (
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
-            "n.search_keys "
-            f"ORDER BY n.{id_field} ASC LIMIT $cap"
+            "n.search_keys, "
+            f"{recency_key_expr('n')} "
+            f"ORDER BY {recency_tie_clause('n', id_field)} LIMIT $cap"
         )
         rows = graph.query(
             cypher, params={"cap": int(corpus_cap) + 1}, timeout=timeout_ms
@@ -1890,8 +2070,8 @@ def run_bm25_query(
         truncated = len(rows) > int(corpus_cap)
         if truncated:
             # DECLINE, do not return a window. The shipped graph-side leg
-            # answered over the whole label; a ranking over the first ``cap``
-            # ids (oldest-first on ULID ids) is not the same answer and is
+            # answered over the whole label; a ranking over only ``cap`` of its
+            # rows is not the same answer and is
             # often a weaker one — so the caller keeps the shipped rows, the
             # same fail-safe an empty arm gets. ``declined`` records WHY the
             # slot was left alone; ``count=0`` because nothing was returned.
@@ -1904,8 +2084,9 @@ def run_bm25_query(
             # an impairment of the memory layer (see ``DEFAULT_BM25_CORPUS_CAP``).
             logger.warning(
                 "BM25 corpus exceeds the %d-row cap — declining to replace "
-                "the shipped lexical rows with a ranking over the first %d "
-                "ids; raise %s or measure on a smaller corpus (#8486)",
+                "the shipped lexical rows with a ranking over only %d of "
+                "the label's rows; raise %s or measure on a smaller corpus "
+                "(#8486)",
                 corpus_cap, corpus_cap, "DEFAULT_BM25_CORPUS_CAP")
             _breaker_record("bm25", True)
             _record(ran=True, degraded=False, reason="empty_results",
@@ -1914,8 +2095,18 @@ def run_bm25_query(
         docs = [
             (row[0], index_text(row[1], row[2])) for row in rows if row[0]
         ]
+        # #10121: the arm's own tie must follow the SAME recency-then-id rule as
+        # every other leg. It sorts its whole corpus itself, so fixing only the
+        # corpus-read ORDER BY would leave the newest match truncated at this
+        # sort (measured before this fix: the just-created point absent from
+        # ``run_bm25_query(limit=5)`` on a 21-row tie, rank 20 of 21).
+        recency = {
+            row[0]: ("" if len(row) <= 3 or row[3] is None else str(row[3]))
+            for row in rows if row[0]
+        }
         ranked = bm25_rank(
-            query, docs, limit=limit, keep_numeric=keep_numeric)
+            query, docs, limit=limit, keep_numeric=keep_numeric,
+            recency=recency)
         _breaker_record("bm25", True)
         _record(ran=True, degraded=False,
                 reason=("ok" if ranked else "empty_results"),
@@ -2217,7 +2408,8 @@ def run_vector_query(
                         f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit, vecf32($query_vec)) "
                         "YIELD node, score "
                         + vec_status_filter +
-                        f"RETURN node.{id_field}, score "
+                        f"RETURN node.{id_field}, score, "
+                        f"{recency_key_expr('node')} AS recency "
                         "LIMIT $limit"
                     )
                 # Signature A (RediSearch-style): repo-pinned docker image
@@ -2237,7 +2429,8 @@ def run_vector_query(
                     "YIELD node "
                     + vec_status_filter +
                     f"RETURN node.{id_field}, "
-                    "vec.cosineDistance(node.embedding, vecf32($query_vec)) AS score "
+                    "vec.cosineDistance(node.embedding, vecf32($query_vec)) AS score, "
+                    f"{recency_key_expr('node')} AS recency "
                     "LIMIT $limit"
                 )
 
@@ -2284,10 +2477,31 @@ def run_vector_query(
             # vec.cosineDistance over the yielded node (the pre-#6214 A
             # substituted the row POSITION for a score, so ANY re-sort would
             # have reversed its ranking) — and the engine's tie order is
-            # replaced here, ONCE, by (distance, id). There is deliberately no
+            # replaced here, ONCE, by (distance ASC, then the shared
+            # recency/id key DESC — #3019, #10121). There is deliberately no
             # second ordering predicate (no per-signature Cypher ORDER BY):
-            # one sort, over the one shape both signatures now produce, so the
-            # two cannot drift apart.
+            # one Python sort, over the one shape both signatures now produce,
+            # so the two cannot drift apart.
+            #
+            # ⛔ RESIDUAL (`#10121` review): this replaces the tie order **of
+            # the rows the engine chose**, not the CHOICE. `queryNodes` picks
+            # its `$limit` rows by distance with an arbitrary order WITHIN a
+            # distance tie, and the sort below can only reorder what it was
+            # handed — so on an INDEXED store whose tie group is larger than
+            # the caller's `limit`, a member of that group (in principle the
+            # NEWEST) can sit outside the window and no sort here can recover
+            # it. That is NOT the `#10121` defect: it needs an exact distance
+            # tie across more than `limit` rows on an indexed store, where
+            # `#10121` is the lexical scorer's constant score across the whole
+            # corpus. It is stated rather than over-fetched because a bigger k
+            # only shrinks the window (any tie group above it still
+            # truncates) and would change this leg's cost and its
+            # `min_similarity` semantics for a case no pin covers yet. A
+            # remedy belongs here as its own change — over-fetch or an ordered
+            # scan — with a docker-lane pin that ties MORE rows than the
+            # caller's `limit`; `tests/test_search_engine_gaps.py::
+            # TestRunVectorQuery`'s `#6214` case ties THREE rows at `limit=10`
+            # and cannot see it.
             #
             # #5583: the engine's value is a DISTANCE (lower is better), NOT a
             # similarity. `db.idx.vector.queryNodes` returns `1 - cosine` for a
@@ -2304,21 +2518,34 @@ def run_vector_query(
             # distance, so they agree on polarity. Cosine distance lies in
             # [0, 2], so `1 - d` lies in [-1, 1] and the [0, 1] clamp still
             # maps a perfect match to 1.0.
-            annotated: list[tuple[float | None, str]] = []
+            # #10121: the equal-distance tie is the SAME recency-then-id rule the
+            # other legs use. Before this, the index branch sorted
+            # ``(distance, id ASC)`` while the scan branch used the recency tie,
+            # so on an indexed store the dense and sparse legs handed DIFFERENT
+            # twins rank 0 — and RRF is rank-based, so the fused order depended
+            # on whether an HNSW index happened to exist. The recency column
+            # rides the cypher RETURN above; a row shape without it (an older
+            # signature, a degraded path) falls back to ``''``, which sorts as
+            # OLDEST exactly as the shared clause does.
+            annotated: list[tuple[float | None, tuple[str, str], object]] = []
             for row in rows:
                 try:
                     distance = float(row[1])
                 except (IndexError, TypeError, ValueError):
                     distance = None
-                annotated.append((distance, row[0]))
-            # An unreadable distance carries no evidence of similarity — rank
-            # it LAST and id-order it among its peers rather than letting it
-            # win a tie. `inf` is the sort key, not the reported score.
+                recency = row[2] if len(row) > 2 else None
+                annotated.append((distance, recency_tie_key(recency, row[0]),
+                                  row[0]))
+            # (distance ASC, then the SHARED recency/id key DESCENDING). An
+            # unreadable distance carries no evidence of similarity — rank it
+            # LAST; `inf` is the sort key, not the reported score. Two stable
+            # passes: the secondary key first, then the primary one.
+            annotated.sort(key=lambda item: item[1], reverse=True)
             annotated.sort(key=lambda item: (
-                item[0] if item[0] is not None else float("inf"), item[1]))
+                item[0] if item[0] is not None else float("inf")))
             out = [
                 (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
-                for dist, pid in annotated
+                for dist, _key, pid in annotated
             ]
             if min_similarity is not None and out:
                 # Score is a true cosine similarity now, for BOTH signatures —
@@ -2389,8 +2616,8 @@ def run_vector_query(
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
             # #3019: a distance tie (equal values, or repeated rows) must not fall
-            # through to DB row order.
-            f"ORDER BY score DESC, n.{id_field} ASC "
+            # through to DB row order. #10121: shared recency tie.
+            f"ORDER BY score DESC, {recency_tie_clause('n', id_field)} "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -2533,10 +2760,14 @@ def run_structural_query(
         # order — the defect this PR exists to close — and every returned pid
         # was None. url is the key that is correct in BOTH states.
         #
-        # `object` is a KNOWN RESIDUAL: its canonical key is `name` and the
-        # live write path mints it id-less, so the `else` below still orders
-        # those rows on NULL — see the same note where the key is first resolved
-        # (the FTS leg's id_field block).
+        # `object` is a NARROWED residual (#10121): its canonical key is `name`
+        # and the live write path mints it id-less, so the `else` below resolves
+        # `id` and those rows carry no identity — but the ORDER BY now routes
+        # every key through `recency_tie_clause`, whose `coalesce(..., '')`
+        # sends the id-less rows to the TAIL of the window instead of its head
+        # (a bare DESC sorted the NULL as the LARGEST value). Their order INSIDE
+        # that tail is still engine row order. See the same note where the key is
+        # first resolved (the FTS leg's id_field block).
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -2591,7 +2822,13 @@ def run_structural_query(
             # #3019: this leg scores every row a CONSTANT (1.0 / 0.5, below), so
             # with no secondary key the WHOLE leg is an unordered tie and the
             # caller's rank — hence the fused top-k — is DB row order.
-            f"ORDER BY n.{id_field} ASC "
+            # #10121: shared recency tie — on a constant-scored leg the tie does
+            # all the work, so "newest first" IS the whole ranking wherever the
+            # rows carry a stamp. Not every family does (see
+            # recency_tie_clause's per-writer table): a session/connector
+            # `:Event` carries none and its `eventId` is not a clock, so there
+            # the whole ranking is that id direction.
+            f"ORDER BY {recency_tie_clause('n', id_field)} "
             f"LIMIT $limit"
         )
         params["limit"] = limit
@@ -2663,8 +2900,9 @@ def expand_structural_hops(
             "RETURN n.id AS id, hops "
             # #3019: `hops ASC` alone leaves equal-hop candidates in engine row
             # order, so with more candidates than `limit` both MEMBERSHIP and
-            # rank are DB-order dependent.
-            "ORDER BY hops ASC, n.id ASC "
+            # rank are DB-order dependent. #10121: hops stays primary (a real
+            # ranking signal), recency breaks the equal-hop tie.
+            f"ORDER BY hops ASC, {recency_tie_clause('n', 'id')} "
             "LIMIT $limit"
         )
         rows = graph.query(
@@ -2788,14 +3026,23 @@ def rrf_fusion(
     #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
     #
     # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
-    # legs that is the leg's secondary sort on its own id field (#3019):
+    # legs that is the shared recency-then-id key the legs interpolate
+    # (``recency_tie_clause`` / ``recency_key_expr`` / ``recency_tie_key`` —
+    # #10121; the id half was #3019's whole rule): recency first, so a tie
+    # surfaces the latest revision, then the leg's own id field —
     # ``url`` for source/document, ``eventId`` for events, and for points the
     # node id — a ULID on the create paths (chronological) but
     # ``pt_<sha256>`` on the extraction/commit paths
-    # (``commit_schema.point_content_id``), so a tie's order is chronological
-    # for one population and content-hash for the other, and the two id spaces
-    # sort as blocks ('p' after the digits). Arbitrary-but-stable, never a
-    # relevance proxy. The single-leg path does not fuse (``sdk.py``'s
+    # (``commit_schema.point_content_id``), so the ID half's order is
+    # chronological for one population and content-hash for the other, and the
+    # two id spaces sort as blocks ('p' after the digits). That id half is
+    # arbitrary-but-stable by design — it is the total order that makes the key
+    # deterministic, never a relevance proxy; the RECENCY half is the one that
+    # carries meaning, and it is why a tie is no longer "whichever id sorts
+    # first". The FUSED score's own tie at the end of this function remains
+    # ``(-score, id)`` — fusion consumes leg POSITIONS, so it has no recency
+    # signal of its own (#10121 scopes itself to the legs). The single-leg path
+    # does not fuse (``sdk.py``'s
     # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
     # score there: the two paths disagree about identical evidence.
     #

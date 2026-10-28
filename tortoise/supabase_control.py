@@ -1118,29 +1118,17 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # point read on `idx_graphs_org_id`, not a scan, and it buys the record's
     # fail-closed tenant; None (no row) keeps the record write REFUSED rather
     # than filed under a guess.
+    #
+    # #10046: the read+mint is NOT redeclared here — it is
+    # :func:`default_graph_id_for_credential`, the one home the session/JWT and
+    # OAuth credential resolvers call too, so all three credential classes name
+    # the default tenant the same way (or refuse it the same way).
     if graph_id:
         default_graph_id = None
     else:
-        default_graph_id = default_graph_id_for(cp, org_id)
-        if default_graph_id is None:
-            # #10025 review F1: SELF-HEAL the forward half. `20261028000001`
-            # only backfills orgs that existed when it ran, and provisioning's
-            # mint is best-effort (a raise there would cost an account — see
-            # `_mint_default_graph_row_best_effort`), so without this the org
-            # would stay unnamed FOREVER: every record write refused
-            # `no_tenant` while `/health` reads armed and green, and a retry of
-            # the provisioning request cannot fix it (it 409s). Minting here
-            # makes that window one request long.
-            #
-            # Safe to WRITE on an auth path: this runs only on the miss, the
-            # mint is idempotent and convergent (a concurrent request loses on
-            # `uq_graphs_org_name_active` and adopts the winner's row), and it
-            # can never fail the request — `record_tenant_for` still refuses
-            # rather than guesses. Same posture as `update_last_used` below
-            # ("a telemetry write must NEVER gate authentication").
-            default_graph_id = _mint_default_graph_row_best_effort(
-                cp, org_id, org_row.get("graph_name"),
-                context="api-key auth self-heal")
+        default_graph_id = default_graph_id_for_credential(
+            cp, org_id, org_row.get("graph_name"),
+            context="api-key auth self-heal")
     return {
         "org_id": org_id,
         "key_id": key_id,
@@ -1254,6 +1242,44 @@ def default_graph_id_for(cp, org_id: str) -> str | None:
             "(fail-closed; migration 20261028000001 applied?): %s", e)
         return None
     return rows[0]["id"] if rows else None
+
+
+def default_graph_id_for_credential(cp, org_id: str,
+                                   graph_name: str | None = None, *,
+                                   context: str) -> str | None:
+    """The org's default-graph id for a CREDENTIAL resolver, minting on a miss.
+
+    THE credential-resolution home for that row (#10046), shared by every
+    resolver whose dict reaches
+    :func:`tortoise.record_writer.record_tenant_for` — an API key
+    (:func:`resolve_api_key`), a hosted SESSION/JWT
+    (``hosted_api._session_user_org``) and an OAuth ``oat_`` token
+    (``tortoise.oauth.resolve_oauth_access_token``). One home, one answer: three
+    copies of this read is how one credential class gets named while another is
+    refused ``no_tenant`` with the deployment reading armed and green — the
+    measured state #10046 was filed on.
+
+    The READ is :func:`default_graph_id_for`, i.e. fail-closed — absent,
+    tombstoned, another org's, or unreadable all return ``None``, which
+    ``record_tenant_for`` turns into a counted ``no_tenant`` refusal rather than
+    a guessed tenant.
+
+    The WRITE (:func:`_mint_default_graph_row_best_effort`) runs ONLY on a miss
+    and never fails the caller, for #10025 review F1's reason: ``20261028000001``
+    backfills only the orgs that existed when it ran and provisioning's mint is
+    best-effort, so without this an org would stay unnamed FOREVER — every
+    record write refused, and a retry of the provisioning request cannot fix it
+    (it 409s). Safe on an auth path for the mint's own stated reasons: only on
+    the miss, idempotent and convergent under a race, and a failure still leaves
+    the write REFUSED rather than misfiled.
+
+    ``context`` names the calling resolver in the mint's log lines.
+    """
+    row_id = default_graph_id_for(cp, org_id)
+    if row_id is None:
+        row_id = _mint_default_graph_row_best_effort(
+            cp, org_id, graph_name, context=context)
+    return row_id
 
 
 def update_last_used(cp, key_id: str) -> None:
@@ -3114,7 +3140,9 @@ def provision_org(cp, *, prior_org_ids: list[str] | None = None,
     # it names does not exist until the RPC commits.
     #
     # The row is not silently skipped when this fails — the helper logs it, and
-    # the org's next API-key request self-heals it (see `resolve_api_key`), so
+    # the org's next credential resolution self-heals it (see
+    # `default_graph_id_for_credential`, called by `resolve_api_key`,
+    # `hosted_api._session_user_org` and `resolve_oauth_access_token`), so
     # `provision_org`'s documented "raise ⇒ nothing committed" contract holds
     # and the unnamed-record state is transient rather than permanent.
     if params.get("p_org_id"):
@@ -4059,11 +4087,13 @@ def ensure_default_graph_row(cp, org_id: str,
 
     ⛔ SO HOW DOES A MISSED MINT GET HEALED? Three ways, none of them
     operator-only: (1) the failure is logged at ERROR by the wrapper, naming
-    the org and the residual state; (2) the org's next API-key request
-    self-heals it — :func:`resolve_api_key` calls this function when
-    :func:`default_graph_id_for` finds no row, so the unnamed window closes on
-    first use rather than lasting forever; (3) re-running ``20261028000001``
-    or re-provisioning (both idempotent) heals it explicitly — documented in
+    the org and the residual state; (2) the org's next credential resolution
+    self-heals it — :func:`default_graph_id_for_credential` calls this function
+    when :func:`default_graph_id_for` finds no row, and every credential
+    resolver (API key, hosted SESSION/JWT, OAuth) goes through it — so the
+    unnamed window closes on first use rather than lasting forever; (3)
+    re-running ``20261028000001`` or re-provisioning (both idempotent) heals it
+    explicitly — documented in
     ``docs/ops/multi-graph-migration-runbook.md``.
     ⚠️ (2) and (3) hold for a TRANSIENT miss only. For the two PERSISTENT
     residuals (a graph already named ``default``; a ``kind='default'`` row
@@ -4189,10 +4219,13 @@ _DEFAULT_ROW_MINT_RETRY: dict[str, float] = {}
 #: Prune the cache above this many orgs (see `_record_default_row_mint_failure`).
 _DEFAULT_ROW_MINT_RETRY_MAX = 1024
 #: Serialises every access to `_DEFAULT_ROW_MINT_RETRY` (#10027 review F1).
-#: The dict is PROCESS state, and this mint runs on three executors in the same
-#: process — the auth pool (`resolve_api_key`, up to
+#: The dict is PROCESS state, and this mint runs on several executors in the
+#: same process — the auth pool (`resolve_api_key`, up to
 #: `monitoring.CONTROL_PLANE_WORKERS` threads), the org pool (`provision_org`),
-#: and the MCP loop thread — so a bare read-modify-write over it is not safe:
+#: the telemetry pool (a hosted SESSION/JWT, `hosted_api._session_user_org`'s
+#: best-effort offload, since #10046) and the event loop's DEFAULT EXECUTOR (the
+#: MCP OAuth lane's `asyncio.to_thread`, since #10046) — so a bare
+#: read-modify-write over it is not safe:
 #: CPython documents that "iterating views while adding or deleting entries in
 #: the dictionary may raise a RuntimeError or fail to iterate over all
 #: entries", and a raise here is not a lost cache entry, it is an exception out
@@ -4209,7 +4242,9 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
 
     The seam that must SURVIVE an unreadable control plane: both provisioning
     wrappers (their RPC has committed, and their callers compensate
-    destructively on a raise) and the API-key auth self-heal (auth must not
+    destructively on a raise) and the credential-resolution self-heal — an API
+    key since #10025, and a hosted SESSION/JWT and an OAuth ``oat_`` token since
+    #10046, all through :func:`default_graph_id_for_credential` (auth must not
     fail because a control-plane write did). Returns the row's id, or ``None``
     when the mint could not be done — which leaves the record write REFUSED
     ``no_tenant`` (the documented fail-closed direction), never filed under a
@@ -4247,7 +4282,8 @@ def _mint_default_graph_row_best_effort(cp, org_id: str,
             "default graphs row NOT minted for org %s (%s): the org's record "
             "writes stay refused `no_tenant` until it is healed — a TRANSIENT "
             "cause (an unreadable table, a race) heals on the org's next "
-            "API-key request, which re-attempts the mint. The two PERSISTENT "
+            "credential resolution — API key, hosted session/JWT or OAuth "
+            "`oat_` token, which all re-attempt the mint. The two PERSISTENT "
             "shapes do not: a graph already named 'default', and a "
             "kind='default' row whose status is neither 'active' nor "
             "'deleted' — a re-run of 20261028000001 skips those too (it "
@@ -4275,10 +4311,11 @@ def _record_default_row_mint_failure(org_id: str, now: float) -> None:
     long-lived process, so expired entries are pruned once it grows.
 
     ⛔ The prune iterates a SNAPSHOT, never the live view. This dict is
-    process-global and is written from three concurrent executors in ONE
-    process — the auth pool (8 workers, through `resolve_api_key`'s self-heal),
-    the org pool (4, the provisioning wrappers) and the event loop (the MCP
-    lane) — so the loop can run while another thread inserts a new org key.
+    process-global and is written from concurrent executors in ONE process —
+    the auth pool (8 workers, through the API-key self-heal), the org pool (4,
+    the provisioning wrappers), the telemetry pool (a hosted SESSION/JWT) and
+    the loop's default executor (the MCP OAuth lane) — so one of them can run
+    while another inserts a new org key.
     Mutating a dict during iteration "has an undefined effect and will in most
     cases raise a RuntimeError exception" (PEP 3106; CPython raises
     `dictionary changed size during iteration`), and that raise would not stay
