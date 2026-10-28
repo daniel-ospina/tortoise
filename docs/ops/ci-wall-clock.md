@@ -185,6 +185,7 @@ the 360-minute default.
 | `ai-review-gate` | `ai-review-gate-<PR number>` | true | Already compliant; `pull_request_target` only, so every run is PR-keyed. |
 | `drift-guard` | `drift-guard-<ref>` | true | Already compliant; `pull_request` + `workflow_dispatch`. |
 | `post-merge-validation` | `postmerge-validation` (constant) | false | Serialises; superseded *pending* runs are still dropped by GitHub (§1), which is why `main-lint` keyed its own group on `github.sha`. |
+| `deploy-hosted` | `deploy-hosted` (constant) | false | A RUNNING deploy is never cancelled (#10155; #10109 / #10152 were the stale-production class — production fell hours behind because later merges killed the deploy in flight). A PENDING one is still superseded by the newest push (§4), which is the residual `supabase-deploy`'s flip watcher reports as `UNKNOWN` rather than as a failed flip. The group must stay constant: `supabase-deploy` dispatches this workflow and then watches that run (#3627). |
 | `ci-queue-health` | `ci-queue-health` | false | Deliberate: two governors would cancel each other's kept runs. |
 
 `github.ref` is what makes this branch-scoped: `refs/pull/N/merge` on PRs, `refs/heads/main` on
