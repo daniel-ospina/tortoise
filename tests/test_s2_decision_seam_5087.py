@@ -26,11 +26,11 @@ test is not a test.
 **Why the fifth and sixth.** The first four proved the parsers on their PASSING
 side and left guards deletable with the suite green: ``_noul``'s ``[0, 1]`` band
 on the out-of-band side (including a JSON ``bool``, which ``isinstance(x, int)``
-accepts), the atomicity veto on a fused candidate, and — see the unpinned-model
-assertion — an envelope floor asserted against an empty answer map, which fails
-at ``_answer`` rather than at the pin it claims to test. The fifth and sixth
+accepts), the atomicity veto on a fused candidate, and — see the model-echo
+assertions — an envelope check asserted against an empty answer map, which fails
+at ``_answer`` rather than at the envelope it claims to test. The fifth and sixth
 tests supply the input each guard exists to refuse: the parsers' guards, and then
-``_Bands``' ordering, ``_add_cost``'s non-negativity, ``classify_tail``'s
+``Bands``' ordering, ``_add_cost``'s non-negativity, ``classify_tail``'s
 empty-offer filter, and — added by the round-7 review — the three guards that are
 not about answers at all: the request never goes through a redirect-following
 ``urlopen`` (which would replay the bearer key to a 3xx target), the arming read is
@@ -177,7 +177,6 @@ def test_a_valid_typed_answer_produces_the_expected_verdict():
 def test_an_out_of_schema_answer_fails_closed_and_names_the_question(monkeypatch):
     """Three malformed answers, both steps: wrong primitive, a score off the
     declared scale, and a choice outside the offered set. None may become a
-    nothing may become a
     verdict, and the record must name the question that failed. Two envelope-level
     facts ride along, one line each: the seam is not consulted unless it is ARMED,
     and the response's model echo is RECORDED rather than asserted (the fleet
