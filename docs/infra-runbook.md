@@ -3482,11 +3482,20 @@ happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
-   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
-   an org-wide / session / legacy / OAuth key, the self-host registry lane
-   (`record_writer.record_tenant_for` returns `None` by design), and the
-   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
-   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   `no_tenant` is ALSO the designed outcome where nothing names a graph at all —
+   but since #10046 (API keys since #10025) that is **no longer a credential
+   class**, so do NOT read it as one. What still emits it by design: the
+   self-host registry lane (`record_writer.record_tenant_for` returns `None` by
+   design — a graph-bound key that resolves through no control plane), and an
+   org with NO nameable active `kind='default'` row. (The onboarding-seed and
+   background-indexing runners are NOT one of those since #10047: they build
+   their own SDK and never see the request's credential, so
+   `hosted_api._bind_default_graph_record_tenant` supplies that row at their own
+   construction site.) On the hosted REST, MCP and OAuth lanes a `no_tenant`
+   from a `tt_`/`tk_` key, a session/JWT credential or an `oat_` token therefore
+   means the default row could not be named (missing, tombstoned, another org's,
+   unreadable) or the tenant read was lost — a **fail-and-fix**, not a designed
+   state (#9188/#9192, #10046).
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
