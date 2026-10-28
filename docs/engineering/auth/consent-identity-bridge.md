@@ -96,7 +96,7 @@ payload : {
 | `bind.redirect_uri` | must equal the `redirect_uri` presented at redemption (after the same `_redirect_uri_matches` normalisation the AS already applies) | **the code is redirected to an attacker origin** — the classic mix-up |
 | `bind.code_challenge` | must equal the `code_challenge` presented at redemption | the attacker's own verifier completes a flow the victim approved, i.e. the authorization code is not bound to the client that asked for it |
 | `bind.state` | must equal the `state` presented at redemption | cross-flow substitution |
-| `jti` | recorded on first redemption; a second redemption of the same `jti` is refused | replay: one consent yields N authorization codes |
+| `jti` | recorded on first redemption; a second redemption of the same `jti` is refused | replay of ONE TOKEN: a leaked assertion cannot yield N authorization codes. ⚠️ It does not bound the APPROVAL — the mint does not consume the attempt, and step 2 costs a re-mint rather than a re-login after a post-spend refusal, so one approval can yield one code per mint call. Closing that needs a single-use mark on the BFF's attempt row (a step-2/step-3 contract change), and `test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_recovery` pins the current behaviour both ways. |
 | `exp` | `CONSENT_TOKEN_TTL_S` (proposed **120 s**) from `iat`; verified with ≤30 s leeway | a leaked token stays live indefinitely |
 | `sub` | the asserted identity — the ONLY thing the token is allowed to establish | the AS has no identity input at all |
 | `iss` | must equal the configured session origin | a token minted by a look-alike origin is accepted |

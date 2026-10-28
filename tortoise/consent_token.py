@@ -28,7 +28,15 @@ against the spec rather than against its own prose):
 Why the binding is load-bearing and the TTL is not a substitute — §2.4, verbatim: *"Single-use +
 short TTL bounds replay, not fixation. An attacker's own live link still fixes the victim. Only the
 binding addresses that."* So the bind comparison is the security-critical half of this module, and
-the `jti` register is what stops one consent yielding N codes.
+the `jti` register is what stops ONE TOKEN from yielding N codes.
+
+⚠️ That is a narrower bound than "one consent yields one code", and the difference is deliberate: the
+BFF mint does not consume its attempt, so a page that mints again after a spent/refused redemption (§2.3's
+re-mint recovery, `hosted_api.py`) gets a fresh `jti` and hence a second code for the SAME approval. `jti`
+bounds the token; nothing in steps 1+3 bounds the approval. Closing that needs a single-use mark on the
+BFF's `consent_attempts` row — a step-2/step-3 contract change — and the re-mint is pinned by
+`tests/test_oauth_consent_bff_routes.py::test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_recovery`, so it
+cannot be narrowed silently either.
 
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
 -----------------------------------------

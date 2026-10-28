@@ -1037,6 +1037,27 @@ def test_a_keyless_re_entry_does_not_renew_the_attempt() -> None:
         f"({out['attempts'][0]['expires_at']}) — a dead or foreign row can then be kept alive forever")
 
 
+def test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_recovery() -> None:
+    """The residual, PINNED so it can be neither claimed away nor narrowed silently.
+
+    `jti` bounds a TOKEN: one token cannot yield two authorization codes. It does NOT bound the
+    APPROVAL — this route does not consume the attempt — and that is deliberate, because step 2
+    spends the nonce BEFORE the insert and therefore costs a RE-MINT rather than a re-login when
+    `issue_auth_code` refuses afterwards (`hosted_api.py`: "step 4's page mints again on load").
+    A second mint for the same attempt is the recovery path, so it must keep working; the comment on
+    the `jti` field and `consent_token.py`'s docstring now say exactly that instead of claiming the
+    stronger bound. Making the attempt single-use would be a step-2/step-3 contract change, and this
+    test is what forces that to be a decision rather than an accident.
+    """
+    first = _run("mint_ok")
+    assert first["status"] == 200, first
+    second = _run("mint_ok")
+    assert second["status"] == 200, (
+        f"a re-mint was refused, so step 4's post-spend recovery is broken: {second['body']}")
+    assert first["body"]["token"] != second["body"]["token"], (
+        "the same assertion was returned twice — a replayed token, not a fresh jti")
+
+
 def test_the_four_refusals_are_byte_identical() -> None:
     """Same-403-is-not-an-oracle, pinned by BODY, not by status.
 

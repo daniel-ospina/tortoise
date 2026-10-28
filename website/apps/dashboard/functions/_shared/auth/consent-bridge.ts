@@ -525,7 +525,14 @@ function randomHex(bytes: number): string {
  *   - `bind.code_challenge` — without it the attacker's own verifier completes a flow the
  *     victim approved;
  *   - `bind.state` — without it, cross-flow substitution;
- *   - `jti` — single-use: one consent must not yield N authorization codes;
+ *   - `jti` — single-use: ONE TOKEN must not yield N authorization codes. ⚠️ Not the same claim as
+ *     "one consent must not yield N codes": step 2 deliberately costs a RE-MINT rather than a
+ *     re-login when `issue_auth_code` refuses after the nonce is spent (`hosted_api.py`, "step 4's
+ *     page mints again on load"), and this route does not consume the attempt, so ONE APPROVAL CAN
+ *     YIELD ONE CODE PER MINT CALL. `jti` bounds the token, not the approval. Closing that residual
+ *     needs a single-use mark on `consent_attempts` — a step-2/step-3 contract change, not a line
+ *     here — and the behaviour is pinned (`test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_\
+ *     recovery`) so it cannot be narrowed silently either;
  *   - `exp` — bounds exposure if the assertion leaks;
  *   - `aud`/`iss` — a Supabase-shaped token, or one minted by a look-alike origin, must not
  *     verify here;
