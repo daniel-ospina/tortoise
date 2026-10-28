@@ -2703,9 +2703,39 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     # `re.I`: the inversion is the CLAIM (`name` instead of `id`), not the case
     # of the word. Case-sensitive, the same inversion in ordinary lowercase read
-    # GREEN (measured). Scoped to the same window so it cannot red a truthful
-    # mention of the NAME elsewhere (the doc's own `never a row NAME` at ~3565).
-    assert not re.search(r"row name", _oauth_arm, re.I), (
+    # GREEN (measured: the pattern alone, on the lowercase reword). Scoped to the
+    # same window so it cannot red a truthful mention of the NAME elsewhere (the
+    # doc's own `never a row NAME` sits ~2 500 chars away, in the `g_<hex>`
+    # sentence — the pattern alone is GREEN on the real doc; a truthful id-vs-NAME
+    # clause INSERTED into this arm's own 260-char window is what red a bare-noun
+    # `row name` (measured, #10083 review P2) — and the fix is to read the claim,
+    # not to drop the pin).
+    # The claim is a STAMPING claim: the NAME is put on the credential. So the
+    # negation-governed mentions are stripped first, the way the ruling pin below
+    # strips its noun-negated phrase: "— never the row's name on the credential —"
+    # is the RULING, and a bare-noun pin red it with a message accusing the arm of
+    # the inversion it had just refused (measured, #10083 review P2).
+    # Span-bounded rather than preposition-gated, because the inversion does not
+    # always keep the preposition in front: "… `default_graph_id` — that is, what
+    # the credential actually carries is the row's NAME, not the id" read GREEN on
+    # the preposition-gated form (measured, #10083 review P2), and an inversion
+    # like "some lanes stamp the row's NAME onto the credential" keeps `row id`
+    # earlier in the sentence, so the presence pin above cannot see it.
+    _oauth_claim = re.sub(
+        r"\b(?:never|not|no)\s+(?:an?\s+|the\s+)?row(?:['\u2019]s)?\s+name",
+        " ",
+        _oauth_arm,
+        flags=re.I,
+    )
+    assert not re.search(
+        # TWO-SIDED span, because the inversion is written both ways round: the
+        # claim "... carries is the row's NAME, not the id" puts `credential`
+        # BEFORE the name, so an after-only span read it GREEN (measured).
+        r"\brow(?:['\u2019]s)?\s+name\b(?=[^.]{0,60}?\bthe\s+credential)"
+        r"|\bthe\s+credential\b[^.]{0,60}?\brow(?:['\u2019]s)?\s+name\b",
+        _oauth_claim,
+        re.I,
+    ), (
         "the #10046 arm says the row's NAME is stamped — the opposite of #10025's "
         "id-vs-name ruling, and the healthy row is NAMED `default`, so a reader "
         "checking the name clears real growth"
@@ -3110,13 +3140,20 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # this request`, `hosted_api.py:6992`) is the improvement this bullet exists to
     # encourage, and the full-command form of this pin red it while its message
     # claimed a message was MISSING (#10083 review P3, measured).
+    # Quoting style and flag letters are NOT the claim: `grep -Ei`, `grep -nE` and a
+    # single-quoted body keep every required message, and each red the fixed
+    # `grep -E "` form of this capture with a message claiming the grep is absent
+    # (measured, #10083 review P3). Capture the pattern body regardless of where the
+    # flags sit or how the body is quoted.
     _fault_grep = next(
-        (g for g in re.findall(r'grep -E "([^"]+)"', flat)
+        (g for g in re.findall(
+            r"""grep\s+(?:-[a-z]*\s+)*-[a-z]*E[a-z]*\s*["']([^"']+)["']""", flat)
          if "could not resolve the record tenant" in g or "graphs default-row" in g),
         "",
     )
     assert _fault_grep, (
-        "the fault disjunct no longer carries a `grep -E` for the resolution faults"
+        "the fault disjunct carries no `grep -E` whose pattern names a resolution-"
+        "fault message"
     )
     for _alt in (
         "could not resolve the record tenant",
@@ -3207,72 +3244,126 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "from the fault (which is not) — inverted, a reader counts the growth as "
         "the fault or dismisses the line as missing"
     )
-    # ⛔ POLARITY, not vocabulary: the negation must GOVERN the attribution verb
-    # ("Do not try to attribute…", "cannot attribute", "never assign"), or the
-    # sentence must say the PRACTICE is infeasible ("attribution is impossible",
-    # "attribution would be unexecutable", "no per-request attribution"). An
-    # allow-list of bare words was measured evadable — "…is not impossible: the log
-    # line names the request" and "…is impossible to avoid: the log line names the
-    # request" both passed on the word "impossible" alone (#10083 review cycle 4, P2).
-    # But the reverse failure is the F3 class in assertion form: the first fix pinned
-    # only the `would be unexecutable` SHAPE, so a TRUTHFUL clarification in another
-    # shape — "Per-request attribution is impossible from this log line." or "There is
-    # no per-request attribution in this log line." — red the suite while asserting
-    # exactly the ruling, and the message told the next lane the section "presents
-    # per-request attribution of growth as possible" when it did not (#10083 review,
-    # P2, measured on both). So: accept every shape of the ruling, and reject the two
-    # double-negative evasions explicitly rather than by omission.
+    # ⛔ POLARITY, not vocabulary — a TWO-SIDED test, and both sides are POLARITY
+    # CLASSES rather than shape lists. The first fix pinned only the `would be
+    # unexecutable` SHAPE, so a TRUTHFUL clarification in another shape red the suite
+    # while asserting exactly the ruling ("Per-request attribution is impossible from
+    # this log line.", "There is no per-request attribution in this log line." —
+    # #10083 review, P2, measured on both), with a message telling the next lane the
+    # section "presents per-request attribution of growth as possible" when it did
+    # not. Then the accept half became a NEGATION WORD LIST, which failed the other
+    # way: seven evasions that negate something OTHER than the claim passed both
+    # halves — "Nothing prevents per-request attribution", "It is not hard to
+    # attribute that growth per request", "not out of reach", "The log does not
+    # prevent you from attributing", "not unachievable", "No obstacle prevents", and
+    # "You can attribute that growth per request, no correlation needed" (all
+    # GREEN before this pass; measured, #10083 review). Hence:
+    #
+    #   ACCEPT — the sentence carries NEGATIVE POLARITY: a prohibition, an
+    #   infeasibility, an absence, a failure, a barrier, or an inability. Any truthful
+    #   way of stating the ruling is one of those, and the class is closed under
+    #   rewording in a way a list of shapes is not.
+    #   REJECT — the sentence carries POSITIVE feasibility about the claim (bounded
+    #   to a claim word, so a truth like "no request identity is available" is not
+    #   red), or a DOUBLE NEGATIVE, i.e. negative polarity applied to a
+    #   NEGATIVE-MARKED predicate ("not impossible", "nothing prevents", "does not
+    #   prevent", "not hard", "not out of reach") — the shape that lets a sentence
+    #   carry the accept half's marker and still assert the opposite.
+    #
+    # SELECTION is by CLAIM NOUN OR VERB, not by verb alone: "A per-request breakdown
+    # of `no_tenant` growth is available from the log" and "The log line can be
+    # correlated with a request" carry no `attribut`/`assign` and state the opposite
+    # of the ruling, so a verb-only filter never scanned them (measured GREEN, #10083
+    # review). `per request` alone is deliberately NOT a selector: the hosted-lane
+    # sentence "carries its tenant **per request**, which always wins" is not a claim
+    # about attributing growth, and selecting it made the accept half red a truthful
+    # sentence (measured).
+    _claim = (r"attribut|assign|breakdown|break\s+\w+\s+down|identif|identit|"
+              r"distinguish|correlat|tells?\b[^.]{0,40}?\bapart")
     _sentences = [s for s in re.split(r"(?<=\.)\s+", flat)
-                  if re.search(r"attribut|assign", s, re.I)
-                  and re.search(r"\brequest", s, re.I)]
+                  if re.search(_claim, s, re.I) and re.search(r"\brequest", s, re.I)]
     assert _sentences, (
         "the section never rules per-request attribution out at all — the ruling "
         "below is the only thing that makes the arm executable"
     )
     for _sentence in _sentences:
-        # The REJECT half. Two families, both measured to have slipped a
-        # polarity-only filter (#10083 review cycle 2, P2):
-        #   (a) a DOUBLE NEGATIVE asserts possibility in the language of
-        #       impossibility — "attribution is not impossible", "impossible to
-        #       avoid";
-        #   (b) a POSITIVE feasibility predicate, however it is hedged — "There is
-        #       no doubt that per-request attribution is possible" passed the
-        #       first fix's `\bno\b[^.]*\battribut\w*` accept disjunct, and
-        #       "…impossible to prove: the log names the request" re-asserts the
-        #       false premise in its own tail.
+        # A NEGATION ON THE CLAIM NOUN IS NOT AN EVASION — it IS the ruling:
+        # "No per-request attribution is possible from this log line" red the
+        # positive-feasibility family with a message claiming the section presents
+        # attribution as possible (measured, #10083 review). So the noun-negated
+        # phrase ALONE is removed before the feasibility check. "There is no doubt
+        # that per-request attribution is possible" keeps its nouns (nothing sits
+        # between `no` and `doubt`) and stays RED, which is what that family exists
+        # for. The strip cannot smuggle: it removes only `<negation> <claim>`, and
+        # every family below reads the sentence either side of that pair.
+        _reject_target = re.sub(
+            r"\bno\s+(?:per-request\s+|per\s+request\s+)?"
+            r"(?:attribut|assign|breakdown|identif|distinguish|correlat)\w*",
+            " ",
+            _sentence,
+            flags=re.I,
+        )
         assert not re.search(
-            r"\b(?:is|are|was|were|remains?)\s+not\s+(?:impossible|infeasible|"
-            r"unexecutable|unavailable)\b|\bimpossible\s+to\s+(?:avoid|prevent)\b|"
-            r"\battribut\w*\s+(?:is|are|remains|would\s+be)\s+(?:possible|feasible|"
-            r"available|executable)\b|\b(?:log|line)\b[^.]*\bnames\s+the\s+request\b",
-            _sentence, re.I,
+            # (b) POSITIVE FEASIBILITY about the claim, subject-bounded so an
+            # unrelated truth ("no request identity is available") cannot red it.
+            r"\b(?:attribut|assign|breakdown|identif|distinguish|correlat)\w*"
+            r"[^.]{0,60}?\b(?:is|are|was|were|remains?|can\s+be|could\s+be|"
+            r"may\s+be|might\s+be|will\s+be|would\s+be|stays?)\s+"
+            r"(?:possible|feasible|available|achievable|attainable|reachable|"
+            r"doable|workable|executable|straightforward|trivial)\b|"
+            # (a) DOUBLE NEGATIVE: negative polarity applied to a negative-marked
+            # predicate. This is the family the lexeme-list accept half could not
+            # see — "Nothing prevents …", "does not prevent you from …",
+            # "not unachievable", "not hard to …", "not out of reach".
+            r"\b(?:not|never|nothing|none|no)\b[^.]{0,60}?\b(?:impossible|"
+            r"infeasible|unexecutable|unavailable|unachievable|unattainable|"
+            r"unreachable|unworkable|undoable|hard|difficult|tricky|prevent\w*|"
+            r"block\w*|stop\w*|hinder\w*|obstruct\w*|prohibit\w*|forbid\w*|"
+            r"barrier|obstacle|problem|beyond|out\s+of\s+(?:reach|the\s+question))\b|"
+            # (c) NEGATED FEASIBILITY, the double negative's softer twin:
+            # "attribution is not merely possible but required".
+            r"\bimpossible\s+to\s+(?:avoid|prevent)\b|"
+            r"\bnot\s+(?:merely|simply|only|just|solely)\b[^.]{0,40}?\b"
+            r"(?:possible|feasible|doable|achievable)\b|"
+            # (d) MODAL feasibility about the claim: "you can attribute that growth
+            # per request". Tempered so a negated modal ("can never attribute") is
+            # not red.
+            r"\b(?:can|could|may|might|are\s+able\s+to|is\s+able\s+to)\s+"
+            r"(?:(?!\b(?:not|never)\b)[\w'’]+\s+){0,4}"
+            r"(?:attribut|assign|identif|distinguish|correlat)\w*|"
+            # (e) the tail that re-asserts the false premise.
+            r"\b(?:log|line)\b[^.]*\bnames\s+the\s+request\b",
+            _reject_target, re.I,
         ), (
             "the section asserts that per-request attribution IS possible — through "
-            "a double negative, a hedged feasibility predicate, or a tail that "
-            "re-asserts that the log names the request. Every one of those is the "
-            f"step the ⛔ ruling forbids: {_sentence.strip()!r}"
+            "a positive feasibility predicate, a DOUBLE NEGATIVE ('not impossible', "
+            "'nothing prevents', 'not hard'), a negated feasibility predicate ('not "
+            "merely possible'), a modal ('you can attribute …'), or a tail that "
+            f"re-asserts that the log names the request: {_sentence.strip()!r}"
         )
         assert re.search(
-            r"(?:(?:\bDo not\b|\bNever\b|\bnot\b|\bmay not\b|\bmust not\b|"
-            r"\bcannot\b|\bcan't\b|\bno\b)\s+(?:try\s+to\s+)?(?:attribut|assign)|"
-            r"\battribut\w*\s+(?:would\s+be|is|remains)\s+(?:unexecutable|"
-            r"impossible|infeasible|unavailable)|\bno\b[^.]*\battribut\w*|"
-            # The negation may FOLLOW the noun ("Per-request attribution cannot
-            # be done"), and a qualifier may sit between the noun and the
-            # predicate ("Attribution for a request is impossible"). Both state
-            # the ruling and both red the shape-only accept list (measured,
-            # #10083 review P2). The REJECT half above still catches the
-            # double-negative and the positive-feasibility evasions, so accepting
-            # these shapes costs no discrimination.
-            r"\battribut\w*[^.]{0,60}?\b(?:cannot|can't|can\s+not)\b|"
-            r"\battribut\w*[^.]{0,60}?\b(?:is|are|remains|would\s+be)\s+"
-            r"(?:unexecutable|impossible|infeasible|unavailable)\b)",
+            # The ACCEPT half: NEGATIVE POLARITY, in the class form — a prohibition,
+            # an infeasibility, an absence, a failure, a barrier, an inability.
+            r"\b(?:no|not|never|cannot|can't|none|nobody|nothing|neither|nor|denied|"
+            r"without|unable|incapable|impossible|infeasible|unexecutable|unavailable|"
+            r"unachievable|unattainable|unreachable|unworkable|undoable|fails?|failed|"
+            r"failing|precludes?|precluded|rules?\s+out|ruled\s+out|omits?|omitted|"
+            r"lacks?|lacking|excludes?|excluded|opaque|silent|absent)\b",
             _sentence, re.I,
         ), (
             "the section presents per-request attribution of growth as possible — "
-            "the step the ⛔ ruling below forbids, and the log carries no request "
-            f"identity: {_sentence.strip()!r}"
+            "no prohibition, infeasibility, absence, failure or barrier governs the "
+            "claim, and the log carries no request identity: "
+            f"{_sentence.strip()!r}"
         )
+    # ⛔ THE RESIDUAL, stated so it is not a silent gap: an inversion written with a
+    # verb OUTSIDE the claim list is not SELECTED at all — "The growth can be filed
+    # per request", "Grouping the growth by request is a one-line join on the request
+    # id", "the growth can be split per request without guesswork" are all GREEN
+    # (measured). Widening the list does not close the class, because there is always
+    # another verb for the same claim; what closes it is a human reading the
+    # paragraph, which is why the ⛔ instruction and the bar sentence it qualifies are
+    # pinned on their own text elsewhere in this test.
     # REVERT-DETECTOR, not a claim pin: this reds only if one draft's exact wording
     # ("recipe 1 logs …") comes back — the phrase exists nowhere else in the tree,
     # so the assertion is green by construction and its message describes a class it
