@@ -3032,7 +3032,25 @@ jobs:
     needs: changes
     if: always() && needs.changes.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # #10182: the budget must cover EVERY step this job runs, post-steps
+    # included — a cold pip cache makes `actions/cache` save on the way OUT,
+    # and that save is charged against this timeout like any other step.
+    #
+    # Measured (run 40587081433, job 122533023160): the marker selection PASSED
+    # (12m32s, 0 failed), the artifact uploaded, and then the cache post-step
+    # tarred ~/.cache/pip into a 3.6 GB archive and began uploading it at
+    # ~5.6 MB/s effective — `Sent 2348810240 of 3608530109 (65.1%)` — until
+    # `timeout-minutes: 20` elapsed at 01:20:19 and the job was reported
+    # `cancelled`. `python-ci-gate` reads that as red (correctly: a cancelled
+    # leg certifies nothing, #5219), so a fully green job reddened the required
+    # gate on a diff that touches three Markdown files.
+    #
+    # This is deterministic, not flake: the in-step test cap is `15m` (below),
+    # the install/setup is ~1.5m, and a cold save needs ~11m — ~27m worst case
+    # against a 20m ceiling, so any run whose cache misses would overrun even on
+    # an idle runner. Raised rather than leaving the save unbounded, because the
+    # save is not this job's work and there is no per-post-step timeout.
+    timeout-minutes: 40
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
