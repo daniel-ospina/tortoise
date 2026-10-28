@@ -947,6 +947,18 @@ def test_no_redirect_stems_registry_exact():
         # first registration pass added the other two and missed this, reding
         # `test-slow (c)` at edd8f7ee (the pin working as designed).
         "test_mechanism_write_path_9963",
+        # #10121: the recency-tie pins construct per-test embedded SDKs from a
+        # tmpfile path and read the tie ORDER back off them, so the module-level
+        # `embedded_only` marker is load-bearing and the file belongs in the
+        # URI-unset carve-out lane. Caught by the SOURCE-SCAN half of
+        # `test_module_level_embedded_only_modules_are_carve_out` while the file
+        # was registered in `surfaces:` alone: it was collected by every URI-set
+        # lane and every case SKIPPED — a permanently green, permanently
+        # unexecuted gate (the #4047/#4524 shape). Registered in all three homes
+        # — config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS and this
+        # declaration — so the pin reding on the addition is the pin working as
+        # designed.
+        "test_10121_recency_tie",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
