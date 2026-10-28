@@ -67,8 +67,25 @@ carve_shards: 3
 # time per leg, ~9.6m projected job wall. 2 legs cannot fit a 37.9m pool into
 # 10m at any split, because the best a split can do is pool/2 = 18.9m.
 #
+# ⚠️ THE 37.88m / 7.58m ABOVE ARE THE 2026-10-21 MEASUREMENT, NOT TODAY'S POOL.
+# #10194 took the non-gating lane out of the slow legs (5 eval files, 5.26m:
+# the pool went 65 files / 33.8m / heavier leg 6.77m -> 60 / 28.56m / 5.72m), so
+# the derived pool is 60 files / 28.56m of committed weight and the same formula
+# now yields `ceil(28.56 / 8) = 4`. **5 IS DELIBERATELY KEPT**, and the reason is
+# wall clock, not arithmetic: at 4 legs the pack lands ~7.14m of test time on the
+# heavier leg → ~9.14m with the ~2m setup term, which still fits the 10m
+# guideline; 5 legs lands 5.72m → ~7.72m. So keeping 5 buys ~1.4m of merge
+# ceiling for one more runner — the same trade this key exists to make, and
+# LOWERING it to 4 is its own decision that belongs with #9539's objective and a
+# fresh measurement, not with a pool that shrank.
+#
+# The current derived shape (any date): `python3 tools/ci_selection.py
+# --non-gating-report` prints every leg with its file count and estimated
+# seconds. At this head: 5 legs, 11/12/11/13/13 files, 5.69–5.72m each.
+#
 # The legs are DERIVED (`tools/ci_selection.slow_shard_entries()` LPT-packs
-# `slow_files - carve_out` from the same `durations` map the fast band uses) so
+# `slow_gating_files()` — `slow_files` minus the carve-out minus the non-gating
+# lane, #10194 — from the same `durations` map the fast band uses) so
 # no hand-maintained list can rot — the failure mode that made the two-leg
 # lists drift to 6.4:1 before #9017. WHAT IT COSTS: aggregate runner-minutes
 # scale with the leg count (~41 → ~48 for the setup term), the same trade
@@ -1667,6 +1684,7 @@ surfaces:
   # `test_ci_selection.py` / `test_ci_timing.py` / `test_ci_manifest.py`), and no
   # test leg selected the suite at all.
   - test_10156_alert_registers.py
+  - test_10194_eval_suite_non_gating.py
   - test_2351_claim_class.py
   - test_9555_narrative_cache_rebuild.py
   - test_9555_narrative_carrier.py
@@ -6675,9 +6693,11 @@ tier1:
 # THE SPLIT — HISTORICAL as of #9539: the 2-leg era's pack of that map, recorded
 # because it is the measurement the leg count was argued from, NOT the shape the
 # lane runs now. #9539 replaced the committed pair with legs DERIVED from this same
-# map (`slow_files - carve_out` LPT-packed into `slow_shards` = 5, 13 files each:
-# 7.56m / 7.58m / 7.58m / 7.58m / 7.58m, so a leg's wall is 7.58m + ~2m setup =
-# 9.58m against the 10m target). What the 2-leg pack bought, stated against BOTH
+# map (`slow_gating_files()` — `slow_files` minus the carve-out minus the
+# non-gating lane since #10194 — LPT-packed into `slow_shards` = 5; the 13-files-each
+# / 7.56m–7.58m figures below are the PRE-#10194 shape of that pack, 5 eval files
+# and 5.26m of it have since left the pool). What the 2-leg pack bought, stated
+# against BOTH
 # baselines because they answer different questions:
 #   vs the legs this PR actually REPLACES (main's, i.e. #9035's cut):
 #       17.06m / 20.82m  ->  18.95m / 18.93m   critical leg -1.88m, -9.0%
@@ -6695,11 +6715,19 @@ tier1:
 # rather than a better cut of two: `slow_shards: 5` takes the critical leg from
 # 18.95m to 7.58m.
 # `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
-# headroom from the DERIVED legs — 5.3x the heavier one (7.58m, #9539) against the
-# 2.0x `WATCHDOG_HEADROOM` floor; in the 2-leg era above it read 2.11x at 18.95m —
-# and the workflow's drift guard pins the union of the EXPANDED legs to
-# `slow_files - carve_out`. NOTHING was deleted, moved off the pre-merge gate, or
+# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (5.3x
+# at the 7.58m heavier leg of the pre-#10194 pool; 6.99x at today's 5.72m — the
+# ratio is DERIVED, so it moves with the pool and is not restated as a fixed
+# number), and the workflow's drift guard pins the union of the EXPANDED legs to
+# `slow_gating_files()`. Read the live shape with `python3
+# tools/ci_selection.py --non-gating-report` rather than from a figure here.
+# NOTHING was deleted, moved off the pre-merge gate, or
 # re-marked: all 65 files still run on a PR, with the same nodeids.
+# ⚠️ #10194 exception to that sentence: the FIVE eval files in this list are no
+# longer pre-merge (they are the non-gating lane and run from
+# `eval-suite-manual.yml`). The `slow_files:` declaration below is kept on
+# purpose — the file still needs a `durations` weight and a classification, and
+# `slow_gating_files()` is what drops it from every leg.
 # #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
 # and section scans plus three source-file reads, no DB, so a docs-only PR must run it
 # here.
@@ -6716,6 +6744,12 @@ tier1:
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
+# #10194: this list is a DECLARATION (the file exists, is slow, and needs a
+# `durations` weight + a classification), not the leg membership. The legs run
+# `slow_gating_files()` — this list minus `carve_out` minus the non-gating lane —
+# which is why the five `eval/…` entries below can stay here while running no
+# pre-merge leg. Removing them from the list would delete their weights and
+# their classification, and the next eval run would have no committed cost.
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
 - test_backfill_sources.py
@@ -6834,9 +6868,12 @@ slow_files:
 # There are NO committed file lists left to describe: `test-slow` carries a
 # `${{ fromJSON(...slow_matrix) }}` matrix, and that job's own drift-guard step
 # fails closed if the union of the EXPANDED legs stops matching
-# `slow_files - carve_out` on this same `durations` map. The 40m in-step
+# `slow_gating_files()` (`slow_files` minus carve-out minus the non-gating lane,
+# #10194) on this same `durations` map. The 40m in-step
 # watchdog under the 60m outer cap are LITERALS #9539 deliberately left alone
-# (5.3x / 7.9x the 7.58m heavier derived leg); deriving them from the leg
+# (5.3x / 7.9x the 7.58m heavier derived leg when they were chosen; 6.99x /
+# 10.5x at today's 5.72m leg — the multipliers are DERIVED, so re-derive them
+# rather than quoting these); deriving them from the leg
 # weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
 # keeps the literals honest is
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
@@ -8892,10 +8929,11 @@ durations:
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
-# out). It runs from the on-demand RUNNERS — `.github/workflows/
-# evals-on-demand.yml` and, for the perf lane, `.github/workflows/perf-lane.yml`
-# (both `workflow_dispatch`; the perf lane is also nightly) — and that is the
-# point.
+# out). It runs from the on-demand RUNNERS: `.github/workflows/
+# evals-on-demand.yml` for the lane's LITERAL entries,
+# `.github/workflows/eval-suite-manual.yml` for the two `dir/**` eval subtrees
+# (#10194), and `.github/workflows/perf-lane.yml` for the perf lane (all three
+# `workflow_dispatch`; the perf lane is also nightly) — and that is the point.
 #
 # KNOWN AND DELIBERATE, recorded because it is a real surface: `post-merge-
 # validation.yml` ignores only `slow_files` + `tests/e2e`, so it COLLECTS this
@@ -9160,9 +9198,43 @@ durations:
   test_vocab_gating_callers_5163.py: 6.5
   test_webhook_delivery.py: 2.4
   test_write_path_unreachable_seam_5148.py: 1.2
+# ── THE NON-GATING LANE (`on_demand:`) ──
+#
+# A file listed here RUNS but does not GATE: it is excluded from every pre-merge
+# leg (`fast_pool`, the slow legs, the tier-2 selection, the push matrix) by
+# `tools/ci_selection.py`, and run by a manual workflow instead. Two entry forms:
+#   - `path/to/test_x.py` — one file (`tests/`-relative)
+#   - `dir/**`            — every `test_*.py` under that directory, expanded
+#                           against DISK, so a NEW file in the subtree is off the
+#                           gate without a second config edit (#10194)
+# A runner must exist for every entry (`leg_coverage_issues` cannot see a runner,
+# so this comment is the record): `test_perf_lane_volunteer_context.py` →
+# `.github/workflows/perf-lane.yml`; `eval/retrieval/test_integration.py` →
+# BOTH `.github/workflows/evals-on-demand.yml` (its own literal entry: blank
+# dispatch, embedded shape) and `.github/workflows/eval-suite-manual.yml` (it is
+# also inside `eval/**` below); the two eval subtrees → `eval-suite-manual.yml`.
+# ⛔ Not `evals-on-demand.yml` for the subtrees: that workflow resolves
+# `on_demand_literal_runner_files()` and runs 2 of these 43, so pointing a human
+# at it for an `eval/**` file sends them to a green run over a file it never
+# touched.
 on_demand:
+  # #4711: 24.9% of ALL measured test time in one file; its own docstring says it
+  # asserts report SHAPE, never absolute quality. Also covered by `eval/**` below.
   - eval/retrieval/test_integration.py
+  # #3992: the dedicated perf lane's file — a shared-runner p95 is a flake, not a
+  # correctness signal.
   - test_perf_lane_volunteer_context.py
+  # #10194 (owner decision A, 2026-10-27): the eval subtrees do not gate a merge.
+  # Measured at f8970b53: 42 files / 1097 test functions (3% / 3.3% of the suite)
+  # carrying 2604s of the committed `durations` map (20.8%) across ALL 9 fast
+  # shards and the slow leg — the profile of three python-ci shards that were the
+  # top CPU consumers on a self-hosted runner (205%/176%/34% of 8 cores).
+  # Evals are downstream of the storage + MCP/SDK migrations by the owner's own
+  # ordering; they run on demand (`eval-suite-manual.yml`), never on a merge.
+  # This is a MEMBERSHIP change only — no check name changes, and the `eval`
+  # entries in `surfaces:` above stay (they are module OWNERSHIP, `tortoise/*.py`).
+  - eval/**
+  - longmem_eval/**
 
 # ── #6133: DECLARED SLEEP IS NOT GATE COST, AND NOT THE FLOOR ──
 #
