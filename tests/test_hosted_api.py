@@ -4861,25 +4861,26 @@ class TestSessionDetail:
             f"{r.status_code} {r.text[:300]}")
         assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
 
-    def test_detail_serves_the_list_when_the_record_answers(
+    def test_detail_refuses_a_short_record_answer_instead_of_a_contradicting_body(
             self, client, monkeypatch):
-        """The completeness guard is gated on the record read FAILING.
+        """⛔ #10021 review P2: a record that ANSWERED SHORT is not served as 200.
 
-        Without this, a guard that fired on the success path too would still
-        pass every other test in this class: their record answers agree with
-        `turn_count`, so the count comparison is silent either way. Here the
-        record STATES 4 turns (`session_narrative.turn_count`, its own account)
-        while holding 2 — a DISAGREEMENT — and the endpoint must still serve 200
-        with the turns it does have, because reading the record SUCCEEDED.
+        The completeness guard used to run only when the record read RAISED, so
+        this exact session was served `200 {"turns": 4, "turn_points": [2
+        rows]}` — the two numbers in one body taken from two stores with nothing
+        reconciling them, which is the truncated-result-indistinguishable-from-
+        complete shape #8447 exists to prevent, arriving through the SUCCESS
+        path. The record STATES 4 turns (`session_narrative.turn_count`, its own
+        account) and holds 2; the graph holds no turn node, so the union is 2.
 
-        At this head a short record answer is not authoritative either: the door
-        merges it with the graph copy and serves the UNION
-        (`record_read.merge_turn_payloads`). This session has no turn node, so
-        the union is the record's 2 — and the #8447 refusal stays reserved for a
-        read that FAILED with no complete graph copy to stand in for it.
+        Both arms now ask ONE rule (`record_read.served_turn_count`), and a
+        transcript shorter than the larger claim is refused with the same
+        explicit error the failure arm uses. Serving the 2 rows with `turns: 2`
+        was the other candidate and is rejected: it keeps the body consistent but
+        makes a provably incomplete transcript look complete.
 
-        Mutation: drop the `if _record_read_failed` gate (`if True:`) — this REDs
-        on the 503.
+        Mutation: put the predicate back behind `if _record_read_failed:` — this
+        REDs on the 200 (and on the contradicting body it serves).
         """
         sid = "detail-record-answers-disagreeing"
         import tortoise.hosted_api as ha
@@ -4892,8 +4893,7 @@ class TestSessionDetail:
             params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
 
         # The record's OWN account says 4 turns while it holds 2: the partial
-        # shape that must not be served as a complete transcript (and must not
-        # be refused either — the read succeeded).
+        # shape that must not be served as a complete transcript.
         conn = _ScopedRecordConn(narrative=[(None, None, 0, 4)])
 
         # #10021: the shared read predicate also asks the JOURNAL half of the
@@ -4914,10 +4914,57 @@ class TestSessionDetail:
         ])
 
         r = client.get(f"/v1/sessions/{sid}")
-        assert r.status_code == 200, (
-            "the record read SUCCEEDED — its own answer is served even where it "
-            f"disagrees with the graph's count: {r.status_code} {r.text[:300]}")
-        assert len(r.json()["turn_points"]) == 2, r.json()["turn_points"]
+        assert r.status_code == 503, (
+            "the record answered SHORT of its own count — a 200 here serves "
+            f"2 rows under `turns: 4`: {r.status_code} {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_publishes_the_served_length_when_the_record_holds_more_than_the_window(
+            self, client, monkeypatch):
+        """The OTHER direction: `turns` must describe the transcript served.
+
+        An armed append leaves the record holding `offset + window` rows while
+        `s.turn_count` is the WINDOW length, so publishing the window put a 2
+        above a 4-row list — the same self-contradicting body from the other
+        side. The record's own count covers the whole run, so the union IS the
+        complete transcript: it is served, with its own length.
+
+        Mutation: publish `sess[2]` again — this REDs on `turns == 4`.
+        """
+        sid = "detail-record-appended-window"
+        import tortoise.hosted_api as ha
+        from tortoise.record_read import Turn
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at=$now, s.is_episodic=true, s.turn_count=2, "
+            "    s.turn_max_index=3",
+            params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
+
+        # The record holds the whole run and says so; the session's 2 is the last
+        # append WINDOW.
+        conn = _ScopedRecordConn(narrative=[(None, None, 0, 4)])
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        monkeypatch.setattr(ha, "_open_record", lambda: conn)
+        monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
+            Turn(turn_id=f"{sid}_t{i}", index=i,
+                 content=f"[user] turn {i}.", speaker="user",
+                 created_at="2026-10-25T00:00:00+00:00")
+            for i in range(4)
+        ])
+
+        r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 200, r.text[:300]
+        body = r.json()
+        assert len(body["turn_points"]) == 4, body["turn_points"]
+        assert body["turns"] == 4, (
+            "the body publishes the WINDOW length above the transcript it "
+            f"serves: turns={body['turns']!r} over {len(body['turn_points'])} rows")
 
     def test_detail_exposes_the_session_source_node(self, client):
         """#3809: the detail carries the session's graph Source node

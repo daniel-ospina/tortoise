@@ -2805,11 +2805,29 @@ def _write_capture_turns(
         #     the same "journal what the write LEFT" rule the graph read-back
         #     provides on the other path.
         #
-        # Read only on a RE-CAPTURE: a fresh session has no prior row, so its hot
-        # path keeps its exact query count (#3086).
+        # ⛔ THE GATE IS THE RECORD'S OWN READ, NEVER THE GRAPH'S PROBE (#10021
+        # review P2). This used to run only when `session_existed` — a probe of
+        # the GRAPH's `:Session` node — was true. That premise ("a fresh session
+        # has no prior row") is a fact about the GRAPH; the licence it granted
+        # ("so this capture may journal its own `now`/`draft`") is a fact about
+        # the RECORD, and the two coincide only while every captured session also
+        # has a graph `:Session`. §2.0 makes the record the authority and the
+        # graph its cache, and §9.1's capstone D7 is measured with the graph
+        # destroyed: with `session_existed=False` and record rows PRESENT, the
+        # old gate left `_prior` empty and `_prior_unknown` False, so the FRESH
+        # branch journalled this capture's `status="draft"`/`createdAt=now` and
+        # the record's upsert wrote them from EXCLUDED ABSOLUTELY — re-stamping
+        # `created_at` and demoting an already-promoted turn on the store that IS
+        # the system of record, permanently and silently.
+        #
+        # `turn_prior_vectors` already answers "the record holds no row for this
+        # id" with `{}` — the exact value the old `else` branch fabricated — so
+        # asking it costs one bounded record read and buys correctness. The
+        # #3086 hot path keeps its guarantee: that pin is about work scaling with
+        # TURN COUNT and about on-loop graph work, not about one fixed read.
         _prior: dict[str, Any] = {}
         _prior_unknown = False
-        if session_existed and turn_rows:
+        if turn_rows:
             _read = _record_prior_vectors(
                 sdk, session_id, [row["id"] for row in turn_rows])
             _prior_unknown = _read is None
@@ -38460,8 +38478,10 @@ class TortoiseSDK:
         from tortoise.record_read import (
             TurnAnswer,
             merge_turn_payloads,
+            served_turn_count,
             turn_payloads,
         )
+        from tortoise.record_serve import RecordUnavailable
 
         # The id-space high-water mark (sess[12], the `:Session` read above) is
         # the TAIL witness the record's own `turn_count` cannot be: `None` when
@@ -38518,6 +38538,25 @@ class TortoiseSDK:
             turn_points = (
                 merge_turn_payloads(_answer, graph_points)
                 if _answer is not None else graph_points)
+        # ⛔ THE TWO NUMBERS IN THIS BODY MUST NOT CONTRADICT EACH OTHER
+        # (#10021 review P2). `turns` used to be the `:Session`'s `turn_count`
+        # (a WINDOW length) while `turn_points` is the union the record read and
+        # the graph copy produce, so on a split store the body served
+        # `{"turns": 4, "turn_points": [2 rows]}` with no error — the
+        # truncated-result-indistinguishable-from-complete shape #8447 forbids,
+        # one arm over from the failure path the hosted door already guarded.
+        # The rule is ONE shared definition (`record_read.served_turn_count`),
+        # applied here exactly as the hosted endpoint applies it, so the two
+        # doors cannot disagree about one session (#3557's parity contract).
+        served_turns, _turns_refusal = served_turn_count(
+            answer=_answer, served=len(turn_points), declared=sess[2])
+        if _turns_refusal:
+            _logger.warning("session %s: %s", session_id, _turns_refusal)
+            # An EXPLICIT error, never a shorter transcript served as complete:
+            # a new reply field would widen a public wire surface, so the
+            # refusal is the sanctioned shape (`#8447`: "an explicit error, or a
+            # reply field that says so").
+            raise RecordUnavailable(f"session {session_id}: {_turns_refusal}")
         ext_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
@@ -38544,7 +38583,7 @@ class TortoiseSDK:
         return {
             "id": sess[0],
             "created_at": sess[1],
-            "turns": sess[2],
+            "turns": served_turns,
             "actor_user_id": sess[3],
             "actor_display": sess[3],
             "harness": sess[4],

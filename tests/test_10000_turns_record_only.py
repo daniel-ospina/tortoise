@@ -30,6 +30,7 @@ from __future__ import annotations
 import pytest
 
 import tortoise.sdk as sdk_mod
+from tortoise import record_projection as rp
 from tortoise import record_read
 from tortoise.record_projection import TENANT_GUC_SQL, TENANT_SCOPE_SQL
 from tortoise.record_writer import RecordWrite, RecordWriteOutcome
@@ -478,6 +479,8 @@ def test_an_unreadable_prior_row_omits_the_field_rather_than_restamping(
 
     An omitted column is one the record's upsert leaves untouched; a column
     carrying this capture's `now`/`draft` is a claim that the stored turn is new.
+    The omitted pair is the ONE the snapshot contract declares may go (and only
+    together) — `record_projection.TURNS_SNAPSHOT_UNATTESTABLE_KEYS`.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     seam = _RecordSeam(_APPLIED)
@@ -488,9 +491,109 @@ def test_an_unreadable_prior_row_omits_the_field_rather_than_restamping(
              turn_embs=[[0.1, 0.2, 0.3]])
     snapshot = next(r["point"] for r in seam.records
                     if r.get("type") == "PointAdded")
-    assert "createdAt" not in snapshot and "status" not in snapshot, (
+    assert not (set(snapshot) & rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
         "a capture that could not read the prior row asserted its own "
         "created_at/status over the record's")
+    assert (rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS
+            == frozenset({"status", "createdAt"})), (
+        "the declared un-attestable pair no longer matches the writer's two "
+        "omitted keys — the snapshot contract (and the carrier pin that reads "
+        "it) would then describe a shape no capture produces")
+
+
+def test_a_recapture_on_a_graph_that_lost_its_session_journals_the_records_values(
+        sdk, monkeypatch):
+    """⛔ #10021 review P2: the prior row is read from the RECORD, not the graph.
+
+    The prior-row read used to be gated on `session_existed` — a probe of the
+    GRAPH's `:Session` node. Its premise ("a fresh session has no prior row") is
+    a fact about the graph; the licence it granted ("journal this capture's own
+    `now`/`draft`") is a fact about the record, and §2.0 makes the RECORD the
+    authority while §9.1's capstone D7 is measured with the graph DESTROYED. In
+    exactly that state the old gate left `_prior` empty, took the FRESH branch,
+    and the record's absolute upsert re-stamped `created_at` and DEMOTED an
+    already-promoted turn ON THE STORE OF RECORD, permanently and silently.
+
+    Mutation: put `session_existed and` back in front of the read — this REDs on
+    both assertions below (the snapshot carries this capture's `now`/`draft`).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"reborn_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established")})
+    _bind_tenant(sdk)
+    # `session_existed=False` IS the state under test: the graph no longer holds
+    # this session, the record still holds its turn.
+    _capture(sdk, "reborn", [{"role": "user", "content": "same text"}],
+             turn_embs=[[0.1, 0.2, 0.3]], session_existed=False)
+    snapshot = next(r["point"] for r in seam.records
+                    if r.get("type") == "PointAdded")
+    assert snapshot["createdAt"] == "2026-01-01T00:00:00+00:00", (
+        "the re-capture re-stamped the record's created_at because the GRAPH no "
+        "longer had the session — the record is the store of record (§2.0)")
+    assert snapshot["status"] == "established", (
+        "the re-capture demoted a promoted turn to draft on the store of record")
+
+
+def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
+    """⛔ #10021 review P2: the SDK twin publishes the same reconciled body.
+
+    The hosted door guarded the count only on its FAILURE arm and the SDK door
+    had no guard at all, so both served `{"turns": 4, "turn_points": [2 rows]}`
+    on a record that answered short. One shared rule
+    (`record_read.served_turn_count`) now decides for both.
+
+    The SDK has no error field, so the refusal is an explicit error of the
+    module's own record-read class (`RecordUnavailable`, #8447's sanctioned
+    shape); the OTHER direction — the record holding MORE than the session's
+    window — is served, with `turns` describing what was served.
+
+    Mutation: drop the `if _turns_refusal:` raise (or publish `sess[2]`) — the
+    first arm stops raising and the second REDs on `turns == 4`.
+    """
+    from tortoise.record_serve import RecordUnavailable
+
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=$now, s.is_episodic=true, s.turn_count=4",
+        params={"sid": "sdk-short", "now": "2026-10-25T00:00:00+00:00"})
+    short = record_read.TurnAnswer(
+        answered=False,
+        turns=(record_read.Turn(turn_id="sdk-short_t0", index=0,
+                                content="[user] a", speaker="user"),
+               record_read.Turn(turn_id="sdk-short_t1", index=1,
+                                content="[assistant] b", speaker="assistant")),
+        turn_count=4, kind=record_read.TurnAnswer.PARTIAL,
+        reason="the record states 4 turn(s) but holds only 2")
+    monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
+                        lambda self, sid, **kw: short)
+    with pytest.raises(RecordUnavailable):
+        sdk.get_session("sdk-short")
+
+    # …and the agreement direction: an armed APPEND leaves the record holding
+    # the whole run while `turn_count` is the last WINDOW.
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=$now, s.is_episodic=true, s.turn_count=2",
+        params={"sid": "sdk-append", "now": "2026-10-25T00:00:00+00:00"})
+    whole = record_read.TurnAnswer(
+        answered=True,
+        turns=tuple(record_read.Turn(
+            turn_id=f"sdk-append_t{i}", index=i, content=f"[user] {i}",
+            speaker="user") for i in range(4)),
+        turn_count=4, kind=record_read.TurnAnswer.COMPLETE, reason="turn rows")
+    monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
+                        lambda self, sid, **kw: whole)
+    detail = sdk.get_session("sdk-append")
+    assert len(detail["turn_points"]) == 4, detail["turn_points"]
+    assert detail["turns"] == 4, (
+        "the SDK published the WINDOW length above the transcript it serves: "
+        f"turns={detail['turns']!r} over {len(detail['turn_points'])} rows")
 
 
 def test_the_write_op_meter_counts_the_sessions_turns_not_turn_nodes(sdk):

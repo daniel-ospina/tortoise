@@ -429,10 +429,21 @@ class RecordWrite:
     #: WHY an ARMED call did not write — one of the tokens
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
     #: is counted under (``malformed_dsn``, ``no_durable_journal``, ``no_tenant``,
-    #: ``circuit_open``, ``write_failed``), else ``None``. The SAME vocabulary as
-    #: the counters on purpose (#8447): a caller that reports the refusal and an
-    #: operator reading the metric are naming one thing, and a second word list
-    #: is a second thing to drift.
+    #: ``no_tenant_carried``, ``circuit_open``, ``write_failed``), else ``None``.
+    #: The SAME vocabulary as the counters on purpose (#8447): a caller that
+    #: reports the refusal and an operator reading the metric are naming one
+    #: thing, and a second word list is a second thing to drift.
+    #:
+    #: ⛔ ``no_tenant_carried`` IS A SIXTH TOKEN ON PURPOSE (#10021 review P3).
+    #: The live door splits the nil tenant from a MALFORMED CARRIED pair — one is
+    #: "nobody said whose turns these are", the other is "the caller said, and
+    #: the answer was unusable" — and both count on the ``no_tenant`` COUNTER.
+    #: So the closed list above is the refusal vocabulary and the counter set is
+    #: one word coarser: a consumer branching on this field must accept six
+    #: values, while an operator reading the metric sees five. Listing only the
+    #: counter words here is what made a consumer's closed list miss a value the
+    #: door actually returns (:func:`write_live_record`'s ``LIVE_WRITE_REFUSALS``
+    #: declares them together, and that set is authoritative).
     refusal: str | None = None
 
     @property
@@ -442,11 +453,12 @@ class RecordWrite:
         The one check a caller needs. ``False`` means *nothing was written* —
         for ``NOT_ARMED`` it is not an error (an unarmed deployment is a
         supported state); a ``REFUSED`` call was armed and did not write, and
-        :attr:`refusal` says WHY, but the five refusal tokens are not one
-        severity: ``malformed_dsn`` / ``no_tenant`` / ``circuit_open`` /
-        ``write_failed`` are FAILURES, all four counted on
+        :attr:`refusal` says WHY, but the SIX refusal tokens are not one
+        severity: ``malformed_dsn`` / ``no_tenant`` / ``no_tenant_carried`` /
+        ``circuit_open`` / ``write_failed`` are FAILURES, all five counted on
         ``record_write_failures`` (BOTH ``no_tenant`` arms count — the nil tenant
-        and the malformed CARRIED pair), while ``no_durable_journal`` is a
+        and the malformed CARRIED pair, which is why the token list is one longer
+        than the counter set), while ``no_durable_journal`` is a
         healthy-armed DECLINE counted on ``record_non_journal_skips`` — that lane
         has no journal by design, so nothing a replay could restore is missing
         (#9231 review P2, and the vocabulary note in
@@ -1391,13 +1403,17 @@ def write_live_record(record: Mapping[str, Any], *,
     from "refused, nothing stored", and the only signal was a counter the
     producer does not read. `None` now means exactly one thing on this door.
 
-    ⚠️ RETURNED, NOT YET CONSUMED (#10021): the three production call sites —
-    ``api.EventAPI._emit``, ``mining._emit_event`` and
-    ``sdk.TortoiseSDK._write_record_projection`` — still DISCARD the value, so
-    what this closes today is the seam's capability (a producer that holds the
-    return can branch on it), not the store-selection decision itself.
-    Consuming ``refusal`` is #10021's work; until then the runtime signal for a
-    refused ARMED write remains the counter and the WARNING.
+    ⚠️ RETURNED, AND CONSUMED BY ONE DOOR (#10021). The capture writer is the
+    door that cannot proceed without the answer: `sdk._emit_event` hands this
+    return to `_write_capture_turns` through ``record_sink``, and that writer
+    branches on ``applied``/``statements`` to decide whether the turn is in the
+    record at all or must be written to the graph instead (§9.1/D1's
+    "the store follows the capability"). The other two production call sites —
+    ``api.EventAPI._emit`` and ``mining._emit_event`` — still DISCARD the value,
+    and no door branches on ``refusal`` itself: for them the runtime signal for a
+    refused ARMED write remains the counter and the WARNING. Consuming
+    ``refusal`` where the store decision is not at stake is #8447's work (an
+    explicit signal instead of a counter), not this change's.
 
     The RETURNED WATERMARK describes journal POSITIONS, so a write with no
     proven ordinal consumed none: it reports ``last_seq == first_seq - 1``, this

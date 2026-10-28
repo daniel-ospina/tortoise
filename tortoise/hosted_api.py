@@ -19028,6 +19028,16 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # capture — `sdk.py`'s `merge_sets`), which is the count this endpoint
     # publishes as `turns` below.
     #
+    # ⛔ AND NEITHER MUST THE SUCCESS ARM (#10021 review P2). This guard used to
+    # run only when the read RAISED, so a record that ANSWERED and held short of
+    # its own count was served as `{"turns": 4, "turn_points": [2 rows]}` — the
+    # two numbers taken from two stores with nothing reconciling them, i.e. the
+    # same truncated-result shape one arm over. The rule now lives in ONE place
+    # (`record_read.served_turn_count`) and is applied to BOTH arms; what it
+    # refuses is a transcript that cannot be the one the stores describe, and
+    # what it publishes otherwise is the length of the transcript actually
+    # served (`len(turns)`), never a window length that the list contradicts.
+    #
     # `!=`, not `<`: the stale-turn sweep is gated on the write predicate
     # (`sdk.py:2696`), so a re-capture after arming leaves the OLDER node set in
     # place, and that superset is as much "not this transcript" as a prefix is.
@@ -19055,18 +19065,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     #   * a same-length pre-arming copy is served and is indistinguishable from a
     #     post-arming re-capture on this route — count agreement is necessary,
     #     not sufficient;
-    #   * the guard runs only when the record read FAILS. A record read that
-    #     SUCCEEDS with a short or empty answer is served as the LIST while `turns`
-    #     still reports `sess[2]` — the same self-contradicting body — and this
-    #     route cannot see it. That half belongs to #10021 (recorded there with
-    #     code evidence); doing it here would be a second store-decision rewrite
-    #     against that open branch;
-    #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so this `!=` assumes
-    #     the offset-0 single-capture shape that is the only one wired today. A
-    #     non-zero `turn_offset` append leaves `offset + turn_count` nodes and
-    #     would make a COMPLETE copy refuse — revisit this line when an append
-    #     caller is wired (`tools/backfill_graph_turns.py:503-520` already treats
-    #     that shape as correct);
+    #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so the count check
+    #     assumes the offset-0 single-capture shape that is the only one wired
+    #     today. An append leaves `offset + turn_count` rows against a window
+    #     length of `count`: the record's own `turn_count` covers them
+    #     (`record_read.served_turn_count` takes the LARGER claim), so a complete
+    #     append is served — and published with the length it actually serves.
+    #     Revisit when an append caller is wired (`tools/backfill_graph_turns.py:
+    #     503-520` already treats that shape as correct);
     #   * over-block: a record outage on a session with no turns — including any
     #     session created without a capture — turns a truthful
     #     `200 {"turn_points": []}` into a 503. It needs the read to fail, and the
@@ -19080,11 +19086,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     #     partial copy (`tools/backfill_graph_turns.py:522-528` calls the same
     #     comparison a MEASUREMENT, never a cause).
     _expected_turns = sess[2]
-    if _record_read_failed:
-        if _expected_turns is None:
-            raise _record_unavailable()
-        if len(turns) != _expected_turns:
-            raise _record_unavailable()
+    served_turns, _turns_refusal = _record_read.served_turn_count(
+        answer=_record_answer, served=len(turns),
+        declared=_expected_turns, read_failed=_record_read_failed)
+    if _turns_refusal:
+        _logger.warning("session %s: %s", session_id, _turns_refusal)
+        raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
@@ -19129,7 +19136,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "id": sess[0],
         "created_at": sess[1],
         # #5498: `turns` is the COUNT; the turn LIST is `turn_points` below.
-        "turns": sess[2],
+        # #10021 review P2: the count is the length of the transcript this body
+        # actually serves (`record_read.served_turn_count` decided it above), so
+        # the two halves of the body cannot contradict each other. It equals the
+        # session's `turn_count` in every healthy shape and differs only where
+        # the two stores disagree — where the old value was a window length
+        # published above a longer or shorter list.
+        "turns": served_turns,
         # #2600: actor + harness on the detail dict (raw actor_user_id +
         # resolved display; null for legacy sessions).
         "actor_user_id": actor_user_id,

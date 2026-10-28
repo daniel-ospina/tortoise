@@ -85,6 +85,7 @@ __all__ = [
     "merge_turn_payloads",
     "session_text",
     "session_turns",
+    "served_turn_count",
     "source_narrative",
     "source_session",
     "turn_payloads",
@@ -504,6 +505,68 @@ def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict]) -> list[dict]
         return (0, int(match.group(1)), turn_id)
 
     return [merged[turn_id] for turn_id in sorted(order, key=_order_key)]
+
+
+def served_turn_count(*, answer: "TurnAnswer | None", served: int,
+                      declared: int | None,
+                      read_failed: bool = False) -> tuple[int | None, str]:
+    """The ``turns`` a detail body may publish beside ``served`` rows — or why not.
+
+    ⛔ ONE RULE FOR BOTH ARMS (#10021 review P2). Both doors publish two numbers
+    taken from DIFFERENT stores: ``turns`` was the ``:Session``'s ``turn_count``
+    (the WRITER's claim — a WINDOW length) while ``turn_points`` is the UNION the
+    record read and the graph copy produce. On the failure arm the doors already
+    compared the two and refused; on the SUCCESS arm nothing did, so a record
+    that ANSWERED SHORT served ``{"turns": 4, "turn_points": [2 rows]}`` with no
+    error code — the truncated-result-indistinguishable-from-complete shape
+    ``#8447`` exists to prevent, arriving through the success path.
+
+    The union itself is right and stays: it must not drop the turns a per-turn
+    fallback rescued (:func:`merge_turn_payloads`). What was missing is that the
+    COUNT has to describe the transcript being served, or the body contradicts
+    itself. So the count and the refusal are decided HERE, once, for both doors:
+
+    * **The record was never consulted** (``answer is None`` and the read did not
+      fail — an unarmed deployment): one store, nothing to reconcile. Publish the
+      session's own ``declared`` count, unchanged from pre-``#10000``.
+    * **Otherwise the record was consulted**, so this body is a judgement about
+      two stores. ``expected`` is the LARGEST claim either store makes: the
+      session's window length AND the record's own ``turn_count``. A transcript
+      shorter than the larger claim is provably incomplete → refuse (an explicit
+      error, ``#8447``'s sanctioned shape: a new reply FIELD would widen a public
+      wire surface, which is owner approval and not a lane decision — see
+      ``hosted_api._record_unavailable``).
+    * **A transcript that AGREES is published with its own length**, not with the
+      window length — an append leaves ``offset + count`` rows against a window
+      length of ``count``, and publishing the window there is the same
+      self-contradicting body from the other side.
+
+    ``expected`` is deliberately the max rather than either store alone: an
+    append's older turns predate arming, so their count lives on the record's
+    side, while a mid-capture refusal leaves the record's own count short of the
+    session's. Taking the larger claim can only REFUSE more (fail-closed), never
+    serve a shorter transcript as complete.
+
+    ``read_failed`` keeps the pre-existing failure arm: a record that could not
+    be read and a session carrying no count cannot be verified at all.
+    """
+    if answer is None and not read_failed:
+        return declared, ""
+    claims = [c for c in (declared, getattr(answer, "turn_count", None))
+              if c is not None]
+    expected = max(claims) if claims else None
+    if expected is None:
+        if read_failed:
+            return None, (
+                "the record did not answer and the session carries no "
+                "turn_count, so no copy of this transcript can be proven "
+                "complete")
+        return declared, ""
+    if served != expected:
+        return None, (
+            f"the served transcript holds {served} of the {expected} turn(s) "
+            "the two stores claim — a short copy is not a complete answer")
+    return served, ""
 
 
 def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
