@@ -407,9 +407,22 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 
 - **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
-  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0` (the pin
-  survives the move: the fleet's DEPLOYED callers send that same version to `api.typesafe.ai`, and the
-  agent-infra source caught up in #2859), prompt version
+  lane taking ownership of the issue's work?") — model `jev-1.13.0` at the time this was
+  measured. The fleet's model constant is `jev-latest` by owner ruling 2026-10-27, and the
+  switch **landed** in agent-infra#2914 (merged 2026-10-27), so agent-infra `main` sends the
+  alias as well. What can still lag is a COPY: the three deployed JEV callers under
+  `~/.pi/agent/scripts/` — `turn-classify.py`, `ask-owner.py`, and `lane-actions.py` (which
+  carries no constant of its own and sends `LV.JEV_MODEL` from `state/lane-verdict.py`) — are
+  DERIVED from an agent-infra checkout, so they mirror whatever that checkout held WHEN
+  BOOTSTRAPPED — a bootstrap from a checkout that predates that merge reverts
+  them to the pin (observed 2026-10-27 12:52), a derivation artefact rather than a decision. So
+  name which checkout YOUR copies came from; do not assume the pin means the fleet was never moved.
+  `~/.pi/agent/state/lane-verdict.py` is the exception: bootstrap never writes `state/`, so it
+  is hand-maintained and a pin there is an edit, not a derivation (a box without that file has
+  nothing to assert there). Assert all three after any bootstrap:
+  `grep -rn 'JEV_MODEL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py`
+  (three paths — a bare `grep 'JEV_MODEL ='` reads stdin and answers nothing). Either way a measurement
+  of this seam must name its model rather than assume one. Prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
   `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
