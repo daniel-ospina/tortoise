@@ -14,7 +14,16 @@
 # Coverage — one case per VERDICT-TABLE row, plus the positive controls that
 # make the row's rule load-bearing:
 #   * `no_embedded_servers` → bound 0, a count above 0 REDs, and a watchdog
-#     kill downgrades that red (the `no_embedded_servers` cases 14-16).
+#     kill downgrades that red (the `no_embedded_servers` cases 14-16). Its red
+#     quotes the ATTRIBUTED `own_now`, never the host-wide `COUNT` (case 15b,
+#     #10255 review B): cases 15/16 pass argv fixtures where own_now == COUNT,
+#     so a message carrying the wrong one of the two was unobservable there.
+#     The `probe_failed` arm carries the same rule (cases 16b, 16b-ii).
+#   * a report that keeps `own_roots` but DROPS `sweep.own_left` → RED
+#     (`unreadable`, case 59b, #10255 review 3): the guard at the parser's
+#     `own_left == "absent"` branch is the one shape-change control that
+#     no fixture reached, and deleting it fails OPEN (`[ "$own_now" -gt "" ]`
+#     is status 2, read as false → pass), so it is pinned here.
 #   * `{reaped, cleared, left}` → bound is READ from the report: two reports
 #     with DIFFERENT `left` both PASS against their own value (cases 1, 2), so a
 #     hardcoded bound cannot satisfy both.
@@ -221,6 +230,12 @@ printf '%s' '{"own_roots":["/tmp/tt_fixture"],"sweep":{"reaped":9,"cleared":true
 printf '%s' '{"own_roots":["/tmp/tt_fixture"],"sweep":{"reaped":9,"exited":0,"cleared":true,"left":null,"before":null,"own_left":null}}' > "$WORK/leftnull.json"
 printf '%s' '{"own_roots":["/tmp/tt_fixture"],"sweep":{"reaped":0,"exited":0,"cleared":false,"left":null,"before":5,"own_left":null}}' > "$WORK/leftnull_aborted.json"
 printf '%s' '{"sweep":{"reaped":9,"exited":0,"cleared":true,"left":14,"before":20,"own_left":14}}' > "$WORK/no_attribution.json"
+# #10255 review 3 (P2): the OTHER shape-change control — a report that keeps
+# `own_roots` but DROPS `own_left`. It is the whole reason a producer that stops
+# emitting the field cannot silently retire the leak check, and until now NO
+# fixture reached it (every report-arm fixture carries `own_left`; the only
+# shape-change fixture, `no_attribution.json`, drops `own_roots`).
+printf '%s' '{"own_roots":["/tmp/tt_fixture"],"sweep":{"reaped":9,"exited":0,"cleared":true,"left":14,"before":20}}' > "$WORK/own_left_absent.json"
 printf 'not json at all' > "$WORK/unreadable.json"
 
 # ── argv fixtures (#1005): the counted servers' argv, one `pid<space>args`
@@ -408,9 +423,24 @@ echo "15. no_embedded_servers with an ATTRIBUTED server above 0 REDs"
 run_gate 3 0 none.json argv_own3.txt
 assert_eq "$RC" "1" "exits 1"
 assert_contains "$OUT" "no embedded server was ever running" "names the contradiction"
-assert_contains "$OUT" "::error::redislite server leak: 3 servers after suite but the sweep reports no embedded server was ever running — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+assert_contains "$OUT" "::error::redislite server leak: 3 server(s) under this run's own session temp roots (roots=/tmp/tt_fixture) after suite but the sweep reports no embedded server was ever running — COUNT=3 counted host-wide, so the unattributed surplus belongs to other processes — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
   "the no-embedded leak red is VERBATIM — every field and word"
 assert_not_contains "$OUT" "remain after suite" "does NOT fall through to the pass line"
+
+echo "15b. #10255 review B: the leak red quotes the ATTRIBUTED count, not the host-wide COUNT"
+# The arm's CONDITION was already attributed (own_now > 0); its MESSAGE was not,
+# so on the shared host this gate is written for, own_now=1 with COUNT=5 read as
+# "5 servers leaked" — sending the reader after four servers this run never
+# started. Cases 15/16 pass argv fixtures where own_now == COUNT, so the
+# divergence was never exercised: this fixture is 5 counted, 1 ours.
+run_gate 5 0 none.json argv_own1.txt
+assert_eq "$RC" "1" "exits 1 (one ATTRIBUTED server is still a leak)"
+assert_contains "$OUT" "leak: 1 server(s) under this run's own session temp roots" \
+  "quotes the attributed own_now=1 in the leak claim"
+assert_contains "$OUT" "COUNT=5 counted host-wide" \
+  "keeps the host-wide count as an explicit diagnostic"
+assert_not_contains "$OUT" "leak: 5 " \
+  "does NOT claim the host-wide 5 as this run's leak (the P3 defect)"
 
 echo "16. no_embedded_servers above 0 under a kill downgrades to a warning"
 run_gate 3 137 none.json argv_own3.txt
@@ -421,8 +451,16 @@ echo "16b. left=null (the sweep's probe failed) REDs on an ATTRIBUTED residue"
 run_gate 4 0 leftnull.json argv_own3.txt
 assert_eq "$RC" "1" "exits 1 instead of reading the null as 0"
 assert_contains "$OUT" "probe FAILED" "names the failed probe"
-assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the 4 residue is unaccounted for (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
-  "the probe-failure red is VERBATIM at rc=0"
+assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the 3 server(s) under this run's own session roots (roots=/tmp/tt_fixture) are unaccounted for (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the probe-failure red is VERBATIM at rc=0, quoting the ATTRIBUTED own_now=3 (not the host-wide COUNT=4)"
+
+echo "16b-ii. #10255 review B: a host-wide surplus is never named as this run's residue"
+# Same arm, wider divergence: 9 counted, 3 OURS. The message must name the 3.
+run_gate 9 0 leftnull.json argv_own3.txt
+assert_eq "$RC" "1" "exits 1"
+assert_contains "$OUT" "the 3 server(s) under this run's own session roots" \
+  "names the attributed population"
+assert_not_contains "$OUT" "the 9 " "never claims the host-wide 9 as this run's residue"
 assert_not_contains "$OUT" "within the sweep's own measurement" "never prints a pass line"
 
 echo "16c. left=null under a kill downgrades to a warning"
@@ -721,8 +759,8 @@ run_gate 1 0 leftnull_aborted.json argv_own3.txt
 assert_eq "$RC" "1" "exits 1 at COUNT=1 (the residue is unmeasured)"
 assert_contains "$OUT" "cleared=false" "names the exhausted budget"
 assert_contains "$OUT" "probe FAILED" "names the failed sweep-side probe"
-assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the 1 servers that remain are unmeasured, not a bounded outcome (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
-  "the cleared=false probe-failure red is VERBATIM at rc=0"
+assert_contains "$OUT" "::error::redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the 3 server(s) under this run's own session roots (roots=/tmp/tt_fixture) are unmeasured, not a bounded outcome (issue #1005) — pytest rc 0 (issue #1005 / epic #1647 E2E-7)" \
+  "the cleared=false probe-failure red is VERBATIM at rc=0, quoting the ATTRIBUTED own_now=3 (this fixture counts 1 host-wide — the host-wide count was the wrong number to print)"
 assert_not_contains "$OUT" "diagnostic only" "does not excuse the unmeasured residue"
 run_gate 1 124 leftnull_aborted.json argv_own3.txt
 assert_eq "$RC" "0" "a watchdog kill still downgrades it (rc=124)"
@@ -980,6 +1018,26 @@ assert_contains "$OUT" "no usable own_roots attribution key" \
 assert_not_contains "$OUT" "within the sweep's own measurement" \
   "an unattributable report never reaches the pass line"
 
+echo "59b. a report that DROPS sweep.own_left is unreadable → RED (the attribution cannot be disabled)"
+# #10255 review 3 (P2): `own_left` is REQUIRED (absent = shape change, not a
+# tolerance) because it is the bound the whole #1005 verdict is measured
+# against. This is the one shape-change control with no fixture, and the
+# fail-open it prevents is MEASURED, not assumed: with the guard gone AND the
+# magnitude `max()` no longer naming `own_left` (a plausible refactor — it is
+# validated separately), the parser prints `own_left=absent`, the shell gets a
+# non-numeric string, `[ "$own_now" -gt absent ]` is status 2, and status 2 is
+# read as FALSE → PASS at rc=0. Both neighbouring mutations are also measured
+# so a fixer does not chase a phantom: deleting only the `== "absent"` half is
+# caught by `not own_left_ok` (`_count("absent")` is False), and deleting the
+# whole guard while `max()` still names `own_left` raises TypeError → the
+# `|| kind=unreadable` fallback → RED.
+run_gate 14 0 own_left_absent.json argv_own14.txt
+assert_eq "$RC" "1" "exits 1: a report without own_left cannot be measured against"
+assert_contains "$OUT" "the redislite-hygiene end-sweep report is unreadable (unreadable)" \
+  "names the unusable report (not a leak claim)"
+assert_not_contains "$OUT" "within the sweep's own measurement" \
+  "never reaches the pass line (fail-open pin)"
+
 echo "60. no argv measurement: the host-wide count is diagnostic, never a leak claim"
 run_gate 15 0 report14.json
 assert_eq "$RC" "0" "exits 0 (nothing attributes the surplus to this run)"
@@ -1004,7 +1062,7 @@ assert_not_contains "$OUT" "::error::" "a foreign server is not this run's resid
 
 # A LOST case must not be indistinguishable from success: deleting a case
 # leaves FAIL=0 and merely a LOWER count, so the count is pinned too.
-expected_assertions=249
+expected_assertions=259
 if [ "$PASS" -eq "$expected_assertions" ]; then
   PASS=$((PASS + 1))
   echo "  ✅ assertion count pinned at $expected_assertions (a lost case is not a green run)"

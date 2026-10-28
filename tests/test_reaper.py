@@ -6346,6 +6346,97 @@ def test_own_live_server_count_is_unmeasured_without_a_root_or_probe():
         ["/tmp/tt_ours"], probe=lambda: [1], cmdline_of=lambda pid: "") == 0
 
 
+def test_own_live_server_count_is_unmeasured_when_argv_is_unreadable():
+    """#10255 review A: an UNREADABLE argv is None, never a confident 0.
+
+    The docstring promised this and the code did not implement it: `cmdline_of(pid)
+    or ""` collapsed "I could not read this process's argv" into "this argv
+    names no root of ours", and a live pid then counted as *not ours*. That is
+    the measurement race #1005 exists to remove, one layer down — `own_left` is
+    read inside the loaded pytest process under `pytest -n`, where the 2 s `ps`
+    call is the likeliest thing on the box to time out, while `own_now` is read
+    later from the runner shell. An UNDER-read `own_left` with the server still
+    alive reads as `own_now > own_left` → the gate reds a green run with a leak
+    claim derived from a failed read; and if both reads fail, `0 == 0` PASSES a
+    real residue.
+
+    Non-vacuity: on the pre-fix code (`cmdline_of(pid) or ""`) every case below
+    returns 0 instead of None.
+    """
+    from tortoise.embedded_reaper import own_live_server_count
+
+    assert own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: [7],
+        cmdline_of=lambda pid: None) is None, (
+        "a live pid whose argv could not be read is UNMEASURED, not foreign"
+    )
+    # ONE unreadable pid is enough: the count is not a partial credit.
+    assert own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: [7, 8],
+        cmdline_of={7: "/x/redis-server /tmp/tt_ours/a/redis.conf",
+                    8: None}.get) is None, (
+        "one unreadable live pid makes the whole count unmeasured — a partial "
+        "count would under-read the bound the gate compares against"
+    )
+    # An EMPTY argv is a COMPLETED observation (ps rc 1: the pid is gone
+    # between the count and the read), and that pid is not a server of ours.
+    assert own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: [9], cmdline_of=lambda pid: "") == 0, (
+        "`ps` reporting no such process is a measurement of absence, not a "
+        "failed probe — it must not turn a clean run into an unmeasured one"
+    )
+
+
+def test_cmdline_or_none_separates_a_gone_pid_from_a_failed_probe(monkeypatch):
+    """#10255 review A: the distinguishing read, from ps's own exit status.
+
+    `ps -p <pid>` exits 1 when no pid matched — a COMPLETED measurement of
+    absence (measured on procps-ng 4.0.4; the procps man page documents no
+    exit-status contract) — and >1 only when the probe itself failed. `_cmdline`
+    must keep its historical `""`-for-both behaviour (its other callers depend
+    on a string), so the distinction lives in `_cmdline_or_none`.
+    """
+    from tortoise import embedded_reaper as er
+
+    class _Out:
+        def __init__(self, rc, stdout):
+            self.returncode = rc
+            self.stdout = stdout
+
+    # The per-sweep cache would answer before `ps` does; this test is about the
+    # subprocess read, so start from an empty cache (a leaked entry from another
+    # test would make the assertion vacuous).
+    monkeypatch.setattr(er, "_PROC_INFO_CACHE", {})
+
+    def _reply(rc: int, stdout: str):
+        return lambda *a, **k: _Out(rc, stdout)
+
+    for rc, stdout, expected in (
+        (0, "redis-server /tmp/tt_ours/x", "redis-server /tmp/tt_ours/x"),
+        (1, "", ""),
+    ):
+        monkeypatch.setattr(er.subprocess, "run", _reply(rc, stdout))
+        assert er._cmdline_or_none(12345) == expected, (
+            f"ps rc={rc} must read as {expected!r}"
+        )
+    for rc in (2, 127):
+        monkeypatch.setattr(er.subprocess, "run", _reply(rc, ""))
+        assert er._cmdline_or_none(12345) is None, (
+            f"ps rc={rc} is a FAILED probe, not an empty argv"
+        )
+
+    def _boom(*a, **k):
+        raise er.subprocess.TimeoutExpired(cmd="ps", timeout=2)
+
+    monkeypatch.setattr(er.subprocess, "run", _boom)
+    assert er._cmdline_or_none(12345) is None, (
+        "a timed-out `ps` is unreadable — the 2 s budget is the whole "
+        "hazard this distinction exists for"
+    )
+    # `_cmdline` keeps the historical mapping for its other callers.
+    assert er._cmdline(12345) == ""
+
+
 def test_build_end_sweep_report_threads_the_own_probe():
     """`own_left` is the OWN-probe reading taken AFTER the post-sweep `left`.
 

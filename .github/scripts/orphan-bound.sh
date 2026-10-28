@@ -582,7 +582,15 @@ case "$kind" in
     # another job started after the sweep cannot be read as this run's leak
     # (#1005).
     if [ "$own_now" != "null" ] && [ "$own_now" -gt 0 ]; then
-      red_or_kill_warning "redislite server leak: $COUNT servers after suite but the sweep reports no embedded server was ever running"
+      # #10255 review B (P3): the message quotes the ATTRIBUTED count. The
+      # condition was moved onto the attributed population but the sentence
+      # still printed `$COUNT` — the host-wide figure — so on the shared host
+      # this gate is written for, own_now=1 with COUNT=40 emitted a leak
+      # report claiming 40 servers leaked, none of the surplus attributed to
+      # this run. Every other arm in this file names own_now/own_left for
+      # exactly that reason. `COUNT` stays in the line as an explicit
+      # host-wide diagnostic so the reader can still see the difference.
+      red_or_kill_warning "redislite server leak: $own_now server(s) under this run's own session temp roots (roots=$roots) after suite but the sweep reports no embedded server was ever running — COUNT=$COUNT counted host-wide, so the unattributed surplus belongs to other processes"
     fi
     if [ "$COUNT" -gt 0 ]; then
       foreign_diagnostic "$COUNT" "0" "$own_now" "0" "$roots"
@@ -599,10 +607,13 @@ case "$kind" in
     # `cleared` is a confidence flag about a `left` this report does not carry,
     # so it does not decide the verdict.
     if [ "$own_now" != "null" ] && [ "$own_now" -gt 0 ]; then
+      # #10255 review B (P3), same class: these two carried the host-wide
+      # `$COUNT` while their condition reads `own_now` — the leaked servers
+      # this run actually owns.
       if [ "$cleared" = "false" ]; then
-        red_or_kill_warning "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the $COUNT servers that remain are unmeasured, not a bounded outcome (issue #1005)"
+        red_or_kill_warning "redislite orphan gate: the hygiene end-sweep exhausted its time budget (cleared=false) AND its own count probe FAILED (left=null) — the $own_now server(s) under this run's own session roots (roots=$roots) are unmeasured, not a bounded outcome (issue #1005)"
       fi
-      red_or_kill_warning "redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the $COUNT residue is unaccounted for (issue #1005)"
+      red_or_kill_warning "redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) — the run produced no measurement to bind the bound to, so the $own_now server(s) under this run's own session roots (roots=$roots) are unaccounted for (issue #1005)"
     fi
     if [ "$COUNT" -eq 0 ]; then
       echo "::warning::redislite orphan gate: the hygiene end-sweep's own count probe FAILED (left=null) but the workflow's probe measured 0 live servers — no residue exists to account for; the failed sweep-side probe is diagnostic only (issue #1005)"

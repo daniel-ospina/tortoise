@@ -1236,13 +1236,44 @@ def _derive_real_pid_macos(socket_path: str) -> int | None:
     return None
 
 
-def _cmdline(pid: int) -> str:
+def _cmdline_or_none(pid: int) -> str | None:
+    """The argv of ``pid``, or **None** when it could not be READ.
+
+    ``_cmdline`` collapses two different facts into the same ``""``: "ps could
+    not be run / timed out" and "the pid is not there". For its original
+    callers that is fine (an unreadable argv classifies as not-ours, and the
+    sweep is bounded by other controls), but ``own_live_server_count`` feeds a
+    NUMBER into a gate that compares it against a LATER read (#10255 review A):
+    a failed read there under-reads ``own_left`` and the gate then reds a green
+    run with a "this run's own servers grew" leak claim derived from a probe
+    that never measured anything.
+
+    So the distinction is made here, once, from ps's own exit status:
+
+      - rc 0 → the argv (possibly empty; a zombie has none)
+      - rc 1 → **no pid matched** — a COMPLETED measurement of "it is gone"
+        (measured on procps-ng 4.0.4: ``ps -p 999999`` → rc 1; the procps man
+        page documents no exit-status contract, so this is measured, not
+        assumed). Recorded as ``""`` — the pid died between the count and this
+        read, which the gate's own parser also treats as "not a server".
+      - rc > 1, a timeout, or an OSError → **None**: unreadable, never "empty".
+    """
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None:
         return cached["cmdline"]
-    text = _run_text(
-        ["ps", "-ww", "-o", "command=", "-p", str(pid)], timeout=2)
-    return text if text is not None else ""
+    try:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if getattr(out, "returncode", 0) > 1:
+        return None
+    return _stdout_text(out)
+
+
+def _cmdline(pid: int) -> str:
+    return _cmdline_or_none(pid) or ""
 
 
 def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
@@ -3712,6 +3743,18 @@ def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
     Returns None (never 0) when there is no attribution key, when the probe
     failed, or when argv cannot be read for every live pid — an unmeasured
     residue must not read as "nothing left".
+
+    That last clause is load-bearing and, until #10255's review, was not
+    implemented (#10255 review A): ``_cmdline`` maps an unreadable argv to
+    ``""``, so "I could not read this process's argv" and "this argv names no
+    root of ours" were the same value and a failed read counted as a confident
+    0. The two directions that costs are exactly the ones this module exists to
+    separate: an UNDER-read ``own_left`` lets the gate red a green run with a
+    "your own servers grew" claim (``own_now`` is read later, from the runner
+    shell, usually on a quieter host), and both reads failing reads as
+    ``0 == 0`` → PASS. So the reader here distinguishes them: ``None`` from
+    ``cmdline_of`` means unreadable, and the whole measurement becomes
+    ``None`` — the value the gate already handles as unmeasured.
     """
     prefixes: list[str] = []
     for root in roots or ():
@@ -3720,13 +3763,16 @@ def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
     if not prefixes:
         return None  # no attribution key: unmeasured, NOT zero
     probe = _pgrep_redis_servers_or_none if probe is None else probe
-    cmdline_of = _cmdline if cmdline_of is None else cmdline_of
+    cmdline_of = _cmdline_or_none if cmdline_of is None else cmdline_of
     pids = probe()
     if pids is None:
         return None
     count = 0
     for pid in pids:
-        args = cmdline_of(pid) or ""
+        args = cmdline_of(pid)
+        if args is None:
+            # A live pid whose argv could not be read: unmeasured, never 0.
+            return None
         if any(prefix in args for prefix in prefixes):
             count += 1
     return count

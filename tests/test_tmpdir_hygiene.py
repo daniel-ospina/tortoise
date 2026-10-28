@@ -413,12 +413,55 @@ def test_run_roots_records_the_installed_root_under_the_run_uid():
     )
 
     assert run_uid(), "a run id is always defined (never an empty key)"
-    assert run_registry_path().endswith(run_uid())
+    path = run_registry_path()
+    assert path.endswith(run_uid())
     root = session_tmpdir()
     assert root is not None
+    # #10255 review (P3): read the REGISTRY, not `run_roots()`. `run_roots()`
+    # appends the in-memory `_SESSION_TMPDIR` unconditionally (`if current and
+    # current not in roots`), so `root in run_roots()` passes even if
+    # `record_run_root` were a no-op — the assertion did not test the write path
+    # it names. The write path is what makes a SIBLING worker's root visible to
+    # whichever process exits last and writes the report.
+    recorded = [
+        line.strip()
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert os.path.realpath(root) in recorded, (
+        "install time must RECORD the session root in the run registry — it is "
+        "the attribution key the orphan gate binds to, and a sibling worker's "
+        "root reaches the last process to exit only through this file (#1005)"
+    )
     assert root in run_roots(), (
-        "the installed session root must be readable as one of this run's "
-        "roots — it is the attribution key the orphan gate binds to (#1005)"
+        "the installed session root must also be readable as one of this run's "
+        "roots, which is how the sweep consumes the registry (#1005)"
+    )
+
+
+def test_record_run_root_actually_writes_the_registry(tmp_path, monkeypatch):
+    """#10255 review (P3): the WRITE path, proven discriminating.
+
+    `run_roots()` appends the in-memory `_SESSION_TMPDIR` unconditionally, so
+    any assertion of the shape `root in run_roots()` holds even when nothing was
+    ever written. This drives `record_run_root` against a registry path of its
+    own and reads the FILE, so making the write a no-op reds here — which is the
+    failure mode that would silently de-attributed every sibling worker's root
+    (a sibling's root reaches the process that writes the report ONLY through
+    this file).
+    """
+    from tests import _tmpdir_hygiene as h
+
+    registry = tmp_path / "run-registry.txt"
+    monkeypatch.setattr(h, "run_registry_path", lambda: str(registry))
+    fresh = tmp_path / "session-root"
+    fresh.mkdir()
+    h.record_run_root(str(fresh))
+    lines = [ln.strip() for ln in registry.read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    assert os.path.realpath(str(fresh)) in lines, (
+        "record_run_root must APPEND the realpath of the root to the run "
+        "registry — this is the sibling-worker attribution key (#1005)"
     )
 
 
