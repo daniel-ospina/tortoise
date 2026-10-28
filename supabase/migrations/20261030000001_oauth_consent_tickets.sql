@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261027120001: the consent token's single-use register (#3524 §9 step 1)
+-- Migration 20261030000001: the consent token's single-use register (#3524 §9 step 1)
 -- ----------------------------------------------------------------------------
 -- WHY A SHARED TABLE IS REQUIRED AT ALL
 -- `tortoise/consent_token.py::ProcessLocalJtiStore` bounds replay PER PROCESS. The hosted
@@ -154,7 +154,7 @@ GRANT EXECUTE ON FUNCTION public.consume_oauth_consent_ticket(text, timestamptz)
 -- that Supabase's default privileges hand to `anon` and `authenticated` — so the table would read
 -- as shared and any future `USING (true)` policy would open it. Revoking the grant makes the
 -- boundary the privilege, which `has_table_privilege` can also assert in
--- `supabase/tests/20261027120001_oauth_consent_tickets.sql` (RLS is invisible to it, so a
+-- `supabase/tests/20261030000001_oauth_consent_tickets.sql` (RLS is invisible to it, so a
 -- RLS-only posture cannot be pinned there).
 REVOKE ALL ON TABLE public.oauth_consent_tickets FROM public, anon, authenticated;
 GRANT ALL ON TABLE public.oauth_consent_tickets TO service_role;

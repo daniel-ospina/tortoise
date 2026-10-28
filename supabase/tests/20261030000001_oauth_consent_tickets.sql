@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQL-level verification for migration 20261027120001 (#3524 §9 step 1)
+-- SQL-level verification for migration 20261030000001 (#3524 §9 step 1)
 -- The consent token's single-use register: `consume_oauth_consent_ticket`.
 --
 -- WHAT THIS SUITE IS FOR. The migration's whole value is that the SINGLE-USE

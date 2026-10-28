@@ -145,9 +145,9 @@ deliberate (step 2 costs a re-mint rather than a re-login after a post-spend ref
 different identity began. That column is NOT sufficient on its own, and the first two attempts at it were
 both bypassable, which is worth recording because each looked complete:
 
-* **last-writer-wins** (`COALESCE(excluded, existing)`) let a second signed-in identity overwrite a
+- **last-writer-wins** (`COALESCE(excluded, existing)`) let a second signed-in identity overwrite a
   recorded owner with one `GET`;
-* **first-known-owner-wins** (`COALESCE(existing, excluded)`) protects an OWNED row — but the
+- **first-known-owner-wins** (`COALESCE(existing, excluded)`) protects an OWNED row — but the
   **ownerless** window is the one the cold browser creates on every entry, so the first signed-in
   identity to name the `state` simply BECAME the owner; and because an ownerless row minted for anyone,
   gating the fill alone re-opened the hole through the mint.
@@ -190,11 +190,11 @@ is not a cookie; §4 records why no cheaper carrier proves the CHANNEL, and stri
 **Recorded exemptions from that no-oracle rule** (they are deliberate, and stated here so a later reader
 neither "fixes" them nor reads the sentence above as flow-wide):
 
-* `/api/consent/start` DOES reveal whether a `state` exists — a signed-in visitor who does not hold the
+- `/api/consent/start` DOES reveal whether a `state` exists — a signed-in visitor who does not hold the
   attempt's key is refused **before** the AS renders consent, rather than advanced into a flow it could
   never mint for. Refusing late would be the "approve, then the flow dies" class; a `state` is
   client-chosen and already in the visitor's own URL, so the disclosure buys an attacker nothing new.
-* The *carriage* of the key is exempt in the other direction: it must reach the consent page, which §4
+- The *carriage* of the key is exempt in the other direction: it must reach the consent page, which §4
   costs and records.
 ⛔ A scoped cookie holding the nonce is **not** available here: the bridge's rule is that the two origins
 are reconciled **by the token, never by a second cookie**. The return target is the only carrier that

@@ -37,6 +37,7 @@ proved here is the STORE's contract around it.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from datetime import UTC, datetime
 
@@ -180,12 +181,26 @@ def test_the_seams_declared_type_is_the_seam_not_the_fallback():
     assert typing.get_type_hints(consent_token.configure_consent_jti_store)["store"] == (
         consent_token.ConsentJtiStore | None
     )
-    # Both implementations satisfy the declared contract — the runtime check the annotation above
-    # claims. `runtime_checkable` makes this a real assertion rather than a type-checker claim.
+    # Both implementations satisfy the declared contract — and this asserts the CONTRACT, not just
+    # that the attribute exists: `isinstance` against a `runtime_checkable` Protocol checks MEMBER
+    # PRESENCE only, so on its own it would pass a store whose `consume` had become a blocking
+    # `def` or lost a parameter. The signature is therefore introspected explicitly, which is what
+    # makes the message below true.
+    expected = ["jti", "expires_at"]      # BOUND method: `self` is already consumed
     for store in (ProcessLocalJtiStore(), ControlPlaneJtiStore(FakeControlPlane())):
         assert isinstance(store, consent_token.ConsentJtiStore), (
-            f"{type(store).__name__} does not satisfy ConsentJtiStore — the seam's documented "
-            "`async consume(jti, expires_at) -> bool` contract"
+            f"{type(store).__name__} has no `consume` — it does not satisfy ConsentJtiStore"
+        )
+        consume = store.consume
+        assert inspect.iscoroutinefunction(consume), (
+            f"{type(store).__name__}.consume is not `async def` — a blocking store RECORDS the jti "
+            "and only then fails at the await, spending a nonce in a request that already failed"
+        )
+        assert list(inspect.signature(consume).parameters) == expected, (
+            f"{type(store).__name__}.consume takes "
+            f"{list(inspect.signature(consume).parameters)}, not {expected} — the three call sites "
+            "(consume_consent_jti, the seam's install check, and ProcessLocalJtiStore) pass "
+            "positionally, so a renamed parameter silently changes what `expires_at` means"
         )
 
 
