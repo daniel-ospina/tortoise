@@ -56,9 +56,9 @@ from tortoise.projection import (
     FalkorProjection,
 )
 from tortoise.projection.nonfolded import (
+    _NO_ADDRESS_REMEDY,
     NO_ADDRESS_INSTRUCTION,
     NonFoldedEventsError,
-    _NO_ADDRESS_REMEDY,
     collect_non_folded,
     refused_events,
 )
@@ -681,14 +681,17 @@ class TestReReviewRoundTwo:
             proj.rebuild_all(str(events), confirm_destructive=True)  # no raise
         report = " ".join(r.getMessage() for r in caplog.records)
         assert "[object-superseded-unregistered]" in report, report
-        assert "never established" in report and "nothing was lost" in report, (
-            f"the graph surface's receipt does not say the target was never "
-            f"established / nothing was lost: {report}")
-        # ⛔ A phrase ONLY the RECEIPT renders. "nothing was lost" on the line
-        # above is ALSO supplied by this shape's `_sup_why` arm (the sweep's
-        # second message for the same record), so it alone cannot tell whether
-        # `_object_supersede_miss_detail` ran at all; `EXEMPT_SHAPES` prose
-        # carries "never established" but not that phrase (measured).
+        assert "never established" in report, report
+        # ⛔ NO LOSS VERDICT (#10211 review round 3). This shape's OWN
+        # `EXEMPT_SHAPES` entry carries a DEGRADED GUARANTEE — "what is lost is
+        # the supersede a journal could not address" — and `NonFoldedEvent.__str__`
+        # appends that prose to the receipt, so a receipt claiming "nothing was
+        # lost" put both claims on ONE operator-visible line. The predicate
+        # cannot prove the claim (its RESIDUAL is the case where the supersede
+        # IS lost), so the receipt states what it establishes and stops.
+        assert "nothing was lost" not in report.lower(), (
+            "the receipt asserts a loss verdict the predicate cannot prove and "
+            f"the shape's own DEGRADED GUARANTEE contradicts: {report}")
         assert "no repair to make" in report, (
             f"the receipt was not rendered for the exempt record: {report}")
         # ⛔ The SECOND message must not name a cause the receipt denies: the
@@ -3150,8 +3153,11 @@ def test_exempt_receipt_says_the_target_was_never_established(env):
     assert receipts, r["non_folded_events"]
     receipt = receipts[0]
     assert "never established" in receipt, receipt
-    assert "nothing was lost" in receipt.lower(), receipt
     assert "no repair" in receipt.lower(), receipt
+    # The loss verdict is gone by design (#10211 review round 3): this receipt
+    # shares a line with the shape's DEGRADED GUARANTEE, which says a supersede
+    # IS lost when the establishing line was never written.
+    assert "nothing was lost" not in receipt.lower(), receipt
 
 
 def test_a_nul_bearing_id_counts_as_an_address_end_to_end(env):

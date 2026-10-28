@@ -9187,11 +9187,19 @@ def _object_supersede_miss_detail(shape: str, *, prefix: str = "") -> str:
     ``prefix`` names the surface ("graph fold: ", "reference fold: ", or "").
     """
     if shape == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED:
-        # The caller must not go hunting for a repair that does not exist.
+        # The caller must not go hunting for a repair that does not exist —
+        # but the receipt must not overclaim either (#10211 review round 3):
+        # "nothing was lost" is NOT provable from the journal. The predicate
+        # cannot tell "never established" from "the establishing line is not in
+        # the journal", and the same shape's `EXEMPT_SHAPES` entry carries a
+        # DEGRADED GUARANTEE naming exactly what IS lost (the supersede a
+        # journal could not address). Appending that prose to this receipt put
+        # both claims in ONE line, so the receipt states what it establishes
+        # and stops there.
         return (f"{prefix}supersede matched no Object — the journal never "
-                "established the target this record addresses, so nothing "
-                "was lost and there is no repair to make (recorded, not "
-                "hidden: #3590 D2 exempt)")
+                "established the target this record addresses, so this replay "
+                "applies no supersede here and there is no repair to make for "
+                "this record (recorded, not hidden: #3590 D2 exempt)")
     if shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
         # ⛔ "NO address" alone would be false for a record that CARRIES one
         # that cannot be an address (`{"id": ""}`, `{"name": 123}`,
@@ -12312,8 +12320,10 @@ class FalkorProjection(
                         candidates=((_oname,) if isinstance(_oname, str)
                                     and _oname else (_oid,)),
                         # #10204 / #10183: the exempt record's receipt says the
-                        # target was never established and nothing was lost, so
-                        # a caller does not hunt a repair that does not exist.
+                        # journal never established the target's address and
+                        # that there is no repair to make for this record, so a
+                        # caller does not hunt one. It makes NO loss verdict —
+                        # see the DEGRADED GUARANTEE on this shape.
                         detail=_object_supersede_miss_detail(
                             _sup_shape, prefix="graph fold: "),
                     )
@@ -15311,11 +15321,13 @@ class FalkorProjection(
                 # predicate can PROVE: for the unregistered shape it cannot
                 # tell "never established" from "never journaled" (an
                 # unjournaled/legacy producer — see the RESIDUAL in
-                # `EXEMPT_SHAPES`), which is why the message says nothing was
-                # lost rather than naming a producer defect.
+                # `EXEMPT_SHAPES`), so the message names what was observed and
+                # makes no loss verdict at all (#10211 review round 3: "nothing
+                # was lost" contradicted that shape's own DEGRADED GUARANTEE).
                 if _sup_shape == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED:
-                    _sup_why = ("the journal never established the target this "
-                                "record addresses — nothing was lost")
+                    _sup_why = ("the journal establishes no address for the "
+                                "target this record names — the supersede is "
+                                "skipped here and recorded")
                 elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
                     _sup_why = ("the record carries no name and no id that is "
                                 "a non-empty string, so there is nothing to "
