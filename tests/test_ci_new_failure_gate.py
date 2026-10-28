@@ -28,6 +28,12 @@ WHAT THESE CASES PIN, against #9984's own acceptance list:
     `decide` CLI and the gate over one fixture and comparing verdicts;
   * a leg that never ran is never exemptible (cancelled / no failing job in the
     listing / empty log is UNMEASURED, never CLEAN).
+
+TWO HALVES, TWO KINDS OF EVIDENCE (#10202 review 5). The exempting half needs the real
+shared decision, so those cases announce a SKIP when agent-infra is not checked out. The
+BLOCKING half — `decide` says BLOCK ⇒ the required check FAILS — is pinned by cases that
+need no rail at all (a stand-in CALLEE, `_decision_stub`), so it executes on every CI
+runner. Which kind a case is, is stated in its own block, never inferred from a green run.
 """
 
 from __future__ import annotations
@@ -43,6 +49,25 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / ".github" / "scripts" / "new-failure-gate.py"
 EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
+
+#: sha256 of `.github/scripts/new-failure-gate.py` — the file that AUTHORS the required
+#: check's verdict (#10202 review 5, issue 1).
+#:
+#: ⛔ WHY A WHOLE-FILE DIGEST. `python-ci-gate` DELEGATES every deferrable `failure` to
+#: `ci-introduced-failure` and reads that job's `success` as the certification, so this
+#: module now authors the required check — and it sat outside EVERY pin. The repo
+#: already treats exactly that as unacceptable for the aggregate's own step
+#: (`tests/test_capstone_preregistration_9075.py`, #9075: "a step in that job can export
+#: `BASH_ENV` and make the required check exit 0 over a red leg"). The blocking path is
+#: pinned by execution (the `_decision_stub` cases below run in CI), so this digest is
+#: the second half: it makes every edit to the verdict's author DELIBERATE rather than
+#: silent, which is the property the `core` leg alone cannot give (`core` runs in the
+#: `test` leg, and `test` is itself a deferrable leg — the module's own regression signal
+#: would be adjudicated by the module under regression).
+#:
+#: Re-cut with: `sha256sum .github/scripts/new-failure-gate.py` after reading the diff.
+#:   #9984 — first cut, from #10202 (the module as landed, 658 lines).
+_GATE_MODULE_SHA256 = "4b3ce65979ac45c0e57a33829524b5ab3b7be0a77cb5ff213f40c5fc28570f1c"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -222,6 +247,25 @@ def test_the_module_is_tracked_and_has_no_third_party_imports():
     assert GATE.stat().st_mode & 0o111 or source.startswith("#!/usr/bin/env python3")
 
 
+def test_the_verdicts_author_is_pinned_by_content():
+    """#10202 review 5, issue 1: the module that AUTHORS the required check is pinned.
+
+    A benign-looking early `return EXIT_CLEAN` in `evaluate` is invisible to every
+    other guard: the workflow is unchanged, `gate_digest` projects workflows and
+    settings only (`tools/mergify_config_guard.py::_gate_projection`), and the
+    capstone allow-list covers the aggregate's step, not this file. Re-cut the
+    constant DELIBERATELY when the module changes, and say why in the re-cut history
+    above it — a stale digest must be indistinguishable from a silencing edit.
+    """
+    import hashlib
+
+    assert hashlib.sha256(GATE.read_bytes()).hexdigest() == _GATE_MODULE_SHA256, (
+        "`.github/scripts/new-failure-gate.py` changed without re-cutting "
+        "_GATE_MODULE_SHA256 in this file. That module authors the required check's "
+        "verdict (python-ci-gate delegates every deferrable failure to it), so the edit "
+        "is re-cut DELIBERATELY, with a line in the re-cut history, or not at all.")
+
+
 def test_the_job_slug_matches_the_shared_producer():
     """`job-unreadable::` keys must slug identically on the PR and main sides.
 
@@ -279,6 +323,102 @@ def test_an_absent_shared_predicate_fails_closed(tmp_path):
     proc = box.run(jobs=_jobs((1, "test (d)", "failure")), logs={1: MAIN_RED_LOG})
     assert proc.returncode == 2, proc.stdout
     assert "shared predicate is absent" in proc.stdout
+
+
+# ── the BLOCKING direction, executable with no rail at all (runs in CI) ─────
+#
+# ⛔ WHY THIS BLOCK EXISTS (#10202 review 5, issue 1). Every case below that reaches
+# `EXIT_NEW` needs `scripts/ci_exemption.py` — the SHARED decision — and `scripts/` is a
+# machine-local, untracked pointer (#9475), so on a runner those cases SKIP by name and
+# the code that BLOCKS a PR is executed by NOTHING on the merge path. #9984's whole
+# safety claim is "a PR-caused failure still fails the gate exactly as today", and it
+# was asserted only where CI cannot see it.
+#
+# The remedy stubs the CALLEE, never the predicate: `_decision_stub` answers the three
+# subcommands the module invokes (`ids`, `signatures`, `decide`) with FIXED answers, so
+# what is under test is the module's own reading of them — its exit code and its output —
+# which is the half that blocks. That is not the second implementation #9984
+# constraint 7 forbids (no parsing, no signature rule, no rate comparison); it is a
+# recorded stand-in in the shape `test_a_decision_that_writes_no_verdict_is_never_clean`
+# already uses. These cases run UNCONDITIONALLY, so a weakening of the blocking path
+# reds the `core` leg instead of going green everywhere.
+
+def _decision_stub(*, rc: int, verdict: str | None) -> str:
+    """A stand-in `ci_exemption.py`: fixed ids/signature, and a fixed `decide` answer.
+
+    `verdict=None` means "exits `rc` without writing `--verdict-out`" — the
+    "decided nothing" shape; otherwise the text is written to the flag's path.
+    """
+    return (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "argv = sys.argv[1:]\n"
+        "sub = argv[0] if argv else ''\n"
+        "def opt(n):\n"
+        "    return argv[argv.index(n) + 1] if n in argv else ''\n"
+        "if sub == 'ids':\n"
+        "    print('tests/test_other.py::test_brand_new')\n"
+        "    raise SystemExit(0)\n"
+        "if sub == 'signatures':\n"
+        "    print('tests/test_other.py::test_brand_new\\tAssertionError: this PR broke it')\n"
+        "    raise SystemExit(0)\n"
+        "if sub == 'decide':\n"
+        + ("    open(opt('--verdict-out'), 'w').write(" + repr(verdict) + ")\n"
+           if verdict is not None else "")
+        + f"    raise SystemExit({rc})\n"
+        "raise SystemExit(2)\n"
+    )
+
+
+def _run_against_stub(tmp_path: Path, *, rc: int, verdict: str | None
+                      ) -> subprocess.CompletedProcess:
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=rc, verdict=verdict), encoding="utf-8")
+    return box.run(jobs=_jobs((1, "test (d)", "failure")), logs={1: NEW_LOG})
+
+
+def test_a_shared_decision_that_blocks_makes_the_required_check_FAIL(tmp_path):
+    """#9984 acceptance 2, on the merge path: `decide` rc 1 ⇒ exit 1, naming it.
+
+    This is the one statement that makes "a PR-caused failure still fails" true
+    (`new-failure-gate.py`'s `if code != 0: raise _Blocked`), and until this case
+    existed a one-line `return EXIT_CLEAN` there left every CI-run test green.
+    """
+    proc = _run_against_stub(
+        tmp_path, rc=1,
+        verdict="VERDICT\tBLOCK\ttests/test_other.py::test_brand_new introduced it\n")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "VERDICT: NEW FAILURE" in proc.stdout
+    # The decision's own words are echoed, so an appellant reads the rail's language.
+    assert "BLOCK" in proc.stdout
+    assert "introduced it" in proc.stdout
+
+
+def test_a_blocking_verdict_is_not_undone_by_a_zero_exit_code(tmp_path):
+    """Defence in depth: `decide` exiting 0 with a `BLOCK` verdict still fails.
+
+    The module checks the exit code AND the verdict text, so weakening one of the two
+    is not enough to open the hole — which is why both are pinned by execution.
+    """
+    proc = _run_against_stub(
+        tmp_path, rc=0,
+        verdict="VERDICT\tBLOCK\ttests/test_other.py::test_brand_new introduced it\n")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "VERDICT: NEW FAILURE" in proc.stdout
+
+
+def test_a_stand_in_decision_that_writes_no_verdict_is_never_clean(tmp_path):
+    """The rail's own rule, with no rail present: no `VERDICT` line ⇒ never CLEAN.
+
+    Same stand-in, exits 0, writes nothing. The real `decide` always writes before
+    returning (`--verdict-out` precedes `return 1 if gated else 0`), so this guards a
+    path a future edit reaches silently rather than one reachable today.
+    """
+    proc = _run_against_stub(tmp_path, rc=0, verdict=None)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "VERDICT: CLEAN" not in proc.stdout
+    assert "nothing was decided" in proc.stdout
 
 
 # ── the decision cases: fail-closed baseline, exemption, new failure ────────
