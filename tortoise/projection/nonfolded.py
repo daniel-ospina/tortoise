@@ -480,10 +480,11 @@ _RECONCILE_REMEDY = (
 #: home for it. The per-record receipt in `projection/_object_supersede_miss_detail`
 #: renders this same instruction, so the run-boundary remedy and the per-record
 #: detail cannot drift into two different instructions for one record — the
-#: defect class this module's remedies exist to remove, one level down. Pins
-#: assert THIS constant appears on both surfaces rather than matching a
-#: trailing phrase, so a reword of either copy cannot leave them agreeing by
-#: accident.
+#: defect class this module's remedies exist to remove, one level down.
+#: ⚠️ What the pins actually hold (#10211 review round 2): one asserts the
+#: RENDERED per-record `detail` contains this constant, and one asserts the
+#: boundary sentence interpolates it. A relationship between the two constants
+#: alone is NOT the tie — measured, drifting the receipt left every test green.
 NO_ADDRESS_INSTRUCTION = (
     "supply the target's name or id (fix the producing write, or amend the "
     "journal line)"

@@ -3104,6 +3104,16 @@ def test_no_address_supersede_refuses_with_its_own_shape_and_remedy(
     # satisfied by `refusal_remedy`'s sentence.
     detail = ei.value.events[0].detail
     assert "no `name` and no `id` that is a non-empty string" in detail, detail
+    # ⛔ THE ONE-HOME TIE (#10211 review round 2): the receipt must render the
+    # SAME instruction constant the run-boundary remedy appends. Measured: the
+    # pin below (`NO_ADDRESS_INSTRUCTION in _NO_ADDRESS_REMEDY`) ties the two
+    # module CONSTANTS, so drifting the receipt to its own wording left all 107
+    # tests green while one record got two different repairs on two surfaces —
+    # the defect this change exists to remove. Asserted on the RENDERED detail,
+    # which is the only place the drift is observable.
+    assert NO_ADDRESS_INSTRUCTION in detail, (
+        f"the per-record receipt does not render the one-home instruction "
+        f"constant (two copies have drifted): {detail}")
     # The reference fold (the third classifying surface) agrees, and it is not
     # exempt there either.
     r = check_consistency(str(events / "events.jsonl"), proj)
