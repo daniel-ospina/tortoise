@@ -740,6 +740,37 @@ def test_retrofit_json_is_valid_json(
     assert payload["verdicts"] == session_schema.RETROFIT_VERDICTS
 
 
+def test_retrofit_verb_names_the_turn_store_and_the_record_held_bucket(
+        fake_sdk_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch,
+        capsys) -> None:
+    """#10000: an operator must SEE which store the (a) count measured.
+
+    A clean-looking ``(a)`` is unreadable without the mode: with the record
+    holding the turns, a zero on that line means "nothing to measure here",
+    not "no session lost turns". The bucket is printed beside it (with its
+    ``retro_quantifiable`` flag) so the two can never be confused, and the
+    zero-node session is named in it rather than silently dropped.
+    """
+    import tortoise.record_writer as record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda: "postgresql://record@127.0.0.1:5432/record")
+
+    def factory(*args, **kwargs):
+        sdk = _FakeSDK(*args, **kwargs)
+        sdk.graph = _TwoShapeGraph()
+        return sdk
+
+    monkeypatch.setattr(fake_sdk_module, "TortoiseSDK", factory)
+    rc = audit.main(["retrofit", "--db", "fake-graph.db"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "turns held outside the graph (record armed): True" in out
+    assert "(a') zero turn nodes — record-held, NOT a shortfall : 1" in out
+    assert "retro_quantifiable=False" in out
+    assert "capture_ok=true, short turn count : 1" in out
+
+
 def test_retrofit_uri_reports_the_resolved_graph_name(
         fake_sdk_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch,
         capsys) -> None:
@@ -820,84 +851,6 @@ def test_undercount_counts_the_same_edge_universe_as_the_counter() -> None:
     assert report["entity_links_under_count"]["edges"] == 2
 
 
-def test_the_short_turn_class_is_not_measured_from_the_graph_when_armed(
-        monkeypatch) -> None:
-    """⛔ On an armed deployment the graph holds NO turn node — so it measures 0.
-
-    #10000 moved the turns into the record: once the writer takes the record
-    branch it writes no turn node at all, so `count(t)` is 0 for every session
-    captured since arming and this class — the diagnostic that exists to detect
-    a SHORT stored transcript — reports `stored_turns = 0 < turn_count = N` for
-    sessions whose transcript is stored perfectly. 100% false positive on
-    healthy data, which trains its reader to ignore it.
-
-    So the audit reports the class as NOT MEASURABLE (`retro_quantifiable:
-    False`, the report's own vocabulary) and issues no graph count for it. The
-    honest figure lives in the record (§9.1/D1) and is part of #10000's
-    measurement step. Non-vacuity: pre-fix the key does not exist and the class
-    reports the fake graph's two short sessions.
-    """
-    import tortoise.record_writer as rw
-
-    monkeypatch.setattr(rw, "record_tenant", lambda: ("org-1", "g-1"))
-    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: None)
-    report = session_schema.audit_session_retrofit(_FakeGraph())
-    short = report["short_turn_count"]
-    assert short["retro_quantifiable"] is False
-    assert short["all_short"] == 0 and short["candidates_measured"] == 0
-    assert "record" in (short["reason"] or ""), (
-        "the class is unmeasurable here and must SAY why, not print a number")
-
-
-def test_the_short_turn_class_abstains_when_the_audit_cannot_name_the_tenant(
-        monkeypatch) -> None:
-    """⛔ P2: an ARMED deployment read from a process with no request scope.
-
-    The tenant is a second assumption, and it biases the OTHER way from
-    ``journal_configured=True``. An operator process has no request scope, so on
-    a multi-tenant deployment ``record_tenant()`` is ``None``; asking the
-    capability question with it answered ``no_tenant`` — which is not "the record
-    cannot hold turns", it is "this process cannot name whose turns they are".
-    Read as measurable, the class was measured from the GRAPH, whose ``count(t)``
-    is 0 for every session captured since arming: a 100 % false positive printed
-    as a number, on the deployment this audit targets.
-    """
-    import tortoise.record_writer as rw
-
-    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: "no_tenant")
-    monkeypatch.setattr(rw, "record_tenant", lambda: None)
-    short = session_schema.audit_session_retrofit(_FakeGraph())["short_turn_count"]
-    assert short["retro_quantifiable"] is False, (
-        "an armed record with no tenant in scope was measured from the graph")
-    assert short["all_short"] == 0 and short["candidates_measured"] == 0
-    assert "no_tenant" in (short["reason"] or ""), (
-        "the abstention must name WHY it could not ask, not print a number")
-
-    # A caller that KNOWS the tenant says so and gets the real verdict back:
-    # armed with this tenant ⇒ the turns are record rows ⇒ still not measurable
-    # from the graph.
-    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: None)
-    short = session_schema.audit_session_retrofit(
-        _FakeGraph(), tenant=("org-1", "g-1"))["short_turn_count"]
-    assert short["retro_quantifiable"] is False
-    # ... and the unarmed lane is STILL measured (the abstention is not blanket).
-    monkeypatch.setattr(rw, "live_write_refusal", lambda **kw: "unarmed")
-    short = session_schema.audit_session_retrofit(_FakeGraph())["short_turn_count"]
-    assert short["retro_quantifiable"] is True
-
-
-def test_the_short_turn_class_is_still_measured_on_a_graph_only_deployment(
-        monkeypatch) -> None:
-    """The unarmed lane keeps the measurement it always had (no regression)."""
-    import tortoise.record_writer as rw
-
-    monkeypatch.setattr(rw, "record_tenant", lambda: None)
-    report = session_schema.audit_session_retrofit(_FakeGraph())
-    short = report["short_turn_count"]
-    assert short["retro_quantifiable"] is True
-    assert short["all_short"] == 2 and short["capture_ok_true"] == 1
-
-
 def test_undercount_query_aggregates_the_two_legs_separately() -> None:
     """The two ``OPTIONAL MATCH``es must not cross-product their counts.
 
@@ -933,6 +886,123 @@ def test_undercount_query_aggregates_the_two_legs_separately() -> None:
     # ...and the aggregation is introduced by a WITH clause, not appended to
     # the first match's row scope.
     assert "WITH s, count(r1) AS session_edges" in q
+
+
+# ── #10000: the graph may not be the turns' store ──────────────────────────
+
+
+class _TwoShapeGraph(_FakeGraph):
+    """(a) answered with the three shapes a real graph can hold at once.
+
+    * ``s-armed``    — ``turn_count=5``, **no** turn member: the shape an
+      ARMED capture leaves (§9.1 puts the turns in the record), which is
+      ambiguous graph-side;
+    * ``s-partial``  — ``turn_count=5``, 2 members: a shortfall the graph DOES
+      witness, because some of this session's turns are nodes and fewer than
+      its claim;
+    * ``s-complete`` — not short at all, so it appears in no list.
+
+    One graph, three arms, so the split cannot be satisfied by a fixture that
+    only ever holds the shape it asserts.
+    """
+
+    def query(self, cypher: str, params: dict | None = None) -> _FakeResult:
+        if "stored_turns < s.turn_count" in cypher:
+            return _FakeResult([
+                ("s-armed", 5, 0, True, "llm", "claude", "hosted"),
+                ("s-partial", 5, 2, True, "llm", "claude", "hosted"),
+            ])
+        if "s.capture_ok = true RETURN count(s)" in cypher:
+            return _FakeResult([[2]])
+        if "s.turn_count IS NOT NULL RETURN count(s)" in cypher:
+            return _FakeResult([[3]])
+        if "MATCH (s:Session) RETURN count(s)" in cypher:
+            return _FakeResult([[3]])
+        return super().query(cypher, params)
+
+
+def test_a_zero_node_session_is_not_a_shortfall_when_the_record_holds_turns() \
+        -> None:
+    """#10000: an armed capture must not read as a lost transcript.
+
+    With the record holding the turns, ``s.turn_count`` counts Postgres rows
+    and the graph holds NO turn member for a session the writer stored
+    correctly. Pre-fix ``s-armed`` landed in ``short_turn_count`` — the class a
+    retrofit/backfill acts on — so the audit's own report would have read as a
+    mandate to write the transcript BACK into the graph, the placement §9.1/D1
+    forbids. It is now its own bucket, listed by id.
+    """
+    report = session_schema.audit_session_retrofit(
+        _TwoShapeGraph(), turns_in_record=True)
+    held = report["turns_record_held"]
+    assert [r["id"] for r in held["sample"]] == ["s-armed"]
+    assert held["sessions"] == 1
+    assert held["retro_quantifiable"] is False
+    assert held["reason"] == session_schema.RETROFIT_VERDICTS[
+        "turns_record_held"]["reason"]
+    # …and it is NOT in the short class, while the graph-witnessed partial
+    # shortfall stays there.
+    assert [r["id"] for r in report["short_turn_count"]["sample"]] == [
+        "s-partial"]
+    assert report["short_turn_count"]["all_short"] == 1
+    assert report["short_turn_count"]["capture_ok_true"] == 1
+    assert report["short_turn_count"]["turns_missing"] == 3
+    assert report["short_turn_count"]["turns_in_record"] is True
+    # The denominator is untouched: it is every session that HAS a claim.
+    assert report["short_turn_count"]["candidates_measured"] == 3
+
+
+def test_an_unarmed_deployment_still_reports_a_zero_node_session_as_short() \
+        -> None:
+    """The transitional guarantee: with the graph as the turns' store, a
+    zero-member session IS a shortfall, and the report is unchanged.
+
+    Without this arm the fix would be a blanket suppression — it would hide a
+    real store loss on every deployment that never arms the record, which is
+    the population §9.1 is not yet true of.
+    """
+    report = session_schema.audit_session_retrofit(
+        _TwoShapeGraph(), turns_in_record=False)
+    assert report["turns_record_held"]["sessions"] == 0
+    assert sorted(r["id"] for r in report["short_turn_count"]["sample"]) == [
+        "s-armed", "s-partial"]
+    assert report["short_turn_count"]["all_short"] == 2
+    assert report["short_turn_count"]["turns_missing"] == 8
+    assert report["short_turn_count"]["turns_in_record"] is False
+
+
+def test_the_capability_input_defaults_to_the_process_record_dsn(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """``turns_in_record=None`` reads the store from the configuration.
+
+    The predicate is the capture writer's own capability question, reduced to
+    the half an audit process can see. Both arms are pinned, and so is the
+    failure direction: an unreadable configuration answers ``False`` — the
+    pre-#10000 report — because a bucket that silently claimed "the record
+    holds them" on a bad read would suppress a real shortfall.
+    """
+    import tortoise.record_writer as record_writer
+
+    monkeypatch.setattr(record_writer, "record_dsn",
+                        lambda: "postgresql://record@127.0.0.1:5432/record")
+    armed = session_schema.audit_session_retrofit(_TwoShapeGraph())
+    assert armed["short_turn_count"]["turns_in_record"] is True
+    assert armed["turns_record_held"]["sessions"] == 1
+
+    monkeypatch.setattr(record_writer, "record_dsn", lambda: None)
+    unarmed = session_schema.audit_session_retrofit(_TwoShapeGraph())
+    assert unarmed["short_turn_count"]["turns_in_record"] is False
+    assert unarmed["turns_record_held"]["sessions"] == 0
+
+    def _explode():
+        raise RuntimeError("configuration unreadable")
+
+    monkeypatch.setattr(record_writer, "record_dsn", _explode)
+    unreadable = session_schema.audit_session_retrofit(_TwoShapeGraph())
+    assert unreadable["short_turn_count"]["turns_in_record"] is False, (
+        "an unreadable configuration must leave the report as it was, never "
+        "claim the record holds the turns")
+    assert unreadable["turns_record_held"]["sessions"] == 0
 
 
 # ── the recorded decisions must have a real home ───────────────────────────

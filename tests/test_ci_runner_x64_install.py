@@ -32,9 +32,9 @@ WHAT IS BEING PINNED
      starves the lanes is not capacity (#5215).
   2. The labels are `self-hosted-x64` plus `ubuntu-latest` ONLY when the fallback is engaged:
      `self-hosted-arm64` would let an x86 box serve an arm64-specific job (a false PASS, not a
-     delay), and `ubuntu-<version>` is the version-pinned HOSTED label five legs need. The
-     fallback label is never permanent — it follows the gate's state (`--fallback on|off|auto`),
-     and `auto` must NOT silently equal `on`.
+     delay), and `ubuntu-<version>` is the version-pinned HOSTED label a leg needs when the pool
+     cannot carry it. The fallback label is never permanent — it follows the gate's state
+     (`--fallback on|off|auto`), and `auto` must NOT silently equal `on`.
   3. `auto` READS the pool's state (per page, summed) and refuses (exit 2) when it cannot, rather
      than guessing which pool to join.
   4. A dry run decides nothing and calls nothing: no token, no download, no label read.

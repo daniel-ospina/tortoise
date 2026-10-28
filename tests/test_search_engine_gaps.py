@@ -646,6 +646,88 @@ class TestRunVectorQuery:
         assert "CALL db.idx.vector.queryNodes" in graph.query_calls[0][0]
         assert "vec.euclideanDistance" in graph.query_calls[1][0]
 
+    # ── #10121: the recency column, and the tie it feeds ────────────
+
+    def test_both_index_signatures_carry_the_recency_column(self):
+        """#10121: BOTH `_sig_cypher` forms must project the recency column.
+
+        The Python sort reads the recency column as ``row[2]`` and falls back to
+        ``''`` (oldest) when a row shape has none. That fallback is what makes a
+        missing projection SILENT: the leg keeps working and every row that
+        signature returns degrades to the id-only tie — the exact two-branch
+        disagreement #10121 fixed (the index branch sorting ``(distance, id
+        ASC)`` while the scan branch used the recency tie).
+
+        Nothing else in the suite can see it: the ``#6214`` cases above and the
+        docker-lane tie pin all return 2-COLUMN rows, so ``len(row) > 2`` is
+        false there and the column is never read. Measured (round-8 review):
+        deleting ``AS recency`` from signature A alone red NO test.
+
+        So this asserts the projection in the STRINGS — sig A (the default
+        preference) and sig B via the signature-failure retry.
+        """
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
+            # a list of ROWS, not of scalars: `MockResultSet` hands `result_set`
+            # back verbatim, so a flat `["a", 0.5, "…"]` makes `run_vector_query`
+            # iterate three scalars as if each were a row — `len(0.5)` then
+            # raises OUTSIDE the inner try, the outer `except Exception` demotes
+            # the call to brute-force, and the `== 2` below reds unconditionally
+            # (round-9 review P1).
+            ([["a", 0.5, "2026-01-01T00:00:00"]], None),
+        ])
+
+        run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert len(graph.query_calls) == 2, (
+            "expected the sig-A attempt and its sig-B retry, got "
+            f"{len(graph.query_calls)} call(s)")
+        for index, call in enumerate(graph.query_calls):
+            cypher = call[0]
+            signature = "A" if index == 0 else "B"
+            assert "CALL db.idx.vector.queryNodes" in cypher
+            assert "AS recency" in cypher, (
+                f"index signature {signature} stopped projecting the recency "
+                "column (#10121): the Python tie then silently degrades to "
+                f"id-only for every row this signature returns: {cypher}")
+
+    @pytest.mark.parametrize("rows,expected,reversing_rule", [
+        # the newest row holds the LARGEST id, so an `id ASC` tie — the rule
+        # #10121 removed — puts the OLD row first and this case reds on it.
+        ([("z-new", 0.5, "2026-01-01T00:00:00"),
+          ("a-old", 0.5, "2020-01-01T00:00:00")],
+         ["z-new", "a-old"], "id ASC (the pre-#10121 tie)"),
+        # mirrored: the newest row holds the SMALLEST id, so an `id DESC` tie
+        # inverts it. TWO cases because one cannot cover both directions: with
+        # two rows, `id ASC` and `id DESC` are the only two possible orders, so
+        # any single fixture's recency order must COINCIDE with one of them
+        # (round-9 review P2 — the first version's ids made an `id ASC` revert
+        # produce the same order as the recency tie, so it stayed green).
+        ([("a-new", 0.5, "2026-01-01T00:00:00"),
+          ("z-old", 0.5, "2020-01-01T00:00:00")],
+         ["a-new", "z-old"], "id DESC"),
+    ])
+    def test_index_branch_tie_follows_the_recency_column_not_the_id(
+            self, rows, expected, reversing_rule):
+        """#10121: equal distances are tied by RECENCY, then id.
+
+        Each case is built so that ONE id-only tie produces the opposite order,
+        which is the only way this pin can tell the two rules apart; the two
+        cases together reject an id-only tie in EITHER direction. Measured
+        against the shipped code (`recency_tie_key` + `reverse=True`): both
+        cases pass, and an `id ASC` tie reds case 1 while an `id DESC` tie reds
+        case 2.
+        """
+        graph = SimpleMockGraph(result_set=rows)
+
+        out = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert [pid for pid, _score in out] == expected, (
+            f"the index branch ignored the recency column and tied on the id "
+            f"key instead ({reversing_rule}) — that is the two-branch "
+            f"disagreement #10121 fixed (got {[pid for pid, _score in out]})")
+
     # ── #1359: dual queryNodes signatures ────────────────────────────
 
     def test_docker_mode_signature_a_fails_signature_b_succeeds(self):
@@ -685,19 +767,22 @@ class TestRunVectorQuery:
 
         #6214: THE ORDER IS PART OF THE CONTRACT AND THE ENGINE'S IS NOT.
         Both rows tie on distance (2.4), and the engine mock hands them back
-        with ``zulu`` first. The leg must return ``alpha`` first because the
-        secondary key is the id — not because of the order the engine
-        produced. Dropping the id key makes this assertion fail
-        (``zulu`` would stay first).
+        with ``alpha`` FIRST — deliberately the reverse of the expected answer,
+        so "no secondary sort at all" fails this test rather than passing it by
+        agreeing with the mock's order (#10121 review). The leg must return
+        ``zulu`` first: the tie is recency-then-id DESC and neither row carries
+        a timestamp, so the id key decides.
         """
         graph = MultiCallGraph([
             (None, Exception("Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("zulu", 2.4), ("alpha", 2.4)], None),
+            ([("alpha", 2.4), ("zulu", 2.4)], None),
         ])
 
         result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert result == [("alpha", 0.0), ("zulu", 0.0)]
+        # #10121: the equal-distance tie is recency-then-id DESC, so the
+        # HIGHER id leads. (This pin asserted the pre-#10121 oldest-first order.)
+        assert result == [("zulu", 0.0), ("alpha", 0.0)]
 
     def test_docker_mode_both_signatures_fail_falls_back_to_brute_force(self):
         """#1359: sig A 'not registered' AND sig B fails → brute-force is
@@ -794,22 +879,24 @@ class TestRunVectorQuery:
         Sig B's rows are DISTANCES and come back as similarities (#5583).
 
         #6214: the returned ORDER is now contractual. The two rows tie on
-        distance (0.0 — perfect matches), so the id is the only thing that
-        can order them; the engine mock hands them back ``zulu`` first, and
-        the leg must return ``alpha`` first. Removing the id key leaves the
-        mock's order and fails this assertion.
+        distance (0.0 — perfect matches), so the secondary keys are the only
+        thing that can order them. The mock hands them back ``alpha`` FIRST —
+        deliberately the reverse of the expected answer, so a leg that applies
+        NO sort fails instead of agreeing with the mock (#10121 review).
         """
         graph = MultiCallGraph([
             (None, Exception(
                 "Type mismatch: expected Integer, Float, or Null but was List")),
-            ([("zulu", 0.0), ("alpha", 0.0)], None),
+            ([("alpha", 0.0), ("zulu", 0.0)], None),
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api=None)
 
-        assert result == [("alpha", 1.0), ("zulu", 1.0)]
+        # #10121: recency-then-id DESC — the higher id leads (oldest-first was
+        # the pre-#10121 policy).
+        assert result == [("zulu", 1.0), ("alpha", 1.0)]
         assert len(graph.query_calls) == 2
 
     def test_docker_mode_signature_a_carries_a_distance_and_ties_by_id(self):
@@ -820,18 +907,24 @@ class TestRunVectorQuery:
         not a ranking and reverses under a re-sort (the reason the pre-#6214
         code could not be fixed by sorting alone).
 
-        Two rows tie on distance (0.0), and the engine mock hands them back
-        ``zulu`` first, so ``alpha`` first is reachable only via the id key.
+        Two rows tie on distance (0.0). The engine mock hands them back
+        ``alpha`` FIRST — deliberately the reverse of the expected answer, so a
+        leg that applies NO secondary sort keeps the mock's order and FAILS
+        (#10121 review: the earlier version's expectation matched the mock, so
+        deleting the sort stayed green). The tie is recency-then-id DESC; no
+        row carries a timestamp, so ``zulu`` leads on the id key.
         """
         graph = MultiCallGraph([
-            ([("zulu", 0.0), ("alpha", 0.0)], None),   # sig A succeeds
+            ([("alpha", 0.0), ("zulu", 0.0)], None),   # sig A succeeds
         ])
 
         result = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api="procedure")
 
-        assert result == [("alpha", 1.0), ("zulu", 1.0)]
+        # #10121: recency-then-id DESC — the higher id leads (oldest-first was
+        # the pre-#10121 policy).
+        assert result == [("zulu", 1.0), ("alpha", 1.0)]
         assert len(graph.query_calls) == 1
         sig_a = graph.query_calls[0][0]
         assert "'embedding', $query_vec, $limit)" in sig_a   # A's argument order
@@ -1000,6 +1093,45 @@ class TestRunVectorQuery:
         assert "vec.euclideanDistance" not in cypher
 
 
+def test_index_branch_survives_an_id_less_row():
+    """#10121 review P1: a NULL pid must not raise inside the sort.
+
+    ``:Object`` nodes are written id-less, so ``row[0]`` can be ``None``. An
+    unconditional ``sort(key=lambda item: item[2])`` compares those ``None``
+    keys for EVERY pair (not only on a distance tie), raises
+    ``TypeError: '<' not supported``, and the branch's ``except Exception``
+    swallows it — silently demoting every such read to a full scan with the
+    mechanism mislabelled and the score unit flipped. The shared
+    ``recency_tie_key`` normalises ``None`` to ``''`` so the sort is total.
+    """
+    graph = MultiCallGraph([
+        # The id-less row comes back FIRST from the engine, so `alpha` reaching
+        # the lead is reachable only through the sort — the assertion is not
+        # satisfied by the mock's own order (#10121 round-4 review). The third
+        # column is the recency projection, so the projected value is
+        # exercised rather than silently absent.
+        ([(None, 0.5, ""), ("alpha", 0.5, "2026-01-01T00:00:00Z")], None),
+    ])
+
+    trace: list[dict] = []
+    result = run_vector_query(
+        graph, [0.1] * 384, limit=10, is_embedded=False,
+        vector_index_api="procedure", excluded_statuses=(), leg_trace=trace)
+
+    assert len(result) == 2, f"both rows must survive the sort: {result}"
+    assert result == [("alpha", pytest.approx(0.5)), (None, pytest.approx(0.5))], (
+        "an id-less row must sort as the LAST identity, not raise: "
+        f"{result}"
+    )
+    mechanism = next(
+        (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
+        None)
+    assert mechanism == MECHANISM_INDEX, (
+        "the leg must still answer from the INDEX — a swallowed sort error "
+        f"silently demotes it to a scan, which is the defect this pins: {trace}"
+    )
+
+
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
     """#6214 acceptance 3: the INDEX-accelerated vector leg returns
@@ -1008,9 +1140,15 @@ def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
     Three Points are created in DESCENDING id order with IDENTICAL embeddings,
     so every distance ties and the engine's own order is
     ``[tie6214_zulu, tie6214_mike, tie6214_alpha]`` (measured on
-    falkordb-server:v4.16.7 and falkordb:latest). ``[alpha, mike, zulu]`` is
-    unreachable unless the ``(distance, id)`` secondary key is applied:
-    removing that key leaves the engine order and FAILS this test.
+    falkordb-server:v4.16.7 and falkordb:latest). #10121: the tie is
+    ``recency DESC, id DESC``, and the stamps are set so recency and id DISAGREE
+    — ``alpha`` (the LOWEST id) carries the NEWEST ``createdAt`` — so
+    ``[alpha, mike, zulu]`` is reachable only through the RECENCY key, i.e. the
+    column the index signature projects. Dropping that column falls back to
+    ``''`` for every row and the id key then returns the INVERSE order, which
+    FAILS this test: that is the regression this pin exists for (a round-2
+    review measured that deleting the column from both index signatures redded
+    nothing).
 
     WHY THIS IS THE INDEX PATH AND NOT A SUBSTITUTED SCAN: the leg trace's
     ``mechanism`` is asserted to be ``index``, so a silent fall-through to the
@@ -1033,11 +1171,17 @@ def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
         vec = [0.0] * EMBEDDING_DIM
         vec[0] = 1.0
         vec[1] = 1.0
-        for pid in (f"{prefix}zulu", f"{prefix}mike", f"{prefix}alpha"):
+        # Recency OPPOSES id on purpose — see the docstring.
+        stamps = {
+            f"{prefix}zulu": "2026-01-01T00:00:00Z",
+            f"{prefix}mike": "2026-06-01T00:00:00Z",
+            f"{prefix}alpha": "2026-12-01T00:00:00Z",
+        }
+        for pid, stamp in stamps.items():
             g.query(
                 "CREATE (n:Point {id:$id, text:$id, status:'active', "
-                "embedding: vecf32($vec)})",
-                params={"id": pid, "vec": vec})
+                "createdAt:$c, updatedAt:$c, embedding: vecf32($vec)})",
+                params={"id": pid, "vec": vec, "c": stamp})
 
         trace: list[dict] = []
         out = run_vector_query(
@@ -1055,8 +1199,9 @@ def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
             "the vector leg did not answer from the index, so the tie-order "
             f"assertion below would not be about the index path: {trace}")
         assert got == [f"{prefix}alpha", f"{prefix}mike", f"{prefix}zulu"], (
-            "equal-distance rows are not id-ordered on the index path: "
-            f"{got}")
+            "equal-distance rows are not RECENCY-then-id ordered on the index "
+            "path (#10121) — recency and id disagree in this fixture, so the "
+            f"id key alone would return the inverse: {got}")
     finally:
         try:
             g.query(f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")
