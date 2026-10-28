@@ -22,8 +22,13 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 83 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
-| `ubuntu-24.04` | 5 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`) |
+| `ubuntu-latest` | 75 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-24.04` | 9 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`, and the four fleet observers `availability-liveness:check`, `availability-watchdog:probe`, `ci-check-repair:repair`, `ci-queue-health:queue-health`) |
+
+Counts are JOBS (not files), measured 2026-10-27 at `a97a6b1` + the four-observer pin. Only `runs-on:`
+lines that name a single `ubuntu-*` label are counted; the `ubuntu-latest` row was previously
+written as 83 against a measured 79, so treat both rows as a dated measurement and re-derive them
+(`yaml.safe_load` each workflow, count each job's `runs-on`) rather than trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
@@ -51,9 +56,20 @@ auto` (the default) reads the ARM64 pool's own state and attaches the fallback l
 runners **only if that pool is carrying it right now**; `--fallback on|off` overrides explicitly,
 and an unreadable state is a refusal (exit 2), never a guess. The gate's state stays the source
 of truth for when the pool serves CI. What changes is only *which architecture* may serve the
-fallback — which the decision never specified. The separate decision that pins five legs to
+fallback — which the decision never specified. The separate decision that pins legs to
 `ubuntu-<version>` (the pool is ~2x slower and killed `test-slow` at its watchdog, #6897/#7867)
-is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label.
+is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label — including
+the arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`,
+`ubuntu-26.04-arm`), which `_preserve_labels` drops too — the installer cannot emit one, and
+`tools/runner_autoscale.py::_preserve_labels` DROPS rather than preserves one on re-registration,
+so an out-of-band attachment cannot survive a re-registration or
+`tools/install-ci-runner-x64.sh --repair-labels`. That is NOT the same as "cannot become
+permanent": `scripts/ci_runner_gate.sh` treats any non-auto label as `extra` (`:222`) and re-emits
+it in its whole-set `PUT` body on every fallback transition (`:232`), and a runner nobody
+re-registers keeps whatever label it was given — so re-measure.
+Nothing ASSERTS the LIVE label set: `read_pool()` reads it on every autoscale pass and
+`_preserve_labels` drops a pin from it, but no test and no gate compares it to the invariant above.
+Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a runner's labels are re-cut.
 
 ## What is installed
 
@@ -245,4 +261,4 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    version-pinned hosted legs stay pinned.
 3. **`ubuntu-latest` remains ambiguous by design.** Any job asking for it can land on
    GitHub-hosted, an ARM64 runner, or one of these — that ambiguity is what the fallback is
-   for, and why the five legs that need a specific class are version-pinned.
+   for, and why the legs that need a specific class are version-pinned.

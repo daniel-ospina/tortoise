@@ -138,3 +138,12 @@ docs/product/sdk-rename-table.md
 # across lanes. Derived state: it is re-created by `prepare`, so it must never be
 # committed.
 .batch-review/
+
+# #10220: `tools/worktree_report.py` writes a lane's durable report to
+# `WORKTREE-REPORT.md` at the WORKTREE ROOT, with its raw suite output under
+# `.worktree-report/`. That is lane-local evidence about a working tree — it
+# describes a branch, not the product — and the merge path reads it from disk
+# (agent-infra#2977), so it must never be committed. Derived: every `run` rewrites
+# it, and `check` re-derives the counts from the logs it cites.
+/WORKTREE-REPORT.md
+/.worktree-report/

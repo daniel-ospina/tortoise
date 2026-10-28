@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
+from tortoise.bm25 import DEFAULT_LEXICAL_WEIGHT
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
     EpBreakdown, EpEvidence, annotate_ep_batch, reset_circuit_breakers,
@@ -963,15 +964,26 @@ class TestFusionWeightsProductionDefault:
         return TortoiseSDK
 
     def test_sdk_passes_vector_15_default(self, monkeypatch):
-        """No env → the fusion weights default to {'vector': 1.5}."""
+        """No env → the dense weight is the production 1.5.
+
+        #8488 (owner ruling 2026-10-28): the BM25 arm is ON by default, so the
+        lexical slot's weight is resolved EXPLICITLY and appears in the map —
+        ``fts: 1.0``, the module default. The pin is therefore on the VALUE
+        that decides the fusion (dense 1.5) plus the lexical entry being the
+        default rather than an override; exact-dict equality would pin a shape,
+        not the weighting.
+        """
         captured = {}
         TortoiseSDK = self._spy_and_two_legs(monkeypatch, captured)
         monkeypatch.delenv("TORTOISE_FUSION_WEIGHTS", raising=False)
         sdk = TortoiseSDK()
         sdk._proj = _FakeProj2()
         sdk.tortoise_fts_query("test query", limit=10)
-        assert captured.get("weights") == {"vector": 1.5}, \
-            f"production default must weight vector 1.5, got {captured.get('weights')}"
+        weights = captured.get("weights") or {}
+        assert weights.get("vector") == 1.5, (
+            f"production default must weight vector 1.5, got {weights}")
+        assert weights.get("fts", DEFAULT_LEXICAL_WEIGHT) == DEFAULT_LEXICAL_WEIGHT, (
+            f"the lexical weight must be the module default, got {weights}")
         assert captured.get("names") == ["fts", "vector"]
 
     def test_env_override_replaces_default(self, monkeypatch):
@@ -982,7 +994,12 @@ class TestFusionWeightsProductionDefault:
         sdk = TortoiseSDK()
         sdk._proj = _FakeProj2()
         sdk.tortoise_fts_query("test query", limit=10)
-        assert captured.get("weights") == {"vector": 2.0}, captured.get("weights")
+        weights = captured.get("weights") or {}
+        # The override sets the dense weight; the lexical entry is the arm's
+        # resolved default (#8488), clamped to min(1.0, dense) — see
+        # ``resolve_lexical_weight``.
+        assert weights.get("vector") == 2.0, weights
+        assert weights.get("fts") == 1.0, weights
 
 
 class _FakeProj2:
