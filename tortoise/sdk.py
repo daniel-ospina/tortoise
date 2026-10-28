@@ -16583,6 +16583,21 @@ class TortoiseSDK:
                             src=old_id, tgt=target_key,
                             target_label=target_label,
                             edge_type=rel,
+                            # #9973: the DIRECT successor. The graph's pass-2b
+                            # derives the destination itself (`_final(src)`);
+                            # the RECORD cannot, because it is written LIVE, one
+                            # record at a time, and this descriptor is emitted
+                            # BEFORE the `PointSuperseded` patch that would make
+                            # `public.point.superseded_by` readable — a chase at
+                            # that moment resolves to `src` and re-creates the
+                            # dead-source edge on the production path. The
+                            # producer already knows the successor here, so it
+                            # journals it: the record moves the edge to
+                            # `new_id`, and a later `Y→Z` supersede journals its
+                            # own move, so a chain composes to the final point.
+                            # Additive: no fold reads it, every pre-#9973 reader
+                            # is unchanged.
+                            new_id=new_id,
                         )
                 # Create new edge: new point → same target (MERGE = idempotent, no dupes)
                 proj.g.query(

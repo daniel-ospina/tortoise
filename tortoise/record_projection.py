@@ -630,6 +630,28 @@ class RelationDelete:
 
 
 @dataclass(frozen=True)
+class RelationMove(RelationUpsert):
+    """`DirectEdgeRepoint` — MOVE one edge, never duplicate it (#9973).
+
+    The descriptor's own semantics (`projection/__init__.py` pass-2b) are
+    *move*: the edge is removed at the pre-supersede point and re-created at the
+    FINAL live successor. Applying it as a plain upsert at the descriptor's own
+    `src` leaves the edge on the SUPERSEDED point, never gives it to the
+    successor, and removes nothing — the exact inverse of the graph.
+
+    ``dest_from`` names the record key carrying the DIRECT successor. The
+    producer emits it (`sdk.supersede_point` 2b, ``new_id``) because the record
+    is written **live, one record at a time**, BEFORE the `PointSuperseded`
+    patch that would let a replay derive the successor from
+    `public.point.superseded_by` — see :func:`_relation_repoint_statements`.
+    A descriptor without it (a journal appended before this field existed) keeps
+    the pre-#9973 upsert: the record must never drop an edge it cannot place.
+    """
+
+    dest_from: str = "new_id"
+
+
+@dataclass(frozen=True)
 class NoRecordEffect:
     """A record type that legitimately produces NO record row.
 
@@ -1044,9 +1066,12 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
              "DirectEdgeRepoint",
     ),
     "DirectEdgeRepoint": Mutation(
-        RelationUpsert(),
-        note="A10 pass-2b — same flat descriptor; a `delete_only` leg removes "
-             "the old edge and is carried by the record's own key",
+        RelationMove(),
+        note="A10 pass-2b — same flat descriptor, but the descriptor means MOVE "
+             "(#9973): the edge is removed at `src` and re-created at `new_id` "
+             "(the direct successor the producer journals), resolved by the "
+             "graph's own replay key (#9972). A `delete_only` leg is a pure "
+             "delete (#2489) and is carried by the record's own key",
     ),
     # ── Bookkeeping: declared no-ops, with the reason each one is one ────────
     "IngestStarted": Mutation(
@@ -1794,6 +1819,7 @@ def _endpoint_resolution(
     values: Sequence[Any] | None = None,
     order_by: str | None = None,
     prefer: tuple[str, Any] | None = None,
+    unique: bool = False,
 ) -> tuple[str, list[Any]]:
     """The node row an edge endpoint addresses, keyed by the label's key column.
 
@@ -1905,11 +1931,29 @@ def _endpoint_resolution(
     # An empty *alias* yields a bare parenthesised SELECT — i.e. a SCALAR
     # subquery, which is how the node-key resolver below reuses this one
     # resolution rule instead of restating it (#9956).
+    #
+    # *unique* is the `#5509` discipline in SQL (#9972): a NAME-keyed lookup may
+    # address several live carriers — a name is a mutable natural key, and two
+    # incarnations legitimately share one — so the resolver must return the row
+    # only when the predicate holds for EXACTLY ONE of them. Zero rows then
+    # means "refuse", which is the graph's own verdict (`_refuse_ambiguous_target`,
+    # `projection/edges.py`): a name that does not name ONE identity has no
+    # target, and picking an arbitrary holder is what #5509 removes.
+    #
+    # ⚠️ The guard MUST precede the ORDER BY/LIMIT tail in the SQL text AND in
+    # the parameter order — appending it after `LIMIT 1` is a syntax error, and
+    # the ordering params (`ordering`) bind after the guard's.
+    guard = ""
+    guard_params: list[Any] = []
+    if unique:
+        guard = (f" AND (SELECT count(*) FROM public.{table} "
+                 f"WHERE org_id = %s AND graph_id = %s AND {predicate}) = 1")
+        guard_params = [org_id, graph_id, *bound]
     return (
         f"(SELECT node_key FROM public.{table} "
-        f"WHERE org_id = %s AND graph_id = %s AND {predicate}{tail})"
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}{guard}{tail})"
         f"{' ' + alias if alias else ''}",
-        [org_id, graph_id, *bound, *preferred],
+        [org_id, graph_id, *bound, *guard_params, *preferred],
     )
 
 
@@ -2026,19 +2070,24 @@ def _relation_upsert_statement(
     refused: Mapping[str, frozenset[str]],
     *,
     src_match: tuple[str, ...] | None = None,
+    src_value: str | None = None,
     tgt_match: tuple[str, ...] | None = None,
     tgt_values: Sequence[Any] | None = None,
     tgt_order_by: str | None = None,
     tgt_prefer: tuple[str, Any] | None = None,
+    tgt_unique: bool = False,
 ) -> list[Statement]:
     """One `relation` row, with both endpoints RESOLVED from record rows.
 
-    *src_match* / *tgt_match* / *tgt_values* / *tgt_order_by* / *tgt_prefer* are
-    pass-throughs to :func:`_endpoint_resolution` for a family whose fold
-    addresses an endpoint by something other than the label's default predicate
-    (`extractedFrom` → the Source's canonical identity, #9553 class 1). All are
-    keyword-only with `None` defaults, so every pre-existing call site emits
-    byte-identical SQL.
+    *src_match* / *tgt_match* / *tgt_values* / *tgt_order_by* / *tgt_prefer* /
+    *tgt_unique* are pass-throughs to :func:`_endpoint_resolution` for a family
+    whose fold addresses an endpoint by something other than the label's default
+    predicate (`extractedFrom` → the Source's canonical identity, #9553 class 1;
+    `DirectEdgeRepoint` → the target's NAME-keyed replay key, #9972 — see
+    :func:`_relation_repoint_statements`). *src_value* REPLACES the record's own
+    `src` value with another one (the repoint's successor, #9973) without
+    re-deriving every other coordinate. All are keyword-only with `None`/`False`
+    defaults, so every pre-existing call site emits byte-identical SQL.
 
     ON CONFLICT is a REPLAY, not a re-link — with ONE exception.
     `source_version` (the #5256 read-version anchor) is written by the fold
@@ -2057,6 +2106,8 @@ def _relation_upsert_statement(
     not a recorded read version).
     """
     rel_type, src_label, src, tgt_label, tgt, idx = _relation_coordinates(rel, payload)
+    if src_value is not None:
+        src = src_value
     col_values, tail = _split_properties(
         "relation", {k: payload[k] for k in rel.attrs if k in payload},
         columns=columns, refused=refused,
@@ -2071,7 +2122,8 @@ def _relation_upsert_statement(
         org_id, graph_id, src_label, src, "src", match=src_match)
     tgt_select, tgt_params = _endpoint_resolution(
         org_id, graph_id, tgt_label, tgt, "tgt", match=tgt_match,
-        values=tgt_values, order_by=tgt_order_by, prefer=tgt_prefer)
+        values=tgt_values, order_by=tgt_order_by, prefer=tgt_prefer,
+        unique=tgt_unique)
     columns_ = ["org_id", "graph_id", "rel_type", "src_label", "src_key",
                 "tgt_label", "tgt_key", "idx", *col_values, "props"]
     select_list = ", ".join([
@@ -2127,6 +2179,120 @@ def _relation_delete_statement(
         "AND tgt_label = 'Point' AND tgt_key = %s AND idx = %s",
         (org_id, graph_id, rel_type, src, tgt, idx),
     )
+
+
+def _repoint_target_match(label: str) -> tuple[tuple[str, ...] | None, bool]:
+    """The predicate a repoint descriptor's target is resolved by (#9972).
+
+    A structural `DirectEdgeRepoint` names its target by the graph's **replay
+    key** — `projection/edges.py::stub_key`, the value pass-2b resolves the edge
+    target with: `name` for `aboutSubject`/`aboutObject`/`aboutEvent`/
+    `aboutPoint`, `url` for `aboutDocument`/`extractedFrom`. The record resolved
+    that same value with the label's DEFAULT predicate, which since #9881 is
+    `id` for Object/Subject — a column `stub_key`'s name can never equal (ids
+    are minted `label[:3]-<sha256[:26]>`). So the edge the graph had just moved
+    to the successor landed **0 rows**, silently: an `INSERT … SELECT` whose
+    SELECT yields nothing is a successful no-op — no error, nothing on
+    `record_write_failures`.
+
+    Returns `(match, unique)`: the columns to resolve by, and whether the
+    resolver must REFUSE a key held by 2+ carriers. Object/Subject/Event are
+    NAME-keyed and a name is a mutable natural key two live incarnations may
+    share, so those refuse (the graph's `#5509` rule). `Source` resolves by
+    `node_key` (= `url`, exactly the value the descriptor carries) and
+    `Point`/`Session` keep `node_key` (= their id — the 2a DIRECT shape's
+    endpoint IS an id), both unique by construction.
+    """
+    table = _LABEL_TABLES.get(label)
+    if table in ("object", "subject", "event"):
+        return (("name",), True)
+    if table in ("source", "point", "session"):
+        return (("node_key",), False)
+    raise RecordProjectionError(
+        f"repoint descriptor names label {label!r}, which is not a record node "
+        f"label ({sorted(_LABEL_TABLES)})"
+    )
+
+
+def _relation_repoint_statements(
+    org_id: str,
+    graph_id: str,
+    rel: RelationMove,
+    payload: Mapping[str, Any],
+    columns: Mapping[str, frozenset[str]],
+    refused: Mapping[str, frozenset[str]],
+) -> list[Statement]:
+    """`DirectEdgeRepoint` is a MOVE, not an upsert (#9973, #9972).
+
+    The graph's pass-2b removes the edge at the pre-supersede point and MERGEs it
+    at the FINAL live successor (`projection/__init__.py`, `src_f = _final(src)`).
+    Applying the descriptor as a plain upsert at its own `src` left the record
+    holding the edge on the SUPERSEDED point, never giving it to the successor,
+    and removing nothing — the exact inverse of the graph, and a violation of the
+    E2E-11.6 contract (zero direct edges incident to a superseded point, live AND
+    post-rebuild). A record-sourced rebuild (`read_record_view` →
+    `cache_projection` re-MERGEs every `public.relation` row at its stored
+    endpoints) then resurrected the dead-source edge.
+
+    TWO STATEMENTS, both idempotent, delete FIRST so the move cannot undo itself:
+
+    1. `DELETE` at `(src, rel_type, resolved target)` — the pre-move row. A re-run
+       deletes nothing; the graph's delete-leg is likewise keyed on resolved
+       identities.
+    2. `INSERT … ON CONFLICT` at `(_final(src), rel_type, resolved target)` — the
+       destination. A re-run converges on the one row.
+
+    THE DESTINATION IS THE RECORD'S OWN `new_id`, NOT a `superseded_by` CHASE.
+    The obvious derivation — chase `public.point.superseded_by` from `src` to its
+    terminal row — is WRONG for the LIVE door: the producer emits this descriptor
+    BEFORE the `PointSuperseded` record (EMIT-BEFORE-TRANSFER, `sdk.py` 2b), and
+    `record_writer.write_live_record` applies ONE record at a time, so at the
+    moment this mutation runs the successor link does not exist yet and the chase
+    would resolve to `src` — re-creating the very defect on the production path
+    while looking fixed in a batched replay. The producer therefore journals the
+    direct successor (`new_id`) it already knows. That also makes a CHAIN
+    correct by composition: superseding X→Y journals a move X→Y, then the later
+    Y→Z supersede transfers Y's edges and journals Y→Z, so replaying the moves in
+    order lands the edge on Z and leaves none at X or Y — the same state the
+    graph's transitive `_final()` produces in one hop.
+
+    A descriptor WITHOUT `new_id` (a journal appended before the field existed)
+    keeps the pre-#9973 upsert at `src`: the record must never DELETE an edge it
+    cannot place, so a legacy row is left exactly as that journal recorded it.
+    The `delete_only` self-edge guard (#2489) is untouched — it is a pure delete.
+
+    Both halves resolve the target by the graph's own replay key (#9972), so a
+    NAME-keyed `aboutObject`/`aboutSubject` descriptor lands the successor's edge
+    and an ambiguous name lands nothing in either statement.
+    """
+    rel_type, src_label, src, tgt_label, tgt, idx = _relation_coordinates(
+        rel, payload)
+    match, unique = _repoint_target_match(tgt_label)
+    dest = payload.get(rel.dest_from)
+    if not isinstance(dest, str) or not dest:
+        # Legacy descriptor: the journal never carried the successor, so there is
+        # no destination to move TO. Upsert where the journal says the edge is.
+        return _relation_upsert_statement(
+            org_id, graph_id, rel, payload, columns, refused,
+            tgt_match=match, tgt_unique=unique,
+        )
+    insert = _relation_upsert_statement(
+        org_id, graph_id, rel, payload, columns, refused,
+        src_value=dest, tgt_match=match, tgt_unique=unique,
+    )
+    src_select, src_params = _endpoint_resolution(
+        org_id, graph_id, src_label, src)
+    tgt_select, tgt_params = _endpoint_resolution(
+        org_id, graph_id, tgt_label, tgt, match=match, unique=unique)
+    delete = Statement(
+        "DELETE FROM public.relation "
+        "WHERE org_id = %s AND graph_id = %s AND rel_type = %s "
+        f"AND src_label = %s AND src_key = {src_select} "
+        f"AND tgt_label = %s AND tgt_key = {tgt_select} AND idx = %s",
+        (org_id, graph_id, rel_type, src_label, *src_params,
+         tgt_label, *tgt_params, idx),
+    )
+    return [delete, *insert]
 
 
 def _op_dispatch_statements(
@@ -3243,6 +3409,15 @@ def _declared_mutations(
     if isinstance(effect, OpDispatch):
         return _op_dispatch_statements(org_id, graph_id, effect, record,
                                        columns, refused)
+    if isinstance(effect, RelationMove):
+        # #9973/#9972: the repoint family's own mutation — a `delete_only`
+        # descriptor stays the pure delete it always was; a transfer is a MOVE
+        # (delete at the pre-move endpoint + insert at the successor), with the
+        # target resolved by the graph's replay key rather than the label's id.
+        if record.get("delete_only") is True:
+            return [_relation_delete_statement(org_id, graph_id, effect, record)]
+        return _relation_repoint_statements(org_id, graph_id, effect, record,
+                                            columns, refused)
     if isinstance(effect, RelationUpsert):
         if record.get("delete_only") is True:
             # #2489/#7969: a `delete_only` descriptor is the graph's pass-2b

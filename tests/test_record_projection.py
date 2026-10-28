@@ -2166,6 +2166,143 @@ def test_direct_edge_repoint_delete_only_deletes_rather_than_upserts():
     assert params == ("o", "g", "aboutPoint", "p1", "p2", 0)
 
 
+# ── #9972 / #9973: the transfer descriptor is a MOVE, with a NAME-keyed target ─
+#
+# Two independent defects in the SAME descriptor, which is why they are pinned
+# separately: the record resolved the target by the label's ID column (#9972,
+# the successor's edge landed 0 rows) and applied the descriptor as an upsert at
+# its own `src` (#9973, the superseded point kept the edge and the successor
+# never got it). Both are measured at the plan seam — the emitted statement set —
+# because that is what the replay executor runs.
+
+
+def _structural_repoint(**overrides):
+    """The 2b transfer descriptor EXACTLY as `sdk.supersede_point` journals it.
+
+    `tgt` is the graph's replay key (`stub_key`): a NAME for the about* family,
+    a url for the two Source rels. `new_id` is the direct successor (#9973).
+    """
+    record = {"type": "DirectEdgeRepoint", "ts": "T2",
+              "id": "P1->P2:aboutObject:Acme Corp", "src": "P1",
+              "tgt": "Acme Corp", "target_label": "Object",
+              "edge_type": "aboutObject", "new_id": "P2"}
+    record.update(overrides)
+    return record
+
+
+def test_a_structural_repoint_moves_its_edge_to_the_successor():
+    """#9973: the descriptor means MOVE — remove at old, create at the successor.
+
+    The graph's pass-2b deletes the edge at the pre-supersede point and MERGEs it
+    at `_final(src)` (`projection/__init__.py`). The record upserted at the
+    descriptor's own `src`, so the SUPERSEDED point kept the edge the graph
+    deleted and the successor never received it — the exact inverse of
+    `test_about_edge_follows_successor_after_second_rebuild`, and a violation of
+    E2E-11.6 (`sdk.py`: zero direct edges incident to a superseded point, live AND
+    post-rebuild).
+    """
+    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
+    assert [s.sql.split()[0] for s in statements] == ["DELETE", "INSERT"], \
+        [s.sql for s in statements]
+    delete, insert = statements
+    # 1. the pre-move row is REMOVED (a move with no delete is an upsert)
+    assert delete.sql.startswith("DELETE FROM public.relation"), delete.sql
+    assert "P1" in delete.params, delete.params
+    assert "Acme Corp" in delete.params, delete.params
+    # 2. the row is CREATED at the SUCCESSOR — not at the descriptor's own src
+    assert "P2" in insert.params, (
+        "the successor's row is never written — the descriptor's src is the OLD "
+        f"point: {insert.params}")
+    assert "P1" not in insert.params, (
+        "the edge is still written at the superseded point: "
+        f"{insert.params}")
+
+
+def test_a_structural_repoint_descriptor_resolves_its_name_keyed_target():
+    """#9972: the target is a NAME; the record matched it as an ID.
+
+    `stub_key` emits `target["name"]` for the about* family, and the graph
+    resolves it with `MATCH (x:{label} {{name:$key}})` (`edges.py`). The record
+    used `_ENTITY_MATCH_COLUMNS`, which is `id` for Object/Subject since #9881 —
+    a column a minted id (`label[:3]-<sha256[:26]>`) can never equal, so EVERY
+    such descriptor landed 0 rows in silence.
+    """
+    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
+    for statement in statements:
+        assert "Acme Corp" in statement.params, statement.params
+        # the TARGET predicate specifically — `graph_id = %s` also contains the
+        # substring `id = %s`, so a bare search cannot tell the two apart.
+        assert "public.object WHERE org_id = %s AND graph_id = %s AND id = %s" \
+            not in statement.sql, statement.sql
+        assert "public.object WHERE org_id = %s AND graph_id = %s AND name = %s" \
+            in statement.sql, statement.sql
+
+
+def test_an_ambiguous_name_keyed_target_lands_no_row_at_all():
+    """#5509 in SQL: a name held by 2+ carriers has no single target.
+
+    The graph refuses (`_refuse_ambiguous_target`): a name that does not name ONE
+    identity is not resolved, and picking an arbitrary holder is what #5509
+    removes. The record must REFUSE the same way — both halves of the move resolve
+    to zero rows, so neither the delete nor the insert lands.
+    """
+    for statement in rp.mutations_for(_structural_repoint(), org_id="o",
+                                      graph_id="g"):
+        assert "count(*) FROM public.object" in statement.sql, statement.sql
+        assert ") = 1" in statement.sql, statement.sql
+
+
+def test_a_repoint_without_a_successor_keeps_the_upsert_it_can_place():
+    """A journal appended BEFORE `new_id` existed must not lose its edge.
+
+    The record is allowed to be wrong-but-inert on a legacy descriptor; it is not
+    allowed to DELETE an edge it has no destination for. So a descriptor with no
+    `new_id` emits exactly the pre-#9973 upsert (one statement, no delete) — while
+    still resolving the target by the graph's replay key (#9972 applies to every
+    descriptor, legacy or not).
+    """
+    legacy = _structural_repoint()
+    legacy.pop("new_id")
+    statements = rp.mutations_for(legacy, org_id="o", graph_id="g")
+    assert len(statements) == 1, [s.sql for s in statements]
+    assert statements[0].sql.startswith("INSERT INTO public.relation")
+    assert "name = %s" in statements[0].sql
+
+
+def test_a_repoint_chain_moves_the_edge_to_the_final_successor():
+    """A 3-link chain leaves the edge on the FINAL successor and nowhere else.
+
+    The producer journals ONE descriptor per supersede step (X→Y transfers X's
+    edges; a later Y→Z transfers Y's), each carrying its own direct successor, so
+    replaying the moves in order composes to the graph's transitive `_final()`
+    result: the edge ends on Z, and the deletes at X and Y leave no row behind on
+    an intermediate point.
+    """
+    journal = [
+        {"type": "PointAdded", "ts": "T1", "id": "X",
+         "point": {"content": "old claim", "status": "superseded"}},
+        {"type": "PointAdded", "ts": "T1", "id": "Y",
+         "point": {"content": "middle claim", "status": "superseded"}},
+        {"type": "PointAdded", "ts": "T1", "id": "Z",
+         "point": {"content": "final claim", "status": "live"}},
+        _structural_repoint(id="X->Y:aboutObject:Acme Corp", src="X", new_id="Y"),
+        _structural_repoint(id="Y->Z:aboutObject:Acme Corp", src="Y", new_id="Z"),
+    ]
+    plan = rp.replay_plan(journal, org_id="o", graph_id="g")
+    relation = [s for s in plan if "public.relation" in s.sql]
+    inserts = [s for s in relation if s.sql.startswith("INSERT")]
+    deletes = [s for s in relation if s.sql.startswith("DELETE")]
+    assert len(inserts) == 2 and len(deletes) == 2, (
+        [s.render() for s in relation])
+    # the edge is created at each step's successor …
+    assert ["Y" in s.params and "Z" not in s.params for s in inserts] == [True, False]
+    assert "Z" in inserts[1].params, inserts[1].params
+    # … and never re-created at the point it was moved OFF
+    assert "X" not in inserts[0].params, inserts[0].params
+    assert "X" not in inserts[1].params and "Y" not in inserts[1].params, \
+        inserts[1].params
+
+
 def test_a_node_upsert_merges_the_props_tail_rather_than_replacing_it():
     """The record must not be poorer than the graph on a partial carrier.
 
