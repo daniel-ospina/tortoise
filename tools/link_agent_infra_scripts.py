@@ -34,8 +34,13 @@ loud, never silence); 1 = drift (behind / diverged / the pin commit is absent fr
 2 = cannot verify (the pin file is empty or unreadable, or the checkout is not a git repo).
 
 ``--check`` deliberately keeps the pointer-only contract above: a CORRECT link into a stale
-checkout is exit 0. The staleness is then reported as a ``!`` note on stderr, because the defect
-this closes (#10114) is a setup step that reads green over a tree the box does not run.
+checkout is exit 0. The staleness is then reported as a ``!`` note on stderr on every NON-QUIET
+run, because the defect this closes (#10114) is a setup step that reads green over a tree the box
+does not run. ``--quiet`` keeps meaning what its help says (PR #10250 review, P3): both callers
+that pass it — ``.husky/pre-commit`` and ``tools/agent_infra_drift_check.py`` — key on it meaning
+silent, so the drift note lives under the same guard as the state line rather than beside it.
+Visibility is not traded away for that: every non-quiet run prints the note, and ``--pin-check``
+turns the same fact into a verdict.
 
 Exit 2 is deliberately distinct from 1: "the pointer is wrong" and "there is nothing on this
 machine to point AT" are different repairs, and collapsing them is how a stale checkout gets
@@ -212,8 +217,16 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
             "cannot say whether this checkout is the tree this box runs"
         )
     try:
-        sha = pin.read_text().strip()
-    except OSError as exc:
+        sha = pin.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        # ``UnicodeDecodeError`` is a ``ValueError``, NOT an ``OSError`` (Python's exception
+        # hierarchy; verified, not assumed). A pin holding raw bytes therefore escaped a bare
+        # ``except OSError``, escaped ``main``'s ``ConfigError`` handler, and the interpreter
+        # exited **1** — the DRIFT class, whose repair sends an operator to
+        # `git fetch && git checkout`. A pin this tool cannot DECODE is not a stale checkout, it
+        # is the "cannot verify" state this module already has, so it lands there (exit 2).
+        # The encoding is pinned to utf-8 rather than left to the locale: the harness writes a
+        # hex sha, and a lane's locale must not decide what the box's pin file says.
         return PIN_UNREADABLE, f"the pin record {pin} cannot be read ({exc}) — cannot verify"
     if not sha:
         # ⛔ An EMPTY pin is not "no pin". The file exists and says nothing, so the box cannot
@@ -269,8 +282,10 @@ def pin_remedy(infra: Path, pin: Path | None) -> str:
     """The command that actually fixes drift, so the finding is actionable on its face."""
     sha = "<pin>"
     if pin is not None:
-        with contextlib.suppress(OSError):
-            sha = pin.read_text().strip() or "<pin>"
+        # Same widened tuple as ``pin_state``: an undecodable pin must degrade to the ``<pin>``
+        # placeholder, never raise out of a function whose only job is to print a remedy hint.
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            sha = pin.read_text(encoding="utf-8").strip() or "<pin>"
     return f"cd {infra} && git fetch origin && git checkout {sha}"
 
 
@@ -396,7 +411,15 @@ def main(argv: list[str] | None = None) -> int:
             "passed"
         ),
     )
-    parser.add_argument("--quiet", action="store_true", help="only exit status and errors")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "only exit status and errors — suppresses the state line AND the drift note (the "
+            "note is a warning, and both callers that pass this flag key on it meaning silent); "
+            "use --pin-check when drift must be a verdict"
+        ),
+    )
     args = parser.parse_args(argv)
 
     dest = Path(args.repo).resolve() / LINK_NAME
@@ -422,15 +445,15 @@ def main(argv: list[str] | None = None) -> int:
             state, detail = link_state(dest, src)
             if not args.quiet:
                 print(f"{state}: {detail}")
-            for note in diagnose(infra, pin):
-                print(f"  ! {note}", file=sys.stderr)
+                for note in diagnose(infra, pin):
+                    print(f"  ! {note}", file=sys.stderr)
             return 0 if state == "ok" else 1
         action = materialise(dest, src, dry_run=args.dry_run)
-        for note in diagnose(infra, pin):
-            print(f"  ! {note}", file=sys.stderr)
         if not args.quiet:
             print(action)
             print(f"  agent-infra: {infra}")
+            for note in diagnose(infra, pin):
+                print(f"  ! {note}", file=sys.stderr)
         return 0
     except ConfigError as exc:
         print(f"⛔ {exc}", file=sys.stderr)

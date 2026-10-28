@@ -953,3 +953,91 @@ class TestPinAgreement:
         result = self._pin_check(repo, git_infra, env)
         assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
         assert "not a commit id" in result.stdout, result.stdout
+
+    def test_a_pin_with_non_utf8_bytes_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ISSUE 1 (P2) — the corrupt-BYTES pin, which no test reached.
+
+        ``Path.read_text()`` raises ``UnicodeDecodeError``, a ``ValueError`` and **not** an
+        ``OSError``, so it escaped ``pin_state``'s handler, escaped ``main``'s ``ConfigError``
+        catch, and the interpreter exited **1** — the DRIFT class, whose repair sends an operator
+        to `git fetch && git checkout`. The corrupt-TEXT pin above never reaches the byte-level
+        case: it decodes fine and is caught by ``PIN_SHA_RE``. Both are "cannot verify" (2).
+        """
+        binary_pin = tmp_path / "binary-pin"
+        binary_pin.write_bytes(b"\xff\xfe\x00binary")
+        env = self._env(self._home(tmp_path))
+        result = self._pin_check(repo, git_infra, env, "--pin", str(binary_pin))
+        assert result.returncode == 2, (
+            f"a pin that cannot be DECODED must be 'cannot verify' (2), not drift (1) — "
+            f"rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, (
+            f"the pin read crashed instead of returning a verdict: {result.stderr}"
+        )
+
+    def test_check_quiet_stays_quiet_even_over_a_stale_checkout(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ISSUE 2 (P3) — ``--quiet`` must still mean silent.
+
+        Its help says "only exit status and errors", and the drift note is neither: it is a
+        warning beside a green exit code. Both callers that pass ``--quiet``
+        (``.husky/pre-commit`` and ``tools/agent_infra_drift_check.py``) key on it meaning
+        silent, and the scoping artifact's Wiring row for the CI drift gate states the wrapper
+        "stays green and prints nothing" — true under the guard, true-by-accident without it
+        (a GitHub runner records no pin). Visibility is not traded away: every NON-quiet run
+        still prints the note (``test_check_still_passes_on_a_stale_checkout_but_no_longer_stays_silent``)
+        and ``test_materialise_names_the_drift_it_still_proceeds_through``), and ``--pin-check``
+        turns the same fact into a verdict.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+        run_tool("--repo", str(repo), "--infra", str(git_infra), env=env)
+
+        result = run_tool(
+            "--check", "--quiet", "--repo", str(repo), "--infra", str(git_infra), env=env
+        )
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert result.stdout == "", f"--quiet printed the state line: {result.stdout!r}"
+        assert result.stderr == "", (
+            f"--quiet printed the drift note, so the flag no longer means what its help says: "
+            f"{result.stderr!r}"
+        )
+
+    def test_materialise_quiet_prints_nothing_even_over_a_stale_checkout(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The CI wiring row, pinned: the drift gate calls materialise ``--quiet`` and is SILENT.
+
+        ``tools/agent_infra_drift_check.py:103`` materialises with ``--quiet`` and does not
+        redirect its stderr, so an unguarded ``diagnose()`` loop reaches CI output on any box
+        that records a pin. The note must still print on a non-quiet materialise — the sibling
+        test above pins that half — so this guards the flag, not the visibility.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+
+        result = run_tool("--quiet", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert (repo / "scripts").is_symlink(), "the quiet materialise did not create the link"
+        assert result.stdout == "", f"--quiet printed the action line: {result.stdout!r}"
+        assert result.stderr == "", (
+            f"--quiet printed the drift note through the CI wrapper's path: {result.stderr!r}"
+        )
