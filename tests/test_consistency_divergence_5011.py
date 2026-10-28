@@ -373,6 +373,42 @@ def test_a_tag_edit_does_not_read_as_a_false_divergence(proj, tmp_path):
         }, r
 
 
+def test_an_identifier_alias_is_derived_on_both_sides_not_a_divergence(proj, tmp_path):
+    """#10203 review P1: the checker's canonical view must mirror the writer's
+    OWN identifier derivation, exactly as it mirrors ``flatten_search_keys_prop``.
+
+    The shared Point writer (``_upsert_point_props``) appends a derived alias to
+    ``search_keys`` (``err4032`` for content carrying ``ERR-4032``). That value is
+    a PURE function of the payload and is NEVER journalled — so a checker that
+    applied the writer's flattening but not its alias derivation compared the
+    writer's form against the payload's and reported ``divergence="content"`` on
+    every faithfully-replayed Point whose text carries an identifier. The
+    ``action`` for that divergence is "reconcile by replaying the journal", and a
+    replay re-derives the identical alias — an UNCLEARABLE red (the #5048 /
+    #8006 / #8317 false-divergence class).
+
+    (1) Fails if ``_canonical_point_fields`` stops applying the derivation on
+        either side: the two views then disagree and ``ok`` goes False.
+    (2) Reachable: the journal holds an identifier-shaped create; the projection
+        is the writer's own faithful replay.
+    """
+    log_path = str(tmp_path / "ident.jsonl")
+    _seed(proj, log_path, [_pt("p1", "deploy INV-2024-0091 failed")])
+
+    # The alias is really on the node — otherwise the assertion below would pass
+    # on a graph that never carried it, and the pin would be vacuous.
+    rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN n.search_keys")
+    stored = rows.result_set[0][0] if rows.result_set else None
+    assert stored and "inv20240091" in str(stored), stored
+
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, (
+        "a faithfully replayed identifier Point read as a divergence — the "
+        "checker is not applying the writer's alias derivation: "
+        f"{r['divergent_points']}")
+    assert r["divergence"] is None, r
+
+
 def test_uncarried_list_is_empty_when_the_journal_has_no_such_field(proj, tmp_path):
     """The negative control for the test above: without the field, the report
     must be empty — otherwise ``uncarried_journal_fields`` is a constant.

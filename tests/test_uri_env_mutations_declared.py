@@ -244,6 +244,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_fallback_snapshot.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # ── DELIBERATE_URI: module-level live-FalkorDB probes (set + restore at
     #    import; the probe asserts the docker lane) ──────────────────────────
+    # #8933: the identifier-preservation mechanism's live half. The probe sets
+    # the lane URI, imports FalkorProjection, opens+closes it, and RESTORES the
+    # previous value in a `finally` — so the three sites (set to `_LANE_URI`,
+    # set back to `_old`, `pop` when it was unset) are one save/restore pair at
+    # import, and DELIBERATE_URI is the point: the whole claim under test is that
+    # RediSearch matches the written alias on a REAL FTS index, which no
+    # pure-function test can observe. Nothing leaks into a later docker-lane
+    # test, and an unreachable lane degrades to `LIVE = False` (skips), never to
+    # a silently-embedded green (`requires_live`, #6673 probe pattern).
+    "test_identifier_tokens_8933.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk

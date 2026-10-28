@@ -303,6 +303,18 @@ def identifier_phrase_terms(text: str, *, space_separated: bool = True) -> list[
         if phrase not in seen:
             seen.add(phrase)
             out.append(phrase)
+            # Capped for the same reason the aliases are (:data:`MAX_ALIASES_PER_POINT`):
+            # ``build_or_query`` appends this tail after the original tokens and
+            # the expansion tail, so an uncapped phrase list stops the OR budget
+            # being a bound at all — a query with 3,000 identifier spans minted
+            # 3,000 adjacency constraints, a query string proportional to its
+            # input, and an over-limit query is recorded as an FTS FAILURE
+            # (``_breaker_record("fts", False)``), i.e. it degrades later searches
+            # rather than only failing this one. The bound is already more
+            # discrimination than one query can carry; the tail is a raise, not
+            # a rewrite.
+            if len(out) >= MAX_ALIASES_PER_POINT:
+                break
     return out
 
 
@@ -468,6 +480,9 @@ def build_or_query(
     OR alternatives: they can only raise a record's score, never remove a
     term, so a query that matched before still matches. The phrase is what
     makes the fix work on records written BEFORE the write-side alias existed.
+    Each tail is capped at ``MAX_ALIASES_PER_POINT``, so the OR budget stays a
+    BOUND (originals ≤ ``max_terms`` + expansion ≤ 8 + 8 aliases + 8 phrases)
+    rather than growing with the query's input.
     """
     # #8933: the identifier terms are computed SEPARATELY from the capped
     # original set, so they can never consume one of its slots — the A4
@@ -483,7 +498,17 @@ def build_or_query(
     # take the escaped-RAW branch and match NOTHING (measured on #8933: the
     # index stores `err` and `4032` separately, so the composite literal is not
     # a term the index holds).
-    if (len(tokens) + len(aliases) + len(phrases)) <= 1 or max_terms < 1:
+    #
+    # #10203 review P3-1: the predicate must be "no identifier term survived",
+    # not "the total term count is <= 1". `identifier_phrase_terms` DROPS a span
+    # carrying a 1-char segment (:300), so for `A-4032` the alias is the ONLY
+    # term that survives — `len(tokens) + len(aliases) + len(phrases) == 0 + 1 +
+    # 0 == 1` took the raw branch and returned the literal `A\-4032`, discarding
+    # `a4032` and matching nothing. Counting the plain tokens separately keeps
+    # the pre-#8933 degenerate behaviour exactly (`not aliases and not phrases`
+    # makes it `len(tokens) <= 1`) while never taking the raw branch while an
+    # identifier term exists.
+    if max_terms < 1 or (len(tokens) <= 1 and not aliases and not phrases):
         return escape_redisearch_literal(query)
     tokens.sort(key=len, reverse=True)  # stable — ties keep source order
     original = tokens[:max_terms]

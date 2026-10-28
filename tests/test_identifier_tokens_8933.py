@@ -38,6 +38,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tests import _live_utils
+from tortoise.projection.entities import (
+    append_identifier_aliases,
+    flatten_search_keys_prop,
+    point_identifier_aliases,
+)
 from tortoise.sparse import (
     IDENTIFIER_ENV,
     MAX_IDENTIFIER_LEN,
@@ -56,10 +61,16 @@ from tortoise.sparse import (
 _LANE_URI = os.environ.get("TORTOISE_DB_URI") or \
     _live_utils.docker_uri("tortoise_test_identifier_8933")
 LIVE = False
+# Bound BEFORE the `try`: the `finally` must restore the environment even when
+# the probe fails at its very first statement (an unreachable lane raises inside
+# `_FP.from_uri`, but a broken import raises BEFORE `_old` would be assigned).
+# An unbound `_old` in `finally` raises `NameError`, and an exception in
+# `finally` replaces the caught one — so the promised "skip gracefully" would
+# become a collection ERROR for the whole file (#10203 review P3).
+_old = os.environ.get("TORTOISE_DB_URI")
 try:
     from tortoise.projection import FalkorProjection as _FP
 
-    _old = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = _LANE_URI
     _probe = _FP.from_uri(_LANE_URI)
     _probe.close()
@@ -158,9 +169,49 @@ class TestRoundTrip:
     ])
     def test_write_and_read_agree_on_every_separated_spelling(
             self, spelling, expected):
-        write_side = identifier_aliases(spelling, space_separated=False)
+        """The write side is exercised through its ACTUAL door
+        (`point_identifier_aliases`, the function `_upsert_point_props` calls on
+        the payload), not by re-calling the shared helper with
+        `space_separated=False`: a second normaliser introduced inside the
+        write-side wrapper — one that kept the separators, or one that also
+        accepted the space form — passes a comparison of `identifier_aliases`
+        with itself, and then every identifier query silently matches nothing.
+        """
+        write_side = point_identifier_aliases({"content": spelling})
         read_side = identifier_aliases(spelling)
         assert write_side == read_side == [expected], (write_side, read_side)
+
+    @pytest.mark.parametrize("spelling,expected", [
+        ("ERR-4032", "err4032"),
+        ("INV-2024-0091", "inv20240091"),
+        ("capstone-9664", "capstone9664"),
+    ])
+    def test_write_and_read_agree_through_the_shared_point_writer(
+            self, spelling, expected):
+        """The same invariant at the OTHER end of the write path: what the
+        writer actually puts in the graph. A journal payload whose
+        `search_keys` is a LIST (the E3 spelling the SDK doors send) and one
+        that is already FLAT must derive the same aliases, and the append must
+        be idempotent — a second application IS the replay path.
+        """
+        listed = {"content": f"error {spelling} on deploy",
+                  "search_keys": ["release", "deploy"]}
+        flattened = dict(listed)
+        flatten_search_keys_prop(flattened)
+
+        def writer_view(props):
+            view = dict(props)
+            aliases = point_identifier_aliases(props)
+            flatten_search_keys_prop(view)
+            append_identifier_aliases(view, aliases)
+            append_identifier_aliases(view, point_identifier_aliases(props))
+            return view["search_keys"], listed["search_keys"]
+
+        got_listed, untouched = writer_view(listed)
+        got_flattened, _ = writer_view(flattened)
+        assert got_listed == got_flattened, (got_listed, got_flattened)
+        assert got_listed.split() == ["release", "deploy", expected], got_listed
+        assert untouched == ["release", "deploy"], untouched
 
     @pytest.mark.parametrize("typed", ["ERR-4032", "ERR 4032", "err4032",
                                        "Err_4032", "err4032"])
@@ -209,6 +260,33 @@ class TestRoundTrip:
         assert identifier_aliases("x A-4032 y") == ["a4032"]
         assert identifier_phrase_terms("x A-4032 y") == []
 
+    @pytest.mark.parametrize("query,alias", [
+        ("A-4032", "a4032"), ("x-4032", "x4032"), ("q-4711", "q4711")])
+    def test_the_lone_alias_reaches_the_or_union(self, query, alias):
+        """The alias "carrying it alone" must be true of the EMITTED query, not
+        just of `identifier_aliases` (#10203 review P3-1).
+
+        A span with a 1-char segment yields an alias and NO phrase, so it is the
+        only identifier term there is; the degenerate predicate counted terms
+        and, seeing exactly one, took the escaped-RAW branch and returned the
+        escaped literal `A-4032` — a term the index never stores, so the query matched
+        nothing and the alias was silently discarded. Every other token in these
+        queries is <2 chars or all-digit, which is what reproduces it.
+        """
+        assert alias in build_or_query(query).split("|"), build_or_query(query)
+
+    def test_no_identifier_term_is_ever_discarded_by_the_raw_branch(self):
+        """The general form of the pin above: while ANY identifier term exists,
+        `build_or_query` must not fall back to the escaped literal.
+        """
+        for query in ("A-4032", "x-4032", "q-4711", "ab-12", "z 99"):
+            aliases = identifier_aliases(query)
+            phrases = identifier_phrase_terms(query)
+            if not (aliases or phrases):
+                continue
+            emitted = build_or_query(query).split("|")
+            assert set(aliases) | set(phrases) <= set(emitted), (query, emitted)
+
 
 # ── criterion 4: raw retrieval unchanged ───────────────────────────────────
 
@@ -221,6 +299,44 @@ class TestRawRetrieval:
         (the string `tests/test_sparse.py` pins for the OR-union path)."""
         assert build_or_query("what is ava's favorite board game?") == \
             "favorite|board|game|ava"
+
+    @pytest.mark.parametrize("query,today", [
+        ("top 10", "top|top10|\"top 10\""),
+        ("step 10 failed", "failed|step|step10|\"step 10\""),
+        ("invoice 2024", "invoice|invoice2024|\"invoice 2024\""),
+    ])
+    def test_the_space_typed_pair_is_a_MEASURED_cost_not_a_silent_one(
+            self, query, today):
+        """R1's honest boundary: byte-identity holds for a query with no
+        identifier SHAPE, but `<word> <2+ digits>` IS a shape this change reads
+        as an identifier — the ruling requires that a code "matches however the
+        person typed it — dashes, spaces, or none", so `ERR 4032` cannot be
+        distinguished syntactically from `top 10`.
+
+        The consequence is pinned here rather than left to be discovered: such
+        a query gains an alias term AND an adjacency phrase, so a document whose
+        PROSE happens to contain the pair can outrank one that matches all of
+        the query's words (#10203 review, measured on a live FalkorDB). That is
+        a cost of the ruling's space form, not an accident — a test that
+        reds the day someone narrows it, so narrowing is a decision rather
+        than a diff.
+        """
+        assert build_or_query(query) == today
+
+    def test_the_identifier_tail_is_BOUNDED(self):
+        """The OR budget must stay a bound. `max_terms` + the expansion tail is
+        not the whole budget once the identifier tail rides it, so each tail is
+        capped: a pathological query cannot mint an input-proportional query
+        string (and an over-limit query is recorded as an FTS FAILURE, which
+        degrades later searches, not just this one).
+        """
+        from tortoise.sparse import MAX_ALIASES_PER_POINT
+
+        fat = " ".join(f"code-{i:04d}" for i in range(500))
+        terms = build_or_query(fat).split("|")
+        assert len(terms) <= 12 + 2 * MAX_ALIASES_PER_POINT, len(terms)
+        phrases = [t for t in terms if t.startswith('"')]
+        assert len(phrases) <= MAX_ALIASES_PER_POINT, len(phrases)
 
     @pytest.mark.parametrize("query", [
         "time is 27:12", "price was $40", "how much did I spend at $40?",

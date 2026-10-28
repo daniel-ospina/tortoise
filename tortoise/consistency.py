@@ -97,8 +97,10 @@ from .projection.entities import (
     _store_holds_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+    append_identifier_aliases,
     flatten_search_keys_prop,
     is_non_operator_payload,
+    point_identifier_aliases,
     promote_status_applies,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
@@ -499,6 +501,18 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     compared: a journal list with NO graph value reports the key, which is the
     coverage the pre-#8006 ``uncarried`` classification did not have.
 
+    #8933 Stage 2: the SAME rule for the derived IDENTIFIER ALIASES the writer
+    appends to ``search_keys`` (``_upsert_point_props``). The alias is a pure
+    function of the payload's own ``content``/``search_keys`` and is never
+    recorded in the journal, so a checker that compared the WRITER'S form
+    without applying the SAME derivation would report a FALSE content
+    divergence on ``search_keys`` for every faithfully replayed Point whose
+    text carries an identifier — the #8317/#10053 class (a writer-side
+    derivation the reference fold does not mirror), in its false-FAIL direction.
+    Applying it on both sides is idempotent where the graph already holds it
+    (the append is a set difference) and correct where it does not: a DERIVED
+    value cannot diverge from a journal that never recorded it.
+
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
     so the exclusion stays visible instead of becoming a silent hole.
@@ -510,8 +524,14 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
         if k not in _NOT_COMPARED and k not in skip and v is not None
     }
     # The writer's OWN normalization, so the checker's view of a point matches
-    # what the writer makes of it (#8006).
+    # what the writer makes of it (#8006, #8933). Derived from ``props`` — the
+    # RAW payload — exactly as ``_upsert_point_props`` derives it, and appended
+    # to the flattened copy the same way. Skipped when the fold declared
+    # ``search_keys`` uncarried for this point, so the append cannot re-add a
+    # key the uncarried classification deliberately excluded.
     flatten_search_keys_prop(out)
+    if "search_keys" not in skip:
+        append_identifier_aliases(out, point_identifier_aliases(props))
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]

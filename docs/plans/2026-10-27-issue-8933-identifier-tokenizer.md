@@ -55,10 +55,10 @@ projection writer are internal; `TortoiseSDK`'s public method set is untouched).
 | Surface | Layer | Test |
 |---|---|---|
 | `sparse.tokenize_sparse_query` (one tokenizer, imported by `bm25`, `search_engine`, `sdk` PRF) | unit | `tests/test_identifier_tokens_8933.py::TestPolicy` |
-| `sparse.build_or_query` (the literal RediSearch query string) | unit | `TestPolicy`, `TestRawRetrievalUnchanged` |
+| `sparse.build_or_query` (the literal RediSearch query string) | unit | `TestPolicy`, `TestRawRetrieval` |
 | `projection/entities._upsert_point_props` (shared Point writer: SDK doors + `EventAPI` seam + replay) | integration | `TestWritePath` (live FTS lane) |
 | `search_engine.run_fts_query` over the real index | integration | `TestDiscrimination` (live FTS lane) |
-| the #2070 number-lane control (`keep_numeric`) | unit | `TestRawRetrievalUnchanged` |
+| the #2070 number-lane control (`keep_numeric`) | unit | `TestRawRetrieval` |
 
 ## 5. Research
 
@@ -76,6 +76,7 @@ The `<!-- research: v1 -->` comment ([issuecomment-6451906842](https://github.co
 | `tortoise/projection/entities.py::_upsert_point_props` | flattens `search_keys` on a copy when a list is present | also appends the derived aliases to `search_keys` (same copy, same door) |
 | `tortoise/projection/entities.py::flatten_search_keys_prop` | THE one home of the search_keys graph form | unchanged (the alias is appended *after* flattening) |
 | rebuild / replay (`rebuild_all` pass 1a → `_upsert_point_props`) | writes the journal payload | re-derives the same aliases from `content` — the backfill for existing records is a **replay**, not new code, and is idempotent by construction |
+| `tortoise/consistency.py::_canonical_point_fields` | applies the writer's `flatten_search_keys_prop` to the canonical view of BOTH sides | **also** applies the writer's own alias derivation (`append_identifier_aliases(out, point_identifier_aliases(props))`), so `derived == replay(journal)` stays clearable — the checker compares the WRITER'S form (see the module's own `:128-133` rule). Omitted from this table in the first revision, which is why the review caught it: a derivation the checker does not mirror reports a FALSE `content` divergence on `search_keys` that no replay can clear (#5048 / #8006 / #8317 class) |
 | `search_engine.run_fts_query` | passes `build_or_query` output to `queryNodes` | unchanged — the alias/phrase arrive through the query string and the indexed text |
 
 ## 7. Implementation steps
@@ -109,21 +110,21 @@ integration test; step 6 is the whole file.
 **Risk surface** — what this change can break, each with the check that would catch it:
 
 - R1 **A query that matched before stops matching** (the alias/phrase could displace or de-rank an
-  original token) → `TestRawRetrievalUnchanged` (non-identifier queries are byte-identical
+  original token) → `TestRawRetrieval` (non-identifier queries are byte-identical
   `build_or_query` output; a mixed-alnum query keeps every original token) and the A4 reserved-slot
   assertion `tests/test_ask_retrieval_levers.py::test_expansion_never_displaces_original_tokens`.
 - R2 **Write-side and read-side normalisers drift** (the silent-nothing failure) →
-  `TestRoundTrip::test_write_and_read_agree_on_every_spelling` calls ONE function from both sides
+  `TestRoundTrip::test_write_and_read_agree_on_every_separated_spelling` calls ONE function from both sides
   over a spelling table; deleting the shared call on either side reds it.
 - R3 **Bare-numeric noise re-enters the search lane** (the #2070 control silently reversed beyond
-  identifiers) → `TestRawRetrievalUnchanged::test_no_bare_numeric_token_on_the_search_lane`
+  identifiers) → `TestRawRetrieval::test_no_bare_numeric_token_reaches_the_search_lane`
   (`27:12`, `$40`, `2024-01-15` contribute no all-digit token; `build_or_query` differs from
   `keep_numeric=True`).
 - R4 **The write path indexes text that was not scrubbed** (ruling risk 2) →
   `TestWritePath::test_redacted_span_contributes_no_secret_alias` — a `[REDACTED:…]` span yields no
   alias containing the secret, because redaction replaces the whole value (`tortoise/security.py:488`).
 - R5 **A point with no identifier is written differently** (raw-retrieval regression) →
-  `TestWritePath::test_no_identifier_leaves_search_keys_absent` — a plain point still writes no
+  `TestWritePath::test_no_identifier_takes_the_pre_8933_path` — a plain point still writes no
   `search_keys` at all.
 - R6 **Unbounded index growth** (aliases appended per write, forever) → `append_identifier_aliases`
   is idempotent (alias set difference against the existing tokens) and capped at
