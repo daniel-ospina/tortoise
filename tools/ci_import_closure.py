@@ -1093,19 +1093,74 @@ def _artifacts(repo: str, run_id: int) -> list[dict]:
     return [json.loads(line) for line in out.decode().splitlines() if line.strip()]
 
 
+# ⛔ THE ARTIFACT NAME IS NOT DERIVABLE FROM THE CHECK-RUN NAME (#10143 review
+# P2, round at `960937f5c`).
+#
+# `upload-artifact`'s `name` is an ARBITRARY user-supplied label — the action's
+# own README documents it as "Name of the artifact to upload. Optional. Default
+# is 'artifact'" — with no relationship to `github.job` or the job's display
+# name. A `pytest-log-<check-run>` rule therefore gets three legs in
+# `python-ci.yml` WRONG, and each of the three failed in BOTH directions:
+#
+#   * a FALSE `artifact_errors` entry for a leg that DID upload — which makes the
+#     window PARTIAL forever and `validate` exit 2 on a readable window;
+#   * that leg's junit never opened, because a sibling red leg makes `selected`
+#     non-empty and disables the wide fallback — the under-count direction this
+#     harness exists to prevent.
+#
+# So a leg has a CANDIDATE SET (most specific first) and the caller takes the
+# FIRST candidate present in the run's listing.
+ARTIFACT_NAME_OVERRIDES: dict[str, list[str]] = {
+    # `test-record-postgres` (`python-ci.yml:3584`) has NO `name:`, so its check
+    # run is the job id; `:3707` uploads the LITERAL `pytest-log-record-postgres`
+    # — the `test-` prefix is not in the artifact.
+    "test-record-postgres": ["pytest-log-record-postgres"],
+    # Same shape: job `:3018` (no `name:`) uploads the literal at `:3178`.
+    "test-d14-hosted-api": ["pytest-log-d14-hosted-api"],
+    # The BARE matrix name is shard 0, whose `name:` suffix is `''` while its
+    # ARTIFACT label is `a` (`tools/ci_selection.py:3643-3652`; the upload at
+    # `python-ci.yml:3011` uses `matrix.label`). The check run therefore reads
+    # `test-carve-out` while the artifact is `pytest-log-test-carve-out-a` — the
+    # `-a` is not a guess, it is pinned against the selector itself by
+    # `test_the_bare_carve_out_artifact_label_matches_the_selector`.
+    "test-carve-out": ["pytest-log-test-carve-out-a"],
+}
+
+
+def _without_test_prefix(job_name: str) -> str:
+    """`test-<x>` → `<x>`; the two literal uploads drop exactly that prefix."""
+    return job_name[len("test-"):] if job_name.startswith("test-") else job_name
+
+
 def artifact_names_for_job(job_name: str) -> list[str]:
-    """The `pytest-log-*` artifact a job uploads (python-ci.yml's naming contract).
+    """CANDIDATE `pytest-log-*` artifact names for a check-run name, best first.
 
     Shim: `test (f)` uploads `pytest-log-test-f`; a non-matrix job uploads
-    `pytest-log-<job>`. The caller falls back to "all pytest-log artifacts in the
-    run" when the expected name is absent, so a future rename degrades to a wider
-    (never narrower) read — but it records the substitution as PARTIAL first
-    (`pr_ground_truth`), because a SIBLING leg's junit is not this leg's truth.
+    `pytest-log-<job>` — TRUE for every leg except the three in
+    `ARTIFACT_NAME_OVERRIDES` and the `test-`-stripped literal uploads, which is
+    why this returns candidates rather than one name. The caller falls back to
+    "all pytest-log artifacts in the run" when NONE is present, so a future
+    rename degrades to a wider (never narrower) read — but it records the
+    substitution as PARTIAL first (`pr_ground_truth`), because a SIBLING leg's
+    junit is not this leg's truth.
     """
+    candidates: list[str] = []
+
+    def add(name: str) -> None:
+        if name and name not in candidates:
+            candidates.append(name)
+
     if "(" in job_name and job_name.endswith(")"):
         base, _, label = job_name.rpartition(" (")
-        return [f"pytest-log-{base}-{label.rstrip(')')}"]
-    return [f"pytest-log-{job_name}"]
+        label = label.rstrip(")")
+        add(f"pytest-log-{base}-{label}")
+        add(f"pytest-log-{_without_test_prefix(base)}-{label}")
+        return candidates
+    for override in ARTIFACT_NAME_OVERRIDES.get(job_name, []):
+        add(override)
+    add(f"pytest-log-{job_name}")
+    add(f"pytest-log-{_without_test_prefix(job_name)}")
+    return candidates
 
 
 # ⛔ THE LEGS THE SELECTOR DOES NOT MODEL, AND WHOSE JUNIT THIS HARNESS STILL
@@ -1226,13 +1281,42 @@ def _download_artifact(repo: str, artifact_id: int, cache: Path) -> Path:
     return target
 
 
+def _is_junit_member(name: str) -> bool:
+    """`junit.xml`, `junit-d14.xml`, `sub/junit.xml` — but not `myjunit.xml`.
+
+    ⛔ `--junitxml` TAKES A CALLER-CHOSEN PATH (#10143 review P2). Matching only
+    a member that `endswith("junit.xml")` made the d14 leg unreadable BY
+    CONSTRUCTION: `python-ci.yml:3088` runs it with `--junitxml=/tmp/junit-d14.xml`
+    and uploads that file, so that leg's ground truth was never parsed — it read
+    as "no junit in the artifact" (a permanent false PARTIAL) and its failures
+    reached neither the residual arm nor the miss count, which is the opposite of
+    what `docs/ci/core-import-closure.md` §3.4 claimed.
+    """
+    base = name.rsplit("/", 1)[-1].lower()
+    return base.startswith("junit") and base.endswith(".xml")
+
+
+def _junit_member(names: list[str]) -> str | None:
+    """The junit payload among a zip's members: exact `junit.xml`, else the first.
+
+    Deterministic (`sorted`) because an artifact can legitimately carry more than
+    one junit-shaped member, and a member chosen by zip order would make the
+    ground truth depend on upload order.
+    """
+    candidates = [n for n in names if _is_junit_member(n)]
+    if not candidates:
+        return None
+    exact = [n for n in candidates if n.rsplit("/", 1)[-1].lower() == "junit.xml"]
+    return sorted(exact or candidates)[0]
+
+
 def _junit_from_zip(zip_path: Path) -> bytes | None:
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            names = [n for n in zf.namelist() if n.endswith("junit.xml")]
-            if not names:
+            member = _junit_member(zf.namelist())
+            if member is None:
                 return None
-            return zf.read(names[0])
+            return zf.read(member)
     except (zipfile.BadZipFile, OSError):
         return None
 
@@ -1325,7 +1409,6 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
     for rid in sorted(run_ids):
         # PAGINATED (#10143 review P2) — see `_artifacts`.
         arts = _artifacts(repo, rid)
-        present = {str(a.get("name", "")) for a in arts}
         jobs_here = [job for r, job in failed_legs if r == rid]
         # ⛔ A SIBLING LEG'S JUNIT IS NOT THIS LEG'S GROUND TRUTH (#10143 review
         # P2). `rid` is the workflow RUN, and `test`/`test-slow`/`test-carve-out`
@@ -1341,15 +1424,27 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         # Record the substitution per missing job BEFORE the fallback is used:
         # the rename mitigation survives, and the masking state becomes PARTIAL
         # and uncacheable.
+        # ⛔ ONE ARTIFACT PER LEG, CHOSEN BY CANDIDATE PRIORITY (#10143 review
+        # P2). The candidates are not interchangeable guesses: the first is the
+        # leg's own upload wherever the name is derivable, and the rest exist
+        # only because `upload-artifact`'s `name` is a free-form label (see
+        # `ARTIFACT_NAME_OVERRIDES`). Taking the first HIT per job — instead of
+        # a union over every candidate for every job — also stops one leg's
+        # candidate from selecting another leg's artifact.
+        per_leg: list[dict] = []
         for job in jobs_here:
-            if present & set(artifact_names_for_job(job)):
-                continue
-            artifact_errors.append(
-                f"run {rid}: job {job} uploaded no "
-                f"{artifact_names_for_job(job)[0]} — a sibling leg's junit "
-                "must not stand in for it"[:200])
-        wanted_names = {n for job in jobs_here for n in artifact_names_for_job(job)}
-        selected = [a for a in arts if a.get("name") in wanted_names]
+            candidates = artifact_names_for_job(job)
+            hit = next(
+                (a for cand in candidates for a in arts
+                 if str(a.get("name", "")) == cand), None)
+            if hit is None:
+                artifact_errors.append(
+                    f"run {rid}: job {job} uploaded none of "
+                    f"{', '.join(candidates)} — a sibling leg's junit "
+                    "must not stand in for it"[:200])
+            else:
+                per_leg.append(hit)
+        selected = per_leg
         if not selected:
             selected = [a for a in arts if str(a.get("name", "")).startswith("pytest-log-")]
         if not selected:

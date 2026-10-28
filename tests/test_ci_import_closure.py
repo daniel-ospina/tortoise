@@ -442,11 +442,124 @@ def test_ground_truth_reports_a_junit_whose_failures_have_no_file(monkeypatch, t
 
 
 def test_artifact_name_contract_for_shard_and_plain_jobs():
-    assert artifact_names_for_job("test (f)") == ["pytest-log-test-f"]
-    assert artifact_names_for_job("test-slow (c)") == ["pytest-log-test-slow-c"]
-    assert artifact_names_for_job("test-carve-out (a)") == ["pytest-log-test-carve-out-a"]
-    assert artifact_names_for_job("test-concurrency-falkor") == [
-        "pytest-log-test-concurrency-falkor"]
+    """The four shapes that already matched keep their OWN name first."""
+    assert artifact_names_for_job("test (f)")[0] == "pytest-log-test-f"
+    assert artifact_names_for_job("test-slow (c)")[0] == "pytest-log-test-slow-c"
+    assert artifact_names_for_job("test-carve-out (a)")[0] == "pytest-log-test-carve-out-a"
+    assert artifact_names_for_job("test-concurrency-falkor")[0] == (
+        "pytest-log-test-concurrency-falkor")
+
+
+def test_artifact_names_cover_the_three_legs_whose_upload_is_not_the_job_name():
+    """#10143 review P2: `artifact_names_for_job` returned a name that exists for
+    NONE of these three legs, so each recorded a FALSE `artifact_errors` entry (a
+    permanent PARTIAL, exit 2) AND never had its junit opened.
+
+    The check run carries the job's DISPLAY name; the artifact carries whatever
+    the step's `with: name:` evaluates to, which `upload-artifact` documents as an
+    arbitrary user label.
+    """
+    # python-ci.yml:3584 has no `name:`; :3707 uploads the LITERAL — no `test-`.
+    assert "pytest-log-record-postgres" in artifact_names_for_job(
+        "test-record-postgres")
+    # same shape: job :3018 (no `name:`), literal upload at :3178.
+    assert "pytest-log-d14-hosted-api" in artifact_names_for_job(
+        "test-d14-hosted-api")
+    # bare matrix name = shard 0: `name:` suffix '' but artifact label 'a'.
+    assert "pytest-log-test-carve-out-a" in artifact_names_for_job("test-carve-out")
+
+
+def test_the_bare_carve_out_artifact_label_matches_the_selector():
+    """The `-a` above is NOT a guess about shard 0 — it is read off the selector.
+
+    `python-ci.yml:3011` names the upload with `matrix.label`, while the job's
+    display name uses `matrix.suffix`; `carve_shard_entries` sets `suffix=''` and
+    `label='a'` for shard 0. Pin the two together, so a future re-labelling of
+    shard 0 breaks HERE (one line) instead of silently mis-naming three legs.
+    """
+    from tools import ci_import_closure as module
+    sel = module._selection_module()
+    include = sel.carve_matrix_include(
+        sel.carve_shard_entries(sel.load_manifest()))["include"]
+    assert include, "the manifest must expand at least one carve-out shard"
+    first = include[0]
+    assert first["suffix"] == "", "shard 0 must keep the BARE job name"
+    assert f"pytest-log-test-carve-out-{first['label']}" in artifact_names_for_job(
+        "test-carve-out")
+
+
+@pytest.mark.parametrize("job,artifact,member", [
+    ("test-record-postgres", "pytest-log-record-postgres", "junit.xml"),
+    ("test-d14-hosted-api", "pytest-log-d14-hosted-api", "junit-d14.xml"),
+    ("test-carve-out", "pytest-log-test-carve-out-a", "junit.xml"),
+])
+def test_a_leg_whose_upload_is_not_the_job_name_is_read_with_no_false_partial(
+        monkeypatch, tmp_path, job, artifact, member):
+    """End-to-end for both #10143 artifact-name findings at once.
+
+    A red leg whose artifact name differs from its check-run name, beside a
+    readable SIBLING leg, must (a) record NO `artifact_errors` entry and (b)
+    read ITS OWN junit — not the sibling's. Pre-fix, (a) failed with a false
+    "uploaded no …" entry and (b) failed silently: `selected` was non-empty (the
+    sibling), so the wide fallback never fired and this leg's junit was never
+    opened. The d14 row carries its payload as `junit-d14.xml`, so it also pins
+    the `_junit_from_zip` member rule.
+    """
+    from tools import ci_import_closure as module
+    sibling = "pytest-log-test-a"
+    # REAL files: a classname that resolves to nothing is recorded as an
+    # unattributable failure, which would blur the two states under test.
+    own = _junit(
+        '<testcase classname="tests.test_ci_import_closure" name="t1">'
+        '<failure message="boom">trace</failure></testcase>')
+    other = _junit(
+        '<testcase classname="tests.test_ci_selection" name="t1">'
+        '<failure message="boom">trace</failure></testcase>')
+    _fake_ground_truth(monkeypatch, module, junit=None,
+                       listing_names=[sibling, artifact], job=job,
+                       junits={artifact: own, sibling: other}, member=member)
+    truth = module.pr_ground_truth("o/r", "cafe01", tmp_path)
+    assert truth["artifact_errors"] == [
+    ], (f"a leg that DID upload {artifact} must not be reported as having "
+        "uploaded nothing — that entry is a permanent false PARTIAL")
+    assert truth["failed_files"] == ["tests/test_ci_import_closure.py"], (
+        "the leg's OWN junit must be the one read; the sibling's clean-for-us "
+        "junit standing in is the masking state this check exists to prevent")
+
+
+def test_a_junit_member_under_a_caller_chosen_name_is_read(tmp_path):
+    """#10143 review P2: `--junitxml` takes a caller-chosen PATH.
+
+    `_junit_from_zip` matched only a member ending in `junit.xml`, so the d14
+    leg's `junit-d14.xml` was unreadable BY CONSTRUCTION. `_junit_from_zip` had
+    no pin at all before this one.
+    """
+    import zipfile
+
+    from tools import ci_import_closure as module
+
+    def _zip(name: str, members: dict[str, bytes]) -> Path:
+        path = tmp_path / name
+        with zipfile.ZipFile(path, "w") as zf:
+            for member, payload in members.items():
+                zf.writestr(member, payload)
+        return path
+
+    assert module._junit_from_zip(
+        _zip("d14.zip", {"junit-d14.xml": b"<d14/>"})) == b"<d14/>"
+    assert module._junit_from_zip(
+        _zip("both.zip", {"junit-d14.xml": b"<d14/>",
+                          "junit.xml": b"<exact/>"})) == b"<exact/>", (
+        "an exact junit.xml wins when an artifact carries both, and the choice "
+        "must not depend on zip order")
+    assert module._junit_from_zip(
+        _zip("nested.zip", {"reports/junit-3.xml": b"<nested/>"})) == b"<nested/>"
+    assert module._junit_from_zip(
+        _zip("none.zip", {"pytest.log": b"log"})) is None
+    assert module._junit_from_zip(
+        _zip("decoy.zip", {"myjunit.xml": b"<not-junit/>"})) is None, (
+        "`endswith('junit.xml')` also accepted `myjunit.xml`; the member must "
+        "be a junit FILE, not a name that merely ends the same way")
 
 
 # ---------------------------------------------------------------------------
@@ -664,12 +777,23 @@ def _truth_cache(cache: Path, sha: str, repo: str = "o/r") -> Path:
 
 
 def _fake_ground_truth(monkeypatch, module, *, junit: bytes | None,
-                       listing_names: list[str]):
-    """Drive `pr_ground_truth` with a fake check-run + one fake artifact."""
+                       listing_names: list[str], job: str = "test (a)",
+                       junits: dict[str, bytes] | None = None,
+                       member: str = "junit.xml"):
+    """Drive `pr_ground_truth` with a fake check-run + fake artifacts.
+
+    `job` is the CHECK-RUN name (the leg's display name) and `listing_names` the
+    run's artifact listing — two things that are allowed to disagree, which is
+    the whole of the #10143 `artifact_names_for_job` finding. `junits` maps an
+    ARTIFACT NAME to its own payload so a sibling leg can carry a DIFFERENT
+    junit from the red leg's: that is what makes "the right artifact was read"
+    assertable instead of assumed. `member` is the payload's filename inside the
+    zip (the d14 leg uploads `junit-d14.xml`).
+    """
     import io
     import zipfile
 
-    run = {"name": "test (a)", "conclusion": "failure", "id": 99,
+    run = {"name": job, "conclusion": "failure", "id": 99,
            "details_url": "https://github.com/o/r/actions/runs/99/job/1"}
     monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [run])
     monkeypatch.setattr(module, "_run_id", lambda r: 99)
@@ -677,18 +801,22 @@ def _fake_ground_truth(monkeypatch, module, *, junit: bytes | None,
     # PR-metadata seam and stubbing it here left the artifact listing unstubbed.
     monkeypatch.setattr(
         module, "_artifacts",
-        lambda repo, run_id: [{"id": 7, "name": n} for n in listing_names])
+        lambda repo, run_id: [{"id": 7 + i, "name": n}
+                              for i, n in enumerate(listing_names)])
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        if junit is not None:
-            zf.writestr("junit.xml", junit)
-        else:
-            zf.writestr("pytest.log", "some log\n")
-    blob = buf.getvalue()
+    blobs: dict[int, bytes] = {}
+    for i, name in enumerate(listing_names):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            payload = (junits or {}).get(name, junit)
+            if payload is not None:
+                zf.writestr(member, payload)
+            else:
+                zf.writestr("pytest.log", "some log\n")
+        blobs[7 + i] = buf.getvalue()
     monkeypatch.setattr(
         module, "_download_artifact",
-        lambda repo, aid, cache: _write_tmp(cache, aid, blob))
+        lambda repo, aid, cache: _write_tmp(cache, aid, blobs[aid]))
 
 
 def _write_tmp(cache: Path, aid: int, blob: bytes) -> Path:
