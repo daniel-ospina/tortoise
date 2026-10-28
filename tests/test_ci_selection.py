@@ -3112,6 +3112,33 @@ def test_backfill_graph_turns_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_backfill_copy_turns_tool_change_selects_core_not_tier1():
+    # #10017 review P1 (the third time this class was measured on this chain):
+    # tools/backfill_copy_turns.py is the COPY phase — the write whose turns the
+    # parity gate then certifies before an IRREVERSIBLE delete — and it owns
+    # tests/test_10017_backfill_copy.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a copy-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, so the
+    # file's own suite — and its #5128 interpreter guard, the repo gate that DID
+    # red this tool at 4cdad4be7 — never ran on the PR editing the copy.
+    # Registering the test under `core` does not help: a name in a
+    # surface's test_files only runs when that surface is ALREADY selected.
+    #
+    # Measured before the CORE_ALSO entry: `--changed-files
+    # tools/backfill_copy_turns.py` -> surfaces=[], full=False,
+    # test_10017_backfill_copy.py ABSENT. Same #1349/#3332/#3616 silent-drop
+    # class as tools/backfill_graph_turns.py above. CORE_ALSO (not
+    # TOOL_CARVEOUTS) because the suite is hermetic (a fake graph + a fake
+    # journal, no DB). Mutation check: removing the CORE_ALSO entry fails the
+    # second assert below.
+    r = _sel(["tools/backfill_copy_turns.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_10017_backfill_copy.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_graph_census_tool_change_selects_core_not_tier1():
     # #8882 review P1: tools/graph_census.py is the CLI for the measured census
     # and owns tests/test_graph_census_8882.py, registered `core`.

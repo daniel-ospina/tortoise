@@ -2151,6 +2151,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # whole matrix for a DB-free instrument. Pinned by
              # tests/test_ci_selection.py::test_backfill_graph_turns_tool_change_selects_core_not_tier1.
              "tools/backfill_graph_turns.py",
+             # #10017 review P1 (the THIRD time this class was measured on this
+             # chain): tools/backfill_copy_turns.py is the COPY phase — the write
+             # whose turns the parity gate then certifies before an IRREVERSIBLE
+             # delete — and it owns tests/test_10017_backfill_copy.py, registered
+             # `core`. Same mechanism as its two siblings above: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS row, so a
+             # tool-only diff came back with `changed == []`, took the docs-only
+             # early return and selected NO surface. Measured before this entry:
+             # `--changed-files tools/backfill_copy_turns.py` -> surfaces=[],
+             # full=False, test_10017_backfill_copy.py ABSENT (tier-1 smoke only).
+             # That diff also loses the file's own repo guard — the #5128
+             # interpreter guard in tests/test_entry_point_python_guard.py, which
+             # DID red this tool at 4cdad4be7 — so the one diff that can break the
+             # copy ran nothing that pins it.
+             # `CORE_ALSO` (not `TOOL_CARVEOUTS`) for the same reason as the
+             # census: the suite is hermetic (a fake graph + a fake journal, no
+             # DB), so `core` is the surface that can actually run it. Pinned by
+             # tests/test_ci_selection.py::
+             # test_backfill_copy_turns_tool_change_selects_core_not_tier1.
+             "tools/backfill_copy_turns.py",
              # #9085 review P1: `tests/test_runner_ports_6673.py` (registered
              # `core`) carries the two #8124 guards that pin the ENGINE, and both
              # read a file the selector did not keep:
