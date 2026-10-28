@@ -17513,11 +17513,21 @@ class FalkorProjection(
         """
         from tortoise.cache_projection import (
             NODE_TABLES,
+            apply_event_stream_folds,
             project_records,
             record_plan,
         )
 
-        nodes = tuple(view.nodes)
+        # #10198: the record's EVENT STREAM derives the connector/pack lifecycle
+        # onto the Objects it names. `read_record_view` already applied it, and
+        # the application is idempotent (a pure replay of the stream in `seq`
+        # order, with the live fold's per-event terminal guard); it runs here as
+        # well because a caller may hand this method a view it assembled from
+        # rows WITHOUT a connection, and such a view must fold by the events it
+        # carries rather than materialize a connector-tracked Object with no
+        # `status` (which `live._terminal_excluded` then reads as LIVE).
+        nodes = apply_event_stream_folds(
+            view.nodes, getattr(view, "lifecycle_events", ()) or ())
         # #9599: `rebuild_from_record` is a GRAPH write, so it obeys the GRAPH's
         # rule even though the RECORD layer deliberately keeps the row (see
         # `record_projection`'s `SessionRecorded` note — the record is the

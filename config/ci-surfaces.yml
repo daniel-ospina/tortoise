@@ -4105,6 +4105,13 @@ surfaces:
   # made from the resolved endpoint KINDS (the route classifier alone cannot
   # see them). Registered with the ingest family it pins.
   - test_8499_point_mediated_routing.py
+  # #9749: the connection-attribute arms, judged by the EFFECTIVE route —
+  # `confidence`/`weight` on a promoted Point-bearing connection is a Phase-1
+  # violation (INGEST_CONTRACT §13 row 4), and on the operator-less DIRECT
+  # route ingest now forwards both into `create_direct_edge` instead of
+  # validating them and dropping them. Registered with the ingest family it
+  # pins.
+  - test_9749_connection_attribute_route.py
   - test_integration_search.py
   # #4780: the incident-kind registry's generated checks — runbook ⇄ code set
   # equality (both directions), the frozen string set, the emitted flag against a
@@ -6357,6 +6364,18 @@ surfaces:
   - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
   - longmem_eval/test_measurement_posture.py  # #8486: the run's measurement posture — ingest mode + belief-layer activation; the completed-receipt disclosure gate (hermetic, no DB/network)
+  # #10137: the CONTRIBUTION census against a REAL graph — `operators` /
+  # `points_off_neutral` / `factors` / `no_op_reason` are new Cypher reads, and a
+  # broken read FAILS SILENTLY (an absent result set must be told apart from a
+  # MEASURED 0 — `_census` / `_census_ids` do exactly that, which is why the
+  # lossy "absent → 0" helper is gone). Registering it against
+  # `tools/longmem_eval/` means a change to the census query SELECTS the file
+  # that can tell a real zero from a broken query; as a `longmem_eval/**` path it
+  # then runs in the NON-GATING eval lane (`on_demand`, #10194/#10206), not on the
+  # merge gate — the registration is surface OWNERSHIP, not shard membership.
+  # Not embedded-only: a URI lane redirects the by-path SDK construction to the
+  # server and the assertions hold either way.
+  - longmem_eval/test_ep_census_10137.py
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`); opt-in `disable` applies the incident mitigation + read-back and FAILS CLOSED when it cannot read the value or open the probe (the one exception to UNKNOWN-and-proceed, which stays soft for `require-off`/`allow`); a readable value that is neither `yes` nor `no` is UNKNOWN, never `off`; wiring aborts before BOTH model loads (R6 cross-encoder pre-warm + `--model` injection), the embedder pre-flight and the dataset download (hermetic: a fake connection records commands AND a loopback RESP2 server drives the REAL `_connection_from_uri` builder — the anti-inert leg)
@@ -8407,6 +8426,18 @@ durations:
   eval/why_suite/test_why_suite_grading.py: 0.1
   eval/why_suite/test_why_suite_schema.py: 0.1
   longmem_eval/test_ep_activation.py: 0.1
+  # #10137: a file ADDED BY A PR can never carry a CI junit measurement (the
+  # refresher samples push-to-main runs only), so it takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as
+  # a SHARD-LAYOUT input (#2818/#3419). What the weight covers, measured here
+  # for the record only (`--collect-only` is the authority, as the sibling rows
+  # say): 7 cases, each building ONE throwaway embedded `TortoiseSDK` — 158.6 s
+  # total at #10188's head, of which 128.7 s is the cold first case and ~26.7 s
+  # covers the other six, because a cold HuggingFace reach-out dominates the
+  # first read on this box. The CI runner's own junit reading replaces this row.
+  # `tools/ci_timing.py --refresh-durations` re-bases it after the next
+  # push-to-main sweep.
+  longmem_eval/test_ep_census_10137.py: 2.0
   longmem_eval/test_probe_v2.py: 0.1
   test_alert_store.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_analytics.py: 0.1
