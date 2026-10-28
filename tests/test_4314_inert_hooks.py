@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -940,3 +941,302 @@ def test_the_double_quoted_block_extractor_is_not_vacuous():
         f"(Only ``volunteer-turn.sh`` currently uses a double-quoted block; "
         f"the rest are single-quoted or heredocs, so this floor is small on "
         f"purpose and still catches a regex that stopped matching.)")
+
+
+# ── #4848: existence is not usability ────────────────────────────────────
+#
+# A capture seam accepted "a directory that holds `tortoise/`" as proof the
+# tree was RUNNABLE, then ran it under an interpreter it never version-checked.
+# On a stock macOS host `python3` is 3.9 while the package needs 3.12+, so a
+# checkout with no `.venv` degraded to `ImportError: cannot import name 'UTC'
+# from 'datetime'` at rc 0 — silent, and misattributed. These guards drive the
+# REAL shipped seams and the REAL guard block; each names its mutation.
+
+_GUARD_BEGIN = "# BEGIN tortoise-interp-guard (#4848)"
+_GUARD_END = "# END tortoise-interp-guard (#4848)"
+
+
+def _guard_block(path: Path) -> str:
+    """The sentinel-delimited guard block of a shipped seam, verbatim."""
+    text = path.read_text(encoding="utf-8")
+    start = text.index(_GUARD_BEGIN)
+    end = text.index(_GUARD_END) + len(_GUARD_END)
+    return text[start:end]
+
+
+def _old_python_shim(bindir: Path, *, version: str = "3.9.6") -> Path:
+    """A ``python3`` that is TOO OLD for the package.
+
+    Faithful where it matters and transparent everywhere else: it answers the
+    guard's version probe with "no", reports ``version`` when asked what it is,
+    and delegates every other call to this test process's interpreter (a real
+    3.9 cannot parse what a 3.12 needs, and this shim only has to be
+    *unusable*, not a python of its own).
+    """
+    bindir.mkdir(parents=True, exist_ok=True)
+    shim = bindir / "python3"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        'for a in "$@"; do\n'
+        "  case \"$a\" in\n"
+        "    *version_info*) exit 1 ;;\n"
+        f"    *platform.python_version*) printf '%s\\n' '{version}'; exit 0 ;;\n"
+        "  esac\n"
+        "done\n"
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8")
+    shim.chmod(0o755)
+    return shim
+
+
+def _logging_capture_bin(venv_bin: Path, log: Path) -> Path:
+    """A checkout's own ``tortoise`` console script: logs its path + argv.
+
+    A ``#!/usr/bin/env bash`` shebang is deliberately NOT python — the guard
+    judges what it can see, and an unknown interpreter is never refused.
+    """
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    script = venv_bin / "tortoise"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "SELF=%s\\n" "$0" >> {log}\n'
+        f'printf "%s\\n" "$@" >> {log}\n'
+        f'echo DONE >> {log}\n',
+        encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def _coreutils(bindir: Path) -> None:
+    """The shell plumbing a seam needs, plus nothing that could pass for an
+    interpreter: ``python3`` is planted by the caller."""
+    bindir.mkdir(parents=True, exist_ok=True)
+    for tool in ("cat", "tr", "head", "mkdir", "date", "dirname", "sed",
+                 "basename", "rm", "env", "mktemp", "sleep", "awk", "grep",
+                 "cut", "nohup", "sort", "uniq", "wc", "ls", "pwd", "chmod",
+                 "cp", "mv", "bash"):
+        real = shutil.which(tool)
+        if real:
+            (bindir / tool).symlink_to(real)
+
+
+def test_the_interp_guard_block_is_byte_identical_across_the_seams():
+    """#4848 shipped ONE guard block, copied into every seam that resolves an
+    interpreter, because the plan's rejected alternative was a sourced shared
+    helper (an install-surface change: nothing in these hooks sources anything,
+    and each is installed as an independent artifact with its own
+    ``tortoise-hook-version`` marker).
+
+    A copy that drifts is the defect. `test_cursor_capture_hook.py`'s warning —
+    "a one-sided fix is the same class of defect as this one" — is why this pin
+    exists: it fails the moment one seam is fixed and another is not.
+
+    Mutation: edit one copy (a comment, a probe, the floor) — this REDs with
+    the two files that disagree."""
+    blocks = {_hook_id(p): _guard_block(p) for p in _HOOK_SCRIPTS}
+    assert len(blocks) == len(_HOOK_SCRIPTS), blocks.keys()
+    distinct = set(blocks.values())
+    assert len(distinct) == 1, (
+        "the #4848 interpreter guard has DRIFTED between seams — the copies "
+        "must be byte-identical:\n"
+        + "\n".join(f"  {name}: {len(b)} bytes"
+                    for name, b in blocks.items()))
+    block = distinct.pop()
+    # The floor must travel via ONE variable, so the probe and every refusal
+    # text move together (a hard-coded floor in a seam is what re-stales).
+    assert block.count('_TORTOISE_MIN_PY="') == 1, block
+    for fn in ("_tortoise_py_qualifies", "_tortoise_script_interp",
+               "_tortoise_bin_qualifies", "_tortoise_dir_runnable",
+               "_tortoise_unusable_reason"):
+        assert f"{fn}() {{" in block, fn
+
+
+@pytest.mark.parametrize("hook", _HOOK_SCRIPTS, ids=_hook_id)
+def test_every_seam_declares_the_guard_exactly_once(hook):
+    """Exactly one block per seam, at column 0 and OUTSIDE the worker branch:
+    the synchronous half of a detached seam fires far more often than the
+    worker, and a block defined only inside ``if --worker`` would be undefined
+    on the branch that refuses."""
+
+    text = hook.read_text(encoding="utf-8")
+    assert text.count(_GUARD_BEGIN) == 1, hook
+    assert text.count(_GUARD_END) == 1, hook
+    for line in ("_tortoise_py_qualifies() {", "_tortoise_dir_runnable() {",
+                 "_tortoise_unusable_reason() {"):
+        starts = [ln for ln in text.splitlines() if ln.startswith(line)]
+        assert len(starts) == 1, (hook.name, line)
+
+
+def test_the_guard_refuses_an_interpreter_that_is_too_old(tmp_path):
+    """The predicate itself, driven as the seams drive it: a 3.9 answers the
+    probe with "no", a 3.12 with "yes", an absent interpreter is a REFUSAL (not
+    a pass), and a console script whose `#!` names a missing interpreter is
+    refused while a non-python shebang is left alone.
+
+    Mutation: make the probe ``[ -x "$1" ]`` (existence, not version) — this is
+    exactly the shipped defect, and every assertion below REDs."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    old = _old_python_shim(bindir)
+    block = _guard_block(CODEX_HOOK)
+    script = tmp_path / "guard.sh"
+    script.write_text(block + "\n" + f'''
+_tortoise_py_qualifies "{old}" && echo "old:qualifies" || echo "old:refused"
+_tortoise_py_qualifies "{sys.executable}" \\
+  && echo "new:qualifies" || echo "new:refused"
+_tortoise_py_qualifies "" && echo "empty:qualifies" || echo "empty:refused"
+_tortoise_py_qualifies "/nonexistent/python3" \\
+  && echo "absent:qualifies" || echo "absent:refused"
+dead="$(mktemp -d)/tortoise"
+printf '#!/nonexistent/python3\\n' > "$dead"
+chmod +x "$dead"
+_tortoise_bin_qualifies "$dead" && echo "deadshebang:qualifies" \\
+  || echo "deadshebang:refused"
+sh="$(mktemp -d)/tortoise"
+printf '#!/bin/sh\\nexit 0\\n' > "$sh"
+chmod +x "$sh"
+_tortoise_bin_qualifies "$sh" && echo "shshebang:qualifies" \\
+  || echo "shshebang:refused"
+reason="$(_tortoise_unusable_reason "")"
+case "$reason" in
+  *"3.9.6"*"tortoise needs Python"*) echo "reason:names-version" ;;
+  *) echo "reason:$reason" ;;
+esac
+''', encoding="utf-8")
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path),
+           "TMPDIR": str(tmp_path)}
+    proc = subprocess.run(["/bin/bash", str(script)], text=True,
+                          capture_output=True, env=env, timeout=60)
+    out = proc.stdout
+    assert "old:refused" in out, out
+    assert "new:qualifies" in out, out
+    assert "empty:refused" in out, out
+    assert "absent:refused" in out, out
+    assert "deadshebang:refused" in out, out
+    assert "shshebang:qualifies" in out, out
+    assert "reason:names-version" in out, (
+        f"the refusal must name the interpreter's VERSION and the floor: {out}")
+
+
+def test_a_checkout_that_cannot_be_run_is_skipped_for_a_later_one(tmp_path):
+    """THE root cause (#4848): the resolution loop accepted a candidate on
+    "it holds `tortoise/`" and never tried the next one, so a stale tree with
+    no interpreter *won* over a perfectly good checkout.
+
+    Mutation: restore `[ -d "$CANDIDATE/tortoise" ]` as the whole acceptance
+    test — the stale candidate wins, the good checkout's console script never
+    runs, and this REDs."""
+    home = tmp_path / "home"
+    (home / ".codex" / "hooks").mkdir(parents=True)
+    hook = home / ".codex" / "hooks" / "session-end.sh"
+    shutil.copy(CODEX_HOOK, hook)
+    hook.chmod(0o755)
+
+    # Candidate 1 ($TORTOISE_SRC_DIR): the package, and NOTHING to run it with.
+    stale = _module_dir(tmp_path / "stale")
+    # Candidate 2 (the installer's record): a checkout with its own venv.
+    good = _module_dir(tmp_path / "good")
+    log = tmp_path / "argv.log"
+    _logging_capture_bin(good / ".venv" / "bin", log)
+
+    (home / ".tortoise").mkdir(parents=True, exist_ok=True)
+    (home / ".tortoise" / "hook-src-dir").write_text(str(good) + "\n")
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir)  # the ambient interpreter cannot run the package
+
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["/bin/bash", str(hook)], input=json.dumps({
+            "session_id": "sid-4848", "transcript_path": str(transcript),
+            "cwd": str(home)}), text=True, capture_output=True,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path), "TORTOISE_SRC_DIR": str(stale)},
+        timeout=30)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _wait_for(lambda: log.is_file()
+                     and "DONE" in log.read_text(encoding="utf-8")), (
+        "the stale candidate was accepted and the runnable one never tried — "
+        "the loop still stops at the first directory that holds `tortoise/`")
+    body = log.read_text(encoding="utf-8")
+    assert "SELF=" in body and str(good / ".venv" / "bin" / "tortoise") in body, body
+    assert "sessions" in body, body
+
+
+def test_a_stale_checkout_refuses_with_a_wrong_interpreter_reason(tmp_path):
+    """The refusal must say *wrong interpreter*, not leave the CLI to say
+    `datetime has no UTC`. The message names the version and the path, and it
+    is NOT the "could not resolve a module dir" text — that would send the user
+    to `hooks upgrade` for a problem an upgrade cannot fix.
+
+    Mutation: drop the `_tortoise_unusable_reason` splice — the detail falls
+    back to "could not resolve", which is false here, and this REDs."""
+    home = tmp_path / "home"
+    (home / ".codex" / "hooks").mkdir(parents=True)
+    hook = home / ".codex" / "hooks" / "session-end.sh"
+    shutil.copy(CODEX_HOOK, hook)
+    hook.chmod(0o755)
+    stale = _module_dir(tmp_path / "stale")
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["/bin/bash", str(hook)], input=json.dumps({
+            "session_id": "sid-4848", "transcript_path": str(transcript),
+            "cwd": str(home)}), text=True, capture_output=True,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path), "TORTOISE_SRC_DIR": str(stale)},
+        timeout=30)
+
+    assert proc.returncode == 0, proc.stderr
+    body = _breadcrumb(home, "codex")
+    assert body["kind"] == "install-inert", body
+    detail = body["detail"]
+    assert str(stale) in detail, detail
+    assert "3.9.6" in detail, detail
+    assert "tortoise needs Python" in detail, detail
+    assert "could not resolve a tortoise module dir" not in detail, (
+        f"a dir WAS resolved; the refusal must not send the user to "
+        f"`hooks upgrade`: {detail}")
+
+
+def test_the_claude_seam_refuses_a_stale_checkout_the_same_way(tmp_path):
+    """The Claude seam carries the same block and must produce the same shape,
+    because a one-sided fix is the same class of defect as the one being fixed.
+    This seam resolves no console script, so the PROBE is what refuses it: with
+    no qualifying interpreter the capture is not even attempted.
+
+    Mutation: make ``_tortoise_py_qualifies`` an existence test — the seam runs
+    the capture under 3.9, the ImportError is swallowed by its own ``exit 0``,
+    no breadcrumb is written at all, and this REDs."""
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    hook = home / ".claude" / "hooks" / "session-end.sh"
+    shutil.copy(CLAUDE_HOOK, hook)
+    hook.chmod(0o755)
+    stale = _module_dir(tmp_path / "stale")
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = _run_claude_hook(
+        hook, home, transcript=transcript,
+        path=f"{bindir}:/usr/bin:/bin",
+        extra_env={"TORTOISE_SRC_DIR": str(stale)})
+
+    assert proc.returncode == 0, proc.stderr
+    body = _breadcrumb(home, "claude")
+    assert body["kind"] == "install-inert", body
+    detail = body["detail"]
+    assert str(stale) in detail, detail
+    assert "3.9.6" in detail, detail
+    assert "tortoise needs Python" in detail, detail

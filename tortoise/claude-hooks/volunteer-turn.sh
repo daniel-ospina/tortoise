@@ -30,6 +30,173 @@
 # are accepted.
 set -euo pipefail
 
+# ── The interpreter guard (#4848) ─────────────────────────────────────────
+# BEGIN tortoise-interp-guard (#4848)
+#
+# A capture seam must never hand the `tortoise` package to an interpreter that
+# cannot import it. `python3` on a stock macOS box is 3.9 while the package
+# needs 3.12+ (`datetime.UTC`, `tortoise/quota.py`), so a source tree holding
+# `tortoise/` but no `.venv` used to be ACCEPTED on that test alone and then
+# run under the ambient interpreter — dying with
+# `ImportError: cannot import name 'UTC' from 'datetime'`, an error that names
+# nothing near the missing venv, at rc 0, so the only trace was a breadcrumb
+# nobody read. EXISTENCE IS NOT USABILITY (#4848): every candidate this seam is
+# about to EXECUTE is probed first, and an unusable one is SKIPPED so the
+# resolution loop can still reach a later, runnable candidate.
+#
+# The floor travels as ARGV to the probe, so the check and the refusal text
+# cannot disagree and one edit moves both. `PYTHON_BIN` in the ENVIRONMENT is an
+# explicit operator override and is honoured as-is — never probed, never
+# second-guessed.
+_TORTOISE_MIN_PY="3.12"
+
+# 0 when "$1" is an interpreter that can run this package, 1 otherwise.
+# An unanswerable probe (missing, not executable, a python 2, a shell script
+# wearing the name `python3`) is a REFUSAL: for an interpreter the seam is about
+# to execute, "cannot tell" is not "yes".
+_tortoise_py_qualifies() {
+  if [ -z "${1:-}" ] || [ ! -x "$1" ]; then
+    return 1
+  fi
+  "$1" -c 'import sys
+raise SystemExit(0 if sys.version_info >= tuple(int(p) for p in sys.argv[1].split(".")) else 1)' \
+    "$_TORTOISE_MIN_PY" >/dev/null 2>&1
+}
+
+# The interpreter a console script names on its `#!` line, or nothing when the
+# script is not python at all. A console script is only as usable as that
+# interpreter: a stale venv's `bin/tortoise` still names one that no longer
+# exists, and accepting it runs into `bad interpreter` — the same silent
+# no-capture, one layer down. UNKNOWN (a `#!/bin/sh` wrapper, an unreadable
+# file) is NOT a refusal: this guard only judges what it can see.
+_tortoise_script_interp() {
+  local first rest cmd
+  if [ -z "${1:-}" ] || [ ! -f "$1" ] || [ ! -r "$1" ]; then
+    return 0
+  fi
+  first=""
+  IFS= read -r first < "$1" 2>/dev/null || return 0
+  case "$first" in
+    '#!'*) : ;;
+    *) return 0 ;;
+  esac
+  rest="${first#\#!}"
+  rest="${rest#"${rest%%[![:space:]]*}"}"
+  cmd="${rest%%[[:space:]]*}"
+  case "$cmd" in
+    */env | env)
+      # `#!/usr/bin/env python3` names an interpreter to LOOK UP, not to test.
+      rest="${rest#"$cmd"}"
+      rest="${rest#"${rest%%[![:space:]]*}"}"
+      case "$rest" in
+        -* | '') return 0 ;;
+      esac
+      cmd="${rest%%[[:space:]]*}"
+      ;;
+  esac
+  case "$cmd" in
+    *python*) printf '%s\n' "$cmd" ;;
+  esac
+  return 0
+}
+
+# 0 when the console script "$1" would run under a qualifying interpreter.
+_tortoise_bin_qualifies() {
+  local interp
+  if [ -z "${1:-}" ] || [ ! -x "$1" ]; then
+    return 1
+  fi
+  interp="$(_tortoise_script_interp "$1")"
+  if [ -z "$interp" ]; then
+    return 0
+  fi
+  case "$interp" in
+    /*) : ;;
+    *) interp="$(command -v "$interp" 2>/dev/null || true)" ;;
+  esac
+  _tortoise_py_qualifies "$interp"
+}
+
+# The interpreter this seam WOULD use for the module dir "$1", by the same
+# precedence the seams resolve in. Prints nothing when there is none at all.
+# DIAGNOSIS only — never a gate.
+_tortoise_candidate_python() {
+  local dir="${1:-}"
+  if [ -n "${PYTHON_BIN:-}" ]; then
+    printf '%s\n' "$PYTHON_BIN"
+  elif [ -n "$dir" ] && [ -x "$dir/.venv/bin/python" ]; then
+    printf '%s\n' "$dir/.venv/bin/python"
+  elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    printf '%s\n' "$VIRTUAL_ENV/bin/python"
+  else
+    command -v python3 2>/dev/null || true
+  fi
+}
+
+# 0 when this seam can actually RUN the checkout at "$1". Holding `tortoise/`
+# is not that (#4848): the tree must offer an entry point this guard accepts. A
+# WHEEL install resolves a module dir INSIDE a venv's site-packages, where there
+# is no `.venv` beneath it — the venv that OWNS the tree is the one marked by
+# `pyvenv.cfg`, found by walking up (bounded), the same way the seams' own wheel
+# probe does (#2385).
+_tortoise_dir_runnable() {
+  local dir="${1:-}" probe depth
+  if [ -z "$dir" ]; then
+    return 1
+  fi
+  if [ -n "${PYTHON_BIN:-}" ]; then
+    return 0
+  fi
+  if _tortoise_bin_qualifies "$dir/.venv/bin/tortoise"; then
+    return 0
+  fi
+  if _tortoise_py_qualifies "$dir/.venv/bin/python"; then
+    return 0
+  fi
+  probe="$dir"
+  depth=0
+  while [ "$depth" -lt 5 ]; do
+    if [ -z "$probe" ] || [ "$probe" = "/" ]; then
+      break
+    fi
+    if [ -f "$probe/pyvenv.cfg" ]; then
+      if _tortoise_bin_qualifies "$probe/bin/tortoise"; then
+        return 0
+      fi
+      if _tortoise_py_qualifies "$probe/bin/python"; then
+        return 0
+      fi
+      break
+    fi
+    probe="${probe%/*}"
+    depth=$((depth + 1))
+  done
+  if [ -n "${VIRTUAL_ENV:-}" ] && _tortoise_py_qualifies "$VIRTUAL_ENV/bin/python"; then
+    return 0
+  fi
+  _tortoise_py_qualifies "$(command -v python3 2>/dev/null || true)"
+}
+
+# The clause a refusal splices in when a candidate was found but could not be
+# run. Names the interpreter AND its version, because the whole defect is a
+# message that pointed at `datetime` instead of at "wrong interpreter".
+_tortoise_unusable_reason() {
+  local dir="${1:-}" probe version
+  probe="$(_tortoise_candidate_python "$dir")"
+  if [ -z "$probe" ]; then
+    printf 'found no python3 interpreter'
+    return 0
+  fi
+  version="$("$probe" -c 'import platform
+print(platform.python_version())' 2>/dev/null || true)"
+  if [ -z "$version" ]; then
+    version="an unrecognised version"
+  fi
+  printf 'the interpreter available is %s at %s and cannot run it (tortoise needs Python %s+)' \
+    "$version" "$probe" "$_TORTOISE_MIN_PY"
+}
+# END tortoise-interp-guard (#4848)
+
 # ── The local capture-error breadcrumb ───────────────────────────────────
 # Mirrors `tortoise.__main__._record_capture_error` (same file layout, same
 # `TORTOISE_IMPORT_RECEIPT_DIR` override) for the one case that helper cannot
@@ -113,20 +280,35 @@ fi
 # A candidate module dir is accepted ONLY when it actually holds a
 # `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
 # recorded module dir, then `../..` — the LAST resort, because from an
-# installed hook that is `$HOME`, which is not a checkout (#4314).
+# installed hook that is `$HOME`, which is not a checkout (#4314). A
+# candidate that HOLDS the package but cannot be RUN is skipped too, so the
+# loop can still reach a later, usable one (#4848) — and the first such
+# candidate is remembered so the refusal can NAME it.
 TORTOISE_MODULE=""
+TORTOISE_UNUSABLE_DIR=""
 for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
                  "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
                  "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
   if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/tortoise" ]; then
-    TORTOISE_MODULE="$CANDIDATE"
-    break
+    if _tortoise_dir_runnable "$CANDIDATE"; then
+      TORTOISE_MODULE="$CANDIDATE"
+      break
+    fi
+    [ -n "$TORTOISE_UNUSABLE_DIR" ] || TORTOISE_UNUSABLE_DIR="$CANDIDATE"
   fi
 done
 
+# `PYTHON_BIN` from the ENVIRONMENT is an explicit operator override and is
+# honoured as-is (see the guard above); it is never probed and never overridden
+# by a guess.
 TORTOISE_BIN="$(command -v tortoise || true)"
+TORTOISE_UNUSABLE_BIN=""
+if [ -n "$TORTOISE_BIN" ] && ! _tortoise_bin_qualifies "$TORTOISE_BIN"; then
+  TORTOISE_UNUSABLE_BIN="$TORTOISE_BIN"
+  TORTOISE_BIN=""
+fi
 if [ -z "$TORTOISE_BIN" ] && [ -n "$TORTOISE_MODULE" ] \
-   && [ -x "$TORTOISE_MODULE/.venv/bin/tortoise" ]; then
+   && _tortoise_bin_qualifies "$TORTOISE_MODULE/.venv/bin/tortoise"; then
   TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
 fi
 
@@ -159,17 +341,33 @@ if [ -n "$TORTOISE_MODULE" ]; then
   done
 fi
 if [ -z "$TORTOISE_BIN" ] && [ -n "$TORTOISE_VENV" ] \
-   && [ -x "$TORTOISE_VENV/bin/tortoise" ]; then
+   && _tortoise_bin_qualifies "$TORTOISE_VENV/bin/tortoise"; then
   TORTOISE_BIN="$TORTOISE_VENV/bin/tortoise"
 fi
 if [ -z "$TORTOISE_BIN" ] && [ -n "${VIRTUAL_ENV:-}" ] \
-   && [ -x "$VIRTUAL_ENV/bin/tortoise" ]; then
+   && _tortoise_bin_qualifies "$VIRTUAL_ENV/bin/tortoise"; then
   TORTOISE_BIN="$VIRTUAL_ENV/bin/tortoise"
 fi
 if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
   # No binary and no module dir: record the breadcrumb (the SAME shape and
   # location `sessions import` writes) and exit 0 — an inert install must
   # leave evidence instead of silence (#4314).
+  #
+  # #4848: a module dir (or a `tortoise` binary) that WAS found but cannot be
+  # run is a DIFFERENT cause with a different remedy — say which, and name the
+  # interpreter, so the report stops pointing at `datetime`.
+  if [ -n "$TORTOISE_UNUSABLE_DIR" ]; then
+    _record_breadcrumb "$HARNESS" \
+      "the installed volunteer hook resolved a tortoise source dir at $TORTOISE_UNUSABLE_DIR but $(_tortoise_unusable_reason "$TORTOISE_UNUSABLE_DIR") and injected nothing. Remedy: create that checkout's venv (uv sync --extra embeddings --extra parity in it) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
+      || true
+    exit 0
+  fi
+  if [ -n "$TORTOISE_UNUSABLE_BIN" ]; then
+    _record_breadcrumb "$HARNESS" \
+      "the installed volunteer hook found a tortoise binary at $TORTOISE_UNUSABLE_BIN but the interpreter on its #! line cannot run it (tortoise needs Python $_TORTOISE_MIN_PY+), and injected nothing. Remedy: reinstall it (uv tool install --force .) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
+      || true
+    exit 0
+  fi
   _record_breadcrumb "$HARNESS" \
     "the installed volunteer hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), found no tortoise binary, and injected nothing" \
     || true
@@ -179,22 +377,25 @@ fi
 # the module runs under an interpreter that actually has tortoise installed.
 # A wheel install has no checkout venv, so fall back to the venv that OWNS
 # the resolved module dir (#2385 item 3) before the ambient python3.
-PYTHON_BIN=""
+PYTHON_BIN="${PYTHON_BIN:-}"
 if [ -z "$TORTOISE_BIN" ]; then
-  if [ -x "$TORTOISE_MODULE/.venv/bin/python" ]; then
-    PYTHON_BIN="$TORTOISE_MODULE/.venv/bin/python"
-  elif [ -n "$TORTOISE_VENV" ] && [ -x "$TORTOISE_VENV/bin/python" ]; then
-    PYTHON_BIN="$TORTOISE_VENV/bin/python"
-  elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
-    PYTHON_BIN="$VIRTUAL_ENV/bin/python"
-  else
-    PYTHON_BIN="$(command -v python3 || true)"
+  if [ -z "$PYTHON_BIN" ]; then
+    if _tortoise_py_qualifies "$TORTOISE_MODULE/.venv/bin/python"; then
+      PYTHON_BIN="$TORTOISE_MODULE/.venv/bin/python"
+    elif [ -n "$TORTOISE_VENV" ] && _tortoise_py_qualifies "$TORTOISE_VENV/bin/python"; then
+      PYTHON_BIN="$TORTOISE_VENV/bin/python"
+    elif [ -n "${VIRTUAL_ENV:-}" ] && _tortoise_py_qualifies "$VIRTUAL_ENV/bin/python"; then
+      PYTHON_BIN="$VIRTUAL_ENV/bin/python"
+    elif _tortoise_py_qualifies "$(command -v python3 2>/dev/null || true)"; then
+      PYTHON_BIN="$(command -v python3 || true)"
+    fi
   fi
   if [ -z "$PYTHON_BIN" ]; then
-    # The module dir resolved but there is no interpreter to run it: record
-    # the breadcrumb (evidence, not silence) and exit 0 (#4314).
+    # The module dir resolved but there is no USABLE interpreter to run it:
+    # record the breadcrumb (evidence, not silence) and exit 0 (#4314), naming
+    # the interpreter that was refused (#4848).
     _record_breadcrumb "$HARNESS" \
-      "the installed volunteer hook resolved a tortoise module dir but found no python3 interpreter, and injected nothing" \
+      "the installed volunteer hook resolved a tortoise module dir at ${TORTOISE_MODULE:-?} but $(_tortoise_unusable_reason "${TORTOISE_MODULE:-}") and injected nothing. Remedy: create that checkout's venv (uv sync --extra embeddings --extra parity in it) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
       || true
     exit 0
   fi
