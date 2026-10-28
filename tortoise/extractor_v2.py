@@ -8492,9 +8492,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
     decision-only model that answers *"should this candidate exist at all?"*.
-    Off-path only when ALL THREE switches are off: ``TORTOISE_VET``,
+    Off-path only when ``vet_arbiter`` is ``None`` **and** all three env
+    switches are off: ``TORTOISE_VET``,
     ``TORTOISE_VALUE_GATE`` (its ``#4899`` predicate runs inside this pass) and
     ``TORTOISE_S2_DECISION_SEAM`` (seam arbiter even vs ``TORTOISE_VET=0``; can ``DISCARD``).
+    A supplied ``vet_arbiter`` arms both passes on its own (``vet_enabled``'s
+    FIRST term), so with every switch off an injected arbiter still runs them —
+    the state the capstone probes and the seam's armed tests drive.
 
     ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
     None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the

@@ -1420,6 +1420,39 @@ def test_flag_off_is_off_path(monkeypatch):
     assert "pytest" in names and "the plan doc" in names
 
 
+def test_the_injected_arbiter_is_the_fourth_off_path_term(monkeypatch):
+    """#10072 review: ``extract_session_v2``'s docstring said the VET passes are
+    "Off-path only when ALL THREE switches are off" — which is FALSE exactly on
+    the path the capstone probes: ``vet_enabled``'s FIRST term is
+    ``vet_arbiter is not None``, so with all three env switches off a supplied
+    arbiter still runs both passes. The pre-diff text carried that half
+    ("None + ``TORTOISE_VET`` unset → VET is entirely off-path"); the #5087
+    edit replaced it with the three-switch enumeration and dropped it.
+
+    Two limbs, because the defect was a claim about behaviour: (a) the behaviour
+    — every switch off + an arbiter ⇒ the pass RUNS and its verdict is applied;
+    (b) the prose — the off-path sentence names the arbiter, so it cannot be
+    re-worded back into an exhaustive-sounding three-term list without a red.
+    """
+    for env in ("TORTOISE_VET", "TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM"):
+        monkeypatch.delenv(env, raising=False)
+    from tortoise import extractor_v2 as v2
+
+    out = v2.extract_session_v2(_Model(), _conv(), vet_arbiter=_discard)
+    assert out["vet"]["enabled"] is True, (
+        "an injected vet_arbiter alone must arm the passes — it is "
+        "`vet_enabled`'s first term")
+    assert [e["name"] for e in out["embed_list"]["entities"]] == ["the plan doc"], (
+        "the arbiter's DISCARD must be applied on the env-off arm, which is "
+        "what makes the pass off-path only when the arbiter is ALSO absent")
+
+    doc = v2.extract_session_v2.__doc__ or ""
+    flat = " ".join(doc.split())
+    assert "Off-path only when ``vet_arbiter`` is ``None``" in flat, (
+        "the off-path claim must name the arbiter term (it is what the code "
+        "ORs first), not only the three env switches")
+
+
 def test_flag_on_removes_discarded_candidate_before_the_tail(monkeypatch):
     monkeypatch.setenv("TORTOISE_VET", "1")
     from tortoise import extractor_v2 as v2

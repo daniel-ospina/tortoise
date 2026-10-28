@@ -3033,9 +3033,14 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
 #: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
-#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: production 5-stage extractor), tortoise/vet_gate.py (its S2.2 gate), and
+#: tortoise/s2_decision_seam.py (the typed-decision seam that gate is told
+#: by — it decides DISCARD/KEEP, so its BANDS and prompts are pipeline too).
 #: A content change to any of these invalidates every cached per-question
-#: graph automatically — no manual cache-bust.
+#: graph automatically — no manual cache-bust. ⛔ Name every file here that
+#: the tuple below carries: the count in this prose went stale twice (#10072
+#: review rounds), so a missing name is a claim mismatch, not a shorthand.
+#: ``tests/test_eval_ingest_cache.py`` pins that correspondence.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
@@ -3083,18 +3088,18 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: three small modules); the digest is
-    stable within a process and identical across processes on the same
-    checkout. ``paths`` is injectable for hermetic tests (fake files). An
+    Reads the files at run start (cheap: the small modules listed above); the
+    digest is stable within a process and identical across processes on the
+    same checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
+    review class): those modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the three
-    hot files even across an uncommitted local edit (dirty-tree runs)."""
+    conservative net; ``paths`` keeps the digest sensitive to those hot
+    files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
     for p in files:

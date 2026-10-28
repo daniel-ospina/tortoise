@@ -241,6 +241,43 @@ def test_ingest_code_fingerprint_real_files_deterministic():
         runner.ingest_code_fingerprint()
 
 
+def test_the_header_names_every_file_the_fingerprint_hashes():
+    """#10072 review: the header above ``INGEST_CACHE_CODE_FILES`` is the only
+    description a maintainer gets of what invalidates a cached ingest, and it
+    went stale TWICE in one PR — a fourth file was appended (this PR's
+    ``s2_decision_seam.py``) while the prose still enumerated three, and an
+    earlier round left a stale ``three`` in the reading function's docstring.
+
+    Reddens on the pre-fix file: ``s2_decision_seam.py`` is in the tuple and
+    absent from the header. Counted numerals are NOT pinned (they are what went
+    stale); the NAME correspondence is, because a name is checkable and a count
+    is not.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(runner)
+    # the comment block that introduces the tuple, up to the assignment
+    head = src[:src.index("INGEST_CACHE_CODE_FILES = (")]
+    header = head[head.rindex("#: Files whose content IS"):]
+    # a stale spelled-out cardinal is the SECOND half of the same defect: the
+    # prose said "three" beside a tuple of four.
+    spelled = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    stale = [w for n, w in spelled.items()
+             if n != len(runner.INGEST_CACHE_CODE_FILES)
+             and re.search(rf"\b{w}\b", header)]
+    assert not stale, (
+        f"the header spells {stale} while the tuple holds "
+        f"{len(runner.INGEST_CACHE_CODE_FILES)} files — drop the numeral or fix it")
+    missing = [p.name for p in runner.INGEST_CACHE_CODE_FILES
+               if p.name not in header]
+    assert not missing, (
+        "the header above INGEST_CACHE_CODE_FILES does not name every file the "
+        f"fingerprint hashes — missing: {missing}. The prose is what a "
+        "maintainer reads to decide whether their edit invalidates cached "
+        "ingests (#10072 review; this exact omission was one).")
+
+
 def test_cache_hit_decision_rules():
     """(b/c/d + design 4) pure hit/miss decision: a graph is cached+valid
     iff the stored marker carries the matching fingerprint AND content is
