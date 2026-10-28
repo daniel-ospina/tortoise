@@ -11059,22 +11059,186 @@ def _org_is_anon(org_id: str) -> bool:
         return False
 
 
+#: Episode-feed depth the acknowledgement route resolves against (#10156).
+#: Larger than the dashboard's render limit on purpose: the owner may be
+#: acknowledging an episode that `limit=20` does not render, and "we did not
+#: look" must not be reported back as "no such episode".
+_ALERT_ACK_SCAN = 200
+
+
 @app.get("/v1/team/alerts")
 async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """#308 (R7) — suspicious-activity alert history for the dashboard.
 
     Session-authed (NOT API-key authed) by design: it must stay reachable
     while the org is suspended so the owner can see what happened and find
-    the appeal path (scoping delta 12)."""
+    the appeal path (scoping delta 12).
+
+    #10156: each entry carries `register` ("alert" = something happened, or
+    "activity" = a detector measured a rate and changed nothing), `count` and
+    `first_at` (one row per sustained BOUT, not per detector window), `acked`,
+    and the opaque `episode` key the acknowledgement route takes. The panel
+    renders the two registers separately and can say "nothing was changed"
+    only because the register travels with the row.
+
+    ``scan_saturated`` says the scan was cut. It is NOT a per-row flag (that is
+    ``truncated``): it exists for the empty-feed case, where there is no row to
+    carry the caveat."""
     membership = await _membership_org(user["user_id"], org_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
+    saturated = False
+    unavailable = False
     try:
         from tortoise.supabase_control import get_abuse_store
-        alerts = get_abuse_store().recent_alerts(org_id, limit=20)
+        store = get_abuse_store()
+        alerts = store.recent_alerts(org_id, limit=20)
     except Exception:
-        alerts = []  # best-effort — an alert-history failure is not a 500
-    return {"org_id": org_id, "alerts": alerts}
+        # Best-effort — an alert-history failure is not a 500. But it is ALSO not
+        # "nothing happened": the panel unmounts on an empty feed, so a failed
+        # read would render as an all-clear on the one screen whose job is not to
+        # hide incidents (round-23 review finding). `unavailable` says "we could
+        # not look", which is a different fact from "we looked and found none".
+        alerts = []
+        unavailable = True
+    else:
+        # The saturation probe gets its OWN handler: it is a SECONDARY read, and
+        # while it shared the `try` above, a probe failure (a store that does not
+        # implement it, a transient error) discarded an already-successful alert
+        # read and unmounted a live `suspend` row (round-23 review finding).
+        # Fail-soft into "saturated", which is the conservative direction: the
+        # panel then says the window may be full rather than claiming it is not.
+        try:
+            saturated = bool(store.alert_scan_saturated(org_id))
+        except Exception:
+            saturated = True
+    # #10156 round-8 review finding: `truncated` rides on a row, so an EMPTY feed
+    # that is empty only because the scan was cut (the newest rows were all
+    # non-alert) would otherwise read as "nothing ever happened" — the exact
+    # false negative this change exists to remove. Reported as a separate flag so
+    # the panel can say "there may be more" without a row.
+    return {"org_id": org_id, "alerts": alerts, "scan_saturated": saturated,
+            "unavailable": unavailable}
+
+
+@app.post("/v1/team/alerts/ack")
+async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
+    """#10156 — acknowledge ONE alert episode so it stops rendering as current.
+
+    Persisted as a durable row (``abuse_events`` / ``alert_ack``), never a
+    cookie: a dismissal that evaporates on the next device or the next deploy
+    is not a dismissal, and the customer would be told "acknowledged" by a
+    browser that had remembered it. The response is deliberately NOT optimistic
+    — a failure to store returns 503 rather than 200, because the row would
+    otherwise reappear on the next poll and teach the customer the control is
+    broken.
+
+    GATED BY ROLE, but deliberately NOT by ``_require_owner_admin``: that helper
+    also 403s a SUSPENDED org, and this surface must stay reachable while
+    suspended (the appeal flow reads it — #1853). Acknowledging changes no
+    enforcement state and disables nothing; it records that a human saw a row,
+    so owner/admin is the right gate and the suspension stamp is not.
+
+    The episode is RESOLVED against the org's current feed before it is written
+    (review findings, two of them):
+
+    * an arbitrary/stale ``episode`` string is refused instead of being written
+      as a row that nothing will ever match (the previous version accepted any
+      string from an owner and accumulated one row per attempt);
+    * the WINDOW written with the acknowledgement is the one from OUR feed, not
+      from the request: the client sends only the key it rendered, and a
+      client-supplied window would let a caller acknowledge an episode it was
+      never shown.
+
+    ``rendered_at`` is OPTIONAL and is only an ASSERTION, not input to the
+    window (#10156 round 9): it is the ``at`` the caller had on screen, and if
+    our feed has moved past it on the INCIDENT register we refuse with 409 so
+    the dashboard reloads — because the acknowledgement we would otherwise write
+    covers the newer row too, and a re-suspension inside the same episode gap
+    would then be dismissed by a click that never saw it.
+
+    A ``truncated`` episode IS acknowledgeable. An intermediate version refused
+    it with 409 on the reasoning that its key is anchored to the oldest row we
+    can see, so it moves as the window slides — which was true of the KEY. It is
+    not true of the ACKNOWLEDGEMENT: ``_episode_acknowledged`` matches on
+    identity plus window OVERLAP, so a record of the window we can see survives
+    the scan sliding past the episode's start. Refusing would have made the
+    oldest, longest-running episode permanently undismissable — a live security
+    row with no way to clear it (review finding P1).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    org_id = str(body.get("org_id") or "").strip()
+    episode = str(body.get("episode") or "").strip()
+    if not org_id or not episode:
+        raise HTTPException(status_code=422,
+                            detail="org_id and episode are required")
+    role = await _membership_role(user["user_id"], org_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403,
+                            detail="Requires owner or admin role in team")
+    from tortoise.supabase_control import get_abuse_store
+    try:
+        store = get_abuse_store()
+        # A LARGE limit: the caller's `episode` may be any episode in the feed,
+        # not just the newest 20 the dashboard renders.
+        current = store.recent_alerts(org_id, limit=_ALERT_ACK_SCAN,
+                                      include_identity=True)
+    except Exception as exc:
+        _raise_503_if_cp_outage(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="alert episode could not be resolved") from exc
+    match = next((a for a in current if a.get("episode") == episode), None)
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no such alert episode on this Organization")
+    # ROUND 9 (review finding) — a dismissal must not cover an incident it was
+    # not shown. The window written with the ack is the episode's newest row AT
+    # WRITE TIME, and `_episode_acknowledged`'s incident gate only refuses rows
+    # NEWER than that — so anything that arrived between the render and the click
+    # is folded into the dismissal and can never re-open it. A re-suspension
+    # immediately after a suspension is exactly that case, and a suspension
+    # writes no follow-up row, so nothing else would ever surface it.
+    #
+    # The client therefore sends the `at` it RENDERED, and we use it only as an
+    # ASSERTION about what was on screen — never as the window (that stays
+    # server-derived, see above): if our feed has moved past it, the click is
+    # answering a row that is no longer current, so we refuse and the dashboard
+    # reloads. Applied to the INCIDENT register only: absorbing a newer
+    # observation is the deliberate choice for a rate (`_episode_acknowledged`),
+    # and refusing there would live-lock dismissal of an ongoing rate, where a
+    # new window can arrive every 5 minutes.
+    from tortoise import abuse as _abuse  # the timestamp + register vocabulary
+    rendered_at = str(body.get("rendered_at") or "").strip()
+    if rendered_at and match.get("register") == _abuse.REGISTER_ALERT:
+        newer = _abuse._parse_ts(match.get("at"))
+        seen = _abuse._parse_ts(rendered_at)
+        if newer is not None and seen is not None and newer > seen:
+            raise HTTPException(
+                status_code=409,
+                detail="this alert changed since it was shown — reload to "
+                       "see what is current")
+    # The WINDOW is taken from OUR feed, never from the request: the client
+    # sends only the key it rendered, and a client-supplied window would let a
+    # caller acknowledge an episode it was never shown (review finding).
+    # `truncated` episodes ARE acknowledgeable — the window we can see is enough,
+    # because `_episode_acknowledged` matches by OVERLAP rather than by the key,
+    # so the acknowledgement survives the scan sliding past the episode's start.
+    try:
+        store.record_alert_ack(org_id, episode, ack_of=match,
+                               by=user.get("user_id"))
+    except Exception as exc:
+        _raise_503_if_cp_outage(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="alert acknowledgement could not be stored") from exc
+    return {"org_id": org_id, "episode": episode, "acknowledged": True}
 
 
 @app.get("/v1/internal/abuse/state")
