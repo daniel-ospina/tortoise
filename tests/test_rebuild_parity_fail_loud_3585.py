@@ -637,14 +637,80 @@ class TestReReviewRoundTwo:
         # message must say so, or it sends the operator after a merge/rename or
         # an unjournaled producer, neither of which exists here.
         report = " ".join(r.getMessage() for r in caplog.records)
-        assert "HARD-DELETED and this record carries no `id`" in report, (
-            f"the miss arm does not name the hard-delete-no-id limb: {report}")
+        assert "HARD-DELETED under an `id` this record DOES NOT CARRY" in report, (
+            f"the miss arm does not name the hard-delete limb: {report}")
         assert "CONSERVATIVE refusal" in report, (
             f"the miss arm calls a conservative refusal a divergence: {report}")
+        # ⚠️ AND NOT "carries no `id`" — the bound reads the record's OWN id, so
+        # a record carrying an UNRELATED id (of another node) lands here too and
+        # would be falsified by the operator's own report line on the next
+        # output row. MEASURED (#10211 review round 9).
         assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
         r = check_consistency(str(events / "events.jsonl"), proj)
         assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
         assert r["divergence"] == "non-folded", r["divergence"]
+    def test_deleted_target_with_an_unrelated_id_never_claims_no_id(
+            self, env, caplog):
+        """#10211 review round 9: the hard-delete limb must not assert the
+        record carries NO `id`.
+
+        FAILS IF: the limb says "this record carries no `id`". The anchored
+        `supersede-target-deleted` bound reads the record's OWN id, so a record
+        carrying an UNRELATED id (of a different node) reaches this arm too —
+        and the same warning line sits beside a report row that visibly shows
+        the id, so the message is falsified by the operator's own output.
+
+        REACHABLE: a raw/legacy producer pairing a deleted target's NAME with a
+        stale/unrelated id.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="GONE2")["node"]["id"]
+        sdk.delete_entity(oid)
+        _raw(events, type="ObjectSuperseded", name="GONE2", id="o-junk",
+             supersedes_by="other", event_id="e-gone2")
+        proj = sdk._get_proj()
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+                pytest.raises(NonFoldedEventsError):
+            proj.rebuild_all(str(events), confirm_destructive=True)
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "HARD-DELETED under an `id` this record DOES NOT CARRY" in report, (
+            f"the miss arm does not name the hard-delete cause generically: "
+            f"{report}")
+        assert "carries no `id`" not in report, (
+            f"the miss arm asserts the record carries no id, which is false for "
+            f"this record (it carries 'o-junk'): {report}")
+
+    def test_state_op_writing_a_name_other_than_rename_is_covered(
+            self, env, caplog):
+        """#10211 review round 9: the non-creation limb's name route is ANY
+        entity-mutation state op, not only a rename.
+
+        FAILS IF: the limb enumerates "a rename's `SET`". `journal_object_established`
+        takes the name from any op in `_ENTITY_MUTATION_STATE_OPS` carrying
+        `state.name`, so an `op=supersede` (or any other op) writes an
+        established name the same way — and a cause list that names only
+        `rename` leaves that record in neither limb, the defect round 6 fixed
+        one spelling over.
+
+        REACHABLE: a raw/legacy producer emitting a state op that is not a
+        rename, then superseding the name it wrote.
+        """
+        sdk, events = env
+        _raw(events, type="ObjectRegistered", id="o-anchor", name="ANCHOR",
+             status="live", event_id="e-anchor")
+        _raw(events, type="EntityMutated", op="supersede", label="Object",
+             id="o-ghost", state={"name": "GHOST2"}, event_id="e-ghost")
+        _raw(events, type="ObjectSuperseded", name="GHOST2",
+             supersedes_by="other", event_id="e-ghost-sup")
+        proj = sdk._get_proj()
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+                pytest.raises(NonFoldedEventsError):
+            proj.rebuild_all(str(events), confirm_destructive=True)
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "a state op's `SET`" in report, (
+            f"the non-creation limb does not name the state-op SET route: {report}")
+        assert "a rename's `SET`" not in report, (
+            f"the limb still narrows the name route to a rename: {report}")
 
     def test_id_only_absent_target_supersede_is_exempt_both_engines(
             self, env, tmp_path, caplog):
@@ -2737,7 +2803,7 @@ def test_rename_carried_name_with_no_creation_still_refuses(env, caplog):
         f"unestablished: {ei.value}")
     report = " ".join(r.getMessage() for r in caplog.records)
     assert "DID establish this record's address" in report, report
-    assert "the NAME a rename's `SET` carries" in report, (
+    assert "a name it writes" in report, (
         f"the miss arm's non-creation limb does not name the NAME spelling, so "
         f"this record falls outside both limbs: {report}")
 
