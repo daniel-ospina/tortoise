@@ -545,6 +545,14 @@ def _quoted_program(value: str) -> bool:
     substring test (`"def" in value`) — a quoted program is required to DEFINE
     a function, class or import, which an identifier merely spelling "def"
     does not.
+
+    ⛔ SCOPE, stated so this predicate is not trusted further than it goes
+    (#10150 round-10 review): a fixture that WRITES such a program and then
+    EXECUTES it is out of scope — this predicate cannot tell that from a
+    fixture the census merely parses, and it answers "quoted program" for
+    both. No site in the tree does it today (the guard's own 18-entry allow
+    list was re-run: none goes inert); closing it needs the write/exec edge,
+    not a better string test.
     """
     try:
         parsed = ast.parse(value)

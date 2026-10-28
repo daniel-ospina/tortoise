@@ -1378,15 +1378,25 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
       `create_point`'s `_create_map`, and a revision bumps `updatedAt`.
     * `:Object` / `:Subject` — `createdAt` stamped ON CREATE by
       `_upsert_object` / `_upsert_subject` (`coalesce($ca, $now)`).
-    * `:Event` — **split**. The journaled SDK doors synthesize `createdAt`
-      before the fold (`_apply_and_journal` / `_create_entity`, gated on
-      `type in _JOURNALED_ENTITY_EVENT_TYPES`), and `_EVENT_HANDLED`
-      deliberately omits the key so `_persist_extra_props` carries it onto the
-      node (#2788 — pinned by `tests/test_event_state_carrier_2788.py`). The
-      SESSION-INDEXER and connector raw writers set `startedAt` and no
-      `createdAt` at all (`sdk.py` session props), so those Events carry NO
-      recency stamp — and their `eventId` is `session_<id>`, not a minted
-      ULID, so the id fallback is not a clock either.
+    * `:Event` — **the exception, and the one to get right**: stamping is a
+      per-DOOR fact, and ONLY the RECORD door stamps.
+      `TortoiseSDK._apply_and_journal` (pre-built records — the provenance /
+      indexer writes) synthesizes `createdAt` under
+      `type in _JOURNALED_ENTITY_EVENT_TYPES` before the fold, and
+      `_EVENT_HANDLED` omits the key on purpose so `_persist_extra_props`
+      carries it onto the node (#2788,
+      `tests/test_event_state_carrier_2788.py`);
+      `tests/test_github_indexer.py::test_7951_indexer_journals_createdAt_for_events`
+      pins the RECORD, and the node half was measured in round 10.
+      `_create_entity` (the public `create_event` /
+      `create_entity(type='event')`) does NOT: its only `createdAt` synthesis
+      is gated on the Object/Subject REGISTRATION probes and is "provably
+      Object/Event-inert" in its own words, so a `create_event` node carries
+      NEITHER stamp (measured). `EventAPI.add_event` builds its payload
+      without `createdAt` as well, and the session-indexer / connector writers
+      set `startedAt` only. On the PRIMARY public Event door, therefore, the
+      recency key is the constant `''` and the order falls to
+      `eventId DESC` — which for `session_<id>` ids is not a clock.
     * `:Source` — `ingestedAt` is what these writers always stamp; a document
       `:Source` carries `createdAt` only when its producer emits one (an
       allowed extra prop, `_SOURCE_HANDLED`), and the structural stub
