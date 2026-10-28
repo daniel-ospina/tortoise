@@ -249,6 +249,45 @@ class TestRoundTrip:
         assert identifier_alias("27-12") is None
         assert tokenize_sparse_query("time is 27:12") == ["time"]
 
+    @pytest.mark.parametrize("prose", [
+        "meeting 27:12",        # TIME
+        "spent 27.5 hours",     # DECIMAL
+        "budget 12,000 total",  # thousands separator
+        "rate 50% today",       # percentage
+        "deadline 2024/12/01",  # slash date
+    ])
+    def test_a_punctuated_quantity_after_a_word_mints_nothing(self, prose):
+        """#10203 review round 7 (F3): the space form's punctuation guard must
+        cover every separator that makes the digit run the HEAD of a bigger
+        token, not just ``-``/``_``.
+
+        The assertion above (``time is 27:12``) could not see this: its letters
+        half is the stopword ``is``, so ``_spaced_pair_spans`` drops the span
+        BEFORE the guard is consulted — it passes with the guard removed
+        entirely. These fixtures use a non-stopword letters half, which is what
+        reaches it.
+
+        (1) Fails on the pre-fix guard ``(?![-_])``: each of these minted an
+            alias (``meeting27``) and an adjacency phrase (``"meeting 27"``),
+            so the ruling's "``27:12`` and ``$40`` contribute none" claim broke
+            through this side door — and the phrase then boosted a document
+            whose PROSE merely contains the pair.
+        (2) Reachable: each shape is ordinary prose a user queries with.
+        """
+        assert identifier_aliases(prose) == [], prose
+        assert identifier_phrase_terms(prose) == [], prose
+
+    def test_a_sentence_final_code_still_mints(self):
+        """The guard is ``<punct><digit>``, NOT a bare ``<punct>``: a
+        sentence-final ``deploy ERR 4032.`` must keep minting ``err4032``.
+
+        This is the counterweight to the test above — widening the guard must
+        not swallow the ordinary shape it exists beside.
+        """
+        assert identifier_aliases("deploy ERR 4032.") == ["err4032"]
+        assert identifier_phrase_terms("deploy ERR 4032.") == ['"err 4032"']
+        assert identifier_aliases("deploy err 4032, then retry") == ["err4032"]
+
     def test_leading_zeros_are_preserved_not_normalised_away(self):
         """INV-2024-0091 vs INV-2024-91 are DIFFERENT codes; the alias must not
         collapse them (leading zeros carry identity)."""
@@ -498,6 +537,82 @@ class TestWritePath:
         append_identifier_aliases(copy, aliases)
         assert payload["search_keys"] == ["alpha", "beta"], payload
 
+    def test_the_sdk_create_door_derives_and_stays_equal_to_the_replay(
+            self, tmp_path):
+        """#10203 review round 7 (F1, blocking): the door the SESSION CAPTURE
+        mints through must derive the alias, and live must equal ``replay(journal)``.
+
+        ``create_point`` is the door ``_capture_session_impl`` calls, and it
+        only ever ran ``_flatten_search_keys_prop`` — the alias was written by
+        ``_upsert_point_props`` (the REPLAY door, `apply`) alone, so a captured
+        Point indexed ``err`` + ``4032`` but never ``err4032``. The ruling's
+        "dashes, spaces, or none" promise therefore did not hold for the
+        primary corpus, and this change INTRODUCED live ≠ replay: the rebuilt
+        node carried the alias, the live one did not, and the strip this PR
+        adds to ``check_consistency`` hid the asymmetry from the detector that
+        exists to catch it.
+
+        (1) Fails on the pre-fix door in two ways: the live node's
+            ``search_keys`` is ``None`` (nothing derived), and that ``None``
+            differs from the replayed ``err4032`` (the parity assertion).
+        (2) Reachable: this is the ordinary product write, not a raw Cypher
+            fixture — the discrimination test's corpus is built with raw Cypher
+            and so could never see the door at all.
+        """
+        import uuid
+
+        from tortoise.log import EventLog
+        from tortoise.projection import FalkorProjection
+        from tortoise.sdk import TortoiseSDK
+
+        log_path = str(tmp_path / "capture.jsonl")
+        sdk = TortoiseSDK(
+            os.path.join(str(tmp_path), "capture.db"),
+            namespace=f"test_ident_capture_{uuid.uuid4().hex[:8]}",
+            event_log_path=log_path,
+        )
+        try:
+            pid = sdk.create_point(
+                content="error ERR-4032 on deploy", kind="statement")["id"]
+
+            def keys_of(graph):
+                rows = graph.query(
+                    f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys"
+                ).result_set
+                return rows[0][0] if rows else None
+
+            live = keys_of(sdk._get_proj().g)
+            assert live is not None and "err4032" in str(live).split(), (
+                "the SDK create door — the session-capture mint's door — did "
+                f"not derive the alias; node holds {live!r}")
+            # An aliased spelling anywhere else must not be able to pass: the
+            # query typed with NO separator is what the alias exists to serve.
+            assert "err4032" in build_or_query("err4032").split(), live
+
+            replayed = FalkorProjection(
+                os.path.join(str(tmp_path), "replay.db"),
+                graph_name=f"test_ident_replay_{uuid.uuid4().hex[:8]}")
+            try:
+                for event in EventLog(log_path).read_all():
+                    if event.get("type") == "PointAdded":
+                        replayed.apply(event)
+                assert keys_of(replayed.g) == live, (
+                    "derived != replay(journal) on `search_keys`: the live "
+                    "create and the rebuild disagree, so the alias is not a "
+                    "pure function of the record")
+            finally:
+                replayed.close()
+
+            # Derived, never recorded: the journal keeps E3's spelling, which
+            # is what lets a rebuild re-derive instead of trusting a value.
+            for event in EventLog(log_path).read_all():
+                point = event.get("point") or {}
+                assert "err4032" not in str(point.get("search_keys") or ""), (
+                    "the derived alias reached the JOURNAL: "
+                    f"{point.get('search_keys')!r}")
+        finally:
+            sdk.close()
+
 
 @requires_live
 class TestWritePathLive:
@@ -676,3 +791,38 @@ class TestDiscrimination:
         monkeypatch.setenv(IDENTIFIER_ENV, "0")
         rank = self._rank_of(corpus, "capstone 9664 write probe", "p-99")
         assert rank is not None and rank > 1, rank
+
+
+# ── the operator contract: the bisect switch must be DISCOVERABLE ──────────
+
+def test_env_example_declares_the_identifier_bisect_switch():
+    """#10203 review round 7 (F4, repo rule): ``.env.example`` IS this repo's
+    env contract, and the PR calls ``TORTOISE_IDENTIFIER_TOKENS`` "the fail-safe
+    bisect switch the ruling asks for" — an operator whose aggregate retrieval
+    disappoints must be able to FIND it without reading ``tortoise/sparse.py``.
+
+    The convention is pinned by test for this exact class of switch:
+    ``tests/test_bm25_lexical_8488.py::test_env_example_declares_the_bm25_arm_switch``
+    and ``tests/test_time_aware_2520.py::test_env_example_declares_the_valid_time_kill_switch``
+    (#8487). This is the third of that family.
+
+    (1) Fails on the pre-fix ``.env.example``, which has zero occurrences of the
+        name and so nothing for the grep to assert against.
+    (2) Reachable: the shipped default is ON, so the switch is the only route
+        back to pre-#8933 behaviour without a revert.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    env = (root / ".env.example").read_text()
+    assert IDENTIFIER_ENV in env, (
+        f"{IDENTIFIER_ENV} (the #8933 fail-safe bisect switch, default ON) is "
+        "not declared in .env.example")
+    declared = [
+        line for line in env.splitlines()
+        if line.strip().startswith(f"# {IDENTIFIER_ENV}=")
+        or line.strip().startswith(f"{IDENTIFIER_ENV}=")
+    ]
+    assert declared, (
+        f"{IDENTIFIER_ENV} must be shown as a commented assignment (the "
+        "example form an operator copies), not just named in prose")

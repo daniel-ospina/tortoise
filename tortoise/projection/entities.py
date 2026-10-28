@@ -1200,6 +1200,29 @@ def point_identifier_aliases(props: dict) -> list[str]:
     """
     if not identifier_tokens_enabled():
         return []
+    return _derive_point_identifier_aliases(props)
+
+
+def _derive_point_identifier_aliases(props: dict) -> list[str]:
+    """The alias derivation WITHOUT the ``TORTOISE_IDENTIFIER_TOKENS`` gate.
+
+    Split out for the CANONICALISER only (:func:`strip_identifier_aliases`),
+    and the split is load-bearing rather than tidiness (#10203 review round 7,
+    F2). The switch is the ruling's fail-safe BISECT lever: an operator flips
+    it to measure the feature off. A verifier whose verdict depends on the
+    verifier's own environment is not a verifier — with the gate in the strip,
+    `check_consistency` run under ``TORTOISE_IDENTIFIER_TOKENS=0`` against a
+    graph written with it ON (the shipped default) compared the alias
+    un-stripped, reported `divergence="content"` on a faithful graph, and moved
+    `db_hash` (`_graph_fingerprint` reads the same canonical view), so a stored
+    baseline read back as `unrecorded-mutation`. Both answers were a function of
+    the process env on an unchanged journal+graph pair.
+
+    The alias's SHAPE does not depend on whether the writer was enabled — it is
+    a pure function of the view's own ``content``/``search_keys`` — so the
+    canonical form must be computed unconditionally. Never call this from a
+    write path; the gate belongs there.
+    """
     keys = props.get("search_keys")
     if isinstance(keys, (list, tuple)):
         keys = " ".join(str(s) for s in keys)
@@ -1264,12 +1287,19 @@ def strip_identifier_aliases(view: dict) -> bool:
     canonicalised, so a rebuild or backfill that only ADDS aliases cannot move
     a recorded baseline into ``unrecorded-mutation``.
 
+    ⛔ The derivation here is UNCONDITIONAL — it deliberately does NOT go
+    through :func:`point_identifier_aliases`, whose ``TORTOISE_IDENTIFIER_TOKENS``
+    gate is a WRITE-side switch. A canonical form that honoured the checker's own
+    env would make ``check_consistency`` and ``db_hash`` answer differently about
+    an unchanged journal+graph pair when an operator flips the bisect lever
+    (#10203 review round 7, F2).
+
     Returns ``True`` when the view changed.
     """
     keys = view.get("search_keys")
     if not isinstance(keys, str) or not keys:
         return False
-    derived = set(point_identifier_aliases(view))
+    derived = set(_derive_point_identifier_aliases(view))
     if not derived:
         return False
     tokens = keys.split()

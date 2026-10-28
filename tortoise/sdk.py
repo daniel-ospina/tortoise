@@ -159,6 +159,13 @@ from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
     revise_identifier_aliases as _revise_identifier_aliases,
 )
+# #8933 Stage 2 — the write half at the CREATE door. Both are the SAME helpers
+# `_upsert_point_props` uses, so a live create and a rebuild replay derive
+# identically instead of drifting (the ruling's criterion 2).
+from .projection.entities import (
+    append_identifier_aliases,
+    point_identifier_aliases,
+)
 from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 # #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
 # The Point `name` advisory below reads the Point's fields OFF it rather than
@@ -10523,6 +10530,35 @@ class TortoiseSDK:
         # (plan §6.7), not a committed rebuild record: the JSONL journal (the
         # rebuild source) holds nothing.
         _intended = _journal_snapshot_from_create_map(_create_map, _create_params)
+        # ── #8933 Stage 2, WRITE HALF — at CAPTURE ──
+        # The ruling says "at capture, write a normalised copy of each identifier
+        # into the indexed text", and `create_point` is the door the mint uses
+        # (`_capture_session_impl` -> `self.create_point`). It used to reach only
+        # `_flatten_search_keys_prop`, so no SDK-created or captured Point ever
+        # held the alias while a REPLAY of the same `PointAdded` did
+        # (`apply` -> `_upsert_point_props`) — `derived = replay(journal)` was
+        # false on `search_keys`, and a query typed with no separator
+        # (`err4032`, the ruling's "dashes, spaces, or none") matched nothing.
+        #
+        # ⛔ It is DERIVED into the node and never RECORDED: `_intended` is
+        # snapshotted on the line above, so the alias reaches the CREATE map and
+        # nothing else. The journal keeps E3's spelling and a rebuild re-derives
+        # the same value from `content` + the payload's own `search_keys` — the
+        # SAME `point_identifier_aliases`/`append_identifier_aliases` pair
+        # `_upsert_point_props` calls, never a second normaliser (the ruling's
+        # criterion 2, and the Elastic `normalizer`-on-the-field shape).
+        _alias_view = {"content": content}
+        if isinstance(props.get("search_keys"), str):
+            _alias_view["search_keys"] = props["search_keys"]
+        if append_identifier_aliases(
+                _alias_view, point_identifier_aliases(_alias_view)):
+            # Rebuilt here (not earlier) so the un-patched path builds the field
+            # list byte-identically to before this change.
+            _create_params["_cp_alias"] = _alias_view["search_keys"]
+            _create_map["search_keys"] = "$_cp_alias"
+            _create_fields = "".join(
+                f", `{str(_k).replace('`', '``')}`: {_v}"
+                for _k, _v in _create_map.items())
         # The append's OWN outcome is the commit signal — a per-call value, not
         # a delta of the shared `_journal_write_failures` counter: a concurrent
         # writer on the same instance can increment that counter between the

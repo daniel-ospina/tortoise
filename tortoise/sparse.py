@@ -127,10 +127,24 @@ _IDENTIFIER_SEP_RE = re.compile(r"[-_ ]")
 #: aliases from prose (a document saying "sprint 2024" must not spend index
 #: space on ``sprint2024``; a user typing a code into one query may, and its
 #: noise is bounded to that query). The letters side may not be a stopword
-#: (``is 27:12`` is prose, not a code), and the digit run may not be the head of
-#: a longer punctuated span (``date 2024-01-15`` is a DATE — its ``2024`` is
+#: (``is 27:12`` is prose, not a code), and the digit run may not be the HEAD of a
+#: longer punctuated span (``date 2024-01-15`` is a DATE — its ``2024`` is
 #: followed by ``-``, so that span keeps the #2070 numeric-noise treatment).
 #:
+#: #10203 review round 7 (F3): the guard was ``[-_]`` only, so a TIME or a
+#: DECIMAL minted an alias and an adjacency phrase — ``meeting 27:12`` gave
+#: ``meeting27`` + ``"meeting 27"`` and ``spent 27.5 hours`` gave ``spent27`` +
+#: ``"spent 27"``. That is the ruling's ``27:12``/``$40`` class coming back
+#: through a side door (both the ruling and this PR's body say those contribute
+#: NONE), and the phrase then prefers the WRONG document: ``"meeting 27"``
+#: matches "meeting 27 covers the rollout" while the document actually about the
+#: 27:12 meeting (tokens ``27, 12, meeting``) does not. Widened to every
+#: separator that makes the run the head of a bigger token, plus ``%`` (a
+#: percentage is one quantity, not a code).
+#:
+#: The guard is ``<punct><digit>`` rather than a bare ``<punct>`` ON PURPOSE: a
+#: sentence-final ``deploy ERR 4032.`` must keep minting ``err4032``. Only a
+#: punctuation mark that CONTINUES into more digits is disqualifying.
 #: #10203 review round 6 (P2): the letters segment uses the WRITE side's OWN
 #: alphabet (``[A-Za-z][A-Za-z0-9]*``), not ``[A-Za-z]{2,}``. The narrower form
 #: disagreed with ``_IDENTIFIER_SPAN_RE`` on every one-character prefix —
@@ -140,7 +154,9 @@ _IDENTIFIER_SEP_RE = re.compile(r"[-_ ]")
 #: dashes, spaces, or none". The read side is allowed to be the PERMISSIVE
 #: half, so the fix widens IT rather than narrowing what the write side mints.
 _SPACED_PAIR_RE = re.compile(
-    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:[ \t]+\d{2,}(?![-_]))+)(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])"
+    r"([A-Za-z][A-Za-z0-9]*(?:[ \t]+\d{2,}(?![-_:.,%/]\d|%))+)"
+    r"(?![A-Za-z0-9])"
 )
 
 

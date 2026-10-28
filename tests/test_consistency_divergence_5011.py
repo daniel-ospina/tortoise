@@ -501,6 +501,63 @@ def test_the_graph_fingerprint_is_alias_invariant(proj, tmp_path):
         "search_keys divergence would be invisible")
 
 
+def test_the_checkers_verdict_does_not_depend_on_the_checkers_env(
+        proj, tmp_path, monkeypatch):
+    """#10203 review round 7 (F2, blocking): the alias strip must be
+    UNCONDITIONAL — a verifier whose verdict is a function of the verifier's own
+    environment is not a verifier.
+
+    The strip derived through ``point_identifier_aliases``, which returns ``[]``
+    whenever ``TORTOISE_IDENTIFIER_TOKENS`` is off (its WRITE-side gate). So a
+    graph written with the shipped default ON, read by a checker whose process
+    had the switch OFF, compared the node's ``"deploy inv20240091 failed"``
+    against a journal reference that canonicalised to ``"deploy failed"``:
+    ``divergence="content"`` on a FAITHFUL graph. ``_graph_fingerprint`` reads
+    the same canonical view, so ``db_hash`` moved with the env too — a stored
+    baseline then read back as ``unrecorded-mutation``, and moved back when the
+    operator flipped the switch again.
+
+    That matters because the switch exists to be flipped DURING A BISECT: an
+    operator measuring a bad batch would get a checker that changes its answer
+    about an unchanged journal+graph pair.
+
+    (1) Fails on the pre-fix strip: under the OFF env the check reports
+        ``ok=False`` / ``divergence="content"`` and a ``db_hash`` that differs
+        from the ON run — both on an unmodified fixture.
+    (2) Reachable: the point really carries the alias (asserted on the node
+        first), and the env is the ONLY thing that differs between the runs.
+    """
+    from tortoise.env_truthy import env_flag
+
+    log_path = str(tmp_path / "ident-env.jsonl")
+    monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
+    _seed(proj, log_path, [_pt("p1", "deploy INV-2024-0091 failed")])
+
+    rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN n.search_keys")
+    stored = rows.result_set[0][0] if rows.result_set else None
+    assert stored and "inv20240091" in str(stored), (
+        f"the fixture must carry the derived alias, or this pin is vacuous: "
+        f"{stored!r}")
+
+    while_on = check_consistency(log_path, proj)
+    assert while_on["ok"] is True, while_on
+
+    monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "0")
+    assert env_flag("TORTOISE_IDENTIFIER_TOKENS", True) is False, (
+        "the kill switch did not take effect, so the second read is not the "
+        "OFF case this test is about")
+    while_off = check_consistency(log_path, proj)
+    assert while_off["ok"] is True, (
+        "``check_consistency`` answered differently about an UNCHANGED "
+        "journal+graph pair because the CHECKER's env changed — the derived "
+        f"alias is being compared: {while_off['divergent_points']}")
+    assert while_off["divergence"] is None, while_off
+    assert while_off["db_hash"] == while_on["db_hash"], (
+        "``db_hash`` moved with the checker's env, so a stored baseline reads "
+        "back as `unrecorded-mutation` after an operator flips the bisect "
+        f"switch: on={while_on['db_hash']} off={while_off['db_hash']}")
+
+
 def test_uncarried_list_is_empty_when_the_journal_has_no_such_field(proj, tmp_path):
     """The negative control for the test above: without the field, the report
     must be empty — otherwise ``uncarried_journal_fields`` is a constant.
