@@ -2640,6 +2640,33 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "both stamp `default_graph_id`, so a `no_tenant` from either is the "
         "default row failing to be NAMED, i.e. a fail-and-fix"
     )
+    # ⛔ The claim is not the VERDICT. Measured at the merge head: inverting
+    # `a **fail-and-fix**, not a designed state` to `a **designed state**, not a
+    # fail-and-fix`, deleting it with the mechanism, or deleting ONLY the
+    # mechanism all left the suite green — so the paragraph's operative
+    # conclusion (and the evidence it rests on) could be reversed while the
+    # pinned claim sentence survived, which is how an operator gets told to
+    # IGNORE genuine `no_tenant` growth from a session/JWT or `oat_` credential.
+    # This is the class the sibling no-nameable-row VERDICT pin already closes
+    # ("so it is a fail-and-fix as well"), and the same reason the `circuit_open`
+    # EVIDENCE is pinned above: a claim whose consequence is unpinned is prose.
+    assert re.search(
+        r"a \*\*fail-and-fix\*\*, not a designed\s+state \(#10046\)", flat
+    ), (
+        "the #10046 arm's VERDICT is unpinned — 'a **designed state**, not a "
+        "fail-and-fix' leaves every other pin green (measured), which tells an "
+        "operator to IGNORE genuine `no_tenant` growth from a session/JWT or "
+        "OAuth `oat_` credential"
+    )
+    assert re.search(
+        r"`hosted_api\._session_user_org` and `oauth\.resolve_oauth_access_token` "
+        r"put\s+the",
+        flat,
+    ), (
+        "the #10046 arm names no resolution site, so a reader cannot check WHY "
+        "neither credential class is designed residue — the two symbols ARE the "
+        "evidence, and dropping them leaves the verdict resting on nothing"
+    )
     assert not re.search(r"carries no\s+`default_graph_id` at all", flat), (
         "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10046 "
         "'RESOLUTION gap at the credential' claim is back. The CLAIM is measured by "
