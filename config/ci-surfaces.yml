@@ -3914,6 +3914,32 @@ surfaces:
   # *docs-only* diff, where NO surface is selected at all (#9089 review).
   - test_7949_capstone_measure.py
   - test_7949_capstone_verdict_check.py
+  # #7949 E5: the WRITE-BACK half of E5's criterion — a fresh run of the registered
+  # raw-vs-narrative scorer over the committed arm receipts, compared cell by cell
+  # against the table §10 publishes. The run half was pinned
+  # (`tests/eval/write_path/test_score_qualifiers.py::
+  # test_the_committed_score_artifact_regenerates_byte_identically`); the write-back
+  # half had NO pin, so the architecture doc's decisive table could be retyped or
+  # deleted while every gate stayed green and #7949/#7947 kept citing it. Stdlib
+  # only, no DB/network/model, ~2.4 s.
+  #
+  # ⚠️ This `core` row is required for manifest INTEGRITY, not for selection —
+  # measured: delete it and `classify_test_file()` returns None, so
+  # `tools/ci_selection.py --integrity` reds naming this file. It is NOT what
+  # selects the pin on a scorer diff: every tier-2 selection is `tier1 ∪ surfaces`
+  # (`tools/ci_selection.py`, the `files = set(tier1)` statement — cited WITHOUT a
+  # line number on purpose: `:2983` was correct when this comment was written and
+  # had rotted to `:3009` by the next merge, the same `.py:line` rot this PR's own
+  # evidence doc names), so `tier1` alone selects this pin on an instrument change,
+  # and adding/removing this row changes that 706-file selection by nothing
+  # (#10108 review P3; 734 until `#10206` took `tests/eval/**` out of the gating
+  # shard set). `core` is also NOT what
+  # reaches the docs-only diff: measured,
+  # `select(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])` → surfaces `[]`, and
+  # only `tier1` runs. That is why the row below exists, and the `tier1` comment
+  # states the same thing — reading this comment as "`core` covers the docs edit"
+  # would let the next lane delete the `tier1` row believing the pin still fires.
+  - test_7949_e5_section10_writeback.py
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),
   # the shared-hub tree state at measurement time must be recorded as un-recorded,
@@ -6678,6 +6704,19 @@ tier1:
 # is the one it covers. The `core` half is what `--integrity` reads.
 - test_7949_capstone_measure.py
 - test_7949_capstone_verdict_check.py
+# #10108 review (P1): the SAME document's E5 *write-back* pin (`core` above) —
+# `test_7949_e5_section10_writeback.py` binds §10's replicated-run table to a
+# fresh run of the registered scorer (`tests/eval/write_path/score_qualifiers.py`).
+# It is a pure, no-DB file/JSON read, and the diff class that can red it is a
+# docs-only edit of `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — exactly
+# the diff on which `docs/` takes NON_PYTHON_PREFIXES → `changed == []` →
+# `select()`'s early return → tier1 ONLY. Registered in `core` alone it was
+# asleep on the one change it exists to catch (retype a digit, or delete the
+# subsection, and it merged green), which is the same #4309/#3332/#3616
+# silent-drop class as the sibling rows above. Pinned behaviourally by
+# tests/test_ci_selection.py::test_7949_e5_section10_writeback_runs_on_a_docs_only_diff
+# and ::test_docs_scanning_gates_stay_in_tier1.
+- test_7949_e5_section10_writeback.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 # WHY THIS BLOCK EXISTS. `test-slow (b)` was reported as the CI critical path

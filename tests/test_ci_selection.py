@@ -182,6 +182,16 @@ def test_docs_scanning_gates_stay_in_tier1():
         "red on main (#4309/#3616 class, same dual registration as the six "
         "sibling test_extractor_v4_* doc guards)"
     )
+    assert "test_7949_e5_section10_writeback.py" in tier1, (
+        "#10108 review (P1): the E5 write-back pin binds "
+        "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md §10's replicated-run "
+        "table to a fresh run of the registered scorer — `docs/` is in "
+        "NON_PYTHON_PREFIXES and that document matches no SOURCE_PATTERNS "
+        "entry, so a docs-only edit of §10 runs tier1 only; registered in "
+        "`core` alone, retyping one digit or deleting the subsection merged "
+        "green while #7949/#7947 went on citing it (#4309 class, same dual "
+        "registration as the sibling capstone rows above)"
+    )
 
 
 def test_v4_membership_gate_runs_on_both_architecture_docs():
@@ -207,6 +217,35 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+
+def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
+    """#10108 review (P1): pin the SELECTION, not just the manifest string.
+
+    `tests/test_7949_e5_section10_writeback.py` compares §10's published
+    replicated-run figures against a fresh run of the registered scorer. The one
+    change that can red it is a docs-only edit of
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — the diff class on which
+    `docs/` is filtered out by NON_PYTHON_PREFIXES, the document matches no
+    SOURCE_PATTERNS entry, `changed` empties and `select()` takes the docs-only
+    early return, so tier1 is the ONLY surface that runs.
+
+    Measured before the fix: the document's plan was `surfaces=[]`, the tier-1
+    set (64 files) did not contain this file, and the pin was registered in
+    `core` alone — asleep on the exact change it exists to catch. The manifest
+    assertion in :func:`test_docs_scanning_gates_stay_in_tier1` catches a deleted
+    row; this catches a row that is present but no longer reaches the file
+    (#9778 review P2 made the same point for the declared-mechanism gate).
+    """
+    r = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_7949_e5_section10_writeback.py" in r["test_files"], (
+        "a docs-only edit of §10's replicated-run passage must select the pin "
+        "that binds it to the scorer — otherwise the table can be retyped, "
+        "edited one digit, or deleted and merge green (#10108 review P1, "
+        "#4309 class)"
+    )
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
