@@ -1537,6 +1537,44 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           BEFORE the gate sentinel, and its whole definition is pinned here precisely because of
 #:           that position: it cannot be rewritten into a tree edit without reding this allow-list.
 #:           The gate step itself is unchanged (sentinel) and keeps its position.
+#:   #9984 — `python-ci-gate` → `Aggregate matrix result`: ONE row appended to the LEGS heredoc
+#:           (`ci-introduced-failure|…|-`) plus a `failure|timed_out` case that DELEGATES a failed
+#:           test arm to that job instead of reddening on it alone. The job still has exactly ONE
+#:           step — no checkout, no `uses:`, no `env:`, no `$GITHUB_ENV`/`$GITHUB_PATH` write, no
+#:           exit-code swallowing, no early return; the sweep's marker words are unchanged and its
+#:           reachability is preserved (it is gated on `RED_LEGS` being empty, i.e. it still fires
+#:           for a need no row claimed). The predicate itself lives in a SEPARATE job precisely so
+#:           this pin's allow-list never has to widen.
+#:   #9984 review — `python-ci-gate` → `Aggregate matrix result`: the identity-blind sweep's
+#:           `cancelled` half is now swept UNCONDITIONALLY (it could never be delegated, so gating
+#:           it on `RED_LEGS` being empty only blinded this layer to a leg that never ran). Still
+#:           ONE step, still no `env:`/`uses:`/`$GITHUB_ENV` write, no exit-code swallowing, no early
+#:           return; the `failure|cancelled` sweep stays a literal line of code (#9240). The sibling
+#:           half of the same review — the verdict STEP's `if:` naming `timed_out` — is in the
+#:           `ci-introduced-failure` job and is pinned (step key allow-list) by
+#:           `tests/test_ci_new_failure_gate.py`, not by this digest.
+#:   #10206 (re-cut on rebase of #10202) — `changes`: three entries, all from #10206
+#:           (`646d30f9e1ef`), which edited the `changes` job without re-cutting this allow-list and
+#:           so left `main` red on this pin (measured: 46 failures of `test_the_ci_pin_*` at
+#:           `origin/main`, reproduced on a clean main worktree).
+#:             • `Non-gating lanes — what this gate does NOT run (#10194)` — a NEW step, `{name, run}`
+#:               only, no `uses:`/`env:`/`$GITHUB_ENV`/`$GITHUB_PATH` write and no exit-code
+#:               swallowing; it prints the non-gating lane and exits 0 on every path, and its POSITION
+#:               is pinned where the workflow declares it (between `Emit push matrix` and `Tier-2
+#:               duration split`).
+#:             • `Tiered selection` + `Emit push matrix (#1472/#6135)` — digest-only movement, and it
+#:               is COMMENT-only: `_code()` is byte-identical before and after #10206 and the key
+#:               set is unchanged (`id`/`name`/`run`), because the edit only rewrote the prose
+#:               (`slow_files - carve_out` → `slow_gating_files()`). Verified by diffing `_code()`
+#:               at `646d30f9e1ef^` against `origin/main`, not by reading the patch.
+#:   #9984 review (2) — `python-ci-gate` → `Aggregate matrix result`: the identity-blind
+#:           sweep's `failure` half stops being gated on `RED_LEGS` being EMPTY and starts
+#:           being gated on a COUNT (`RESULT_FAILS > ROW_FAILS`), because emptiness asked
+#:           the wrong question — it held whenever ANY leg was delegated, which blinded
+#:           the layer to a `failure` need that had no row of its own. Still ONE step,
+#:           still no `env:`/`uses:`/`$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
+#:           swallowing, no early return; `grep -qE 'failure|cancelled'` survives as a
+#:           literal line of code (#9240).
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1563,7 +1601,7 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     # deletes the whole failure sweep. Both leave every other check in this pin clean.
     "python-ci-gate": (
         ("Aggregate matrix result",
-         "3109139f187cee52e5a3b56192743f25ab7f44d691a7979176acf8f351b3f9ac"),
+         "c40947981e1f62d77e17de090244ed6e09a5877f6c61a32fbb87b31f291772d7"),
     ),
 }
 

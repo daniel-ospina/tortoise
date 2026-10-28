@@ -1873,7 +1873,8 @@ def run_bm25_query(
         cypher = (
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
-            "n.search_keys "
+            "n.search_keys, "
+            "coalesce(n.updatedAt, n.createdAt, '') "
             f"ORDER BY n.{id_field} ASC LIMIT $cap"
         )
         rows = graph.query(
@@ -1914,8 +1915,15 @@ def run_bm25_query(
         docs = [
             (row[0], index_text(row[1], row[2])) for row in rows if row[0]
         ]
+        # #10121: hand the arm the recency stamps it cannot derive from text, so
+        # its own tie resolves newest-first like every other leg.
+        _recency = {
+            row[0]: ("" if len(row) <= 3 or row[3] is None else str(row[3]))
+            for row in rows if row[0]
+        }
         ranked = bm25_rank(
-            query, docs, limit=limit, keep_numeric=keep_numeric)
+            query, docs, limit=limit, keep_numeric=keep_numeric,
+            recency=_recency)
         _breaker_record("bm25", True)
         _record(ran=True, degraded=False,
                 reason=("ok" if ranked else "empty_results"),
