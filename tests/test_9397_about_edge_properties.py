@@ -761,7 +761,8 @@ DIRECT_EDGE_CREATED_ATTR_GUARDS: dict[tuple[str, str], str] = {
 }
 
 #: The property. One ORIGINATED name; `idx` is the second recorded name, written
-#: by the record-layer projection as an INLINE pattern map (see `INLINE_FORM`).
+#: by the record-layer projection as an INLINE pattern map (see the third-form
+#: note below).
 PROPERTY = "confidence"
 #: The second name, and the form that writes it.
 SECOND_PROPERTY = "idx"
@@ -794,7 +795,12 @@ _SET_MAP = re.compile(r"SET\s+(\w+)\s*(\+=|=)\s*(\$|\{)")
 #: materializes — including an allowlisted `aboutObject` one. Found by the
 #: third review cycle: the first census missed the MAP form, the second missed
 #: this, and each time the census's own blindness was the defect.
-INLINE_FORM = "<inline-map>"
+#: ⛔ There is deliberately NO `INLINE_FORM` sentinel beside `MAP_FORM` here: the
+#: inline form's property NAMES are statically readable (`_INLINE_NAME`), so the
+#: census records the NAMES and never needed a form placeholder. One existed and
+#: nothing reached it, which in this file is the defect it names — *a rule that
+#: only lives in dead code is not a rule* (`#10200` review, cycle 6, measured: 0
+#: callers).
 _INLINE_BRACE = re.compile(r"\{([^{}]*)\}")
 _INLINE_NAME = re.compile(r"(\w+)\s*:")
 
@@ -4080,6 +4086,26 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "the exemption",
     "carries nothing",
     "writes nothing",
+    # ⛔ THE NEGATED-AUXILIARY FORMS — the same denial with the writer as the
+    # SUBJECT of the predicate instead of the object of a verb. The tuple above
+    # lists only the AFFIRMATIVE phrasings (`carries no property`, `writes
+    # nothing`), so changing one auxiliary escaped the owner's decision
+    # VERBATIM: *"`sdk.supersede_point` does not carry the binder's `confidence`
+    # on an about edge"* and *"`hosted_backup.restore_graph` itself never writes
+    # the attribute set at all"* were both GREEN at the `#10200` head, while the
+    # PR's own record claimed no passage may say it drops / carries no property
+    # (`#10200` review, cycle 6, executed).
+    # ⚠️ Each entry keeps the DETERMINER (`the` / `a` / `any`) on purpose: the bare
+    # auxiliary is also how these documents say true things about OTHER subjects
+    # (`ingest_corpus` "never writes a Source"), and a denial marker that fires on
+    # a neighbour's object reds true prose.
+    "does not carry the",
+    "does not carry a",
+    "does not write the",
+    "never carries the",
+    "never writes the",
+    "never writes a",
+    "no longer carries the",
 )
 
 #: What makes a denial a statement about HISTORY rather than about HEAD — read in
@@ -4104,12 +4130,13 @@ HISTORY_MARKERS: tuple[str, ...] = (
 #: supersede_point` is not a re-materializing writer"* as a stated verdict (it
 #: contains `re-materializ`) while leg 2 had no marker for it, so the ONE-WORD
 #: paraphrase of the retracted cycle-3 sentence was green on BOTH legs.
-#: ⛔ The negator vocabulary is `_MARKER_NEGATION_BEFORE_RE` / `_POST_NEGATION_RE`
-#: below — the scan `_marker_itself_negated` actually runs. The constant that used
-#: to sit here (`_NEGATOR_RE`, which additionally listed `fails to`, `stops` and
-#: `n't`) was deleted with the window machinery in `#10200` review cycle 5: nothing
-#: reached it. ⚠️ STATED LIMIT, not coverage: `fails to` / `stops` / `n't` / a
-#: BEFORE-positioned `no longer` are therefore NOT read as class negators today.
+#: ⛔ The negator vocabulary is `_MARKER_NEGATION_BEFORE_RE` /
+#: `_MARKER_NEGATION_AFTER_RE` below — the scan `_marker_itself_negated` actually
+#: runs. The constant that used to sit here (`_NEGATOR_RE`, which additionally
+#: listed `fails to`, `stops` and `n't`) was deleted with the window machinery in
+#: `#10200` review cycle 5: nothing reached it. ⚠️ STATED LIMIT, not coverage:
+#: `fails to` / `stops` / `n't` / a BEFORE-positioned `no longer` are therefore NOT
+#: read as class negators today.
 #: They are recorded here so a lane that widens the live scan knows what the dead
 #: one claimed, rather than rediscovering it.
 
@@ -4123,6 +4150,28 @@ HISTORY_MARKERS: tuple[str, ...] = (
 #: separates two units, so it is a clause boundary here even though it is not a
 #: sentence boundary.
 _CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|", ",")
+
+#: Where the HISTORY escape's clause ends: `_CLAUSE_BREAKS` PLUS the coordinators
+#: that join two PREDICATES. ⛔ PUNCTUATION ALONE WAS FAIL-OPEN: a comma-less
+#: coordination put a history marker and a present-tense denial in ONE "clause",
+#: so `_history_in_clause` excused the denial — *"`sdk.supersede_point` was a
+#: declared false positive before `#9417` and it still drops the property on an
+#: about edge"* was GREEN, one omitted comma away from the cycle-3 sentence this
+#: leg exists for (`#10200` review, cycle 6, executed). `and` / `but` / `yet` /
+#: `while` / `whereas` each start a new predication, which is exactly the unit the
+#: history marker has to be in.
+#: ⚠️ Deliberately NOT applied to `_CLAUSE_BREAKS` itself: the count rule reads its
+#: window from that tuple, and `_declared_false_positive_counts` must still see a
+#: numeral in a coordinated clause ("6 writers, 3 by property MAP, and 1 declared
+#: false positive") rather than silently lose it.
+_HISTORY_BREAKS: tuple[str, ...] = (
+    *_CLAUSE_BREAKS,
+    " and ",
+    " but ",
+    " yet ",
+    " while ",
+    " whereas ",
+)
 
 #: ⛔ SUPERSEDED — this block used to define the NEGATOR's break set
 #: (`_NEGATOR_BREAKS`, `_CLAUSE_BREAKS` minus `,`) and a coordinating-comma
@@ -4157,8 +4206,11 @@ _CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|", ",")
 #: ⚠️ Deliberately NOT a whole-clause scan: a negator belonging to a NEIGHBOURING
 #: predicate reds true prose — measured on §13's *"A third NAMED form writer does
 #: not originate it but re-produces it on replay"*, whose `not` belongs to
-#: `originate`, not to the class.
-_POST_NEGATION_RE = re.compile(r"\bno\s+(?:longer|more|further)\b", re.I)
+#: `originate`, not to the class. That rule is `_MARKER_NEGATION_AFTER_RE` (the
+#: POST half of `_marker_itself_negated`), and the clause-wide scan this comment
+#: used to introduce (`_POST_NEGATION_RE`) is DELETED: it ran over `_clause_at`, so
+#: a neighbour's `no longer` suppressed a class marker it does not govern
+#: (`#10200` review, cycle 6, executed).
 
 #: Quantifier negations negate a COUNT, not the class: *"is not the ONLY writer
 #: that carries the set by property MAP"* AFFIRMS that this writer carries it, and
@@ -4170,7 +4222,7 @@ _POST_NEGATION_RE = re.compile(r"\bno\s+(?:longer|more|further)\b", re.I)
 #: in `_has_class_negator` until `#10200` review cycle 5, i.e. in dead code, so
 #: this exclusion never ran; see the SUPERSEDED note above.
 _QUANTIFIER_NEGATION_RE = re.compile(
-    r"\bnot\s+(?:the\s+)?only\b|\bnot\s+solely\b", re.I
+    r"\bnot\s+(?:the\s+)?(?:only|merely|just|simply)\b|\bnot\s+solely\b", re.I
 )
 
 
@@ -4185,14 +4237,14 @@ def _class_marker_negated(sentence: str, match) -> bool:
     `sdk.supersede_point` re-materializes the set by property MAP"* red as `not
     property MAP`), and it CLEARED the exemption direction's own contradiction
     (*"…which never loses a value, is a counted MAP form writer"* was green) —
-    because three of this file's four call sites shared it. The AFTER half keeps
-    `_POST_NEGATION_RE` over the CLAUSE: `no longer` follows the whole predicate,
-    not the marker's span, so an `match.end()`-anchored test would miss
-    *"is a re-materializing writer no longer"*.
+    because three of this file's four call sites shared it. The AFTER half is
+    PREDICATE-scoped too (`_MARKER_NEGATION_AFTER_RE`: ≤ THREE word-tokens behind
+    the marker, never across the clause), because the clause-wide read red TRUE
+    prose whenever a neighbour's `no longer` sat in the same clause — see that
+    constant (`#10200` review, cycle 6, executed).
     """
-    return _marker_itself_negated(sentence, match) or bool(
-        _POST_NEGATION_RE.search(_clause_at(sentence, match.start()))
-    )
+    return _marker_itself_negated(sentence, match)
+
 
 #: A declared false positive described as COUNTED — the same contradiction from
 #: the other side: an exemption the census counts is a writer described as
@@ -4224,6 +4276,12 @@ EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
     "MAP form writer",
     "attribute set by property map",
     "re materializ",
+    # ⛔ THE VERB FORM of "counted", which the participle above does not cover: an
+    # exemption ASSERTED to be one of the counted rows — *"`projection.
+    # _rebuild_all_replay` counts as a writer of the attribute set"* — was GREEN
+    # (`#10200` review, cycle 6, executed).
+    "counts as a writer",
+    "counts as one",
 )
 
 #: A DECLARED FALSE POSITIVE COUNT, in the spellings the documents use. ⛔ The
@@ -4289,6 +4347,17 @@ def _claim_sentences(text: str) -> list[str]:
     documents are tabular (a verdict stated in one row satisfies the run) and
     does not weaken the DENIAL half, which is the half that caught cycles 3 and
     4 — a denial anywhere in the run still reds it.
+    ⛔ The same looseness applies to PROSE, and it is NOT merely a table artefact:
+    measured at the `#10200` review (cycle 6), the guarded passages carry sentences
+    of ~3.9k chars (§13) and ~780 (§11.1), so class vocabulary printed for ONE
+    writer satisfies a DIFFERENT writer named later in the same sentence. A
+    CLAUSE-scoped affirmative rule was measured as the alternative and is NOT
+    available: 13 of the 17 live statements put the symbol and its verdict in
+    different clauses (the verdict usually rides in the appositive or the following
+    clause, e.g. "`_fold_entity_linked_reason` (the replay fold re-SETs it …)"), so
+    clause-scoping would red most of the true prose this leg exists to protect.
+    The bound is therefore the SENTENCE, the DENIAL half is per-occurrence, and the
+    asymmetry is recorded here rather than claimed away.
     """
     flat = _flat(text)
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", flat) if part.strip()]
@@ -4345,6 +4414,10 @@ def _history_in_clause(low: str, match) -> bool:
     reference to an open defect made the retracted cycle-3 sentence green again
     (`#10200` review). A history marker says the state CHANGED, and the clause
     that carries the denial is the clause that says so.
+    ⛔ The clause ends at a COORDINATOR as well as at punctuation
+    (`_HISTORY_BREAKS`): punctuation alone left *"… before `#9417` and it still
+    drops the property"* in ONE clause, so the historical hapt escaped the
+    present-tense denial it did not qualify (`#10200` review, cycle 6, executed).
     ⛔ PER OCCURRENCE, not per marker. Quantifying per marker (`any` over the
     marker's occurrences, which is what this function did) let ONE history-marked
     occurrence excuse a second, present-tense denial of the same marker in the
@@ -4353,7 +4426,12 @@ def _history_in_clause(low: str, match) -> bool:
     and it is exactly the `#10149` class this leg exists for: history kept, the
     denial NOT corrected (`#10200` review, cycle 5, executed).
     """
-    clause = _clause_at(low, match.start())
+    lo = max((low.rfind(brk, 0, match.start()) for brk in _HISTORY_BREAKS), default=-1)
+    hi = min(
+        (pos for pos in (low.find(brk, match.start()) for brk in _HISTORY_BREAKS) if pos != -1),
+        default=len(low),
+    )
+    clause = low[lo + 1:hi]
     return any(history.lower() in clause for history in HISTORY_MARKERS)
 
 
@@ -4401,8 +4479,17 @@ _MARKER_NEGATION_BEFORE_RE = re.compile(
     r"(?:[\w'’\-]+\s+){0,3}$",
     re.I,
 )
+#: POST-positioned negation of the marker's OWN predicate: `no longer` AFTER
+#: the marker, within ≤ THREE word-tokens of it, never across the clause.
+#: ⛔ The old form searched the WHOLE CLAUSE in both directions, so a `no longer`
+#: belonging to a NEIGHBOURING predicate suppressed a class marker it does not
+#: govern — *"An unconditional `SET nr += $attrs` no longer applies to
+#: `sdk.supersede_point`; it uses `ON CREATE`"* red as `not SET nr +=`, and that
+#: is TRUE prose (it paraphrases §13's own sentence). The clause-wide read is the
+#: same "negator of a neighbour" defect the BEFORE half's docstring cites as
+#: measured, on the other side (`#10200` review, cycle 6, executed).
 _MARKER_NEGATION_AFTER_RE = re.compile(
-    r"^\s*(?:no\s+longer|no\s+more|no\s+further)\b", re.I
+    r"\A(?:\s*[\w'\u2019\-]+){0,3}\s+no\s+(?:longer|more|further)\b", re.I
 )
 
 
@@ -5245,6 +5332,119 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "a counted writer, so the corpus's own wording is the trigger and the red "
         "can only be cleared by deleting the correction"
     )
+    # ⛔ Probe 17 (`#10200` review, cycle 6): the NEGATED-AUXILIARY spellings of
+    # the owner's denial. The tuple listed only the AFFIRMATIVE phrasings, so the
+    # same sentence with the writer as SUBJECT escaped verbatim.
+    negated_auxiliary = (
+        (
+            "probe",
+            "`sdk.supersede_point` does not carry the binder's `confidence` on an "
+            "about edge.",
+        ),
+        (
+            "probe",
+            "`hosted_backup.restore_graph` itself never writes the attribute set "
+            "at all.",
+        ),
+    )
+    assert all(
+        any(symbol in item for item in _denied_verdicts([sentence]))
+        for sentence, symbol in zip(
+            negated_auxiliary, ("supersede_point", "restore_graph"), strict=True
+        )
+    ), (
+        "a counted writer denied with a NEGATED AUXILIARY ('does not carry the",
+        " …', 'never writes the …') is green, so the owner's decision is escaped "
+        "by one word — the measured `#10200` cycle-6 finding"
+    )
+    # ⛔ Probe 18 (`#10200` review, cycle 6): the HISTORY escape's clause ended at
+    # punctuation only, so a comma-less coordination put the history marker and a
+    # present-tense denial in ONE clause and the denial was excused.
+    comma_less_history = (
+        (
+            "probe",
+            "`sdk.supersede_point` was a declared false positive before `#9417` "
+            "and it still drops the property on an about edge.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` was a declared false positive before `#9417` "
+            "but it carries no property on an about edge.",
+        ),
+    )
+    assert all(
+        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        for sentence in comma_less_history
+    ), (
+        "the history escape spans a COMMA-LESS coordination, so the cycle-3 "
+        "denial is one omitted comma away from green — reds on `_HISTORY_BREAKS`"
+    )
+    # … and the TRUE history sentence stays green under the same coordinator rule
+    # (a fix that reds the correction record is worse than the fail-open).
+    assert not any(
+        "supersede_point" in item
+        for item in _denied_verdicts(
+            [
+                (
+                    "probe",
+                    "`sdk.supersede_point` was a declared false positive before "
+                    "`#9417` but it is a counted MAP-form writer now.",
+                )
+            ]
+        )
+    ), (
+        "the coordinator boundary red a TRUE history sentence, so the correction "
+        "record cannot be written"
+    )
+    # ⛔ Probe 19 (`#10200` review, cycle 6): the EXEMPT row's VERB form. Only the
+    # participle `counted` was listed, so *"counts as a writer of the attribute
+    # set"* — the exemption asserted to be one of the counted rows — was green.
+    assert any(
+        "_rebuild_all_replay" in item
+        for item in _denied_verdicts(
+            [
+                (
+                    "probe",
+                    "`projection._rebuild_all_replay` counts as a writer of the "
+                    "attribute set.",
+                )
+            ]
+        )
+    ), (
+        "the VERB form of 'called counted' is not seen for the exemption row, so "
+        "the contradiction ships in the documents' verb voice"
+    )
+    # ⛔ Probe 20 (`#10200` review, cycle 6): TRUE prose must stay green when a
+    # NEIGHBOUR predicate carries the negator — `not merely` / `not just` are
+    # QUANTIFIER negations, and the clause-wide post-negation scan used to reach
+    # across a semicolon to a neighbour's `no longer`.
+    true_prose_neighbours = (
+        (
+            "probe",
+            "`sdk.supersede_point` is not merely a MAP form writer but the "
+            "canonical one.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` is not just a MAP form writer but the "
+            "canonical one.",
+        ),
+        (
+            "probe",
+            "An unconditional `SET nr += $attrs` no longer applies to `sdk."
+            "supersede_point`; it uses `ON CREATE`.",
+        ),
+    )
+    neighbour_reds = [
+        offender
+        for sentence in true_prose_neighbours
+        for offender in _denied_verdicts([sentence])
+    ]
+    assert not neighbour_reds, (
+        "TRUE prose reds because a quantifier negation or a NEIGHBOUR's `no "
+        "longer` is read as a class denial — the failure mode that pushes an "
+        "editor to weaken correct sentences: " + repr(neighbour_reds)
+    )
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
         "a corrected passage contradicts a census table:\n  "
@@ -5287,9 +5487,40 @@ def _declared_false_positive_counts(
                     brk in flat[position : phrase.start()] for brk in _CLAUSE_BREAKS
                 )
             ]
-            if not before:
-                continue
-            position, token = max(before)
+            if before:
+                position, token = max(before)
+                number = int(token) if token.isdigit() else numbers[token]
+                label_span = flat[position:phrase.end()]
+            else:
+                # ⛔ A count stated AFTER the phrase is the same statement in the
+                # documents' other voice, and the rule read only BACKWARD — *"The
+                # declared false positives are two in total"* produced NOTHING, so
+                # silence and an uncovered spelling were indistinguishable and a
+                # stale count in that form shipped green (`#10200` review, cycle 6,
+                # executed). Same clause and the same window, read forward.
+                after = [
+                    (position, token)
+                    for position, token in tokens
+                    if position >= phrase.end()
+                    and position - phrase.end() <= _COUNT_WINDOW
+                    and not any(
+                        brk in flat[phrase.end() : position] for brk in _CLAUSE_BREAKS
+                    )
+                ]
+                # … and *"the ONLY declared false positive"* states a count of ONE
+                # by construction. Absent from both documents today; it is read so
+                # that writing it cannot silently state nothing.
+                only = " only " in f" {_clause_at(flat.lower(), phrase.start())} "
+                if after:
+                    position, token = min(after)
+                    number = int(token) if token.isdigit() else numbers[token]
+                    label_span = flat[phrase.start() : position + len(token)]
+                elif only:
+                    position = phrase.start()
+                    number = 1
+                    label_span = flat[position:phrase.end()]
+                else:
+                    continue
             # A statement about HISTORY is TRUE and stays writable, the same escape
             # the denial leg carries (`#10200` review, cycle 3: the count leg had no
             # history notion, so *"before `#9417` it held two declared false
@@ -5299,8 +5530,7 @@ def _declared_false_positive_counts(
                 for history in HISTORY_MARKERS
             ):
                 continue
-            number = int(token) if token.isdigit() else numbers[token]
-            found.append((f"{label}: {flat[position:phrase.end()][:120]!r}", number))
+            found.append((f"{label}: {label_span[:120]!r}", number))
     return found
 
 
@@ -5425,6 +5655,32 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
         "a history-marked count is read as a present-tense claim, so the "
         "correction record the decision blesses reds for being true"
     )
+    # ⛔ Probe (`#10200` review, cycle 6): a count stated AFTER the phrase, and the
+    # `only` form, were both read as NOTHING — so silence and an uncovered spelling
+    # were indistinguishable and a stale count in either shape shipped green.
+    after_phrase = (
+        ("probe", "The declared false positives are two in total."),
+        ("probe", "The declared FALSE POSITIVES number 2."),
+    )
+    assert [
+        count for _where, count in _declared_false_positive_counts(list(after_phrase))
+    ] == [2, 2], (
+        "a count written AFTER the phrase is not read at all, so the rule is "
+        "BACKWARD-only and a stale count in the forward voice pins nothing"
+    )
+    only_phrase = (
+        (
+            "probe",
+            "the guard declares the only declared false positive as "
+            "`projection._rebuild_all_replay`",
+        ),
+    )
+    assert [
+        count for _where, count in _declared_false_positive_counts(list(only_phrase))
+    ] == [1], (
+        "the `only …` form states a count of one by construction and is read as "
+        "silence, so writing it would state nothing"
+    )
     counts = _declared_false_positive_counts(sections)
     assert counts, (
         "no corrected passage states how many declared false positives there "
@@ -5528,6 +5784,49 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the definite-articled form. Absent from both "
         "documents until someone writes it; the documents write `both exemptions` "
         "and `merely exempting` instead, neither of which is a denial"
+    ),
+    "counts as a writer": (
+        "contradiction vocabulary — the VERB form of 'called counted', absent from "
+        "both documents until someone writes it (`#10200` review, cycle 6)"
+    ),
+    "counts as one": (
+        "contradiction vocabulary — the pronoun form of the same claim, absent "
+        "until someone writes it (`#10200` review, cycle 6)"
+    ),
+    "does not write": (
+        "contradiction vocabulary — the bare form of the same denial; absent by "
+        "design, its determiner form is the live marker (`does not write the`)"
+    ),
+    "does not carry the": (
+        "contradiction vocabulary — the determiner form of 'carry no property', "
+        "absent from both documents until someone writes it (the `#10149` denial "
+        "is written affirmatively, `drops the`). Live in `DENIAL_MARKERS` so the "
+        "paraphrase reds the moment it is written"
+    ),
+    "does not carry a": (
+        "contradiction vocabulary — the indefinite-determiner form of the same "
+        "denial, absent until someone writes it (`#10200` review, cycle 6)"
+    ),
+    "does not write the": (
+        "contradiction vocabulary — the determiner form of 'writes nothing', "
+        "absent until someone writes it (`#10200` review, cycle 6)"
+    ),
+    "never carries the": (
+        "contradiction vocabulary — the NEVER-auxiliary determiner form, absent "
+        "until someone writes it (`#10200` review, cycle 6)"
+    ),
+    "never writes the": (
+        "contradiction vocabulary — the determiner form of the NEVER auxiliary, "
+        "absent until someone writes it; it is the spelling that would have "
+        "caught the measured `restore_graph` paraphrase (`#10200` review, cycle 6)"
+    ),
+    "no longer carries the": (
+        "contradiction vocabulary — the post-negated auxiliary determiner form, "
+        "absent until someone writes it (`#10200` review, cycle 6)"
+    ),
+    "no longer writes": (
+        "contradiction vocabulary — the bare post-negated auxiliary form; absent "
+        "by design, its determiner form is recorded above"
     ),
 }
 
