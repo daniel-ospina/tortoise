@@ -1061,12 +1061,27 @@ def _valid_transit_pairs(value):
 def _point_source_refs(extracted_from) -> list:
     """The Point's OWN ``extractedFrom`` refs, normalized exactly as
     ``_link_source`` fans them out: a bare ``str`` is ONE ref (never iterated
-    character-wise), any other value is a sequence, and falsy members are
-    skipped. ``[]`` when the Point has no ``extractedFrom`` at all."""
-    if not extracted_from:
+    character-wise), a ``list``/``tuple`` is that series, falsy members are
+    skipped, and **any other container fans out to NOTHING** (#8171). ``[]``
+    when the Point has no ``extractedFrom`` at all.
+
+    That last clause is `_link_source`'s CONTAINER gate, restated rather than
+    left to the choke point — because this function runs BEFORE it. ``list()``
+    on a mapping yields its KEYS, each a legal-looking string, so a
+    ``{"url": ..., "kind": ...}`` value became ``["url", "kind"]`` and each
+    key was minted as its own ``:Source`` — INVENTED provenance, which is
+    "worse than none" (design contract #3). `_upsert_point_edges` hands
+    `_link_source` the result of THIS function, so the gate at the choke point
+    never sees the container it would have refused; the replay/apply lane lost
+    the guarantee `origin/main` still had (it passed the payload value through
+    unmodified). ``record_projection._point_raw_refs`` carries the identical
+    gate for the record lane, which is why only that lane was safe."""
+    if isinstance(extracted_from, str):
+        refs = [extracted_from]
+    elif isinstance(extracted_from, (list, tuple)):
+        refs = list(extracted_from)
+    else:
         return []
-    refs = ([extracted_from] if isinstance(extracted_from, str)
-            else list(extracted_from))
     return [r for r in refs if r]
 
 
