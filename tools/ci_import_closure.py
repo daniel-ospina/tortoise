@@ -126,7 +126,10 @@ CACHE_DIR = REPO / ".ci-selection" / "closure-cache"
 # `artifact_errors` entry, and then cached the result because `artifact_errors`
 # was empty — so "we could not read the ground truth" was indistinguishable from
 # "nothing failed", permanently. Nothing reads a v1 file now.
-GROUND_TRUTH_VERSION = 2
+# #10143 review P2 (v2 → v3): the truth gained `runs_seen` / `test_legs_seen` and
+# the sibling-leg masking check, so a v2 file cannot answer "did I see any ground
+# truth at all". Nothing reads a v2 file now.
+GROUND_TRUTH_VERSION = 3
 
 # The package whose modules a closure REPORTS. Other in-repo roots (`tests/`,
 # `battery/`, `tools/`) are indexed and TRAVERSED — a test that imports
@@ -841,7 +844,7 @@ def core_test_files(manifest: dict, unresolved: list[str] | None = None) -> list
     or deleted member and used to say nothing, which contradicts this module's
     stated contract ("anything the analysis CANNOT resolve is reported … and
     never dropped") and silently shrinks the denominator every published
-    percentage is a ratio over — `742`, `186/258`, `84.6 %`, the 628-file split
+    percentage is a ratio over — `745`, `186/258`, `84.6 %`, the 630-file split
     ceiling — with no red anywhere. Pass `unresolved` to collect them; the
     caller surfaces them.
     """
@@ -1045,12 +1048,50 @@ def artifact_names_for_job(job_name: str) -> list[str]:
     Shim: `test (f)` uploads `pytest-log-test-f`; a non-matrix job uploads
     `pytest-log-<job>`. The caller falls back to "all pytest-log artifacts in the
     run" when the expected name is absent, so a future rename degrades to a wider
-    (never narrower) read.
+    (never narrower) read — but it records the substitution as PARTIAL first
+    (`pr_ground_truth`), because a SIBLING leg's junit is not this leg's truth.
     """
     if "(" in job_name and job_name.endswith(")"):
         base, _, label = job_name.rpartition(" (")
         return [f"pytest-log-{base}-{label.rstrip(')')}"]
     return [f"pytest-log-{job_name}"]
+
+
+# ⛔ THE LEGS THE SELECTOR DOES NOT MODEL, AND WHOSE JUNIT THIS HARNESS STILL
+# READS (#10143 review P2).
+#
+# `cmd_validate` builds "today's selection" from `select()`. The workflow also
+# runs legs that no diff gate produces, and `pr_ground_truth` reads THEIR junit
+# as ground truth too, because a red run's listing carries every leg's
+# `pytest-log-*` artifact. A failure from such a leg therefore used to land in
+# `not_in_current` — the one branch that ABSOLVES the derivation — so it was never
+# counted as a miss and never made the window PARTIAL. Measured reachability:
+# `tests/test_9555_narrative_carrier.py` is on `api` + `core` but not `tier1`, and
+# `test-record-postgres` runs it on every PR, so a docs-only or `tools/`-only diff
+# took the tier-1 early return and the file fell outside `current_rel`.
+#
+# Derived is `(current - core) | derived_core`, so a file listed here stays
+# selected by BOTH sides: modelling the leg is what keeps the comparison honest,
+# and NOT modelling it would under-count misses one way or over-cover the other.
+# Source — `.github/workflows/python-ci.yml`:
+#
+#   test-track-b         :2527-2531  `FILES="tests/test_ingest_safety.py"`,
+#                                     run with `-m track_b`
+#   test-record-postgres :3640-3644  four literals, run unconditionally
+#
+# ⚠️ `test-d14-hosted-api` (:3087) is `pytest tests/ -m embedded_only` — a MARKER
+# over the whole tree, so its set is not a hand-list, and guessing WIDER is the
+# dangerous direction here (everything in `current` is also in `derived`, so
+# over-covering a leg would HIDE misses). It is deliberately NOT modelled: a
+# failure it contributes lands in `not_in_current`, which now makes the window
+# PARTIAL and is named in the console — unread, never absolved.
+ALWAYS_ON_LEG_FILES: tuple[str, ...] = (
+    "tests/test_ingest_safety.py",                          # test-track-b
+    "tests/test_9078_record_written_by_production_path.py",  # test-record-postgres
+    "tests/test_9555_narrative_carrier.py",
+    "tests/test_9664_capstone_connector_to_record.py",
+    "tests/test_9567_record_capstone.py",
+)
 
 
 def _path_from_classname(classname: str) -> str:
@@ -1150,8 +1191,17 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
 
     Returns `{"failed_files": [...], "failed_tests": [...], "jobs": [...],
     "job_failed_without_test_failure": [...], "artifacts": N,
-    "artifact_errors": [...]}`. Cached per head sha, so a second run of a window
-    is offline and instant — the measurement has to be reproducible.
+    "runs_seen": N, "test_legs_seen": N, "artifact_errors": [...]}`. Cached per
+    head sha, so a second run of a window is offline and instant — the
+    measurement has to be reproducible.
+
+    `runs_seen` / `test_legs_seen` exist because "I read nothing" and "nothing
+    failed" are otherwise byte-identical (#10143 review P2): a head sha whose
+    runs are gone (completed runs are deletable, artifacts expire), or whose
+    only check runs are non-`test*`, produced `jobs: []`, `artifacts: 0`,
+    `artifact_errors: []` — indistinguishable from a green PR, cached as such,
+    and exempt from the window's PARTIAL verdict. Callers must treat a zero as
+    "never assessed", never as "clean".
     """
     cache.mkdir(parents=True, exist_ok=True)
     cached = cache / f"truth-v{GROUND_TRUTH_VERSION}-{sha}.json"
@@ -1162,7 +1212,9 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
             pass
     failed_jobs: list[str] = []
     run_ids: set[int] = set()
-    for run in _check_runs(repo, sha):
+    check_runs = _check_runs(repo, sha)
+    test_legs_seen = 0
+    for run in check_runs:
         # ⛔ THE RED-CLASS SET, NOT EQUALITY WITH "failure" (#10143 review P2).
         # A `test*` leg concluding `timed_out` was dropped HERE, before
         # `failed_jobs` existed — so neither `artifact_errors` nor the window's
@@ -1181,11 +1233,12 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         # artifacts were never read, `artifact_errors` stayed empty and a window
         # containing it could still exit 0 (#10143 review P2).
         conclusion = run.get("conclusion")
-        if conclusion in {"success", "neutral", "skipped", "cancelled",
-                          "stale"}:
-            continue
         name = run.get("name") or ""
         if not name.startswith("test"):
+            continue
+        test_legs_seen += 1
+        if conclusion in {"success", "neutral", "skipped", "cancelled",
+                          "stale"}:
             continue
         failed_jobs.append(name)
         rid = _run_id(run)
@@ -1202,6 +1255,28 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
             "api", f"repos/{repo}/actions/runs/{rid}/artifacts?per_page=100",
         ])
         arts = listing.get("artifacts", []) if isinstance(listing, dict) else []
+        present = {str(a.get("name", "")) for a in arts}
+        # ⛔ A SIBLING LEG'S JUNIT IS NOT THIS LEG'S GROUND TRUTH (#10143 review
+        # P2). `rid` is the workflow RUN, and `test`/`test-slow`/`test-carve-out`
+        # (plus the always-on legs) are matrix jobs inside ONE run, so the
+        # listing below carries every leg's `pytest-log-*`. The wide fallback
+        # two lines down exists so a RENAME degrades to a wider read — but when
+        # it fires because the red leg's OWN artifact is absent (ordinary: the
+        # upload step is `if: always()` + `if-no-files-found: ignore`, so a leg
+        # that early-exits uploads nothing), it substitutes a sibling's clean
+        # junit for the missing one. The sibling parses clean, `pr_found` stays
+        # False, the row reads "job red, no test-level failure" — the #10070
+        # zero-failure shape — and the truncated truth was then CACHED.
+        # Record the substitution per missing job BEFORE the fallback is used:
+        # the rename mitigation survives, and the masking state becomes PARTIAL
+        # and uncacheable.
+        for job in failed_jobs:
+            if present & set(artifact_names_for_job(job)):
+                continue
+            artifact_errors.append(
+                f"run {rid}: job {job} uploaded no "
+                f"{artifact_names_for_job(job)[0]} — a sibling leg's junit "
+                "must not stand in for it"[:200])
         wanted_names = {n for job in failed_jobs for n in artifact_names_for_job(job)}
         selected = [a for a in arts if a.get("name") in wanted_names]
         if not selected:
@@ -1271,11 +1346,14 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         "jobs": sorted(failed_jobs),
         "job_failed_without_test_failure": no_test_failure,
         "artifacts": artifacts_seen,
+        "runs_seen": len(check_runs),
+        "test_legs_seen": test_legs_seen,
         "artifact_errors": artifact_errors,
     }
-    if not artifact_errors:
+    if not artifact_errors and check_runs:
         # Do not cache a partial ground truth: a cached truncation would look
-        # like a clean run on every later invocation.
+        # like a clean run on every later invocation. `check_runs` empty is the
+        # same rule one layer up — "I saw no runs at all" is not an answer.
         cached.write_text(json.dumps(result, indent=1))
     return result
 
@@ -1319,7 +1397,7 @@ def derived_core_selection(
       (c) `keep_empty_closures` and its closure is EMPTY.
 
     (c) is not a fudge, it is the one class the closure provably cannot answer:
-    114 of the 742 core files import nothing from the package — they assert
+    115 of the 745 core files import nothing from the package — they assert
     invariants of a CONFIG, WORKFLOW or DOC file, which is exactly why they were
     hand-registered in `SOURCE_PATTERNS`/`CORE_ALSO` in the first place. An
     import closure has no edge to carry that dependency, so a mapping that drops
@@ -1599,6 +1677,17 @@ def cmd_validate(args: argparse.Namespace) -> int:
             }
         if selection.get("carve_out_run"):
             current_rel |= {_tests_rel(p) for p in (manifest.get("carve_out") or [])}
+        # ⛔ THE WORKFLOW RUNS MORE LEGS THAN `select()` MODELS (#10143 review P2).
+        # `test-track-b` and `test-record-postgres` are not diff-gated at all, and
+        # their junit is read as ground truth by `pr_ground_truth` — so a failure
+        # from them used to land in `not_in_current`, the one branch that absolves
+        # the derivation. `derived` is `(current - core) | derived_core`, so adding
+        # them here keeps them selected by BOTH sides, which is the honest reading:
+        # the derived mapping does not remove those legs. A leg that cannot be
+        # modelled from a hand-list (`test-d14-hosted-api`'s marker selection) is
+        # NOT guessed at — see the `not_in_current` PARTIAL gate below.
+        current_rel |= {_tests_rel(p) for p in ALWAYS_ON_LEG_FILES
+                        if (REPO / p).is_file()}
         # TWO derived mappings, because the difference between them IS the
         # finding: the naive one (drop every core file whose closure misses the
         # diff) and the one that keeps the provably non-Python-dependency files.
@@ -1641,6 +1730,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
             "failed_jobs": truth["jobs"],
             "job_failed_without_test_failure": truth["job_failed_without_test_failure"],
             "artifacts": truth["artifacts"],
+            "runs_seen": truth.get("runs_seen", 0),
+            "test_legs_seen": truth.get("test_legs_seen", 0),
             "artifact_errors": truth["artifact_errors"],
             "misses_naive": naive_misses,
             "misses_keep_non_python": safe_misses,
@@ -1729,7 +1820,39 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if unread:
         print(f"::error:: pr(s) {', '.join(str(p) for p in unread[:5])} ran a red leg "
               "but uploaded no readable artifact — the window is PARTIAL, not clean")
-    if errors or unread:
+    # ⛔ TWO MORE "I DID NOT ASSESS THIS PR" STATES, both byte-identical to a
+    # green PR before this gate (#10143 review P2).
+    #
+    # `unseen` — `pr_ground_truth` saw no check run at all. Completed runs are
+    # deletable and artifacts expire, and a `GITHUB_TOKEN`-created run can
+    # complete with ZERO check runs (docs/00_index.md's #8375 row), so
+    # `jobs: []`, `artifacts: 0`, `artifact_errors: []` is reachable and reads
+    # exactly like a clean PR. `_check_runs` is now counted (`runs_seen`) and
+    # the truth is not cached in that state, so a re-trigger at the same sha is
+    # re-read instead of short-circuiting on the truncation.
+    #
+    # `out_of_model` — a failure whose file is outside the modelled selection.
+    # `misses_for` calls that `not_in_current` ("a gap in the existing selector,
+    # not in this one") and it ABSOLVES the derivation; that absolution is only
+    # sound when the model actually covers every leg. `ALWAYS_ON_LEG_FILES`
+    # covers the legs that can be modelled from a hand-list, and the one that
+    # cannot (`test-d14-hosted-api`, marker-selected over the whole tree) is
+    # deliberately not guessed at — so a residual entry means the harness could
+    # not place a real failure, and it must say so instead of certifying.
+    unseen = [row["pr"] for row in rows if not row.get("runs_seen", 0)]
+    if unseen:
+        print(f"::error:: pr(s) {', '.join(str(p) for p in unseen[:5])} yielded NO "
+              "check run — nothing was assessed for them, so the window is "
+              "PARTIAL, not clean")
+    out_of_model = sorted({(row["pr"], f) for row in rows
+                           for f in row["not_in_current"]})
+    if out_of_model:
+        print("::error:: "
+              f"{len(out_of_model)} failing file(s) fall outside the modelled "
+              "selection, so the derivation was never scored on them — the "
+              "window is PARTIAL, not clean: "
+              + ", ".join(f"pr#{p} {f}" for p, f in out_of_model[:5]))
+    if errors or unread or unseen or out_of_model:
         # An unreadable artifact can only UNDER-count misses, so a zero-miss
         # window with unreadable artifacts is not a clean window. Say so in the
         # exit code rather than in a parenthetical (#10143 review P2).

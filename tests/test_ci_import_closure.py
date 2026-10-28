@@ -308,7 +308,7 @@ def test_harness_does_not_blame_the_derivation_for_a_test_the_selector_never_run
 
 
 def test_empty_closure_files_survive_only_when_asked_to():
-    """114 of 742 core files import nothing from the package: they guard a
+    """115 of 745 core files import nothing from the package: they guard a
     CONFIG/WORKFLOW/DOC file, which no import edge can carry (#10070, #10120)."""
     core = ["tests/test_config_guard.py", "tests/test_imports_pkg.py"]
     closures = {
@@ -465,10 +465,10 @@ def test_real_suite_core_surface_is_derived(repo_closure):
     del index, scans
     expected = len([f for f in manifest["surfaces"]["core"] if f.endswith(".py")])
     # EXACTLY, not `>= expected * 0.95` (#10143 review P2). The comment claimed
-    # exact basename resolution while the assertion tolerated 5 % — at 742
+    # exact basename resolution while the assertion tolerated 5 % — at 745
     # members that is up to 37 core files silently ceasing to resolve with every
     # test still green, and every published percentage is a ratio over this
-    # count. Measured today: all 742 resolve. `core_test_files` now reports an
+    # count. Measured today: all 745 resolve. `core_test_files` now reports an
     # unresolvable member instead of dropping it, so the failure names the file.
     unresolved: list[str] = []
     core = core_test_files(manifest, unresolved)
@@ -1068,6 +1068,7 @@ def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys):
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
         "failed_files": [], "failed_tests": [], "jobs": [],   # ← green PR
         "job_failed_without_test_failure": [], "artifacts": 0,
+        "runs_seen": 3, "test_legs_seen": 3,
         "artifact_errors": [], "junit_missing": [], "ground_truth_complete": True,
     })
 
@@ -1079,3 +1080,179 @@ def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys):
         "a green PR that uploaded nothing is a clean PR, not a partial window"
     )
     assert "PARTIAL" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# #10143 review round at `cbe0aecb8`: the three fail-open paths that survived it.
+#
+# Each pin fails on the code as it stood at that head and passes on the fix, so
+# the defect cannot come back silently. Grouped, like the round above, so the
+# next reviewer can see exactly what was wrong and re-verify it.
+# ---------------------------------------------------------------------------
+def test_ground_truth_reports_a_leg_masked_by_a_sibling_legs_artifact(
+    monkeypatch, tmp_path,
+):
+    """P2: a SIBLING leg's junit must never stand in for the red leg's own.
+
+    `_run_id` parses the workflow RUN out of `details_url`, and `test`,
+    `test-slow`, `test-carve-out` and the always-on legs are matrix jobs inside
+    ONE run — so the artifact listing carries every leg's `pytest-log-*`. The
+    wide fallback (a rename mitigation) fired whenever the red leg's OWN artifact
+    was absent, which is ordinary: the upload step is `if: always()` +
+    `if-no-files-found: ignore`, so a leg that early-exits uploads nothing. The
+    sibling then parsed clean, the row read `job red, no test-level failure` (the
+    genuine #10070 zero-failure shape), `artifact_errors` stayed empty — and the
+    truncated truth was CACHED, so every re-run read the false answer forever.
+
+    The two states must be told apart: the fallback still reads the sibling (the
+    rename mitigation is kept) AND the substitution is recorded, which is what
+    makes the window PARTIAL and the result uncacheable.
+    """
+    from tools import ci_import_closure as module
+    _fake_ground_truth(
+        monkeypatch, module,
+        junit=b'<testsuite><testcase classname="tests.test_x" name="t"/>'
+              b"</testsuite>",
+        listing_names=["pytest-log-test-b"],   # ← a SIBLING leg, not `test (a)`
+    )
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["artifact_errors"], (
+        "the failed leg's own artifact is absent and a sibling's was substituted "
+        "— that is an unread leg, and it must be reported")
+    assert "sibling" in truth["artifact_errors"][0], (
+        "the entry must name the substitution, not just count an error")
+    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+        "a masked leg is PARTIAL truth and must never be cached")
+
+
+def test_a_read_leg_whose_own_artifact_is_present_records_nothing(monkeypatch, tmp_path):
+    """The masking check must not fire when the red leg's own junit IS there.
+
+    The control for the pin above: an always-firing fail-closed check carries no
+    information (the same argument as the green-PR pin), so a leg whose expected
+    artifact exists must leave `artifact_errors` empty and be cached.
+    """
+    from tools import ci_import_closure as module
+    _fake_ground_truth(
+        monkeypatch, module,
+        junit=b'<testsuite><testcase classname="tests.test_x" name="t"/></testsuite>',
+        listing_names=["pytest-log-test-a", "pytest-log-test-b"],
+    )
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["artifact_errors"] == []
+    assert (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
+
+
+def test_ground_truth_counts_the_check_runs_it_saw_and_caches_only_a_read_one(
+    monkeypatch, tmp_path,
+):
+    """P2: "I saw no check run at all" was byte-identical to a green PR.
+
+    Completed runs are deletable and artifacts expire; a `GITHUB_TOKEN`-created
+    run can complete with zero check runs (`docs/00_index.md`'s #8375 row). In
+    that state `jobs: []`, `artifacts: 0`, `artifact_errors: []` reads exactly
+    like a clean PR, so `validate` could exit 0 on a PR it never assessed — and
+    the empty truth was cached, which is precisely what
+    `.github/workflows/ci-check-repair.yml` re-triggers against.
+    """
+    from tools import ci_import_closure as module
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [])
+    monkeypatch.setattr(module, "_gh_json", lambda args: {"artifacts": []})
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["runs_seen"] == 0
+    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+        "an unassessed PR must not be cached as a clean one")
+
+
+def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",)):
+    """Drive `cmd_validate` over one synthetic PR and return its exit code."""
+    import argparse
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": []}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
+    monkeypatch.setattr(ci, "changed_files",
+                        lambda repo, pr, cache: list(changed))
+    monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: dict(truth_stub))
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    return ci.cmd_validate(args)
+
+
+def _truth(**over):
+    base = {
+        "failed_files": [], "failed_tests": [], "jobs": [],
+        "job_failed_without_test_failure": [], "artifacts": 0,
+        "runs_seen": 3, "test_legs_seen": 3, "artifact_errors": [],
+    }
+    base.update(over)
+    return base
+
+
+def test_validate_exits_two_when_a_pr_yielded_no_check_run(monkeypatch, capsys):
+    """P2: `runs_seen == 0` must be PARTIAL, not a green PR."""
+    from tools import ci_import_closure as ci
+    rc = _stub_validate(monkeypatch, ci, _truth(runs_seen=0, test_legs_seen=0))
+    assert rc == 2, "a PR nothing was read for must not certify the window"
+    out = capsys.readouterr().out
+    assert "PARTIAL" in out and "NO check run" in out
+
+
+def test_validate_exits_two_when_a_failure_falls_outside_the_modelled_selection(
+    monkeypatch, capsys,
+):
+    """P2: `not_in_current` was an ABSOLUTION, and it is only sound when the
+    model covers every leg the workflow runs.
+
+    A failing file the modelled selection does not contain was reported on one
+    console line and then dropped from every condition, so `validate` printed
+    `TOTAL MISSES 0` and exited 0 on a window whose real failure it had just
+    declared out of scope. `ALWAYS_ON_LEG_FILES` now covers the legs that can be
+    modelled from a hand-list; whatever is left is a hole in the harness's model
+    (`test-d14-hosted-api`'s marker selection is deliberately not guessed at),
+    and a hole means PARTIAL, never clean.
+    """
+    from tools import ci_import_closure as ci
+    rc = _stub_validate(monkeypatch, ci, _truth(
+        failed_files=["tests/test_not_selected_anywhere.py"],
+        jobs=["test (a)"], artifacts=1,
+    ))
+    assert rc == 2, "an unmodelled failure must not certify the window"
+    out = capsys.readouterr().out
+    assert "PARTIAL" in out and "fall outside the modelled selection" in out
+
+
+def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys):
+    """P2: the always-on legs are unioned into today's selection.
+
+    `test-record-postgres` runs four files on EVERY PR (`python-ci.yml:3640`),
+    and the harness reads its junit as ground truth. A docs-only or `tools/`-only
+    diff takes the tier-1 early return, so those files were outside
+    `current_rel` before — and `misses_for` called the failure `not_in_current`,
+    i.e. it blamed the existing selector for a test the selector DID run and left
+    the derivation unscored. Measured reachability: `test_9555_narrative_carrier`
+    is on `api` + `core` but NOT on `tier1`.
+    """
+    from tools import ci_import_closure as ci
+    assert "tests/test_9555_narrative_carrier.py" in ci.ALWAYS_ON_LEG_FILES
+    rc = _stub_validate(monkeypatch, ci, _truth(
+        failed_files=["tests/test_9555_narrative_carrier.py"],
+        jobs=["test-record-postgres"], artifacts=1,
+    ))
+    out = capsys.readouterr().out
+    assert "fall outside the modelled selection" not in out, (
+        "an always-on leg's file is IN the model, so it must not read as a hole")
+    assert "outside today's selection" not in out, (
+        "the leg runs it on every PR, so the existing selector DID run it — "
+        "scoring it `not_in_current` blamed the selector for the model's gap")
+    assert rc != 2, (
+        "a failure the harness can place must not turn the window PARTIAL")
+    # Both sides select it (it is in `current` and in `base = current - core`), so
+    # the derived mapping is scored as COVERING it — which is the honest result:
+    # the derivation narrows `core`, it does not remove an always-on leg.
+    assert rc == 0 and "MISS[" not in out

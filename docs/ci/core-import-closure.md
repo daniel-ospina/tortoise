@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (47 tests, incl. the harness mutation check)
+- Pins: `tests/test_ci_import_closure.py` (53 tests, incl. the harness mutation check)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
   is **classification only**: a diff that changes *this instrument* and nothing else
   (`tools/ci_import_closure.py`-only) is a non-Python change — `tools/` is in
@@ -33,7 +33,7 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
   `config/ci-surfaces.yml`'s own comment states the same boundary.
 - Reproduce: `uv run python tools/ci_import_closure.py` · `… validate --window 40`
 - **Measurement basis:** the head of PR #10143 — the commit that adds this line. Two things make a
-  re-run differ from these tables: `main` keeps adding `core` registrations (**742** here), and the
+  re-run differ from these tables: `main` keeps adding `core` registrations (**745** here), and the
   file enumeration has two paths — `git ls-files` (used whenever git is available) and a
   pruning directory walk of the WHOLE repo (the fallback). They enumerate the same package set; a
   fallback that walked a fixed root list (`tortoise`, `tests`, `battery`, `tools`) used to differ
@@ -43,21 +43,21 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 ## 1. What was derived
 
-Static `ast` analysis of every tracked `*.py`: for each of the **742** `core` test files, the
+Static `ast` analysis of every tracked `*.py`: for each of the **745** `core` test files, the
 transitive set of `tortoise/**` modules it imports. Modules under analysis are never imported
 (that has side effects and measures the wrong thing); every edge comes from the source text, and
 `tests/`-side helpers are traversed but not reported.
 
 | Measure | Value |
 |---|---|
-| core test files | **742** (741 before this lane registered its own test) |
+| core test files | **745** (744 before this lane registered its own test) |
 | `tortoise/**` modules in the tree | 258 |
 | **distinct closure sets** (a split's real granularity) | **59** |
-| closure size — median / mean / min / max | **186** / 158.9 / 0 / 207 |
-| files sharing the single largest closure (186 modules) | **425** |
-| files with an EMPTY closure (no `tortoise/**` import at all) | **114** |
-| files reaching `tortoise/__init__.py` | **628 (84.6 %)** |
-| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 141 (19.0 %) |
+| closure size — median / mean / min / max | **186** / 158.7 / 0 / 207 |
+| files sharing the single largest closure (186 modules) | **427** |
+| files with an EMPTY closure (no `tortoise/**` import at all) | **115** |
+| files reaching `tortoise/__init__.py` | **630 (84.6 %)** |
+| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 141 (18.9 %) |
 
 ### 1.1 Function-local imports are the whole ballgame (and the trap)
 
@@ -73,26 +73,29 @@ itself deferred. Measured both ways on the same tree:
 | `closure(tortoise/__init__.py)` | **6** | **186** |
 | core closure median / max | **21** / 86 | **186** / 207 |
 
-A closure that reads only top-level imports would have selected **299** of 742 files for a change to
-`tortoise/sdk.py`, against **628** with every nesting walked — and its median closure is 21 modules
-where this tool's is 186. Three different populations are in play here, and two of them happen to be
-`329`; they are stated separately because they are not the same set (their overlap is 77 files):
+A closure that reads only top-level imports would have selected **299** of 745 files for a change to
+`tortoise/sdk.py`, against **630** with every nesting walked — and its median closure is 21 modules
+where this tool's is 186. Three different populations are in play here, and the closure gap and the
+direct-importer set are close in size (331 and 329) without being the same set — their overlap is 77
+files:
 
 | quantity | value | definition |
 |---|---|---|
-| closure gap | **329** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`628 − 299`) |
-| direct importers | **329** | of 742 core files, those with any `tortoise.sdk` edge of their own |
+| closure gap | **331** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`630 − 299`) |
+| direct importers | **329** | of 745 core files, those with any `tortoise.sdk` edge of their own |
 | direct, module-level | **233** | of those 329, the ones with a module-level `tortoise.sdk` edge — so **96** import it only inside a function body |
 
 This is the reason the tool walks the whole tree and tags every edge `in_function`: a reader that
-kept only module-level edges would lose `tortoise.sdk` from 329 closures, and only 96 of those files
-import `sdk` inside a function themselves — the other 252 reach it transitively, through another
-module's deferred edge.
+kept only module-level edges would lose `tortoise.sdk` from 331 closures, and only **77** of those
+files import `sdk` inside a function themselves — the other **254** reach it transitively, through
+another module's deferred edge. (A file with a module-level `sdk` edge cannot be in the gap at all:
+its module-level closure would already contain `tortoise.sdk`. So the only direct importers inside
+the gap are the function-only ones — bounded by the 96 in the table above and measured as 77.)
 
-**59 distinct sets sounds like granularity. It is not.** 425 + 114 = **539 of 742 (72.6 %)** core
+**59 distinct sets sounds like granularity. It is not.** 427 + 115 = **542 of 745 (72.8 %)** core
 files sit in one of two degenerate buckets — "the entire 186-module block" or "nothing at all" —
-and a change to any module in that block still selects 628 files, i.e. **84.6 % of the surface**.
-The best reduction a closure-based split could deliver for those changes is 742 → 628 (15 %).
+and a change to any module in that block still selects 630 files, i.e. **84.6 % of the surface**.
+The best reduction a closure-based split could deliver for those changes is 745 → 630 (15.4 %).
 
 ## 2. Why the block exists: ONE deferred import
 
@@ -127,7 +130,7 @@ test that ACTUALLY failed on it?* Ground truth is each run's `junit.xml` artifac
 a failing test — see §3.3). Two derived mappings are scored:
 
 - **naive** — a core file stays selected only if a changed `tortoise/**` module is in its closure.
-- **keep-non-python** — the same, plus core files whose closure is **empty**: 114 files import
+- **keep-non-python** — the same, plus core files whose closure is **empty**: 115 files import
   nothing from the package because they assert an invariant of a CONFIG/WORKFLOW/DOC file (or
   drive a script as a subprocess). No import edge can ever exist for them, so only a hand-written
   registration carries that dependency.
@@ -137,18 +140,21 @@ merged` was measured to under-report — it returned 24 PRs while #10102/#10103/
 absent). The window is a MOVING set, so the exact one these numbers come from is listed here:
 10167, 10162, 10153, 10151, 10144, 10140, 10135, 10134, 10129, 10128, 10120, 10118, 10111, 10110,
 10106, 10104, 10103, 10102, 10101, 10100, 10098, 10097, 10096, 10094, 10092, 10091, 10089, 10087,
-10086, 10081, 10079, 10078, 10075, 10071, 10070, 10069, 10068, 10066, 10055, 10053. A re-run
-`--window 40` after further merges reports different totals — that is the window moving, not a
-contradiction. Coverage: **11 PRs carried ≥ 1 test-level failure**, **22 failing test files (17
-distinct)**; **5 artifacts, across 4 PRs, were unreadable**, so this window is
-**PARTIAL** and `validate` exits **2** to say so rather than reporting a clean window it could not
-read. An unreadable artifact can only UNDER-count misses, so the two miss counts below are lower
-bounds (the 40-PR count includes the `init`-level checks only; a green PR contributes nothing here).
+10086, 10081, 10079, 10078, 10075, 10071, 10070, 10069, 10068, 10066, 10055, 10053 (`--prs` that list
+reproduces the tables below exactly; a re-run `--window 40` after further merges reports different
+totals — that is the window moving, not a contradiction). Coverage: **11 PRs carried ≥ 1 test-level
+failure**, **22 failing test files (17 distinct)**; **16 artifact problems, across 9 PRs, made ground
+truth partial** — **11 legs whose OWN `pytest-log-*` artifact was absent while a sibling leg's was
+present** (7 PRs: #10144, #10140, #10120, #10111, #10104, #10103, #10096), and **5 artifacts that
+carried no `junit.xml`** (4 PRs: #10144, #10134, #10103, #10098). So this window is **PARTIAL** and
+`validate` exits **2** to say so rather than reporting a clean window it could not read. A partial
+artifact set can only UNDER-count misses, so the two miss counts below are lower bounds (the 40-PR
+count includes the `init`-level checks only; a green PR contributes nothing here).
 
-| mapping | misses | PRs | median selected tests (today: 974) |
+| mapping | misses | PRs | median selected tests (today: 966) |
 |---|---|---|---|
 | naive | **10** | 4 (#10151, #10144, #10134, #10070) | 482 |
-| keep-non-python | **9** | 3 (#10151, #10144, #10134) | 596 |
+| keep-non-python | **9** | 3 (#10151, #10144, #10134) | 597 |
 
 **A single miss means the derivation is not safe. There are 9** (10 for the naive reader). They fall
 in three classes, and only one of them is an analysis limitation that better parsing would fix:
@@ -205,6 +211,26 @@ intersects nothing, so the failure is scored `no-closure-intersection` — i.e. 
 derivation is SAFE. A failure whose file neither key can attribute blocks the cache and makes the
 window PARTIAL.
 
+### 3.4 Every way "I did not read this" could have read as "nothing failed"
+
+The harness is only worth its verdict if its own blind spots are enumerated, so all of them are
+closed the same way: the state is recorded, the truth is **not cached**, and the window exits **2**.
+
+| state | why it is reachable | closed by |
+|---|---|---|
+| artifact present, no `junit.xml` (pytest died before writing it) | upload step is `if: always()` + `if-no-files-found: ignore` | `artifact_errors` entry per artifact |
+| `junit.xml` unparseable | corrupt/truncated zip payload | `parse_junit_failures`' `error` is now read, not ignored |
+| failing test whose FILE neither key can attribute | `xunit2` legs drop `file`/`line` | `unresolved` → `artifact_errors` |
+| red run whose artifact listing is **empty** | artifacts expire in 90 days; deleting a run deletes them | `artifact_errors` entry per run |
+| **the red leg's own artifact is absent but a SIBLING leg's is present** | `rid` is the workflow **run**, and `test`/`test-slow`/`test-carve-out`/the always-on legs are matrix jobs inside one run; a leg that early-exits uploads nothing | **measured 11 times across 7 PRs in the §3 window** — the wide `pytest-log-*` fallback (a rename mitigation, kept) now also records the substitution, so a sibling's clean junit can no longer stand in for the leg that failed |
+| **the head sha yielded no check run at all** | completed runs are deletable; a `GITHUB_TOKEN`-created run can complete with zero check runs | `runs_seen` / `test_legs_seen` are recorded, a zero is never cached, and the window is PARTIAL |
+| **a failure lands outside the modelled selection** | `select()` models the surface legs only, while ground truth covers every leg — so `test-record-postgres`'s four files (run on EVERY PR, `python-ci.yml:3640`) and `test-track-b`'s one (`:2527`) were outside `current_rel` | those legs are unioned into today's selection (`ALWAYS_ON_LEG_FILES`), and any residual entry is reported as a HOLE IN THE MODEL and makes the window PARTIAL — never as an absolution |
+
+`test-d14-hosted-api` (`pytest tests/ -m embedded_only`) is deliberately **not** modelled: its set is
+a marker over the whole tree, and a wider guess is the DANGEROUS direction, because everything in
+`current` is also in `derived` — over-covering a leg would hide misses. A failure it contributes
+lands in the residual arm above, which is loud.
+
 ## 4. Prior art, and why the choices above differ from it
 
 Probed 2026-10-27 from primary sources. Rung used: **3** (`web_fetch`); rung 1
@@ -248,8 +274,10 @@ truth under `.ci-selection/closure-cache/` (gitignored), so re-runs are offline 
 exits **2** when the window is partial — an artifact it could not read, an unparseable or missing
 `junit.xml`, a red leg whose artifact listing was **empty** (artifacts expire after 90 days by
 default, and deleting a run deletes its artifacts, so "nothing uploaded" is an ordinary state, not
-a clean one), a failing test whose **file** neither the xunit1 `file` attribute nor the `classname`
-fallback can attribute to a file in the checkout, or a window with no PRs at all — **1** when it
+a clean one), a red leg whose **own** artifact was absent while a sibling leg's stood in for it, a
+head sha that yielded **no check run**, a failing test whose **file** neither the xunit1 `file`
+attribute nor the `classname` fallback can attribute to a file in the checkout, a failure that
+falls **outside the modelled selection** (§3.4), or a window with no PRs at all — **1** when it
 found a miss, and **0** only for a complete, miss-free window. A `core` member that resolves to no
 test file is named on stdout and carried in the JSON as `unresolved_core`, because every percentage
 here is a ratio over that count.
@@ -258,21 +286,21 @@ here is a ratio over that count.
 
 **Is a file-level split of `surfaces.core` justified by the data? No.**
 
-1. **The granularity is not there.** 59 distinct closure sets, but 72.6 % of core files are in the
+1. **The granularity is not there.** 59 distinct closure sets, but 72.8 % of core files are in the
    two degenerate buckets (one 186-module set, or empty), and the median core closure is **186 of
-   258 modules (72 %)**. A change to any module in that block still selects 628 files — 84.6 % of
-   the surface — so the ceiling of a split is a 15 % reduction, for a change that would narrow a
+   258 modules (72 %)**. A change to any module in that block still selects 630 files — 84.6 % of
+   the surface — so the ceiling of a split is a 15.4 % reduction, for a change that would narrow a
    guard.
 2. **The derivation is not safe.** 9 historical misses (10 naive) over 40 merged PRs — a lower
-   bound, since 5 artifacts were unreadable — in three classes, and only one class is an analysis
-   limitation. A mapping that would not have run 9 tests that actually failed is not a mapping to
-   build selection on.
+   bound, since 16 artifact problems in that window left its ground truth partial — in three
+   classes, and only one class is an analysis limitation. A mapping that would not have run 9 tests
+   that actually failed is not a mapping to build selection on.
 3. **The lever is import hygiene, not surface bookkeeping.** In order of measured leverage:
    - the **one deferred `config → sdk` import** (§2): worth 179 of the 186 modules in the shim's
      closure, i.e. it is the entire 84.6 % block;
    - **`tortoise/sdk.py`** (42 230 lines, 89 in-repo import targets) and **`tortoise/hosted_api.py`**
      (88, of which 51 only in function bodies): splitting *these* is what gives a closure something
-     to differentiate on — 329 of 742 core files import `tortoise.sdk` directly;
+     to differentiate on — 329 of 745 core files import `tortoise.sdk` directly;
    - **test-side hygiene** where a test imports the whole package for one constant.
 
    Doing (a) or (b) makes this measurement worth re-running; nothing in `ci-surfaces.yml` needs to
