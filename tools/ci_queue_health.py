@@ -40,9 +40,15 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               ``CI: OK(queued=54, pr_running=2, pr_queued=32)`` with the oldest
               queued PR run at **527 minutes** — a clean bill of health printed
               for a repo whose REQUIRED ``python-ci-gate`` answers in hours. It has
-              no action available (a backlogged queue is MADE of the PR work the
-              governor exists to protect), so it is WARNED about, never acted on,
-              and exits 0 for the same reason PR-STARVED does. ``starves_pr`` is
+              no action available — the governor's WHOLE action surface is a
+              trim-safe OFFENDER's queued runs, and a queued PR run is never a
+              candidate — so it is WARNED about, never acted on, and exits 0 for
+              the same reason PR-STARVED does. Its reason line therefore reports
+              the queue's leader and that leader's trim-safety as FACTS, never as a
+              claim about what the queue is made of (the #9118 P2-2 class: this
+              clause is reachable with a trim-safe workflow holding the queue's
+              largest share, where "the queue is PR work" would point the operator
+              away from the one workflow the governor could trim). ``starves_pr`` is
               False: that predicate asks about ABSENCE, and this state is about
               RATE. #10237 ask 3 — "the job must fail loudly rather than hang" —
               is exactly this state; GitHub's own only bound is a 24-hour queued-
@@ -58,12 +64,16 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               (ISSUE 3 of the #9118 review: clause order used to return ``OK``
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
-              per REPO — no PR-event run is executing, and the FEED WAS CUT AT ITS
-              PAGE CAP, so the older runs — the end the age clause needs — were
-              never read. Neither starvation nor health is witnessed: it is not
-              ``OK`` (the fail-open the truncation residual of the #9118 review
-              names), and not ``PR-STARVED`` either (the wait was not measured).
-              WARNED about, never acted on, exit 0 — see the truncation note below.
+              per REPO — the PR WAIT was not witnessed, for one of two reasons:
+              (a) the FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end
+              the age clause needs — were never read (and no PR-event run is
+              executing); or (b) the QUEUED PR-EVENT RUNS CARRY NO READABLE
+              ``created_at``, so the wait cannot be measured at all. Neither
+              starvation nor health is witnessed: it is not ``OK`` (the fail-open
+              the truncation residual of the #9118 review names, and the same
+              refusal `age_seconds` documents for an unreadable stamp), and not
+              ``PR-STARVED`` either (the wait was not measured). WARNED about,
+              never acted on, exit 0 — see the truncation note below.
               `tools/ci_check_repair.py` deliberately does NOT treat it as
               starvation (`QueueHealth.starves_pr` is False here): an unread window
               is not a measured starvation, and inferring STARVED from it would be
@@ -160,9 +170,10 @@ Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
      state line stays available in ``pre_action_state_line`` with ``cleared``
      naming the difference. ``PR-STARVED`` is also 0: the state is real and
      warned about, but no action is available (nothing trim-safe to blame).
-     ``PR-BACKLOGGED`` is 0 for exactly that reason — the queue is made of the PR
-     work the governor must not touch, so there is nothing to cancel, and the
-     alarm is its state line plus the workflow's annotation.
+     ``PR-BACKLOGGED`` is 0 for exactly that reason — the only runs this tool may
+     cancel belong to a trim-safe OFFENDER, and a queued PR run is never a
+     candidate, so there is nothing to cancel, and the alarm is its state line
+     plus the workflow's annotation.
      ``PR-UNWITNESSED`` is 0 for the same reason — an action already happened
      before the verdict was reached, and the honest claim is "not witnessed",
      which is warned about rather than turned into a red run nobody can clear by
@@ -180,11 +191,12 @@ Usage:
   uv run python tools/ci_queue_health.py --apply         # measure AND unjam a trim-safe flood
 
 ``OK`` is the ONLY healthy state, and it now means what it says: no starvation
-witnessed, no backlog past the wait budget. Both halves of the starvation class
-have their own witness — ABSENT-of-execution (``PR-STARVED``) and RATE
-(``PR-BACKLOGGED``) — because a queue that serves two PR runs while twenty wait
-behind them is neither "running" nor "not running", and the tool used to report
-that shape as ``OK`` (measured 2026-10-28, #10237).
+witnessed, no backlog past the wait budget — and, when the wait COULD NOT be
+measured, not ``OK`` either (that is ``PR-UNWITNESSED``). Both halves of the
+starvation class have their own witness — ABSENT-of-execution (``PR-STARVED``)
+and RATE (``PR-BACKLOGGED``) — because a queue that serves two PR runs while
+twenty wait behind them is neither "running" nor "not running", and the tool
+used to report that shape as ``OK`` (measured 2026-10-28, #10237).
 """
 from __future__ import annotations
 
@@ -223,10 +235,12 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed with no PR-event run executing: starvation is neither
-#: witnessed nor DISPROVED, so this is not ``OK``. See the truncation note in the
-#: module docstring — the runs endpoint is newest-first and cannot be asked for
-#: the oldest end, so a capped read loses exactly the runs the age clause needs.
+#: A truncated feed with no PR-event run executing, or queued PR-event runs whose
+#: timestamps cannot be read: the PR WAIT is neither witnessed nor DISPROVED, so
+#: this is not ``OK``. See the truncation note in the module docstring — the runs
+#: endpoint is newest-first and cannot be asked for the oldest end, so a capped
+#: read loses exactly the runs the age clause needs — and see `age_seconds` for
+#: why an unreadable stamp cannot be treated as zero.
 PR_UNWITNESSED = "PR-UNWITNESSED"
 UNKNOWN = "UNKNOWN"
 
@@ -239,16 +253,11 @@ EXIT_UNMEASURABLE = 2
 #: workflow's `::warning`, not by a red run that no one can act on.
 #: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
 #: and no action can clear it, so it is announced (state line + `::warning`).
-#: PR-STARVED is a MEASURED state (never UNKNOWN) with no action available, so it
-#: shares EXIT_OK's code — it is announced by its own state line and the
-#: workflow's `::warning`, not by a red run that no one can act on.
-#: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
-#: and no action can clear it, so it is announced (state line + `::warning`).
 #: PR-BACKLOGGED joins them for the same reason PR-STARVED did: its whole content
-#: is "a queued PR run waited N minutes", and the only thing this tool may cancel
-#: is a trim-safe OFFENDER's run — a backlogged queue is made of the PR work it
-#: must never touch. A red run nobody can clear by acting is noise, not an alarm;
-#: the alarm is the state line plus the workflow annotation.
+#: is "a queued PR run waited N minutes", and the only runs this tool may cancel
+#: belong to a trim-safe OFFENDER — a queued PR run is never a candidate. A red
+#: run nobody can clear by acting is noise, not an alarm; the alarm is the state
+#: line plus the workflow annotation.
 EXIT_FOR = {
     OK: EXIT_OK,
     FLOOD: EXIT_FLOOD,
@@ -401,10 +410,19 @@ class QueueHealth:
                 f"queued={self.queued_total}, pr_running={self.pr_running})"
             )
         if self.verdict == PR_UNWITNESSED:
-            # The one thing a truncated feed must never print is a bare `OK`.
+            # The one thing an UNWITNESSED wait must never print is a bare `OK`. The
+            # counts stay the measured ones — including `pr_running`, which is NOT
+            # always 0 here: the second cause of this state is a queue whose PR runs
+            # ARE executing but carry no readable timestamp, and a hardcoded
+            # `pr_running=0` would be a falsehood in the line the fleet reads.
+            # `oldest=unmeasured` is the dimension that was not witnessed.
+            oldest = self.oldest_pr_queued_age_seconds
+            waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"
+            feed = "truncated" if self.truncated else "read"
             return (
-                f"CI: PR-UNWITNESSED(queued={self.queued_total}, pr_running=0, "
-                f"pr_queued={self.pr_queued}, feed=truncated)"
+                f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
+                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
+                f"oldest={waited}, feed={feed})"
             )
         if self.verdict == PR_STARVED:
             oldest = self.oldest_pr_queued_age_seconds
@@ -646,7 +664,7 @@ def classify_queue(
         return QueueHealth(**base)
 
     def healthy() -> QueueHealth:
-        """`OK` — but only when PR work is not merely QUEUED BEHIND other PR work.
+        """`OK` — but only when the PR wait was MEASURED and inside the budget.
 
         Every clause that used to return `OK` returns through here. `OK` is a claim
         about the QUEUE, and "one PR run is executing" is not evidence that the
@@ -655,15 +673,54 @@ def classify_queue(
         The backlog witness speaks only about a wait that WAS read, so it is
         available wherever `OK` was — including under a truncated feed, which is
         why it is not routed through the `PR-UNWITNESSED` degradation.
+
+        The one `OK` that does NOT come through here is the `no queued PR run`
+        clause below, and that is not a hole in the guarantee: with no queued
+        PR-event run there is no PR wait at all, so no wait can be past a budget
+        (the clause reports `pr_queued=0` so a reader sees what was not measured).
+        Where a wait DOES exist and cannot be read, this seam refuses `OK` and
+        returns `PR-UNWITNESSED` — an unmeasured wait is not a measured-healthy
+        one, which is the same refusal the truncated feed gets.
         """
         if backlogged_wait is None:
+            if pr_queued_runs and oldest_pr_age is None:
+                # THE BUDGET IS UNREADABLE, NOT ABSENT. This state's whole content
+                # is a duration; where the duration cannot be read at all, `OK`
+                # would be a clean bill of health for a wait nobody measured —
+                # exactly the fail-open `PR-UNWITNESSED` exists to refuse, and the
+                # shape `age_seconds` says the caller must not infer health from
+                # ("the caller treats None as 'not witnessed' and says so").
+                reasons.append(
+                    "PR-UNWITNESSED: "
+                    + (
+                        f"PR CI is executing ({pr_running} run(s)) but the "
+                        if pr_running
+                        else "no PR-event run is executing and the "
+                    )
+                    + "queued PR-event run(s) carry no readable timestamp, so the "
+                    "wait cannot be measured and the wait budget cannot be "
+                    "applied — not reported as OK"
+                )
+                return health(PR_UNWITNESSED)
             return health(OK)
+        # WHOSE QUEUE IS IT? (#9118 P2-2, recurring INSIDE this state.) This clause
+        # is reached from `pr_running != 0`, i.e. from a queue whose leader the
+        # flood clauses have already declined to call a flood — which includes the
+        # case where that leader IS a trim-safe workflow holding the queue's
+        # largest share. Asserting there that "a backlogged queue is made of the PR
+        # work" would point the operator away from the one workflow the governor
+        # could trim, and would contradict the reason line above it. So the leader
+        # and its trim-safety are reported as FACTS (the shape `no_flood()` uses),
+        # and the no-action clause states what actually bounds the governor.
         reasons.append(
             f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
             f"queued PR-event run has waited {backlogged_wait:.0f}s "
             f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
-            f"checks cannot answer inside that wait. Nothing was trimmed: a "
-            f"backlogged queue is made of the PR work the governor must protect"
+            f"checks cannot answer inside that wait. Largest share: "
+            f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
+            f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
+            f"no run was trimmed: the governor only cancels a trim-safe OFFENDER's "
+            f"queued runs, and a queued PR run is never a candidate"
         )
         return health(PR_BACKLOGGED)
 
@@ -715,9 +772,16 @@ def classify_queue(
         )
         return no_flood()
     if pr_running != 0:
+        # AN EXECUTING PR RUN IS A FACT, NOT EVIDENCE OF SERVICE. "Serving" is the
+        # proposition this state exists to refute: two executing runs with thirty
+        # queued is exactly how the tool printed a clean bill of health for a
+        # required check answering in hours (#10237). So this clause says only what
+        # it knows — the ABSENCE the flood clause names does not hold — and leaves
+        # whether that execution is ENOUGH to the wait witness in `healthy()`.
         reasons.append(
-            f"not a flood: {pr_running} PR-event run(s) are executing, so PR CI is "
-            "being served"
+            f"not a flood: {pr_running} PR-event run(s) are executing, so this is "
+            "NOT the absence the flood clause names (whether that execution is "
+            "ENOUGH is the wait-budget question below)"
         )
         return healthy()
     if not pr_queued_runs:
@@ -734,7 +798,10 @@ def classify_queue(
             "not a flood: the queued PR-event run(s) carry no readable timestamp, so "
             "the wait cannot be measured"
         )
-        return health(OK, oldest_pr_queued_age_seconds=None)
+        # Through the seam, not straight to `OK`: a wait nobody measured is not a
+        # measured-healthy one, and `healthy()` is where that refusal lives. The
+        # base already reports `oldest_pr_queued_age_seconds=None`.
+        return healthy()
     if oldest_pr_age < min_age_seconds:
         reasons.append(
             f"not a flood: the oldest queued PR-event run is {oldest_pr_age:.0f}s old, "
