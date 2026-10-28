@@ -988,6 +988,34 @@ def test_the_mints_store_fault_is_also_a_typed_503_with_a_log_line() -> None:
         f"the mint's store fault was SILENT: {out['stderr'][-600:]!r}")
 
 
+def test_the_keys_HOLDER_renews_the_attempt() -> None:
+    """The mirror of the test below, and the half nothing pinned.
+
+    `CONSENT_ATTEMPT_TTL_S` exists to outlive the sign-in round trip, and the return leg's renewal
+    is the only thing that gives a slow round trip that window. Measured gap: setting the renewal
+    arm to a no-op (`THEN consent_attempts.expires_at`) left every route test green, so a visitor
+    whose provider round trip outlived 15 minutes would come back to an expired row and get
+    `403 no_authorize_attempt` AFTER approving — with no test able to red it.
+    """
+    # The hash is plain SHA-256 hex — computed here independently of the shipped helper, so this
+    # also pins the digest choice the row is keyed on.
+    import hashlib
+    from_hash = hashlib.sha256(b"holder-key").hexdigest()
+    seeded = [{
+        "state": "state-xyz", "client_id": "client-abc",
+        "redirect_uri": "https://client.example/cb",
+        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "scope": "mcp", "resource": None, "user_id": None,
+        "created_at": 0, "expires_at": 1_000, "attempt_key_hash": from_hash,
+    }]
+    out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-1",
+               params=dict(_PARAMS, attempt_key="holder-key"))
+    row = out["attempts"][0]
+    assert row["expires_at"] > 1_000, (
+        "the key's HOLDER did not renew the attempt — a sign-in round trip that outlives the TTL "
+        f"returns to a dead row and the visitor is refused after approving: {row}")
+
+
 def test_a_keyless_re_entry_does_not_renew_the_attempt() -> None:
     """`expires_at` is refreshed only by the key's holder.
 

@@ -273,10 +273,12 @@ export interface ConsentAttempt {
    * column existed). THIS COLUMN never holds the raw key — but that is a narrower claim than "the
    * raw key is never stored anywhere": the key must reach the browser, so it travels the sign-in
    * hop's return target, and `auth/start.ts` PERSISTS that return target in `auth_flows.next` in
-   * this same D1 database (`FLOW_MAX_AGE_S`). Read access to `auth_flows` during the ≤15-minute
-   * attempt window is therefore equivalent to holding the key. §2.3/§4 record that carrier as a
-   * known cost of the design; do not restate it here as if it did not exist — a claim stronger than
-   * the code is how the next lane stops looking for the residual.
+   * this same D1 database (`FLOW_MAX_AGE_S`, 30 MINUTES — not the attempt's 15). So read access to
+   * `auth_flows` is equivalent to holding the key for up to THIRTY minutes, while the attempt row
+   * itself lives `CONSENT_ATTEMPT_TTL_S` (15) and is renewed only by the key's holder. Two numbers,
+   * two carriers, and quoting the small one for both is how a 20-minute-old row gets written off as
+   * inert. §2.3/§4 record the carriers as a known cost; do not restate them here as if they did not
+   * exist — a claim that is wrong in EITHER direction stops the next lane looking for the residual.
    */
   attempt_key_hash: string | null;
 }

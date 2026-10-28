@@ -146,7 +146,9 @@ its return target carries no key), and the refusal arrives AFTER sign-in as `403
 flow_not_yours`. Because a keyless re-entry no longer refreshes `expires_at`, that row dies at its original
 TTL instead of shadowing every retry — and a client that reuses the same `state` for a new attempt is
 reusing a per-attempt value, which an OAuth client does not do (it mints a fresh `state` per authorize
-request). A visitor who reloads the SAME url recovers by starting the flow again.
+request). Reloading the SAME url does NOT recover: it is refused (`403 flow_not_yours` once signed in,
+`302` then the same `403` when cold) until that row expires. Recovery is a NEW authorize request — a new
+`state` from the caller.
 
 ⚠️ **Where the raw key goes** (stated, because the row's SHA-256 is the narrow claim and is easy to
 misread as the whole one): the key rides the `selfPath` return target **and** `authorizeUrl` (the page is
