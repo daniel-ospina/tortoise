@@ -130,9 +130,12 @@ READY_SLEEP="${READY_SLEEP:-10}"
 #   • phase 1 hits `/health` — an in-memory snapshot, no I/O — as the FIRST
 #     request of the run, against a container that has only just started. The
 #     cold-start cost of that first request (DNS/TLS, runtime warm-up, first
-#     touch of the code path) is NOT the endpoint's own I/O, and it is the one
-#     request whose failure aborts the whole gate, so it gets the LOOSER bound:
-#     `CURL_MAX_TIME_APP` = 10 s.
+#     touch of the code path) is NOT the endpoint's own I/O, and a hiccup here
+#     ends the gate BEFORE the DB wait and the readiness poll run at all — so it
+#     throws away the two budgets that would have tolerated it. It therefore gets
+#     the LOOSER bound: `CURL_MAX_TIME_APP` = 10 s. (Not "the only request whose
+#     failure fails the gate": phase 3 fails it too, by design — this one fails
+#     it EARLY.)
 #   • phase 2 hits the SAME `/health` with a TIGHTER bound
 #     (`CURL_MAX_TIME_HEALTH` = 5 s), because it runs only after phase 1 has
 #     already proven reachability and it is a bounded POLL: 18 × (5 + 10) = 270 s

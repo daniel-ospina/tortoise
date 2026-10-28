@@ -504,7 +504,16 @@ def test_a_watch_that_exhausts_its_bound_reports_unknown(tmp_path: Path) -> None
       * any other non-zero → a terminal run that did not succeed.
 
     This test exists because deleting the 124 arm — the whole distinction — kept
-    every other test green: the sibling above asserts only a non-zero exit.
+    every other test green: the sibling above asserts only a non-zero exit. So
+    the assertions below pin the arm's OWN text and, just as importantly, assert
+    the FALL-THROUGH message is absent: without that, deleting the arm would
+    stay green, because the non-terminal arm of the `-ne 0` branch also exits
+    non-zero, also says UNKNOWN, also says "Do NOT re-dispatch", and also omits
+    "did not reach success". The two messages are told apart by their own
+    sentences, and they must not be confused: the fall-through blames "the watch
+    most likely lost the API on one of its polls", which would send an operator
+    whose 330-minute window expired hunting a network error instead of learning
+    that the bound expired.
     """
     proc = _run_step(
         _DISPATCH_STEP, tmp_path,
@@ -525,6 +534,23 @@ def test_a_watch_that_exhausts_its_bound_reports_unknown(tmp_path: Path) -> None
     assert "Do NOT re-dispatch" in proc.stdout, (
         "the exhaustion message must forbid the remediations that are wrong for "
         f"a merely-queued run\n{proc.stdout}"
+    )
+    # The arm's own text — the whole point of the arm, and nothing else produces
+    # it. Deleting the `watch_rc -eq 124` branch previously left this test GREEN
+    # because every assertion above is also satisfied by the non-terminal arm of
+    # the `-ne 0` branch; these two are what tell the exhaustion verdict apart
+    # from a suspected poll error (verified by mutation: delete the arm and this
+    # test reds).
+    assert "did not FINISH within the 330-minute wait" in proc.stdout, (
+        "an exhausted wait must say the WAIT BOUND expired — the message an "
+        "operator reads to know the run may still be queued, not broken\n"
+        f"{proc.stdout}"
+    )
+    assert "lost the API" not in proc.stdout, (
+        "an exhausted wait was reported as a suspected poll/API error — with the "
+        "124 arm deleted a 124 falls through to the non-terminal arm, so this "
+        "assertion is what makes its removal fail instead of pass\n"
+        f"{proc.stdout}"
     )
 
 
