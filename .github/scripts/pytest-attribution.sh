@@ -134,13 +134,17 @@ fi
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
 # leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}`.
 #
-# ⚠️ STATUS: PARTIALLY APPLIED (2026-10-25). `python-ci.yml`'s `test` job — the fast
-# matrix, NINE legs, and the largest share of this failure — now passes
-# `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and therefore
-# per-job, since a runner runs one job at a time). For THAT job signals (1)-(3) are
-# now a backstop against a test that shells out to pytest, not the load-bearing
-# defence against a co-tenant. The other legs still write `/tmp/...` literals and
-# still need the same change; the three signals below keep the KILL path — the one
+# ⚠️ STATUS: PARTIALLY APPLIED (2026-10-25, extended 2026-10-28). `python-ci.yml`'s
+# `test` job — the fast matrix, NINE legs, and the largest share of this failure — now
+# passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and
+# therefore per-job, since a runner runs one job at a time). For THAT job signals
+# (1)-(3) are now a backstop against a test that shells out to pytest, not the
+# load-bearing defence against a co-tenant. The `test-d14-hosted-api` leg followed it
+# (#10237) after TRUNCATED fired on a real artifact — run 40698118723 / job
+# 122916471295, an 18,643-byte NUL hole under a peer's session header, which threw
+# away that leg's OWN `= 5 failed, 197 passed … 3 errors in 550.72s =` and its eight
+# attributable nodeids. The remaining legs still write `/tmp/...` literals and still
+# need the same change (#7815); the three signals below keep the KILL path — the one
 # that produced the "timeout flakes" — from being fooled until they get it.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:

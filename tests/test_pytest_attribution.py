@@ -1112,11 +1112,22 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 _TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
 #: The per-runner indirection a hardened job writes through, as it appears in a `tail`.
 _RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
+#: ⛔ THE INDIRECTION IS NOT ALWAYS `$PYTEST_LOG` (2026-10-28). `test-d14-hosted-api`
+#: hardened onto `$PYTEST_D14_LOG`/`$PYTEST_D14_JUNIT` (#10237) because that job's
+#: artifact basenames are read by name (`tools/ci_timing.py` globs `junit*.xml`), so it
+#: keeps them and moves only the host-global DIRECTORY. Two consequences for this
+#: counter, and both are the direction that must NOT red: an exact-match on
+#: `"$PYTEST_LOG"` would drop the D14 `tee` site and red the floor as "a leg was
+#: dropped" when a path was merely hardened; and a `tee` whose target is quoted was
+#: never matched at all, so the site would vanish silently. Both are one token shape —
+#: `"$PYTEST_<NAME>"` — so it is matched as a shape.
+_PER_RUNNER_LOG_RE = re.compile(r'^"\$PYTEST_[A-Z0-9_]+"$')
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
 #: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
 #: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
 #: is not end-anchored — which is why comment lines are filtered out before matching.
-_TEE_SITE_RE = re.compile(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)")
+#: The quoted alternative carries the per-runner indirection (`tee "$PYTEST_D14_LOG"`).
+_TEE_SITE_RE = re.compile(r'\|\s*tee\s+("[^"\s|]+"|[^\s|]+)')
 
 
 def capture_site(line: str) -> str | None:
@@ -1140,7 +1151,7 @@ def capture_site(line: str) -> str | None:
     if match is None:
         return None
     target = match.group(1)
-    if target == _RUNNER_TEMP_LOG:
+    if _PER_RUNNER_LOG_RE.match(target):
         # A per-runner path: the leg still owes the reporter a call, and the
         # window assertion below compares this same token (the call is
         # `--log "$PYTEST_LOG"`), so the pairing is checked exactly as it is for
@@ -1168,6 +1179,16 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     deliberately the LOG CAPTURE, not the file name: a leg's log name is not a
     contract, and the rail's capture is `gh run view --log-failed` across every job,
     so any of these legs can omit its own failure set.
+
+    ⛔ THE D14 `tee` IS NOW A PER-RUNNER PATH AND IS STILL COUNTED (#10237). That leg
+    moved to `$PYTEST_D14_LOG` for the reason the `test` job moved (#10028): on the
+    self-hosted pool two concurrent D14 jobs on different runners share ONE `/tmp`, and
+    the measured artifact (run 40698118723, job 122916471295) carried an 18,643-byte NUL
+    hole under a peer's session header — the reporter called the leg's own summary STALE
+    and threw away eight attributable nodeids. Both spellings are the same SITE, which
+    is why this counter matches the token as a shape (`_PER_RUNNER_LOG_RE`) rather than
+    as `"$PYTEST_LOG"` exactly: hardening one leg's path must never read as "a leg was
+    dropped".
     """
     tails = 0
     for workflow in ATTRIBUTION_WORKFLOWS:
@@ -1196,6 +1217,40 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
+
+
+def test_the_per_runner_tee_site_is_counted_and_the_comment_above_it_is_not() -> None:
+    r'''`tee "$PYTEST_D14_LOG"` is a capture site; the prose naming it is not.
+
+    #10237 moved the D14 leg onto the per-runner indirection for the reason the `test`
+    job moved (#10028) — and the move must not read as "a leg was dropped". Two
+    falsifiable claims, both asserted here rather than asserted-about:
+
+    (1) the quoted per-runner token IS matched, so the floor still sees 8 sites;
+    (2) the UNQUOTED, un-hardened `/tmp` literal it replaced is still matched too, so
+        the counter is not satisfied only by the new spelling;
+    (3) the reporter PAIRING still resolves for the new token — the call the workflow
+        writes is `--log "$PYTEST_D14_LOG"`, i.e. the same token, quoted.
+
+    Deleting the quoted alternative from `_TEE_SITE_RE` (i.e. going back to the
+    `/tmp/`-only `(/tmp/[^\s|]+\.log)` group it replaced in #10237) makes (1) fail,
+    which is the mutation this test exists for: without it the site vanishes silently
+    and the floor only notices once a SECOND leg is lost (the pre-#10028 slack).
+    '''
+    site = '            -v --timeout=300 2>&1 | tee "$PYTEST_D14_LOG" || rc=$?'
+    assert capture_site(site) == '"$PYTEST_D14_LOG"'
+    # (2) the literal spelling the D14 leg used before #10237 is still a site.
+    assert capture_site(site.replace('"$PYTEST_D14_LOG"', "/tmp/pytest-d14.log")) == (
+        "/tmp/pytest-d14.log"
+    )
+    # (3) the pairing the window assertion reads: same token, quoted, on the call line.
+    assert f"pytest-attribution.sh --log {capture_site(site)}" in (
+        '          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_D14_LOG" --rc "$rc"'
+    )
+    # The tail spelling is unchanged for the `test` job — the shape is the same shape.
+    assert capture_site('          tail -n 300 "$PYTEST_LOG"') == _RUNNER_TEMP_LOG
+    # A quoted NON-per-runner target is not a site (it is not a pytest log we own).
+    assert capture_site('          | tee "$SOMETHING_ELSE"') is None
 
 
 def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
@@ -1299,6 +1354,14 @@ def _run_step_body(
     `python`/`python3` are stubs that emit one pytest start line (so the `tee` writes a
     real log) and then exit with the leg's status. `bash -e` models the runner's
     default shell, and `cwd=REPO` is what makes `bash .github/scripts/...` resolve.
+
+    ⛔ `$PYTEST_*` TOKENS ARE RESOLVED INTO THE SANDBOX TOO (#10237). A hardened leg
+    reads its log and junit from per-job paths that its job's FIRST step writes to
+    `$GITHUB_ENV`; running the body here without them would leave the token empty and
+    the `tee` would fail on `""` for a reason that has nothing to do with the status
+    under test. Injected from the tokens the body itself names, so a leg that hardens
+    a new path needs no edit here — and the relocation property (no shared file is
+    touched) is kept, which is the whole reason this helper exists.
     """
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
@@ -1319,6 +1382,9 @@ def _run_step_body(
     shim.write_text(TIMEOUT_SHIM, encoding="utf-8")
     shim.chmod(0o755)
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    for token in sorted(set(re.findall(r"\$PYTEST_[A-Z0-9_]+", body))):
+        suffix = ".log" if token.endswith("_LOG") else ".xml"
+        env[token[1:]] = str(sandbox / f"{token[1:].lower()}{suffix}")
     return subprocess.run(
         ["bash", "-e", str(script)],
         cwd=REPO,
@@ -1331,19 +1397,22 @@ def _run_step_body(
 
 
 @pytest.mark.parametrize(
-    ("workflow", "job", "step", "log"),
+    ("workflow", "job", "step", "log_token"),
     [
         (
             WORKFLOW,
             "test-d14-hosted-api",
             "Run the embedded_only marker selection",
-            "/tmp/pytest-d14.log",
+            # #10237: the D14 leg's log is the per-runner `$PYTEST_D14_LOG` (a quoted
+            # token), not the host-global `/tmp/pytest-d14.log` two concurrent D14 jobs
+            # on one shared host used to truncate under each other.
+            '"$PYTEST_D14_LOG"',
         ),
     ],
     ids=["d14"],
 )
 def test_a_failing_pytest_still_reds_the_step(
-    workflow: Path, job: str, step: str, log: str, tmp_path: Path
+    workflow: Path, job: str, step: str, log_token: str, tmp_path: Path
 ) -> None:
     """A `| tee` leg that also REPORTS must still fail when its pytest failed.
 
@@ -1366,7 +1435,9 @@ def test_a_failing_pytest_still_reds_the_step(
     case is absent here rather than asserting a pipeline that does not exist.
     """
     body = _step_run_body(workflow, job, step)
-    assert f"--log {log}" in body, f"{workflow.name}:{job}: no reporter call for {log}"
+    assert f"--log {log_token}" in body, (
+        f"{workflow.name}:{job}: no reporter call for {log_token}"
+    )
     result = _run_step_body(body, tmp_path, pytest_rc=137)
     assert result.returncode == 137, (
         "the step did not exit with the leg's own status — a red pytest was swallowed "

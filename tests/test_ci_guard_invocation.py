@@ -375,6 +375,18 @@ class _Run:
         `[ -f $RUNNER_TEMP/pytest-rc ]` then missed, `RC` stayed empty, the frozen
         check never ran and the suite redded — but only on Linux, never on macOS
         where the sandbox lives under `/var/folders/`.
+
+        ⛔ `$PYTEST_*` TOKENS ARE EXPORTED, NOT REWRITTEN (#10237). A job that moved
+        its pytest log and junit off host-global `/tmp` names (#10028 `test`, #10237
+        `test-d14-hosted-api`) reads them from variables its FIRST step writes to
+        `$GITHUB_ENV`. This harness executes ONE step at a time, so those variables
+        are part of the environment it must model — the same way `RUNNER_TEMP` and
+        `STUB_PYTEST_RC` are — or the step shell sees `""` for the log and junit, the
+        `tee` and the skip-guard invocation carry empty paths, and the frozen
+        `embedded-only.txt` set reads as enforced by nothing. Substituting them into
+        the TEXT instead would be wrong twice: it would rewrite `/tmp/` (the defect)
+        rather than model the indirection, and it would satisfy this harness while the
+        real step still had no log.
         """
         token = "\x00RUNNER_TEMP\x00"
         text = (self.step.get("run") or "").replace("${RUNNER_TEMP:-/tmp}", token)
@@ -410,6 +422,20 @@ class _Run:
         text = re.sub(r"/tmp/", f"{self.sandbox}/", text)
         return text.replace(token, str(self.sandbox))
 
+    def pytest_artifact_env(self) -> dict[str, str]:
+        """The per-job `$PYTEST_*` paths this step names, resolved into the sandbox.
+
+        The workflow's job-level `Resolve per-job pytest artifact paths` step exports
+        these through `$GITHUB_ENV`; one step is executed here, so the harness supplies
+        them, exactly as it supplies `RUNNER_TEMP`. Derived FROM the body, so a job that
+        hardens another path needs no edit here.
+        """
+        body = self.step.get("run") or ""
+        env: dict[str, str] = {}
+        for token in sorted(set(re.findall(r"\$\{?(PYTEST_[A-Z0-9_]+)\}?", body))):
+            env[token] = str(self.sandbox / f"{token.lower()}.artifact")
+        return env
+
     def prepare(self) -> _Run:
         self.script.write_text(self._relocated(), encoding="utf-8")
         # the fixtures the frozen-set steps branch on: "the pytest leg was green"
@@ -437,6 +463,8 @@ class _Run:
             "STUB_PYTEST_RC": pytest_rc,
             "STUB_PASSED": "40",
             "RUNNER_TEMP": str(self.sandbox),
+            # #10237: the per-job pytest artifact paths the job's first step exports.
+            **self.pytest_artifact_env(),
         }
         try:
             proc = subprocess.run(
