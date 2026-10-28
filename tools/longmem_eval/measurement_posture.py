@@ -279,7 +279,12 @@ def summarize_belief_activation(
       baseline sits here with EP never having run — which is why
       ``points_moved_off_neutral`` narrows it to what THIS pass created.
     * ``points_moved_off_neutral`` — the subset of ``points_off_neutral`` that
-      was NOT off-neutral before the pass, i.e. what this pass actually moved.
+      was NOT off-neutral before the pass: the claims this pass moved OFF the
+      neutral mean. It is an ID-SET difference, so it detects movement FROM the
+      neutral mean only — a claim that was already off-neutral and whose
+      posterior the pass changed further (0.60 → 0.80) is deliberately not
+      counted, and neither is one that moved back TO neutral. It answers "did
+      the belief layer contribute", not "did any posterior change".
       ``operators`` / ``factor_edges`` — the graph-shape census, ``None``
       (UNKNOWN) when no manifest could read one.
     * ``by_question_type`` — the same populations split by the benchmark's own
@@ -416,6 +421,18 @@ def summarize_belief_activation(
     summary["questions_neutral"] = len(neutral)
     summary["neutral_questions"] = _sorted(neutral)
     summary["questions_off_neutral"] = questions_off_neutral
+    # #10137 review 6 (P2): the None/0 decision is applied PER BUCKET too, not
+    # only at the run level. A type whose every question was inert kept the
+    # initialised ``0`` and published ``points_off_neutral: 0,
+    # points_off_neutral_unread: 0`` — a MEASURED zero for a type nothing ever
+    # measured — while the run-level cell correctly published ``None`` for the
+    # same evidence. The split is the deliverable the issue asks for ("split by
+    # question type"), so both views must be judged by one rule.
+    for b in by_type.values():
+        if b["questions_measured"] <= b["questions_contribution_unknown"]:
+            b["points_off_neutral"] = None
+        if b["questions_measured"] <= b["points_moved_off_neutral_unread"]:
+            b["points_moved_off_neutral"] = None
     # #10137 review (P1): the CONTRIBUTION cells are derived from the SAME
     # classified population as the enumerated buckets, never summed over every
     # manifest. Summing all manifests published points from a question whose
@@ -436,7 +453,8 @@ def summarize_belief_activation(
         b["questions_measured"] > b["questions_contribution_unknown"]
         for b in by_type.values())
     summary["points_off_neutral"] = (
-        sum(b["points_off_neutral"] for b in by_type.values())
+        sum(b["points_off_neutral"] for b in by_type.values()
+            if b["points_off_neutral"] is not None)
         if off_measured else None)
     summary["points_off_neutral_unread"] = sum(
         b["points_off_neutral_unread"] for b in by_type.values())
@@ -444,7 +462,8 @@ def summarize_belief_activation(
         b["questions_measured"] > b["points_moved_off_neutral_unread"]
         for b in by_type.values())
     summary["points_moved_off_neutral"] = (
-        sum(b["points_moved_off_neutral"] for b in by_type.values())
+        sum(b["points_moved_off_neutral"] for b in by_type.values()
+            if b["points_moved_off_neutral"] is not None)
         if moved_measured else None)
     summary["points_moved_off_neutral_unread"] = sum(
         b["points_moved_off_neutral_unread"] for b in by_type.values())

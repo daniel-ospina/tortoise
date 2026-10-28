@@ -173,6 +173,46 @@ def test_a_real_source_baseline_moves_the_census(sdk):
     assert summary["neutral_questions"] == []
 
 
+def test_a_direct_claim_to_claim_factor_edge_is_counted(sdk):
+    """The ``factor_edges`` census needs a POSITIVE end-to-end pin.
+
+    Every other real-graph case asserts ``== 0`` — and ``0`` is equally the
+    answer of a correct query and of one that matches nothing
+    (``... WHERE false RETURN count(r)``), which is exactly the silent-zero
+    failure the module's ``_scalar_or_none`` guards against at the read layer
+    but which the END-TO-END layer cannot see. This cell is not decorative: it
+    is what separates ``INERT_NO_OPERATORS`` ("structural — nothing EP can do
+    will help", pointing a fix at extraction) from ``no_ep_factors`` (an
+    arm/pass cause), so a dead query would route the whole #10137 population
+    at the wrong component.
+
+    A direct claim→claim ``IMPL`` edge is a factor with NO operator node, which
+    is the one shape that tells the two censuses apart.
+    """
+    a = _claim(sdk, "conclusion A")
+    b = _claim(sdk, "premise B")
+    # premise → conclusion, typed directly: `create_edge` only accepts the
+    # STRUCTURAL predicates, and IMPL/NAND are written by the operator path or
+    # by the graph itself (the same raw write `tests/test_event_provenance.py`
+    # uses for its own direct IMPL edge).
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$premise}), (c:Point {id:$conclusion}) "
+        "CREATE (p)-[:IMPL]->(c)",
+        params={"premise": b, "conclusion": a},
+    )
+
+    manifest = _manifest_of(sdk)
+
+    assert manifest["operators"] == 0   # no operator NODE exists
+    assert manifest["factor_edges"] == 1  # ...but a direct factor does
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": manifest}],
+        requested=True)
+    assert mp.INERT_NO_OPERATORS not in [
+        e["reason"] for e in summary["inert_questions"]]
+
+
 def test_the_census_agrees_with_the_canonical_read(sdk):
     """The off-neutral count is derived FROM ``read_confidence`` over the
     graph's own rows, so the two surfaces cannot disagree.

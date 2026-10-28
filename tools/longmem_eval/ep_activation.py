@@ -47,7 +47,8 @@ state's own bar is deliberately NOT re-cut here (that is #8486's recorded
 disclosure rule and an open owner decision) — see
 ``measurement_posture.belief_layer_state``.
 
-Hermetic by construction: the module imports only ``logging`` and ``time``;
+Hermetic by construction: the module imports only the standard library
+(``logging``, ``time``, ``math``, ``sys``);
 ``activate_beliefs`` takes an already-constructed SDK (or a stub) so it can
 be unit-tested without a database.
 """

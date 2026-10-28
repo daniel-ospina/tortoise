@@ -917,9 +917,19 @@ def test_by_question_type_turns_the_assertion_into_a_measurement():
     # counted only classified ``measured`` questions, so one report published
     # two different numbers for ``points_off_neutral``. Both are now derived
     # from the buckets, and this asserts the property rather than the fix.
-    assert sum(b["points_off_neutral"] for b in by_type.values()) == \
+    #
+    # #10137 review 6 (P2): a bucket that measured NOTHING publishes ``None``,
+    # not a fabricated ``0`` — so the reconciliation is over the buckets that
+    # DID measure, and the inert-only types must be absent from the sum rather
+    # than contributing a zero. Below, ``single-session-*`` measured no claim.
+    assert by_type["single-session-user"]["points_off_neutral"] is None
+    assert by_type["single-session-assistant"]["points_off_neutral"] is None
+    assert by_type["single-session-user"]["points_moved_off_neutral"] is None
+    assert sum(b["points_off_neutral"] for b in by_type.values()
+               if b["points_off_neutral"] is not None) == \
         summary["points_off_neutral"]
-    assert sum(b["points_moved_off_neutral"] for b in by_type.values()) == \
+    assert sum(b["points_moved_off_neutral"] for b in by_type.values()
+               if b["points_moved_off_neutral"] is not None) == \
         summary["points_moved_off_neutral"]
     # the per-type counter is named apart from the run-level ``measured``
     # (which counts MANIFESTS, a different population — #10137 review)
@@ -1119,6 +1129,49 @@ def test_an_all_inert_run_never_publishes_a_measured_zero_contribution():
     assert summary["questions_inert"] == 3
     assert summary["points_off_neutral"] is None
     assert summary["points_moved_off_neutral"] is None
+
+
+def test_an_inert_only_question_type_never_publishes_a_measured_zero():
+    """RED: the run-level cell was taught to publish ``None`` for a run that
+    measured nothing, but the per-type bucket kept its INITIALISED ``0`` — so
+    the type whose questions were never measured at all published
+    ``points_off_neutral: 0, points_off_neutral_unread: 0`` (a measured zero,
+    with nothing to say it was not one) while the run-level cell for the same
+    evidence published ``null``. The per-type split is the deliverable #10137
+    asks for ("split by question type"), so the same rule applies to it.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "single-session-user",
+          "belief_activation": _unmeasured_manifest(operators=0,
+                                                    factor_edges=0)},
+         {"question_id": "q2", "question_type": "single-session-user",
+          "belief_activation": {"ep_ran": False, "error": "boom"}}],
+        requested=True)
+    bucket = summary["by_question_type"]["single-session-user"]
+    assert bucket["questions_measured"] == 0
+    assert bucket["points_off_neutral"] is None          # never measured
+    assert bucket["points_moved_off_neutral"] is None    # never measured
+    assert bucket["questions_contribution_unknown"] == 0  # nothing to read
+    # ...and the run-level cell agrees, so the two views cannot disagree
+    assert summary["points_off_neutral"] is None
+    assert summary["points_moved_off_neutral"] is None
+
+
+def test_a_measured_bucket_still_publishes_its_zero_beside_an_inert_one():
+    """The control: a bucket that DID measure keeps its number, including a
+    measured ``0`` — only the never-measured buckets are UNKNOWN, and the
+    run-level sum covers the measured ones."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "i1", "question_type": "inert-type"},
+         {"question_id": "m1", "question_type": "measured-type",
+          "belief_activation": _census(points_off_neutral=0,
+                                       points_moved_off_neutral=0)}],
+        requested=True)
+    by_type = summary["by_question_type"]
+    assert by_type["inert-type"]["points_off_neutral"] is None
+    assert by_type["measured-type"]["points_off_neutral"] == 0
+    assert summary["points_off_neutral"] == 0
+    assert summary["points_moved_off_neutral"] == 0
 
 
 def test_the_run_level_cell_does_not_depend_on_the_question_type_split():
