@@ -1020,3 +1020,266 @@ def test_read_record_view_asks_for_the_scope_it_was_given():
         "for)")
     for sql in seen[2:]:
         assert "org_id = %s" in sql and "graph_id = %s" in sql
+
+
+# ── 3c. §2.6's DERIVED half — the cache COMPUTES what the record may not store
+
+
+def test_the_cache_computes_the_lifecycle_status_the_record_may_not_store():
+    """#9974 — `status` is DERIVED (§2.6), so something must DERIVE it.
+
+    The measured defect this pins. §2.6 (`02-identity-and-placement.md`)
+    classifies `Object.status` / `Subject.status` as a **cache** — *"the journal
+    value is not the record"* — and both schemas refuse the name in `props`, so
+    the record correctly stores nothing. Nothing then COMPUTED it: the
+    record-sourced projection wrote the record's columns and invoked no fold, so
+    after `rebuild_from_record` a superseded Object carried NO `status` at all,
+    `live._terminal_excluded` read the absence as LIVE (the legacy-node rule),
+    and `entity_identity.resolve_entity_id` resolved the superseded name.
+
+    The carrier is the record's own PRIMARY column: `_fold_object_superseded`
+    (Object) and `EntityMutated op=supersede`'s generic fold (Subject, #1423)
+    each write `status='superseded'` and `supersededBy` in ONE statement, so
+    `supersededBy` present ⇒ the fold set `'superseded'`.
+    """
+    obj = _node("Object", {"id": "o-1", "name": "alpha",
+                           "superseded_by": "alpha-v2"})
+    assert obj.props["status"] == "superseded", (
+        "a rebuild materialised a superseded Object with no status — the "
+        "record refuses the name and the cache did not derive it (#9974)"
+    )
+    # The record's PRIMARY carrier still rides through unchanged (no over-drop).
+    assert obj.props["supersededBy"] == "alpha-v2"
+
+    subj = _node("Subject", {"id": "s-1", "name": "role",
+                             "subject_kind": "team",
+                             "superseded_by": "role-v2"})
+    assert subj.props["status"] == "superseded", (
+        "the Subject half of #1423's supersession is the same §2.6 cache and "
+        "the same carrier — it must derive identically"
+    )
+    assert subj.props["supersededBy"] == "role-v2"
+
+    # …and it reaches the STATEMENT, not just the model: an assertion over
+    # `RecordNode.props` would pass while `node_statement` dropped the field.
+    stmt = cp.node_statement(obj)
+    assert stmt.params["props"]["status"] == "superseded"
+
+
+def test_the_derivation_fabricates_nothing_where_the_record_is_silent():
+    """The other direction, which a naive `'live'` default would break.
+
+    `status` is NOT a `FOLD_ON_CREATE_DEFAULTS` constant. Filling `'live'` where
+    the record carries no lifecycle signal would replace *"the record did not
+    say"* with a positive claim — and for a row the record holds a NON-default
+    status for by other means (an event-kind fold, `restatus`) that claim would
+    be false. So an Object the record carries NO supersession signal for carries
+    NO `status`: the absent value keeps `_terminal_excluded`'s documented legacy
+    rule (*"nodes without a stored status are LIVE"*) instead of minting a value
+    the record cannot support.
+
+    ⚠️ The silence being read is the PAIR (`supersededBy` OR `supersededAt`),
+    not `supersededBy` alone — a blank `supersededBy` is NOT silence when
+    `supersededAt` is present, which is exactly the id-only legacy shape
+    (:func:`test_an_id_only_supersession_is_derived_not_left_live`) that a
+    `supersededBy`-only reading left resurrected.
+    """
+    obj = _node("Object", {"id": "o-2", "name": "gamma"})
+    assert "status" not in obj.props, (
+        "the projection invented a lifecycle status the record does not carry "
+        "— #9974's residue (restatus / event-kind folds) is a DECISION, not a "
+        "constant to fabricate"
+    )
+    # …and neither is an EMPTY carrier; that edge is measured and pinned
+    # separately, in `test_an_empty_carrier_is_not_a_supersession`.
+
+
+def test_an_empty_carrier_is_not_a_supersession():
+    """An EMPTY carrier is not a supersession — measured against a live engine.
+
+    `public.object_current_status` reads the carriers with `IS NOT NULL`, so a
+    row whose `superseded_by` is `''` answers `'superseded'` there. The GRAPH
+    does not agree, and the graph is what this cache is a cache OF. Measured on
+    a live engine at this head:
+
+        update_entity(obj, supersededBy="")   ->  status='live',  supersededBy=''
+        update_entity(obj, supersededBy="v2") ->  status='live',  supersededBy='v2'
+
+    So truthiness — not `IS NOT NULL` — is what agrees with the live node, and
+    the record VIEW is the side that over-reports on this edge (a defect in the
+    view, named in `DERIVED_FROM_RECORD`'s bound). Deriving on an empty carrier
+    would resurrect a node as TERMINAL that the graph holds LIVE.
+    """
+    for label in ("Object", "Subject"):
+        node = _node(label, {"id": "e-1", "name": "epsilon",
+                             "superseded_by": "", "superseded_at": ""})
+        assert "status" not in node.props, (
+            f"an EMPTY carrier derived a lifecycle status on :{label} — the "
+            "record view's IS NOT NULL is not the graph's reading (measured: "
+            "an empty carrier coexists with a LIVE node)"
+        )
+
+
+def test_the_record_can_clear_the_carriers_it_can_set():
+    """The record DOES express un-supersede, by clearing the carriers.
+
+    This pins the bound's `NOT MONOTONE` bullet, which an earlier revision got
+    wrong by generalising the status-only `restatus` no-op into "the record
+    cannot express un-superseded". Measured: an explicit
+    `update_entity(status='live', supersededBy=None, supersededAt=None)`
+    journals `EntityMutated op=supersede` with null state, and the mutation
+    writes BOTH columns — so a later rebuild derives nothing, matching the
+    graph.
+    """
+    from tortoise.record_projection import mutations_for
+
+    stmts = mutations_for(
+        {"type": "EntityMutated", "label": "Object", "op": "supersede",
+         "state": {"supersededBy": None, "supersededAt": None}, "id": "o-1"},
+        org_id="o", graph_id="g",
+    )
+    sql = " ".join(s.sql for s in stmts)
+    assert "superseded_by" in sql and "superseded_at" in sql, (
+        f"the un-supersede write no longer clears both carriers ({sql!r}) — "
+        "if it stopped, the record genuinely could not express un-superseded "
+        "and the bound's NOT MONOTONE bullet must be re-derived"
+    )
+    assert any(p is None for s in stmts for p in s.params), (
+        "the un-supersede write no longer binds NULL to a carrier — re-derive "
+        "the NOT MONOTONE bullet rather than trusting it"
+    )
+
+
+def test_a_status_only_restatus_derives_nothing_the_record_cannot_carry():
+    """`restatus`: #9974's residue, and `superseded` is IN it.
+
+    The bound names `superseded` FIRST among the values this table cannot
+    derive, because it is the on-point status and the one a reader would assume
+    is covered. Measured: `update_entity(subject, status='superseded')`
+    leaves the node `status='superseded'` with BOTH carriers absent, and the
+    record mutation is the `never_store` no-op — so a rebuild derives nothing
+    and the entity comes back LIVE. That remains #9974's open window; this test
+    exists so the bound cannot silently claim otherwise.
+    """
+    from tortoise.record_projection import mutations_for
+
+    stmts = mutations_for(
+        {"type": "EntityMutated", "label": "Subject", "op": "restatus",
+         "state": {"status": "superseded"}, "id": "s-1"},
+        org_id="o", graph_id="g",
+    )
+    sql = " ".join(s.sql for s in stmts)
+    assert "superseded_by" not in sql and "superseded_at" not in sql, (
+        f"a status-only restatus now carries a supersession column ({sql!r}) "
+        "— if it started to, `superseded` would leave the NOT-DERIVED residue "
+        "and the bound must be re-derived"
+    )
+    # …and the row it produces really derives nothing: no carrier, no status.
+    assert "status" not in _node("Subject", {"id": "s-1", "name": "role",
+                                               "subject_kind": "team"}).props
+
+
+def test_an_id_only_supersession_is_derived_not_left_live():
+    """#9974's own shape, on the carrier the record writes for it.
+
+    The record does NOT always carry `supersededBy`. An id-only (legacy §6b)
+    `ObjectSuperseded` — still replayed, and pinned by
+    `test_status_projection.py::test_rebuild_all_legacy_6b_id_only_shape_supersedes`
+    (#2164/#2193) — folds `status='superseded'` with `supersededBy=''`, and the
+    mutation writes `superseded_at` ALONE:
+
+        UPDATE public.object SET superseded_at = %s …          (no supersedes_by)
+
+    So a derivation reading `supersededBy` only derives NOTHING here, and the
+    entity is materialized without a `status` — which `_terminal_excluded` reads
+    as LIVE. That is #9974 itself, unfixed on a shape the record still emits.
+    The sources are therefore BOTH PRIMARY carriers, as alternatives.
+    """
+    for label in ("Object", "Subject"):
+        node = _node(label, {"id": "x-1", "name": "acme",
+                             "superseded_at": "2026-01-01T00:00:00Z"})
+        assert node.props.get("status") == "superseded", (
+            f"an id-only supersession left the rebuilt :{label} with no status "
+            "— the record carries `superseded_at`, so this is #9974 again"
+        )
+    # …and the value reaches the STATEMENT, not only the model.
+    stmt = cp.node_statement(_node("Object", {
+        "id": "o-4", "name": "acme", "superseded_at": "2026-01-01T00:00:00Z"}))
+    assert stmt.params["props"]["status"] == "superseded"
+
+
+def test_the_derivation_is_pinned_to_the_folds_own_lifecycle_writes():
+    """A `status` derivation is only sound while the fold writes the CARRIERS.
+
+    `DERIVED_FROM_RECORD` infers `status='superseded'` from a supersession
+    carrier. That inference holds only because the folds write `status`
+    together with those carriers — so this pin reads the fold's clauses and the
+    mutation builders, and reds if any half moves. Source-parsed for the same
+    reason as the `FOLD_ON_CREATE_DEFAULTS` pin: a live graph cannot guard the
+    DB-free lane.
+    """
+    fold = _fold_source()
+    # Object: the blind (replay) clause writes status AND supersededBy together.
+    assert re.search(r"SET o\.status='superseded', o\.supersededBy=\$sb", fold), (
+        "`_fold_object_superseded` no longer writes status and supersededBy in "
+        "one clause — DERIVED_FROM_RECORD's inference is no longer sound"
+    )
+    # The CAS'd live arm keeps the pair together too (both arms are
+    # `CASE WHEN live`, so a node is never given one without the other).
+    assert re.search(r"SET o\.status = CASE WHEN live THEN 'superseded'", fold), (
+        "`_fold_object_superseded`'s CAS arm changed shape — re-derive the "
+        "status/supersededBy pairing, do not guess"
+    )
+    # The fold sets status UNCONDITIONALLY on `supersedes_by` (it is $sb, which
+    # may be ''), which is why a blank successor is still a supersession and the
+    # id-only shape needs the `supersededAt` carrier rather than a blank check.
+    assert re.search(r"supersededBy=\$sb", fold), (
+        "the fold no longer binds supersededBy to the raw $sb — a blank-"
+        "successor supersession may have become conditional; re-derive"
+    )
+    # Subject: `commit_ops` builds ONE state map carrying both keys, and the
+    # generic `SET s += $s` fold applies it atomically.
+    ops = (REPO_ROOT / "tortoise" / "commit_ops.py").read_text()
+    assert re.search(
+        r'state = \{"status": "superseded", "supersededBy": supersedes_by,', ops
+    ), (
+        "`commit_ops._apply_subject_supersession` no longer journals status and "
+        "supersededBy in ONE state map — the Subject derivation lost its carrier"
+    )
+    # The MUTATION path is the record's second writer, and it is the one that
+    # produces `superseded_at` with NO `superseded_by` (an id-only event). Pin
+    # that shape, because it is the carrier the derivation nearly missed.
+    from tortoise.record_projection import mutations_for
+    id_only = mutations_for(
+        {"type": "ObjectSuperseded", "ts": "2026-01-01T00:00:00Z", "id": "o-1"},
+        org_id="o", graph_id="g",
+    )
+    sql = " ".join(s.sql for s in id_only)
+    assert "superseded_at" in sql and "superseded_by" not in sql, (
+        "an id-only ObjectSuperseded no longer writes `superseded_at` alone — "
+        "if it started writing `superseded_by` the two carriers converged and "
+        "this pin (and the id-only test) must be re-derived"
+    )
+    # The scope of the table is asserted, so adding a member without this
+    # review is a red rather than a silent widening of what the cache invents.
+    assert {label: tuple(member[0] for member in members)
+            for label, members in cp.DERIVED_FROM_RECORD.items()} == {
+        "Object": ("status",), "Subject": ("status",)
+    }, (
+        "DERIVED_FROM_RECORD gained or lost a derived property — every member "
+        "must be a §2.6 DERIVED name with a PRIMARY carrier, and each needs its "
+        "own pin"
+    )
+    # …and every member must read the record's whole OR-predicate, both PRIMARY
+    # carriers (§2.6: `supersededBy` and `supersededAt`). A one-carrier member
+    # resurrects the shape that carrier does not cover.
+    assert {label: tuple(member[1] for member in members)
+            for label, members in cp.DERIVED_FROM_RECORD.items()} == {
+        "Object": (("supersededBy", "supersededAt"),),
+        "Subject": (("supersededBy", "supersededAt"),),
+    }, (
+        "a DERIVED_FROM_RECORD member stopped covering BOTH PRIMARY "
+        "supersession carriers — the record emits each alone (id-only legacy "
+        "shape carries only superseded_at), so a one-carrier reading leaves "
+        "#9974 open on the other"
+    )

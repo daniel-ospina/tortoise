@@ -23,7 +23,12 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   capacity is now a goal in its own right. So this file adds capacity openly instead of dressing
   it up as a fallback. It does NOT reverse the parts the owner did not reopen: the fallback
   LABEL stays gate-following (see `resolve_labels`), and nothing here relabels, removes, or
-  re-ranks an existing runner.
+  re-ranks an existing runner -- with ONE exception, a version-pinned hosted label
+  (`VERSION_PINNED_HOSTED_LABEL`), which re-registration DROPS, so a pin attached out of band cannot
+  survive the next RE-REGISTRATION (a repair that only restarts a healthy runner never re-registers
+  it). The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label set on every
+  pass and `_preserve_labels` drops a pin from it, but no test and no gate compares the live set to
+  the invariant (`docs/ops/ci-runner-x64.md:67`), so re-measure it after any runner is registered.
 
 THE CEILING IS A PREDICATE, NOT A NUMBER
     ceiling = min(core_ceiling, runners_live + headroom_by_memory)
@@ -250,6 +255,22 @@ ARCH_LABEL = {
     "aarch64": "self-hosted-arm64",
     "arm64": "self-hosted-arm64",
 }
+
+#: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool deliberately
+#: claims only `ubuntu-latest` and never one of these (`docs/ops/ci-runner-x64.md:25-26`), because
+#: a job that pins a version asks for the GitHub-hosted image specifically.
+#:
+#: The class is bounded by what GitHub's hosted images ANSWER TO, not by a spelling: the same label
+#: table publishes the arm64 variants `ubuntu-24.04-arm` / `ubuntu-22.04-arm` / `ubuntu-26.04-arm`
+#: (`github/docs` `data/reusables/actions/supported-github-runners.md`, checked 2026-10-27), and a
+#: job pinned to one of those is escaping this pool exactly as a bare version pin does. The suffixed
+#: shape is in the class as defence in depth over the WHOLE hosted version family, NOT because it is
+#: the likeliest one to be attached here: this runbook is the x64 pool
+#: (`docs/ops/ci-runner-x64.md:13`), and the ARM64 VMs register their own markers (`:33-34`), so an
+#: `-arm` pin on this box is the LEAST likely — and it is dropped anyway. A custom label that merely
+#: starts `ubuntu-<digits>` (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be
+#: preserved.
+VERSION_PINNED_HOSTED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*(?:-arm)?", re.IGNORECASE)
 
 DEFAULT_REPO = "daniel-ospina/tortoise"
 
@@ -1130,11 +1151,16 @@ def converge(
                 f"{c['name']} still offline after restart — re-registering with --replace"
             )
         try:
-            # ⛔ Re-registering KEEPS the labels the runner already carries. Deriving a fresh set
-            # drops any custom/tier label (and the fallback label, when it is engaged), so the
-            # workflows that target it queue forever — a "repair" that removes capacity. Only a
-            # runner absent from the pool (ORPHANED) has no labels to keep, and only that case
-            # derives them. ⛔ PER RUNNER, never a value cached from the previous iteration: that
+            # ⛔ Re-registering KEEPS the labels the runner already carries — EXCEPT a
+            # version-pinned hosted label (`VERSION_PINNED_HOSTED_LABEL`; the carve-out is spelled
+            # out in `_preserve_labels`). That one is DROPPED, because a job naming `ubuntu-24.04`
+            # wants the GitHub-hosted image and not this pool, so keeping the pin is how a label
+            # attached once out of band becomes permanent. Deriving a whole fresh set is still the
+            # failure this preserves against: it drops any custom/tier label (and the fallback
+            # label, when it is engaged), so the workflows that target it queue forever — a
+            # "repair" that removes capacity. Only a runner absent from the pool (ORPHANED) has no
+            # labels to keep, and only that case derives them.
+            # ⛔ PER RUNNER, never a value cached from the previous iteration: that
             # leaked one runner's set (including an other-arch marker) onto every later repair in
             # the same pass (round 2, finding 3). Host-derived labels (self-hosted/Linux/X64/ARM64)
             # cannot be set by hand and are filtered out of what is preserved.
@@ -1385,6 +1411,17 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     other label (a custom tier, a pool tag, `ubuntu-latest` while the fallback is engaged) is
     PRESERVED, because a workflow targeting it would otherwise queue forever.
 
+    ⛔ A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04`-shaped, INCLUDING GitHub's arm64 spelling
+    `ubuntu-24.04-arm` — see `VERSION_PINNED_HOSTED_LABEL`) is the ONE exception, and it is
+    dropped rather than preserved. The recorded invariant is that the pool claims `ubuntu-latest`
+    and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`), and that label is
+    precisely what a lane pins to ESCAPE this pool. Preserving it on re-registration is how a label
+    attached once out of band — the 2026-10-24 drift that put `finding-provenance` on
+    `pi-runner-vm-*` with `ubuntu-24.04` (`tests/test_runner_tool_contract.py:5-12`) — becomes
+    permanent, and it would silently un-pin every observer job pinned to it. Dropping it restores
+    the invariant; no workflow is starved by that, because a job naming the label wants the
+    GitHub-hosted image. `ubuntu-latest` itself is NOT dropped: that one is the fallback label.
+
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with
     `self-hosted-arm64` — a false PASS (an arm64 job built on x86), not a queue delay.
@@ -1395,6 +1432,7 @@ def _preserve_labels(current: list[str], machine: str) -> str:
         x
         for x in current
         if x and x.lower() not in host_derived and not x.lower().startswith("self-hosted-")
+        and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)
     ]
     if not arch:
         return ""  # unknown arch: the caller falls back to resolve_labels, which REFUSES

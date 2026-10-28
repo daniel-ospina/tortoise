@@ -140,10 +140,13 @@ Migrations + functions deploy via `.github/workflows/supabase-deploy.yml`.
 > every apply succeeded, and it fails closed on BOTH halves: if it cannot
 > dispatch, the run goes RED; and having dispatched, it WATCHES that run and
 > goes RED if it does not reach success — an ordinary merge to `main` touching
-> `tortoise/**` starts a run in `deploy-hosted`'s `cancel-in-progress`
-> concurrency group, so the flip can be cancelled after the dispatch was
-> accepted. Dispatch FROM `main` — a non-main run is refused before any
-> migration is applied.
+> `tortoise/**` starts a run in `deploy-hosted`'s single constant
+> `concurrency` group, so a run landing while the flip is still PENDING
+> supersedes it after the dispatch was accepted. `cancel-in-progress: false`
+> (#10155) stops a RUNNING flip being killed, which is the worse failure; a
+> pending one is still superseded by the newest push, because a shared group
+> holds one pending run. Dispatch FROM `main` — a non-main run is refused
+> before any migration is applied.
 
 **Migration drift gate (#1095):** `deploy-hosted.yml` runs
 `.github/scripts/check-migration-drift` before shipping app code — a fail-closed
@@ -161,11 +164,48 @@ forward migration, or `migration repair --linked --status applied <version>`
 when the migration is provably already in prod — because the apply pushes the
 whole pending set in filename order.
 
-Manual fallback — for when the automated co-move has already FAILED. The run
-says which way: a dispatch error, or `run <id> did not reach success`. Do not
-run the last line alongside a healthy co-move — `deploy-hosted.yml` is
-`cancel-in-progress: true`, so a manual dispatch CANCELS the in-flight
-automated flip and turns that run red.
+Manual fallback — for when the automated co-move has already FAILED. **The run
+says which way, and the distinction that matters is whether the dispatch was
+ACCEPTED.** Six arms exit 1 (`supabase-deploy.yml`, the co-move step), and only
+TWO of them mean the flip was never started or is known to have failed:
+
+**Safe to fall back — the dispatch did not land, or the flip is known to have
+failed:**
+
+- **`Could not dispatch deploy-hosted`** — the POST itself failed, so the flip
+  was never started. Re-run, or flip by hand.
+- **`did not reach success`** / **`did NOT flip`** — the dispatch WAS accepted and
+  the run reached a terminal non-success state, or a newer push superseded it
+  while it was still PENDING. This is the case the fallback below is for.
+
+⛔ **NOT safe to fall back — the dispatch was accepted and the flip may be
+RUNNING.** All four of these exit 1, so they must not be read as "nothing
+happened":
+
+- **`answered with an unreadable body`** — the app flip is **`UNCONFIRMED`**;
+- **`did not name a run`** — the app flip is **`UNOBSERVED`**;
+- **`did not FINISH within the … wait`** — the flip is **`UNKNOWN`, NOT failed**.
+  The watch gave up while the run was still QUEUED or running (runner-queue
+  latency is not ours to bound).
+- **`reported a non-zero exit … its state is NOT terminal`** — the flip is
+  **`UNKNOWN`, NOT failed**: the watch exited non-zero on a failed POLL (it
+  returns the same exit code for a transport/API error as for a failed run, and
+  over ~6,600 polls that is a realistic event) while the run's own
+  `status`/`conclusion` say it has not finished.
+
+In those four cases do **NOT** run the fallback and do **NOT** re-dispatch —
+both queue behind that run and supersede its pending slot, which leaves the
+schema applied and the app orphaned: exactly the #3627 window this section
+exists to close. Watch it instead
+(`gh run watch <id> --repo daniel-ospina/tortoise`), and if it is genuinely
+stuck, cancel the `supabase-deploy` job — it holds the `supabase-deploy-apply`
+lock for as long as it waits, so every later apply is queued behind it.
+
+Do not run the last line alongside a healthy co-move — `deploy-hosted.yml`
+serialises every run in ONE constant `concurrency` group, so a manual dispatch
+QUEUES and supersedes the still-PENDING automated flip (it no longer cancels a
+running one since `cancel-in-progress: false`, #10155), and the automated run
+then reports that its flip was superseded.
 
 ```bash
 supabase db push --project-ref ybetwichurajbfswfeqa
