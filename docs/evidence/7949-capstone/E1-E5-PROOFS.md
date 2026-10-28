@@ -140,13 +140,16 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
   Measured with `git show <ref>:docs/00_index.md` over every commit that touched the
   bundle's rows, they read `:141`/`:148`/`:149` at the pre-PR head `59cd1101` and
   `:141`/`:148`/`:149`/`:150` at the commit that wrote that sentence (`b65c79080`) —
-  i.e. those four numbers were **wrong when written, not stale**, and nothing rotted
-  between then and this head. The rot claim is the same kind of unmeasured assertion
-  this audit exists to catch, so it is recorded rather than deleted. The consequence
-  is unchanged and worse than the draft said: at this head `:140` (the Objective-7
-  exit artifact), `:146` (hosted prerequisites, epic #7879) and `:147` (the read
-  path, #7970) are **three other rows**, so three of the four would have routed a
-  reader into someone else's epic. And
+  i.e. those four numbers were **wrong when written, not stale** at `b65c79080`. The
+  rot claim is the same kind of unmeasured assertion this audit exists to catch, so it
+  is recorded rather than deleted. ⚠️ Then it happened to this bullet's OWN numbers,
+  which is why they are gone: at `b2027e46b` the draft's `:140` / `:146` / `:147` were
+  the Objective-7 exit row, the hosted-prerequisites row and the read-path row, and
+  the merge of `origin/main` in `75d9ef846` shifted every one of them (`+1` / `+2` /
+  `+2`). A reader is therefore given **titles, never line numbers**: the three rows
+  those numbers now land on belong to other epics (the `#7846` graph-key `RESTORE`
+  row, the `#10183` AX-principles row and the `#7950` capstone-evidence row), so three
+  of the four would have routed a reader into someone else's epic. And
   the README does not name this file — so "reachable through the bundle's rows" was
   false and a reader routing by the documented entry point could not reach it. (An
   earlier draft justified adding nothing by `_index_row`'s "exactly one" rule; that was
