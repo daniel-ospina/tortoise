@@ -622,13 +622,13 @@ number's resolution is checked against the tree when it is re-derived.)
 
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
-| S0 READ | `_edus_from_conversation` `:8507` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:8540` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:8564` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:8593` | `result["vet"]` — built at `extractor_v2.py:8971-8975`, DROPPED at the meta fold `sdk.py:13785` | ❌ **#9116** |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:8609` | `result["classify_later"]` — built at `extractor_v2.py:8961-8967`, dropped at the same fold | ❌ **#9116** |
-| S3 RESOLVE | `search_graph` `:8625` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
-| S5 CONNECT | `execute_embed` `:8845` (+ `run_s4` `:8646` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S0 READ | `_edus_from_conversation` `:8595` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+| S1 NARRATE | `run_s1` `:8628` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:8652` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:8681` | `result["vet"]` — built at `extractor_v2.py:8971-8975`, DROPPED at the meta fold `sdk.py:13785` | ❌ **#9116** |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:8697` | `result["classify_later"]` — built at `extractor_v2.py:8961-8967`, dropped at the same fold | ❌ **#9116** |
+| S3 RESOLVE | `search_graph` `:8713` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
+| S5 CONNECT | `execute_embed` `:8933` (+ `run_s4` `:8734` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]` | ❌ **#9116** — the committed `:Point` nodes and their `eventId` stamps in the live graph are the witness `capstone_measure.py` uses |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself, which
