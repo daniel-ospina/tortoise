@@ -932,6 +932,53 @@ def test_an_empty_record_declares_partial_not_complete():
 # ── 6. the record read shape, over a (fake) connection ──────────────────────
 
 
+#: The statement's OWN unwrap marker, from `cache_projection._PAYLOAD_EVENT`:
+#: the reader declares that it unwraps a nested `payload -> 'event'` envelope,
+#: and `_project_journal_rows` honours that declaration (and only that one).
+_UNWRAP_MARK = "jsonb_typeof(payload -> 'event') = 'object'"
+
+
+def _project_journal_rows(sql: str, rows, params):
+    """Emulate the JSONB projection `_LIFECYCLE_EVENTS_SQL` asks Postgres for.
+
+    The reader's columns are computed by JSON operators, which a DB-free cursor
+    cannot run — so this fake honours the statement's OWN declared semantics:
+
+    * it unwraps `payload -> 'event'` only when the SQL asks for it (the
+      ``_UNWRAP_MARK`` substring), which is what Postgres does too; and
+    * it applies the single-Object narrowing only when the `to_jsonb(`
+      containment clause is present, using the trailing `target` bind.
+
+    A statement that reads the top level only therefore leaves a
+    nested-envelope row with no `event_kind` — exactly what Postgres would
+    return — so a reader that LOST the unwrap fails the fold instead of passing
+    on a fake that pre-flattened the shape. Rows already shaped as columns
+    (`payload` absent) pass through unchanged.
+    """
+    unwrap = _UNWRAP_MARK in sql
+    narrow = "to_jsonb(" in sql
+    target = params[-1] if (narrow and params) else None
+    out = []
+    for row in rows:
+        payload = row.get("payload")
+        if isinstance(payload, dict) or "payload" in row:
+            row = dict(row)
+            nested = payload.get("event") if isinstance(payload, dict) else None
+            src = nested if (unwrap and isinstance(nested, dict)) else (payload or {})
+            row["event_kind"] = src.get("eventKind")
+            row["object_name"] = src.get("object")
+            row["about_entities"] = src.get("about_entities")
+            row["about_entities_camel"] = src.get("aboutEntities")
+        if narrow:
+            about = row.get("about_entities") or row.get("about_entities_camel")
+            names = [row.get("object_name")]
+            names.extend(about if isinstance(about, list) else [about])
+            if target not in names:
+                continue
+        out.append(row)
+    return out
+
+
 class _FakeCursor:
     def __init__(self, rows_by_table, seen: list[str] | None = None):
         self._rows = rows_by_table
@@ -946,7 +993,10 @@ class _FakeCursor:
         if sql == cp._rp.TENANT_GUC_SQL:
             self._tenant = params[0] if params else None
         m = re.search(r"FROM public\.(\w+)", sql)
-        self._current = self._rows.get(m.group(1), []) if m else []
+        table = m.group(1) if m else None
+        self._current = self._rows.get(table, []) if table else []
+        if table == "journal_event":
+            self._current = _project_journal_rows(sql, self._current, params)
 
     def fetchall(self):
         return list(self._current)
@@ -1358,6 +1408,102 @@ def test_read_record_view_folds_the_event_stream_onto_the_object():
         view.nodes, view.lifecycle_events) == view.nodes
 
 
+
+def _nested(seq, event, **envelope):
+    """One record row as `ConversationMiner._emit_event` persists it (#5475).
+
+    `record_projection._journal_row` stores the record minus `ENVELOPE_KEYS`,
+    and `version` / `event` / `createdAt` are NOT envelope keys — so the durable
+    payload nests the event and `payload ->> 'eventKind'` is NULL for it.
+    """
+    payload = {"version": "1.0", "type": "EventRecorded", "event": event,
+               "createdAt": "2026-10-28T12:00:00Z"}
+    payload.update(envelope)
+    return {"seq": seq, "payload": payload}
+
+
+def test_a_nested_envelope_event_still_folds_the_lifecycle():
+    """One of the record's three writing doors nests the event (review P2).
+
+    `mining.ConversationMiner._emit_event` builds
+    `{"version", "type", "event": {…}, "createdAt"}` and writes it to the
+    record; the LIVE fold unwraps it (`inner = event.get("event", event)`),
+    so a record-side reader that read only the TOP level folded NOTHING for
+    every mined event, silently — the guide "a rebuild folds by exactly the
+    declaration a live write folds by" false for one of the production doors.
+
+    The pre-fix reader returns no event at all here, so both the view fold and
+    the single-row door (`read_node`) answer without a status.
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-1", "name": "issue-1", "object_kind": "issue",
+                    "props": {}}],
+        "journal_event": [
+            _nested(1, {"eventKind": "github.issue.open",
+                        "object": "issue-1"}),
+            _nested(2, {"eventKind": "github.issue.closed",
+                        "object": "issue-1"}),
+        ],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g")
+    obj = next(n for n in view.nodes if n.label == "Object")
+    assert obj.props.get("status") == "completed", (
+        "a nested-envelope EventRecorded was dropped by the record-side reader "
+        "— the live fold folds it")
+    # …and the SINGLE-ROW door: its narrowing predicate is the second half of
+    # the same bug (a nested payload matched neither `object` nor
+    # `about_entities`, so the event never came back).
+    assert [e.seq for e in cp.read_lifecycle_events(
+        conn, org_id="o", graph_id="g", target="issue-1")] == [1, 2]
+    assert rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                        key="o-1")["status"] == "completed"
+    # …and an unrelated target still narrows to nothing, so the unwrap did not
+    # defeat the single-row filter.
+    assert cp.read_lifecycle_events(
+        conn, org_id="o", graph_id="g", target="issue-9") == ()
+
+
+def test_both_about_entities_spellings_are_preferred_not_unioned():
+    """The live fold PREFERS one spelling; the reader must not union them.
+
+    `entities.py` reads `inner.get("about_entities") or
+    inner.get("aboutEntities") or []`, so a payload carrying BOTH with different
+    contents folds only the snake_case list there. The pre-fix reader
+    concatenated the two, folding Objects the live graph never touched — the
+    same silent-divergence class as the nested envelope, in the same reader.
+    """
+    from tortoise.status_folds import StatusFoldIndex
+
+    index = StatusFoldIndex()
+    index.by_event = {"disbursement": [("venture:tranche", "released")]}
+    index.statuses_by_kind = {"venture:tranche": ("pending", "released")}
+    index.lifecycle_kinds = frozenset(index.statuses_by_kind)
+    index.kind_forms = frozenset({"venture:tranche", "tranche"})
+
+    conn = _FakeConn({
+        "journal_event": [{"seq": 1, "payload": {
+            "eventKind": "disbursement",
+            "about_entities": ["snake"],
+            "aboutEntities": ["camel"],
+        }}],
+    })
+    events = cp.read_lifecycle_events(conn, org_id="o", graph_id="g")
+    assert [e.about_names for e in events] == [("snake",)], (
+        "the reader unioned the two `about_entities` spellings — the live fold "
+        "prefers the snake_case one and never folds the camelCase list")
+    snake = _node("Object", {"id": "t-1", "name": "snake",
+                             "object_kind": "tranche"})
+    camel = _node("Object", {"id": "t-2", "name": "camel",
+                             "object_kind": "tranche"})
+    folded = {n.props["name"]: n.props.get("status")
+              for n in cp.apply_event_stream_folds([snake, camel], events,
+                                                   index=index)}
+    assert folded == {"snake": "released", "camel": None}, (
+        f"the rebuild folded an Object the live fold never touched: {folded}")
+
+
 def test_the_event_stream_fold_is_last_writer_by_journal_seq():
     """`seq` is the order, and the INPUT order must not matter.
 
@@ -1478,13 +1624,19 @@ def test_the_event_stream_fold_can_never_write_a_terminal_status():
 
     The record carries no signal for a TERMINAL `restatus`
     (`deprecated`/`archived`/`retracted` — see `DERIVED_FROM_RECORD`'s
-    NOT-DERIVED bullet), so a rebuild cannot honour it, and the fold may label
-    an Object the graph kept terminal. That is survivable ONLY because the
-    vocabulary has no terminal word: an ABSENT status already reads LIVE to
-    `_terminal_excluded`, so the pre-#10198 rebuild showed such an Object too,
-    and this fold can never HIDE one the graph presents. If a connector or pack
-    fold ever gains a terminal target, this guard must be re-derived — not
-    widened.
+    NOT-DERIVED bullet), so a rebuild cannot honour one the GRAPH set, and the
+    fold may label an Object the graph kept terminal. That is survivable because
+    an ABSENT status already reads LIVE to `_terminal_excluded`, so the
+    pre-#10198 rebuild showed such an Object too.
+
+    ⚠️ This test alone is NOT the guard, and reading it as one was the review's
+    finding: it asserts over `BUILTIN_CONNECTOR_FOLDS` (the half with no
+    terminal target, untouched by this change), so it passed unchanged on the
+    pre-fix code. What actually protects a terminal Object is the PER-EVENT
+    replay guard, asserted in
+    `test_a_terminal_pack_fold_latches_instead_of_being_resurrected` — the half
+    that CAN break it — and here the built-in half is kept only as the cheap
+    catalogue check it always was.
     """
     from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
     from tortoise.status_folds import BUILTIN_CONNECTOR_FOLDS
@@ -1492,8 +1644,82 @@ def test_the_event_stream_fold_can_never_write_a_terminal_status():
     assert not (set(BUILTIN_CONNECTOR_FOLDS.values())
                 & OBJECT_TERMINAL_STATUSES), (
         "a built-in connector fold now targets a TERMINAL Object status — the "
-        "record has no carrier for that decision, so the record-side fold must "
-        "first learn how to honour it")
+        "record has no carrier for that decision, and the built-in half folds "
+        "on the event's declared `object`, so it would hide an Object on a "
+        "rebuild")
+
+
+def _terminal_index(terminal_word: str):
+    """A pack-shaped index whose fold targets a TERMINAL word (`archived`).
+
+    `status_folds.validate_status_decl` admits this (it only requires the target
+    to be one of the kind's declared `statuses`), so the fold must handle it —
+    and the LIVE fold does, as a state machine: after `archive` writes
+    `archived`, the guard `AND (o.status IS NULL OR NOT (o.status IN $excluded))`
+    refuses the later `resume`.
+    """
+    from tortoise.status_folds import StatusFoldIndex
+
+    index = StatusFoldIndex()
+    index.by_event = {
+        "archive": [("venture:tranche", terminal_word)],
+        "resume": [("venture:tranche", "active")],
+    }
+    index.statuses_by_kind = {
+        "venture:tranche": ("active", terminal_word)}
+    index.lifecycle_kinds = frozenset(index.statuses_by_kind)
+    index.kind_forms = frozenset({"venture:tranche", "tranche"})
+    return index
+
+
+def test_a_terminal_pack_fold_latches_instead_of_being_resurrected():
+    """The live fold is a STATE MACHINE, not a last-writer pick (review P2).
+
+    Live: `archive` writes `archived`, then the guarded `SET` refuses `resume`,
+    so the Object stays terminal and out of `recall_state`'s default view. The
+    pre-fix record-side fold took the LAST writer by `seq` and wrote `active` —
+    a terminal Object RESURRECTED on rebuild, the #2164/#3309 class the live
+    test `test_a_superseded_object_is_not_resurrected_by_a_connector_event`
+    exists to prevent (that one only covers the `superseded` carrier).
+
+    Both temporal orders are asserted, because the reverse one shows the other
+    half of the divergence: the pre-fix fold could also HIDE an Object the graph
+    presents as active (writing `archived` over a later `resume` is refused
+    live, applied on rebuild).
+    """
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+
+    tranche = _node("Object", {"id": "t-1", "name": "tranche-a",
+                               "object_kind": "tranche"})
+    for word in sorted(OBJECT_TERMINAL_STATUSES):
+        index = _terminal_index(word)
+        archive = _lifecycle("tranche-a", "archive", 1)
+        resume = _lifecycle("tranche-a", "resume", 2)
+        assert cp.apply_event_stream_folds(
+            [tranche], [archive, resume], index=index)[0].props["status"] \
+            == word, (
+            f"a later event resurrected a terminal Object — live refuses the "
+            f"write (`o.status IN $excluded`), so `{word}` must latch")
+        # The reverse order: `resume` then `archive` ends terminal on BOTH paths.
+        assert cp.apply_event_stream_folds(
+            [tranche], [_lifecycle("tranche-a", "resume", 1),
+                        _lifecycle("tranche-a", "archive", 2)],
+            index=index)[0].props["status"] == word
+    # …and a non-terminal fold still folds: the guard is on TERMINAL statuses,
+    # not on "a fold already ran" (live overwrites `active` with `active`).
+    index = _terminal_index("archived")
+    assert cp.apply_event_stream_folds(
+        [tranche], [_lifecycle("tranche-a", "resume", 1)],
+        index=index)[0].props["status"] == "active"
+
+    # …and a terminal status the ROW carries (a supersession) still stops the
+    # whole replay, including a pack fold that would otherwise resurrect it.
+    superseded = _node("Object", {"id": "t-2", "name": "tranche-b",
+                                   "object_kind": "tranche",
+                                   "superseded_by": "v2"})
+    assert cp.apply_event_stream_folds(
+        [superseded], [_lifecycle("tranche-b", "resume", 1)],
+        index=index)[0].props["status"] == "superseded"
 
 
 def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():

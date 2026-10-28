@@ -504,23 +504,33 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: position, which is exactly the order the live fold applies events in. The
 #: per-event payload keys (`eventKind`/`object`/`about_entities`) are the
 #: projection's contract (#7969); they are read HERE, in the projection, and
-#: nowhere else.
+#: nowhere else. The payload is unwrapped to the event ITSELF first, because the
+#: record persists two envelope shapes and only one is flat (see
+#: :data:`_PAYLOAD_EVENT`) — the live fold unwraps the nested one, so a reader
+#: that did not would fold nothing for every conversation-mined event, silently.
 #:
 #: HOW IT FOLDS. The LIVE fold's semantics, imported rather than restated:
 #:
-#: * **last writer by `seq`**, over the events that name the Object — its
-#:   `object` (the event's declared target) or one of its `about_entities` (the
-#:   loose list the extraction pipeline emits instead);
+#: * **the events replayed in `seq` order**, over the ones that name the Object —
+#:   its `object` (the event's declared target) or one of its `about_entities`
+#:   (the loose list the extraction pipeline emits instead). `about_entities` is
+#:   PREFERRED over `aboutEntities`, not unioned with it, exactly as the live
+#:   fold reads them;
 #: * **pack-declared folds first**, guarded to an Object whose `objectKind` is
 #:   the DECLARING pack's namespaced kind; **then the built-in connector
 #:   compatibility fold**, guarded to an Object whose kind declares NO lifecycle
 #:   (a kind that declares `statuses` OWNS its state — the #2725 collision);
 #: * **a terminal Object is never resurrected.** The live guard is `o.status IS
-#:   NULL OR NOT (o.status IN $excluded)`; here the only terminal value the
-#:   record can carry is `superseded` (from :data:`DERIVED_FROM_RECORD`), and a
-#:   supersession wins over any connector event in either temporal order — a
-#:   connector fold that ran first was overwritten by the supersession, and one
-#:   that ran after it was suppressed. So the guard is exact for that value.
+#:   NULL OR NOT (o.status IN $excluded)`, applied to EVERY `SET`, so it is a
+#:   state machine rather than a last-writer pick: once a write makes the Object
+#:   terminal, the later folds are refused. This replays the stream with that
+#:   same guard per event (:func:`_is_terminal_status`), so a pack fold that
+#:   targets a terminal word (`archived`) latches instead of being overwritten
+#:   by the next event — and a supersession (`superseded`, from
+#:   :data:`DERIVED_FROM_RECORD`) still wins in either temporal order. Replaying
+#:   the transition rules, rather than reading the last event's value, IS what a
+#:   rebuild of an event-sourced projection is (Microsoft Learn, *Event Sourcing
+#:   pattern*: rehydration = *"replaying all the events in its stream"*).
 #:
 #: ⚠️ **BOUND — a TERMINAL `restatus` (`deprecated`/`archived`/`retracted`) is
 #: not honoured**, because the record carries no signal for it (see
@@ -528,10 +538,12 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: Object the graph holds `archived` and that later receives a
 #: `github.issue.closed` is folded to `completed` here where the live fold
 #: refused. That does NOT make it newly visible — an ABSENT status already reads
-#: LIVE to `_terminal_excluded`, so the pre-#10198 rebuild showed it too — and
-#: the fold can never produce a terminal value, so it cannot HIDE an Object the
-#: graph presents. Closing it needs a record carrier for `restatus`, which is
-#: #9974's ownership decision, not this table's.
+#: LIVE to `_terminal_excluded`, so the pre-#10198 rebuild showed it too. The
+#: converse cannot happen either: a terminal value this fold produces is one a
+#: PACK fold declared and the live fold wrote too (`archive → archived`), so a
+#: rebuild hides only Objects the live graph presents as terminal as well.
+#: Closing the `restatus` gap needs a record carrier for it, which is #9974's
+#: ownership decision, not this table's.
 #: ⚠️ **BOUND — the fold's AUDIT emission is not reproduced.**
 #: `_fold_object_status` emits `status_fold_unapplied` (#1934) when a declared
 #: fold's explicit target is absent. That is a warning about a WRITE, not graph
@@ -1054,15 +1066,35 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
 # The EVENT-STREAM fold — the connector / pack lifecycle (#10198)
 # ════════════════════════════════════════════════════════════════════════════
 
+#: The event ITSELF, out of a `public.journal_event.payload`. TWO shapes are
+#: persisted, and the live fold unwraps one of them:
+#:
+#: * **flat** — `eventKind` / `object` / `about_entities` at the top level, what
+#:   `EventAPI._emit` journals; and
+#: * **nested** — `{"version": "1.0", "type": "EventRecorded", "event": {…},
+#:   "createdAt": …}`, what `ConversationMiner._emit_event` builds and writes to
+#:   the record (`mining.py`, #5475). `_journal_row` strips the envelope keys
+#:   (`record_projection.ENVELOPE_KEYS` = type/ts/event_id/initiated_by/
+#:   projection_version/seq), so `version`, `event` and `createdAt` SURVIVE and
+#:   `payload ->> 'eventKind'` is NULL for every mined event.
+#:
+#: The live fold reads both — `inner = event.get("event", event)`
+#: (`projection/entities.py::apply`) — so a record-side reader that read only the
+#: top level would fold NOTHING for a mined event, in silence (review P2).
+#: `jsonb_typeof` is what makes the unwrap exact: `payload -> 'event'` yields JSON
+#: `null` (not SQL NULL) for a missing key, which `COALESCE` would keep.
+_PAYLOAD_EVENT = ("COALESCE(CASE WHEN jsonb_typeof(payload -> 'event') = 'object' "
+                  "THEN payload -> 'event' ELSE NULL END, payload)")
+
 #: The record's own event stream, reduced to the fold's inputs. `seq` orders it.
 #: ⚠️ The payload keys are the projection's own contract (#7969) — this is the
 #: projection reading them, which is where `status_folds` says the fold lives.
 _LIFECYCLE_EVENTS_SQL = (
     "SELECT seq, "
-    "       payload ->> 'eventKind' AS event_kind, "
-    "       payload ->> 'object'    AS object_name, "
-    "       payload -> 'about_entities' AS about_entities, "
-    "       payload -> 'aboutEntities'  AS about_entities_camel "
+    f"       {_PAYLOAD_EVENT} ->> 'eventKind' AS event_kind, "
+    f"       {_PAYLOAD_EVENT} ->> 'object'    AS object_name, "
+    f"       {_PAYLOAD_EVENT} -> 'about_entities' AS about_entities, "
+    f"       {_PAYLOAD_EVENT} -> 'aboutEntities'  AS about_entities_camel "
     "FROM public.journal_event "
     "WHERE org_id = %s AND graph_id = %s "
     "  AND event_type = 'EventRecorded'"
@@ -1076,9 +1108,9 @@ _LIFECYCLE_EVENTS_SQL = (
 #: dropping it.
 _LIFECYCLE_EVENTS_FOR_ONE_SQL = (
     _LIFECYCLE_EVENTS_SQL
-    + " AND ((payload ->> 'object') = %s"
-      " OR (payload -> 'about_entities') @> to_jsonb(%s::text)"
-      " OR (payload -> 'aboutEntities')  @> to_jsonb(%s::text))"
+    + f" AND (({_PAYLOAD_EVENT} ->> 'object') = %s"
+      f" OR ({_PAYLOAD_EVENT} -> 'about_entities') @> to_jsonb(%s::text)"
+      f" OR ({_PAYLOAD_EVENT} -> 'aboutEntities')  @> to_jsonb(%s::text))"
 )
 
 
@@ -1122,8 +1154,14 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
             seq=seq,
             event_kind=kind,
             object_name=row.get("object_name") or None,
+            # PREFER, do not UNION: the live fold is
+            # `inner.get("about_entities") or inner.get("aboutEntities") or []`
+            # (`entities.py::apply`), so a payload carrying both spellings with
+            # different contents folds only the snake_case list there. A rebuild
+            # that concatenated would fold Objects the live graph never touched
+            # (review P2, same reader).
             about_names=(_as_names(row.get("about_entities"))
-                         + _as_names(row.get("about_entities_camel"))),
+                         or _as_names(row.get("about_entities_camel"))),
         ))
     out.sort(key=lambda e: e.seq)
     return tuple(out)
@@ -1158,6 +1196,21 @@ def _lifecycle_index():
     return _status_fold_index()
 
 
+def _is_terminal_status(value: Any) -> bool:
+    """Is this an Object status the live fold's guard refuses to overwrite?
+
+    The ONE reading of `commit_ops.OBJECT_TERMINAL_STATUSES` on this path —
+    the live guard's `$excluded` (`_terminal_object_statuses()` in
+    `projection/entities.py`) is the same set, so the replay below cannot drift
+    from it. Case-folded, matching what this module already did for the record's
+    own `superseded` carrier (the live vocabulary is lowercase, and a
+    case-variant is treated as terminal here rather than resurrected).
+    """
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+
+    return isinstance(value, str) and value.lower() in OBJECT_TERMINAL_STATUSES
+
+
 def apply_event_stream_folds(
     nodes: Iterable[RecordNode],
     events: Iterable[LifecycleEvent],
@@ -1172,12 +1225,26 @@ def apply_event_stream_folds(
     rebuilt cache folds exactly the words the live fold writes, in the order it
     wrote them.
 
+    **A sequential REPLAY, not a last-writer pick.** The live fold is a state
+    machine: every one of its `SET o.status` statements carries the guard
+    `AND (o.status IS NULL OR NOT (o.status IN $excluded))`
+    (`projection/entities.py::_fold_object_status`, both halves), so once an
+    event folds an Object terminal, EVERY later fold is refused. The same guard
+    is applied here, per event, in `seq` order — a rebuild re-runs the
+    transition rules rather than reading the last event's value, which is what
+    rehydration means (Microsoft Learn, *Event Sourcing pattern*: *"Applications
+    derive the current state of an entity by replaying all the events in its
+    stream. This process is known as rehydration."*). Without it, a pack fold
+    that targets a terminal word (`archived`) followed by any later fold
+    resurrected a terminal Object — the #2164/#3309 defect, re-opened on the
+    record path (review P2).
+
     Applied where a VIEW becomes properties: :func:`read_record_view` (so every
     connection-based consumer — reconciliation, `record-restore`, the CLI — sees
     it) and `FalkorProjection.rebuild_from_record` (so a view a CALLER built
-    without a connection folds too). Both applications are idempotent: the fold
-    is "last writer by `seq`", and re-running it over an already-folded node
-    reproduces the same value.
+    without a connection folds too). Both applications are idempotent: the
+    replay is a pure function of (row props, event stream), so re-running it
+    over an already-folded node reproduces the same value.
 
     ``nodes`` is returned unchanged when the view holds no event or no row the
     fold could touch — the common case, and the reason a rebuild of a
@@ -1197,7 +1264,6 @@ def apply_event_stream_folds(
 
     if index is None:
         index = _lifecycle_index()
-    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
     from tortoise.status_folds import builtin_fold_status
 
     out: list[RecordNode] = []
@@ -1207,13 +1273,15 @@ def apply_event_stream_folds(
             out.append(node)
             continue
         current = node.props.get("status")
-        # The live fold's terminal guard. The record can carry only ONE terminal
-        # value (`superseded`, from DERIVED_FROM_RECORD's carriers), and a
-        # supersession beats any connector event in either temporal order, so
-        # refusing to fold here is exact for that value rather than an
-        # approximation of a timeline the record cannot express.
-        if isinstance(current, str) and \
-                current.lower() in OBJECT_TERMINAL_STATUSES:
+        # The live fold's terminal guard, evaluated the way the live fold
+        # evaluates it: per event, against the status the previous event left.
+        # The record can carry ONE terminal value of its own (`superseded`, from
+        # DERIVED_FROM_RECORD's carriers), and a supersession beats any
+        # connector event in either temporal order, so refusing to fold here is
+        # exact for that value rather than an approximation of a timeline the
+        # record cannot express. A terminal status that a PACK fold writes is
+        # guarded below, per event — see the replay loop.
+        if _is_terminal_status(current):
             out.append(node)
             continue
         name = node.props.get("name")
@@ -1227,16 +1295,22 @@ def apply_event_stream_folds(
         # NULL` in the clone's guard); a declared lifecycle kind owns its state
         # and suppresses it (#2725).
         owns = bool(kind_key) and index.owns_state(kind_key)
-        status: str | None = None
+        # The replay: `events_for` is in `seq` order, and EVERY write is guarded
+        # the way the live `SET` is — `AND (o.status IS NULL OR NOT (o.status IN
+        # $excluded))`. So a terminal word written by one event latches: the
+        # later events are refused instead of resurrecting the Object.
+        status: str | None = current
         for event in events_for:
             if kind_key:
                 for target_kind, fold_status in index.folds_for_event(
                         event.event_kind):
-                    if kind_key in index.kind_forms_for(target_kind):
+                    if kind_key in index.kind_forms_for(target_kind) \
+                            and not _is_terminal_status(status):
                         status = fold_status
             if event.object_name == name:
                 builtin = builtin_fold_status(event.event_kind)
-                if builtin is not None and not owns:
+                if builtin is not None and not owns \
+                        and not _is_terminal_status(status):
                     status = builtin
         if status is None or status == current:
             out.append(node)
