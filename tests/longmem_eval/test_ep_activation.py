@@ -685,6 +685,61 @@ def test_an_unreadable_census_is_unknown_never_a_fabricated_zero():
     assert manifest["factor_edges"] is None
 
 
+def test_a_failed_total_census_publishes_unmeasured_as_unknown():
+    """``points_unmeasured`` is DERIVED (``total - with_ep``), and its
+    ``else None`` arm had no pin at all: collapsing UNKNOWN to a fabricated
+    ``0`` there left every test green (measured), which is the one rule the
+    module states for every census cell — a census that failed is never
+    published as a ``0``.
+
+    ``points_unmeasured == 0`` is a FINDING here ("every claim carries a
+    posterior"), so a failed total read must read UNKNOWN, not zero.
+    """
+    sdk, graph = _make(["c1"], with_ep=1, ep_rows=[])
+    real_query = graph.query
+
+    def _query(cypher, params=None):
+        flat = " ".join(cypher.split())
+        # the TOTAL census only — ``count(n)`` WITHOUT the posterior filter
+        if "count(n)" in flat and "posterior_alpha IS NOT NULL" not in flat:
+            raise RuntimeError("timeout reading the point total")
+        return real_query(cypher, params)
+
+    graph.query = _query
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["points_with_ep"] == 1     # the other census WAS read
+    assert manifest["points_unmeasured"] is None
+
+
+def test_a_claim_state_read_failure_still_publishes_the_pass():
+    """The ROW-SET twin of `_census`: its ``except`` arm had no pin, so a raise
+    could be narrowed to propagate out of ``activate_beliefs`` and discarding a
+    pass whose promotion writes and posteriors are already committed — the
+    fail-open handler would then turn a completed question into
+    ``activation_failed``.
+
+    A raise on the claim-state read is UNKNOWN contribution, never a lost pass.
+    """
+    sdk, graph = _make(["c1"], operators=1, with_ep=1,
+                       ep_rows=[["c1", 6.0, 2.0, None, None]])
+    real_query = graph.query
+
+    def _query(cypher, params=None):
+        flat = " ".join(cypher.split())
+        if "n.posterior_alpha, n.posterior_beta" in flat:
+            raise RuntimeError("connection reset")
+        return real_query(cypher, params)
+
+    graph.query = _query
+    manifest = epa.activate_beliefs(sdk)
+
+    assert manifest["ep_ran"] is True          # the pass was NOT discarded
+    assert manifest["points_with_ep"] == 1     # coverage still measured
+    assert manifest["points_off_neutral"] is None
+    assert manifest["points_moved_off_neutral"] is None
+
+
 def test_a_census_failure_does_not_discard_a_completed_pass():
     """A MEASUREMENT query failing must not retroactively invalidate a pass
     whose promotion writes and posteriors are already committed."""

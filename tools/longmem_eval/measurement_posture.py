@@ -378,13 +378,21 @@ def summarize_belief_activation(
             "points_moved_off_neutral_unread": 0,
         })
         bucket["questions"] += 1
-        if manifest is not None:  # only manifests carry these cells
-            for k in ("operators", "factor_edges"):
-                v = _optional_int(manifest.get(k))
-                if v is None:
-                    bucket[f"{k}_unread"] += 1
-                else:
-                    bucket[k] = (bucket[k] or 0) + v
+        # #10137 review 10 (P3): the bucket's ``*_unread`` counters use the same
+        # QUESTION denominator as the run-level cell. Guarding on ``manifest is
+        # not None`` made a manifest-less question (``no_manifest`` — a
+        # checkpoint written before the arm) neither counted nor unread INSIDE
+        # its type, so a 3-question type whose census was read for 1 published
+        # ``operators: 3, operators_unread: 0`` while the run-level cell said
+        # ``operators_unread: 2``: the split stopped reconciling, and the type
+        # figure claimed a completeness it did not have.
+        for k in ("operators", "factor_edges"):
+            v = (_optional_int(manifest.get(k))
+                 if manifest is not None else None)
+            if v is None:
+                bucket[f"{k}_unread"] += 1
+            else:
+                bucket[k] = (bucket[k] or 0) + v
         if measured:
             bucket["questions_measured"] += 1
             bucket["questions_with_ep"] += 1

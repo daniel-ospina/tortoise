@@ -1305,6 +1305,32 @@ def test_a_manifest_less_question_is_unread_not_absent_from_the_denominator():
     assert empty["points_with_ep_unread"] == 2
 
 
+def test_a_manifest_less_question_is_unread_inside_its_question_type_too():
+    """RED: the round-9 denominator fix reached the run-level loop only. The
+    per-type bucket still guarded its ``*_unread`` counters on
+    ``manifest is not None``, so a manifest-less question was counted in
+    neither side INSIDE its type: a 3-question type whose census was read for 1
+    published ``operators: 3, operators_unread: 0`` while the run-level cell for
+    the same key said ``operators_unread: 2`` — the split stopped reconciling,
+    and the type figure claimed a completeness it did not have.
+    """
+    manifest = _census(operators=3, factor_edges=0, points_with_ep=0,
+                       points_unmeasured=3)
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "A",
+          "belief_activation": manifest},
+         {"question_id": "q2", "question_type": "A"},   # RESUMED: no manifest
+         {"question_id": "q3", "question_type": "A"}],
+        requested=True)
+    bucket = summary["by_question_type"]["A"]
+    assert bucket["operators"] == 3
+    assert bucket["operators_unread"] == 2
+    assert bucket["factor_edges_unread"] == 2
+    # ...and the split reconciles with the run-level cells
+    assert summary["operators_unread"] == bucket["operators_unread"]
+    assert summary["factor_edges_unread"] == bucket["factor_edges_unread"]
+
+
 def test_a_partial_census_sum_says_how_partial_it_is():
     """A sum over the MEASURED cells is published, but never without the count
     of cells that were unread — otherwise a partial sum reads as a complete

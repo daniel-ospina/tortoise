@@ -8317,10 +8317,11 @@ durations:
   # refresher samples push-to-main runs only), so it takes the header's flat
   # `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as
   # a SHARD-LAYOUT input (#2818/#3419). What the weight covers, measured here
-  # for the record only: 4 cases, each building ONE throwaway embedded
-  # `TortoiseSDK`, ~8s of graph work once the embedder is warm (a cold
-  # HuggingFace reach-out dominated the first read on this box, and the CI
-  # runner's own junit reading is what replaces this row).
+  # for the record only (`--collect-only` is the authority, as the sibling rows
+  # say): 7 cases, each building ONE throwaway embedded `TortoiseSDK` — 158.6 s
+  # total at #10188's head, of which 128.7 s is the cold first case and ~26.7 s
+  # covers the other six, because a cold HuggingFace reach-out dominates the
+  # first read on this box. The CI runner's own junit reading replaces this row.
   # `tools/ci_timing.py --refresh-durations` re-bases it after the next
   # push-to-main sweep.
   longmem_eval/test_ep_census_10137.py: 2.0
