@@ -152,7 +152,11 @@ def test_the_real_gate_observes_exactly_the_legs_its_table_names(guard):
     """`needs:` and the `LEGS` heredoc describe the SAME set in the real workflow."""
     needs, legs = guard.gate_legs()
     assert set(needs) == legs
-    assert len(needs) == len(legs) == 12, (
+    # 13 since #9984 added `ci-introduced-failure`: the required check consumes the
+    # introduced-failure verdict as one more leg, so a red verdict is a leg the gate
+    # observes and names (it is the one failure that can never be deferred, since
+    # deferring it would make the verdict ask itself).
+    assert len(needs) == len(legs) == 13, (
         "python-ci-gate's claim changed shape — update the enumeration's "
         "coverage accounting for the new leg")
     for leg in ("test", "test-slow", "test-carve-out"):
