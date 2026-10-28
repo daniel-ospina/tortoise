@@ -3756,8 +3756,19 @@ jobs:
       # adjudicate, and on a `push` run the module refuses by design (see below). A
       # `cancelled` leg is not in this set — the aggregate reds on that class itself,
       # and a leg that never ran has no failure set to compare.
+      #
+      # ⛔ THE CONDITION MUST NAME EVERY CLASS THE AGGREGATE DELEGATES (#9984 review).
+      # The aggregate delegates BOTH `failure` and `timed_out` for a deferrable leg, and
+      # `contains()` is EXACT-ELEMENT membership over the joined array — so
+      # `always() && contains(needs.*.result, 'failure')` left a `timed_out` delegation
+      # with NO adjudicator: this job still RUNS (it is `always()`), its predicate step
+      # is SKIPPED, every remaining step succeeds, and the aggregate reads that
+      # job-level `success` as a certification — the required check goes GREEN on a PR
+      # whose shard timed out, with no comparison against main at all. Joined to the
+      # aggregate's own delegable set by
+      # `tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_every_class_the_aggregate_delegates`.
       - name: Was a leg's failure introduced by this PR? (#9984)
-        if: ${{ always() && contains(needs.*.result, 'failure') }}
+        if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'timed_out')) }}
         env:
           # `GH_TOKEN` is what the jobs/logs API reads. `github.token` carries exactly
           # the `actions: read` this job declares — no wider.
@@ -3971,12 +3982,18 @@ jobs:
           # `tests/test_required_set_sync.py` at test time; this is the narrowest
           # third layer, and the only one still reachable if that guard is itself
           # what drifted (pinned by tests/test_ci_selection.py).
-          # ⛔ GATED ON `RED_LEGS` BEING EMPTY (#9984): `failure`/`timed_out` legs DO
-          # have rows and ARE accounted for (they are adjudicated below), so an
-          # ungated sweep would re-red exactly the case #9984 exists to decide — and
-          # would do it identity-blind, which is the opposite of the fix. When no leg
-          # row claimed the failure this is still the only layer that sees it.
-          if [ -z "$RED_LEGS" ] && echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+          # ⛔ `cancelled` IS SWEPT UNCONDITIONALLY (#9984 review). It can never be
+          # delegated — the leg loop above reds on that class by name — so a
+          # `cancelled` result still in `$RESULTS` without a row is drift, and gating
+          # the WHOLE sweep on `RED_LEGS` being empty made a delegated `failure`
+          # elsewhere blind this layer to a leg that never ran. Measured pre-fix: a
+          # `cancelled` need whose row was deleted passed rc=0 as soon as one
+          # deferrable leg was delegated. Only the `failure` half is gated on
+          # `RED_LEGS`, because THAT is the class the row table now adjudicates.
+          # Both halves stay LITERAL — `failure|cancelled` is pinned as a line of code
+          # (#9240), so narrowing the gated clause would let that pin lapse.
+          if echo "$RESULTS" | grep -qE 'cancelled' \
+             || { [ -z "$RED_LEGS" ] && echo "$RESULTS" | grep -qE 'failure|cancelled'; }; then
             echo "::error::a need reported failure-or-cancelled but no leg row named it — the leg table above has drifted from needs:; merge blocked"
             rm -f "$LEGS_FILE"
             exit 1

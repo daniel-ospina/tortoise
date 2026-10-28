@@ -1545,6 +1545,14 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           reachability is preserved (it is gated on `RED_LEGS` being empty, i.e. it still fires
 #:           for a need no row claimed). The predicate itself lives in a SEPARATE job precisely so
 #:           this pin's allow-list never has to widen.
+#:   #9984 review — `python-ci-gate` → `Aggregate matrix result`: the identity-blind sweep's
+#:           `cancelled` half is now swept UNCONDITIONALLY (it could never be delegated, so gating
+#:           it on `RED_LEGS` being empty only blinded this layer to a leg that never ran). Still
+#:           ONE step, still no `env:`/`uses:`/`$GITHUB_ENV` write, no exit-code swallowing, no early
+#:           return; the `failure|cancelled` sweep stays a literal line of code (#9240). The sibling
+#:           half of the same review — the verdict STEP's `if:` naming `timed_out` — is in the
+#:           `ci-introduced-failure` job and is pinned (step key allow-list) by
+#:           `tests/test_ci_new_failure_gate.py`, not by this digest.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1571,7 +1579,7 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     # deletes the whole failure sweep. Both leave every other check in this pin clean.
     "python-ci-gate": (
         ("Aggregate matrix result",
-         "96fa9ecfae5ce15c8b51023a78609f9e1a6b2d5dcc89dfef0427df8786a1d71d"),
+         "a0d84429a82e45f27f71ebddad7a6fed8b326b765cde17bbeab553353cb04e36"),
     ),
 }
 
