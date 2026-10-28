@@ -683,7 +683,15 @@ NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
         "and nothing is written. The about*/structural transfer is a separate "
         "BARE `MERGE (s)-[:{etype}]->(t)` (the code says so in place: "
         "'Structural 2b transfers are bare: NO attr SET'), and "
-        "`create_about_edge` journals no `DirectEdgeCreated` at all — so this "
+        "`create_about_edge` reaches the `DirectEdgeCreated` fold through "
+        "`_record_structural_edges` (#9553) — so this writer's edge DOES arrive "
+        "at the fold, and what keeps a property off it is the descriptor's "
+        "EMPTY attribute map (no `direction`/`confidence`/`weight`/`label`/ "
+        "`batch_id`), NOT a restriction on the relation. ⛔ The pre-`#9553` "
+        "half of this sentence (a mint that 'journals no `DirectEdgeCreated` at "
+        "all') was TRUE once and stayed here after `#9553` made it false, while "
+        "the documents this guard governs were corrected around it — a record "
+        "is worth nothing if it states the opposite mechanism to the code. This "
         "writer carries NO property on an about edge"
     ),
 }
@@ -3974,17 +3982,18 @@ def test_every_direct_edge_created_producer_is_safe_for_an_about_edge():
 #: each class, and they are derived from the classes the tables already encode —
 #: a `MAP_WRITERS` row carries the edge's whole attribute set by property map, a
 #: `RECORDED_WRITERS` row writes `SET r.<prop>`, and a `NOT_AN_ABOUT_WRITER` row
-#: is an exemption that writes NOTHING. `_flat` is applied to the sentence and
-#: the marker alike, so these are written in their FLATTENED spelling.
+#: is an exemption that writes NOTHING. `_flat` is applied to SENTENCES, so every
+#: marker is written in its FLATTENED spelling — `_flat` turns `-` between word
+#: characters into a SPACE, which is why a hyphenated marker can never match.
+#: ⛔ That is not a style note: `"MAP-form"`, `"NAMED-form"`, `"re-materializ"`
+#: and `"MAP-form writer"` were all DEAD on arrival (`#10200` reviews measured 0
+#: occurrences each in the flattened documents), and a marker that matches
+#: nothing pins nothing while reading as if it did. Each marker family below
+#: carries a probe in the legs, so a marker that dies reds instead of lying.
 CLASS_VERDICT_MARKERS: dict[str, tuple[str, ...]] = {
     "MAP": (
         "property MAP",
-        "MAP-form",
         "MAP form",
-        # ⛔ FLATTENED spelling: `_flat` turns `RE-MATERIALIZING` into
-        # `RE MATERIALIZING`, so the hyphenated form of this marker matched ZERO
-        # occurrences in either document (`#10200` review: measured 0 hyphenated
-        # vs 8 flattened). A marker that matches nothing pins nothing.
         "re materializ",
         "SET r +=",
         "SET r = $p",
@@ -3992,7 +4001,6 @@ CLASS_VERDICT_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     "NAMED": (
         "NAMED form",
-        "NAMED-form",
         "SET r.<prop>",
         "SET r.confidence",
         "originating",
@@ -4051,7 +4059,27 @@ _NEGATOR_RE = re.compile(
 #: Where a CLAUSE ends. A negator or a history marker outside the denial's own
 #: clause says nothing about that denial — the sentence-wide reading is what let a
 #: trailing open-defect reference excuse the retracted sentence above it.
-_CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|")
+#: ⚠️ The COMMA is a boundary (`#10200` review): without it a comma-joined run is
+#: ONE clause, so *"was a declared false positive before `#9417`, and it still
+#: drops the property"* — history kept, the denial NOT corrected — was green. In
+#: English a comma between coordinated predicates separates two units, so it is a
+#: clause boundary here even though it is not a sentence boundary.
+_CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|", ",")
+
+#: Quantifier negations negate a COUNT, not the class: *"is not the ONLY writer
+#: that carries the set by property MAP"* AFFIRMS that this writer carries it, and
+#: *"Not only X but also Y carries it by property MAP"* affirms both. Reading them
+#: as class negations red a TRUE sentence on BOTH legs, and the cheapest way for an
+#: editor to clear that red is to weaken true prose — the failure mode the legs
+#: exist to prevent, pointed the other way. Stripped before `_NEGATOR_RE` runs.
+_QUANTIFIER_NEGATION_RE = re.compile(
+    r"\bnot\s+(?:the\s+)?only\b|\bnot\s+solely\b", re.I
+)
+
+
+def _has_class_negator(prefix: str) -> bool:
+    """Does this clause prefix carry a negator of the CLASS (not of a quantity)?"""
+    return bool(_NEGATOR_RE.search(_QUANTIFIER_NEGATION_RE.sub(" ", prefix)))
 
 #: A declared false positive described as COUNTED — the same contradiction from
 #: the other side: an exemption the census counts is a writer described as
@@ -4060,7 +4088,13 @@ _CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|")
 EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
     "counted",
     "is one of them",
-    "MAP-form writer",
+    # FLATTENED — and a wider claim than the word "counted": an exemption
+    # ASSERTED to carry the set by property map states the same contradiction.
+    # Both were measured green at the `#10200` head: `"MAP-form writer"` was a
+    # dead marker (0 flattened occurrences), and *"writes the attribute set by
+    # property MAP"* named no member at all.
+    "MAP form writer",
+    "attribute set by property map",
 )
 
 #: A DECLARED FALSE POSITIVE COUNT, in the spellings the documents use. The `^`
@@ -4155,7 +4189,7 @@ def _stated_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
     for marker in markers:
         pattern = re.compile(re.escape(marker.lower()))
         if any(
-            not _NEGATOR_RE.search(_clause_before(low, match.start()))
+            not _has_class_negator(_clause_before(low, match.start()))
             for match in pattern.finditer(low)
         ):
             found.append(marker)
@@ -4169,7 +4203,7 @@ def _denied_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
     for marker in markers:
         pattern = re.compile(re.escape(marker.lower()))
         if any(
-            _NEGATOR_RE.search(_clause_before(low, match.start()))
+            _has_class_negator(_clause_before(low, match.start()))
             for match in pattern.finditer(low)
         ):
             found.append(marker)
@@ -4325,6 +4359,26 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
         "a sentence that NEGATES the class counts as stating it, so the one-word "
         "paraphrase of the retracted `#10149` cycle-3 sentence stays green"
     )
+    # … and Probe 4: a marker whose spelling `_flat` can never produce is a DEAD
+    # marker, and a dead marker pins nothing while reading as if it did
+    # (`#10200` review: `re-materializ`, `MAP-form`, `NAMED-form` and
+    # `MAP-form writer` each matched 0 flattened occurrences). This probe names
+    # the site with the HYPHENATED spelling a document actually writes, so it
+    # reds if the marker goes back to a form `_flat` never emits.
+    hyphenated = (
+        (
+            "probe",
+            "`hosted_backup.restore_graph` is a RE-MATERIALIZING writer of the "
+            "attribute set.",
+        ),
+    )
+    assert not any(
+        "restore_graph" in item for item in _unstated_verdicts(list(hyphenated))
+    ), (
+        "a `RE-MATERIALIZING` sentence is not read as stating the MAP class, so "
+        "the marker is written in a spelling `_flat` cannot produce and pins "
+        "nothing"
+    )
     unstated = _unstated_verdicts(sections)
     assert not unstated, (
         "these census rows are named in a corrected passage that never states "
@@ -4408,16 +4462,20 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "denial, so `#10149`'s claim restated in the class's own vocabulary "
         "is green"
     )
-    # Probe 5: the MEASURED cycle-3 sentence with a bare open-defect reference
+    # Probe 5: the MEASURED cycle-3 denial with a bare open-defect reference
     # appended. `#10139` is NOT a history marker (`#10200` review): it excused
     # every denial in the sentence, and it is the reference the corrected
     # paragraph already ends with — so restoring the retracted sentence beside
     # the rebuild note walked through the gate that exists for it.
+    # ⚠️ The denial here is the ONE in the `#10139` clause. The full measured
+    # sentence also carries *"is NOT one of them"* in an earlier clause, and that
+    # clause reds either way — a probe built on it stays green with `#10139`
+    # restored, i.e. it pins nothing.
     retracted_with_10139 = (
         (
             "probe",
-            "`sdk.supersede_point` is NOT one of them: it **drops** the "
-            "binder's `confidence` on the `about*` edge (`#10139`).",
+            "`sdk.supersede_point` drops the binder's `confidence` on the "
+            "`about*` edge (`#10139`).",
         ),
     )
     assert any(
@@ -4427,6 +4485,85 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "a bare `#10139` excuses the retracted sentence, so the escape is wider "
         "than the recorded `before`/`until #9417` and the leg loses its grip on "
         "the sentence class it was opened for"
+    )
+    # Probe 6: the escape is COMMA-blind if `_CLAUSE_BREAKS` has no comma, and a
+    # comma-joined run is then ONE clause — so history kept with the denial NOT
+    # corrected was green (`#10200` review).
+    half_corrected = (
+        (
+            "probe",
+            "`sdk.supersede_point` was a declared false positive before "
+            "`#9417`, and it still drops the property on an about edge.",
+        ),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(half_corrected))
+    ), (
+        "a comma-joined present-tense denial is excused by a history marker "
+        "earlier in the same run, so the escape spans a conjunction and a "
+        "half-corrected sentence stays green"
+    )
+    # Probe 7: an exemption ASSERTED to carry the set by property map. The one
+    # member that said this was a dead `_flat` spelling, so only the literal word
+    # `counted` red the contradiction (`#10200` review).
+    exemption_as_map = (
+        (
+            "probe",
+            "`projection._rebuild_all_replay` writes the attribute set by "
+            "property MAP.",
+        ),
+    )
+    assert any(
+        "_rebuild_all_replay" in item
+        for item in _denied_verdicts(list(exemption_as_map))
+    ), (
+        "an exemption said to write the attribute set by property MAP is not "
+        "seen, so the contradiction is caught only when the sentence uses the "
+        "word 'counted'"
+    )
+    # … and the TRUE exemption sentence must stay writable, or the leg forbids
+    # the documents from stating why the row is exempt at all.
+    exemption_true = (
+        (
+            "probe",
+            "`projection._rebuild_all_replay` is a declared false positive: "
+            "its about transfer is a bare `MERGE`, so it carries no property on "
+            "an about edge.",
+        ),
+    )
+    assert not any(
+        "_rebuild_all_replay" in item
+        for item in _denied_verdicts(list(exemption_true))
+    ), (
+        "the leg reds a TRUE statement of the exemption, so an editor clearing "
+        "it would have to delete the record of why the row is exempt"
+    )
+    # Probe 8: a QUANTIFIER negation is not a class negation. ``is not the only
+    # writer that carries the set by property MAP`` AFFIRMS the writer, and
+    # `STORAGE-ARCHITECTURE.md` §13 already uses the idiom ("is not the only `SET`
+    # in the function"); reading it as a denial reds TRUE prose, and the cheapest
+    # way to clear that red is to weaken the prose (`#10200` review).
+    quantifier = (
+        (
+            "probe",
+            "`cache_projection.relation_statement` is not the only writer that "
+            "carries the set by property MAP.",
+        ),
+    )
+    assert not any(
+        "relation_statement" in item
+        for item in _denied_verdicts(list(quantifier))
+    ), (
+        "a quantifier negation ('not the only') is read as a class negation, so "
+        "a true affirmative sentence reds and an editor would have to weaken it"
+    )
+    assert not any(
+        "relation_statement" in item
+        for item in _unstated_verdicts(list(quantifier))
+    ), (
+        "a quantifier negation makes the class count as UNSTATED, so the leg "
+        "reds a sentence that does state the class"
     )
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
