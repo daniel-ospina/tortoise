@@ -3371,21 +3371,26 @@ text, so do not grep the 9090 listener for a counter name.
    it repeats at most once per window, and it is exactly the line that item 2's
    `record_position_unproven` counter is counting — grepping only the
    `did not happen` prefix for it returns nothing.
-   (c) The tenant-RESOLUTION faults — three MESSAGES, none of which this grep
+   (c) The tenant-RESOLUTION faults — four MESSAGES, none of which this grep
    matches (`tortoise.hosted_api`'s fail-soft path, #5148):
    `could not resolve the record tenant for this request`
    (`_resolve_record_tenant`, the per-request lane),
    `could not resolve the DEFAULT-graph record tenant for org …`
-   (`_bind_default_graph_record_tenant`, the seed / indexing lanes), and
+   (`_bind_default_graph_record_tenant`, the seed / indexing lanes),
    `graphs default-row read failed — the record tenant stays unnamed`
    (`supabase_control.default_graph_id_for` — which swallows that exception and
    returns `None`, so on a default-row read fault NEITHER of the other two is
-   logged at all). (The discriminator is the message text, not the logger: the
+   logged at all), and
+   `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
+   (`hosted_api._cp_offload`, the session/JWT lane) — where the resolution never
+   RAN at all: the offload REFUSED the submission or its wait bound expired, so
+   no resolver was entered and none of the three lines above exists. (The
+   discriminator is the message text, not the logger: the
    SDK's `no_journal` line, from a *different module*, IS in the grep — see the
    ⛔ paragraph below.) The refusal each fault then produces
    (`the record write did not happen (no_tenant)`) IS in the grep, but that is
    the growth, not the fault; read the faults with the `grep -E` in the ⚠️
-   `no_tenant` bound below, which matches all three.
+   `no_tenant` bound below, which matches all four.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed
@@ -3547,12 +3552,12 @@ why the two recipes above are the verification and the deploy status is not.
    Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
    only when the capture ran **unbound**, when item 1's row did not appear, or
    when the capture's credential was refused a tenant the record CAN key on.
-   That last arm has TWO readings, because it has two causes; read BOTH before
-   you call the growth other traffic:
-   - **A resolution FAULT** logs one of THREE messages (recipe 1's exclusion (c)
+   That last arm has THREE readings, because it has three causes; read all THREE
+   before you call the growth other traffic:
+   - **A resolution FAULT** logs one of FOUR messages (recipe 1's exclusion (c)
      above) — **recipe 1's grep does NOT match** (it greps
      `the record write did not happen`) any of them, so read the faults with
-     `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed|default graphs? row NOT minted"`.
+     `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed|default graphs? row NOT minted|control-plane offload 'default_graph_row' failed"`.
    - **No nameable default row** (absent, inactive, or the `default` sentinel)
      is also a refusal of a tenant the record CAN key on, so it is a
      fail-and-fix as well — and on the seed / indexing lane it logs **NOTHING**
@@ -3564,6 +3569,18 @@ why the two recipes above are the verification and the deploy status is not.
      its `id` must be a real `g_<hex>` (the `default` SENTINEL is a pre-#10025
      id value, never a row NAME — the minted row is named `default`, so the name
      tells you nothing here).
+   - **A resolution ABANDONED at the seam** is the third cause, and it is the one
+     the row reading above CANNOT clear. `hosted_api._cp_offload(... ,
+     op="default_graph_row", best_effort=True)` logs
+     `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
+     when the offload REFUSES the submission or its wait bound expires, and then
+     normalizes either return to no tenant — so the resolution **never ran**, and
+     the `kind='default'` row the reading above inspects is **untouched and
+     healthy**: it is `active` and carries a real `g_<hex>` id, so that reading
+     PASSES while the capture still counts `no_tenant`. `best_effort=True` is
+     there precisely so an offload hiccup does not 503, so this is expected
+     traffic on the session/JWT lane — and the growth is still the deployment's
+     (control-plane saturation, or a refused submission), never another tenant's.
    ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a

@@ -3023,9 +3023,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # reading whose verdict can be inverted silently is the exact class this PR
     # closes: the arm would then contradict the summary sentence above it
     # (`… it is a fail-and-fix only when … a tenant the record CAN key on`).
-    # The LEAD-IN is pinned with it: "read BOTH" over two causes is what makes
-    # the silent second reading executable — "read ONE" restores the fail-open
-    # the bullet exists to remove.
+    # The LEAD-IN is pinned with it: the count over the causes is what makes the
+    # SILENT readings executable — a lead-in that reads fewer causes lets the
+    # operator skip one and read an empty grep as 'no fault'. The count was WRONG
+    # (`TWO readings, because it has two causes`, pre-fix) while the arm had a
+    # third source of the same refusal, which is the fail-open this bound exists to
+    # close one cause further out (#10083 review, P2).
     # ⛔ These two pins anchor the RULING and stop short of the rest of the
     # sentence (#10083 review cycle 5, P3, measured): the parenthetical is an
     # ENUMERATION (`absent, inactive, or the `default` sentinel`) and the tail of
@@ -3035,12 +3038,24 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # still intact and told the next lane to restore a verdict it never removed.
     # A pin must red on the class its message names.
     assert re.search(
-        r"TWO readings, because it has two causes; read BOTH before you call the "
-        r"growth",
+        r"THREE readings, because it has three causes; read all THREE before you "
+        r"call the growth",
         flat,
     ), (
-        "the no-nameable-row lead-in no longer says to read BOTH causes, so the "
+        "the no-nameable-row lead-in no longer says to read all THREE causes, so a "
         "SILENT reading can be skipped and an empty grep read as 'no fault'"
+    )
+    # ⛔ ... and the numeral is DERIVED from the bullets, not trusted: the defect
+    # was a lead-in whose count disagreed with the causes that actually exist, so
+    # adding or losing a bullet has to move the count (or red).
+    _bound_bullets = re.findall(
+        r"- \*\*(A resolution FAULT|No nameable default row|A resolution ABANDONED)",
+        flat,
+    )
+    assert len(_bound_bullets) == 3, (
+        "the `no_tenant` bound no longer enumerates exactly THREE causes "
+        f"({_bound_bullets!r}) — the lead-in's count and its members disagree, so "
+        "an operator reads an exhaustive list that is not exhaustive"
     )
     assert re.search(
         r"\*\*No nameable default row\*\* \(absent[^)]*\) is also a refusal of a "
@@ -3059,6 +3074,44 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     assert re.search(r"empty read of that grep does not clear\s+this arm", flat), (
         "the section does not rule out the empty-read misreading — read the "
         "`kind='default'` row, not the log"
+    )
+    # ⛔ And the THIRD cause's verdict, which is the one no other reading can
+    # reach: the resolution was ABANDONED at the seam, so the row reading PASSES on
+    # it. Without this the bound is again a two-reading procedure over a three-cause
+    # arm, and an operator who reads BOTH as prescribed is left with the paragraph's
+    # own verdict — "other traffic" — for a fail-and-fix state (#10083 review, P2).
+    assert re.search(
+        r"\*\*A resolution ABANDONED at the seam\*\* is the third cause, and it is "
+        r"the one the row reading above CANNOT clear",
+        flat,
+    ), (
+        "the abandoned-at-the-seam cause is not named as one the row reading cannot "
+        "clear — its fault is logged BEFORE the row is read, so a healthy "
+        "`kind='default'` row is exactly what that cause looks like"
+    )
+    assert re.search(
+        r"the `kind='default'` row the reading above inspects is \*\*untouched and "
+        r"healthy\*\*",
+        flat,
+    ), (
+        "the section does not say WHY the row reading passes on this cause — an "
+        "operator who finds a healthy row concludes the growth is other traffic"
+    )
+    assert re.search(
+        r"and the growth is still the deployment's\s+\(control-plane saturation, "
+        r"or a refused submission\), never another tenant's",
+        flat,
+    ), (
+        "the abandoned-at-the-seam arm's VERDICT is unpinned — the growth must be "
+        "the deployment's own fault, not another tenant's traffic"
+    )
+    assert re.search(
+        r"normalizes either return to no tenant — so the resolution \*\*never ran\*\*",
+        flat,
+    ), (
+        "the section does not pin the mechanism that makes this cause distinct — "
+        "`_cp_offload` normalizes both `None` and `OFFLOAD_REFUSED` to no tenant, "
+        "so no resolver message is emitted at all"
     )
     # ⛔ And the REMEDY itself, not just its lead-in: "read the row" is the only
     # executable step for the silent arm, and it was unpinned (measured: replacing it
@@ -3146,8 +3199,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # (measured, #10083 review P3). Capture the pattern body regardless of where the
     # flags sit or how the body is quoted.
     _fault_grep = next(
-        (g for g in re.findall(
-            r"""grep\s+(?:-[a-z]*\s+)*-[a-z]*E[a-z]*\s*["']([^"']+)["']""", flat)
+        (g for _q, g in re.findall(
+            r"""grep\s+(?:-[a-z]*\s+)*-[a-z]*E[a-z]*\s*(["'])(.+?)\1""", flat)
          if "could not resolve the record tenant" in g or "graphs default-row" in g),
         "",
     )
@@ -3160,6 +3213,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "could not resolve the DEFAULT-graph record tenant",
         "graphs default-row read failed",
         "default graphs? row NOT minted",
+        "control-plane offload 'default_graph_row' failed",
     ):
         assert re.search(re.escape(_alt), _fault_grep), (
             f"the fault disjunct's grep misses {_alt!r}, so that fault reads as "
@@ -3188,13 +3242,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         _excl_c = _excl_c[:2500]
     _msgs = (r"could not resolve the record tenant for this request",
              r"could not resolve the DEFAULT-graph record tenant for org",
-             r"graphs default-row read failed — the record tenant stays unnamed")
+             r"graphs default-row read failed — the record tenant stays unnamed",
+             r"control-plane offload 'default_graph_row' failed")
     for _msg in _msgs:
         assert re.search(re.escape(_msg), _excl_c), (
             f"recipe 1's exclusion (c) does not name {_msg!r} among the resolution "
-            "faults, so its 'three MESSAGES' count and its members disagree"
+            "faults, so its 'four MESSAGES' count and its members disagree"
         )
-    assert len(_msgs) == 3 and re.search(r"three MESSAGES", _excl_c), (
+    assert len(_msgs) == 4 and re.search(r"four MESSAGES", _excl_c), (
         "the exclusion (c) no longer presents exactly the three emitted messages "
         "under a matching count"
     )
@@ -3214,7 +3269,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # inversion is caught by the `(?:all|each) of which` detector below, so
     # accepting the class costs no discrimination.
     assert re.search(
-        r"three MESSAGES,?\s+(?:none of which\s+this grep\s+matches"
+        r"four MESSAGES,?\s+(?:none of which\s+this grep\s+matches"
         r"|which\s+this grep\s+does not match"
         r"|of which\s+this grep\s+matches none"
         r"|none of which\s+are matched by this grep)",
@@ -3223,7 +3278,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "exclusion (c) no longer says these three faults are OUTSIDE recipe 1's "
         "grep — inverted, it tells the reader an empty recipe-1 read clears them"
     )
-    assert not re.search(r"three MESSAGES, (?:all|each) of which this grep", _excl_c), (
+    assert not re.search(r"four MESSAGES, (?:all|each) of which this grep", _excl_c), (
         "exclusion (c) claims the three resolution faults ARE in recipe 1's grep, "
         "which is false — recipe 1 greps `the record write did not happen`"
     )
@@ -3280,7 +3335,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # sentence (measured).
     _claim = (r"attribut|assign|breakdown|break\s+\w+\s+down|identif|identit|"
               r"distinguish|correlat|tells?\b[^.]{0,40}?\bapart")
-    _sentences = [s for s in re.split(r"(?<=\.)\s+", flat)
+    # ⛔ SELECTION and the CHUNK BOUNDARY are two separate defects, and only the
+    # first was closed by widening `_claim`. Splitting only on `(?<=\.)\s+` fuses a
+    # sentence that FOLLOWS an emphasized ruling into the ruling's own chunk, because
+    # the ruling ends `… from the log.**` — the whitespace after it is preceded by
+    # `*`, not `.` — and the accept half then needs its negation only SOMEWHERE in
+    # the chunk, which the ruling itself supplies. Measured (#10083 review, P2):
+    # appending ` Then attribute that growth per request from the log.` — or ` **Do**
+    # attribute …` — immediately after the ⛔ ruling left the whole suite GREEN, i.e.
+    # the one placement this comment says it closes ("a section that says both is
+    # green under a presence-only ⛔ pin") was the one placement the scan could not
+    # read. `**` is markdown emphasis, not sentence content, so stripping it before
+    # the split makes the ruling its own sentence and the appended instruction its
+    # own; `!` and `?` are sentence boundaries too. This does not weaken the scan —
+    # it only makes every chunk SHORTER, so no chunk can gain a negation it did not
+    # have, and the baseline ruling stays green on its own text.
+    _prose = flat.replace("**", "")
+    _sentences = [s for s in re.split(r"(?<=[.!?])\s+", _prose)
                   if re.search(_claim, s, re.I) and re.search(r"\brequest", s, re.I)]
     assert _sentences, (
         "the section never rules per-request attribution out at all — the ruling "
@@ -3386,10 +3457,39 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "bound names a third (the `tortoise.hosted_api` tenant-resolution fault), "
         "so a reader takes an exhaustive enumeration that is not exhaustive"
     )
-    assert re.search(r"\(c\) The tenant-RESOLUTION faults — three MESSAGES", flat), (
+    assert re.search(r"\(c\) The tenant-RESOLUTION faults — four MESSAGES", flat), (
         "the exclusion list does not name the resolution-fault member, so the "
         "count and the members disagree"
     )
+    # ⛔ The COUNT is not the ENUMERATION. Pinning `THREE readings` and the (c)
+    # member left (a) and (b) DELETABLE with the suite green (measured, #10083
+    # review P3): the only other mention of `no_durable_journal` in this function is
+    # the bare-token loop at `for expected in (…)`, and that token occurs four times
+    # elsewhere in the section, so it cannot see the deletion — while the label
+    # still said THREE. Members (a) and (b) are the two exclusions an operator most
+    # needs: (a) is the healthy M2 decline, the one line a BROKEN record also
+    # produces, and (b) is the `position_unproven` line item 2's own counter counts.
+    # So derive the membership from the markers AND pin each member's own clause.
+    _excl_list = flat.partition("THREE readings are not in this grep")[2].partition(
+        "⛔ **`no_journal` and `seam_unimportable` ARE in it**"
+    )[0]
+    _members = re.findall(r"\(([a-c])\) The ", _excl_list)
+    assert _members == ["a", "b", "c"], (
+        "recipe 1's exclusion list no longer carries all three members — a label "
+        f"that says THREE over {_members!r} is the same self-contradiction class "
+        "this section exists to remove"
+    )
+    for _clause, _why in (
+        (r"`the record write was declined \(no_durable_journal\)`",
+         "the healthy-M2 decline an operator must not read as a failure"),
+        (r"`no layer-1 position row for this record \(position_unproven\)`",
+         "the once-per-window line item 2's own counter is counting"),
+    ):
+        assert re.search(_clause, _excl_list), (
+            f"recipe 1's exclusion list no longer names {_why} — its label still "
+            "counts the member, so a reader takes a list that is missing it as "
+            "exhaustive"
+        )
     # The reason the fault escapes the grep is the MESSAGE, not the logger: the
     # section's own ⛔ paragraph names `tortoise/sdk.py` — a different module — as
     # emitting the identical prefix, so "a different module's logger" is refuted by
@@ -3426,11 +3526,18 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # The ⛔ marker is pinned WITH the clause, not by a bare `⛔` search: this section
     # carries 10 ⛔ markers, so a bare search is satisfied by any of them and leaves
     # the ruling unmarked-and-green (#10083 review F1 — the first attempt did exactly
-    # that, making the pin weaker than the one it replaced). The `(?:Do not|Never)`
-    # alternation admits the equivalent rewording while still requiring the marker;
-    # only the WRAP is neutralised by `flat` (#10071 review F3).
+    # that, making the pin weaker than the one it replaced). `(?:Do not|Never)`
+    # admits the equivalent prohibition and `try to` is OPTIONAL, because requiring
+    # it made this pin DISAGREE with the polarity scan ~60 lines above: `Do not
+    # attribute that growth per request from the log.` and `Never attribute …` RED
+    # here while that scan accepted both, so this pin fired "the section does not
+    # forbid the impossible step" at a section that forbids it (measured, #10083
+    # review P2). The INVERTED twin (`**Do try to attribute …**`) still reds, here
+    # and in the polarity scan. Only the WRAP is neutralised by `flat` (#10071
+    # review F3).
     assert re.search(
-        r"⛔ \*\*(?:Do not|Never)\*{0,2} try to attribute that growth per request",
+        r"⛔ \*\*(?:Do not|Never)\*{0,2} (?:try to )?(?:attribute|assign) "
+        r"that growth per request",
         flat,
     ), (
         "the section does not forbid the impossible step it describes — "
