@@ -1345,3 +1345,26 @@ def test_a_partial_census_sum_says_how_partial_it_is():
     assert summary["operators_unread"] == 1
     assert summary["factor_edges"] == 0
     assert summary["factor_edges_unread"] == 1
+
+
+def test_a_boolean_coverage_cell_is_not_a_measured_question():
+    """RED: `questions_with_ep` read the coverage cell with `_as_int`, which
+    coerces a boolean to 1, while `_classify_question` reads the SAME manifest
+    cell as UNKNOWN (the round-11 rule). One report therefore published
+    `questions_with_ep: 1` and `belief_layer: activated` — `beliefs_activated:
+    true`, the value the receipt gate reads — while also listing the question as
+    inert with reason `unmeasured` and a bucket `questions_with_ep` of 0.
+
+    A bool is not a count here either: the run measured nothing.
+    """
+    manifest = {"ep_ran": True, "points_with_ep": True, "points_unmeasured": 0,
+                "operators": 2, "factor_edges": 0}
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "multi-session",
+          "belief_activation": manifest}], requested=True)
+
+    assert summary["questions_with_ep"] == 0
+    assert summary["by_question_type"]["multi-session"]["questions_with_ep"] == 0
+    assert summary["inert_questions"][0]["reason"] == "unmeasured"
+    block = mp.build(ingest_mode="v2", activation=summary)["belief_layer"]
+    assert block != mp.BELIEF_LAYER_ACTIVATED

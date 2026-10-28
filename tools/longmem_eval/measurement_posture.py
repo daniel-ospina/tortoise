@@ -316,7 +316,16 @@ def summarize_belief_activation(
         "questions_with_ep": sum(
             1 for m in manifests
             if m.get("ep_ran") is True
-            and _as_int(m.get("points_with_ep")) > 0),
+            # #10137 review 12 (P3): read the coverage cell through the same
+            # UNKNOWN-preserving coercion as every other census cell. ``_as_int``
+            # coerces a boolean to 1, so a manifest with
+            # ``points_with_ep: true`` counted as a measured question here while
+            # ``_classify_question`` called the same manifest ``unmeasured`` —
+            # one report said ``questions_with_ep: 1`` + ``belief_layer:
+            # activated`` AND ``questions_inert: 1`` with reason ``unmeasured``,
+            # publishing ``beliefs_activated: true`` for a run with zero measured
+            # questions.
+            and (_optional_int(m.get("points_with_ep")) or 0) > 0),
         "failed": sum(1 for m in manifests if m.get("error")),
         "engine": next((m.get("ep_engine") for m in manifests
                         if m.get("ep_engine")), None),
