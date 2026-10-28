@@ -3,14 +3,23 @@
 # WHY THIS WORKFLOW EXISTS
 # `config/ci-surfaces.yml` `on_demand:` lists test files that must not gate a
 # merge. They are excluded from EVERY pre-merge leg (fast halves, slow,
-# carve-out) by `tools/ci_selection.py::on_demand_files`, and run from here.
+# carve-out) by `tools/ci_selection.py::on_demand_files`, and run from the
+# lane's manual runners — this one for the lane's LITERAL entries (#10194 moved
+# the two eval subtrees to `eval-suite-manual.yml`).
 #
-# ⚠️ `on_demand:` NOW HAS TWO RUNNERS, and this is only one of them: the
+# ⚠️ `on_demand:` NOW HAS THREE RUNNERS, and this is only one of them: the
 # dedicated perf lane (`tests/test_perf_lane_volunteer_context.py`, #3992) is
 # run by `.github/workflows/perf-lane.yml`, because the plan names it in its own
-# right. The lane membership is what keeps both off the gate. Running the whole
-# lane from here as well is supported — a blank `files` input runs every entry —
-# and it is why this workflow now PROVISIONS the pinned dense model below: the
+# right, and the two eval subtrees are run by
+# `.github/workflows/eval-suite-manual.yml` (#10194). The lane membership is what
+# keeps all three off the gate. This workflow runs the lane's LITERAL entries
+# only: a blank `files` input resolves
+# `ci_selection.on_demand_literal_runner_files()` — TWO files at this head,
+# `eval/retrieval/test_integration.py` and
+# `test_perf_lane_volunteer_context.py` — and NOT the lane's 43. (Before #10194
+# a blank dispatch really did run every entry; that sentence is now false, and
+# leaving it in promises a run this workflow does not perform.) It is also why
+# this workflow now PROVISIONS the pinned dense model below: the
 # perf file fails closed on a keyword-only read path
 # (`battery/runner/retrieval_preflight.require_hybrid_retrieval`, #2985), so an
 # unprovisioned job would red on a missing embedder that reads like a code
@@ -23,6 +32,14 @@
 # ndcg within [0,1], gate-verdict membership) and declares itself "never
 # asserted for absolute quality". Nothing in it can tell a PR that it broke a
 # customer; it is a calibration instrument for the retrieval pipeline.
+#
+# WHERE IT RUNS NOW. Still here: `eval/retrieval/test_integration.py` is a
+# LITERAL `on_demand:` entry of its own, so this workflow is its embedded-shape
+# runner (it is one of the two files a blank dispatch resolves). It is ALSO
+# inside `eval/**`, so `eval-suite-manual.yml` runs it too, in the docker shape
+# the gating shards used — as the most expensive of that lane's 42 files
+# (1 523.4 s of its 2 604.3 s). Both runners are `workflow_dispatch`; neither
+# gates.
 #
 # It still has to RUN — a calibration instrument that is never run is
 # documentation. Hence this workflow.
@@ -39,8 +56,27 @@
 # A second copy of the list is a second place to forget: the lane would grow
 # in the manifest and not here, and the new file would run nowhere at all —
 # excluded from the gate and claimed by nothing. `on_demand_files()` is the
-# single source of truth, and the step below asserts the lane is non-empty so
+# single source of truth (read through `on_demand_literal_runner_files()` below,
+# which is defined over it), and the step below asserts the lane is non-empty so
 # the silent-empty case fails instead of passing green.
+#
+# #10194: THE SUBTREE ENTRIES ARE NOT THIS WORKFLOW'S
+# `on_demand:` also carries `eval/**` + `longmem_eval/**` (42 files) since
+# #10194. They have their OWN runner — `.github/workflows/eval-suite-manual.yml`
+# — because they need the DOCKER shape the gating shards ran them in, while this
+# lane is the embedded redislite shape. A blank dispatch here therefore runs the
+# lane's LITERAL entries — `on_demand_literal_runner_files()`, which keeps every
+# non-`dir/**` member of `on_demand_files()` INCLUDING one that also sits inside
+# a subtree (`eval/retrieval/test_integration.py` is BOTH, and its own entry is
+# what keeps this workflow its runner) — so no file is executed in an
+# environment it was not chosen for. ⛔ Do not "simplify" that selector back to
+# the bare subtraction (`on_demand_files() - on_demand_subtree_files()`): it
+# throws the #4711 file away with the subtree it happens to live in, leaving a
+# blank dispatch that runs only the file `perf-lane.yml` already runs.
+# Reading this as "one runner per lane" would be wrong on
+# purpose-reason: the lane is a MEMBERSHIP statement (must not gate), and a
+# membership can have several runners with different environments (#3992 already
+# established that with perf-lane.yml).
 
 name: On-demand evals
 
@@ -50,7 +86,10 @@ on:
       files:
         description: >-
           Space-separated tests/-relative test files to run. Leave blank to
-          run the whole `on_demand:` lane from config/ci-surfaces.yml.
+          resolve THIS workflow's lane from config/ci-surfaces.yml —
+          on_demand_literal_runner_files(), the literal entries (2 files), not
+          the whole 43-file lane: #10194 put the eval subtrees on
+          eval-suite-manual.yml.
         required: false
         default: ''
         type: string
@@ -139,8 +178,15 @@ jobs:
             python3 - > /tmp/lane.txt <<'PY'
           import sys
           sys.path.insert(0, 'tools')
-          from ci_selection import load_manifest, on_demand_files
-          lane = sorted(on_demand_files(load_manifest()))
+          from ci_selection import load_manifest, on_demand_literal_runner_files
+          # #10194: this workflow owns the LITERAL entries; the subtree entries
+          # belong to eval-suite-manual.yml (docker shape). See the header.
+          # #10206 review: the expression lives in the selector, not here — a
+          # literal that ALSO sits inside a subtree (`eval/retrieval/
+          # test_integration.py`, the file this workflow was created for, #4711)
+          # must not be subtracted away with the subtree it happens to live in.
+          # Pinned by `test_the_embedded_runner_keeps_the_literal_inside_the_subtree`.
+          lane = sorted(on_demand_literal_runner_files(load_manifest()))
           if not lane:
               # Fail loudly: an EMPTY lane means the exclusion silently stopped
               # excluding anything, and a green run here would read as "the

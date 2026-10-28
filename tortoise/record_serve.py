@@ -195,7 +195,10 @@ RECORD_SERVE_ENV = "TORTOISE_RECORD_SERVE"
 #:             record that ANSWERS and cannot serve (`record-miss`), cannot be
 #:             reached (`record-unavailable`), or cannot be scoped because this
 #:             CREDENTIAL resolves no record tenant (`record-tenant-unresolved`
-#:             — normal for session/JWT credentials, not a misconfiguration).
+#:             — since #10046 no credential CLASS lands here by design: an API
+#:             key since #10025, a session/JWT credential and an OAuth `oat_`
+#:             token since #10046 all name the org's default graph, so read this
+#:             as an UNNAMEABLE default row, never as ordinary session traffic).
 #:             It does NOT cover a record that was never armed or is
 #:             misconfigured: an absent/malformed DSN, a missing driver, an
 #:             unprojectable row and a bad tenancy are structural and answer
@@ -479,10 +482,15 @@ def not_served_reads() -> tuple[str, ...]:
 FALLBACK_RECORD_UNAVAILABLE = "record-unavailable"
 FALLBACK_RECORD_MISS = "record-miss"
 #: A THIRD reason, for a condition that is neither: the credential resolves no
-#: record tenant at all. `record_tenant_for` returns `None` for every session/JWT
-#: read and every non-Supabase deployment, so folding this into
-#: `record-unavailable` would fire an OUTAGE counter permanently on a condition
-#: the record never caused — and the counter's whole purpose is to be alertable.
+#: record tenant at all. `record_tenant_for` returns `None` when nothing NAMED a
+#: tenant — the org's default row is absent, tombstoned, another org's or
+#: unreadable (or the deployment is non-Supabase). It is NOT a credential class:
+#: since #10046 an API key (#10025), a session/JWT credential and an OAuth `oat_`
+#: token all name the org's default graph, so this counter firing means a default
+#: row could not be named, not that the caller's credential is merely
+#: session-shaped. Folding it into `record-unavailable` would fire an OUTAGE
+#: counter permanently on a condition the record never caused — and the counter's
+#: whole purpose is to be alertable.
 FALLBACK_RECORD_TENANT_UNRESOLVED = "record-tenant-unresolved"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
@@ -668,11 +676,22 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     reachable only after the record was successfully read; a failure to read
     raises :class:`RecordServeError`.
 
+    ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
+    ``node_from_row`` DERIVES from those columns (`status`, from a supersession
+    carrier) — #9974. So the schema's refused names CAN appear here, synthesized
+    rather than stored, and a consumer must not read their presence as "the
+    record holds a column for this": ``_refused('object')`` still lists
+    `status`. That is the projection's contract for a record-sourced node (the
+    same map a `rebuild_from_record` materializes), and it is what makes this
+    read agree with the rebuilt cache instead of silently dropping a lifecycle
+    value the cache carries.
+
     ⭐ The row becomes properties through ``cache_projection.node_from_row`` —
     the CACHE PROJECTION's own row→property map. The projection writes the cache
     through it; this reads the record through it. One declaration, so the two
-    directions cannot drift about what a column is called, and the derived
-    names the schema refuses are refused on both sides by the same code.
+    directions cannot drift about what a column is called, and which derived
+    names a row can yield is decided in ONE place (that table's bound, not a
+    second rule here).
     """
     from .cache_projection import NODE_TABLES, node_from_row
 
