@@ -2678,9 +2678,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # section-wide search let the #10046 arm's clause be DELETED, reworded to
     # `row on the credential`, or inverted to `puts no default_graph_id on the
     # credential at all` with the suite GREEN (measured, #10083 review P2).
-    # Bind the clause to ITS OWN arm by proximity to the symbol only it names —
-    # 56 chars on the current text, 538 to the org-wide copy — which keeps the
-    # reorder / `both put the` tolerance above.
+    # Bind the clause to ITS OWN arm by a WINDOW after the one symbol only that
+    # arm names — 56 chars to the clause, 538 to the org-wide copy — and check the
+    # window's CONTENT order-free. An order-anchored pattern red a claim-preserving
+    # reorder (`… stamp `default_graph_id` on the credential: the org's active
+    # `kind='default'` row id …`) while its message said the arm "does not say
+    # WHICH field is stamped" when it did (measured, #10083 review P2). Reorder,
+    # insertion and grammar are all legitimate here; what must hold is that the
+    # arm's own sentence names `row id` AND `default_graph_id`, never the NAME.
     assert "`hosted_api._session_user_org`" in flat, (
         "the #10046 arm names no session-lane resolution site, so a reader cannot "
         "check WHY a session/JWT credential is no longer designed residue"
@@ -2689,11 +2694,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the #10046 arm names no OAuth resolution site, so a reader cannot check "
         "WHY an `oat_` credential is no longer designed residue"
     )
-    assert re.search(
-        r"`oauth\.resolve_oauth_access_token`\s+.{0,100}?`kind='default'` row id "
-        r"on the credential as\s+`default_graph_id`",
-        flat,
-    ), (
+    _oauth_arm = flat.partition("`oauth.resolve_oauth_access_token`")[2][:260]
+    assert re.search(r"\brow id\b", _oauth_arm) and "`default_graph_id`" in _oauth_arm, (
         "the #10046 arm does not say WHICH field is stamped (bound to that arm's "
         "own sentence, not the org-wide one) — #10025's ruling is that the id is "
         "identity and the name is a label, so 'the row' without `row id` sends "
@@ -2701,10 +2703,9 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     # `re.I`: the inversion is the CLAIM (`name` instead of `id`), not the case
     # of the word. Case-sensitive, the same inversion in ordinary lowercase read
-    # GREEN (measured). Safe against the doc's legitimate `row NAME` at ~3565
-    # ("never a row NAME — the minted row is named `default`"): that occurrence
-    # has no "on the credential" tail.
-    assert not re.search(r"row name on the credential", flat, re.I), (
+    # GREEN (measured). Scoped to the same window so it cannot red a truthful
+    # mention of the NAME elsewhere (the doc's own `never a row NAME` at ~3565).
+    assert not re.search(r"row name", _oauth_arm, re.I), (
         "the #10046 arm says the row's NAME is stamped — the opposite of #10025's "
         "id-vs-name ruling, and the healthy row is NAMED `default`, so a reader "
         "checking the name clears real growth"
@@ -2718,7 +2719,15 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "cannot check that a resolution fault is what makes a bound capture land "
         "in `no_tenant`"
     )
-    assert not re.search(r"carries no\s+`default_graph_id` at all", flat), (
+    # SCOPED to the session/OAuth arm the pre-#10046 claim was about. Section-wide
+    # this forbade a TRUE sentence about the self-host registry lane, whose
+    # credential carries no `default_graph_id` at all (only the Supabase credential
+    # resolvers stamp it) — a lane clarifying that lane red the suite with a
+    # message describing the opposite (#10083 review P2, measured).
+    assert not re.search(
+        r"(?:session/JWT|`oat_`).{0,240}carries no\s+`default_graph_id` at all",
+        flat,
+    ), (
         "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10046 "
         "'RESOLUTION gap at the credential' claim is back. The CLAIM is measured by "
         "the `session/JWT credential and an OAuth` pin above; keep this exact, "
@@ -2856,7 +2865,16 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "fault' leaves every other pin green (measured), which reads a real "
         "control-plane fault on the seed / indexing lanes as designed residue"
     )
-    assert not re.search(r"designed (?:outcome|residue), not a fault", flat), (
+    # Redundant AND false-reding as a section-wide detector: the ⚠️ bound itself
+    # calls the self-host lane's `no_tenant` "the designed outcome", so a truthful
+    # "a designed outcome, not a fault, for that lane" red it with a message about
+    # the RUNNERS arm (measured, #10083 review P2). The inversion it was for is
+    # already red by the positive verdict pin above; this keeps the explicit
+    # forbidding but binds it to the runners arm's own `control-plane` clause.
+    assert not re.search(
+        r"control-plane (?:fault|failure)[^.]{0,300}designed (?:outcome|residue), not a fault",
+        flat,
+    ), (
         "REVERT-DETECTOR (one measured inversion, not a class): the runners arm is "
         "stated backwards — a `no_tenant` there is a control-plane fault, so "
         "calling it designed residue is the fail-open read the bound exists to close"
@@ -3087,15 +3105,29 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # paths). A narrower grep sends the operator to an empty read on some of them,
     # i.e. "no fault" on a fail-and-fix `no_tenant` growth (#10083 review cycle 2 P1,
     # widened in cycle 3).
-    assert re.search(
-        r'grep -E "could not resolve the record tenant\|could not resolve the '
-        r'DEFAULT-graph record tenant\|graphs default-row read failed\|default '
-        r'graphs\? row NOT minted"',
-        flat,
-    ), (
-        "the fault disjunct's grep misses at least one reachable resolution-fault "
-        "message, so that fault reads as 'no fault'"
+    # A SET of required alternatives, not the whole command: a lane WIDENING the
+    # grep with another reachable message (`could not bind the record tenant for
+    # this request`, `hosted_api.py:6992`) is the improvement this bullet exists to
+    # encourage, and the full-command form of this pin red it while its message
+    # claimed a message was MISSING (#10083 review P3, measured).
+    _fault_grep = next(
+        (g for g in re.findall(r'grep -E "([^"]+)"', flat)
+         if "could not resolve the record tenant" in g or "graphs default-row" in g),
+        "",
     )
+    assert _fault_grep, (
+        "the fault disjunct no longer carries a `grep -E` for the resolution faults"
+    )
+    for _alt in (
+        "could not resolve the record tenant",
+        "could not resolve the DEFAULT-graph record tenant",
+        "graphs default-row read failed",
+        "default graphs? row NOT minted",
+    ):
+        assert re.search(re.escape(_alt), _fault_grep), (
+            f"the fault disjunct's grep misses {_alt!r}, so that fault reads as "
+            "'no fault'"
+        )
     # ⛔ Scoped to the (c) PARAGRAPH, not the whole section: the same literals
     # appear elsewhere in this section, so a section-wide search let (c) stop naming
     # a member while the pin stayed green (#10083 review cycle 3, P2, measured).
@@ -3224,7 +3256,17 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             r"(?:(?:\bDo not\b|\bNever\b|\bnot\b|\bmay not\b|\bmust not\b|"
             r"\bcannot\b|\bcan't\b|\bno\b)\s+(?:try\s+to\s+)?(?:attribut|assign)|"
             r"\battribut\w*\s+(?:would\s+be|is|remains)\s+(?:unexecutable|"
-            r"impossible|infeasible|unavailable)|\bno\b[^.]*\battribut\w*)",
+            r"impossible|infeasible|unavailable)|\bno\b[^.]*\battribut\w*|"
+            # The negation may FOLLOW the noun ("Per-request attribution cannot
+            # be done"), and a qualifier may sit between the noun and the
+            # predicate ("Attribution for a request is impossible"). Both state
+            # the ruling and both red the shape-only accept list (measured,
+            # #10083 review P2). The REJECT half above still catches the
+            # double-negative and the positive-feasibility evasions, so accepting
+            # these shapes costs no discrimination.
+            r"\battribut\w*[^.]{0,60}?\b(?:cannot|can't|can\s+not)\b|"
+            r"\battribut\w*[^.]{0,60}?\b(?:is|are|remains|would\s+be)\s+"
+            r"(?:unexecutable|impossible|infeasible|unavailable)\b)",
             _sentence, re.I,
         ), (
             "the section presents per-request attribution of growth as possible — "
