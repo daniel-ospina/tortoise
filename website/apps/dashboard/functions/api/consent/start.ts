@@ -120,7 +120,11 @@ export function validate(params: URLSearchParams): ValidatedParams | string {
 }
 
 /** The AS authorize URL, rebuilt from the VALIDATED params (never the raw request string). */
-export function authorizeUrl(asOrigin: string, v: ValidatedParams): string {
+export function authorizeUrl(
+  asOrigin: string,
+  v: ValidatedParams,
+  attemptKey: string | null = null,
+): string {
   const url = new URL("/oauth/authorize", asOrigin);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", v.client_id);
@@ -130,6 +134,16 @@ export function authorizeUrl(asOrigin: string, v: ValidatedParams): string {
   url.searchParams.set("state", v.state);
   if (v.scope) url.searchParams.set("scope", v.scope);
   if (v.resource) url.searchParams.set("resource", v.resource);
+  // ⛔ THE KEY MUST REACH THE PAGE THAT CALLS THE MINT, or the whole hop is dead on arrival: the
+  // consent page is on the AS origin and it is §2.3's only documented mint caller, so a key that
+  // travelled only in the app-origin return target would make EVERY mint answer
+  // `403 no_authorize_attempt` — the visitor approves and the flow dies after consent, the exact
+  // class this key exists to remove. Carriage here is a recorded DECISION, not an oversight: §2.3
+  // forbids a second COOKIE (identity must reconcile by the token), and a URL parameter is not a
+  // cookie. The cost is stated in §4: the key transits the AS page URL (and therefore its logs and
+  // the browser's history) for the ≤15-minute attempt window, which is why it is per-attempt,
+  // single-row, and useless without the row.
+  if (attemptKey !== null) url.searchParams.set(ATTEMPT_KEY_PARAM, attemptKey);
   return url.toString();
 }
 
@@ -142,7 +156,6 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   const asOrigin = env.CONSENT_AS_ORIGIN ?? "https://api.premiselabs.co";
-  const authorizeUrlBuilt = authorizeUrl(asOrigin, validated);
   const attempted = params.get(CONSENT_RETRY_PARAM) === "1";
 
   // ── the session: `__Host-session`, and the SAME 401/503 split as everywhere else ────
@@ -223,18 +236,21 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "unavailable", reason: "session_store_unavailable" }, { status: 503 });
   }
 
-  // A signed-in visitor who does NOT hold this attempt's key is looking at somebody else's flow
-  // (or lost theirs). Refuse HERE, before the AS renders a consent page: advancing would let the
-  // visitor approve a flow they cannot mint for, and the flow would then die after consent — the
-  // exact shape the raw-`state` fix removed one field over. A 403, not a terminal state: no
-  // retry can make this flow theirs.
+  // ⛔ This route DOES tell a caller whether a `state` exists: a signed-in visitor who does not hold
+  // the attempt's key is refused here, before consent, rather than advanced into a flow it cannot
+  // mint for (which would die AFTER the visitor approved). That is a deliberate, recorded EXEMPTION
+  // from §2.3's no-oracle rule, which is scoped to the MINT: refusing before consent is the right
+  // behaviour, and `state` is client-chosen and already in the visitor's own URL.
   if (!ownsFlow && userId !== null) {
     return json({ error: "no_authorize_attempt", reason: "flow_not_yours" }, { status: 403 });
   }
 
   // ── the decision (property 4) ───────────────────────────────────────────────────────
-  // `auth_url` returns to THIS route, carrying `consent_retry=1` as the loop guard's carrier.
-  // `safeNext` is what keeps it a same-origin path rather than an open redirect.
+  // The authorize URL carries the attempt key (see `authorizeUrl`): the AS page is the mint's only
+  // caller, so without it the page could never present one. `auth_url` returns to THIS route,
+  // carrying `consent_retry=1` as the loop guard's carrier. `safeNext` is what keeps it a
+  // same-origin path rather than an open redirect.
+  const authorizeUrlBuilt = authorizeUrl(asOrigin, validated, ownsFlow ? attemptKey : null);
   const selfParams = new URLSearchParams(url.search);
   selfParams.set(CONSENT_RETRY_PARAM, "1");
   // The key MUST ride back: it is the only proof that the browser returning from sign-in is the

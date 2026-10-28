@@ -92,10 +92,18 @@ const NOW = Date.now();
 // A D1 stand-in: the tables these two routes touch, over in-memory rows. `meta.changes`
 // counts what the WHERE matched, as D1 does (a CAS that matches nothing must report 0).
 class FakeD1 {
-  constructor(tables) {
+  constructor(tables, opts) {
     this.tables = tables || { sessions: [], consent_attempts: [] };
     this._sqlite = null;
     this._seeded = false;
+    // A REAL store fault: without this the 503 arm is unreachable in tests, so nothing would red if
+    // the route were ever changed to continue — i.e. if the security gate started failing OPEN.
+    this._throws = Boolean(opts && opts.throws);
+  }
+  _maybeThrow(sql) {
+    if (this._throws && /consent_attempts/.test(sql)) {
+      throw new Error("D1_ERROR: control plane unreachable");
+    }
   }
   // ⛔ `exec()` RUNS the statement. It used to be a no-op, which meant the shipped
   // `ensureConsentAttemptTable` DDL — the ONLY definition of this table, there is no migration for
@@ -104,6 +112,7 @@ class FakeD1 {
   // production answering 503 on every `/api/consent/start`. The table is now created by the code
   // under test, including the `ALTER … ADD COLUMN` path for a database an earlier build bootstrapped.
   exec(sql) {
+    this._maybeThrow(sql);
     this._db().exec(sql);
     this._maybeSeed();
     return Promise.resolve();
@@ -167,6 +176,7 @@ class FakeD1 {
   }
   _isConsent(sql) { return /consent_attempts/.test(sql) && !/FROM sessions/.test(sql); }
   _consent(sql, args) {
+    this._maybeThrow(sql);
     this._maybeSeed();
     const stmt = this._db().prepare(sql);
     const out = /^\s*(SELECT|INSERT|DELETE|UPDATE)/i.test(sql) && /RETURNING|^\s*SELECT/i.test(sql)
@@ -233,7 +243,10 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     SESSIONS: new FakeD1({
       sessions: scenario === "mint_no_session" ? []
         : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)],
-      consent_attempts: seeded.includes(scenario)
+      // `??`, not `||`: a supplied row set must REPLACE the built-in one (`||` binds tighter than
+      // `?:`, so the first version kept the literal seed and dropped the caller's rows — and with
+      // them the hash, which made the cross-route key test fail for the wrong reason).
+      consent_attempts: opts.seededAttempts ?? (seeded.includes(scenario)
         ? [{ state: "state-xyz", client_id: "client-abc", redirect_uri: "https://client.example/cb",
              code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", scope: "mcp",
              resource: null,
@@ -242,7 +255,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
                : (scenario === "mint_null_owner" ? null : "user-1"),
              created_at: NOW, expires_at: NOW + 900_000,
              attempt_key_hash: seededHash }]
-        : [],
+        : []),
     }),
   });
   // An unprovisioned key is ABSENCE, not a falsy value: delete it rather than set "".
@@ -264,7 +277,8 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
   const seeded = opts.seededAttempts || [];
-  const store = new FakeD1({ sessions, consent_attempts: seeded });
+  const store = new FakeD1({ sessions, consent_attempts: seeded },
+                          { throws: Boolean(opts.storeThrows) });
   if (opts.wantLegacySchema) store._legacySchema();
   const e = env({ SESSIONS: store });
   const source = opts.params || {
@@ -925,6 +939,70 @@ def test_the_native_scheme_allowlist_is_the_same_set_on_both_halves() -> None:
     uris = [f"{scheme}://client.example/cb" for scheme in sorted(as_schemes)]
     for row in _run("redirect_uri_table", uris=uris)["verdicts"]:
         assert row["accepted"], f"the BFF refuses the AS's own native scheme: {row}"
+
+
+def _key_from_authorize(location: str | None) -> str:
+    """The attempt key on the AS authorize URL — the carriage the MINT's caller actually has."""
+    assert location, "an advance must answer a redirect to the AS"
+    keys = urllib.parse.parse_qs(urllib.parse.urlsplit(location).query).get("attempt_key")
+    assert keys, (
+        "the authorize URL carries NO attempt key — the consent page (the mint's ONLY documented "
+        f"caller, §2.3) could never present one, so every mint would answer 403: {location!r}")
+    return keys[0]
+
+
+def test_the_key_the_page_receives_is_the_key_the_mint_accepts() -> None:
+    """THE end-to-end carriage: `start` → the AS page's URL → `POST /api/consent/token` → 200.
+
+    Nothing pinned this before. The mint tests seeded their own row and hash, and `start`'s tests
+    only checked that SOME key came back in the app-origin return target — so a key that never
+    reached the page (the mint's only caller) would have failed every real mint with
+    `403 no_authorize_attempt` the moment step 4 wired the call: the visitor approves, the flow dies
+    after consent. Measured here across the two routes, which is the only place the property lives.
+    """
+    advanced = _run("start_signed_in")            # signed in: the decision is `advance`
+    assert advanced["status"] == 302, advanced
+    key = _key_from_authorize(advanced["location"])
+
+    minted = _run("mint_ok", seededAttempts=advanced["attempts"], attemptKey=key)
+    assert minted["status"] == 200, (
+        f"the key handed to the AS page was REFUSED by the mint: {minted['body']}")
+
+
+def test_the_four_refusals_are_byte_identical() -> None:
+    """Same-403-is-not-an-oracle, pinned by BODY, not by status.
+
+    A mutant that answered a distinguishable body for the mismatch arm (`attempt_key_mismatch`)
+    passed the status-only assertions while handing a `state`-guesser a way to tell a real flow from
+    a guess. All four arms — no key, wrong key, a pre-column row, an unrecorded `state` — must be
+    the same bytes.
+    """
+    arms = {
+        "absent": _run("mint_ok", omitKey=True),
+        "wrong": _run("mint_ok", attemptKey="not-the-key"),
+        "pre_column": _run("mint_ok", seededKeyHash=None),
+        "unknown_state": _run("mint_no_attempt"),
+    }
+    bodies = {}
+    for name, out in arms.items():
+        assert out["status"] == 403, (name, out)
+        bodies[name] = json.dumps(out["body"], sort_keys=True)
+    assert len(set(bodies.values())) == 1, (
+        f"the refusals are DISTINGUISHABLE, so the mint is a `state`/key oracle: {bodies}")
+
+
+def test_a_store_fault_is_a_typed_503_and_never_a_redirect() -> None:
+    """The gate must fail CLOSED when the store cannot answer.
+
+    `FakeD1` never threw, so nothing redded if the route were changed to continue past a store
+    fault — which would make the ownership check fail OPEN (no row read, no key verified). The
+    contract is the same as every other store path here: typed 503, named reason, and NO Location
+    header (a redirect on an infrastructure blip reads as a sign-out, #3485).
+    """
+    out = _run("start_signed_in", storeThrows=True)
+    assert out["status"] == 503, out
+    assert out["body"] == {"error": "unavailable", "reason": "consent_store_unavailable"}, out["body"]
+    assert out["location"] is None, f"a store fault produced a REDIRECT: {out['location']!r}"
 
 
 def _key_from(location: str | None) -> str:

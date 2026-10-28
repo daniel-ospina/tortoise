@@ -139,6 +139,16 @@ first caller to name the `state` own the flow while the mint read the same row a
 disagreeing about one row — so such an attempt is refused and the visitor restarts. A missing, wrong, or
 pre-column key answers the SAME `403 no_authorize_attempt` as an unrecorded flow, so the route is not an
 oracle for guessing a `state`.
+
+**Recorded exemptions from that no-oracle rule** (they are deliberate, and stated here so a later reader
+neither "fixes" them nor reads the sentence above as flow-wide):
+
+* `/api/consent/start` DOES reveal whether a `state` exists — a signed-in visitor who does not hold the
+  attempt's key is refused **before** the AS renders consent, rather than advanced into a flow it could
+  never mint for. Refusing late would be the "approve, then the flow dies" class; a `state` is
+  client-chosen and already in the visitor's own URL, so the disclosure buys an attacker nothing new.
+* The *carriage* of the key is exempt in the other direction: it must reach the consent page, which §4
+  costs and records.
 ⛔ A scoped cookie holding the nonce is **not** available here: the bridge's rule is that the two origins
 are reconciled **by the token, never by a second cookie**. The return target is the only carrier that
 keeps that rule.
@@ -223,6 +233,7 @@ The mint requires the browser to reach the session origin even though the consen
 | **Latency** | one extra round trip per consent screen; the consent interaction is out-of-band of the token hot path, so this is not on any p95 that matters. |
 | **Failure domains** | +1 (the mint route). The `no_session`/`unavailable` split (property 3) is what keeps that addition from becoming a sign-out. |
 | **Loop risk** | the navigation must be marked as already-attempted so a session that cannot be established reaches a **terminal, actionable** state instead of bouncing forever — the #3485/#3503 class. The carrier is a NAMED query parameter, `consent_retry=1`, placed on the sign-in hop's return target (`auth_url`'s `next`) by the `sign_in` redirect; the route reads it on return and passes `attempted = true` to `decideConsentAdvance` (`consent-flow.ts::CONSENT_RETRY_PARAM`). It is deliberately NOT `stale=1` (`welcome.ts`, `admin/[[path]].ts`), which marks an out-of-date snapshot and means something different. The existing page already carries the copy and the retry affordance for this (`#5734`), and it must be carried over, not re-derived. |
+| **The attempt key transits the AS page URL** | §2.3 gives the flow to the BROWSER that created it, and the consent page on `api.*` is the mint's only documented caller — so the key must arrive with the page. It rides the `authorizeUrl` query (`ATTEMPT_KEY_PARAM`), which puts it in the AS's request log and the visitor's history for the ≤15-minute attempt window. **This is a recorded DECISION, not an oversight:** §2.3 forbids a second *cookie* (identity reconciles by the token), and a URL parameter is not one. The mitigation is structural rather than secrecy — the key is per-attempt, 32 random bytes, stored only as a SHA-256, useless without the row, and inert once the row expires. |
 
 ## 5. Task 2 — RFC 8414 `authorization_endpoint` stability: VERIFIED
 

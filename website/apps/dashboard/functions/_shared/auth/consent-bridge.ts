@@ -26,7 +26,7 @@
  */
 
 // One `Env`, owned by `session.ts` — a second declaration would drift from the runtime's.
-import type { Env } from "./session";
+import { ensureColumn, type Env } from "./session";
 
 export type { Env };
 
@@ -300,12 +300,11 @@ export async function ensureConsentAttemptTable(db: D1Database): Promise<void> {
   );
   // `CREATE TABLE IF NOT EXISTS` cannot add a COLUMN to a table that already exists, and SQLite
   // has no `ADD COLUMN IF NOT EXISTS` — so a database bootstrapped by an earlier runtime build
-  // needs the ALTER, and the duplicate-column error IS the "already there" answer.
-  try {
-    await db.exec("ALTER TABLE consent_attempts ADD COLUMN attempt_key_hash TEXT;");
-  } catch {
-    // already present
-  }
+  // needs the ALTER. `ensureColumn` is the repo's rule for exactly this shape: only the
+  // duplicate-column error is swallowed, and a GENUINE DDL failure propagates so the caller can
+  // answer a typed 503 instead of leaving a table that silently never evolved (which showed up as
+  // "the INSERT references a missing column" — every request 503ing with no signal anywhere).
+  await ensureColumn(db, "consent_attempts", "attempt_key_hash", "TEXT");
   await db.exec(
     "CREATE INDEX IF NOT EXISTS idx_consent_attempts_expires " +
       "ON consent_attempts(expires_at);",
