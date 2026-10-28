@@ -2319,6 +2319,12 @@ def _matrix_rows() -> dict[str, tuple[str, str, str]]:
 
 _RECORD_ARMING_HEADING = "### Arming the Postgres record"
 
+# The numeral words a count-bearing runbook list may carry, so a pin can compare the
+# LIST'S LABEL to the members that actually follow it instead of pinning one word
+# (#10083 review F1: a literal `THREE` reds an honest `FOUR` relabel while a
+# fourth member stays invisible to a fixed-name alternation).
+_NUMERALS = {"TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
+
 
 def _record_arming_section() -> str:
     """The runbook's `Arming the Postgres record` section, verbatim.
@@ -3037,25 +3043,50 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # uses, `hosted_api._bind_record_tenant`), reddened a verdict pin that was
     # still intact and told the next lane to restore a verdict it never removed.
     # A pin must red on the class its message names.
-    assert re.search(
-        r"THREE readings, because it has three causes; read all THREE before you "
-        r"call the growth",
+    # ⛔ The lead-in's numeral is DERIVED from the bullets that follow it, not
+    # pinned as a WORD and not counted through a fixed name list (#10083 review F1,
+    # P2, measured). Both halves of that pin were fail-open in one direction and
+    # false-red in the other:
+    #   - a fixed-name alternation (`A resolution FAULT|No nameable default row|A
+    #     resolution ABANDONED`) can only ever return names from that set, so
+    #     `len(...) == 3` meant "the three original names are still present". A
+    #     FOURTH bullet — e.g. `A malformed CARRIED tenant`, a cause this section
+    #     itself describes — stayed GREEN while the lead-in still promised an
+    #     exhaustive THREE;
+    #   - a lane that adds a cause AND honestly relabels to `FOUR readings … read
+    #     all FOUR` was RED against the literal `THREE`, with a message telling it
+    #     the lead-in had stopped saying to read every cause — the false-red class
+    #     this PR spent cycles 7-16 removing.
+    # So parse the numerals out of the lead-in and compare them to the members that
+    # actually follow it. An honest FOUR is green; a silent fourth member is not.
+    _lead_in = re.search(
+        r"That last arm has ([A-Z]+) readings, because it has ([a-z]+) causes; "
+        r"read all ([A-Z]+) before you call the growth other traffic:",
         flat,
-    ), (
-        "the no-nameable-row lead-in no longer says to read all THREE causes, so a "
-        "SILENT reading can be skipped and an empty grep read as 'no fault'"
     )
-    # ⛔ ... and the numeral is DERIVED from the bullets, not trusted: the defect
-    # was a lead-in whose count disagreed with the causes that actually exist, so
-    # adding or losing a bullet has to move the count (or red).
-    _bound_bullets = re.findall(
-        r"- \*\*(A resolution FAULT|No nameable default row|A resolution ABANDONED)",
-        flat,
+    assert _lead_in, (
+        "the no-nameable-row lead-in no longer says to read all N causes before "
+        "calling the growth other traffic, so a SILENT reading can be skipped and "
+        "an empty grep read as 'no fault'"
     )
-    assert len(_bound_bullets) == 3, (
-        "the `no_tenant` bound no longer enumerates exactly THREE causes "
-        f"({_bound_bullets!r}) — the lead-in's count and its members disagree, so "
-        "an operator reads an exhaustive list that is not exhaustive"
+    _lead_nums = {_NUMERALS.get(_word.upper()) for _word in _lead_in.groups()}
+    assert len(_lead_nums) == 1 and None not in _lead_nums, (
+        "the bound's own lead-in counts its causes inconsistently "
+        f"{_lead_in.groups()!r} — 'N readings … N causes … read all N' is the claim "
+        "that makes every reading executable"
+    )
+    # Count the bullets from the LIST ITSELF, scoped to the block the lead-in
+    # introduces: a `- **…**` bullet elsewhere in the section is not a cause and
+    # must not be able to red this.
+    _bound_list = section.partition("before you call the growth other traffic:")[
+        2
+    ].split("\n   ⛔", 1)[0]
+    _bound_bullets = re.findall(r"^   - \*\*(.+?)\*\*", _bound_list, re.M)
+    assert _lead_nums == {len(_bound_bullets)}, (
+        f"the `no_tenant` bound's lead-in says {_lead_in.group(1)} readings but the "
+        f"list enumerates {len(_bound_bullets)} ({_bound_bullets!r}) — the lead-in's "
+        "count and its members disagree, so an operator reads an exhaustive list "
+        "that is not exhaustive and skips a cause"
     )
     assert re.search(
         r"\*\*No nameable default row\*\* \(absent[^)]*\) is also a refusal of a "
@@ -3452,10 +3483,17 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # elsewhere in the section too, so this pins the enumerated clause, not a token.
     # Measured: reverting it to "TWO" left every other assertion green (#10083
     # review P2).
-    assert re.search(r"THREE readings are not in this grep", flat), (
-        "recipe 1's exclusion list still says TWO readings while the `no_tenant` "
-        "bound names a third (the `tortoise.hosted_api` tenant-resolution fault), "
-        "so a reader takes an exhaustive enumeration that is not exhaustive"
+    # ⛔ The LABEL's numeral is compared to the members, in both directions
+    # (#10083 review F1, P2, measured). A literal `THREE` was RED against an honest
+    # relabel to FOUR, and the `\(([a-c])\)` membership pin could not see a `(d)`,
+    # so a fourth member of a list still labelled THREE was GREEN — both are the
+    # self-contradiction class this section exists to remove.
+    _excl_label = re.search(
+        r"(TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep", flat
+    )
+    assert _excl_label, (
+        "recipe 1's exclusion list's exhaustive label is gone, so a reader takes "
+        "the `no_tenant` bound's extra readings as covered by the fault grep"
     )
     assert re.search(r"\(c\) The tenant-RESOLUTION faults — four MESSAGES", flat), (
         "the exclusion list does not name the resolution-fault member, so the "
@@ -3470,14 +3508,20 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # needs: (a) is the healthy M2 decline, the one line a BROKEN record also
     # produces, and (b) is the `position_unproven` line item 2's own counter counts.
     # So derive the membership from the markers AND pin each member's own clause.
-    _excl_list = flat.partition("THREE readings are not in this grep")[2].partition(
-        "⛔ **`no_journal` and `seam_unimportable` ARE in it**"
-    )[0]
-    _members = re.findall(r"\(([a-c])\) The ", _excl_list)
-    assert _members == ["a", "b", "c"], (
-        "recipe 1's exclusion list no longer carries all three members — a label "
-        f"that says THREE over {_members!r} is the same self-contradiction class "
-        "this section exists to remove"
+    _excl_list = re.split(
+        r"(?:TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep", flat, maxsplit=1
+    )[-1].partition("⛔ **`no_journal` and `seam_unimportable` ARE in it**")[0]
+    _members = re.findall(r"\(([a-z])\) The ", _excl_list)
+    assert _members == [chr(ord("a") + _i) for _i in range(len(_members))], (
+        "recipe 1's exclusion list's member markers are not a run from (a) "
+        f"({_members!r}) — a gap or a renumbering hides a member from the count"
+    )
+    assert _NUMERALS[_excl_label.group(1)] == len(_members), (
+        "recipe 1's exclusion list is labelled "
+        f"{_excl_label.group(1)} readings but enumerates {len(_members)} "
+        f"({_members!r}) — a label that says THREE over four members is the same "
+        "self-contradiction class this section exists to remove, so a reader takes "
+        "an exhaustive enumeration that is not exhaustive"
     )
     for _clause, _why in (
         (r"`the record write was declined \(no_durable_journal\)`",
@@ -3535,8 +3579,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # review P2). The INVERTED twin (`**Do try to attribute …**`) still reds, here
     # and in the polarity scan. Only the WRAP is neutralised by `flat` (#10071
     # review F3).
+    # The casing is part of the alternation because `Do NOT` is this section's OWN
+    # house style (13 and 19 lines below: `⛔ **Do NOT put it in `fly.toml`'s
+    # `[env]`.**`, `⛔ **Do NOT set TORTOISE_RECORD_SINGLE_TENANT**`), so requiring
+    # `Do not` red a pure STRENGTHENING of the ruling with a message accusing the
+    # section of not making it — and it disagreed with the polarity scan ~60 lines
+    # above, whose accept/reject halves are `re.I` (measured, #10083 review F2).
     assert re.search(
-        r"⛔ \*\*(?:Do not|Never)\*{0,2} (?:try to )?(?:attribute|assign) "
+        r"⛔ \*\*(?:Do not|Do NOT|Never)\*{0,2} (?:try to )?(?:attribute|assign) "
         r"that growth per request",
         flat,
     ), (
