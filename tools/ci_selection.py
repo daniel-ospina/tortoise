@@ -1369,6 +1369,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_inbound_relay_sweep_tool_change_selects_core_not_tier1.
              "tools/inbound_relay_sweep.py",
+             # #10220: tools/worktree_report.py owns tests/test_worktree_report.py
+             # (registered `core`), and the same silent drop bit it: `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches
+             # the tool, so a TOOL-ONLY change selected NO surface, took the
+             # docs-only early return and landed on tier-1 smoke, where that file
+             # is not registered. The very PR that can weaken the report's
+             # anti-fabrication rules (re-hash the log, re-derive the counts, drop a
+             # rule) would then be the one that never ran the cases pinning them.
+             # MEASURED before this entry: `select(["tools/worktree_report.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, n=64,
+             # test_worktree_report.py ABSENT; after -> surfaces=['core'], present.
+             # ⚠️ n is a SNAPSHOT taken at the head that measured it — re-measure, do
+             # not trust the count. Same #1349/#3332/#3616 class as the entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
+             "tools/worktree_report.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no

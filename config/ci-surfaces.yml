@@ -2956,6 +2956,16 @@ surfaces:
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
+  # #10220: the durable lane report (WORKTREE-REPORT.md) and its anti-fabrication
+  # checker — `tools/worktree_report.py`. Hermetic (a throwaway git repo in
+  # `tmp_path`; no DB, no network), so it pins no api/engine surface and `core`
+  # carries it. `tools/` is a flat NON_PYTHON_PREFIXES entry with no matching
+  # SOURCE_PATTERNS row, so a TOOL-ONLY diff would select NO surface and fall back
+  # to tier-1 smoke, which does not carry this file — the neighbouring `CORE_ALSO`
+  # entry for the tool closes that half (same #1349/#3332/#3616 class as
+  # `test_work_claim.py` above). Pinned by
+  # `tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1`.
+  - test_worktree_report.py
   - test_work_claim.py  # #5052: the dispatch-time claim CAS on the graph (tools/work_claim.py) — `core` here covers edits to THIS test file; the tool's own edits are covered by the `tools/work_claim` (PREFIX) TOOL_CARVEOUTS entry in tools/ci_selection.py, which covers the whole `work_claim*` family — the tool plus any store split (a `tools/` source has NO named surface and is filtered out before the `core` fallback, so the registration alone would not select this suite for a tool-only PR)
   # RETIRED 2026-10-19: test_orchestrator_harness.py drove operations/orchestrator-harness/,
   # which moved to agent-infra/scripts/orchestrator-harness/. The suite was retired with the copy,
