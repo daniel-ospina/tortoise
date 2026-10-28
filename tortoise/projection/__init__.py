@@ -69,6 +69,7 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     OBJECT_ADDRESS_UNESTABLISHED,
     SHAPE_DELETE_MISS,
     SHAPE_EDGE_MESSAGE_MISS,
+    NO_ADDRESS_INSTRUCTION,
     SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS,
     SHAPE_OBJECT_SUPERSEDED_UNREGISTERED,
     SHAPE_POINT_BELIEF_MISS,
@@ -9202,9 +9203,12 @@ def _object_supersede_miss_detail(shape: str, *, prefix: str = "") -> str:
         # not have stored it".
         return (f"{prefix}supersede carries NO address it could be looked up "
                 "by — no `name` and no `id` that is a non-empty string — so "
-                "there is nothing the journal can be checked against; supply "
-                "the target's name or id (fix the producing write, or amend "
-                "the journal line)")
+                "there is nothing the journal can be checked against; "
+                # ⛔ ONE home for the instruction: the run-boundary remedy
+                # (`nonfolded._NO_ADDRESS_REMEDY`) interpolates this same
+                # constant, so the per-record receipt and the abort cannot give
+                # one record two different repairs.
+                f"{NO_ADDRESS_INSTRUCTION}")
     return f"{prefix}supersede matched no Object"
 
 

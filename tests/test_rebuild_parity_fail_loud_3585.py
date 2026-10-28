@@ -56,7 +56,9 @@ from tortoise.projection import (
     FalkorProjection,
 )
 from tortoise.projection.nonfolded import (
+    NO_ADDRESS_INSTRUCTION,
     NonFoldedEventsError,
+    _NO_ADDRESS_REMEDY,
     collect_non_folded,
     refused_events,
 )
@@ -3060,13 +3062,14 @@ def test_no_address_supersede_refuses_with_its_own_shape_and_remedy(
         f"(#10183): {msg}")
     assert "supply the target's name or id" in msg.lower(), msg
     # ⛔ ...and the REMEDY, not merely the receipt: `__str__` embeds every
-    # refused record's detail, whose no-address receipt carries that same
-    # phrase, so only the appended sentence discriminates `_NO_ADDRESS_REMEDY`
-    # (MEASURED: unpinned, that phrase alone survived deleting the remedy). It
-    # is the LAST sentence by
-    # construction.
-    assert msg.rstrip().endswith("and re-run."), (
-        f"the abort did not end with the no-address REMEDY: {msg[-160:]}")
+    # refused record's detail, whose no-address receipt carries the same
+    # INSTRUCTION, so only the appended SENTENCE discriminates
+    # `_NO_ADDRESS_REMEDY` (MEASURED: unpinned, that phrase alone survived
+    # deleting the remedy). Pinned by the sentence rather than by its trailing
+    # words — a terminator match passes on any rewording that keeps the ending,
+    # which is exactly how two copies of one instruction drift apart.
+    assert _NO_ADDRESS_REMEDY in msg, (
+        f"the abort did not carry the no-address REMEDY sentence: {msg[-200:]}")
     # ⛔ The sweep's SECOND message for this record must not name the
     # genuine-miss causes either (#10183): MEASURED — deleting this shape's
     # `_sup_why` arm otherwise leaves the file green.
@@ -3336,10 +3339,15 @@ def test_a_mixed_abort_carries_both_remedies(env):
     assert "Reconcile the journal" in msg, msg
     assert "supply the target's name or id" in msg.lower(), msg
     # The REMEDY sentence itself, not only the receipt's copy of the phrase
-    # (MEASURED: without it the phrase is satisfied by the receipt). It is
-    # appended last, so its terminator discriminates.
-    assert msg.rstrip().endswith("and re-run."), (
-        f"the mixed abort did not end with the no-address remedy: {msg[-160:]}")
+    # (MEASURED: without it the phrase is satisfied by the receipt).
+    assert _NO_ADDRESS_REMEDY in msg, (
+        f"the mixed abort did not carry the no-address remedy sentence: "
+        f"{msg[-200:]}")
+    # ⛔ ONE HOME (#10211 review): the instruction the run-boundary remedy
+    # appends and the instruction the per-record receipt renders are the SAME
+    # constant, so a reword cannot leave two surfaces telling one caller two
+    # different repairs.
+    assert NO_ADDRESS_INSTRUCTION in _NO_ADDRESS_REMEDY, _NO_ADDRESS_REMEDY
     # Both on the health gate too — the mixed case is where the two remedy
     # renderers would drift apart silently (MEASURED: one was split, the other
     # was not).

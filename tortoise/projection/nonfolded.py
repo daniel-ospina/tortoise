@@ -476,13 +476,28 @@ _RECONCILE_REMEDY = (
     "Reconcile the journal (a missing creation event, an out-of-order append, "
     "or an unjournaled producer) before relying on this graph."
 )
+#: The no-address shape's ACTUAL repair (#10183's third part), and the ONE
+#: home for it. The per-record receipt in `projection/_object_supersede_miss_detail`
+#: renders this same instruction, so the run-boundary remedy and the per-record
+#: detail cannot drift into two different instructions for one record — the
+#: defect class this module's remedies exist to remove, one level down. Pins
+#: assert THIS constant appears on both surfaces rather than matching a
+#: trailing phrase, so a reword of either copy cannot leave them agreeing by
+#: accident.
+NO_ADDRESS_INSTRUCTION = (
+    "supply the target's name or id (fix the producing write, or amend the "
+    "journal line)"
+)
 _NO_ADDRESS_REMEDY = (
     "A record of shape "
     f"`{SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}` carries no name and no "
     "id that is a non-empty string, so there is no missing creation to add "
     "and nothing out of order "
-    "— the only repair is to supply the target's name or id (fix the "
-    "producing write, or amend the journal line) and re-run."
+    # ⛔ "ITS repair", not "the only repair": `refusal_remedy` emits BOTH
+    # sentences for a MIXED set, and an unscoped exclusivity claim then tells
+    # the caller to reconcile the journal AND that reconciling it is not the
+    # repair — the contradiction this split exists to end.
+    f"— its repair is to {NO_ADDRESS_INSTRUCTION} and re-run."
 )
 
 
