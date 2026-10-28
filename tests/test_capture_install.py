@@ -3432,7 +3432,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 14}
+                             "pi": 15}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3528,12 +3528,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 14`` from
+    Mutation: delete ``// tortoise-hook-version: 15`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 14
+    assert hook_install.read_hook_version(_PI_SRC) == 15
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -3549,7 +3549,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    14, "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6")
+    15, "009341cef30fb2b052cfc9167295b6ebb158b83638d7316aa42c67f3e8143161")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3631,6 +3631,16 @@ _GENERATION_DIGESTS = {
     # defect. The reason sanitiser also moved to the single write site, so
     # `spool.error` (a raw exception message) can no longer bypass it.
     14: "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6",
+    # Generation 15: the capture spool's count/byte ceiling ranks entries in TWO
+    # CLASSES before age — an already-filed entry (its bytes are on the wire, and
+    # the harness's own session log still holds them) is the safe loss and is
+    # reaped FIRST, while a never-filed entry is the only copy of a conversation
+    # that never reached the graph (#6388).  Generation 14 ranked by age alone,
+    # so on a box whose backlog is older than its successes the cap reaped the
+    # very backlog it exists to deliver.  The discard line also names the class of
+    # loss now (`UNDELIVERED (never filed)` vs `filed`); it is the only surface a
+    # cap eviction has.  Behaviour moved, so the generation moves with it.
+    15: "009341cef30fb2b052cfc9167295b6ebb158b83638d7316aa42c67f3e8143161",
 }
 
 
