@@ -58,9 +58,12 @@ Consequences (E2E-5 exit gate):
 - **A missed mint heals itself on first use.** `resolve_api_key` calls the mint
   when `default_graph_id_for` finds no row for an org-wide key, so the unnamed
   window is one request long rather than permanent (and the migration re-run
-  above stays available for an org that never authenticates). Until it is
-  healed the record keeps refusing that org `no_tenant` — fail-closed, and now
-  logged, never silent.
+  above stays available for an org that never authenticates). Since #10046 the
+  same self-heal serves the other two request credentials —
+  `hosted_api._session_user_org` and `oauth.resolve_oauth_access_token` both go
+  through `supabase_control.default_graph_id_for_credential`, the one home for
+  "the org's default row, minted on a miss". Until it is healed the record keeps
+  refusing that org `no_tenant` — fail-closed, and now logged, never silent.
 
 - **Two real residuals.** Both leave an organization with no id for its
   default graph, so the record keeps refusing it `no_tenant` (fail-closed, and

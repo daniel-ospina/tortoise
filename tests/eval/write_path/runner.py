@@ -1181,14 +1181,16 @@ def operator_drop_notes(drops: dict, posture: str) -> list[str]:
             "operator drops (#8503): the EXTRACTOR logged no operator drop and "
             "no supersede refusal in any session — so an edge_missing verdict "
             "in this receipt is not an EXTRACTOR-side drop. ⛔ This does NOT "
-            "cover three seams: the commit layer (apply_payload_operators logs "
+            "cover two seams: the commit layer (apply_payload_operators logs "
             "its skips through _logger, with no warnings sink on the capture); "
-            "a session whose snapshot failed to read (it emits no warnings at "
-            "all; graph_census's per-session error names those); and a "
-            "point-level `supersedes` ref on a point that folds as NOOP, which "
-            "is dropped where the ref is collected, before the resolver runs, "
-            "so it logs nothing. All three are INVISIBLE to this block, which "
-            "is a named blind spot, not a clean bill"
+            "and a session whose snapshot failed to read (it emits no warnings "
+            "at all; graph_census's per-session error names those). Both are "
+            "INVISIBLE to this block, which is a named blind spot, not a clean "
+            "bill. (#9906 closed the third this note used to name: a "
+            "point-level `supersedes` ref on a point that FOLDS — NOOP, MERGE "
+            "or a same-session duplicate — is now carried onto the surviving "
+            "point and reaches the resolver, so its refusals are counted here "
+            "like any emitted point's.)"
         ]
     if not refusals:
         # ⛔ THE DROPS-ONLY CASE IS THE ONE THIS NOTE EXISTS FOR: returning []
@@ -1349,6 +1351,11 @@ _SUPERSEDE_REFUSAL_MARKERS = (
     "empty retraction ref",
     "does not resolve to an S3 search result",
     "lifecycle=superseded with no supersedes ref",
+    # #9906: the fold-carry's one "cannot carry" form — a ``supersedes`` ref on
+    # a point that folded (NOOP/MERGE/duplicate) onto a survivor with no graph
+    # id. The ref is NAMED there precisely so the receipt cannot report a false
+    # zero; without this marker the warning exists and the count does not see it.
+    "with no surviving point id",
 )
 
 
@@ -1359,18 +1366,18 @@ def operator_drop_warnings(session_results: list[dict]) -> dict:
     int, "by_session": {sid: [warning, ...]}}``.
 
     ⛔ ``operator_drops == 0`` means the EXTRACTOR logged no drop — it does
-    NOT mean the write path dropped nothing. THREE seams are outside this
-    instrument's reach, and the run note names all three: the commit layer
+    NOT mean the write path dropped nothing. TWO seams are outside this
+    instrument's reach, and the run note names both: the commit layer
     (`commit_ops.apply_payload_operators`) logs its skips through
-    ``_logger`` only, with no warnings sink on the capture; a snapshot that
+    ``_logger`` only, with no warnings sink on the capture; and a snapshot that
     never read a session produces no warnings at all (``graph_census``'s
-    per-session ``error`` names the ones that did not); and a point-level
-    ``supersedes`` ref on a point that folds as a NOOP is dropped where the
-    ref is collected, before the resolver runs, so it logs nothing either.
+    per-session ``error`` names the ones that did not).
     So a zero is evidence about the operator pass and about nothing else.
-    (This docstring said TWO while ``operator_drop_notes`` enumerated three —
-    code-review round 8; the note is the copy a receipt reader sees, so the
-    docstring was the stale half.)
+    (This docstring counted THREE while ``operator_drop_notes`` enumerated
+    three — code-review round 8; the note is the copy a receipt reader sees, so
+    the docstring was the stale half. #9906 closed the third: a point-level
+    ``supersedes`` ref on a folding point is now CARRIED to the survivor, so it
+    reaches the resolver like any other ref and a refusal there is counted.)
     """
     by_session: dict[str, list[str]] = {}
     total = operator_drops = supersede_refusals = 0
