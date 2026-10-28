@@ -1190,6 +1190,41 @@ def test_a_dry_run_needs_no_journal(monkeypatch) -> None:
                        "--dry-run"])
 
 
+def test_a_missing_graph_refusal_names_this_tool_and_no_flag_it_lacks(
+        monkeypatch) -> None:
+    """The census's refusal offers `--create-if-missing`, which THIS tool has not.
+
+    ⛔ `_assert_graph_exists` belongs to the census, and its message is authored
+    for it: prefixed `census:` and ending `pass --create-if-missing to accept
+    that`. The copy defines no such flag (measured: `error: unrecognized
+    arguments`, exit 1), so re-raising it verbatim sent the operator to a remedy
+    that cannot run AND named the wrong tool as the one that refused. The check is
+    still the census's (reusing the side-effect-free `GRAPH.LIST`), because the
+    thing this guard protects against — a bare MATCH materialising the keyspace —
+    is identical for both tools; only the message is the copy's own.
+    """
+
+    class _DB:
+        def list_graphs(self):
+            return ["other"]
+
+    monkeypatch.setenv("FALKORDB_CLOUD_URI", "bogus")
+    monkeypatch.setattr(copy_mod.census, "_connect",
+                        lambda uri: (_DB(), "shown"))
+    with pytest.raises(SystemExit) as excinfo:
+        copy_mod.main(["--graph", "typo", "--org-id", "o", "--graph-id", "gid",
+                       "--dry-run"])
+    message = str(excinfo.value)
+    assert message.startswith("copy: graph 'typo' does not exist"), message
+    # The one remedy a refusal names must be one the operator can run here, and
+    # the tool that refused must be the one that gets named.
+    assert "--create-if-missing" not in message, (
+        f"the copy has no --create-if-missing flag; the refusal must not offer "
+        f"it: {message}")
+    assert "census:" not in message, (
+        f"the refusal must name the tool that refused: {message}")
+
+
 # ── the record's bookkeeping may never go DOWN ───────────────────────────
 
 def test_the_counts_are_omitted_when_the_graph_measured_no_turn() -> None:
@@ -1325,6 +1360,61 @@ def test_a_count_the_record_already_holds_is_never_written_down() -> None:
             "s1", {"turn_count": 6}, turn_count=12, max_index=11,
             event_id="E", floor=empty)
         assert (none["turn_count"], none["turn_max_index"]) == (12, 11)
+
+    # ⛔ A floor that holds a COUNT but no MARK still states a window: the record's
+    # own read is `coalesce(turn_max_index, turn_count, 0)` (`sdk.py:3075`), so a
+    # row at `turn_count=20` reads 20 even with a NULL mark. Writing the graph's
+    # `attached=11` over it moved the effective window 20 -> 11 — the lowering
+    # this test's subject forbids, through the one spelling the read collapses.
+    # `_record_floor` folds `count` into the mark for exactly this, so the write
+    # below can only RAISE it.
+    count_only = copy_mod.build_session_event(
+        "s1", {"turn_count": 6}, turn_count=12, max_index=11, event_id="E",
+        floor={"turn_count": 20, "turn_max_index": 20})
+    assert count_only["turn_max_index"] == 20
+
+
+def test_the_floor_folds_a_count_into_the_mark_its_read_collapses(monkeypatch) -> None:
+    """A row holding `turn_count` but no `turn_max_index` still states a WINDOW.
+
+    `public.session_narrative` carries `turn_count` and no `turn_max_index` column
+    at all, and a pre-#10000 journal row can likewise hold the count only. The
+    record reads the window as `coalesce(turn_max_index, turn_count, 0)`, so such
+    a row DOES state a mark — and a floor that folded only the literal column
+    reported "nothing held", letting a re-run whose graph still attaches fewer
+    turns write the smaller mark over it. Measured before the fix: this fixture's
+    floor was `{"turn_count": 20}` and the copy wrote `turn_max_index=11`,
+    moving the record's effective window 20 -> 11.
+    """
+    from tortoise import record_projection, record_serve
+
+    class _Cursor:
+        def execute(self, sql, params):
+            pass
+
+        def fetchall(self):
+            # (session, turn_count, turn_max_index): the FIRST home holds the
+            # count only (its mark column does not exist); the NARRATIVE home is
+            # the one that reports a mark — and a smaller count — for the same
+            # session, so the fold has to keep the larger of each.
+            return [("s1", 20, None), ("s1", 8, "11")]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(record_serve, "open_record", lambda dsn: _Conn())
+    monkeypatch.setattr(record_projection, "scope_connection",
+                        lambda conn, org_id: _Cursor())
+
+    floor = copy_mod._record_floor("postgresql://u@db/r", "o", "gid")
+    # The count still floors the count, and the mark can never be BELOW a count
+    # the record itself vouches for.
+    assert floor["s1"]["turn_count"] == 20
+    assert floor["s1"]["turn_max_index"] == 20, (
+        "the count-only row states a window of 20; folding only the literal "
+        "column leaves 11 here and the next write lowers the record"
+    )
 
 
 def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:

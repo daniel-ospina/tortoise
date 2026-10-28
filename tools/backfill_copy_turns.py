@@ -455,8 +455,22 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
         mark = census._int_or_none(turn_max_index)
         if count is not None:
             held["turn_count"] = max(held.get("turn_count", count), count)
-        if mark is not None:
-            held["turn_max_index"] = max(held.get("turn_max_index", mark), mark)
+        # ⛔ The record's OWN read spells the window
+        # `coalesce(s.turn_max_index, s.turn_count, 0)` (`tortoise/sdk.py:3075`),
+        # so a row that holds a COUNT but no mark still states a window of
+        # `count`. Folding only the literal `turn_max_index` column made that row
+        # read as "nothing held" at the write site (`or -1`), so a run whose graph
+        # still attached `attached < count` turns wrote the SMALLER mark over the
+        # record and moved its effective window DOWNWARDS (measured: a row at
+        # `turn_count=20` with a NULL mark reads 20, and a copy with
+        # `attached=11` wrote `turn_max_index=11`) — the exact lowering this
+        # function exists to prevent, through the one spelling the read collapses.
+        # `session_narrative` is the home that makes it reachable: it carries
+        # `turn_count` and no `turn_max_index` column at all.
+        effective_mark = mark if mark is not None else count
+        if effective_mark is not None:
+            held["turn_max_index"] = max(
+                held.get("turn_max_index", effective_mark), effective_mark)
     return floor
 
 
@@ -1148,7 +1162,23 @@ def main(argv: list[str] | None = None) -> int:
     from tortoise.ids import ulid
 
     db, shown = census._connect(uri)
-    census._assert_graph_exists(db, args.graph)
+    # ⛔ NOT a bare `census._assert_graph_exists(db, args.graph)`: its refusal is
+    # authored for the census — it is prefixed `census:` and ends by offering
+    # `--create-if-missing`, a flag THIS tool does not define (measured:
+    # `error: unrecognized arguments`, exit 1). The one remedy named in an
+    # operator-facing refusal has to be one the operator can actually run, and the
+    # refusal has to name the tool that refused. `GRAPH.LIST` is side-effect free,
+    # so the check is reused rather than restated; only the message is the copy's.
+    try:
+        census._assert_graph_exists(db, args.graph)
+    except SystemExit:
+        names = list(db.list_graphs() or [])
+        raise SystemExit(
+            f"copy: graph {args.graph!r} does not exist on this instance "
+            f"({len(names)} graph(s) there) — and reading a non-existent graph "
+            "CREATES it (FalkorDB materialises the keyspace on the first query), "
+            "so this tool will not be the thing that creates it. Check --graph."
+        ) from None
     graph = db.select_graph(args.graph)
 
     # The record seam's OWN failure classes are part of the artifact contract:
