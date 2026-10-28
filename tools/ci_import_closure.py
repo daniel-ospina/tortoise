@@ -338,7 +338,17 @@ class FileScan:
 
 
 def _is_type_checking_guard(expr: ast.expr) -> bool:
-    """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` (and any conjunction of it)."""
+    """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` (and any conjunction of it).
+
+    ⛔ `if not TYPE_CHECKING:` IS NOT A TYPE-CHECKING BLOCK (#10143 review P2).
+    `ast.walk` found the `TYPE_CHECKING` name ANYWHERE in the test, so the NEGATED
+    form — the standard idiom for a runtime import that a type checker cannot
+    see — classified its body as type-only, and `--exclude-type-checking` then
+    DELETED a genuinely runtime edge. That is the same axis inversion the
+    `_dedupe_deps` fix removed: a reader must never drop the other axis's edges.
+    """
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+        return False
     for node in ast.walk(expr):
         if isinstance(node, ast.Name) and node.id == "TYPE_CHECKING":
             return True
@@ -372,11 +382,20 @@ def _nodes_with_context(tree: ast.AST):
             for child in node.orelse:
                 stack.append((child, in_tc, in_fn))
             continue
-        child_fn = in_fn or isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-        )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # ⛔ ONLY THE BODY IS FUNCTION-LOCAL (#10143 review P2). Decorators,
+            # default values, annotations and the return annotation are evaluated
+            # where the `def` EXECUTES — module import time — so tagging them
+            # `in_function=True` made `--import-time-only` drop real import-time
+            # edges, which skews the very number that flag exists to demonstrate.
+            body = node.body if isinstance(node.body, list) else [node.body]
+            body_ids = {id(b) for b in body}
+            for child in ast.iter_child_nodes(node):
+                stack.append(
+                    (child, in_tc, True if id(child) in body_ids else in_fn))
+            continue
         for child in ast.iter_child_nodes(node):
-            stack.append((child, in_tc, child_fn))
+            stack.append((child, in_tc, in_fn))
 
 
 def _imports_with_context(tree: ast.AST):
@@ -1039,7 +1058,39 @@ def _run_id(check_run: dict) -> int | None:
     if marker not in url:
         return None
     tail = url.split(marker, 1)[1]
-    return int(tail.split("/")[0])
+    head = tail.split("/", 1)[0]
+    # A non-numeric head is UNATTRIBUTABLE, not a crash: the caller records the
+    # leg as unread (#10143 review P1). `int(...)` used to raise here, which
+    # would abort the whole window on one malformed url.
+    return int(head) if head.isdigit() else None
+
+
+def _slug(repo: str) -> str:
+    """`owner/name` → a filename-safe component for the caches (#10143 review P2).
+
+    The caches used to be keyed on the head sha / PR number ALONE while `--repo`
+    is a first-class flag. PR numbers collide across repos and a commit sha is
+    shared by a fork, so an upstream run's truth was reusable for a fork run —
+    pairing a diff from one repo with the ground truth of another, which can only
+    HIDE a miss, records no error, and was then cached.
+    """
+    return repo.replace("/", "__")
+
+
+def _artifacts(repo: str, run_id: int) -> list[dict]:
+    """Every artifact of one workflow run, PAGINATED.
+
+    `?per_page=100` with no `--paginate` (and `total_count` ignored) truncated the
+    listing at 100, so a red leg's artifact beyond page 1 looked ABSENT — which
+    fired the sibling-substitution fallback and could substitute a clean sibling's
+    junit for the red leg's own (#10143 review P2). Line-oriented parse because
+    `--paginate --jq '.artifacts[]'` emits one object per line, per page.
+    """
+    out = _run_gh([
+        "api", f"repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100",
+        "--paginate", "--jq", ".artifacts[]",
+    ])
+    return [json.loads(line) for line in out.decode().splitlines() if line.strip()]
 
 
 def artifact_names_for_job(job_name: str) -> list[str]:
@@ -1204,14 +1255,25 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
     "never assessed", never as "clean".
     """
     cache.mkdir(parents=True, exist_ok=True)
-    cached = cache / f"truth-v{GROUND_TRUTH_VERSION}-{sha}.json"
+    cached = cache / f"truth-v{GROUND_TRUTH_VERSION}-{_slug(repo)}-{sha}.json"
     if cached.exists():
         try:
             return json.loads(cached.read_text())
         except (OSError, ValueError):
             pass
     failed_jobs: list[str] = []
+    # (run id, job name) — a red leg is checked against ITS OWN run's artifact
+    # listing. `failed_jobs` was GLOBAL across runs while the listing was PER RUN,
+    # so a red leg in run A was re-checked against run B's artifacts and produced
+    # a spurious "uploaded no pytest-log-…" entry even when both legs were
+    # perfectly readable — an honest multi-workflow window then read PARTIAL
+    # forever. Measured shape: `ci.yml`'s `test-isolation` red beside any red
+    # `python-ci` leg (`ci.yml` and `python-ci.yml` are different RUNS).
+    failed_legs: list[tuple[int, str]] = []
     run_ids: set[int] = set()
+    # Initialised BEFORE the check-run loop: a red leg whose `details_url` carries
+    # no run id is recorded up there, and it used to be dropped with no record.
+    artifact_errors: list[str] = []
     check_runs = _check_runs(repo, sha)
     test_legs_seen = 0
     for run in check_runs:
@@ -1244,18 +1306,27 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         rid = _run_id(run)
         if rid:
             run_ids.add(rid)
+            failed_legs.append((rid, name))
+        else:
+            # ⛔ AN UNATTRIBUTABLE RED LEG IS AN UNREAD ONE, NOT AN ABSENT ONE
+            # (#10143 review P1). `if rid:` had no `else`: the leg never reached
+            # `run_ids`, so its artifacts were never read AND `artifact_errors`
+            # stayed empty. Beside a readable sibling red leg, `artifacts > 0`
+            # also disabled the unread-PR guard, so the window could exit 0 over a
+            # leg whose ground truth was never opened.
+            artifact_errors.append(
+                f"red leg {name}: no Actions run id in its details_url — its "
+                "junit was never read"[:200])
 
     artifacts_seen = 0
-    artifact_errors: list[str] = []
     failed_files: set[str] = set()
     failed_tests: list[str] = []
     no_test_failure: list[str] = []
     for rid in sorted(run_ids):
-        listing = _gh_json([
-            "api", f"repos/{repo}/actions/runs/{rid}/artifacts?per_page=100",
-        ])
-        arts = listing.get("artifacts", []) if isinstance(listing, dict) else []
+        # PAGINATED (#10143 review P2) — see `_artifacts`.
+        arts = _artifacts(repo, rid)
         present = {str(a.get("name", "")) for a in arts}
+        jobs_here = [job for r, job in failed_legs if r == rid]
         # ⛔ A SIBLING LEG'S JUNIT IS NOT THIS LEG'S GROUND TRUTH (#10143 review
         # P2). `rid` is the workflow RUN, and `test`/`test-slow`/`test-carve-out`
         # (plus the always-on legs) are matrix jobs inside ONE run, so the
@@ -1270,14 +1341,14 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         # Record the substitution per missing job BEFORE the fallback is used:
         # the rename mitigation survives, and the masking state becomes PARTIAL
         # and uncacheable.
-        for job in failed_jobs:
+        for job in jobs_here:
             if present & set(artifact_names_for_job(job)):
                 continue
             artifact_errors.append(
                 f"run {rid}: job {job} uploaded no "
                 f"{artifact_names_for_job(job)[0]} — a sibling leg's junit "
                 "must not stand in for it"[:200])
-        wanted_names = {n for job in failed_jobs for n in artifact_names_for_job(job)}
+        wanted_names = {n for job in jobs_here for n in artifact_names_for_job(job)}
         selected = [a for a in arts if a.get("name") in wanted_names]
         if not selected:
             selected = [a for a in arts if str(a.get("name", "")).startswith("pytest-log-")]
@@ -1292,6 +1363,7 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
             artifact_errors.append(f"run {rid}: no pytest-log-* artifact uploaded"[:200])
             continue
         pr_found = False
+        executed_total = 0
         for art in selected:
             artifacts_seen += 1
             try:
@@ -1333,10 +1405,22 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
                     f"{art.get('name')}: {len(parsed['unresolved'])} failing "
                     f"test(s) with no resolvable file "
                     f"({parsed['unresolved'][0]})"[:200])
+            executed_total += int(parsed.get("executed") or 0)
             if parsed["files"]:
                 pr_found = True
                 failed_files.update(parsed["files"])
                 failed_tests.extend(parsed["names"])
+        # ⛔ A JUNIT WITH ZERO `<testcase>` ELEMENTS IS NOT "NOTHING FAILED"
+        # (#10143 review P2). `parse_junit_failures` computed `executed` and this
+        # caller never read it: a red leg whose junit described 0 tests (the suite
+        # did not run — collection aborted, a marker selected nothing, exit 5)
+        # parsed as CLEAN, `artifact_errors` stayed empty, the row read "job red,
+        # no test-level failure" (the genuine #10070 zero-failure shape) and the
+        # truncated truth was CACHED.
+        if selected and not executed_total:
+            artifact_errors.append(
+                f"run {rid}: junit present but described 0 testcases — the suite "
+                "did not run, so 'no test-level failure' is not a reading"[:200])
         if not pr_found:
             no_test_failure.append(f"run {rid}")
 
@@ -1350,17 +1434,21 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         "test_legs_seen": test_legs_seen,
         "artifact_errors": artifact_errors,
     }
-    if not artifact_errors and check_runs:
+    if not artifact_errors and check_runs and test_legs_seen:
         # Do not cache a partial ground truth: a cached truncation would look
         # like a clean run on every later invocation. `check_runs` empty is the
-        # same rule one layer up — "I saw no runs at all" is not an answer.
+        # same rule one layer up — "I saw no runs at all" is not an answer — and
+        # `test_legs_seen == 0` is the third (#10143 review P1): runs exist but no
+        # `test*` leg among them, so nothing was assessed. Caching that made a
+        # re-trigger at the same sha short-circuit on the emptiness instead of
+        # re-reading it.
         cached.write_text(json.dumps(result, indent=1))
     return result
 
 
 def changed_files(repo: str, pr: int, cache: Path | None = None) -> list[str]:
     if cache is not None:
-        cached = cache / f"files-{pr}.json"
+        cached = cache / f"files-{_slug(repo)}-{pr}.json"
         if cached.exists():
             try:
                 return json.loads(cached.read_text())
@@ -1372,7 +1460,8 @@ def changed_files(repo: str, pr: int, cache: Path | None = None) -> list[str]:
     ])
     files = sorted({line for line in out.decode().splitlines() if line.strip()})
     if cache is not None:
-        (cache / f"files-{pr}.json").write_text(json.dumps(files, indent=1))
+        (cache / f"files-{_slug(repo)}-{pr}.json").write_text(
+            json.dumps(files, indent=1))
     return files
 
 
@@ -1518,16 +1607,42 @@ def _load_all(follow_type_checking: bool = True,
     scans = scan_all(index, files)
     unresolved_core: list[str] = []
     core = core_test_files(manifest, unresolved_core)
+    # ⛔ A MISSING OR RENAMED `core` SURFACE IS NOT AN EMPTY ONE (#10143 review
+    # P1). `manifest["surfaces"].get("core") or []` turns a renamed key (or a
+    # failed `_surface_members` fallback) into `core == []`. Then `unresolved_core`
+    # stays empty, `core_rel` is empty, `derived = current` (nothing is ever
+    # dropped from today's selection), every real failure is `covered`, and
+    # `validate` prints "TOTAL MISSES 0" and exits 0 — a clean window certified by
+    # an analysis that examined NOTHING. Same hazard as the empty-window bug, one
+    # layer up, and it is reachable by a rename nobody would call a failure.
+    core_empty = not core
     closures = compute_closures(scans, index, core,
                                 follow_type_checking=follow_type_checking,
                                 follow_function_local=follow_function_local)
     return manifest, {"scans": scans, "closures": closures, "core": core,
-                      "unresolved_core": unresolved_core}, index
+                      "unresolved_core": unresolved_core,
+                      "core_empty": core_empty}, index
+
+
+def _refuse_an_empty_core(data: dict) -> bool:
+    """True when the `core` surface resolved to nothing, after saying so (#10143 review P1).
+
+    A derivation over an empty surface selects nothing, covers everything, and
+    reports zero misses. It is the strongest possible false green, so every verb
+    that publishes a number refuses instead of printing a table of zeros.
+    """
+    if not data.get("core_empty"):
+        return False
+    print("::error:: the manifest's `core` surface resolved to ZERO test files — a "
+          "derivation over nothing selects nothing and certifies nothing")
+    return True
 
 
 def cmd_closure(args: argparse.Namespace) -> int:
     _manifest, data, index = _load_all(not args.exclude_type_checking,
                                        not getattr(args, "import_time_only", False))
+    if _refuse_an_empty_core(data):
+        return 2
     if data.get("unresolved_core"):
         # Printed, not merely carried in the JSON: every percentage in the table
         # below is a ratio over this denominator, so a member that resolved to
@@ -1619,6 +1734,8 @@ def _tests_rel(path: str) -> str:
 def cmd_validate(args: argparse.Namespace) -> int:
     ci = _selection_module()
     manifest, data, index = _load_all(not args.exclude_type_checking)
+    if _refuse_an_empty_core(data):
+        return 2
     if data.get("unresolved_core"):
         # Reported by `closure` and `report` too — and here it matters MOST: the
         # miss counts below are ratios over this denominator, so a member that
@@ -1844,6 +1961,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"::error:: pr(s) {', '.join(str(p) for p in unseen[:5])} yielded NO "
               "check run — nothing was assessed for them, so the window is "
               "PARTIAL, not clean")
+    # `unassessed` — the THIRD "I did not assess this PR" state (#10143 review
+    # P1). Runs exist (`runs_seen > 0`, so `unseen` cannot see it) and none
+    # concluded red (`failed_jobs: []`, so `unread` cannot see it) because NO
+    # `test*` leg was among them: `test_legs_seen == 0`. `pr_ground_truth` records
+    # that count for exactly this reason and nothing read it, so a window whose
+    # leg names changed in `python-ci.yml` — or a PR whose only check runs are
+    # lint/typecheck legs — read "0 misses" and exited 0, and the emptiness was
+    # CACHED.
+    unassessed = [row["pr"] for row in rows if not row.get("test_legs_seen", 0)]
+    if unassessed:
+        print(f"::error:: pr(s) {', '.join(str(p) for p in unassessed[:5])} yielded NO "
+              "`test*` leg — their test-level ground truth was never assessed, so "
+              "the window is PARTIAL, not clean")
     out_of_model = sorted({(row["pr"], f) for row in rows
                            for f in row["not_in_current"]})
     if out_of_model:
@@ -1852,7 +1982,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
               "selection, so the derivation was never scored on them — the "
               "window is PARTIAL, not clean: "
               + ", ".join(f"pr#{p} {f}" for p, f in out_of_model[:5]))
-    if errors or unread or unseen or out_of_model:
+    if errors or unread or unseen or unassessed or out_of_model:
         # An unreadable artifact can only UNDER-count misses, so a zero-miss
         # window with unreadable artifacts is not a clean window. Say so in the
         # exit code rather than in a parenthetical (#10143 review P2).
@@ -1865,6 +1995,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     manifest, data, index = _load_all(not args.exclude_type_checking)
+    if _refuse_an_empty_core(data):
+        return 2
     closures = data["closures"]
     summary = summarise(closures, index, data["scans"],
                         follow_type_checking=not args.exclude_type_checking)

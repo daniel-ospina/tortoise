@@ -178,7 +178,12 @@ def test_getattr_on_an_in_repo_module_taints_but_on_a_third_party_one_does_not()
     assert [u.reason for u in dirty.unknown] == [UNKNOWN_DYNAMIC_ATTR]
 
     resolved = _scan(idx, "tests/test_a.py", src + "getattr(registry, 'x')\n")
-    assert resolved.unknown == []  # a literal attr is static: not a module, no edge
+    assert resolved.unknown == []
+    # …and it adds NO EDGE either: asserting only `unknown == []` would pass for an
+    # implementation that invented a phantom edge, which is half of what the
+    # comment claims (#10143 review P2).
+    assert [(d.target, d.kind) for d in resolved.deps] == [
+        (d.target, d.kind) for d in clean.deps]
 
 
 def test_getattr_resolves_a_literal_attr_from_the_binding_s_dotted_target():
@@ -433,7 +438,7 @@ def test_ground_truth_reports_a_junit_whose_failures_have_no_file(monkeypatch, t
                        listing_names=["pytest-log-test-a"])
     truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
     assert truth["artifact_errors"]
-    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
+    assert not (_truth_cache(tmp_path, "deadbeef")).exists()
 
 
 def test_artifact_name_contract_for_shard_and_plain_jobs():
@@ -645,6 +650,19 @@ def test_summarise_reports_the_shim_closure_for_the_reader_that_was_used():
     assert naive["package_init_closure"] == 2     # the deferred sdk edge is gone
 
 
+def _truth_cache(cache: Path, sha: str, repo: str = "o/r") -> Path:
+    """The truth cache path — keyed by REPO **and** sha (#10143 review P2).
+
+    Keyed on the sha alone, `--repo` (a first-class flag) could reuse another
+    repo's truth: PR numbers collide across repos and a fork shares the commit
+    sha, so a diff from one repo was paired with the ground truth of another — a
+    state that can only HIDE a miss, records no error, and was cached.
+    """
+    from tools import ci_import_closure as module
+    return cache / (f"truth-v{module.GROUND_TRUTH_VERSION}-"
+                    f"{module._slug(repo)}-{sha}.json")
+
+
 def _fake_ground_truth(monkeypatch, module, *, junit: bytes | None,
                        listing_names: list[str]):
     """Drive `pr_ground_truth` with a fake check-run + one fake artifact."""
@@ -655,9 +673,11 @@ def _fake_ground_truth(monkeypatch, module, *, junit: bytes | None,
            "details_url": "https://github.com/o/r/actions/runs/99/job/1"}
     monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [run])
     monkeypatch.setattr(module, "_run_id", lambda r: 99)
+    # The listing seam is `_artifacts` (per RUN, paginated); `_gh_json` is the
+    # PR-metadata seam and stubbing it here left the artifact listing unstubbed.
     monkeypatch.setattr(
-        module, "_gh_json",
-        lambda args: {"artifacts": [{"id": 7, "name": n} for n in listing_names]})
+        module, "_artifacts",
+        lambda repo, run_id: [{"id": 7, "name": n} for n in listing_names])
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -686,7 +706,7 @@ def test_ground_truth_records_an_artifact_that_carries_no_junit(monkeypatch, tmp
     assert truth["artifact_errors"], (
         "an artifact with no junit.xml must be REPORTED — silently dropping it "
         "makes 'could not read' indistinguishable from 'nothing failed'")
-    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+    assert not (_truth_cache(tmp_path, "deadbeef")).exists(), (
         "a PARTIAL ground truth must never be cached as truth")
 
 
@@ -697,7 +717,7 @@ def test_ground_truth_records_an_unparseable_junit(monkeypatch, tmp_path):
                        listing_names=["pytest-log-test-a"])
     truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
     assert truth["artifact_errors"], "unparseable junit must be reported, not dropped"
-    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
+    assert not (_truth_cache(tmp_path, "deadbeef")).exists()
 
 
 def test_ground_truth_records_a_red_run_that_uploaded_no_artifact(monkeypatch, tmp_path):
@@ -715,7 +735,7 @@ def test_ground_truth_records_a_red_run_that_uploaded_no_artifact(monkeypatch, t
     assert truth["artifact_errors"], (
         "a red run with an EMPTY artifact listing is an unread run, not a clean one")
     assert truth["artifacts"] == 0
-    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+    assert not (_truth_cache(tmp_path, "deadbeef")).exists(), (
         "a partial ground truth must never be cached as truth")
 
 
@@ -823,13 +843,13 @@ def test_closure_module_report_writes_the_json_it_was_asked_for(tmp_path, monkey
     assert _json.loads(out.read_text())["summary"]["core_files"] == 1
 
 
-def _stub_selection_module():
+def _stub_selection_module(select_files=()):
     from types import SimpleNamespace
 
     return SimpleNamespace(
         TESTS_DIR=Path(__file__).resolve().parent,
         select=lambda changed, event, manifest, explain: {
-            "test_files": [], "slow_files": [], "surfaces": [],
+            "test_files": list(select_files), "slow_files": [], "surfaces": [],
         },
     )
 
@@ -849,8 +869,12 @@ def test_validate_exits_two_when_it_could_not_read_the_window(
     from tools import ci_import_closure as ci
 
     idx, scans, closures = _cli_world()
-    data = {"scans": scans, "closures": closures, "core": []}
+    data = {"scans": scans, "closures": closures,
+            "core": ["tests/test_t.py"]}
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    # `cmd_validate` mkdirs `CACHE_DIR` = REPO/.ci-selection/closure-cache, so an
+    # un-redirected test writes into the CHECKOUT (#10143 review P2).
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
@@ -878,8 +902,12 @@ def test_validate_exits_two_on_an_empty_window(tmp_path, monkeypatch, capsys):
     from tools import ci_import_closure as ci
 
     idx, scans, closures = _cli_world()
-    data = {"scans": scans, "closures": closures, "core": []}
+    data = {"scans": scans, "closures": closures,
+            "core": ["tests/test_t.py"]}
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    # `cmd_validate` mkdirs `CACHE_DIR` = REPO/.ci-selection/closure-cache, so an
+    # un-redirected test writes into the CHECKOUT (#10143 review P2).
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [])
 
@@ -918,8 +946,12 @@ def test_a_red_pr_that_uploaded_no_artifact_is_not_a_clean_window(
     from tools import ci_import_closure as ci
 
     idx, scans, closures = _cli_world()
-    data = {"scans": scans, "closures": closures, "core": []}
+    data = {"scans": scans, "closures": closures,
+            "core": ["tests/test_t.py"]}
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    # `cmd_validate` mkdirs `CACHE_DIR` = REPO/.ci-selection/closure-cache, so an
+    # un-redirected test writes into the CHECKOUT (#10143 review P2).
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
@@ -1043,7 +1075,8 @@ def test_core_members_that_do_not_resolve_are_reported_not_dropped():
     )
 
 
-def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys):
+def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys,
+                                                       tmp_path):
     """The partial-window test must be `red legs && nothing read`, NOT `== 0`.
 
     `artifacts` counts junit blobs read off RED `test*` legs only, so a fully
@@ -1058,8 +1091,12 @@ def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys):
     from tools import ci_import_closure as ci
 
     idx, scans, closures = _cli_world()
-    data = {"scans": scans, "closures": closures, "core": []}
+    data = {"scans": scans, "closures": closures,
+            "core": ["tests/test_t.py"]}
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    # `cmd_validate` mkdirs `CACHE_DIR` = REPO/.ci-selection/closure-cache, so an
+    # un-redirected test writes into the CHECKOUT (#10143 review P2).
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
@@ -1119,9 +1156,11 @@ def test_ground_truth_reports_a_leg_masked_by_a_sibling_legs_artifact(
     assert truth["artifact_errors"], (
         "the failed leg's own artifact is absent and a sibling's was substituted "
         "— that is an unread leg, and it must be reported")
-    assert "sibling" in truth["artifact_errors"][0], (
-        "the entry must name the substitution, not just count an error")
-    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+    assert any("test (a)" in e for e in truth["artifact_errors"]), (
+        "the entry must name the LEG whose junit was substituted — pinning the "
+        "wording instead of the job let a reworded message fail a correct fix "
+        "(#10143 review P2)")
+    assert not (_truth_cache(tmp_path, "deadbeef")).exists(), (
         "a masked leg is PARTIAL truth and must never be cached")
 
 
@@ -1140,7 +1179,7 @@ def test_a_read_leg_whose_own_artifact_is_present_records_nothing(monkeypatch, t
     )
     truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
     assert truth["artifact_errors"] == []
-    assert (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists()
+    assert (_truth_cache(tmp_path, "deadbeef")).exists()
 
 
 def test_ground_truth_counts_the_check_runs_it_saw_and_caches_only_a_read_one(
@@ -1157,21 +1196,34 @@ def test_ground_truth_counts_the_check_runs_it_saw_and_caches_only_a_read_one(
     """
     from tools import ci_import_closure as module
     monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [])
-    monkeypatch.setattr(module, "_gh_json", lambda args: {"artifacts": []})
+    monkeypatch.setattr(module, "_artifacts", lambda repo, run_id: [])
     truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
     assert truth["runs_seen"] == 0
-    assert not (tmp_path / f"truth-v{module.GROUND_TRUTH_VERSION}-deadbeef.json").exists(), (
+    assert not (_truth_cache(tmp_path, "deadbeef")).exists(), (
         "an unassessed PR must not be cached as a clean one")
 
 
-def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",)):
-    """Drive `cmd_validate` over one synthetic PR and return its exit code."""
+def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",),
+                   select_files=(), cache: Path | None = None):
+    """Drive `cmd_validate` over one synthetic PR and return its exit code.
+
+    `cache` is not decoration: `cmd_validate` runs
+    `CACHE_DIR.mkdir(parents=True, exist_ok=True)` with
+    `CACHE_DIR = REPO/.ci-selection/closure-cache`, so a test that does not
+    redirect it writes into the CHECKOUT — while declaring a `tmp_path` that
+    reads as isolation. Pass `cache=tmp_path`.
+    """
     import argparse
 
     idx, scans, closures = _cli_world()
-    data = {"scans": scans, "closures": closures, "core": []}
+    data = {"scans": scans, "closures": closures,
+            "core": ["tests/test_t.py"]}
+    if cache is not None:
+        monkeypatch.setattr(ci, "CACHE_DIR", cache)
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
-    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(
+        ci, "_selection_module",
+        lambda: _stub_selection_module(list(select_files)))
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
     monkeypatch.setattr(ci, "changed_files",
@@ -1194,17 +1246,19 @@ def _truth(**over):
     return base
 
 
-def test_validate_exits_two_when_a_pr_yielded_no_check_run(monkeypatch, capsys):
+def test_validate_exits_two_when_a_pr_yielded_no_check_run(monkeypatch, capsys,
+                                                           tmp_path):
     """P2: `runs_seen == 0` must be PARTIAL, not a green PR."""
     from tools import ci_import_closure as ci
-    rc = _stub_validate(monkeypatch, ci, _truth(runs_seen=0, test_legs_seen=0))
+    rc = _stub_validate(monkeypatch, ci, _truth(runs_seen=0, test_legs_seen=0),
+                        cache=tmp_path)
     assert rc == 2, "a PR nothing was read for must not certify the window"
     out = capsys.readouterr().out
     assert "PARTIAL" in out and "NO check run" in out
 
 
 def test_validate_exits_two_when_a_failure_falls_outside_the_modelled_selection(
-    monkeypatch, capsys,
+    monkeypatch, capsys, tmp_path,
 ):
     """P2: `not_in_current` was an ABSOLUTION, and it is only sound when the
     model covers every leg the workflow runs.
@@ -1221,13 +1275,14 @@ def test_validate_exits_two_when_a_failure_falls_outside_the_modelled_selection(
     rc = _stub_validate(monkeypatch, ci, _truth(
         failed_files=["tests/test_not_selected_anywhere.py"],
         jobs=["test (a)"], artifacts=1,
-    ))
+    ), cache=tmp_path)
     assert rc == 2, "an unmodelled failure must not certify the window"
     out = capsys.readouterr().out
     assert "PARTIAL" in out and "fall outside the modelled selection" in out
 
 
-def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys):
+def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys,
+                                                          tmp_path):
     """P2: the always-on legs are unioned into today's selection.
 
     `test-record-postgres` runs four files on EVERY PR (`python-ci.yml:3640`),
@@ -1243,7 +1298,7 @@ def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys):
     rc = _stub_validate(monkeypatch, ci, _truth(
         failed_files=["tests/test_9555_narrative_carrier.py"],
         jobs=["test-record-postgres"], artifacts=1,
-    ))
+    ), cache=tmp_path)
     out = capsys.readouterr().out
     assert "fall outside the modelled selection" not in out, (
         "an always-on leg's file is IN the model, so it must not read as a hole")
@@ -1256,3 +1311,362 @@ def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys):
     # the derived mapping is scored as COVERING it — which is the honest result:
     # the derivation narrows `core`, it does not remove an always-on leg.
     assert rc == 0 and "MISS[" not in out
+
+
+# ---------------------------------------------------------------------------
+# #10143 review round at `3934648ae`: the fourth fresh-context round.
+#
+# Two classes of defect, both of the kind that certifies a window it never read:
+#   * paths that DROP a red leg's ground truth without recording it
+#     (no run id, zero-testcase junit, an unattributed `test*` leg, an empty
+#     `core` surface, a cache keyed without the repo), and
+#   * pins whose SUBJECT was degenerate, so the shipped bug and the fix agreed by
+#     accident (the classname fallback's nesting, `cmd_validate`'s exit 1, the
+#     `not TYPE_CHECKING` branch, a decorator's import-time edge).
+#
+# Each test below fails on the code as it stood at `3934648ae`.
+# ---------------------------------------------------------------------------
+def test_validate_exits_one_when_the_derivation_really_misses(
+    monkeypatch, capsys, tmp_path,
+):
+    """P1: NOTHING pinned `cmd_validate` returning 1 — its only positive signal.
+
+    Every CLI assertion was `== 0` or `== 2`, so replacing
+    `return 0 if total_naive == 0 and total_safe == 0 else 1` with `return 0`
+    left all 53 tests green while a window with real misses certified as clean.
+    The `misses_for` unit tests do not cover it: they never travel through the row
+    loop, the totals, or the exit code.
+    """
+    from tools import ci_import_closure as ci
+
+    rc = _stub_validate(
+        monkeypatch, ci,
+        _truth(failed_files=["tests/test_t.py"], jobs=["test (a)"], artifacts=1),
+        # `tortoise/hub.py` is OUTSIDE `test_t`'s closure, and today's selector
+        # DID run `test_t` — so this is a genuine miss of the derivation, not an
+        # out-of-model failure.
+        changed=("tortoise/hub.py",),
+        select_files=["test_t.py"],
+        cache=tmp_path,
+    )
+    out = capsys.readouterr().out
+    assert "MISS[naive] pr#1 test_t.py" in out, out   # tests/-relative, like `select()`
+    assert rc == 1, "a real miss must exit 1 — never 0"
+
+
+def test_junit_classname_fallback_resolves_a_NESTED_module(monkeypatch, tmp_path):
+    """P1: the longest-first loop was never exercised by its own pin.
+
+    Both shipped cases (`tests.test_x`, `tests.test_x.TestX`) resolve on the FIRST
+    candidate, so a naive `"/".join(parts[:-1]) + ".py"` — the bug's exact shape,
+    one component short — passed them and mis-resolved every genuinely nested test
+    file, which under-counts misses. The `harness.py` decoy is what makes the
+    precedence load-bearing: a short-split implementation returns it instead.
+    """
+    from tools import ci_import_closure as module
+
+    (tmp_path / "tests/eval/harness").mkdir(parents=True)
+    (tmp_path / "tests/eval/harness/test_x.py").write_text("def test_a(): pass\n")
+    (tmp_path / "tests/eval/harness.py").write_text("")
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    xml = _junit(
+        '<testcase classname="tests.eval.harness.test_x" name="test_a">'
+        '<failure message="boom">trace</failure></testcase>'
+    )
+    assert parse_junit_failures(xml)["files"] == ["tests/eval/harness/test_x.py"]
+
+
+def test_ground_truth_records_a_red_leg_with_no_run_id(monkeypatch, tmp_path):
+    """P1: `if rid:` had no `else`, so an unattributable red leg VANISHED.
+
+    It never reached `run_ids`, so its artifacts were never read AND
+    `artifact_errors` stayed empty; beside a readable sibling red leg,
+    `artifacts > 0` also disabled the unread-PR guard, so a window could exit 0
+    over a leg whose ground truth was never opened.
+    """
+    from tools import ci_import_closure as module
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [
+        {"name": "test (a)", "conclusion": "failure", "id": 99,
+         "details_url": "https://example.invalid/not-an-actions-url"}])
+    monkeypatch.setattr(module, "_artifacts", lambda repo, run_id: [])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["jobs"] == ["test (a)"]
+    assert any("no Actions run id" in e for e in truth["artifact_errors"]), truth
+    assert not _truth_cache(tmp_path, "deadbeef").exists(), (
+        "a leg nothing was read for must not be cached as truth")
+
+
+def test_ground_truth_records_a_junit_with_zero_testcases(monkeypatch, tmp_path):
+    """P2: `executed` was computed by the parser and NEVER read by the caller.
+
+    A red leg whose junit described zero `<testcase>` elements — the suite did not
+    run: collection aborted, a marker selected nothing, exit 5 — parsed as clean,
+    `artifact_errors` stayed empty, the row read "job red, no test-level failure"
+    (the genuine #10070 zero-failure shape) and the truncated truth was cached.
+    """
+    from tools import ci_import_closure as module
+    _fake_ground_truth(monkeypatch, module, junit=b"<testsuite/>",
+                       listing_names=["pytest-log-test-a"])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert any("0 testcases" in e for e in truth["artifact_errors"]), truth
+    assert not _truth_cache(tmp_path, "deadbeef").exists()
+
+
+def test_ground_truth_scopes_each_red_leg_to_its_own_run(monkeypatch, tmp_path):
+    """P2: `failed_jobs` was GLOBAL across runs while the listing is PER RUN.
+
+    A red leg in run A was re-checked against run B's artifact listing, so an
+    honest two-workflow window (a red `python-ci` `test*` leg beside a red
+    `ci.yml` job — different RUNS) recorded a substitution entry for a leg whose
+    own junit was right there. A fail-closed check that always fires carries no
+    information.
+    """
+    import io
+    import zipfile
+
+    from tools import ci_import_closure as module
+
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [
+        {"name": "test (a)", "conclusion": "failure", "id": 1,
+         "details_url": "https://github.com/o/r/actions/runs/11/job/1"},
+        {"name": "test-isolation", "conclusion": "failure", "id": 2,
+         "details_url": "https://github.com/o/r/actions/runs/22/job/2"},
+    ])
+    listings = {
+        11: [{"id": 7, "name": "pytest-log-test-a"}],
+        22: [{"id": 8, "name": "isolation-report"}],
+    }
+    monkeypatch.setattr(module, "_artifacts", lambda repo, rid: listings[rid])
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("junit.xml", _junit(
+            '<testcase classname="tests.test_a" name="t1" file="tests/test_a.py">'
+            '<failure message="boom">trace</failure></testcase>'))
+    blob = buf.getvalue()
+    monkeypatch.setattr(module, "_download_artifact",
+                        lambda repo, aid, cache: _write_tmp(cache, aid, blob))
+
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert not any("test (a)" in e for e in truth["artifact_errors"]), (
+        "run 11's leg uploaded its OWN junit — checking it against run 22's "
+        f"listing is the cross-run bug: {truth['artifact_errors']}")
+    assert any("test-isolation" in e for e in truth["artifact_errors"]), (
+        "run 22's leg genuinely carries no `pytest-log-*`, so it is an UNREAD leg "
+        "and must still be recorded — the fix narrows the check, it does not "
+        "silence it")
+
+
+def test_the_artifacts_listing_is_paginated(monkeypatch):
+    """P2: `?per_page=100` with no `--paginate` truncated the listing at 100.
+
+    A red leg's artifact beyond page 1 then looked ABSENT, which fires the
+    sibling-substitution fallback — substituting a clean sibling's junit for the
+    red leg's own. `_check_runs` already paginated; this path did not.
+    """
+    from tools import ci_import_closure as module
+    seen: list[list[str]] = []
+
+    def _run_gh(argv):
+        seen.append(list(argv))
+        return (b'{"id": 1, "name": "pytest-log-test-a"}\n'
+                b'{"id": 2, "name": "pytest-log-test-b"}\n')
+
+    monkeypatch.setattr(module, "_run_gh", _run_gh)
+    arts = module._artifacts("o/r", 99)
+    assert [a["name"] for a in arts] == ["pytest-log-test-a", "pytest-log-test-b"]
+    assert "--paginate" in seen[0], "the listing must ask for every page"
+
+
+def test_the_ground_truth_cache_is_keyed_by_repo(monkeypatch, tmp_path):
+    """P2: keyed on the sha alone, so `--repo fork/x` reused upstream's truth.
+
+    `--repo` is a first-class flag; PR numbers collide across repos and a fork
+    shares the commit sha, so a diff from one repo was paired with the ground
+    truth of another — a state that can only HIDE a miss, records no error, and
+    was then cached.
+    """
+    import io
+    import zipfile
+
+    from tools import ci_import_closure as module
+
+    # The truth must be CACHEABLE for this pin to mean anything: a red leg whose
+    # own junit parses clean, so `artifact_errors` stays empty and the result is
+    # written. (Counting reads with an uncacheable truth is degenerate — nothing is
+    # written, so every call re-reads and the pin cannot fail.)
+    junit_for = {
+        "o/r": _junit('<testcase classname="tests.test_a" name="t1" '
+                      'file="tests/test_a.py"><failure message="boom">t</failure>'
+                      '</testcase>'),
+        "fork/r": _junit('<testcase classname="tests.test_b" name="t1" '
+                         'file="tests/test_b.py"><failure message="boom">t</failure>'
+                         '</testcase>'),
+    }
+    calls: list[str] = []
+
+    def _check_runs(repo, sha):
+        calls.append(repo)
+        return [{"name": "test (a)", "conclusion": "failure", "id": 99,
+                 "details_url": "https://github.com/o/r/actions/runs/99/job/1"}]
+
+    def _download(repo, aid, cache):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("junit.xml", junit_for[repo])
+        return _write_tmp(cache, aid, buf.getvalue())
+
+    monkeypatch.setattr(module, "_check_runs", _check_runs)
+    monkeypatch.setattr(module, "_run_id", lambda r: 99)
+    monkeypatch.setattr(module, "_artifacts",
+                        lambda repo, rid: [{"id": 7 if repo == "o/r" else 8,
+                                            "name": "pytest-log-test-a"}])
+    monkeypatch.setattr(module, "_download_artifact", _download)
+
+    first = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    second = module.pr_ground_truth("fork/r", "deadbeef", tmp_path)
+    assert first["failed_files"] == ["tests/test_a.py"]
+    assert second["failed_files"] == ["tests/test_b.py"], (
+        "the fork reused the upstream repo's cached TRUTH for the same sha — its "
+        "own head was never read")
+    assert calls == ["o/r", "fork/r"], (
+        "the second repo must READ again instead of reusing the first repo's cache")
+
+
+def test_truth_is_not_cached_when_no_test_leg_was_seen(monkeypatch, tmp_path):
+    """P1: `test_legs_seen == 0` was recorded for exactly this rule and gated nowhere.
+
+    Runs exist but no `test*` leg among them, so nothing was assessed. Caching it
+    made a re-trigger at the same sha short-circuit on the emptiness instead of
+    re-reading it — and `cmd_validate` scored the row as a clean PR.
+    """
+    from tools import ci_import_closure as module
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [
+        {"name": "lint", "conclusion": "success", "id": 1, "details_url": ""}])
+    monkeypatch.setattr(module, "_artifacts", lambda repo, rid: [])
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert truth["runs_seen"] == 1 and truth["test_legs_seen"] == 0
+    assert not _truth_cache(tmp_path, "deadbeef").exists()
+
+
+def test_validate_exits_two_when_no_test_leg_was_assessed(
+    monkeypatch, capsys, tmp_path,
+):
+    """P1: `runs_seen > 0` with `test_legs_seen == 0` was a fully green window.
+
+    Every row then has `jobs: []`, `failed_jobs: []`, `artifacts: 0`,
+    `artifact_errors: []` — which `unseen` cannot see (it reads `runs_seen`) and
+    `unread` cannot see (it requires `failed_jobs`). Reachable whenever the leg
+    names change in `python-ci.yml`, or a PR's only check runs are lint/typecheck
+    legs.
+    """
+    from tools import ci_import_closure as ci
+    rc = _stub_validate(monkeypatch, ci, _truth(runs_seen=3, test_legs_seen=0),
+                        cache=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 2 and "NO `test*` leg" in out, out
+
+
+def test_load_all_flags_an_empty_core_surface(monkeypatch):
+    """P1 producer: a renamed/absent `core` key must be FLAGGED, not derived over.
+
+    `manifest["surfaces"].get("core") or []` turned a missing key into an empty
+    surface: `unresolved_core` stayed empty, `core_rel` empty, `derived = current`
+    (nothing is ever dropped), so every real failure was `covered` and the window
+    reported "TOTAL MISSES 0" — a clean window certified by an analysis that
+    examined nothing.
+    """
+    from types import SimpleNamespace
+
+    from tools import ci_import_closure as module
+
+    stub = SimpleNamespace(
+        load_manifest=lambda: {"surfaces": {}},
+        _surface_members=lambda members: list(members or []),
+        TESTS_DIR=Path(__file__).resolve().parent,
+    )
+    monkeypatch.setattr(module, "_selection_module", lambda: stub)
+    monkeypatch.setattr(module, "_git_py_files", lambda root: [])
+    _manifest, data, _index = module._load_all()
+    assert data["core"] == []
+    assert data["core_empty"] is True
+    assert module._refuse_an_empty_core(data) is True
+
+
+def test_validate_refuses_an_empty_core_surface(monkeypatch, capsys, tmp_path):
+    """P1 consumer: the verb that PUBLISHES the miss counts must refuse."""
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": [], "core_empty": True}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
+
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    assert ci.cmd_validate(args) == 2
+    assert "ZERO test files" in capsys.readouterr().out
+
+
+def test_a_not_type_checking_guard_is_a_RUNTIME_edge():
+    """P2: `if not TYPE_CHECKING:` is the runtime branch, not a type-only one.
+
+    `ast.walk` found the `TYPE_CHECKING` name anywhere in the test, so the negated
+    form — the standard idiom for a runtime import a type checker cannot see — was
+    classified as type-only, and `--exclude-type-checking` then DELETED a
+    genuinely runtime edge. That is the same axis inversion the `_dedupe_deps` fix
+    removed: a reader must never drop the other axis's edges.
+    """
+    idx = _index("tortoise/lazy.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "from typing import TYPE_CHECKING\n"
+        "if not TYPE_CHECKING:\n"
+        "    from tortoise.lazy import thing\n"
+        "    thing\n",
+    )
+    deps = {d.target: d for d in scan.deps}
+    assert "tortoise.lazy" in deps
+    assert deps["tortoise.lazy"].type_checking is False, (
+        "a runtime edge must not be tagged type-only — `--exclude-type-checking` "
+        "would delete it")
+
+
+def test_a_decorator_and_a_default_are_import_time_edges():
+    """P2: decorators and defaults execute where the `def` runs — at import.
+
+    `child_fn` was applied to EVERY child of a `FunctionDef`, so an import inside a
+    decorator or a default value was tagged function-local and
+    `--import-time-only` dropped it. That is the reader this tool says it ships to
+    expose the trap, so an under-selection there skews the number the flag exists
+    to publish.
+    """
+    idx = _index("tortoise/lazy.py", "tortoise/base.py", "tortoise/other.py")
+    decorated = _scan(
+        idx, "tests/test_a.py",
+        "import importlib\n"
+        "@importlib.import_module('tortoise.lazy')\n"
+        "def f():\n"
+        "    pass\n",
+    )
+    assert [(d.target, d.in_function) for d in decorated.deps] == [
+        ("tortoise.lazy", False)], (
+        "a decorator evaluates at module import time, not when the function is "
+        "called")
+
+    defaulted = _scan(
+        idx, "tests/test_b.py",
+        "import importlib\n"
+        "def g(x=importlib.import_module('tortoise.base')):\n"
+        "    from tortoise.other import y\n"
+        "    return x, y\n",
+    )
+    assert {(d.target, d.in_function) for d in defaulted.deps} == {
+        ("tortoise.base", False), ("tortoise.other", True)}, (
+        "the default is import-time; only the BODY is function-local")

@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (53 tests, incl. the harness mutation check)
+- Pins: `tests/test_ci_import_closure.py` (66 tests, incl. the harness mutation check)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
   is **classification only**: a diff that changes *this instrument* and nothing else
   (`tools/ci_import_closure.py`-only) is a non-Python change — `tools/` is in
@@ -54,7 +54,7 @@ transitive set of `tortoise/**` modules it imports. Modules under analysis are n
 | `tortoise/**` modules in the tree | 258 |
 | **distinct closure sets** (a split's real granularity) | **59** |
 | closure size — median / mean / min / max | **186** / 158.7 / 0 / 207 |
-| files sharing the single largest closure (186 modules) | **427** |
+| files sharing the single **most common** closure (186 modules; the largest is 207) | **427** |
 | files with an EMPTY closure (no `tortoise/**` import at all) | **115** |
 | files reaching `tortoise/__init__.py` | **630 (84.6 %)** |
 | files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 141 (18.9 %) |
@@ -184,6 +184,8 @@ and its ceiling is the 15 % in §1.
 |---|---|---|
 | function-local imports | **dependency** (`in_function: true`) | the suite uses them heavily; `tortoise/sdk.py` has 61 of its 89 in-repo import targets only inside function bodies. A top-level-only reader reports a 6-module closure for the package shim instead of 186 and a median core closure of 21 instead of 186 (§1.1) — the sharpest false-green in this whole measurement. |
 | `TYPE_CHECKING` blocks | **dependency** (tagged `type_checking`) | the opposite of `tach`, which skips them because it asks about *runtime coupling*. Our question is *would a change here be observable*, where over-approximation is the safe direction and one extra test beats a false green. `--exclude-type-checking` reproduces tach's polarity. |
+| `if not TYPE_CHECKING:` | **runtime** dependency (`type_checking: false`) | the NEGATED guard is the standard idiom for a runtime import a type checker cannot see. `ast.walk` found the `TYPE_CHECKING` name anywhere in the test, so the negated body was tagged type-only and `--exclude-type-checking` DELETED a real runtime edge — the same axis inversion the `_dedupe_deps` key removes, one level up. |
+| decorators, default values, annotations, return annotation | **import-time** (`in_function: false`) | they are evaluated where the `def` EXECUTES, not when the body is called. Tagging them function-local made `--import-time-only` drop real import-time edges — an under-selection inside the reader that exists to *demonstrate* under-selection, which skews the 21-module figure it publishes. |
 | `from __future__` | **not a dependency**, counted and named | no `tortoise/**` target can match it; excluding it silently would make the exclusion invisible. |
 | re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.6 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
 | dynamic imports | constant argument **resolved**; computed argument → `UNKNOWN` with reason | `importlib.import_module("tortoise.x")` is still static information; only a computed name is a blind spot. |
@@ -205,11 +207,17 @@ is counted and the window exits **2**, see §5.)
 The failing FILE comes from the xunit1 `file` attribute, with a `classname` fallback for legs that
 omit the repo's `-o junit_family=xunit1` override (`xunit2` is pytest's ini default, and it drops
 `file`/`line` entirely). The fallback resolves the module by trying every prefix of the dotted
-`classname` against the checkout, longest first — `tests.test_a` → `tests/test_a.py`. Taking
+`classname` against the checkout, longest first — `tests.eval.harness.test_x` →
+`tests/eval/harness/test_x.py`, never the sibling module `tests/eval/harness.py`. Taking
 `classname.rpartition(".")` instead produced `tests.py` for every module-level test: a path that
 intersects nothing, so the failure is scored `no-closure-intersection` — i.e. as evidence the
 derivation is SAFE. A failure whose file neither key can attribute blocks the cache and makes the
 window PARTIAL.
+
+The ground-truth caches are keyed by **repo and sha** (and by repo and PR for the diff): `--repo` is
+a first-class flag, PR numbers collide across repos, and a fork shares the commit sha — so a sha-only
+key let one repo's truth be paired with another's diff, a state that can only HIDE a miss and
+records no error.
 
 ### 3.4 Every way "I did not read this" could have read as "nothing failed"
 
@@ -224,6 +232,11 @@ closed the same way: the state is recorded, the truth is **not cached**, and the
 | red run whose artifact listing is **empty** | artifacts expire in 90 days; deleting a run deletes them | `artifact_errors` entry per run |
 | **the red leg's own artifact is absent but a SIBLING leg's is present** | `rid` is the workflow **run**, and `test`/`test-slow`/`test-carve-out`/the always-on legs are matrix jobs inside one run; a leg that early-exits uploads nothing | **measured 11 times across 7 PRs in the §3 window** — the wide `pytest-log-*` fallback (a rename mitigation, kept) now also records the substitution, so a sibling's clean junit can no longer stand in for the leg that failed |
 | **the head sha yielded no check run at all** | completed runs are deletable; a `GITHUB_TOKEN`-created run can complete with zero check runs | `runs_seen` / `test_legs_seen` are recorded, a zero is never cached, and the window is PARTIAL |
+| **runs exist but NONE of them is a `test*` leg** (`test_legs_seen == 0`) | the leg names change in `python-ci.yml`, or a PR's only check runs are lint/typecheck | counted and never cached; `validate` treats a zero as UNASSESSED and exits **2**. This state was recorded for exactly this reason and gated nowhere, so `jobs: []` / `artifacts: 0` / `artifact_errors: []` read as a clean PR |
+| **a red `test*` leg whose `details_url` carries no run id** | a check run not created by a workflow run, or a url shape change | recorded in `artifact_errors` per leg. The leg never reached the artifact loop, and beside a readable red sibling `artifacts > 0` also disabled the unread-PR guard |
+| **a junit that parses but contains ZERO `<testcase>` elements** | the suite did not run (collection aborted, a marker selected nothing, exit 5) | `parse_junit_failures` reports `executed` and the caller now reads it: a red run that described 0 tests is an unread run, not "no test-level failure" |
+| **a red `test*` leg whose run uploads no `pytest-log-*` at all** (e.g. `ci.yml`'s `test-isolation`) | that leg is outside the junit-carrying set, so its failures cannot be attributed to files | recorded in `artifact_errors` and the window is PARTIAL. This is deliberate and it is the honest state: the harness cannot read that leg, and an unread leg can only UNDER-count misses. Each red leg is checked against **its own run's** listing, so a leg in one workflow is never re-checked against another's artifacts |
+| **the manifest's `core` surface resolves to ZERO test files** | a renamed/removed `core` key, or a failed `_surface_members` fallback | `core_empty` is flagged and every verb that publishes a number REFUSES (exit **2**). An empty surface makes `derived = current`, so nothing can ever miss and the window reports "TOTAL MISSES 0" from an analysis that examined nothing |
 | **a failure lands outside the modelled selection** | `select()` models the surface legs only, while ground truth covers every leg — so `test-record-postgres`'s four files (run on EVERY PR, `python-ci.yml:3640`) and `test-track-b`'s one (`:2527`) were outside `current_rel` | those legs are unioned into today's selection (`ALWAYS_ON_LEG_FILES`), and any residual entry is reported as a HOLE IN THE MODEL and makes the window PARTIAL — never as an absolution |
 
 `test-d14-hosted-api` (`pytest tests/ -m embedded_only`) is deliberately **not** modelled: its set is
