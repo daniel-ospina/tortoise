@@ -156,14 +156,22 @@ at 20 m, which `python-ci-gate` reads as red (#5219). `max 8.03` therefore never
 binding term is the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm —
 read the cap against the SUM of the job's caps, not against its median.
 
-Every other row was checked against that rule and needed no move: their cold saves are small or
-absent. ONE row is knowingly left inside the rule rather than fixed on suspicion —
-**`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
-`timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save**, because it
-installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so writes
-the same 3.6 GB class of archive as d14 on a cold key. It is recorded here rather than raised
-because nothing has measured it being cancelled, and this document's own rule is to move a cap
-from a measurement instead of on suspicion; if it does false-kill, the number to move is 15 → 25.
+Every other row was checked against that rule. The discriminating fact is **not** that the
+remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
+write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
+SUM. `test` clears it with room to spare (10 m last-failed pre-phase + 19 m shard watchdog + 6 m
+embedder + ~1 m setup + ~9 m save = 45 m against 90), and `test-record-postgres` is outside the
+class altogether (above). THREE rows do NOT clear it, and all three are recorded here rather than
+moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
+cap from a measurement instead of on suspicion. `test-slow` sits exactly AT its cap (10 m embedder +
+40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and `test-carve-out` is 9 m past
+it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against 30). The third has the least
+headroom of all: **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the
+run plus a `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip`
+save** — ≈ 30 m —
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
+writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
+move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
@@ -185,16 +193,23 @@ document exists to remove.
 | `ai-review-gate` (REQUIRED, entry gate) | 14 | 0.03 | 0.10 | 0.13 | **15 (was none)** |
 | `drift-guard` (merge path, not a required context) | 22 | 0.33 | 0.37 | 0.43 | **15 (was none)** |
 
-**Rule used.** cap = **2 × measured max, rounded to the nearest 5 minutes, floored at 15 m** for
-a job whose failure reds a required context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest
-floor at 15). ⚠ That formula is a LOWER bound, not the only term: a job that ends with an
-`actions/cache` save POST-step is sized on the SUM of its in-step caps plus that save, which
-`2 × max` cannot see at all — the derivation for `test-d14-hosted-api` above is the worked
-example. At the time of the first pass no cap was raised and none was lowered: `test` 90,
-`test-slow` 60 and `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase +
-the shard's in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode —
-a runner-level kill that loses the pass/fail summary. The one cap moved since is
-`test-d14-hosted-api` 20 → 40 (#10182), on the post-step term.
+**Rule used.** ONE rule with two arms, and every moved row follows its arm:
+
+- **No cold `actions/cache` save in the job** — cap = **2 × measured max**, rounded to the nearest
+  5 minutes, floored at 15 m, for a job whose failure reds a required context (`docs` 20.5 → 20;
+  `legal-e2e` 18.5 → 20; `test-record-postgres` 15.43 × 2 → 30; the rest floor at 15).
+- **A cold `actions/cache` save in the job** — `2 × max` cannot see the POST-step at all, so the
+  binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
+  the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
+  killed at the cap reds a required check (#5219), while 10 m of extra exposure costs only a held
+  slot. The worked example is `test-d14-hosted-api`: 15 m in-step + ~1 m + ~9 m save = 25 m →
+  37.5 → **40**, which is the number that ships (#10182).
+
+At the time of the first pass no cap was raised and none was lowered: `test` 90, `test-slow` 60 and
+`test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase + the shard's
+in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode — a runner-level
+kill that loses the pass/fail summary. The one cap moved since is `test-d14-hosted-api` 20 → 40
+(#10182), on the post-step arm.
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit
