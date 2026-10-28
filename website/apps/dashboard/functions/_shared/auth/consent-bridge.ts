@@ -383,7 +383,15 @@ export async function recordConsentAttempt(
         "AND consent_attempts.attempt_key_hash = excluded.attempt_key_hash " +
         "THEN COALESCE(consent_attempts.user_id, excluded.user_id) " +
         "ELSE consent_attempts.user_id END, " +
-        "expires_at=excluded.expires_at " +
+        // The TTL is refreshed ONLY by the key's holder. Without this, any caller could keep a row
+        // — including a DEAD pre-column one — alive forever just by naming its `state`, so "expires
+        // in 15 minutes" would bound nothing. A foreign or keyless re-entry leaves the clock alone,
+        // which is also what makes a dead row actually die instead of shadowing the visitor's retry.
+        "expires_at=CASE " +
+        "WHEN consent_attempts.attempt_key_hash IS NOT NULL " +
+        "AND consent_attempts.attempt_key_hash = excluded.attempt_key_hash " +
+        "THEN excluded.expires_at " +
+        "ELSE consent_attempts.expires_at END " +
         "RETURNING attempt_key_hash",
     )
     .bind(
@@ -428,7 +436,15 @@ export function newAttemptKey(): string {
   return b64url(bytes);
 }
 
-/** The query parameter the attempt key travels in, on the return leg only. */
+/**
+ * The query parameter the attempt key travels in.
+ *
+ * It is carried in TWO places, which are both load-bearing: the `authorizeUrl` query (the consent
+ * page is the mint's only caller, so it cannot present a key it never received) and the app-origin
+ * sign-in return target. It is stripped only on the page's `redirectTo` hop (step 4) — do NOT read
+ * "one carrier" into this constant, or that hop will drop it and every mint will answer
+ * `403 no_authorize_attempt` after the visitor approved.
+ */
 export const ATTEMPT_KEY_PARAM = "attempt_key";
 
 /** Delete expired attempts, bounded, never throwing (the `sweepExpiredFlows` contract). */

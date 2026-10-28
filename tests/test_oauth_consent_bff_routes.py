@@ -256,7 +256,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
              created_at: NOW, expires_at: NOW + 900_000,
              attempt_key_hash: seededHash }]
         : []),
-    }),
+    }, { throws: Boolean(opts.storeThrows) }),
   });
   // An unprovisioned key is ABSENCE, not a falsy value: delete it rather than set "".
   if (scenario === "mint_no_secret") delete e.CONSENT_TOKEN_SECRET;
@@ -907,7 +907,7 @@ def test_the_return_leg_never_nulls_a_recorded_owner() -> None:
         "redirect_uri": "https://client.example/cb",
         "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
         "scope": "mcp", "resource": None, "user_id": owner,
-        "created_at": 0, "expires_at": 0,
+        "created_at": 0, "expires_at": 9_999_999_999_999,
     }]
     out = _run("start_terminal_after_retry", seededAttempts=seeded)
     assert out["status"] == 200, out
@@ -971,6 +971,42 @@ def test_the_key_the_page_receives_is_the_key_the_mint_accepts() -> None:
     minted = _run("mint_ok", seededAttempts=advanced["attempts"], attemptKey=key)
     assert minted["status"] == 200, (
         f"the key handed to the AS page was REFUSED by the mint: {minted['body']}")
+
+
+def test_the_mints_store_fault_is_also_a_typed_503_with_a_log_line() -> None:
+    """The read-fault arm of the MINT, pinned separately from `start`'s.
+
+    Only `start_*` scenarios could throw, so deleting the mint's `console.error` (or turning its
+    typed 503 into a 500) left the whole file green: a failed `ALTER TABLE` would then leave every
+    `/api/consent/token` answering 503 with nothing in the logs to act on — the symptom the
+    DDL-propagation fix exists to remove.
+    """
+    out = _run("mint_ok", storeThrows=True)
+    assert out["status"] == 503, out
+    assert out["body"] == {"error": "unavailable", "reason": "consent_store_unavailable"}, out["body"]
+    assert "consent attempt read failed" in out["stderr"], (
+        f"the mint's store fault was SILENT: {out['stderr'][-600:]!r}")
+
+
+def test_a_keyless_re_entry_does_not_renew_the_attempt() -> None:
+    """`expires_at` is refreshed only by the key's holder.
+
+    Refreshing it unconditionally made every TTL a lie in one direction: any caller naming a `state`
+    — including a DEAD pre-column row's — could keep the row alive forever, so "expires in 15
+    minutes" bounded nothing and a dead row shadowed the visitor's retries indefinitely.
+    """
+    seeded = [{
+        "state": "state-xyz", "client_id": "client-abc",
+        "redirect_uri": "https://client.example/cb",
+        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "scope": "mcp", "resource": None, "user_id": "user-1",
+        "created_at": 0, "expires_at": 9_999_999_999_998, "attempt_key_hash": "a" * 64,
+    }]
+    out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-2",
+               params=dict(_PARAMS, attempt_key="b-attempt-key"))
+    assert out["attempts"][0]["expires_at"] == 9_999_999_999_998, (
+        "a caller holding no valid key RENEWED the attempt's lifetime "
+        f"({out['attempts'][0]['expires_at']}) — a dead or foreign row can then be kept alive forever")
 
 
 def test_the_four_refusals_are_byte_identical() -> None:
@@ -1087,7 +1123,7 @@ def test_the_owner_fill_is_refused_by_a_FOREIGN_key_even_when_the_owner_is_known
         "redirect_uri": "https://client.example/cb",
         "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
         "scope": "mcp", "resource": None, "user_id": "user-1",
-        "created_at": 0, "expires_at": 0, "attempt_key_hash": "a" * 64,
+        "created_at": 0, "expires_at": 9_999_999_999_999, "attempt_key_hash": "a" * 64,
     }]
     out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-2",
                params=dict(_PARAMS, attempt_key="b-attempt-key"))
@@ -1150,7 +1186,7 @@ def test_a_second_identity_cannot_take_over_a_flow_by_re_entering_it() -> None:
         "redirect_uri": "https://client.example/cb",
         "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
         "scope": "mcp", "resource": None, "user_id": "user-1",
-        "created_at": 0, "expires_at": 0, "attempt_key_hash": "a" * 64,
+        "created_at": 0, "expires_at": 9_999_999_999_999, "attempt_key_hash": "a" * 64,
     }]
     out = _run("start_signed_in", seededAttempts=owned, sessionUserId="user-2",
                params=dict(_PARAMS, attempt_key="b-attempt-key"))
@@ -1185,7 +1221,7 @@ def test_a_row_from_an_OLD_BUILD_is_dead_rather_than_adoptable() -> None:
         "redirect_uri": "https://client.example/cb",
         "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
         "scope": "mcp", "resource": None, "user_id": None,
-        "created_at": 0, "expires_at": 0,
+        "created_at": 0, "expires_at": 9_999_999_999_999,
     }]
     out = _run("start_signed_in", seededAttempts=legacy, sessionUserId="user-2",
                wantLegacySchema=True, params=dict(_PARAMS, attempt_key="b-attempt-key"))
