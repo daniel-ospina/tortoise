@@ -6322,7 +6322,8 @@ def test_own_live_server_count_attributes_by_session_root():
         22: "/x/redislite/bin/redis-server --unixsocket /tmp/tt_other/b/redis.socket",
     }
     count = own_live_server_count(
-        ["/tmp/tt_ours"], probe=lambda: list(cmds), cmdline_of=cmds.get)
+        ["/tmp/tt_ours"], probe=lambda: list(cmds),
+        cmdlines_of=lambda pids: {pid: cmds[pid] for pid in pids})
     assert count == 2, (
         "only the two servers under /tmp/tt_ours may be attributed to this run "
         "— /tmp/tt_ours_c is a DIFFERENT root (a prefix, not a parent), and "
@@ -6343,47 +6344,158 @@ def test_own_live_server_count_is_unmeasured_without_a_root_or_probe():
     assert own_live_server_count(["", "   "]) is None
     assert own_live_server_count(["/tmp/tt_ours"], probe=lambda: None) is None
     assert own_live_server_count(
-        ["/tmp/tt_ours"], probe=lambda: [1], cmdline_of=lambda pid: "") == 0
+        ["/tmp/tt_ours"], probe=lambda: [1],
+        cmdlines_of=lambda pids: {pid: "" for pid in pids}) == 0
 
 
-def test_own_live_server_count_is_unmeasured_when_argv_is_unreadable():
-    """#10255 review A: an UNREADABLE argv is None, never a confident 0.
+def test_own_live_server_count_is_unmeasured_when_the_argv_read_fails():
+    """#10255 review A/B: a FAILED argv read is None, never a confident 0.
 
     The docstring promised this and the code did not implement it: `cmdline_of(pid)
     or ""` collapsed "I could not read this process's argv" into "this argv
     names no root of ours", and a live pid then counted as *not ours*. That is
     the measurement race #1005 exists to remove, one layer down — `own_left` is
-    read inside the loaded pytest process under `pytest -n`, where the 2 s `ps`
-    call is the likeliest thing on the box to time out, while `own_now` is read
-    later from the runner shell. An UNDER-read `own_left` with the server still
-    alive reads as `own_now > own_left` → the gate reds a green run with a leak
-    claim derived from a failed read; and if both reads fail, `0 == 0` PASSES a
-    real residue.
+    read inside the loaded pytest process under `pytest -n`, while `own_now` is
+    read later from the runner shell. An UNDER-read `own_left` with the server
+    still alive reads as `own_now > own_left` → the gate reds a green run with a
+    leak claim derived from a failed read; and if both reads fail, `0 == 0`
+    PASSES a real residue.
 
-    Non-vacuity: on the pre-fix code (`cmdline_of(pid) or ""`) every case below
+    Since #10255 review B the read is ONE batched `ps`, so the distinction is
+    "the call failed" vs "the pid was not in the result" rather than per-pid
+    None — a failed call nulls the WHOLE measurement, which is the deterministic
+    outcome a per-pid read could not give.
+
+    Non-vacuity: on the pre-fix code (`cmdline_of(pid) or ""`) the None case
     returns 0 instead of None.
     """
     from tortoise.embedded_reaper import own_live_server_count
 
     assert own_live_server_count(
-        ["/tmp/tt_ours"], probe=lambda: [7],
-        cmdline_of=lambda pid: None) is None, (
-        "a live pid whose argv could not be read is UNMEASURED, not foreign"
+        ["/tmp/tt_ours"], probe=lambda: [7], cmdlines_of=lambda pids: None
+    ) is None, (
+        "a failed argv read is UNMEASURED, not a count of zero"
     )
-    # ONE unreadable pid is enough: the count is not a partial credit.
+    # ONE failed call is enough: the count is not a partial credit, so it cannot
+    # under-read the bound the gate compares against.
     assert own_live_server_count(
         ["/tmp/tt_ours"], probe=lambda: [7, 8],
-        cmdline_of={7: "/x/redis-server /tmp/tt_ours/a/redis.conf",
-                    8: None}.get) is None, (
-        "one unreadable live pid makes the whole count unmeasured — a partial "
-        "count would under-read the bound the gate compares against"
+        cmdlines_of=lambda pids: None) is None, (
+        "one failed batched read makes the whole count unmeasured"
     )
-    # An EMPTY argv is a COMPLETED observation (ps rc 1: the pid is gone
-    # between the count and the read), and that pid is not a server of ours.
+    # A pid ABSENT from the batched result is a COMPLETED observation of absence
+    # (ps rc 1 for it: it exited between the count and the read) and is not a
+    # server of ours — that must not turn a clean run into an unmeasured one.
     assert own_live_server_count(
-        ["/tmp/tt_ours"], probe=lambda: [9], cmdline_of=lambda pid: "") == 0, (
-        "`ps` reporting no such process is a measurement of absence, not a "
-        "failed probe — it must not turn a clean run into an unmeasured one"
+        ["/tmp/tt_ours"], probe=lambda: [9],
+        cmdlines_of=lambda pids: {}) == 0, (
+        "`ps` not listing a pid is a measurement of absence, not a failed "
+        "probe"
+    )
+    # An EMPTY argv (a zombie: ps lists it with no command) is likewise a
+    # completed observation that this pid names no root of ours.
+    assert own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: [10],
+        cmdlines_of=lambda pids: {10: ""}) == 0, (
+        "an empty argv names no session root, so it is not ours"
+    )
+
+
+def test_own_live_server_count_reads_every_argv_in_one_ps_call(monkeypatch):
+    """#10255 review B: attribution must not cost one `ps` PER LIVE SERVER.
+
+    `probe` is host-wide — it has no root filter — and the per-sweep cache does
+    not cover those pids (`discover()` clears it in its `finally` and only this
+    sweep's candidates are re-populated), so a per-pid reader paid a fresh 2 s
+    subprocess for every live server on the host, in every pytest teardown,
+    under `pytest -n` once per worker — the cost `_batch_process_info` exists to
+    avoid (#1005 perf).
+
+    Batching is also what makes the failure mode deterministic: one call either
+    reads the process table or fails, instead of N independent 2 s timeouts in
+    which ONE foreign server's timeout nulled our own measurement (and
+    `own_left: null` with `own_now > 0` is a RED — another process's slow `ps`
+    could red a run that leaked nothing).
+
+    Non-vacuity: the pre-fix reader never called `_batch_process_info_or_none`
+    at all (it called `_cmdline_or_none` once per pid), so `calls` stayed empty
+    and this test errors/fails rather than passing.
+    """
+    from tortoise import embedded_reaper as er
+
+    calls: list[list[int]] = []
+
+    def fake_batch(pids):
+        calls.append(list(pids))
+        return {pid: {"cmdline": "redis-server /tmp/tt_ours/a/redis.conf"}
+                for pid in pids}
+
+    monkeypatch.setattr(er, "_batch_process_info_or_none", fake_batch)
+    n = er.own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: [31, 32, 33, 34, 35])
+
+    assert n == 5, n
+    assert len(calls) == 1, (
+        f"the pid set must be read in ONE call, not {len(calls)} — one `ps` "
+        "per host-wide live server is what review B removed"
+    )
+    assert calls[0] == [31, 32, 33, 34, 35], calls[0]
+
+
+def test_batch_cmdlines_or_none_separates_a_gone_pid_from_a_failed_probe(
+        monkeypatch):
+    """#10255 review B: the batched read's exit-status contract.
+
+    `ps -p <list>` exits 1 only when NO pid in the list matched — a partially
+    gone list still exits 0 and prints the survivors. So the batched reader
+    must report the survivors, `{}` for a fully gone population (a COMPLETED
+    measurement), and None only when `ps` itself failed. Collapsing those is how
+    a failed probe re-enters the gate as "this run left nothing".
+    """
+    from tortoise import embedded_reaper as er
+
+    class _Out:
+        def __init__(self, rc, stdout):
+            self.returncode = rc
+            self.stdout = stdout
+
+    def _reply(rc: int, stdout: str):
+        return lambda *a, **k: _Out(rc, stdout)
+
+    row = "  42  01:02  1 Mon Aug 24 02:17:56 2026 redis-server /tmp/x/a.conf"
+    monkeypatch.setattr(er.subprocess, "run", _reply(0, row + "\n"))
+    assert er._batch_cmdlines_or_none([42]) == {
+        42: "redis-server /tmp/x/a.conf"}, er._batch_cmdlines_or_none([42])
+
+    # Partially gone: ps exits 0 and lists only the survivor.
+    monkeypatch.setattr(er.subprocess, "run", _reply(0, row + "\n"))
+    assert er._batch_cmdlines_or_none([42, 43]) == {
+        42: "redis-server /tmp/x/a.conf"}, (
+        "a pid that exited between the count and the read is simply absent"
+    )
+
+    # Every counted pid gone: ps rc 1 — a completed measurement, NOT a failure.
+    monkeypatch.setattr(er.subprocess, "run", _reply(1, ""))
+    assert er._batch_cmdlines_or_none([42]) == {}, (
+        "rc 1 is 'no pid matched', a measurement of absence — collapsing it "
+        "into None would make a clean run unmeasured"
+    )
+
+    for rc in (2, 127):
+        monkeypatch.setattr(er.subprocess, "run", _reply(rc, ""))
+        assert er._batch_cmdlines_or_none([42]) is None, (
+            f"ps rc={rc} is a FAILED probe: unmeasured, never 'nothing there'"
+        )
+
+    def _boom(*a, **k):
+        raise er.subprocess.TimeoutExpired(cmd="ps", timeout=10)
+
+    monkeypatch.setattr(er.subprocess, "run", _boom)
+    assert er._batch_cmdlines_or_none([42]) is None, (
+        "a timed-out batched `ps` is unreadable, not an empty population"
+    )
+    assert er._batch_cmdlines_or_none([]) == {}, (
+        "an empty pid list has nothing to measure and nothing to fail"
     )
 
 

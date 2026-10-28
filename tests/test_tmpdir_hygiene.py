@@ -503,10 +503,22 @@ def test_run_roots_is_run_scoped_not_a_shared_pile(tmp_path, monkeypatch):
     )
 
 
-def test_record_run_root_is_additive_and_never_raises(tmp_path, monkeypatch):
+def test_record_run_root_is_additive_and_never_raises(tmp_path, monkeypatch,
+                                                      caplog):
     """Every worker's root lands in one file; concurrent appends must not lose
-    a sibling's root (the O_APPEND contract), and a write failure degrades to
-    the gate's unattributable path instead of failing the suite."""
+    a sibling's root (the O_APPEND contract), and a write failure must not fail
+    the suite.
+
+    #10255 review B: a write failure does NOT "degrade to the gate's
+    unattributable path" — that was this test's claim and it was false.
+    `run_roots()` re-appends the in-memory root unconditionally, so `own_roots`
+    in the report is never empty from this cause and the gate takes the
+    ATTRIBUTED path with a PARTIAL root set. The assertions below pin the TRUE
+    contract: the failure is swallowed, it is recorded where it happened, and
+    the process's own root is still reported.
+    """
+    import logging
+
     import tests._tmpdir_hygiene as hygiene
 
     monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
@@ -524,7 +536,28 @@ def test_record_run_root_is_additive_and_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR",
                         str(tmp_path / "tt_blocker" / "sub"))
     (tmp_path / "tt_blocker").write_text("not a directory")
-    hygiene.record_run_root(str(tmp_path / "tt_gw2"))  # must not raise
+    with caplog.at_level(logging.WARNING, logger=hygiene.logger.name):
+        hygiene.record_run_root(str(tmp_path / "tt_gw2"))  # must not raise
+    assert any("could not record" in rec.getMessage()
+               for rec in caplog.records), (
+        "a swallowed registry write must be RECORDED where it happened — it "
+        "is the only trace, because nothing in the report or the gate can see "
+        "it (#10255 review B)"
+    )
+
+    # The corrected claim, pinned: a failed append does not empty `own_roots`.
+    monkeypatch.setattr(hygiene, "_SESSION_TMPDIR", str(tmp_path / "tt_gw3"))
+    roots = hygiene.run_roots()
+    assert str(tmp_path / "tt_gw3") in roots, (
+        "a failed append does NOT make `own_roots` empty: the in-memory root "
+        "is re-appended, so the gate takes the ATTRIBUTED path with a PARTIAL "
+        "root set and never reports `unattributable` from this cause — making "
+        "this test's earlier claim true would require changing the GATE too"
+    )
+    assert str(tmp_path / "tt_gw2") not in roots, (
+        "the failed append really did not land — otherwise the assertion above "
+        "would be vacuous"
+    )
 
 
 def test_host_coordination_is_host_scoped_and_lock_is_sweep_scoped():

@@ -172,10 +172,11 @@
 #   and does not independently red it. What the gate DOES red: a server under
 #   OUR roots that appears AFTER the sweep measured ours
 #   (`own_now > own_left`), an abort or failure that produced no usable report
-#   (`error`, `skipped`), a `probe_failed` at a non-zero count (no `left` to bind
-#   to), an identity violation (`reaped + exited + left < before`), and an
-#   unaccounted/unreadable report. `cleared: false` does NOT red at any count:
-#   it reports whether the sweep's time budget sufficed, which is a function of
+#   (`error`, `skipped`), a `probe_failed` with a non-zero ATTRIBUTED count
+#   (`own_now > 0`; there is no `own_left` to bind to), an identity violation
+#   (`reaped + exited + left < before`), and an unaccounted/unreadable report.
+#   `cleared: false` does NOT red at any count: it reports whether the sweep's
+#   time budget sufficed, which is a function of
 #   runner load and unrelated to the residue, so redding it fires on healthy
 #   loaded runs — a loaded runner reported `{reaped: 9, cleared: false, left:
 #   159, before: 168}` at COUNT=13 with the identity and `COUNT <= left` both
@@ -194,8 +195,9 @@
 #   conftest end-sweep, so the finalizer that would have produced the report
 #   never ran. A count ABOVE this gate's own bound therefore downgrades to a
 #   `::warning::` (the run is already red and a second red only blinds the
-#   detector), as does a failed probe at a non-zero count. A budget-exhausted
-#   sweep is a `::warning::` at EVERY count (#4989), so it has no red left to
+#   detector), as does a failed probe with a non-zero ATTRIBUTED count. A
+#   budget-exhausted sweep is a `::warning::` at EVERY count (#4989), so it has
+#   no red left to
 #   downgrade. `error`, `skipped` and `unattributable` stay RED even under a
 #   kill: those are unaccounted — or unmeasurable — no matter why pytest
 #   stopped.
@@ -644,9 +646,11 @@ case "$kind" in
       # BOUND, not a residue of its own: it says whether the reap loop's TIME
       # BUDGET sufficed, which is a property of the runner's load, not of the
       # residue. It is therefore diagnostic at EVERY measured count (#4989).
-      # The bound is enforced below — `COUNT > left` and the accounting
-      # identity — and both are derived from the sweep's own measurement rather
-      # than from its budget, so neither is weakened here.
+      # The bound is enforced below — the ATTRIBUTED comparison
+      # (`own_now` vs `own_left`) and the accounting identity — and both are
+      # derived from the sweep's own measurement rather than from its budget, so
+      # neither is weakened here. (`COUNT > left` is NOT one of them any more;
+      # see the measured-verdict block at the end of this arm.)
       #
       # This arm previously red at COUNT > 0, which reintroduced the false red
       # #4740 removed. A loaded run reported

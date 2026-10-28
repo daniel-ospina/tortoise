@@ -1242,11 +1242,16 @@ def _cmdline_or_none(pid: int) -> str | None:
     ``_cmdline`` collapses two different facts into the same ``""``: "ps could
     not be run / timed out" and "the pid is not there". For its original
     callers that is fine (an unreadable argv classifies as not-ours, and the
-    sweep is bounded by other controls), but ``own_live_server_count`` feeds a
-    NUMBER into a gate that compares it against a LATER read (#10255 review A):
-    a failed read there under-reads ``own_left`` and the gate then reds a green
-    run with a "this run's own servers grew" leak claim derived from a probe
-    that never measured anything.
+    sweep is bounded by other controls), but the ATTRIBUTABLE read
+    (``own_live_server_count``) feeds a NUMBER into a gate that compares it
+    against a LATER read (#10255 review A): a failed read there under-reads
+    ``own_left`` and the gate then reds a green run with a "this run's own
+    servers grew" leak claim derived from a probe that never measured anything.
+
+    That read is now BATCHED (one ``ps`` for the whole pid set, #10255 review
+    B — see :func:`_batch_cmdlines_or_none`), so it does not come through here;
+    the distinction below is kept because ``_cmdline``'s ``""``-for-both
+    collapse is exactly what the batched reader must not repeat.
 
     So the distinction is made here, once, from ps's own exit status:
 
@@ -1650,17 +1655,44 @@ _UNIXSOCKET_LONG_RE = re.compile(r"--unixsocket\s+(\S+)")
 _PROC_INFO_CACHE: dict[int, dict] = {}
 
 
-def _batch_process_info(pids: list[int]) -> dict[int, dict]:
-    """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}."""
+def _batch_process_info_or_none(pids: list[int]) -> dict[int, dict] | None:
+    """One ps call for all pids: {pid: {...}}, or **None** when ps failed.
+
+    The `{}`-on-failure contract of :func:`_batch_process_info` cannot answer
+    "did I measure?" — a timed-out / missing / erroring ``ps`` and a process
+    table with nothing to report are the same value to a caller that only gets
+    a dict. That distinction matters to a caller which feeds a NUMBER into a
+    gate (#10255 review B: ``own_live_server_count``), because a failed read
+    that reports "none" under-reads the bound the gate compares against.
+
+    Two facts are separated here, from ``ps``'s own exit status (measured on
+    procps-ng 4.0.4, which documents no exit-status contract):
+
+      - rc 0 → the rows of the pids that still exist (a pid that exited between
+        the caller's count and this read is simply absent from the result)
+      - rc 1 → **no pid in the list matched**: a COMPLETED measurement of an
+        empty population, i.e. ``{}`` — every counted process is gone
+      - rc > 1, a timeout, a missing ``ps`` → **None**: unmeasured, never "none"
+
+    An empty ``pids`` list is ``{}`` too: there is nothing to measure and
+    nothing to fail.
+    """
     if not pids:
         return {}
-    text = _run_text(
-        ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
-         "-p", ",".join(str(p) for p in pids)],
-        timeout=10, env={**os.environ, "LC_ALL": "C"},
-    )
+    try:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
+             "-p", ",".join(str(p) for p in pids)],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if getattr(out, "returncode", 0) > 1:
+        return None  # the probe itself failed: unmeasured, NOT "nothing there"
+    text = _stdout_text(out)
     if text is None:
-        return {}
+        return None
     result: dict[int, dict] = {}
     for line in text.splitlines():
         parts = line.strip().split(None, 8)
@@ -1685,6 +1717,31 @@ def _batch_process_info(pids: list[int]) -> dict[int, dict]:
             "cmdline": parts[8] if len(parts) > 8 else "",
         }
     return result
+
+
+def _batch_process_info(pids: list[int]) -> dict[int, dict]:
+    """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}.
+
+    ``{}`` on failure — the historical contract its callers are written to
+    (they fall back to a live probe). A caller that must report an UNMEASURED
+    residue uses :func:`_batch_process_info_or_none` instead.
+    """
+    return _batch_process_info_or_none(pids) or {}
+
+
+def _batch_cmdlines_or_none(pids: list[int]) -> dict[int, str] | None:
+    """The argv of every pid that still exists, in ONE ``ps`` call.
+
+    Or **None** when the call failed, so the whole attribution is unmeasured
+    rather than partially read. A pid absent from the result matched no process
+    (``ps`` exits 1 only when NO pid in the list matched, so a partially-gone
+    list still exits 0) — it exited between the caller's count and this read,
+    and it is therefore not one of our servers.
+    """
+    info = _batch_process_info_or_none(pids)
+    if info is None:
+        return None
+    return {pid: (rec.get("cmdline") or "") for pid, rec in info.items()}
 
 
 def _pgrep_redis_servers() -> list[int]:
@@ -3718,7 +3775,7 @@ def live_embedded_server_count() -> int | None:
     return None if probe is None else len(probe)
 
 
-def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
+def own_live_server_count(roots, probe=None, cmdlines_of=None) -> int | None:
     """Live embedded servers attributable to THIS RUN, or None if unmeasured.
 
     #1005 (epic #1647 E2E-7): the CI orphan gate used to compare its own
@@ -3741,8 +3798,8 @@ def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
     it may call a residue a leak.
 
     Returns None (never 0) when there is no attribution key, when the probe
-    failed, or when argv cannot be read for every live pid — an unmeasured
-    residue must not read as "nothing left".
+    failed, or when the argv read itself failed — an unmeasured residue must not
+    read as "nothing left".
 
     That last clause is load-bearing and, until #10255's review, was not
     implemented (#10255 review A): ``_cmdline`` maps an unreadable argv to
@@ -3752,9 +3809,30 @@ def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
     separate: an UNDER-read ``own_left`` lets the gate red a green run with a
     "your own servers grew" claim (``own_now`` is read later, from the runner
     shell, usually on a quieter host), and both reads failing reads as
-    ``0 == 0`` → PASS. So the reader here distinguishes them: ``None`` from
-    ``cmdline_of`` means unreadable, and the whole measurement becomes
-    ``None`` — the value the gate already handles as unmeasured.
+    ``0 == 0`` → PASS.
+
+    The argv read is ONE batched ``ps`` for the whole pid set (#10255 review B),
+    not one ``ps`` per pid. ``probe`` is HOST-WIDE — it has no root filter, so
+    its pid set contains every other job's and every sibling worker's servers —
+    and the per-sweep cache does not cover them (``discover()`` clears
+    ``_PROC_INFO_CACHE`` in its ``finally`` and only this sweep's candidates are
+    re-populated), so the per-pid version paid a fresh 2 s-bounded subprocess
+    for every live server on the host, in EVERY pytest teardown, under
+    ``pytest -n`` once per worker — the exact cost ``_batch_process_info``
+    exists to avoid (#1005 perf).
+
+    Batching is also what makes "unmeasured" a single deterministic outcome. A
+    per-pid read made it N independent chances: one FOREIGN server's 2 s
+    timeout nulled our own measurement, and ``own_left: null`` with
+    ``own_now > 0`` is a RED — so another process's slow ``ps`` could red a run
+    that leaked nothing, one layer below the false red this module removes. Now
+    one call either reads the table or fails.
+
+    The two facts stay distinct, from ``ps``'s own exit status (see
+    :func:`_batch_cmdlines_or_none`): a pid ABSENT from the batched result
+    matched no process — it exited between the count and this read, so it is
+    simply not one of ours — while a FAILED call (rc > 1, a timeout, a missing
+    ``ps``) returns None for the whole measurement.
     """
     prefixes: list[str] = []
     for root in roots or ():
@@ -3763,16 +3841,22 @@ def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
     if not prefixes:
         return None  # no attribution key: unmeasured, NOT zero
     probe = _pgrep_redis_servers_or_none if probe is None else probe
-    cmdline_of = _cmdline_or_none if cmdline_of is None else cmdline_of
+    cmdlines_of = (_batch_cmdlines_or_none if cmdlines_of is None
+                   else cmdlines_of)
     pids = probe()
     if pids is None:
         return None
+    if not pids:
+        return 0  # a completed measurement of "no live embedded server"
+    argvs = cmdlines_of(list(pids))
+    if argvs is None:
+        # The argv read itself failed: unmeasured, never 0.
+        return None
     count = 0
     for pid in pids:
-        args = cmdline_of(pid)
-        if args is None:
-            # A live pid whose argv could not be read: unmeasured, never 0.
-            return None
+        # Absent from the batched result = the pid exited between the count and
+        # this read (ps rc 1 for it), i.e. no process, so no server of ours.
+        args = argvs.get(pid) or ""
         if any(prefix in args for prefix in prefixes):
             count += 1
     return count

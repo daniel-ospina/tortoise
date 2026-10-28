@@ -435,6 +435,31 @@ def record_run_root(root: str) -> None:
 
     Called at install time, before the process can spawn an embedded server, so
     the registry is complete by the time ANY process of the run sweeps.
+
+    ⚠️ A failed append happens SILENTLY, and it does NOT reach the gate's
+    ``unattributable`` path (#10255 review B — an earlier comment here claimed
+    it did, and that claim was false). Two facts make the real failure mode
+    narrow and quiet rather than loud:
+
+      - ``run_roots()`` re-appends this process's in-memory ``_SESSION_TMPDIR``
+        unconditionally, so ``own_roots`` in the report is never empty from this
+        cause. The gate therefore takes the ATTRIBUTED path — with a **partial**
+        root set, which it treats as authoritative.
+      - the report is written by whichever ``pytest -n`` worker exits LAST, and
+        it sees a sibling's root only through this file. So if a sibling's
+        append failed, that sibling's leaked server is counted in neither
+        ``own_left`` nor ``own_now`` and passes silently, where origin/main's
+        host-wide ``COUNT > left`` would have red on it.
+
+    That residue is deliberately NOT papered over with an ``own_roots_incomplete``
+    flag: the fact would have to TRAVEL to the process that writes the report —
+    over the very medium that just failed — and the process that hit the error
+    re-adds its own root in memory anyway, so such a flag could only ever
+    describe a root set that is already complete. It would be inert exactly
+    where it claims to protect (AGENTS.md, "an inert enforcer"). What IS
+    possible is a record in the process that hit it, which is what the warning
+    below is: this runs at install time, OUTSIDE test capture, so it is not
+    discarded the way a passing test's teardown warning is (#7735).
     """
     if not root:
         return
@@ -449,8 +474,16 @@ def record_run_root(root: str) -> None:
             os.write(fd, line.encode())
         finally:
             os.close(fd)
-    except OSError:
-        pass  # attribution degrades to the gate's unattributable path
+    except OSError as exc:
+        # Swallowed on purpose (this must never fail the suite or a collect),
+        # but never silent: see the docstring for what is lost and why a flag
+        # would not have helped.
+        logger.warning(
+            "#1005: could not record %s in the run registry %s (%s) — a "
+            "sibling worker of this run will not see this root, and the orphan "
+            "gate cannot report `unattributable` for it (it reads a PARTIAL "
+            "root set as authoritative)",
+            root, path, exc)
 
 
 def run_roots() -> list[str]:
