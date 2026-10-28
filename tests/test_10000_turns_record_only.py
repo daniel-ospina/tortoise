@@ -111,8 +111,21 @@ class _RecordingSeam:
         return None
 
     def point_contents(self) -> list[str]:
-        return [r["point"]["content"] for r in self.records
-                if r.get("type") == "PointAdded"]
+        """The turn text the capture handed the record, in EITHER carrier shape.
+
+        #10017 step 7 moved the record-armed lane from one `PointAdded` per turn
+        to ONE `TurnsRecorded` carrier holding them (`turns`), so a seam that
+        only read `point` would report "no turn reached the record" on the very
+        lane this file is about — and the non-vacuity assertion below would then
+        fail for a capture that stored the transcript correctly.
+        """
+        out: list[str] = []
+        for record in self.records:
+            if record.get("type") == "PointAdded":
+                out.append(record["point"]["content"])
+            elif record.get("type") == "TurnsRecorded":
+                out.extend(turn["content"] for turn in record.get("turns") or ())
+        return out
 
 
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
