@@ -157,7 +157,9 @@ from .projection.entities import (  # #3998: the declared :Source surface
 # `EventAPI.add_point` stored NOTHING.
 from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
+    revise_identifier_aliases as _revise_identifier_aliases,
 )
+from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
@@ -14353,6 +14355,34 @@ class TortoiseSDK:
         # the hash from PointRevised.new_content).
         if "content" in props:
             props["content_hash"] = _content_hash(props["content"])
+            # #8933 Stage 2 / #10203 (measured P0): a content edit is the THIRD
+            # derived value this door recomputes in the same round trip, for the
+            # same reason as the hash (#1904) and the vector (#4208) — the live
+            # node must equal what a replay of `PointRevised` produces, and the
+            # ruling writes the alias AT CAPTURE, so a revision has to re-derive
+            # it. Leaving it alone meant an edit that introduced an identifier
+            # never indexed it, an edit that removed one kept a stale alias that
+            # still matched the old code, and `check_consistency` reported an
+            # unclearable `divergence="content"` on `search_keys` for a faithful
+            # graph (its reference view derived the NEW content's alias while the
+            # node could only hold the creation's).
+            #
+            # The node's previous value says which tokens are STALE and is not in
+            # the event, so it is read here; `revise_identifier_aliases` then
+            # keeps every non-alias key and swaps the derived half. A
+            # caller-supplied `search_keys` owns the list and wins as the base.
+            if _identifier_tokens_enabled():
+                _prev = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
+                    params={"id": id},
+                ).result_set
+                _old_content, _old_keys = _prev[0] if _prev else (None, None)
+                props["search_keys"] = _revise_identifier_aliases(
+                    new_content=props["content"],
+                    old_content=_old_content,
+                    old_search_keys=_old_keys,
+                    caller_search_keys=props.get("search_keys"),
+                )
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #5004 round-4: a caller-supplied vector is stored VERBATIM here

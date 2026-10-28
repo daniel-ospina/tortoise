@@ -375,34 +375,33 @@ def test_a_tag_edit_does_not_read_as_a_false_divergence(proj, tmp_path):
         }, r
 
 
-def test_an_identifier_alias_is_derived_on_the_journal_side_not_a_divergence(proj, tmp_path):
-    """#10203 review P1: the checker's REFERENCE view must mirror the writer's own
-    identifier derivation, exactly as it mirrors ``flatten_search_keys_prop``.
+def test_an_identifier_alias_is_not_a_search_keys_divergence(proj, tmp_path):
+    """#10203 review round 6 (measured P0): the DERIVED alias is not compared.
 
     The shared Point writer (``_upsert_point_props``) appends a derived alias to
-    ``search_keys`` (``inv20240091`` for content carrying ``INV-2024-0091``). That
-    value is a PURE function of the payload and is NEVER journalled — so a checker
-    that applied the writer's flattening but not its alias derivation compared the
-    node's form against the payload's and reported ``divergence="content"`` on
-    every faithfully-replayed Point whose text carries an identifier, with an
-    action ("reconcile by replaying the journal") that re-derives the identical
-    alias — an UNCLEARABLE red (the #5048 / #8006 / #8317 false-divergence class).
+    ``search_keys`` (``inv20240091`` for content carrying ``INV-2024-0091``).
+    That value is a PURE function of the point's own ``content``/``search_keys``
+    and is never journalled, so it is not independent evidence: the checker
+    strips it from BOTH views (``strip_identifier_aliases``).
 
-    The derivation is applied to the JOURNAL side ONLY. The graph side is the
-    node's own content, because the comparison target is ``replay(journal)``;
-    deriving there as well would mask a missing alias (a false PASS) and move
-    ``db_hash`` for every stored baseline — see the siblings below, which pin
-    those two directions.
+    The first shape of this change derived it on the JOURNAL side only, which is
+    a false red the moment a revision is involved: ``update_point`` /
+    ``_revise_point`` write ``n.content`` and do NOT touch ``search_keys`` (the
+    ruling writes the alias AT CAPTURE), so the reference view minted an alias
+    of the NEW content that the node could never hold. Measured before the fix:
+    ``ok=False``, ``divergence="content"``, ``fields=['search_keys']``, action
+    "reconcile by replaying the journal" — which reproduced the same red.
 
-    (1) Fails if the journal-side derivation is removed: the views disagree and
-        ``ok`` goes False.
-    (2) Reachable: the journal holds an identifier-shaped create; the projection
-        is the writer's own faithful replay.
+    (1) Fails if the derivation reappears on either side (the create, or the
+        content revision below, goes red) and fails if the alias stops reaching
+        the node (the first assertion is a live-node check, not a self-check).
+    (2) Reachable: an identifier-shaped create, then a content edit that
+        INTRODUCES an identifier, then one that REMOVES it.
     """
     log_path = str(tmp_path / "ident.jsonl")
     _seed(proj, log_path, [_pt("p1", "deploy INV-2024-0091 failed")])
 
-    # The alias is really on the node — otherwise the assertion below would pass
+    # The alias is really on the node — otherwise the assertions below would pass
     # on a graph that never carried it, and the pin would be vacuous.
     rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN n.search_keys")
     stored = rows.result_set[0][0] if rows.result_set else None
@@ -410,25 +409,39 @@ def test_an_identifier_alias_is_derived_on_the_journal_side_not_a_divergence(pro
 
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, (
-        "a faithfully replayed identifier Point read as a divergence — the "
-        "checker is not applying the writer's alias derivation: "
-        f"{r['divergent_points']}")
+        "a faithfully replayed identifier Point read as a divergence — an alias "
+        f"is being compared: {r['divergent_points']}")
     assert r["divergence"] is None, r
 
+    for revision in ({"new_content": "error ERR-4032 on deploy"},
+                     {"new_content": "deploy is clean again"}):
+        EventLog(log_path).append(
+            {"type": "PointRevised", "id": "p1", **revision})
+        proj.apply({"type": "PointRevised", "id": "p1", **revision})
+        after = check_consistency(log_path, proj)
+        assert after["ok"] is True, (
+            f"the content revision {revision!r} read as a divergence — the "
+            f"derived alias is being compared on one side only "
+            f"(#10203 P0): {after['divergent_points']}")
+        assert after["divergence"] is None, after
 
-def test_a_missing_alias_is_a_TRUE_divergence_that_a_replay_clears(proj, tmp_path):
-    """The FALSE-PASS direction. The graph side must NOT re-derive the alias.
 
-    If both sides derived it, a node that is MISSING the alias would canonicalise
-    to the same view as one that holds it, so (a) a graph-only strip of the alias
-    would report clean, and (b) the entire pre-#8933 backfill state would be
-    indistinguishable from a fully replayed graph — the checker would certify a
-    graph that is not what a replay produces. #8933 has no separate backfill ("the
-    existing rebuild path already does it"), so this divergence IS the instrument
-    that says a record still needs one.
+def test_a_missing_alias_is_not_a_divergence_but_a_replay_restores_it(proj, tmp_path):
+    """The FALSE-PASS question, answered honestly: the alias is derived, so its
+    ABSENCE is not evidence of an unfaithful graph.
 
-    (1) Fails if the graph side derives the alias (ok would be True, fields empty).
-        Fails if the action stops being the replay.
+    It cannot be: every independent fact about the point (``content``, the
+    payload's own keys) is compared on its own, and the alias is a pure function
+    of those. What USED to be reported here was a ``search_keys`` divergence
+    whose action ("replay the journal") was the documented backfill — but the
+    same reasoning that made it clearable made it WRONG: it reds on any graph
+    whose content was edited after capture (see the sibling test), which is not
+    a divergence at all. So the pin is now the outcome that matters: a
+    pre-#8933 node compares CLEAN, and the existing rebuild/backfill path still
+    re-derives the alias onto it.
+
+    (1) Fails if a missing alias starts reporting a divergence again, or if the
+        replay stops re-deriving the alias onto the node.
     (2) Reachable: a node written before #8933 carries no alias; the journal is
         the same create.
     """
@@ -438,35 +451,38 @@ def test_a_missing_alias_is_a_TRUE_divergence_that_a_replay_clears(proj, tmp_pat
     proj.g.query("MATCH (n:Point {id:'p1'}) REMOVE n.search_keys")
 
     r = check_consistency(log_path, proj)
-    assert r["ok"] is False, (
-        "a node missing its derived alias read as consistent — the graph side is "
-        f"re-deriving it (a false PASS): {r}")
-    fields = {f for d in r["divergent_points"] for f in d["fields"]}
-    assert "search_keys" in fields, r["divergent_points"]
-    assert "replaying the journal" in (r["action"] or ""), r["action"]
+    assert r["ok"] is True, (
+        "a node missing a DERIVED alias read as a divergence — the alias is a "
+        f"pure function of the compared content: {r['divergent_points']}")
 
-    # ...and the documented action really clears it: a replay re-derives the alias.
+    # ...and the documented backfill still works: a replay re-derives the alias.
     fresh = _proj(tmp_path, "replayed")
     try:
         for event in EventLog(log_path).read_all():
             fresh.apply(event)
+        rows = fresh.g.query("MATCH (n:Point {id:'p1'}) RETURN n.search_keys")
+        rederived = rows.result_set[0][0] if rows.result_set else None
+        assert rederived and "inv20240091" in str(rederived), rederived
         after = check_consistency(log_path, fresh)
         assert after["ok"] is True, after
     finally:
         fresh.close()
 
 
-def test_the_graph_fingerprint_does_not_derive_the_alias(proj, tmp_path):
-    """The BASELINE direction: ``db_hash`` must not depend on a derivation.
+def test_the_graph_fingerprint_is_alias_invariant(proj, tmp_path):
+    """The BASELINE direction: ``db_hash`` must not depend on the derived alias.
 
-    ``_graph_fingerprint`` feeds ``db_hash``, so deriving the alias there would
-    map a LEGACY graph (no alias) onto the same digest as a backfilled one and
-    move every stored baseline whose graph carries an identifier-shaped span —
-    the first post-upgrade run would then read a healthy graph as
-    ``unrecorded-mutation``, exactly the class
-    ``_PROJECTION_STATE_FORMAT_HISTORY`` exists to prevent.
+    ``_graph_fingerprint`` feeds ``db_hash``, so a digest that DIFFERED between a
+    pre-#8933 graph (no alias) and a backfilled one would move every stored
+    baseline whose graph carries an identifier-shaped span: the first
+    post-upgrade run would read a healthy graph as ``unrecorded-mutation`` and
+    send the operator hunting an unjournalled writer that does not exist — the
+    class ``_PROJECTION_STATE_FORMAT_HISTORY`` exists to prevent. Because the
+    alias is stripped from the canonical view, the two states share ONE digest
+    and the backfill owes no format bump.
 
-    (1) Fails if the two digests collapse to one value again.
+    (1) Fails if the digest starts depending on the derived alias (the two
+        digests diverge again).
     (2) Reachable: both graphs are legitimate states (aliased vs pre-#8933).
     """
     def dg(search_keys=None):
@@ -476,9 +492,13 @@ def test_the_graph_fingerprint_does_not_derive_the_alias(proj, tmp_path):
             props["search_keys"] = search_keys
         return _digest(_graph_fingerprint({("Point", "p1"): props}))
 
-    assert dg("inv20240091") != dg(), (
-        "the fingerprint derives the alias, so a legacy graph and a backfilled "
-        "graph share one db_hash and no baseline can tell them apart")
+    assert dg("inv20240091") == dg(), (
+        "the fingerprint depends on the derived alias, so adding it during a "
+        "rebuild moves every stored baseline into `unrecorded-mutation`")
+    # A NON-derived key still moves the digest: the strip is targeted, not a hole.
+    assert dg("release") != dg(), (
+        "stripping the alias also stripped a payload-owned key, so a real "
+        "search_keys divergence would be invisible")
 
 
 def test_uncarried_list_is_empty_when_the_journal_has_no_such_field(proj, tmp_path):

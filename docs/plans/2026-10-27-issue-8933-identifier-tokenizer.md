@@ -41,8 +41,18 @@ must not ship. Pinned by the round-trip test, which calls ONE function from both
 
 **OVERRIDES:** the #2070 `keep_numeric=False` / "search lane stays byte-identical" control, for
 identifier-shaped queries only — owner ruling on #8933, 2026-10-26: the identifier is preserved
-(`good > easy`). Bare numeric tokens are still dropped; nothing else about the search lane's
-bytes changes.
+(`good > easy`). Bare numeric tokens are still dropped.
+
+⚠️ **What that reopen actually widens, stated so nobody has to measure it from the code.**
+Byte-identity holds only for queries with no identifier SHAPE. The space form the ruling requires
+("matches however the person typed it — dashes, spaces, or none") is syntactically
+indistinguishable from prose, so **any** `<word> <2+ digits>` query now gains an alias term and an
+adjacency phrase: `top 10` → `top|top10|"top 10"` (was `top\ 10`), and a document whose prose
+happens to contain that pair can outrank one matching all of the query's words — measured on a
+live FalkorDB at #10203 review, and pinned by
+`TestRawRetrieval::test_the_space_typed_pair_is_a_MEASURED_cost_not_a_silent_one`.
+`tests/test_bm25_lexical_8488.py` also records a measured ranking harm from the phrase half. The
+ruling authorises this cost; it is not a side effect discovered later.
 
 ## 3. Complexity + domains
 
@@ -73,10 +83,11 @@ The `<!-- research: v1 -->` comment ([issuecomment-6451906842](https://github.co
 | `tortoise/sparse.py::expansion_tokens` | tokenizes PRF aliases with `keep_numeric=True` | unchanged; aliases now also appear in `search_keys` so they can be harvested — additive |
 | `tortoise/bm25.py::bm25_tokens` | `tokenize_sparse_query` | inherits the aliases — no second tokenizer (the dual-stack contract) |
 | `tortoise/embeddings.py::search_points` | sklearn TF-IDF over `index_text(content, search_keys)` | unchanged; the alias reaches it through `search_keys` (already in the indexed text) |
-| `tortoise/projection/entities.py::_upsert_point_props` | flattens `search_keys` on a copy when a list is present | also appends the derived aliases to `search_keys` (same copy, same door) |
+| `tortoise/projection/entities.py::_upsert_point_props` | flattens `search_keys` on a copy when a list is present | also appends the derived aliases to `search_keys` (same copy, same door) — and, when the payload does **not** carry its own non-blank `search_keys`, **appends** the alias to the node's stored value instead of assigning it (`identifier_alias_append_clauses`, a guarded `SET` in the same query). Assigning it turned a stored `"release deploy rollout"` into `"err4032"` for the E3 default spelling `search_keys: []` — measured, #10203 review round 6 P1 |
+| `tortoise/sdk.py::update_point` + `projection/_revise_point` (the two CONTENT-EDIT doors) | write `n.content` and left `search_keys` alone | **recompute the derived aliases** (`revise_identifier_aliases`): the node's previous `content`/`search_keys` is read in the same round trip, its own aliases are dropped, the new content's are added, and an empty remainder REMOVES the property. Same rule the door already applies to `content_hash` (#1904) and the vector (#4208). Without it a revision never indexed a newly added identifier, kept a stale one after it was removed, and reported an unclearable `content` divergence on `search_keys` (measured P0) |
 | `tortoise/projection/entities.py::flatten_search_keys_prop` | THE one home of the search_keys graph form | unchanged (the alias is appended *after* flattening) |
 | rebuild / replay (`rebuild_all` pass 1a → `_upsert_point_props`) | writes the journal payload | re-derives the same aliases from `content` — the backfill for existing records is a **replay**, not new code, and is idempotent by construction |
-| `tortoise/consistency.py::_canonical_point_fields` | applies the writer's `flatten_search_keys_prop` to the canonical view of BOTH sides | **also** applies the writer's own alias derivation (`append_identifier_aliases(out, point_identifier_aliases(props))`) — on the JOURNAL/reference view ONLY (`derive_identifier_aliases=False` for the graph view and for `_graph_fingerprint`), so `derived == replay(journal)` stays clearable while the graph side stays the node's own content. Omitted from this table in the first revision, which is why the review caught it: a derivation the checker does not mirror reports a FALSE `content` divergence on `search_keys` that no replay can clear (#5048 / #8006 / #8317 class). The asymmetry is load-bearing in the OTHER direction too: deriving on the graph side as well would mask a missing alias (a false PASS) and move `db_hash` for every stored baseline, so the pre-#8933 backfill would have no instrument at all (#10203 review P1) |
+| `tortoise/consistency.py::_canonical_point_fields` | applies the writer's `flatten_search_keys_prop` to the canonical view of BOTH sides | **strips the derived alias from BOTH sides** (`strip_identifier_aliases`). The first shape of this change derived it on the JOURNAL side only (`derive_identifier_aliases=False` for the graph view) to keep the graph side "the node's own content"; that is a false red, measured: the revise door never derived, so any content edit introducing an identifier made the reference view mint an alias the node could never hold — `ok=False`, `fields=['search_keys']`, action "replay the journal", which reproduces the same red. Deriving on the GRAPH side instead (the other direction) is a false PASS. The alias is a PURE function of `content`+`search_keys`, both of which are compared on their own, so it is not independent evidence: removing it is exact on both sides, and it makes `db_hash` alias-invariant, so a backfill that only ADDS aliases cannot move a recorded baseline (no `_PROJECTION_STATE_FORMAT` bump is owed) |
 | `search_engine.run_fts_query` | passes `build_or_query` output to `queryNodes` | unchanged — the alias/phrase arrive through the query string and the indexed text |
 
 ## 7. Implementation steps
@@ -99,6 +110,32 @@ The `<!-- research: v1 -->` comment ([issuecomment-6451906842](https://github.co
 Each step's test is named in §4/§8. Step 4's test is the policy pin; step 5's is the write-path
 integration test; step 6 is the whole file.
 
+### Decision update — review round 6 (2026-10-28), why §6's checker row reversed
+
+The plan's checker decision ("derive the alias on the journal side only") was **withdrawn on
+measurement**, not on preference. Reproduced end-to-end against a live lane: create a point, then
+`PointRevised(new_content="error ERR-4032 on deploy")` → the node keeps the creation's
+`search_keys`, the reference view derives the new content's alias, and `check_consistency` returns
+`ok=False`, `divergence="content"`, `fields=['search_keys']` with the action "reconcile by
+replaying the journal" — which reproduces the red. Setting `TORTOISE_IDENTIFIER_TOKENS=0` on the
+identical journal+graph returns `ok=True`, i.e. the false red was this change's alone. Two
+alternatives were considered and rejected: (a) make the REVISE door derive while the checker keeps
+the journal-side derivation — still needs the old content to retract a stale alias, so it needs the
+same read, and it cannot cover an `PointAdded` re-emit that changes content at all; (b) move the
+alias to a NEW indexed property — correct, but it changes the `Point` fulltext field set, and on an
+existing graph the engine refuses to re-create an index with a different field set ("already
+indexed"), so live upgrades would write a field nothing indexes until a rebuild. The chosen shape
+fixes the write doors (which is where the value must be correct) and makes the checker exact.
+
+**Known residual, filed rather than hidden:** a `PointAdded` re-emit over an **existing** id whose
+content changed and which carries no `search_keys` list keeps the previous content's alias
+(the append cannot retract what it cannot see). `check_consistency` reports it as a REAL
+`search_keys` divergence — a replay of that journal does not produce the stale token — so it is
+detectable and its action clears it. Everything the capture and revise doors write is retracted
+correctly. Also documented, not fixed here: dropping separators means `foo-12-34` and `foo-1234`
+share the alias `foo1234` (the ruling's own concatenation rule; the adjacency PHRASE distinguishes
+them, the alias term does not, and widening the grammar is a separate measured step).
+
 ## 8. Rounds
 
 **Rounds:** 1 (verifiers: 1, class: code)
@@ -110,16 +147,19 @@ integration test; step 6 is the whole file.
 **Risk surface** — what this change can break, each with the check that would catch it:
 
 - R1 **A query that matched before stops matching** (the alias/phrase could displace or de-rank an
-  original token) → `TestRawRetrieval` (non-identifier queries are byte-identical
+  original token) → `TestRawRetrieval` (a query with no identifier SHAPE is byte-identical
   `build_or_query` output; a mixed-alnum query keeps every original token) and the A4 reserved-slot
   assertion `tests/test_ask_retrieval_levers.py::test_expansion_never_displaces_original_tokens`.
+  The space form's measured cost on `<word> <2+ digits>` prose is §2's warning, pinned by
+  `test_the_space_typed_pair_is_a_MEASURED_cost_not_a_silent_one` — R1 is about not LOSING what
+  matched, not about promising the query string never changes.
 - R2 **Write-side and read-side normalisers drift** (the silent-nothing failure) →
   `TestRoundTrip::test_write_and_read_agree_on_every_separated_spelling` calls ONE function from both sides
   over a spelling table; deleting the shared call on either side reds it.
 - R3 **Bare-numeric noise re-enters the search lane** (the #2070 control silently reversed beyond
   identifiers) → `TestRawRetrieval::test_no_bare_numeric_token_reaches_the_search_lane`
-  (`27:12`, `$40`, `2024-01-15` contribute no all-digit token; `build_or_query` differs from
-  `keep_numeric=True`).
+  (`27:12`, `$40`, `2024-01-15` contribute no all-digit token; the same identifier query is
+  compared against `keep_numeric=True`, so the test cannot pass with the mechanism removed).
 - R4 **The write path indexes text that was not scrubbed** (ruling risk 2) →
   `TestWritePath::test_redacted_span_contributes_no_secret_alias` — a `[REDACTED:…]` span yields no
   alias containing the secret, because redaction replaces the whole value (`tortoise/security.py:488`).
@@ -130,6 +170,15 @@ integration test; step 6 is the whole file.
   is idempotent (alias set difference against the existing tokens) and capped at
   `MAX_ALIASES_PER_POINT`; `TestWritePath::test_append_is_idempotent` re-applies three times and
   asserts the value is unchanged.
+- R7 **A revision's derived alias diverges between live and replay** (the false-red / stale-alias
+  class) → `TestWritePathLive::test_a_content_edit_rederives_the_alias_and_retracts_stale_ones`
+  (projection door) and `test_the_sdk_update_door_rederives_too` (SDK door),
+  `tests/test_consistency_divergence_5011.py::test_an_identifier_alias_is_not_a_search_keys_divergence`
+  (create + two revisions compare clean) and `::test_the_graph_fingerprint_is_alias_invariant`
+  (a backfill cannot move `db_hash`, while a payload-owned key still moves it).
+- R8 **The derived alias replaces a stored retrieval vocabulary** →
+  `TestWritePathLive::test_an_empty_search_keys_list_does_not_replace_the_stored_vocabulary`
+  (the E3 `search_keys: []` default keeps the node's own keys and gains the alias).
 
 **Threat classes:** (not adversarial) — no gate/enforcement code in this diff.
 

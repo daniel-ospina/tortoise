@@ -130,8 +130,17 @@ _IDENTIFIER_SEP_RE = re.compile(r"[-_ ]")
 #: (``is 27:12`` is prose, not a code), and the digit run may not be the head of
 #: a longer punctuated span (``date 2024-01-15`` is a DATE — its ``2024`` is
 #: followed by ``-``, so that span keeps the #2070 numeric-noise treatment).
+#:
+#: #10203 review round 6 (P2): the letters segment uses the WRITE side's OWN
+#: alphabet (``[A-Za-z][A-Za-z0-9]*``), not ``[A-Za-z]{2,}``. The narrower form
+#: disagreed with ``_IDENTIFIER_SPAN_RE`` on every one-character prefix —
+#: ``X-4032`` minted the alias ``x4032`` while ``X 4032`` returned NOTHING (it
+#: fell to the degenerate escaped-RAW branch) — which breaks the ruling's
+#: explicit promise that the alias matches "however the person typed it —
+#: dashes, spaces, or none". The read side is allowed to be the PERMISSIVE
+#: half, so the fix widens IT rather than narrowing what the write side mints.
 _SPACED_PAIR_RE = re.compile(
-    r"(?<![A-Za-z0-9])([A-Za-z]{2,}(?:[ \t]+\d{2,}(?![-_]))+)(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:[ \t]+\d{2,}(?![-_]))+)(?![A-Za-z0-9])"
 )
 
 

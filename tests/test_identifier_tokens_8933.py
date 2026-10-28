@@ -87,6 +87,19 @@ requires_live = pytest.mark.skipif(
     not LIVE, reason="requires a live FalkorDB FTS lane (docker services job)")
 
 
+def _or_terms(query: str) -> list[str]:
+    """Split an OR-union query into its terms, keeping a PHRASE whole.
+
+    `build_or_query` joins with `|`, and a phrase term itself contains spaces but
+    no `|`, so a plain `.split("|")` is enough here — but the earlier version of
+    the R3 test stripped the quotes FIRST and then split, which turned
+    `"err 4032"` into the bare digit term `4032` and made the test's own quote
+    guard dead code (#10203 review round 6). Quotes are kept: callers compare
+    whole terms, and a phrase is one term.
+    """
+    return [t.strip() for t in query.split("|") if t.strip()]
+
+
 # ── criterion 1: the policy, and the mechanism that produces it ────────────
 
 class TestPolicy:
@@ -344,10 +357,44 @@ class TestRawRetrieval:
     ])
     def test_no_bare_numeric_token_reaches_the_search_lane(self, query):
         """R3: the #2070 control is NOT silently reversed. Whatever the
-        identifier mechanism emits, no all-digit token becomes an OR term."""
-        terms = build_or_query(query).replace('"', "|").split("|")
-        assert not any(t.strip().isdigit() for t in terms
-                       if not t.strip().startswith('"')), terms
+        identifier mechanism emits, no all-digit token becomes an OR term.
+
+        #10203 review round 6 (P2): the first version of this test was
+        MUTATION-BLIND — every parametrised query carried no identifier at all,
+        so it passed unchanged with the mechanism removed, and its
+        `.replace('"', "|")` pre-processing made the quote guard below dead
+        code (a phrase would have split into its segments). It now also
+        asserts the MECHANISM IS PRESENT on an identifier query (so the query
+        under test is a real one) and compares against the `keep_numeric=True`
+        lane, parsing with the quote-aware splitter.
+        """
+        terms = _or_terms(build_or_query(query))
+        assert not any(t.isdigit() for t in terms), terms
+
+        ident = "time is 27:12 for ERR-4032"
+        with_num = _or_terms(build_or_query(ident, keep_numeric=True))
+        without = _or_terms(build_or_query(ident))
+        assert "err4032" in without, without
+        assert "4032" not in without, without
+        # The identifier's digits DO reach the numeric lane only when the
+        # caller asks for numerics, and then they are the #2070 flag's doing.
+        assert "4032" in with_num, with_num
+
+    def test_a_one_character_prefix_matches_however_it_is_typed(self):
+        """#10203 review round 6 (P2): the two extractors disagreed on
+        one-character prefixes. ``X-4032`` minted the alias ``x4032`` on the
+        write side while ``X 4032`` returned NOTHING (the degenerate escaped-RAW
+        branch, which matches zero rows) — breaking the ruling's promise that
+        the alias matches "however the person typed it — dashes, spaces, or
+        none".
+
+        (1) Fails if the read-side extractor narrows its letters segment again.
+        (2) Reachable: two spellings of the same one-letter-prefixed code.
+        """
+        for typed in ("X-4032", "X 4032", "x4032"):
+            q = build_or_query(typed)
+            assert "x4032" in _or_terms(q), (typed, q)
+        assert identifier_aliases("X-4032", space_separated=False) == ["x4032"]
 
     def test_search_lane_numeric_defaults_are_unchanged(self):
         """Mirrors the #2070 pin: the product search lane's defaults did not
@@ -483,6 +530,94 @@ class TestWritePathLive:
             "MATCH (n:Point {id:'p-plain-1'}) RETURN n.search_keys"
         ).result_set
         assert rows and rows[0][0] is None, rows
+
+    def _keys(self, proj, pid):
+        rows = proj.query(
+            f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys"
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def test_an_empty_search_keys_list_does_not_replace_the_stored_vocabulary(self, proj):
+        """#10203 review round 6 (measured P1): the alias must not become the
+        WHOLE value.
+
+        `search_keys: []` is the E3 `PointPayload` DEFAULT spelling, and the
+        pre-#8933 writer popped a blank list and wrote nothing (the node kept
+        what it held). Materialising the derived alias as the whole value
+        turned a stored `"release deploy rollout"` into `"err4032"` — a silent
+        loss of the retrieval vocabulary the A4/#2070 expansion leg reads.
+
+        (1) Fails if the not-owned path assigns instead of appends.
+        (2) Reachable: one point, two emits, the second carrying the default
+            empty list.
+        """
+        proj.apply({"type": "PointAdded", "point": {
+            "id": "p-own-1", "content": "release notes",
+            "search_keys": ["release", "deploy", "rollout"]}})
+        assert self._keys(proj, "p-own-1") == "release deploy rollout"
+        proj.apply({"type": "PointAdded", "point": {
+            "id": "p-own-1", "content": "error ERR-4032 on deploy",
+            "search_keys": []}})
+        stored = self._keys(proj, "p-own-1") or ""
+        for token in ("release", "deploy", "rollout", "err4032"):
+            assert token in stored.split(), (token, stored)
+
+    def test_a_content_edit_rederives_the_alias_and_retracts_stale_ones(self, proj):
+        """#10203 review round 6 (measured P0/P1): a revision is not a capture.
+
+        `update_point` / `_revise_point` write `n.content` and — before this —
+        left `search_keys` alone, so an edit that introduced an identifier never
+        indexed it and an edit that removed one left a stale alias that still
+        matched the old code. The fix is the same rule the door already applies
+        to `content_hash` (#1904) and the vector (#4208): recompute the derived
+        value in the same write.
+
+        (1) Fails if the revise door stops recomputing (the intro assertion),
+            and fails if it stops RETRACTING (the removal assertion).
+        (2) Reachable: a creation with its own keys, then two revisions — one
+            adding an identifier, one dropping it.
+        """
+        proj.apply({"type": "PointAdded", "point": {
+            "id": "p-rev-1", "content": "release notes",
+            "search_keys": ["release", "deploy"]}})
+        proj.apply({"type": "PointRevised", "id": "p-rev-1",
+                    "new_content": "error ERR-4032 on deploy"})
+        assert self._keys(proj, "p-rev-1") == "release deploy err4032"
+        proj.apply({"type": "PointRevised", "id": "p-rev-1",
+                    "new_content": "deploy is clean again"})
+        assert self._keys(proj, "p-rev-1") == "release deploy"
+
+    def test_the_sdk_update_door_rederives_too(self):
+        """The SECOND content-edit door. `check_consistency` compares the graph
+        against `replay(journal)`, so both doors must produce the SAME value —
+        `update_point` writes live (`SET n += $props`) and journals a
+        `PointRevised`, which the revise door above folds.
+
+        (1) Fails if the SDK door stops recomputing (the node would keep the
+            creation's alias while the replay derives the revision's).
+        (2) Reachable: create with keys, edit in an identifier, edit it out,
+            edit in a DIFFERENT identifier.
+        """
+        import tempfile
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(db_path=os.path.join(tempfile.mkdtemp(), "t.db"))
+        pid = sdk.create_point(content="release notes", kind="statement",
+                               search_keys=["release", "deploy"])["id"]
+
+        def keys():
+            rows = sdk._proj.g.query(
+                f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys"
+            ).result_set
+            return rows[0][0] if rows else None
+
+        sdk.update_point(pid, content="error ERR-4032 on deploy")
+        assert keys() == "release deploy err4032", keys()
+        sdk.update_point(pid, content="deploy is clean again")
+        assert keys() == "release deploy", keys()
+        sdk.update_point(pid, content="another ERR-4031 here")
+        assert keys() == "release deploy err4031", keys()
 
 
 # ── criterion 3: discrimination survives on #10121's fixture ───────────────
