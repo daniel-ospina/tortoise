@@ -1275,6 +1275,36 @@ def test_an_unknown_coverage_census_is_never_summed_as_a_measured_zero():
     assert fail_open["points_unmeasured_unread"] == 1
 
 
+def test_a_manifest_less_question_is_unread_not_absent_from_the_denominator():
+    """RED: the ``*_unread`` counters iterated the MANIFEST-bearing subset, so a
+    question with NO manifest — the ``no_manifest`` shape this module names
+    itself (a checkpoint written before the arm existed, or under another arm)
+    — was neither KNOWN nor UNREAD. A 3-question run whose census was read for
+    ONE of them published ``operators: 7, operators_unread: 0``: a partial sum
+    that claims to be complete, which is the invariant the block exists to
+    keep. A missing manifest is an unread census, full stop.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _census(
+            operators=7, factor_edges=2)},
+         {"question_id": "q2"},               # RESUMED: no manifest at all
+         {"question_id": "q3"}],
+        requested=True)
+    assert summary["operators"] == 7           # the measured cell only
+    assert summary["operators_unread"] == 2    # ...and it says how partial
+    assert summary["factor_edges_unread"] == 2
+    assert summary["points_with_ep_unread"] == 2
+    # a run with NO manifest anywhere is UNKNOWN beside a NON-ZERO unread
+    # count — never "UNKNOWN and nothing unread", which reads as a whole
+    # measurement that happened to be empty.
+    empty = mp.summarize_belief_activation(
+        [{"question_id": "q1"}, {"question_id": "q2"}], requested=True)
+    assert empty["operators"] is None
+    assert empty["operators_unread"] == 2
+    assert empty["points_with_ep"] is None
+    assert empty["points_with_ep_unread"] == 2
+
+
 def test_a_partial_census_sum_says_how_partial_it_is():
     """A sum over the MEASURED cells is published, but never without the count
     of cells that were unread — otherwise a partial sum reads as a complete

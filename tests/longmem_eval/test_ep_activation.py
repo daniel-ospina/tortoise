@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from tools.longmem_eval import ep_activation as epa  # noqa: E402, RUF100
+from tools.longmem_eval import measurement_posture as mp  # noqa: E402, RUF100
 
 # ── read_confidence ────────────────────────────────────────────────────────
 
@@ -328,6 +329,41 @@ def test_off_neutral_agrees_with_read_confidence_over_a_population():
     # sanity: the population really does contain both sides (c1 0.75, c3 0.75,
     # c4's per-field coalesce 2/3 — and c2 stays neutral)
     assert epa.points_off_neutral(rows) == 3
+
+
+def test_an_absent_result_set_is_unknown_not_a_measured_zero(monkeypatch):
+    """RED for the ABSENT-ROW arm of ``_scalar_or_none``, which no other test
+    reaches: both unread-census tests make the query RAISE (the ``except`` arm),
+    and the stub's ``factor_edges=None`` is a falsy CELL (the ``TypeError``
+    arm), so returning ``0`` for an empty result set left every test green
+    (measured: 48 passed).
+
+    The consequence is the one the module exists to prevent: ``operators: 0``
+    plus ``factor_edges: 0`` off a census that was never read fabricates the
+    STRUCTURAL ``no_operators`` verdict — the single reason in
+    ``INERT_REASONS_STRUCTURAL``, which tells a lane that extraction is the
+    fault and nothing the arm does can ever help.
+    """
+    sdk, graph = _make(["c1"], total=3, with_ep=0)
+    real_query = graph.query
+
+    def _query(cypher, params=None):
+        flat = " ".join(cypher.split())
+        if "RETURN count(o)" in flat or "RETURN count(r)" in flat:
+            return _Result([])            # no row, WITHOUT raising
+        return real_query(cypher, params)
+
+    graph.query = _query
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["operators"] is None
+    assert manifest["factor_edges"] is None
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": manifest}],
+        requested=True)
+    assert summary["inert_questions"][0]["reason"] == mp.INERT_UNMEASURED
+    assert summary["inert_questions"][0]["reason"] \
+        not in mp.INERT_REASONS_STRUCTURAL
 
 
 def test_a_non_finite_posterior_is_never_a_contribution():

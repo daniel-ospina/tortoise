@@ -332,8 +332,20 @@ def summarize_belief_activation(
     # review 2, P1). A cell that is ABSENT is UNKNOWN for the same reason as a
     # ``None`` one — the fail-open manifest omits every census cell because
     # none was read — so the four keys share ONE rule.
+    #
+    # #10137 review 9 (P3): the denominator is the QUESTION population, not the
+    # manifest-bearing subset. Iterating ``manifests`` made a question with NO
+    # manifest (the shape this module itself classifies ``no_manifest`` — a
+    # checkpoint written before the arm, or under another arm) neither KNOWN nor
+    # UNREAD, so a 3-question run whose census was read for 1 of them published
+    # ``operators: 7, operators_unread: 0``: a partial sum that claims to be
+    # complete, which is the invariant the block above exists to keep. A missing
+    # manifest is an unread census, full stop.
     for key in _UNKNOWN_PER_MANIFEST_KEYS:
-        values = [_optional_int(m.get(key)) for m in manifests]
+        values = [
+            _optional_int(o["belief_activation"].get(key))
+            if isinstance(o.get("belief_activation"), dict) else None
+            for o in rows]
         known = [v for v in values if v is not None]
         summary[key] = sum(known) if known else None
         summary[f"{key}_unread"] = len(values) - len(known)
