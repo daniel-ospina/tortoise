@@ -110,9 +110,13 @@ required, and neither substitutes for `bind`.
 **Mint site (DELIVERED — this is the shipped contract, not a sketch):** `POST /api/consent/token`
 (`website/apps/dashboard/functions/api/consent/token.ts`), JSON body `{state, attempt_key}`, which:
 
-1. enforces an **exact-origin CORS allowlist of the AS origin** with `Access-Control-Allow-Credentials:
-   true` — the allowlist is what stops a cross-site page from driving the mint with the victim's cookie —
-   and requires `Content-Type: application/json` (a form post from another site is refused `415`);
+1. enforces an **exact-origin CORS allowlist of the AS origin** (`allowedOrigin`: the request's
+   `Origin`, parsed, must equal the configured AS origin — an ABSENT `Origin` is refused too) with
+   `Access-Control-Allow-Credentials: true`, and a refused origin answers **403 `forbidden_origin`**
+   with no CORS headers. That allowlist is what stops a cross-site page from driving the mint with the
+   victim's cookie. A request that DOES carry the AS origin must then send
+   `Content-Type: application/json`, or it is refused **415 `unsupported_media_type`** — the media-type
+   gate is the second layer, so a cross-site form post is answered `403` by the allowlist first;
 2. reads `__Host-session` and resolves the credential with `getAccessTokenForSession` (`token.ts:134`);
 3. answers **401 `no_session`** when there is no session, **403 `no_authorize_attempt`** when the flow is
    not this caller's, and **503 `unavailable`** when the store is unreachable — never a sign-out
@@ -125,9 +129,12 @@ required, and neither substitutes for `bind`.
    anyone who names the `state`;
 6. mints the token (§2.1) and returns `{token, exp}`. The session's access token never leaves the server.
 
-⚠️ It is a `POST`, not the `GET` this section first sketched: a state-changing call is guarded by
-`csrf.ts`'s `guardStateChangingRequest` on POST, while `SameSite=Lax` rides a top-level GET. The route both
-returns `{token, exp}` and never takes a bind from the caller — do not "restore" the sketch.
+⚠️ It is a `POST`, not the `GET` this section first sketched, and the guard is the route's OWN: the
+`allowedOrigin` allowlist above plus the JSON media type. ⛔ It must NOT use `csrf.ts`'s
+`guardStateChangingRequest`: that helper's origin layer is `guardOrigin`, which refuses anything that is not
+`appOrigin(env)` — so adding it here would answer `403 forbidden_origin` to every legitimate `api.*` call
+and kill the consent arm. The route both returns `{token, exp}` and never takes a bind from the caller — do
+not "restore" the earlier sketch, and do not "align" this route with `start.ts` by importing that guard.
 
 ⚠️ **The mint does NOT consume the attempt**, so one approval can produce one code per call — that is
 deliberate (step 2 costs a re-mint rather than a re-login after a post-spend refusal) and it is pinned by

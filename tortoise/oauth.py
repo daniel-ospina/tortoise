@@ -431,8 +431,8 @@ def _is_loopback(hostname: str) -> bool:
     # ``>=3.12``. Normalising FIRST makes the verdict identical on every supported interpreter,
     # exactly as ``_parse_bind_ip`` does for ``--bind`` (#719). Without it this predicate flips
     # with the interpreter's PATCH level: on 3.12.0–3.12.6 it refuses a loopback redirect that the
-    # consent BFF's mirror (which normalises) accepts, so the BFF advances a flow this AS then
-    # refuses — the divergence `test_the_redirect_uri_rule_agrees_with_the_AS` exists to catch.
+    # refuses. The guard is test_the_loopback_verdict_does_not_depend_on_the_interpreter_patch_level
+    # — the cross-half table only bites on a buggy stdlib.
     if getattr(ip, "ipv4_mapped", None) is not None:
         ip = ip.ipv4_mapped
     return ip.is_loopback
