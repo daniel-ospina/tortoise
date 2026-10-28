@@ -175,17 +175,26 @@ here so "swept" is never read into a number nothing re-checks.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:13282` is the fold (`"stats": out.get("stats") or {}`) — while the
-extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8873`) and
-`result["vet"]` (`:8883`) on a surface the receipt never carries. `#9116` is open and
-still true at this head.
+`tortoise/sdk.py:13625` is the meta fold — while the extractor builds
+`result["classify_later"]` (`tortoise/extractor_v2.py:8961`) and `result["vet"]`
+(`tortoise/extractor_v2.py:8971`) on the extractor's OWN return.
 
-⇒ **S2.2 and S2.3 are unobservable through the capstone's own entry point**, so any
-table `probes/capstone_measure.py` can emit today reports 6 of 8 steps observed and
-**no row it contains can be certified GREEN**, whatever the underlying numbers do.
-This is a limit of the instrument, not of the verdicts — and it is the reason the
-epic's closing rule is unsatisfiable until `#9116` lands, ahead of every row's own
-blocker.
+⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
+it was written in.** The fold no longer forwards `stats` alone — it calls
+`_capture_stats_with_step_witness`, which copies each stage's own counts onto
+`stats["step_witness"]` (a sub-key of the `stats` key the receipt already
+carried, so no new receipt key and no SDK/MCP verb). S2.2 and S2.3 are
+therefore REACHABLE through the capstone's own entry point at this head; what is
+still true is that they were **absent on the `e0fc940b` run**, which is what the
+scored log and the 6-of-8 row set record.
+
+⇒ **A table measured BEFORE the seam reports 6 of 8 steps observed** and no row
+the already-scored log contains can be certified GREEN, whatever the underlying
+numbers do — that is a limit of the measurement's stamp, not of the verdicts.
+The seam does not by itself move a row: a row moves only by RE-RUNNING
+`probes/capstone_measure.py` at a post-seam head, which is what turns those two
+rows into witnesses. Until such a re-run is committed, the epic's closing rule
+stays unsatisfiable on the committed evidence, ahead of every row's own blocker.
 
 ---
 
