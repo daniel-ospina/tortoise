@@ -191,8 +191,8 @@ floor at 15). ⚠ That formula is a LOWER bound, not the only term: a job that e
 `actions/cache` save POST-step is sized on the SUM of its in-step caps plus that save, which
 `2 × max` cannot see at all — the derivation for `test-d14-hosted-api` above is the worked
 example. At the time of the first pass no cap was raised and none was lowered: `test` 90,
-`test-slow` 60 and `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase
-+ the shard's in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode —
+`test-slow` 60 and `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase +
+the shard's in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode —
 a runner-level kill that loses the pass/fail summary. The one cap moved since is
 `test-d14-hosted-api` 20 → 40 (#10182), on the post-step term.
 
