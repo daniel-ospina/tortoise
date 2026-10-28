@@ -313,19 +313,18 @@ def summarize_belief_activation(
         # pass ran AND its census found persisted posteriors) — see the
         # docstring; ``belief_layer_state`` cannot report ``activated``
         # without one per question.
+        #
+        # #10137 review 13 (P2): the cell is DERIVED from
+        # ``_classify_question``'s own ``measured`` verdict rather than
+        # re-spelling the predicate here. The two spellings had drifted: this
+        # one counted a manifest carrying BOTH ``ep_ran: True`` and ``error``
+        # (the error arm is checked FIRST there, so that question was
+        # ``activation_failed`` and the buckets counted it as 0), which broke
+        # the `sum(bucket) == run-level` reconciliation this block exists to
+        # guarantee — and inflated the coverage cell ``belief_layer_state``
+        # builds ``activated`` on. ONE predicate, so it cannot drift again.
         "questions_with_ep": sum(
-            1 for m in manifests
-            if m.get("ep_ran") is True
-            # #10137 review 12 (P3): read the coverage cell through the same
-            # UNKNOWN-preserving coercion as every other census cell. ``_as_int``
-            # coerces a boolean to 1, so a manifest with
-            # ``points_with_ep: true`` counted as a measured question here while
-            # ``_classify_question`` called the same manifest ``unmeasured`` —
-            # one report said ``questions_with_ep: 1`` + ``belief_layer:
-            # activated`` AND ``questions_inert: 1`` with reason ``unmeasured``,
-            # publishing ``beliefs_activated: true`` for a run with zero measured
-            # questions.
-            and (_optional_int(m.get("points_with_ep")) or 0) > 0),
+            1 for m in manifests if _classify_question(m)[1]),
         "failed": sum(1 for m in manifests if m.get("error")),
         "engine": next((m.get("ep_engine") for m in manifests
                         if m.get("ep_engine")), None),

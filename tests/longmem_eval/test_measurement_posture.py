@@ -1368,3 +1368,36 @@ def test_a_boolean_coverage_cell_is_not_a_measured_question():
     assert summary["inert_questions"][0]["reason"] == "unmeasured"
     block = mp.build(ingest_mode="v2", activation=summary)["belief_layer"]
     assert block != mp.BELIEF_LAYER_ACTIVATED
+
+
+def test_a_pass_that_ran_AND_errored_is_not_a_measured_question_either():
+    """RED: the run-level cell and the buckets spelled the ``measured``
+    predicate SEPARATELY, and they disagreed on one shape.
+
+    `_classify_question` checks `error` BEFORE the census, so a manifest
+    carrying both `ep_ran: True` and `error` is `activation_failed` and never
+    measured. The run-level cell checked only `ep_ran is True` plus the
+    coverage cell, so the SAME manifest counted 1 there and 0 in the bucket —
+    `sum(bucket) == run-level` (the invariant this block is built on) broken,
+    and the inflated coverage cell is the number `belief_layer_state` derives
+    `activated` from.
+
+    No in-tree producer emits this shape (`run.py::_activate_beliefs_for_question`
+    always pairs `error` with `ep_ran: False`), which is exactly why the pin has
+    to be a fixture: the hazard is a FUTURE producer, and the fix is one
+    predicate instead of two.
+    """
+    manifest = {"ep_ran": True, "points_with_ep": 2, "points_unmeasured": 0,
+                "operators": 2, "factor_edges": 0, "error": "dream raised"}
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "multi-session",
+          "belief_activation": manifest}], requested=True)
+
+    assert summary["questions_with_ep"] == 0
+    assert summary["by_question_type"]["multi-session"]["questions_with_ep"] == 0
+    assert sum(b["questions_with_ep"] for b in summary["by_question_type"].values()) \
+        == summary["questions_with_ep"]
+    assert summary["inert_questions"][0]["reason"] == "activation_failed"
+    assert summary["failed"] == 1
+    block = mp.build(ingest_mode="v2", activation=summary)["belief_layer"]
+    assert block != mp.BELIEF_LAYER_ACTIVATED
