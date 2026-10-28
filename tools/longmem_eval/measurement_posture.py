@@ -158,6 +158,37 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _failed(manifest: dict[str, Any]) -> bool:
+    """The ONE spelling of ``_classify_question``'s ``activation_failed`` arm.
+
+    Named and exported-in-module so the run-level cells (``ep_ran``,
+    ``failed``) and the per-question classifier cannot drift apart again — that
+    drift is what #10137 review 13 fixed for ``questions_with_ep`` and review 14
+    for these two. A manifest FAILED if it carries a diagnosis (``error``) OR
+    says the pass did not run: the two shapes a producer can emit are
+    ``activate_beliefs``'s own fail-open return and
+    ``run.py::_activate_beliefs_for_question``'s handler, and both must read as
+    one.
+    """
+    return bool(manifest.get("error")) or manifest.get("ep_ran") is not True
+
+
+def _failure_message(manifest: dict[str, Any]) -> str | None:
+    """The ``errors`` cell for ONE manifest, or ``None`` when it did not fail.
+
+    A manifest that failed WITHOUT naming a diagnosis still gets a line: the
+    alternative is an empty ``errors`` list beside a non-zero ``failed`` count,
+    which reads as "something broke and we are not saying what". The line states
+    the SHAPE (no diagnosis was reported), it does not invent a cause.
+    """
+    if not _failed(manifest):
+        return None
+    error = manifest.get("error")
+    if error:
+        return str(error)
+    return "activation failed: ep_ran is not true and no diagnosis was reported"
+
+
 def _classify_question(
     manifest: dict[str, Any] | None,
 ) -> tuple[str | None, bool, int | None, int | None]:
@@ -186,7 +217,7 @@ def _classify_question(
     """
     if not isinstance(manifest, dict):
         return INERT_NO_MANIFEST, False, None, None
-    if manifest.get("error") or manifest.get("ep_ran") is not True:
+    if _failed(manifest):
         return INERT_ACTIVATION_FAILED, False, None, None
     with_ep = _optional_int(manifest.get("points_with_ep"))
     off_neutral = _optional_int(manifest.get("points_off_neutral"))
@@ -308,7 +339,27 @@ def summarize_belief_activation(
         "questions": len(rows),
         # the subset that actually reported an activation manifest
         "measured": len(manifests),
-        "ep_ran": sum(1 for m in manifests if m.get("ep_ran") is True),
+        # #10137 review 14 (P2): `ep_ran` and `failed` are DERIVED from
+        # ``_classify_question``'s first arm, not re-spelled here. They were the
+        # third pair of duplicate predicates in this block, and the drift was
+        # the common failure shape rather than a corner: the producer
+        # (``ep_activation.activate_beliefs``) used to return `ep_ran: False`
+        # with NO `error` key when `dream` raised, so `failed` (keyed on
+        # `error`) published 0 for a run where every pass raised — while the
+        # classifier called every one of those questions
+        # `activation_failed`. The producer now records the diagnosis too
+        # (review 14), but the ONE-predicate rule is what makes the cells
+        # agree whether or not a future producer remembers.
+        #
+        # The partition closes by construction: a manifest is either
+        # `activation_failed` or it reported a real activation, so
+        # `ep_ran + failed == measured`.
+        "ep_ran": sum(1 for m in manifests if not _failed(m)),
+        "failed": sum(1 for m in manifests if _failed(m)),
+        "engine": next((m.get("ep_engine") for m in manifests
+                        if m.get("ep_engine")), None),
+        "errors": [e for e in (_failure_message(m) for m in manifests)
+                   if e is not None][:5],
         # #8486: the positive-measurement evidence for this question (the
         # pass ran AND its census found persisted posteriors) — see the
         # docstring; ``belief_layer_state`` cannot report ``activated``
@@ -325,10 +376,6 @@ def summarize_belief_activation(
         # builds ``activated`` on. ONE predicate, so it cannot drift again.
         "questions_with_ep": sum(
             1 for m in manifests if _classify_question(m)[1]),
-        "failed": sum(1 for m in manifests if m.get("error")),
-        "engine": next((m.get("ep_engine") for m in manifests
-                        if m.get("ep_engine")), None),
-        "errors": [str(m.get("error")) for m in manifests if m.get("error")][:5],
     }
     for key in _SUMMED_KEYS:
         summary[key] = sum(_as_int(m.get(key, 0)) for m in manifests)

@@ -255,6 +255,27 @@ def test_activate_ep_failure_is_fail_open_and_reported():
     # promotion writes still committed — the manifest is the surface that
     # tells the caller the pass failed
     assert manifest["points_promoted"] == 1
+    # #10137 review 14 (P2): the DIAGNOSIS rides on the manifest. It used to
+    # reach only the log, so the run summary's `failed`/`errors` cells — keyed
+    # on `error`, the key `run.py`'s outer handler already writes — read a run
+    # where every pass raised as `failed: 0` / `errors: []`. The two failure
+    # shapes are now one key.
+    assert manifest["error"] == "RuntimeError: EP exploded"
+
+
+def test_a_successful_pass_carries_no_error_cell_value():
+    """The success path sets `error: None`, not an absent key.
+
+    Both matter: `_classify_question` reads `manifest.get("error")` (absent and
+    `None` are both falsy, so either would classify right), but the KEY being
+    present on every manifest is what makes `{"error": …}` a shape a reader can
+    rely on rather than a key only the failure path has.
+    """
+    sdk, _ = _make(["c1"])
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["ep_ran"] is True
+    assert "error" in manifest
+    assert manifest["error"] is None
 
 
 def test_activate_namespace_mismatch_refuses():

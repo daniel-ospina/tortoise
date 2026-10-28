@@ -885,6 +885,16 @@ def test_a_measured_question_is_measured_whatever_the_cause_cell_says():
 
 
 def test_by_question_type_turns_the_assertion_into_a_measurement():
+    # #10137 review 14 (P2): ``m2`` is MEASURED but its contribution census was
+    # never read (``points_off_neutral`` absent → UNKNOWN). It was missing from
+    # this fixture, which is exactly why the identity asserted at the bottom of
+    # this test looked complete: without a contribution-unknown row, the
+    # ``off_neutral + neutral`` sum happens to equal ``questions_measured``, so
+    # the assertion could not fail on the population that makes it false — and
+    # would red SPURIOUSLY against a correct implementation the moment someone
+    # added this row. A supported, in-tree shape (`_census_ids` returns None
+    # when the claim-state read raises, and a resumed pre-#10137 manifest is the
+    # same shape), so it belongs in the fixture.
     summary = mp.summarize_belief_activation(
         [{"question_id": "s1", "question_type": "single-session-user",
           "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
@@ -892,6 +902,10 @@ def test_by_question_type_turns_the_assertion_into_a_measurement():
           "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
          {"question_id": "s3", "question_type": "single-session-assistant",
           "belief_activation": _unmeasured_manifest(factor_edges=0, operators=0)},
+         {"question_id": "m2", "question_type": "multi-session",
+          "belief_activation": {"ep_ran": True, "points_with_ep": 4,
+                                "points_unmeasured": 0, "operators": 3,
+                                "factor_edges": 0}},
          {"question_id": "m1", "question_type": "multi-session",
           "belief_activation": _census(points_off_neutral=5)}],
         requested=True)
@@ -900,8 +914,9 @@ def test_by_question_type_turns_the_assertion_into_a_measurement():
                             "single-session-assistant", "multi-session"}
     assert by_type["single-session-user"]["questions"] == 2
     assert by_type["single-session-user"]["questions_inert"] == 2
-    assert by_type["multi-session"]["questions_with_ep"] == 1
+    assert by_type["multi-session"]["questions_with_ep"] == 2
     assert by_type["multi-session"]["points_off_neutral"] == 5
+    assert by_type["multi-session"]["questions_contribution_unknown"] == 1
     # the split reconciles with the run-level counters (one denominator)
     assert sum(b["questions"] for b in by_type.values()) == summary["questions"]
     assert sum(b["questions_inert"] for b in by_type.values()) == \
@@ -933,8 +948,22 @@ def test_by_question_type_turns_the_assertion_into_a_measurement():
         summary["points_moved_off_neutral"]
     # the per-type counter is named apart from the run-level ``measured``
     # (which counts MANIFESTS, a different population — #10137 review)
+    #
+    # #10137 review 14 (P2): the third term is REQUIRED. A measured question
+    # whose contribution census was never read belongs to NEITHER ``off_neutral``
+    # nor ``neutral`` — it is ``questions_contribution_unknown`` — so the old
+    # two-term form was an identity the module does not hold. Asserted over
+    # ``questions_contribution_unknown`` here and as a full partition below, so
+    # the fifth population the README names is pinned rather than assumed.
     assert sum(b["questions_measured"] for b in by_type.values()) == \
-        summary["questions_off_neutral"] + summary["questions_neutral"]
+        summary["questions_off_neutral"] + summary["questions_neutral"] \
+        + summary["questions_contribution_unknown"]
+    assert sum(b["questions_contribution_unknown"] for b in by_type.values()) \
+        == summary["questions_contribution_unknown"]
+    # every question lands in exactly one of the four populations
+    assert (summary["questions_inert"] + summary["questions_neutral"]
+            + summary["questions_off_neutral"]
+            + summary["questions_contribution_unknown"]) == summary["questions"]
 
 
 def test_populations_are_order_independent():
@@ -1401,3 +1430,49 @@ def test_a_pass_that_ran_AND_errored_is_not_a_measured_question_either():
     assert summary["failed"] == 1
     block = mp.build(ingest_mode="v2", activation=summary)["belief_layer"]
     assert block != mp.BELIEF_LAYER_ACTIVATED
+
+
+def test_a_failed_pass_that_names_no_diagnosis_still_counts_as_failed():
+    """RED: the run-level `failed` cell keyed on `error` alone, and the shape
+    that key was blind to is the COMMON one.
+
+    `ep_activation.activate_beliefs` used to return `ep_ran: False` with no
+    `error` key when `dream` raised (review 14 adds the diagnosis there), while
+    `_classify_question` resolved the same manifest from the `ep_ran` arm and
+    called it `activation_failed`. So a run in which EVERY pass raised published
+    `failed: 0`, `errors: []` — the one number a reader has for "did anything
+    break" said nothing did — while `inert_by_reason` simultaneously reported
+    every question as `activation_failed`.
+
+    `failed`/`ep_ran` are now derived from the classifier's own arm, so the
+    cells agree on this shape whether or not a producer fills `error` in, and
+    `errors` states the shape instead of inventing a cause.
+    """
+    outcomes = [{"question_id": "q1", "belief_activation": {"ep_ran": False}},
+                {"question_id": "q2", "belief_activation": {"ep_ran": False}},
+                {"question_id": "q3", "belief_activation": _manifest()}]
+    summary = mp.summarize_belief_activation(outcomes, requested=True)
+
+    assert summary["measured"] == 3
+    assert summary["failed"] == 2
+    assert summary["ep_ran"] == 1
+    # the partition closes by construction, not by two spellings agreeing
+    assert summary["ep_ran"] + summary["failed"] == summary["measured"]
+    assert summary["inert_by_reason"]["activation_failed"] == 2
+    assert len(summary["errors"]) == 2
+    assert all("no diagnosis was reported" in e for e in summary["errors"])
+    # the failure is VISIBLE in the posture, and cannot read as activated
+    posture = mp.build(ingest_mode="v2", activation=summary)
+    assert posture["belief_layer"] == mp.BELIEF_LAYER_PARTIAL
+    assert posture["beliefs_activated"] is False
+
+
+def test_a_diagnosis_carrying_failure_reports_the_message_verbatim():
+    """The other half: when `error` IS set, `errors` quotes it, not the shape."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1",
+          "belief_activation": {"ep_ran": False,
+                                "error": "DreamNoOpError: no ep factors"}}],
+        requested=True)
+    assert summary["failed"] == 1
+    assert summary["errors"] == ["DreamNoOpError: no ep factors"]

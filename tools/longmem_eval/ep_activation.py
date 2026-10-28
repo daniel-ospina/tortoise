@@ -183,10 +183,15 @@ _COUNT_OPERATORS = (
 #: ``op_type IS NULL``).
 #:
 #: ⚠️ It deliberately does NOT carry the other conjuncts those arms carry —
-#: ``epistemic_disjunction(a/b)`` and ``_live_only(a.status/b.status)``
-#: (`ep.py:1939-1947`), which exclude draft AND terminal endpoints such as
-#: ``outdated``. That is a SHAPE census, not a CONSUMABILITY census, and the
-#: over-count is the safe direction, for a reason specific to the verdict it
+#: `epistemic_disjunction(a/b)` and `_live_only(a.status/b.status)`
+#: (`ep.py:1939-1947`) — and the two omissions are safe for DIFFERENT reasons,
+#: which the earlier wording wrongly merged into one. `_live_only` excludes
+#: draft AND terminal endpoints (an `outdated` claim is not consumable today);
+#: `epistemic_disjunction` restricts an endpoint to the EPISTEMIC_LABELS set and
+#: says nothing about status. Neither omission can UNDER-count, and over-counting
+#: is what keeps the verdict non-structural — which is the property this cell
+#: needs. That is a SHAPE census, not a CONSUMABILITY census, for a reason
+#: specific to the verdict it
 #: feeds: ``no_operators`` claims the graph is structurally EP-inert — "no
 #: factor reaches a claim, so nothing EP does can ever help" — a PERMANENT
 #: claim. An edge whose endpoint is ``outdated`` is not consumable TODAY, but
@@ -578,14 +583,26 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
             "unread" if before_cov is None else f"points_with_ep={before_cov}")
         off_neutral_before = None
 
-    # ── 2. Run EP — whole-graph stabilization, posteriors persisted ───
+    # ── 2. Run EP — whole-graph stabilization, posteriors persisted ───────
     ep_ran = False
+    ep_error: str | None = None
     dream_result = None
     try:
         dream_result = sdk.dream(
             mode="full", require_calibration=False, warm_start=False)
         ep_ran = True
     except Exception as exc:  # noqa: BLE001, RUF100
+        # #10137 review 14 (P2): the DIAGNOSIS goes on the manifest, not only
+        # into the log. This fail-open return — the common failure shape, since
+        # a raise inside `dream` is the expected #3154/#3139 breakage — used to
+        # carry `ep_ran: false` and NO `error`, while `run.py`'s outer handler
+        # (the rarer shape: `activate_beliefs` itself raising) writes both. The
+        # summary's `failed`/`errors` cells keyed on `error`, so a run in which
+        # EVERY pass raised published `failed: 0` and an empty `errors` list —
+        # the one number a reader has for "did anything break" said nothing
+        # did. `_classify_question` already resolved the question correctly (the
+        # `ep_ran` arm), so only the published diagnosis was missing.
+        ep_error = f"{type(exc).__name__}: {exc}"
         logger.warning(
             "activate_beliefs: EP pass failed after promoting %d points / "
             "%d operators — claims remain unmeasured: %s",
@@ -643,13 +660,19 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     factors = (_optional_int(dream_result.get("budget_used"))
                if isinstance(dream_result, dict) else None)
     # Only a pass that RETURNED has a reason; a raised pass is reported by
-    # `ep_ran`/`error`, and a stale reason from an earlier pass would be a lie.
+    # `ep_ran`/`error` (and now really is — see `ep_error` above), and a stale
+    # reason from an earlier pass would be a lie.
     no_op_reason = _read_no_op_reason(sdk) if ep_ran else None
 
     return {
         "points_promoted": points_promoted,
         "operators_promoted": operators_promoted,
         "ep_ran": ep_ran,
+        #: ``None`` on success, else ``"<ExcType>: <message>"``. Same shape
+        #: ``run.py::_activate_beliefs_for_question`` writes when the call
+        #: itself raises, so the summary's failure cells see BOTH failure
+        #: shapes through one key instead of only the rarer one.
+        "error": ep_error,
         "ep_engine": EP_ENGINE,
         "points_with_ep": with_ep,
         "points_unmeasured": points_unmeasured,
