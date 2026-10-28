@@ -9210,8 +9210,12 @@ def _object_supersede_miss_detail(shape: str, *, prefix: str = "") -> str:
         # `_writable_id` is a separate question, and a NUL-bearing id counts as
         # an address here — so this shape must not be read as "the graph could
         # not have stored it".
+        # ⛔ SYMMETRIC, not "no `name`" (#10211 review round 5): the predicate
+        # is "NEITHER is a non-empty string", and `{"name": 123}` / `{"name": ""}`
+        # CARRY a name — so the asymmetric phrasing was false for exactly the
+        # records this comment exists to describe.
         return (f"{prefix}supersede carries NO address it could be looked up "
-                "by — no `name` and no `id` that is a non-empty string — so "
+                "by — neither `name` nor `id` is a non-empty string — so "
                 "there is nothing the journal can be checked against; "
                 # ⛔ ONE home for the instruction: the run-boundary remedy
                 # (`nonfolded._NO_ADDRESS_REMEDY`) interpolates this same
@@ -15330,8 +15334,8 @@ class FalkorProjection(
                                 "target this record names — the supersede is "
                                 "skipped here and recorded")
                 elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
-                    _sup_why = ("the record carries no name and no id that is "
-                                "a non-empty string, so there is nothing to "
+                    _sup_why = ("neither `name` nor `id` on the record is a "
+                                "non-empty string, so there is nothing to "
                                 "check it against")
                 elif _sup_shape == SHAPE_SUPERSEDE_TARGET_DELETED:
                     _sup_why = ("the journal hard-deleted the target before "
@@ -15339,23 +15343,32 @@ class FalkorProjection(
                                 "both end with it absent — nothing was lost")
                 elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_MISS:
                     # ⛔ THIS ARM'S TEXT WAS RETIRED BY THE AMENDMENT (#10211
-                    # review round 4): it used to say "object not re-created by
+                    # review rounds 4-5): it used to say "object not re-created by
                     # any journaled event (pre-#2194 journal, unjournaled capture
                     # SDK, legacy unjournaled Object, or delete race)", which was
                     # true of the OLD miss population — records the journal had
                     # established NOTHING for. Both of those now classify
                     # separately (`no-address`, `unregistered`), so a record can
-                    # only reach THIS arm with `OBJECT_ADDRESS_ESTABLISHED`,
-                    # which `journal_object_established` derives from a journaled
-                    # event alone. The creation IS in the journal; the fold
-                    # missed because the carrier collapsed onto one merge key or
-                    # was renamed away. Telling the operator to look for an
-                    # unjournaled producer sent them after a defect that the
-                    # journal in their hands disproves.
+                    # only reach THIS arm with `OBJECT_ADDRESS_ESTABLISHED`.
+                    # ⚠️ But ESTABLISHED does NOT imply a creation: two of the
+                    # oracle's address sources produce an address and no node —
+                    # a state op's TARGET id (`journal_object_established`, the
+                    # "addressable BY ID" source) and a mention stub's
+                    # deterministic id (a later registration re-ids that node).
+                    # MEASURED on the state-op fixture below: the run ALSO logs
+                    # "the journal claims a mutation whose entity never
+                    # re-existed on this replay", i.e. the cause is a missing
+                    # creation. So the cause clause is a DISJUNCTION — naming
+                    # only the collapse/rename sent an operator after a merge
+                    # that does not exist while the abort's own remedy named the
+                    # right repair for the same record.
                     _sup_why = ("the journal DID establish this record's "
-                                "address, but the fold could not land the "
-                                "supersede on it — the carrier was collapsed "
-                                "or renamed away")
+                                "address, but no Object carries it on this "
+                                "replay — a genuine divergence: either the "
+                                "carrier was collapsed or renamed, or the "
+                                "journal holds the address from a write that "
+                                "created nothing (a state op's or a mention "
+                                "stub's target id)")
                 else:
                     # Unreachable fail-safe: every shape this sweep can record
                     # has an arm above. Named so an added shape is LOUD here

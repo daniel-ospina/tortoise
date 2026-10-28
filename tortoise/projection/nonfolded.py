@@ -97,9 +97,11 @@ SHAPE_OBJECT_SUPERSEDED_MISS = "object-superseded-miss"
 #: "established then hard-deleted", and a graph probe would exonerate a graph
 #: whose journal is simply incomplete.
 #:
-#: * :data:`OBJECT_ADDRESS_NONE` — no ``name`` and no ``id`` that is a
-#:   non-empty ``str``. PRESENCE, not writability: a NUL-bearing id IS an
-#:   address here, so this is not "an address the graph could not store".
+#: * :data:`OBJECT_ADDRESS_NONE` — NEITHER ``name`` nor ``id`` is a non-empty
+#:   ``str``. ⚠️ Symmetric on purpose: a record carrying ``{"name": 123}`` or
+#:   ``{"name": ""}`` DOES carry a name, so "no ``name``" was false for it.
+#:   PRESENCE, not writability: a NUL-bearing id IS an address here, so this is
+#:   not "an address the graph could not store".
 #: * :data:`OBJECT_ADDRESS_UNESTABLISHED` — carries ≥1 address, the journal
 #:   established none of them → the exempt shape.
 #: * :data:`OBJECT_ADDRESS_ESTABLISHED` — carries an address the journal DID
@@ -253,9 +255,15 @@ EXEMPT_SHAPES: dict[str, str] = {
         "`ObjectRegistered`, an `EntityMutated` state op (a rename `SET`ting "
         "the MERGE key), an `EventRecorded` mention stub. ID sources: a "
         "registration's id, a mention stub's DETERMINISTIC id, a state op's "
-        "TARGET id. An address the journal DID establish is a real target — "
-        "the fold missed because the carrier was collapsed away or renamed, "
-        "not because it never existed — so that record keeps refusing. "
+        "TARGET id. An address the journal DID establish is a real target, so "
+        "that record keeps REFUSING — but ⛔ its cause is NOT exclusively a "
+        "collapse/rename (#10211 review round 5): an ESTABLISHED address does "
+        "not imply a creation, because a state op's target id and a mention "
+        "stub's deterministic id are addresses the journal holds without "
+        "creating a node (a later registration re-ids the stub's). So the miss "
+        "is a genuine divergence with a DISJUNCTIVE cause — the carrier was "
+        "collapsed or renamed, OR the journal holds that address from a write "
+        "that created nothing. "
         "Because nothing could have produced the address, live folded nothing "
         "either and live/replay end in the SAME state — so this is NOT the tier "
         "of the neighbouring `edge-message-miss` exemption, which still "
@@ -491,15 +499,15 @@ NO_ADDRESS_INSTRUCTION = (
 )
 _NO_ADDRESS_REMEDY = (
     "A record of shape "
-    f"`{SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}` carries no name and no "
+    f"`{SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}` has neither a `name` nor an `id` "
+    "that is a non-empty string, so there is no creation THIS RECORD names "
+    "to add and no ordering it reports "
     # ⛔ SCOPED TO THE RECORD, not to the journal (#10211 review round 4): a
     # record with no address establishes NOTHING about the journal — its target
     # is unknown, so a missing creation for that unknown target is exactly what
     # cannot be ruled out. "the only repair is to fix the producing write" even
     # concedes that lines can be missing. Claiming "nothing out of order" for
     # the journal was an inference this record cannot support.
-    "id that is a non-empty string, so there is no creation THIS RECORD names "
-    "to add and no ordering it reports "
     # ⛔ "ITS repair", not "the only repair": `refusal_remedy` emits BOTH
     # sentences for a MIXED set, and an unscoped exclusivity claim then tells
     # the caller to reconcile the journal AND that reconciling it is not the

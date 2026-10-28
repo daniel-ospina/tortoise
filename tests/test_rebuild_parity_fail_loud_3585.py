@@ -2371,6 +2371,19 @@ def test_classify_object_supersede_unregistered_is_its_own_exempt_shape():
     assert classify_terminalizer_miss(
         "ObjectSuperseded", object_address=OBJECT_ADDRESS_NONE,
     ) == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS
+    # ⛔ THE PREDICATE IS SYMMETRIC (#10211 review round 5): every one of these
+    # CARRY something that is not an address — `{"name": 123}` and
+    # `{"name": ""}` carry a NAME — so the operator strings must say "neither
+    # `name` nor `id` is a non-empty string", not "carries no name", which was
+    # false for exactly these records.
+    from tortoise.projection import (
+        journal_object_established,
+        supersede_object_address,
+    )
+    _journal = [{"type": "ObjectRegistered", "id": "obj-sym", "name": "SYM"}]
+    _est = journal_object_established(_journal)
+    for _rec in ({"name": 123}, {"name": ""}, {"id": ""}, {"id": None}, {}):
+        assert supersede_object_address(_rec, _est) == OBJECT_ADDRESS_NONE, _rec
     assert SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS not in EXEMPT_SHAPES, (
         "the no-address case has nothing checkable in it, so 'the journal "
         "never established it' is unfalsifiable — it must keep refusing")
@@ -3127,7 +3140,7 @@ def test_no_address_supersede_refuses_with_its_own_shape_and_remedy(
     # separate copies of the same instruction, and only the abort text is
     # satisfied by `refusal_remedy`'s sentence.
     detail = ei.value.events[0].detail
-    assert "no `name` and no `id` that is a non-empty string" in detail, detail
+    assert "neither `name` nor `id` is a non-empty string" in detail, detail
     # ⛔ THE ONE-HOME TIE (#10211 review round 2): the receipt must render the
     # SAME instruction constant the run-boundary remedy appends. Measured: the
     # pin below (`NO_ADDRESS_INSTRUCTION in _NO_ADDRESS_REMEDY`) ties the two
@@ -3154,7 +3167,9 @@ def test_no_address_supersede_refuses_with_its_own_shape_and_remedy(
 
 def test_exempt_receipt_says_the_target_was_never_established(env):
     """PIN `#10204` (AX receipt, #9202 rule 3 / `#10183`): the exempt record's
-    in-band receipt says the target was never established and NOTHING WAS LOST.
+    in-band receipt says the target was never established and makes NO LOSS
+    VERDICT — the loss claim it used to carry is the shape's own DEGRADED
+    GUARANTEE, which `__str__` appends to the same line.
 
     FAILS IF: the receipt keeps the bare "supersede matched no Object" — which
     is accurate and useless: it sends a caller hunting a repair that does not
