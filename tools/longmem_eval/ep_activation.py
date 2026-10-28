@@ -54,11 +54,14 @@ be unit-tested without a database.
 """
 from __future__ import annotations
 
-import math
 import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# The preamble above is PINNED to exactly `import sys` by
+# tests/test_entry_point_python_guard.py (`_guard_index`), so `math` — #10137's
+# `math.isfinite` — sits BELOW the guard with the rest of the stdlib imports
+# rather than in isort's alphabetical slot above it.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/longmem_eval/ep_activation.py requires Python >= 3.12 (got "
@@ -66,6 +69,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import logging
+import math
 import time
 
 logger = logging.getLogger(__name__)
