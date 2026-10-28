@@ -10,8 +10,8 @@ carve_out_run: bool}.
 python-ci legs (2026-09-02-ci-audit F1/F2 — a docs-only PR paid ~59 runner-
 min slow + 23.5 min carve-out). select() now emits the diff-gate contract on
 every return path: slow_run (test-slow runs), slow_selected (the slow files
-test-slow should run — surface-matched on tier-2 PRs, the whole committed
-leg set = slow_files - carve_out on full selections), carve_out_run (the
+test-slow should run — surface-matched on tier-2 PRs, the whole GATING leg set
+= slow_gating_files() on full selections), carve_out_run (the
 carve-out job runs — full selections or a matched surface owns carve-out
 files). The workflow's changes job echoes these; docs/website-only PRs
 (surfaces == []) skip both legs, trunk (push) + nightly (schedule) +
@@ -2698,12 +2698,13 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
 # 23m31 carve-out); select() now emits slow_run / slow_selected /
 # carve_out_run on every return path so the workflow can diff-gate them.
 def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
-    """Surface -> slow files that run in test-slow (slow minus carve-out).
+    """Surface -> slow files that run in test-slow (the GATING slow pool).
 
     The slow carve-out files (test_reaper et al.) run in the dedicated
     URI-unset carve-out job (epic #1647 E2E-4), never the docker slow legs
-    — the test-slow committed leg set is exactly slow_files - carve_out
-    (pinned by the workflow's drift-guard step, #1471).
+    — the test-slow leg set is exactly `slow_gating_files()`: slow_files minus
+    carve_out minus the non-gating lane (#10194) (pinned by the workflow's
+    drift-guard step, #1471).
 
     First-match semantics (#2159 review P2-2): classify_test_file returns
     the FIRST surface whose patterns match (dict order api, battery, core,
@@ -2711,10 +2712,8 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     under two surfaces therefore owns to the first — a tier-2 PR touching
     ONLY the second surface will not run it (full runs stay the backstop).
     test_diff_gate_keys_emitted_on_every_return_path pins every
-    slow_selected subset to slow_files - carve_out; the tier-2 intersection
+    slow_selected subset to slow_gating_files(); the tier-2 intersection
     tests pin the per-surface splits."""
-    slow = set(manifest.get("slow_files", []))
-    carve = set(manifest.get("carve_out", []))
     # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
     # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
     # and they build their collect-only input from `slow_selected`. A
@@ -2727,9 +2726,17 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     # tests/test_uri_requiring_selection.py). No file is in both lanes today;
     # the guard test pins that, and handles a future relocation rather than
     # forbidding it.
+    # #10194: the POOL is `slow_gating_files()` — the single definition that also
+    # drops the non-gating lane — so a lane file can never ride the tier-2 slow
+    # leg even when the surface the PR touched is the one that owns it. The
+    # `slow`/`carve` bindings that used to be here are GONE rather than chained
+    # (three expressions of the same pool is the drift this consolidates), which
+    # is why the two local assignments above them were deleted, not re-pointed:
+    # a leftover `slow` would be an unused binding that ruff rejects (F841) and
+    # a second, silently-wrong definition for the next reader to reuse.
     uri_requiring = uri_requiring_files(manifest)
     by_surface: dict[str, set[str]] = {}
-    for f in sorted(slow - carve - uri_requiring):
+    for f in sorted(slow_gating_files(manifest) - uri_requiring):
         by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
     return by_surface
 
@@ -2742,19 +2749,27 @@ def carve_out_by_surface(manifest: dict) -> dict[str, set[str]]:
     return by_surface
 
 
-def _full_selection(manifest: dict, slow: set[str]) -> dict:
+def _full_selection(manifest: dict) -> dict:
     """push/schedule/shared-module/unknown-path selection (tier 3).
 
     The trunk + nightly backstop: full matrix AND both diff-gated legs run
     (test-slow + test-carve-out) — main can never lose slow/carve-out
     coverage to a PR-shape gate."""
-    carve = set(manifest.get("carve_out", []))
+    # #10194: the full selection's slow leg is `slow_gating_files()` — the ONE
+    # definition of the gating slow pool (slow - carve-out - non-gating lane) —
+    # so "evals paused" is true on the push/trunk path too, not only on a PR.
+    # There is deliberately NO pool parameter: the caller's `slow` set is the
+    # pre-exclusion declaration, and threading it in here is how this function
+    # would grow a second, quietly-different pool (#10206 review).
+    gating_slow = slow_gating_files(manifest)
     return {"surfaces": list(manifest["surfaces"]), "full": True,
-            "test_files": "ALL", "slow_files": sorted(slow),
+            "test_files": "ALL", "slow_files": sorted(gating_slow),
             # #2147/#2148: full selection always runs both legs; slow_selected
-            # carries the whole committed leg set (slow - carve-out).
+            # carries the whole GATING leg set — `slow_gating_files()` (slow minus
+            # carve-out minus the non-gating lane), which is the same pool the
+            # `slow_files` key above emits.
             "slow_run": True, "carve_out_run": True,
-            "slow_selected": sorted(slow - carve)}
+            "slow_selected": sorted(gating_slow)}
 
 
 def select(changed_files: list[str], event: str, manifest: dict,
@@ -2800,6 +2815,16 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # construction, whatever a previous call recorded.
         explain.clear()
     slow = set(manifest.get("slow_files", []))
+    # #10194: `slow_gating` is what every return path EMITS as `slow_files`, and
+    # it is the same pool the legs are built from (`slow_gating_files()`: slow
+    # minus carve-out minus the non-gating lane). Before #10194 the two were
+    # equal, so emitting the raw config list was harmless; now they differ, and
+    # emitting the raw list would hand the `changes` job a candidate pool whose
+    # lane members the legs then refuse — a matrix that disagrees with the
+    # selection, which is the #1266 drift class. `slow` is kept separately for
+    # the two places that mean "is this file DECLARED slow" (the tier-1
+    # subtraction and the full-vs-partial decision).
+    slow_gating = slow_gating_files(manifest)
     # #1371: slow files run ONLY in the test-slow job — never in the fast
     # gate's tier-1/tier-2 selections (they are already covered there).
     # Every return path carries slow_files so the workflow's changes job can
@@ -2807,7 +2832,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # #2147/#2148: every return path ALSO carries slow_run / slow_selected /
     # carve_out_run (the test-slow + test-carve-out diff-gate contract).
     if event in ("push", "schedule"):
-        return _full_selection(manifest, slow)
+        return _full_selection(manifest)
 
     tier1 = set(manifest.get("tier1", [])) - slow
     # Filter out non-python-relevant paths — but a path that a SOURCE_PATTERNS
@@ -2876,8 +2901,9 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # docs-only vector could not fail: with tier1 ∩ uri_requiring == []
         # the output is byte-identical with and without the subtraction).
         return {"surfaces": [], "full": False,
-                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)),
-                "slow_files": sorted(slow),
+                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)
+                                     - on_demand_files(manifest)),
+                "slow_files": sorted(slow_gating),
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
 
@@ -2961,7 +2987,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
                          if c.startswith(SHARED_MODULES)
                          or _is_linter_policy_path(c)}
                 explain["unknown_all_blast"] = set(unknown) <= blast
-        return _full_selection(manifest, slow)
+        return _full_selection(manifest)
 
     # No separate `SHARED_MODULES` / linter-policy returns here: both causes were
     # appended to `reasons` above, so the `if reasons:` return already answered
@@ -3014,6 +3040,13 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # Tier-2 ONLY: the `full` path returned above and keeps these files, because
     # a full leg HAS the URI.
     files -= uri_requiring_files(manifest)
+    # #10194: and the NON-GATING LANE, on the tier-2 path too. The five eval
+    # files in `slow_files` and the 37 in the fast pool are all still REGISTERED
+    # in a surface, so without this subtraction a PR that touches the `eval`
+    # surface re-selects all of them and they gate again — the exclusion would
+    # hold on `push` and silently fail on every PR, which is the direction that
+    # reads green. (`slow_selected` is covered by `slow_gating_files()`.)
+    files -= on_demand_files(manifest)
     # #2147/#2148 tier-2: test-slow runs the slow files owned by the matched
     # surfaces (slow_selected — carve-out files excluded: they run in the
     # carve-out job when it triggers, never the docker slow legs); test-carve-
@@ -3029,7 +3062,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
         if s in carve_by_surface:
             carve_out_run = True
     return {"surfaces": surfaces, "full": False, "test_files": sorted(files),
-            "slow_files": sorted(slow),
+            "slow_files": sorted(slow_gating),
             "slow_run": bool(slow_selected), "carve_out_run": carve_out_run,
             "slow_selected": sorted(slow_selected)}
 
@@ -3219,6 +3252,47 @@ def carve_out_files(manifest: dict) -> set[str]:
     return set(manifest.get("carve_out", []))
 
 
+# #10194: the SUBTREE form of an `on_demand:` entry — `dir/**`. The lane was
+# built for one FILE at a time, and a subtree of 42 eval files registered that
+# way is 42 lines a lane has to keep re-adding (a new eval test file would
+# silently re-enter the gate, which is the failure the owner decision exists to
+# stop). An entry ending in `/**` means "every test file under this directory",
+# expanded against DISK by `on_demand_subtree_files()`.
+ON_DEMAND_SUBTREE_SUFFIX = "/**"
+
+
+def on_demand_subtree_prefixes(manifest: dict) -> tuple[str, ...]:
+    """The lane's SUBTREE entries (`dir/**`), as `dir/` prefixes, in order."""
+    prefixes = []
+    for entry in manifest.get("on_demand") or []:
+        if isinstance(entry, str) and entry.endswith(ON_DEMAND_SUBTREE_SUFFIX):
+            prefixes.append(entry[:-len(ON_DEMAND_SUBTREE_SUFFIX)] + "/")
+    return tuple(prefixes)
+
+
+def on_demand_subtree_files(manifest: dict) -> set[str]:
+    """Every `test_*.py` under a subtree lane entry, tests/-relative (#10194).
+
+    Disk-derived on purpose: the lane's meaning is "this SUBTREE does not gate",
+    so a file added to `tests/eval/` tomorrow is off the gate without a config
+    edit — the opposite of the literal form, where the new file silently
+    re-enters the gating shards until someone notices. The expansion happens
+    inside `on_demand_files()`, so every consumer (the leg producers, the
+    coverage guards, the runners) sees ONE set.
+
+    A prefix with no directory yields nothing rather than raising: the dead-entry
+    report in `leg_coverage_issues()` is what NAMES it.
+    """
+    found: set[str] = set()
+    for prefix in on_demand_subtree_prefixes(manifest):
+        base = TESTS_DIR / prefix
+        if not base.is_dir():
+            continue
+        found.update(str(p.relative_to(TESTS_DIR))
+                     for p in sorted(base.rglob("test_*.py")))
+    return found
+
+
 def on_demand_files(manifest: dict) -> set[str]:
     """Files excluded from every PRE-MERGE leg — a lane with two runners.
 
@@ -3238,7 +3312,64 @@ def on_demand_files(manifest: dict) -> set[str]:
     # `or []` is the fix; a test pins the None form specifically, because the
     # obvious `on_demand=[]` spelling in a test is a Python list and never
     # reproduces the state a human actually types into the YAML.
-    return set(manifest.get("on_demand") or [])
+    #
+    # #10194: a `dir/**` entry is expanded to the test files UNDER it, so the
+    # accessor keeps answering the question every consumer asks — "is this FILE
+    # in the lane?" — and no caller needs a second, pattern-aware membership
+    # test. A caller that compared raw entries would silently see `eval/**` as a
+    # filename that matches nothing.
+    entries = manifest.get("on_demand") or []
+    literals = {e for e in entries
+                if not (isinstance(e, str)
+                        and e.endswith(ON_DEMAND_SUBTREE_SUFFIX))}
+    return literals | on_demand_subtree_files(manifest)
+
+
+def on_demand_literal_runner_files(manifest: dict) -> set[str]:
+    """Lane files the EMBEDDED-shape runner owns (`evals-on-demand.yml`).
+
+    #10194 moved the two eval subtrees to their own docker-shaped runner
+    (`.github/workflows/eval-suite-manual.yml`), so the lane now has two runners
+    with different environments. What is left for the embedded one is the lane's
+    LITERAL entries — and a literal that merely happens to live INSIDE a subtree
+    stays here, because its own `on_demand` entry is what keeps this runner its
+    runner.
+
+    ⛔ Subtracting the subtree wholesale (`on_demand_files() -
+    on_demand_subtree_files()`) silently dropped `eval/retrieval/
+    test_integration.py` — the file `evals-on-demand.yml` was created for
+    (#4711) — and left the lane resolving to `test_perf_lane_volunteer_context.py`
+    alone, a file `perf-lane.yml` already runs. The workflow, the config comment
+    and `docs/ci/affected-test-selection.md` all still said the #4711 file ran
+    here, so nothing reddened: the resolver is in a `run:` heredoc, where no test
+    can see it. That is why the expression lives HERE, where it can be pinned
+    (#10206 review).
+    """
+    literals = {e for e in (manifest.get("on_demand") or [])
+                if isinstance(e, str)
+                and not e.endswith(ON_DEMAND_SUBTREE_SUFFIX)}
+    return (on_demand_files(manifest)
+            - on_demand_subtree_files(manifest)) | literals
+
+
+def slow_gating_files(manifest: dict) -> set[str]:
+    """The slow files a GATING leg may run: `slow_files - carve_out - lane`.
+
+    #10194: this is the ONE definition of the slow pool's gating membership.
+    Before it, three producers each computed it themselves — `push_legs()`
+    (`slow - carve_out`), `slow_leg_by_surface()` (`slow - carve - uri`), and
+    `_full_selection()` (`slow - carve`) — so a new exclusion had to be added in
+    three places or it was half-adopted (the failure `on_demand_files()`'s own
+    docstring names). They all read this now.
+
+    Subtracting the non-gating lane here is what lets the lane OVERLAP
+    `slow_files`: the config keeps the declaration (the file still needs a
+    `durations` weight and a classification), and the LEG drops it — exactly the
+    way slow carve-out files are handled.
+    """
+    return (set(manifest.get("slow_files") or [])
+            - carve_out_files(manifest)
+            - on_demand_files(manifest))
 
 
 def uri_requiring_files(manifest: dict) -> set[str]:
@@ -3426,11 +3557,12 @@ def slow_leg_files(manifest: dict) -> list[str]:
     filtered per leg. Sorted for determinism: the LPT pack's tie-break reads
     the input order.
     """
-    slow = {f[:-3] if f.endswith(".py") else f
-            for f in manifest.get("slow_files", [])}
-    carve = {f[:-3] if f.endswith(".py") else f
-             for f in carve_out_files(manifest)}
-    return sorted(slow - carve)
+    # #10194: read through `slow_gating_files()`, the single definition of the
+    # gating slow pool, so the in-workflow drift guard that compares the expanded
+    # legs against THIS function cannot disagree with the producer that built
+    # them. (Bare names: the workflow's matrix format.)
+    return sorted(f[:-3] if f.endswith(".py") else f
+                  for f in slow_gating_files(manifest))
 
 
 def slow_shard_entries(manifest: dict) -> list[dict]:
@@ -3704,7 +3836,10 @@ def push_legs(manifest: dict) -> dict:
     (#6145) — the per-leg budget is a property of the SHARD, not a workflow
     literal.
     """
-    slow = set(manifest.get("slow_files", []))
+    # #10194: `slow` is the GATING pool — `slow_gating_files()` already removed
+    # carve-out and the non-gating lane, so the subtraction below is idempotent
+    # and kept only because the emitted `slow` key's shape is pinned.
+    slow = slow_gating_files(manifest)
     carve_out = carve_out_files(manifest)
     on_demand = on_demand_files(manifest)
     fast = fast_pool(manifest)
@@ -3807,6 +3942,60 @@ def build_shard_entries(files: list[str], durations: dict,
     return entries
 
 
+def non_gating_report(manifest: dict) -> str:
+    """#10194: the OBSERVABILITY line for the gating run.
+
+    A membership change is invisible in a CI log unless the log says what left:
+    "the evals are not running" and "the evals are excluded on purpose" look
+    identical from a green run. This prints, on every run, which lane entries are
+    non-gating, how many files each one resolves to, and the shard → file-count
+    map the run is about to expand — so a reader can SEE that the 42 files are
+    absent from all 9 shards rather than infer it from a total.
+    """
+    lane = on_demand_files(manifest)
+    prefixes = on_demand_subtree_prefixes(manifest)
+    lines = [f"non-gating lane: {len(lane)} file(s) excluded from every gating leg"]
+    literals = sorted(e for e in manifest.get("on_demand") or []
+                      if not (isinstance(e, str)
+                              and e.endswith(ON_DEMAND_SUBTREE_SUFFIX)))
+    # Attribute every file to exactly ONE entry, so the itemization RECONCILES
+    # with the total. A literal that also sits inside a subtree (`eval/
+    # retrieval/test_integration.py` inside `eval/**`) was listed twice and the
+    # lines summed to 44 against a 43-file total — in the one feature whose
+    # whole purpose is an auditable count (#10206 review).
+    accounted = 0
+    for entry in literals:
+        inside = next((p for p in prefixes if entry.startswith(p)), None)
+        if inside:
+            lines.append(f"  {entry} -> covered by {inside}** below")
+        else:
+            lines.append(f"  {entry} -> 1 file")
+            accounted += 1
+    for prefix in prefixes:
+        n = sum(1 for f in lane if f.startswith(prefix))
+        lines.append(f"  {prefix}** -> {n} file(s)")
+        accounted += n
+    if accounted != len(lane):
+        lines.append(f"  ⚠️ itemization does not reconcile: {accounted} of "
+                     f"{len(lane)} file(s) attributed — an `on_demand` entry "
+                     f"resolved to files no line above claims")
+    legs = push_legs(manifest)
+    lines.append(f"gating fast shards: {len(legs['shards'])} "
+                 f"(file counts below EXCLUDE the lane above)")
+    for shard in legs["shards"]:
+        lines.append(f"  test ({shard['name']}): {len(shard['files'])} files, "
+                     f"est {shard['est_seconds']:.0f}s, "
+                     f"watchdog {shard['watchdog_minutes']:.0f}m")
+    lines.append(f"gating slow legs: {len(legs['slow_shards'])} "
+                 f"({len(legs['slow'])} file(s))")
+    lines.append(f"gating carve-out legs: {len(legs['carve_shards'])} "
+                 f"({len(legs['carve_out'])} file(s))")
+    total = sum(len(s["files"]) for s in legs["shards"])
+    lines.append(f"gating fast-pool total: {total} file(s); "
+                 f"non-gating total: {len(lane)} file(s)")
+    return "\n".join(lines)
+
+
 def fast_matrix_include(shards: list[dict]) -> dict:
     """#6135: the GitHub Actions matrix the `test` job expands.
 
@@ -3873,7 +4062,8 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
         issues.append(f"slow shard pack runs a file twice: {dupes}")
     if set(covered) != slow_leg:
         issues.append(
-            f"slow shards do not cover slow_files - carve_out exactly: "
+            f"slow shards do not cover slow_gating_files() "
+            f"(slow_files - carve_out - the non-gating lane, #10194) exactly: "
             f"missing={sorted(slow_leg - set(covered))} "
             f"extra={sorted(set(covered) - slow_leg)}")
     if carve_out & ENV_BROKEN_FILES:
@@ -3887,8 +4077,17 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     # the lane is not a portability regression.
     if "on_demand" in manifest and not on_demand:
         issues.append("on_demand lane is present but EMPTY — it excludes nothing")
-    if on_demand & slow:
-        issues.append(f"on-demand/slow overlap (still on the merge path): {sorted(on_demand & slow)}")
+    # #10194: the lane may now legitimately OVERLAP the config's `slow_files`
+    # (five eval files are declared slow AND in the lane), the same way slow
+    # carve-out files do — `slow_files` keeps the declaration and the LEG drops
+    # the file. So the invariant is about the LEG: a lane file that reaches a
+    # gating slow leg is still on the merge path, and `slow_gating_files()` is
+    # the single place that subtracts it. Reading this as a config-set overlap
+    # would red a correct manifest and invite deleting the lane entry.
+    gating_slow = set(slow_gating_files(manifest))
+    if on_demand & gating_slow:
+        issues.append("on-demand file leaked into a gating slow leg: "
+                      f"{sorted(on_demand & gating_slow)}")
     # REACHABLE but DORMANT with the current config: `fast_pool()` filters the
     # lane out, and `push_extra` is EMPTY today, so this branch does not fire on
     # the real manifest. It fires when a `push_extra` entry names a lane file —
@@ -3925,6 +4124,17 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     for f in sorted(on_demand):
         if not (TESTS_DIR / f).exists():
             issues.append(f"on-demand {f} has no tests/{f} (dead entry)")
+    # #10194: a SUBTREE entry gets the same dead-entry treatment, in the form
+    # that can actually be wrong for it — the directory is gone, or it is there
+    # and holds no test file, in which case the exclusion reads as a saving while
+    # excluding nothing (the same false assurance the literal case guards).
+    for prefix in on_demand_subtree_prefixes(manifest):
+        if not (TESTS_DIR / prefix).is_dir():
+            issues.append(f"on-demand subtree {prefix}** has no tests/{prefix} "
+                          "directory (dead entry)")
+        elif not any(f.startswith(prefix) for f in on_demand):
+            issues.append(f"on-demand subtree {prefix}** holds no test files "
+                          "(dead entry — it excludes nothing)")
     for f in manifest.get("push_extra", []):
         if f in classified:
             issues.append(f"push_extra {f} is a classified top-level file (move it into a surface)")
@@ -4157,14 +4367,22 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
         tier-2 path does not subtract ENV_BROKEN_FILES, so a PR touching a
         kept file can still place a member of the set in a tier-2 fast shard.
         That is a separate question and is NOT changed here.
-      * `fast_pool()` also omits `on_demand`, which this function does not
-        subtract. That is LATENT rather than live only because no on_demand
-        file is currently a member of any surface, and the universe this check
-        walks is the surfaces — so such a file cannot reach it today. Add one
-        to a surface and it becomes this same false positive.
+      * `fast_pool()` also omits `on_demand`. That WAS unsubtracted here, and
+        LATENT rather than live only while no on_demand file was a member of any
+        surface; #10194 made the lane hold 42 surface-registered files, so it is
+        subtracted above (see the #10194 note).
 
     The durable rule: this subtraction must stay in sync with `fast_pool`'s own
     filter, since the two are complements of the same pool.
+
+    #10194: `on_demand` is now subtracted HERE too. The paragraph above called
+    that case LATENT "only because no on_demand file is currently a member of
+    any surface" — and #10194 ends exactly that premise: the 42 eval files stay
+    registered in their surfaces (that registration is what classifies them) and
+    are excluded from the gate by the LANE, so without this subtraction
+    `--integrity` prints a permanent 36-file "coverage hole" that is not one.
+    The stale-warning cost the paragraph describes is the reason it is fixed with
+    the change rather than after a confused reader reports it.
 
     The cost of leaving it in was not cosmetic: `--integrity` printed
     `1 manifest fast files are in NO shard (full-matrix coverage hole, #1266)`
@@ -4182,6 +4400,7 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
     fast -= slow
     fast -= carve_out
     fast -= ENV_BROKEN_FILES
+    fast -= on_demand_files(manifest)
     halfset = {f for fs in halves.values() for f in fs}
     return sorted(f for f in fast if f[:-3] not in halfset)
 
@@ -5404,6 +5623,14 @@ def main() -> int:
     ap.add_argument("--split", action="store_true",
                     help="#1473/#6135: LPT-pack the stdin JSON test-file list "
                          "into the configured number of shards")
+    ap.add_argument("--non-gating-report", action="store_true",
+                    help="#10194: print the non-gating lane and the gating "
+                         "shard → file-count map (observability, exit 0)")
+    ap.add_argument("--non-gating-subtree-files", action="store_true",
+                    help="#10194: print the SUBTREE entries' files as "
+                         "pytest-pathable `tests/…` entries, one per line — the "
+                         "resolver the manual eval workflow feeds straight to "
+                         "pytest")
     args = ap.parse_args()
 
     manifest = load_manifest()
@@ -5486,6 +5713,33 @@ def main() -> int:
             print("   review: config/ci-surfaces.yml — move a file to another surface if the default is wrong.")
         else:
             print("✅ manifest already covers all test files")
+        return 0
+
+    if args.non_gating_report:
+        print(non_gating_report(manifest))
+        return 0
+
+    if args.non_gating_subtree_files:
+        # #10194: the SUBTREE entries only — the literal entries have their own
+        # runners (evals-on-demand / perf-lane) and their own environments, so a
+        # workflow that ran the whole lane would run files it does not own, in a
+        # shape it was not built for (the embedded redislite lane vs the docker
+        # one). Printed empty rather than failing here: the caller fails closed
+        # on an empty list, which is the state that must never read as a green
+        # "ran nothing" (same rule as evals-on-demand's step).
+        #
+        # ⛔ The output is `tests/<relative>`, NOT `on_demand_subtree_files()`'s
+        # raw tests/-relative form. The caller feeds these straight to pytest
+        # from the repo root, where a bare `eval/ask/test_ask_corpus.py` does not
+        # exist — pytest exits 4 with "file or directory not found" and the lane
+        # runs ZERO files while its own guard reports green. Verified live: the
+        # first cut of this verb printed the bare form and every dispatch of
+        # `eval-suite-manual.yml` would have reddened on path validation.
+        # `run_affected.sh` prints the same pytest-pathable shape for the same
+        # reason; the accessor stays tests/-relative because every other
+        # consumer (the leg producers, the guards) indexes the manifest that way.
+        for f in sorted(on_demand_subtree_files(manifest)):
+            print(f if f.startswith("tests/") else f"tests/{f}")
         return 0
 
     if args.emit_push_matrix:

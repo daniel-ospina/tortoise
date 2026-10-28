@@ -680,8 +680,22 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
     Asserted on the SURFACE and the guard FILE, not on non-emptiness: every
     one of these diffs selects its surface without the census entry, so a bare
     `surfaces` check can only pass.
+
+    ⛔ #10194 REVERSED THE SECOND HALF, DELIBERATELY (owner decision A,
+    2026-10-27): `tests/eval/**` is now the NON-GATING lane, so the census no
+    longer runs on any PR — a diff to `tortoise/retrieval.py` selects 158 files
+    and NONE of them is the census. The surface mapping this test was built to
+    prove is still correct and still asserted; what it must now also assert is
+    the CONSEQUENCE, so nobody reads a green PR as "the census ran". The
+    published §2.3 readings can go stale until evals reopen; that is the cost
+    the owner accepted, and it is recorded here rather than left to be
+    rediscovered. Reachable from `eval-suite-manual.yml`, never from a merge.
     """
+    from tools.ci_selection import on_demand_files
     guard = "eval/write_path/test_value_span_census_2684.py"
+    assert guard in on_demand_files(load_manifest()), (
+        f"{guard} must be in the non-gating lane — #10194 took the eval subtree "
+        "out of the merge gate; if it left the lane it is gating again")
     for changed, surface in (
             ("tortoise/extractor_v2.py", "core"),
             ("tortoise/retrieval.py", "sdk"),
@@ -695,10 +709,11 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
             f"{changed} selects {r['surfaces']}, not {surface} — the premise "
             "of this pin changed; re-derive it"
         )
-        assert guard in r["test_files"], (
-            f"{changed} does not select {guard} — the census sleeps on the "
-            "diff that can out-date the numbers it publishes "
-            f"(selected: {r['test_files']})"
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert guard not in selected, (
+            f"{changed} selects {guard} again — a non-gating lane file is back "
+            "on a pre-merge leg, which is the regression #10194 exists to "
+            f"prevent (selected: {sorted(selected)[:8]} ...)"
         )
 
 
@@ -2225,13 +2240,22 @@ def test_tools_longmem_change_selects_eval_not_tier1():
     assert r["full"] is False
     assert r["surfaces"] == ["eval"]
     # #6137 moved `eval/retrieval/test_run.py` out of the fast pool into the
-    # slow legs, so the witness that "eval was selected" is another eval file
-    # that stayed — and the moved one is asserted to still run PRE-MERGE, one
-    # leg over (a relocation that dropped it instead would be a coverage loss,
-    # which is the whole thing #6137 must not do).
-    assert "eval/retrieval/test_1348.py" in r["test_files"]
+    # slow legs, so the witness that "eval was selected" had to be another eval
+    # file that stayed.
+    # #10194 moved BOTH of them into the non-gating lane, so the witness is now
+    # an `eval`-surface file that is NOT under the eval/longmem subtrees —
+    # `test_measure_ask_distilled.py` (registered on `eval`, at the top of
+    # `tests/`). The property under test is unchanged: an eval-harness diff must
+    # select the eval surface's tests and must NOT collapse to tier-1 smoke.
+    # What changed is that the subtree's own files no longer ride along, which
+    # is asserted here rather than merely allowed.
+    assert "test_measure_ask_distilled.py" in r["test_files"], r["test_files"]
+    assert "eval/retrieval/test_1348.py" not in r["test_files"], (
+        "eval/ files are the non-gating lane (#10194) — they must not reach a "
+        "tier-2 fast shard")
     assert "eval/retrieval/test_run.py" not in r["test_files"]
-    assert "eval/retrieval/test_run.py" in r["slow_selected"] and r["slow_run"] is True
+    assert "eval/retrieval/test_run.py" not in r["slow_selected"], (
+        "#10194: a lane file must not ride the tier-2 slow leg either")
     assert set(r["test_files"]) != _tier1()
 
 
@@ -4320,8 +4344,14 @@ def test_expensive_eval_integration_is_in_the_on_demand_lane():
 def test_slow_files_emitted_on_every_return_path():
     # #1371: the changes job reads slow_files from every selection mode — a
     # missing key would KeyError the nightly/schedule run or empty test-slow.
+    # #10194: the emitted set is the GATING pool (`slow_gating_files()`: slow
+    # minus carve-out minus the non-gating lane), because the changes job feeds
+    # `slow_matrix`/the legs straight out of it. Asserting the raw config list
+    # would pin the pool that the legs deliberately no longer run.
+    from tools.ci_selection import slow_gating_files
     m = load_manifest()
-    expected = set(m["slow_files"])
+    expected = set(slow_gating_files(m))
+    assert expected, "the gating slow pool must not be empty — vacuous otherwise"
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4340,9 +4370,12 @@ def test_diff_gate_keys_emitted_on_every_return_path():
     slow_run / slow_selected / carve_out_run — the changes job echoes them,
     so a missing key would KeyError the echo (or the nightly run) and
     silently mis-gate a leg. slow_selected must always be a subset of
-    slow_files - carve_out (test-slow's committed leg set)."""
+    slow_gating_files() (test-slow's leg set: slow minus carve-out minus the
+    non-gating lane, #10194)."""
+    from tools.ci_selection import slow_gating_files
+
     m = load_manifest()
-    leg_set = set(m["slow_files"]) - set(m["carve_out"])
+    leg_set = set(slow_gating_files(m))
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4355,7 +4388,7 @@ def test_diff_gate_keys_emitted_on_every_return_path():
         for key in ("slow_run", "slow_selected", "carve_out_run"):
             assert key in r, f"missing {key} for {changed}/{event}"
         assert set(r["slow_selected"]) <= leg_set, \
-            f"slow_selected must be subset of slow_files - carve_out ({changed}/{event})"
+            f"slow_selected must be subset of slow_gating_files() ({changed}/{event})"
 
 
 def test_docs_only_skips_slow_and_carve_out():
@@ -4378,10 +4411,21 @@ def test_docs_only_skips_slow_and_carve_out():
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
     """#2147/#2148: push/schedule/unknown-path/shared-module -> full:
     test-slow AND test-carve-out run, and slow_selected is the whole
-    committed leg set (slow_files - carve_out) — the trunk + nightly
-    backstop is never weakened by the PR-shape gates."""
+    committed leg set — the trunk + nightly backstop is never weakened by the
+    PR-shape gates.
+
+    #10194: the leg set is `slow_gating_files()` (slow - carve-out - the
+    non-gating lane). The backstop claim survives the membership change — the
+    pool the legs run is still the WHOLE of that pool — but it no longer means
+    "every slow_files entry": five eval files stay declared slow and are
+    subtracted, exactly the way carve-out files already were."""
+    from tools.ci_selection import slow_gating_files
     m = load_manifest()
-    leg_set = sorted(set(m["slow_files"]) - set(m["carve_out"]))
+    leg_set = sorted(slow_gating_files(m))
+    assert leg_set, "the full selection's slow leg must not be empty"
+    assert len(leg_set) < len(m["slow_files"]), (
+        "this test is about the pool the legs actually run; if it equals the "
+        "raw config list the subtraction has stopped happening")
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4430,11 +4474,17 @@ def test_tier2_carve_out_run_when_surface_owns_carve_files():
 
 def test_full_mode_selection_unchanged():
     # #1371: push/schedule full mode keeps its exact contract (test_files ALL)
-    # and only gains the slow_files key.
+    # and only gains the slow_files key. #10194: the emitted slow pool is the
+    # GATING pool, so the count is compared against the same accessor the
+    # emitter reads — never the raw config list.
+    from tools.ci_selection import slow_gating_files
     r = _sel([], "push")
     assert r["full"] is True
     assert r["test_files"] == "ALL"
-    assert len(r["slow_files"]) == len(load_manifest()["slow_files"])
+    assert len(r["slow_files"]) == len(slow_gating_files(load_manifest()))
+    assert len(slow_gating_files(load_manifest())) < len(load_manifest()["slow_files"]), (
+        "the gating pool must be a strict subset of the declared slow files, "
+        "or #10194's lane subtraction stopped happening")
 
 # ── #1429: auto-registration of unlisted test files ──────────────────────
 
@@ -4900,7 +4950,9 @@ def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
     #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
-    from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
+    from tools.ci_selection import (  # noqa: I001
+        ENV_BROKEN_FILES, on_demand_files, push_legs,
+    )
     m = load_manifest()
     legs = push_legs(m)
     carve = {f.replace(".py", "") for f in m["carve_out"]}
@@ -4912,9 +4964,18 @@ def test_push_legs_partitions_every_classified_file():
     fast = {f.replace(".py", "") for f in classified if f not in m["slow_files"]}
     fast |= {f.replace(".py", "") for f in m.get("push_extra", [])}
     broken = {f.replace(".py", "") for f in ENV_BROKEN_FILES}
+    # #10194: the non-gating lane is a subtraction from the fast pool just like
+    # the carve-out, and it is read from the ONE accessor (a literal list here
+    # would be a second definition of the lane that could drift from the one
+    # `fast_pool()` subtracts — the partition would then fail for the right
+    # reason at the wrong time).
+    lane = {f[:-3] if f.endswith(".py") else f for f in on_demand_files(m)}
+    assert lane, "the lane must be non-empty, or this subtraction proves nothing"
+    assert set().union(*(set(s["files"]) for s in legs["shards"])) & lane == set(), (
+        "a non-gating lane file reached a push shard")
     # #6135: the fast pool is partitioned across N shards, not two halves.
     shards = [set(s["files"]) for s in legs["shards"]]
-    assert set().union(*shards) == fast - broken - carve
+    assert set().union(*shards) == fast - broken - carve - lane
     assert sum(len(s) for s in shards) == len(set().union(*shards)), "leg overlap"
     # carve-out files never ride the docker legs (fast OR slow)
     for shard in shards:
@@ -6653,7 +6714,7 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     `durations` map on every run, so a slow file that grows reds THIS instead of
     silently restoring the merge ceiling:
 
-      * coverage — the legs partition `slow_files - carve_out` exactly, once
+      * coverage — the legs partition `slow_gating_files()` exactly, once
         each (no gap, no duplicate);
       * balance — no leg exceeds its fair share by more than the house
         `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
@@ -6679,7 +6740,8 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         f"a slow file rides more than one leg: "
         f"{sorted({f for f in flat if flat.count(f) > 1})}")
     assert set(flat) == set(slow_leg_files(m)), (
-        "the slow legs must cover slow_files - carve_out exactly: "
+        "the slow legs must cover slow_gating_files() "
+        "(slow_files - carve_out - the non-gating lane, #10194) exactly: "
         f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
         f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
     # balance: no leg above its fair share by more than the house band
@@ -6789,12 +6851,15 @@ def test_9017_block_states_the_derived_split_not_the_2_leg_era():
 
     Its per-file table is still a valid measurement (run 39165691659) but the
     SPLIT narrative wrapped around it is not: #9539 replaced the committed pair
-    with legs DERIVED from that same map (`slow_files - carve_out` LPT-packed
+    with legs DERIVED from that same map (`slow_gating_files()` — slow minus
+    carve-out minus the non-gating lane since #10194 — LPT-packed
     into `slow_shards` = 5). In the present tense, "the LPT pack of that map into
     two legs of 18.945m / 18.933m" and "2.11x the heavier leg" both contradict
     the lane the reader is about to configure — including the number the per-leg
-    `matrix.watchdog_minutes` follow-up would size the 40m literal against (the
-    heavier DERIVED leg is 7.58m, 5.3x, not 18.95m at the 2.0x floor). This is
+    `matrix.watchdog_minutes` follow-up would size the 40m literal against (at
+    the time of that review the heavier DERIVED leg was 7.58m, 5.3x, not 18.95m
+    at the 2.0x floor; #10194 has since taken 5.26m out of the pool, so the live
+    figure must be RE-DERIVED, never quoted). This is
     exactly the rotation the durations header asks for, and the same failure this
     block's own history records ("they rot on every re-cut, and this comment has
     now been wrong twice for that reason").
@@ -7263,7 +7328,8 @@ def test_diff_gated_jobs_consume_changes_outputs():
     surfaces' slow files run. test-slow's matrix is the selector's
     `${{ fromJSON(needs.changes.outputs.slow_matrix) }}` — there are NO
     literal rows to keep in sync; the in-workflow drift-guard step pins the
-    union of the EXPANDED legs to slow_files - carve_out (#9539)."""
+    union of the EXPANDED legs to slow_gating_files() (#9539; slow minus
+    carve-out minus the non-gating lane since #10194)."""
     wf = _load_python_ci()
     # job-level gates
     assert wf["jobs"]["test-slow"]["if"] == \
@@ -7321,7 +7387,8 @@ def test_diff_gated_jobs_consume_changes_outputs():
             assert rel not in seen, f"slow leg entry {rel} rides two legs"
             seen.add(rel)
     assert seen == {f + ".py" for f in slow_leg_files(load_manifest())}, (
-        "the legs must cover slow_files - carve_out exactly (no gap, no dup)")
+        "the legs must cover slow_gating_files() exactly (no gap, no dup): slow "
+        "minus carve-out minus the non-gating lane")
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
@@ -8535,7 +8602,24 @@ def test_write_path_measurement_source_edit_selects_eval():
     Watched RED before the entry existed (`surfaces == ['core']`, neither pin
     in `test_files`), GREEN after — mutation-real, not a tautology: deleting
     the SOURCE_PATTERNS entry reproduces the red.
+
+    ⛔ #10194 SUPERSEDES THE `eval`-HALF ASSERTIONS (owner decision A,
+    2026-10-27). The two `eval`-registered pins are under `tests/eval/**`, i.e. in
+    the NON-GATING lane, so they no longer run on any PR — the very thing this
+    test was written to guarantee. The SOURCE_PATTERNS mapping is unchanged and
+    still asserted (a change to `score_qualifiers.py` still selects `core` +
+    `eval`), and the `core` half still gates. What is asserted instead of the
+    eval pins is that they are ABSENT, so a green PR is never read as "the rule
+    was pinned"; the write-path measurements can therefore drift until evals
+    reopen. Reachable from `eval-suite-manual.yml`.
     """
+    from tools.ci_selection import on_demand_files
+    lane = on_demand_files(load_manifest())
+    for pin in ("eval/write_path/test_score_qualifiers.py",
+                "eval/write_path/test_write_path_corpus.py"):
+        assert pin in lane, (
+            f"{pin} must be in the non-gating lane — its subtree is out of the "
+            "merge gate (#10194)")
     cases = (
         # the rule itself — the decisive one: `evaluate_branches`/`verdict_label`
         "tests/eval/write_path/score_qualifiers.py",
@@ -8554,15 +8638,16 @@ def test_write_path_measurement_source_edit_selects_eval():
             f"`eval` surface that owns its pinning tests (and keep `core`, whose "
             f"tests read the same sources); got {r['surfaces']}")
         selected = set(r["test_files"]) | set(r["slow_selected"])
-        assert "eval/write_path/test_score_qualifiers.py" in selected, (
-            f"the test that pins the pre-registered rule must run on {changed}; "
-            f"selected {sorted(selected)}")
-        assert "eval/write_path/test_write_path_corpus.py" in selected, (
-            f"the corpus counts §10's verdict is computed on must be pinned on "
-            f"{changed}; selected {sorted(selected)}")
+        assert not (selected & lane), (
+            f"a non-gating lane file reached a pre-merge leg on {changed}: "
+            f"{sorted(selected & lane)[:5]}")
         assert "test_extractor_v2.py" in selected, (
             "the core-registered importer of tests.eval.write_path.runner must "
             f"still run on {changed}; selected {sorted(selected)}")
+        # The eval pins no longer run on a PR (see the docstring) — assert the
+        # absence so the loss is a pinned fact, not an inference from a count.
+        assert "eval/write_path/test_score_qualifiers.py" not in selected
+        assert "eval/write_path/test_write_path_corpus.py" not in selected
 
 
 def test_ask_sealed_corpus_source_edit_selects_eval():
@@ -8580,7 +8665,20 @@ def test_ask_sealed_corpus_source_edit_selects_eval():
 
     Watched RED before the entry existed (surfaces == ['core'], neither pin in
     test_files), GREEN after.
+
+    ⛔ #10194 SUPERSEDES THE `eval/ask/` PIN ASSERTION (owner decision A,
+    2026-10-27): `eval/ask/test_ask_corpus.py` is in the NON-GATING lane, so it
+    no longer runs on a PR. The `tests/eval/ask/` SOURCE_PATTERNS mapping is
+    unchanged and still asserted; the exit-bar pin
+    (`test_measure_ask_distilled.py`, registered on `eval` at the top of
+    `tests/`, NOT under the lane) still gates, and is asserted to. The sealed
+    corpus's own contract is now pinned only by the manual eval lane.
     """
+    from tools.ci_selection import on_demand_files
+    lane = on_demand_files(load_manifest())
+    assert "eval/ask/test_ask_corpus.py" in lane, (
+        "the sealed corpus's contract test must be in the non-gating lane "
+        "(#10194) — if it left the lane it is gating again")
     cases = (
         # the hash scope / manifest gate / sealed loaders
         "tests/eval/ask/corpus.py",
@@ -8597,12 +8695,15 @@ def test_ask_sealed_corpus_source_edit_selects_eval():
             "eval surface that owns its pinning tests; got "
             + str(r["surfaces"]))
         selected = set(r["test_files"]) | set(r["slow_selected"])
-        assert "eval/ask/test_ask_corpus.py" in selected, (
-            "the corpus contract tests must run on " + changed + "; selected "
-            + str(sorted(selected)))
+        assert not (selected & lane), (
+            f"a non-gating lane file reached a pre-merge leg on {changed}: "
+            f"{sorted(selected & lane)[:5]}")
         assert "test_measure_ask_distilled.py" in selected, (
             "the exit-bar tests must run on " + changed + "; selected "
             + str(sorted(selected)))
+        assert "eval/ask/test_ask_corpus.py" not in selected, (
+            "the sealed-corpus contract test is in the non-gating lane "
+            "(#10194) — a green PR must not be read as \"the corpus was pinned\"")
 
 
 def test_tortoise_api_change_selects_api_and_core():
@@ -10609,13 +10710,43 @@ def test_the_on_demand_lane_is_not_silently_empty():
 
 
 def test_a_lane_file_still_on_a_gated_leg_is_reported():
-    # The silent-and-expensive direction: a file in the lane AND in slow_files
-    # is still on the merge path, so the lane saves nothing while reading as if
-    # it did. leg_coverage_issues is the only thing that can see this.
+    """The silent-and-expensive direction: a lane file that is STILL on a gating
+    leg, so the lane saves nothing while reading as if it did.
+
+    #10194 changed what can go wrong here, and the check follows: the lane now
+    legitimately OVERLAPS `slow_files` (five eval files keep their `durations`
+    weight and their classification; the LEG drops them), exactly as slow
+    carve-out files do. So a config-set overlap is no longer a defect — the
+    defect is a lane file appearing in the pool a gating leg is built from,
+    which `slow_gating_files()` is the single definition of.
+
+    The mutation this pins is therefore the DEFINITION regressing, not the
+    config: patch `slow_gating_files` back to `slow_files - carve_out` (drop the
+    lane subtraction — the exact edit a later reader makes when the lane
+    subtraction looks redundant) and the report must name the file. Without this
+    test the check would be vacuous, because with the shipped definition the
+    intersection is empty BY CONSTRUCTION.
+    """
     m = load_manifest()
     still_slow = dict(m, slow_files=[*list(m["slow_files"]), THE_EXPENSIVE_EVAL])
-    hits = [i for i in leg_coverage_issues(still_slow) if "on-demand/slow overlap" in i]
-    assert hits, "a lane file still in slow_files must be reported"
+    # With the shipped definition the lane is subtracted, so no issue is raised.
+    assert not [i for i in leg_coverage_issues(still_slow) if "leaked" in i], (
+        "a lane file in `slow_files` is now legitimate (the LEG subtracts it) — "
+        "reporting it would red a correct manifest and invite deleting the "
+        "lane entry")
+
+    import tools.ci_selection as cs
+    original = cs.slow_gating_files
+    try:
+        cs.slow_gating_files = lambda mf: (  # type: ignore[assignment]
+            set(mf.get("slow_files") or []) - set(mf.get("carve_out") or []))
+        hits = [i for i in leg_coverage_issues(still_slow) if "leaked" in i]
+    finally:
+        cs.slow_gating_files = original  # type: ignore[assignment]
+    assert hits, (
+        "with the lane subtraction REMOVED from slow_gating_files() a lane file "
+        "is back on a gating slow leg, and this check must say so — if it "
+        "passes, the guard cannot fire for the regression it names")
     assert THE_EXPENSIVE_EVAL in hits[0]
 
 

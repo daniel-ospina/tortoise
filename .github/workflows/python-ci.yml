@@ -181,7 +181,8 @@ env:
   # published as `changes.outputs.slow_matrix`, so there is no committed leg
   # list to rot. `slow_file_issues`/`leg_coverage_issues` pin the pool and
   # `slow_shard_issues` pins the declaration; the drift guard in the job pins
-  # the expanded legs to `slow_files - carve_out` at run time. The push matrix
+  # the expanded legs to `slow_gating_files()` (slow_files minus carve-out minus
+  # the non-gating lane) at run time. The push matrix
   # and env-broken exclusions are derived by the selector (#1472).
   # Env-broken in this job (tests/e2e needs browsers; test_agent_signup needs
   # a live redis on 6379) — single source is tools/ci_selection.py.
@@ -333,7 +334,8 @@ jobs:
           # changes job (red, not silent-green) if slow_run=true with an
           # empty or non-leg slow_selected.
           #
-          # #9539: the leg set is the DERIVED pool (`slow_files - carve_out`),
+          # #9539: the leg set is the DERIVED pool (`slow_gating_files()`:
+          # slow_files - carve_out - non-gating lane, #10194),
           # not the workflow's old committed rows — it is the same set the
           # run step's per-leg intersection can match against, and it is read
           # from the selector rather than parsed out of the workflow, so the
@@ -384,10 +386,24 @@ jobs:
           # same way as `fast_matrix` (one JSON GITHUB_OUTPUT line, so the
           # template-context toString hazard above applies identically).
           echo "carve_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["carve_matrix"]))')" >> "$GITHUB_OUTPUT"
-          # #9539: the slow pool's matrix — `slow_files - carve_out` packed into
+          # #9539: the slow pool's matrix — `slow_gating_files()` packed into
           # `config/ci-surfaces.yml::slow_shards` LPT bins by the same `durations`
           # map the fast band uses. Emitted like the two above (one JSON line).
           echo "slow_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_matrix"]))')" >> "$GITHUB_OUTPUT"
+      - name: Non-gating lanes — what this gate does NOT run (#10194)
+        # #10194: a MEMBERSHIP change is invisible in a CI log unless the log
+        # says what left it. "the evals aren't running" and "the evals are
+        # excluded on purpose" read identically from a green run, so this prints
+        # the non-gating lane (each entry → its resolved file count) and the
+        # shard → file-count map the run is about to expand. A reader can then
+        # SEE that `tests/eval/**` + `tests/longmem_eval/**` are absent from all
+        # nine shards instead of inferring it from a total.
+        #
+        # Report-only on purpose: it reads the same `push_legs()` derivation the
+        # matrix step above emits, and it exits 0 on every path. The gate on this
+        # exclusion is the guard test (tests/test_10194_eval_suite_non_gating.py)
+        # plus `--integrity`, not a log line.
+        run: python3 tools/ci_selection.py --non-gating-report
       - name: Tier-2 duration split (#1473)
         # #1473/#6135: LPT-pack the tier-2 selected files across the configured
         # shard count by measured duration (config/ci-surfaces.yml durations)
@@ -1716,7 +1732,8 @@ jobs:
       # `slow_matrix` (tools/ci_selection.slow_matrix_include) and this job
       # expands it, exactly like `test`'s `fast_matrix` and `test-carve-out`'s
       # `carve_matrix` — so the leg count is `config/ci-surfaces.yml::slow_shards`
-      # and the partition is an LPT pack of `slow_files - carve_out` off the
+      # and the partition is an LPT pack of `slow_gating_files()` (slow_files -
+      # carve-out - non-gating lane, #10194) off the
       # committed `durations` map. Nothing here counts legs or lists files.
       #
       # WHY THE COUNT, MEASURED (5 newest completed main runs, 2026-10-21: ids
@@ -1858,7 +1875,7 @@ jobs:
         timeout-minutes: 10
         run: |
           exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
-      - name: Drift guard — the expanded legs cover slow_files minus carve-out (#1471/#9539)
+      - name: Drift guard — the expanded legs cover the gating slow pool (#1471/#9539/#10194)
         # #1471: the legs MUST cover the full slow-file set — a new slow file
         # added to config/ci-surfaces.yml `slow_files:` that lands in no leg
         # silently drops coverage (the #1260/#1270 drift class). Epic #1647 Task
@@ -1900,7 +1917,8 @@ jobs:
               print(f"❌ test-slow leg drift: missing={sorted(expected - union)} extra={sorted(union - expected)}")
               raise SystemExit(1)
           print(f"{len(legs)} legs cover exactly {len(expected)} slow files "
-                f"(union == slow_files - carve_out, no duplicates)")
+                f"(union == slow_gating_files(): slow_files - carve_out - "
+                f"non-gating lane, no duplicates)")
           EOF
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block — same mechanics as the
@@ -2035,11 +2053,17 @@ jobs:
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
           # shards derive their budget from. Since #9539 the legs are DERIVED
-          # (`slow_files - carve_out` LPT-packed into `slow_shards` = 5), so the
-          # heavier leg carries 7.58m — the DERIVED weight, not a committed row;
-          # the header on this job carries the derivation and the per-leg numbers.
-          # This literal 40m is 5.3x that weight, i.e. 2.6x the 2.0x minimum the
-          # headroom floor requires (15.2m); it was 10m
+          # (`slow_gating_files()` LPT-packed into `slow_shards` = 5, #10194), so the
+          # heavier leg carries the DERIVED weight, not a committed row. That
+          # weight MOVES: 7.58m when this budget was argued, 5.72m after #10194
+          # took the non-gating lane out of the pool. Read the live number from
+          # `python3 tools/ci_selection.py --non-gating-report` (it prints every
+          # leg's file count and estimated seconds) — do NOT quote one here, that
+          # is how this paragraph went stale the first time.
+          # This literal 40m is 6.99x that weight today, i.e. 3.5x the 2.0x
+          # minimum the headroom floor requires (11.44m today; the floor itself
+          # is `WATCHDOG_HEADROOM x heavier leg`, so it moves with the pool); it
+          # was 10m
           # when the committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). The 40m/60m
           # pair is deliberately NOT derived from the leg weight — tightening it
