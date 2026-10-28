@@ -1567,6 +1567,14 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:               set is unchanged (`id`/`name`/`run`), because the edit only rewrote the prose
 #:               (`slow_files - carve_out` → `slow_gating_files()`). Verified by diffing `_code()`
 #:               at `646d30f9e1ef^` against `origin/main`, not by reading the patch.
+#:   #9984 review (2) — `python-ci-gate` → `Aggregate matrix result`: the identity-blind
+#:           sweep's `failure` half stops being gated on `RED_LEGS` being EMPTY and starts
+#:           being gated on a COUNT (`RESULT_FAILS > ROW_FAILS`), because emptiness asked
+#:           the wrong question — it held whenever ANY leg was delegated, which blinded
+#:           the layer to a `failure` need that had no row of its own. Still ONE step,
+#:           still no `env:`/`uses:`/`$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
+#:           swallowing, no early return; `grep -qE 'failure|cancelled'` survives as a
+#:           literal line of code (#9240).
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1593,7 +1601,7 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     # deletes the whole failure sweep. Both leave every other check in this pin clean.
     "python-ci-gate": (
         ("Aggregate matrix result",
-         "a0d84429a82e45f27f71ebddad7a6fed8b326b765cde17bbeab553353cb04e36"),
+         "c40947981e1f62d77e17de090244ed6e09a5877f6c61a32fbb87b31f291772d7"),
     ),
 }
 

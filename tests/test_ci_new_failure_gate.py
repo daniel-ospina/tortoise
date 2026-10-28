@@ -55,20 +55,44 @@ RAIL_ABSENT_REASON = (
     "$AGENT_INFRA_PATH by `tools/link_agent_infra_scripts.py`). The rail-and-gate "
     "agreement cases need the SHARED decision, and a vendored stand-in would be the "
     "second implementation #9984 constraint 7 forbids — so this skips instead of "
-    "asserting against a copy. The gate itself is exercised with the real module in CI, "
-    "where the pinned agent-infra checkout is present."
+    "asserting against a copy. ⛔ AND NO CI JOB RUNS THEM: `python-ci.yml` is "
+    "self-contained BY DECISION (#555 — no `scripts`/`agent-infra` symlink resolves on "
+    "the runner), and the only job that checks agent-infra out (`ci-introduced-failure`, "
+    "at `.ci-predicate`) runs no pytest at all. So on CI these cases SKIP BY NAME and a "
+    "green leg means 'the structural pins held', never 'the decision path ran' — the "
+    "wording `tests/test_pytest_attribution.py` uses for the same layer. This file used "
+    "to claim the opposite ('the gate itself is exercised with the real module in CI'), "
+    "which no job makes true (#10202 review 4)."
 )
+
 
 # ── fixtures: a realistic capture, not a synthetic one ──────────────────────
 #
+# ⛔ THE SHAPE IS THE PRODUCTION SHAPE (#10202 review 4). The gate reads its logs from
+# `gh api repos/<r>/actions/jobs/<id>/logs`, which stamps EVERY line with a bare
+# ISO-8601 instant (BOM on the first) — so a fixture of bare `FAILED` lines is text the
+# endpoint never produces, and a defect in the fetch/de-stamp path stays invisible to
+# every case built on it. That is exactly how the P0 below shipped green.
+_ENDPOINT_STAMP = "2026-10-28T04:05:52.3005076Z"
+
+
+def _api_capture(bare: str, *, stamp: str = _ENDPOINT_STAMP) -> str:
+    """`bare` as the jobs endpoint delivers it: a `<ts>Z ` stamp on every line.
+
+    Byte-for-byte the shape captured from job `122612288295` (#10202):
+    `\ufeff2026-10-28T03:45:23.2665707Z Current runner version: '2.338.0'`.
+    """
+    return "".join(("\ufeff" if index == 0 else "") + stamp + " " + line
+                   for index, line in enumerate(bare.splitlines(keepends=True)))
+
+
 # The shape matters. `ci_exemption.py signatures` derives an id's SIGNATURE from
 # pytest's failure block (`E   <ExceptionType>: …`) and the `FAILED <nodeid> - <detail>`
 # short summary — a capture carrying only a bare `FAILED` line yields an UNSIGNED id,
 # which the decision blocks. A fixture of bare `FAILED` lines would therefore have
 # "proved" only the block path and never the exemption. Verified against the real
 # module: both doors report ids=1 signed=1 on this text.
-
-MAIN_RED_LOG = """\
+_BARE_MAIN_RED_LOG = """\
 tests/test_cache_projection_live.py::test_a FAILED [ 10%]
 
 =================================== FAILURES ===================================
@@ -84,7 +108,7 @@ FAILED tests/test_cache_projection_live.py::test_a - KeyError: 'id'
 ========================= 1 failed, 99 passed in 12.34s ========================
 """
 
-NEW_LOG = """\
+_BARE_NEW_LOG = """\
 tests/test_other.py::test_brand_new FAILED [ 20%]
 
 =================================== FAILURES ===================================
@@ -99,6 +123,13 @@ tests/test_other.py:11: AssertionError
 FAILED tests/test_other.py::test_brand_new - AssertionError: this PR broke it
 ========================= 1 failed, 50 passed in 5.00s ========================
 """
+
+#: The decision fixtures are the TEXT THE ENDPOINT DELIVERS, not the text the runner
+#: wrote: every line stamped, first line BOM-prefixed (#10202 review 4). A fixture
+#: without the stamp cannot see a defect in the fetch/de-stamp path — which is how the
+#: `signatures` door defect below shipped green.
+MAIN_RED_LOG = _api_capture(_BARE_MAIN_RED_LOG)
+NEW_LOG = _api_capture(_BARE_NEW_LOG)
 
 #: main's baseline tables, in the shared producers' own wire formats
 #: (`--main-union-rates` 3 columns, `--main-union-signatures` 2 columns). main is red
@@ -275,6 +306,39 @@ def test_a_pr_that_introduces_one_new_failing_test_FAILS_and_names_it(tmp_path):
 
 
 @pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_a_decision_that_writes_no_verdict_is_never_clean(tmp_path):
+    """#9984 review: mirror the rail — no `VERDICT` line is "nothing was decided".
+
+    `admin-merge.sh` refuses when the verdict file is absent, empty, or lacks a
+    leading `VERDICT` ("the VERDICT FILE is the only thing that tells 'the gate
+    produced a decision' from 'the gate crashed'"). The module used to substitute
+    `VERDICT\\tCLEAN` in exactly that case, so the two doors disagreed on the one
+    input that means "nothing was decided" — the gate would certify a tree the merge
+    path refuses to read.
+
+    Fail-injection: a stand-in `ci_exemption.py` that exits 0 and writes nothing. The
+    real one always writes (`--verdict-out` precedes `return 1 if gated else 0`), so
+    this is a guard on an unreachable-today path — which is the point: it is the path
+    a future edit reaches silently.
+    """
+    box = Sandbox(tmp_path)
+    stub = box.agent_infra / "scripts" / "ci_exemption.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "# exits 0 WITHOUT writing the --verdict-out file: 'decided' with no verdict\n"
+        "sys.exit(0)\n",
+        encoding="utf-8")
+    proc = box.run(jobs=_jobs((1, "test (d)", "failure")), logs={1: MAIN_RED_LOG})
+    assert proc.returncode != 0, (
+        "a shared decision that produced no VERDICT line must never be read as CLEAN — "
+        f"the gate would certify a tree the rail refuses; got {proc.stdout + proc.stderr!r}")
+    assert "VERDICT: CLEAN" not in proc.stdout, (
+        "the gate printed CLEAN without a decision to read; "
+        f"got {proc.stdout!r}")
+
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
 def test_the_verdict_is_auditable(tmp_path):
     """#9984 design constraint 6: print the PR set, the baseline, and every exemption.
 
@@ -385,15 +449,16 @@ case "$*" in
 esac
 """
 
-#: `MAIN_RED_LOG` as `gh` actually returns it: the step log carries the escape
-#: sequences this case is about (pytest colours). Verified against the shared parser —
-#: `ci_exemption.py ids/signatures` still yield `test_a` + `KeyError: 'id'` on it — so
-#: what is under test is the FETCH, not a degraded parse.
-ESCAPED_RED_LOG = MAIN_RED_LOG.replace(
+#: `MAIN_RED_LOG` as `gh` actually returns it: the endpoint's `<ts>Z ` line stamp PLUS
+#: the escape sequences this case is about (pytest colours). Verified against the
+#: shared parser — `ci_exemption.py ids/signatures` still yield `test_a` +
+#: `KeyError: 'id'` on it once the stamp is stripped — so what is under test is the
+#: FETCH, not a degraded parse.
+ESCAPED_RED_LOG = _api_capture(_BARE_MAIN_RED_LOG.replace(
     "FAILED tests/test_cache_projection_live.py::test_a - KeyError: 'id'",
     "\x1b[31mFAILED\x1b[0m tests/test_cache_projection_live.py::test_a - "
     "KeyError: 'id'\x1b[0m",
-)
+))
 
 
 @pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
@@ -431,6 +496,88 @@ def test_an_escaped_log_is_read_not_degraded_to_job_granularity(tmp_path):
     assert "job granularity" not in proc.stdout, proc.stdout
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "EXEMPT: tests/test_cache_projection_live.py::test_a" in proc.stdout
+
+
+#: A `gh run view --log-failed` capture: the OTHER transport shape, with the
+#: `<job>\t<step>\t<ts>Z ` head the shared parser attributes a failing STEP from.
+_STEPPED_CAPTURE = (
+    "test (d)\tRun pytest\t2026-10-28T04:05:52.3005076Z "
+    "FAILED tests/test_cache_projection_live.py::test_a - KeyError: 'id'\n")
+
+
+def _gate_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("new_failure_gate_stamp", GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_endpoint_line_stamp_is_transport_never_content(tmp_path):
+    """#10202 review 4 (P0): the jobs endpoint stamps EVERY line, and the shared
+    `signatures` door cannot read a stamped record.
+
+    Measured at head `06bde46d5`, run `40621960682`, job `122612288295`: the gate
+    printed `VERDICT: UNMEASURED` and the REQUIRED check went red over three nodeids
+    main was ALREADY red for (`ci-failure-set.sh --main-union-signatures` carries all
+    three with identical signatures, verified). Root cause, reproduced with the pinned
+    module on the bytes the job fetched: `ids` rc 0 ids=3, `signatures` rc 1 ids=0.
+    The id door has a raw-log mode (`parse_failed_ids(raw_log=True)`) and mounts
+    `_strip_log_prefix`, whose `_LOG_PREFIX_RE` REQUIRES a tab before the timestamp —
+    so a bare `<ts>Z ` survives and `_SUMMARY_RE`'s `^FAILED` anchor never matches.
+
+    This pins the de-stamp itself: it must restore the runner's own bytes exactly, and
+    it must NOT touch the `<job>\t<step>\t` form (that head is evidence about WHICH
+    STEP failed, and a strip that ate it would silently drop step attribution).
+    """
+    stamped = _api_capture(_BARE_MAIN_RED_LOG)
+    assert stamped != _BARE_MAIN_RED_LOG, "the fixture must carry the endpoint shape"
+    assert stamped.startswith("\ufeff"), "the endpoint BOMs the first line"
+    unstamped_lines = [line for line in stamped.splitlines()[1:] if line.strip()]
+    assert unstamped_lines and all(line.startswith(_ENDPOINT_STAMP)
+                                  for line in unstamped_lines), (
+        "every line — not just the first — carries the endpoint's stamp")
+
+    module = _gate_module()
+    assert module.strip_transport_stamps(stamped) == _BARE_MAIN_RED_LOG, (
+        "de-stamping must restore the runner's own bytes exactly")
+    assert module.strip_transport_stamps(_STEPPED_CAPTURE) == _STEPPED_CAPTURE, (
+        "a `gh run view --log-failed` capture keeps its step head — the shared parser "
+        "attributes the failing STEP from it")
+    # And the strip is NOT a licence to keep a timestamp-shaped line: content that
+    # merely begins with one (no separating space) keeps every character.
+    near_miss = "2026-10-28T04:05:52.3005076Zsuffix"
+    assert module.strip_transport_stamps(near_miss) == near_miss
+
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_a_stamped_capture_is_measurable_end_to_end(tmp_path):
+    """#10202 review 4 (P0), both halves — the door refuses it, the GATE measures it.
+
+    Half 1 is the root cause itself: the shared `signatures` door really does refuse a
+    capture carrying the endpoint's stamp, so deleting the strip would put the
+    required check straight back into `UNMEASURED`. Half 2 is the delivery #9984
+    claims: the gate measures that SAME text and exempts main's own red.
+
+    If half 1 ever starts passing, agent-infra has learned to read the stamp upstream
+    — re-measure before removing the strip, and make this assertion the record of it.
+    """
+    raw = tmp_path / "stamped.log"
+    raw.write_text(MAIN_RED_LOG, encoding="utf-8")
+    door = subprocess.run(
+        [sys.executable, str(EXEMPTION_PY), "signatures", "--log", str(raw)],
+        capture_output=True, text=True, timeout=120)
+    assert door.returncode != 0, (
+        "the shared signature door now reads the endpoint's line stamp — the de-stamp "
+        "in new-failure-gate.py may be removable, but re-measure first: "
+        f"{door.stdout!r}")
+
+    box = Sandbox(tmp_path / "box")
+    proc = box.run(jobs=_jobs((1, "test (d)", "failure")), logs={1: MAIN_RED_LOG})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "EXEMPT: tests/test_cache_projection_live.py::test_a" in proc.stdout
+    assert "VERDICT: CLEAN" in proc.stdout
 
 
 @pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
@@ -523,6 +670,47 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
     assert verdict.get("if") == "always()", (
         "the verdict job must be `if: always()`, or it is SKIPPED on exactly the red "
         "runs it exists for")
+
+
+def test_the_workflow_hands_the_predicate_the_red_legs():
+    """#9984 review: the fail-closed net is only real if the caller turns it on.
+
+    `--red-legs` is the ONE argument that enables `failing_jobs()`'s "a red leg with
+    no failing job in the listing is unobservable" refusal, and it is the ONE flag
+    with a default (`""`) instead of `required=True` — so its omission is silent and
+    fail-OPEN, unlike every other argument. With it empty, every job in the run is in
+    scope and a delegated leg whose failed job is missing from the listing (or ends
+    on a conclusion this module does not map) leaves `failed == []`, so `evaluate`
+    takes its "nothing failed → CLEAN" branch and the required check certifies a red
+    delegated leg.
+
+    The set is DERIVED from `toJSON(needs)` — the same `needs` this job already
+    waited on — so it is not a second copy of the aggregate's leg table and cannot
+    drift from it. A literal leg list here would be the drift the module's own
+    docstring warns about, so the test refuses that shape too.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    verdict = workflow["jobs"]["ci-introduced-failure"]
+    steps = [s for s in (verdict.get("steps") or [])
+             if "new-failure-gate.py" in str(s.get("run") or "")]
+    assert len(steps) == 1, f"expected ONE predicate step, found {len(steps)}"
+    step = steps[0]
+    run = str(step.get("run") or "")
+    assert "--red-legs" in run, (
+        "the predicate must be invoked with `--red-legs`; without it the module's "
+        "unobservable-red-leg refusal never runs and a delegated red leg can be "
+        "certified CLEAN (#9984 review)")
+    needs_env = str((step.get("env") or {}).get("NEEDS_JSON") or "")
+    assert "toJSON(needs)" in needs_env.replace(" ", ""), (
+        "`--red-legs` must be DERIVED from `toJSON(needs)`; a hand-kept leg list is a "
+        f"second copy of the aggregate's table and will drift; got {needs_env!r}")
+    # No literal leg list smuggled into the step: every leg the aggregate declares
+    # must come from `needs`, not from a hard-coded word.
+    assert "DEFERRABLE_LEGS" not in run, (
+        "the verdict step must not carry its own leg list — derive it from needs")
 
 
 def test_the_verdict_step_is_gated_on_every_class_the_aggregate_delegates():

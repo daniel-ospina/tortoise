@@ -23,14 +23,16 @@ and the drift is discovered at 3 a.m. by a lane (#9984 constraint 7).
 
 WHERE THE TWO SIDES COME FROM
   PR side    — the failing JOBS of THIS workflow run, and their own step logs via the
-               Actions jobs API. That text is byte-identical in shape to
-               `gh run view --log-failed` (it is where that command gets it from), so
-               the shared parser reads it unchanged — INCLUDING its terminal escape
-               sequences, which `gh` refuses to print without `--allow-escape-sequences`
-               (see `job_log`; #10202). `runner.temp` artifacts were the
-               alternative and are rejected: only the pytest legs upload one, and a
-               failure in a guard step (an orphan-count assert, a packaging guard) has
-               no artifact at all.
+               Actions jobs API. That text is NOT byte-identical in shape to
+               `gh run view --log-failed`: it carries a bare `<ts>Z ` stamp on every
+               line and no `<job>\t<step>\t` head, so this module strips the stamp
+               before the parser sees it (`strip_transport_stamps`; measured failure
+               of the un-stripped form in #10202 review 4). Terminal escape sequences
+               ARE preserved — and `gh` refuses to print them without
+               `--allow-escape-sequences` (see `job_log`; #10202). `runner.temp`
+               artifacts were the alternative and are rejected: only the pytest legs
+               upload one, and a failure in a guard step (an orphan-count assert, a
+               packaging guard) has no artifact at all.
   main side  — `ci-failure-set.sh --main-union-rates/--main-union-signatures`, the
                widened window the rail uses. NOT a per-name rollup, and NOT a single
                run: a test that fails on main only in some runs is still main's red.
@@ -104,6 +106,45 @@ _UNCERTIFIABLE_CONCLUSIONS = frozenset({"cancelled", "startup_failure", "stale"}
 
 class Unmeasured(Exception):
     """Anything we could not read. Always exit 2, never 0 (#9984 constraint 1)."""
+
+
+#: The Actions jobs-log endpoint's OWN per-line stamp: a bare ISO-8601 instant and a
+#: space, on EVERY line — the first one preceded by a BOM:
+#:
+#:     \ufeff2026-10-28T03:45:23.2665707Z Current runner version: '2.338.0'
+#:     2026-10-28T04:05:52.3005076Z FAILED tests/x.py::test_y - AssertionError: …
+#:
+#: It is TRANSPORT, not content — the runner's own log does not carry it, and the
+#: shared parser strips the OTHER transport form (the `<job>\t<step>\t<ts>Z ` head
+#: `gh run view --log-failed` renders) through `ci_exemption.py::_LOG_PREFIX_RE`,
+#: which REQUIRES a tab before the timestamp. A bare stamp therefore survives, so
+#: `_SUMMARY_RE`'s `^FAILED` anchor never matches and `ci_exemption.py signatures`
+#: exits 1 with `ids=0` on a capture whose `ids` door finds its ids. Measured
+#: (#10202 review 4, job 122612288295): `ids` rc 0 ids=3, `signatures` rc 1 ids=0 →
+#: this module's `Unmeasured` → the REQUIRED check red over a leg main was already
+#: red for, i.e. #9984's whole defect wearing the fail-closed costume.
+#:
+#: Removing the stamp restores the bytes the runner wrote. It does NOT synthesize the
+#: `<job>\t<step>\t` head — the scoping record rejects that (alternative 4), because
+#: `_split_log_line` treats that head as evidence about WHICH STEP failed. A line
+#: with no head is SKIPPED by `guard_step_failures`, so a de-stamped capture can
+#: neither manufacture a step nor attribute an annotation from a passing one.
+#:
+#: `[ \t]` is REQUIRED, not optional: a content line that merely BEGINS with a
+#: timestamp-shaped token (a test echoing one) keeps its text rather than losing a
+#: character to a strip that was not a stamp.
+_API_LINE_STAMP = re.compile(
+    r"^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z[ \t]", re.MULTILINE
+)
+
+
+def strip_transport_stamps(text: str) -> str:
+    """Drop the jobs-endpoint's bare `<ts>Z ` stamp from every line.
+
+    The `gh run view --log-failed` 3-column form is left ALONE (its line starts with
+    the job name, so the anchor cannot match): the shared parser already reads it.
+    """
+    return _API_LINE_STAMP.sub("", text)
 
 
 def leg_base(job_name: str) -> str:
@@ -214,12 +255,13 @@ class Runner:
         return out
 
     def job_log(self, job_id: int, logs_dir: str | None) -> str:
-        """One job's log, in the `job\tstep\t<line>` shape the shared parser reads."""
+        """One job's log, de-stamped, in the shape the shared parser reads."""
         if logs_dir:
             path = Path(logs_dir) / f"{job_id}.log"
             if not path.is_file():
                 raise Unmeasured(f"no recorded log at {path}")
-            return path.read_text(encoding="utf-8", errors="replace")
+            return strip_transport_stamps(
+                path.read_text(encoding="utf-8", errors="replace"))
         # `--allow-escape-sequences` is LOAD-BEARING, not cosmetic (#10202). `gh`
         # exits 1 rather than print a response carrying terminal escape sequences
         # unless it is given this flag, and a pytest/guard step log essentially always
@@ -235,11 +277,11 @@ class Runner:
         # `ci_exemption.py ids/signatures` on an SGR-wrapped capture). A gate that
         # could not read an escaped log would still refuse rather than pass — but a
         # gate that refuses everything is not a gate.
-        return self._run(
+        return strip_transport_stamps(self._run(
             [self.gh, "api", f"repos/{self.repo}/actions/jobs/{job_id}/logs",
              "--allow-escape-sequences"],
             what=f"log for job {job_id}",
-        )
+        ))
 
     def shell(self, argv: list[str], *, what: str) -> str:
         return self._run(argv, what=what)
@@ -271,14 +313,22 @@ class Runner:
 def failing_jobs(jobs: list[dict], red_legs: list[str]) -> tuple[list[dict], list[dict]]:
     """(failed jobs to attribute, red legs that produced no attributable job).
 
-    `red_legs` is normally EMPTY: the run's own job list is the authority, so the
-    predicate job needs no second copy of the aggregate's leg table (two lists would
-    drift, and a leg the predicate did not wait for is a leg it cannot adjudicate).
-    It is accepted for a caller that already knows the set, and the tests use it.
+    `red_legs` is the set of legs whose aggregate-side result was
+    `failure`/`timed_out`, i.e. the legs THIS run delegated here. The workflow
+    derives it from `toJSON(needs)` — the same `needs` this job already waited
+    on — so it is not a second copy of the aggregate's leg table and cannot
+    drift from it (the objection a hand-kept list would earn). The tests pass it
+    directly.
+
+    Leaving it EMPTY is the fail-OPEN shape, not the safe default: every job in
+    the run is then in scope, and a leg whose failed job is missing from the
+    listing (a matrix job that never expanded, a listing gap, a conclusion this
+    module does not map) leaves `failed == []`, so `evaluate` takes its "nothing
+    failed" branch and the required check goes green over a red delegated leg.
 
     A red leg with no failing job in the listing is a leg whose failure set is
-    UNOBSERVABLE (a matrix job that never expanded, a listing gap): the second list
-    carries it so the caller can refuse instead of certifying an empty set.
+    UNOBSERVABLE: it is returned here so the caller can refuse instead of
+    certifying an empty set.
     """
     scoped = ([j for j in jobs if leg_base(j.get("name")) in red_legs]
               if red_legs else list(jobs))
@@ -322,14 +372,23 @@ def pr_failure_rows(runner: Runner, exemption: Path, jobs: list[dict],
     producer emits, carrying no signature so the decision blocks it), and a shared
     blob could not say which job contributed nothing.
 
-    Input shape: the per-job logs endpoint returns the plain log, WITHOUT the
-    `<job>\\t<step>\\t<ts>Z ` prefix `gh run view --log` renders. That prefix is
-    deliberately NOT synthesized here: `_split_log_line` treats a stepped line as
-    evidence about WHICH STEP failed, and inventing a step label would let an
-    annotation from a passing step be attributed as a failure — the fail-OPEN the
-    guard pass exists to close. Bare text is still fully readable by both doors for
-    pytest nodeids; a failure that exists ONLY as a step annotation therefore yields
-    no identity, and that job falls back to `job-unreadable::` and BLOCKS.
+    Input shape: the per-job logs endpoint returns the plain log WITH a bare
+    `<ts>Z ` stamp on every line and WITHOUT the `<job>\\t<step>\\t<ts>Z ` head
+    `gh run view --log` renders. Both are handled before the doors see the text:
+
+      * the bare stamp is REMOVED (:func:`strip_transport_stamps`) because it is
+        transport, not content, and the shared parser's `_LOG_PREFIX_RE` requires a
+        tab before the timestamp — so a stamped `FAILED …` line never matches
+        `_SUMMARY_RE`'s `^FAILED` anchor. Leaving it made `ci_exemption.py signatures`
+        exit 1 with `ids=0` on a capture whose `ids` door found three ids (#10202
+        review 4, measured on job 122612288295), which failed this whole run closed.
+      * the `<job>\\t<step>\\t` head is deliberately NOT synthesized: `_split_log_line`
+        treats a stepped line as evidence about WHICH STEP failed, and inventing a
+        step label would let an annotation from a passing step be attributed as a
+        failure — the fail-OPEN the guard pass exists to close. `guard_step_failures`
+        SKIPS a line with no head, so de-stamping can neither manufacture a step nor
+        an attribution; a failure that exists ONLY as a step annotation yields no
+        identity, and that job falls back to `job-unreadable::` and BLOCKS.
     """
     rows: list[str] = []
     ids_out: list[str] = []
@@ -362,10 +421,22 @@ def pr_failure_rows(runner: Runner, exemption: Path, jobs: list[dict],
                   "job granularity (this BLOCKS; it is not a pass)")
             rows.append(f"job-unreadable::{slug_job(name)}\t1\t1\t")
             continue
-        sigs_text = runner.shell(
-            [sys.executable, str(exemption), "signatures", "--log", str(per_job)],
-            what=f"the shared signature extraction for job {name}",
-        )
+        try:
+            sigs_text = runner.shell(
+                [sys.executable, str(exemption), "signatures", "--log", str(per_job)],
+                what=f"the shared signature extraction for job {name}",
+            )
+        except Unmeasured as exc:
+            # ⛔ THE TWO DOORS MUST AGREE ON ONE CAPTURE (#10202 review 4). `ids` read
+            # n>=1 ids out of this very text and `signatures` read none, so the text
+            # is not the problem — a parser that cannot measure what its sibling door
+            # measured is UNMEASURED, and the message must say so instead of quoting
+            # an all-zero counter line the operator cannot act on.
+            raise Unmeasured(
+                f"the shared SIGNATURE door could not read the capture its ID door "
+                f"read for job {name} (ids={len(ids)}) — the failure set is "
+                f"unmeasurable, so it cannot be compared against main: {exc}"
+            ) from exc
         signatures = parse_signature_rows(sigs_text)
         for nodeid in ids:
             nodeid_count += 1
@@ -514,8 +585,23 @@ def evaluate(args: argparse.Namespace) -> int:
                 "the shared decision BLOCKED a failure (its per-id reasons are printed "
                 "above): relative to main, this PR introduced it"
             )
+        # ⛔ A MISSING VERDICT FILE IS NOT A CLEAN VERDICT (#9984 review). The rail
+        # this decision mirrors refuses exactly here — `admin-merge.sh` treats an
+        # absent/empty/`VERDICT`-less file as "the gate produced no decision", never
+        # as CLEAN ("the VERDICT FILE is the only thing that tells 'the gate produced
+        # a decision' from 'the gate crashed'"). Substituting `VERDICT\tCLEAN` made
+        # the two doors disagree on the one input that means "nothing was decided".
+        # `decide` writes the file before returning 0 (`ci_exemption.py`, the
+        # `--verdict-out` write precedes `return 1 if gated else 0`), so this is a
+        # fail-closed guard on an unreachable path today — reachable the moment the
+        # rail's write moves or fails quietly, which is the class this module exists
+        # to refuse rather than absorb.
         verdict = (outdir / "verdict.txt").read_text(encoding="utf-8").strip() \
-            if (outdir / "verdict.txt").is_file() else "VERDICT\tCLEAN"
+            if (outdir / "verdict.txt").is_file() else ""
+        if not verdict.startswith("VERDICT"):
+            raise Unmeasured(
+                "the shared decision exited 0 but produced no `VERDICT` line — "
+                f"nothing was decided, so nothing can be certified (read {verdict!r})")
         if "BLOCK" in verdict:
             raise _Blocked(f"the shared decision reported {verdict}")
         print(f"VERDICT: CLEAN — every failing id is main's own ({verdict})")

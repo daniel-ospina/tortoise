@@ -5370,16 +5370,26 @@ def test_no_required_check_names_a_fast_leg():
     assert "test" in gate["needs"]
     assert not [n for n in gate["needs"] if str(n).startswith("test (")], gate["needs"]
     # the rollup is job-id keyed, not leg-name keyed. ONE step does the rollup and it
-    # is the sole author of the verdict: the aggregate is no longer `steps[0]` since
-    # #9984 put the two checkouts (this repo, and the pinned agent-infra holding the
-    # shared predicate) ahead of it, so the pin names the property that matters —
-    # exactly one step reads the join — instead of a positional index a prerequisite
-    # step would silently invalidate.
+    # is the sole author of the verdict: `python-ci-gate` still has EXACTLY ONE step
+    # (#9984 kept it that way on purpose — the two checkouts, this repo and the pinned
+    # agent-infra holding the shared predicate, live in the SEPARATE
+    # `ci-introduced-failure` job, because a `uses:`/`with:`/`env:` step added to this
+    # aggregate would widen the shim defence the capstone pin enforces). So the pin
+    # names the property that matters — exactly one step, and exactly one reader of
+    # the join — instead of a positional index. (A previous revision of this comment
+    # claimed the two checkouts sat ahead of the rollup in THIS job; they never did,
+    # and that false premise is what made loosening the positional check look
+    # justified.)
+    assert len(gate.get("steps") or []) == 1, (
+        "python-ci-gate must stay a ONE-step aggregate — an extra step can export "
+        f"BASH_ENV or mask the rollup's exit code (#9984 review); got {[s.get('name') for s in gate.get('steps') or []]}")
     rollup_steps = [s for s in gate.get("steps", [])
                     if "join(needs.*.result, ' ')" in (s.get("run") or "")]
     assert len(rollup_steps) == 1, (
         "exactly one step must own the `needs.*.result` rollup — two readers means "
         f"two verdicts; got {len(rollup_steps)}")
+    assert rollup_steps[0]["run"] == gate["steps"][0]["run"], (
+        "the rollup step must BE the aggregate's only step, not a sibling of one")
     # the merge queue's only merge condition is the aggregate. Comments MAY
     # name a leg as history (several do, deliberately) — the ENFORCED lines
     # must not.
@@ -8464,6 +8474,20 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         assert rc == 1, (
             "a `cancelled` need with no leg row must red the required check even while "
             f"a delegable `failure` is being adjudicated; got {out!r}")
+        assert "no leg row named it" in out, out
+
+        # ... and so must its `failure` half (#9984 review). The gate on that half is a
+        # COUNT (`RESULT_FAILS > ROW_FAILS`), not `RED_LEGS` being empty: emptiness asked
+        # the wrong question, because it holds whenever ANY leg was delegated — so an
+        # un-rowed `failure` need hid behind an unrelated delegated leg and the check
+        # printed "did not introduce it" over a leg the row table never looked at
+        # (measured pre-fix: rc=0). `extra=("failure",)` is a need that reached `needs:`
+        # with no row; `test=failure` is the delegable leg that used to mask it.
+        rc, out = _verdict(delegated_plus_lost, extra=("failure",))
+        assert rc == 1, (
+            "an un-rowed `failure` need must red the required check even while ANOTHER "
+            f"leg is delegated — otherwise the last-resort sweep is blinded in its own "
+            f"case; got {out!r}")
         assert "no leg row named it" in out, out
 
 
