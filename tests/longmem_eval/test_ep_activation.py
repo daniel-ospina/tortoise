@@ -389,6 +389,52 @@ def test_a_non_finite_posterior_is_never_a_contribution():
     assert epa.points_off_neutral(rows) == 0
 
 
+def test_an_id_less_row_cannot_be_counted_as_a_contribution():
+    """RED: the ``if not pid`` arm had no pin — deleting it left the whole
+    suite green (measured). An id-less row cannot be DIFFERENCED, so counting
+    it publishes a contribution for a claim that cannot be named, and it then
+    reconciles with nothing: ``""`` or ``"None"`` present after the pass but
+    not before is credited to ``points_moved_off_neutral``.
+
+    ``None`` and ``""`` both arrive from a projection that returned a short or
+    null id cell, so both spellings are pinned.
+    """
+    rows = [["", 6.0, 2.0, None, None],
+            [None, 6.0, 2.0, None, None],
+            ["c1", 6.0, 2.0, None, None]]
+    assert epa.off_neutral_ids(rows) == {"c1"}
+    assert epa.points_off_neutral(rows) == 1
+    # a row that is not even a sequence is skipped, not fatal (driver shape)
+    assert epa.points_off_neutral([None, [], ["c1", 6.0, 2.0, None, None]]) == 1
+
+
+def test_a_boolean_manifest_cell_is_unknown_never_a_count():
+    """RED: the ``isinstance(value, bool)`` arm of ``_optional_int`` had no pin
+    in either module — dropping it left 111 tests green (measured). Without it
+    a JSON ``true`` publishes ``operators: 1``, a fabricated measurement in the
+    one cell whose value decides the structural ``no_operators`` verdict, and
+    ``False`` publishes a fabricated ``0`` that is worse: it asserts "this
+    graph mints no operators" off a boolean.
+
+    Both module copies are pinned, since each sums its own census cells.
+    """
+    assert epa._optional_int(True) is None
+    assert epa._optional_int(False) is None
+    assert mp._optional_int(True) is None
+    assert mp._optional_int(False) is None
+    # ...and the UNKNOWN reaches the run-level cell, with the unread count that
+    # says the sum is partial.
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": {
+            "ep_ran": True, "points_with_ep": 0, "points_unmeasured": 1,
+            "operators": True, "factor_edges": False}}],
+        requested=True)
+    assert summary["operators"] is None
+    assert summary["operators_unread"] == 1
+    assert summary["factor_edges"] is None
+    assert summary["factor_edges_unread"] == 1
+
+
 def test_the_finiteness_guard_is_load_bearing_for_an_infinite_mean(
         monkeypatch):
     """RED for the GUARD, not for NaN's comparison shape.
