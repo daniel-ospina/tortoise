@@ -950,6 +950,14 @@ _BEST_EFFORT_OPS = frozenset({
     # (accurate) 503 ``DEMAND_STORE_UNAVAILABLE`` body rather than the
     # sign-in-specific ``control_plane_unavailable`` copy.
     "data_source_demand_read",
+    # #10046: the SESSION/JWT credential's default-graph row READ
+    # (``_session_user_org``). The value it resolves becomes the record tenant
+    # for ~33 session endpoints, and a miss is a NAMED ``no_tenant`` refusal —
+    # never a guess — so a lost offload must degrade to that same refusal, not
+    # map onto the sign-in-specific 503. The resolver is also contract-bound
+    # never to raise (it is the API-key lane's own read, plus its on-miss mint),
+    # which is what makes the fail-soft polarity correct rather than a swallow.
+    "default_graph_row",
     # #2853 ruling C — the operator-only ``oauth_clients`` row-count READ
     # (``/v1/internal/oauth/clients/count``). The endpoint's contract is the
     # fail-soft ``status="unavailable"`` body — ruling C rejected a cap, so the

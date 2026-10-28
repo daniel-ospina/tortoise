@@ -2537,9 +2537,74 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the section gives no way to make the capture's own `no_tenant` "
         "impossible — a graph-bound credential is the discriminator"
     )
+    # ⛔ `graph-bound` alone is NOT the discriminator, and the assertion above is
+    # satisfied by the FALSE claim. The control plane is. A graph-bound SELF-HOST
+    # registry credential carries a Falkor `g_<hex>` node id, `record_tenant_for`
+    # returns None for it by design (`control_plane_ids` is False for the
+    # self-host resolver — record_writer.py:648-649), and no `public.graphs` row
+    # exists to file it under — so "a graph-bound credential
+    # cannot land in `no_tenant`" is false, and the paragraph above it lists that
+    # very lane as a designed `no_tenant` producer. Measured (#10071 review P2):
+    # restoring that absolute wording — and separately deleting the counter-example
+    # — left the suite at `99 passed`. The qualifier and the lane that proves it
+    # are the claim, so pin both.
+    assert re.search(
+        r"graph-bound \*\*control-plane\*\* credential cannot land in\s+`no_tenant`\s+"
+        r"\(the self-host registry lane above is a graph-bound key that\s+resolves "
+        r"through no control plane",
+        section,
+    ), (
+        "the `no_tenant` bound is stated as an absolute again — a graph-bound "
+        "self-host registry credential is REFUSED and counted `no_tenant` by design "
+        "(`record_tenant_for` returns None for it, and it can never satisfy the "
+        "`public.graphs` FK), so the section tells an operator to read a designed "
+        "outcome as a fault; the counter-example that makes the qualifier "
+        "checkable is missing or unravelled"
+    )
     assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
         "the bounded arm names no counting site, so a reader cannot check the "
         "claim that `no_tenant` is designed on those lanes"
+    )
+    # The bounded arm must be EXECUTABLE. The first draft sent the operator to
+    # "attribute any `no_tenant` growth … through recipe 1's log line", but that
+    # line (`record_writer.write_live_record`, the `no_tenant` branch) logs only
+    # the env-pair note — no request identity, no org/graph id, not even the
+    # record type — so per-request attribution is impossible from the log and the
+    # arm's only remaining branch reds a healthy deployment (#9585 review P2).
+    assert re.search(r"\*\*no\*\*\s+request\s+identity", section), (
+        "the section claims the `no_tenant` log line can attribute growth to a "
+        "request — it carries no request identity, and of the four "
+        "`record_writer` reasons only `circuit_open` carries the record type, so "
+        "that step cannot be performed"
+    )
+    # The message above states the EVIDENCE for the impossibility (which reasons
+    # carry what), so pin the evidence too — otherwise the parenthetical can be
+    # deleted and the claim stands on an assertion that no longer measures it
+    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
+    # record_writer.py:1218; `malformed_dsn` and `write_failed` log the exception.
+    # NOT :1184 — that is the `no_durable_journal` DEBUG skip, a different site
+    # that would have made this comment claim the opposite of what it means).
+    assert re.search(r"`circuit_open` is the\s+only one that carries the record type", section), (
+        "the section gives no evidence for why the log cannot attribute growth — "
+        "only `circuit_open` carries the record type, so a reader cannot check "
+        "the claim it is asked to act on"
+    )
+    # ⛔ Pin the CLAUSE, not the token: `capture ran **unbound**` alone survives
+    # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
+    # "fail-and-fix whether or not the capture ran **unbound**" — the arm inverted
+    # with the pin still green (#10071 review P1). `only when` is load-bearing.
+    assert re.search(r"fail-and-fix only\s+when the capture ran \*\*unbound\*\*", section), (
+        "the section gives no executable discriminator for `no_tenant` growth — "
+        "an unbound capture is the one state that makes the growth the capture's"
+    )
+    # ⛔ The two pins above are NOT enough on their own: they survive an
+    # inverted prohibition, because a section can say "the line carries **no**
+    # request identity" and "**Do** attribute that growth per request from the
+    # log" at the same time — self-contradictory, and green. Pin the ⛔ clause
+    # itself, which is the sentence that carries the ruling (#10071 review P2).
+    assert re.search(r"⛔ \*\*Do\s+not try to attribute", section), (
+        "the section does not forbid the impossible step it describes — "
+        "per-request attribution from a line that carries no request identity"
     )
 
 
@@ -3086,3 +3151,240 @@ def test_the_record_is_not_armed_single_tenant_on_the_hosted_app():
         assert name not in argv_keys, f"the deploy stages {name} to Fly"
         assert name not in env_bound, f"the deploy binds {name} from a GitHub secret"
         assert name not in declared, f"{name} is declared in fly-managed-secrets.txt"
+
+
+def test_the_readiness_request_bound_clears_the_servers_own_bound() -> None:
+    """The gate's per-REQUEST bound must sit ABOVE the bound the SERVER enforces.
+
+    `deploy-health-gate.sh` bounds each request because a `N tries × S sleep`
+    phase budget is only a bound if the request is one — but the number has to be
+    derived from the endpoint's own server-side bound, not chosen. `/health/ready`
+    runs BOTH plane coordinators SEQUENTIALLY in Supabase mode
+    (`hosted_api.health_ready`): `_READY_PROBE`, bounded at
+    ``DB_PROBE_HARD_TIMEOUT`` (which ALIASES ``monitoring.PROBE_HARD_TIMEOUT`` =
+    3.1 + 2.0 + 0.5 = 5.6 s — NOT the 1.5 s inner ``PROBE_TIMEOUT``), then
+    `_CONTROL_PLANE_PROBE`, bounded at ``CONTROL_PLANE_HARD_TIMEOUT`` (5.0 phases
+    + 1.0 margin = 6.0 s).
+
+    A client bound below that sum is the defect #10155's review found live: the
+    gate shipped a shared 5 s knob, so a healthy-but-slow release answering
+    between 5 s and 11.6 s was cut off, curl printed `000`, and phase 3 reported
+    it as "no response from the app" — the indistinguishable-failure class the
+    gate exists to avoid. `_READY_PROBE` is `fresh_only=True`, so a completed
+    result is served only while it is younger than its own read budget
+    (``monitoring.HealthProbe._view_locked``: ``max_age = self._timeout``), and
+    the polls are ``READY_SLEEP`` (10 s) apart — older than that budget — so
+    EVERY poll re-probes and a sustained slow data plane fails the whole phase.
+    """
+    gate = (_REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh").read_text(
+        encoding="utf-8")
+    # The READINESS knob specifically — a single shared knob cannot satisfy this
+    # and the `/health` snapshot bound (5 s) at the same time, which is why the
+    # pin reads the ready knob by NAME.
+    match = re.search(r'CURL_MAX_TIME_READY="\$\{CURL_MAX_TIME_READY:-(\d+)\}"', gate)
+    assert match, (
+        "the readiness request bound is no longer a numeric default of "
+        "CURL_MAX_TIME_READY in deploy-health-gate.sh — the derivation this test "
+        "pins has nothing to read"
+    )
+    shipped = int(match.group(1))
+
+    import tortoise.hosted_api as hosted_api
+    import tortoise.monitoring as monitoring
+
+    # Guard the derivation itself first: if the server's hard bound ever stops
+    # ALIASING the coordinator constant, `DB_PROBE_HARD_TIMEOUT` silently becomes
+    # a restated literal and the sum below would measure the wrong thing.
+    assert hosted_api.DB_PROBE_HARD_TIMEOUT == monitoring.PROBE_HARD_TIMEOUT, (
+        "DB_PROBE_HARD_TIMEOUT no longer aliases monitoring.PROBE_HARD_TIMEOUT — "
+        "re-derive CURL_MAX_TIME_READY against whatever now bounds the data plane"
+    )
+    server_worst = (hosted_api.DB_PROBE_HARD_TIMEOUT
+                    + hosted_api.CONTROL_PLANE_HARD_TIMEOUT)
+    assert server_worst > 5.0, (
+        f"the server's own readiness worst case reads {server_worst}s; this test "
+        "assumes it exceeds the /health snapshot bound, which is why one knob "
+        "cannot serve both endpoints"
+    )
+    assert shipped > server_worst, (
+        f"CURL_MAX_TIME_READY is {shipped}s but /health/ready's server-side worst "
+        f"case is {server_worst}s (DB_PROBE_HARD_TIMEOUT "
+        f"{hosted_api.DB_PROBE_HARD_TIMEOUT} + CONTROL_PLANE_HARD_TIMEOUT "
+        f"{hosted_api.CONTROL_PLANE_HARD_TIMEOUT}) — a client bound below it reds "
+        "a healthy-but-slow release and reports it as `000 = no response`"
+    )
+
+
+def _gate_knob(gate: str, name: str) -> int:
+    """The SHIPPED default of a `NAME="${NAME:-<int>}"` knob in the gate."""
+    match = re.search(rf'{name}="\$\{{{name}:-(\d+)\}}"', gate)
+    assert match, f"{name} is not a numeric default in deploy-health-gate.sh"
+    return int(match.group(1))
+
+
+def test_the_deploy_retry_loop_fits_under_the_cap_that_kills_it() -> None:
+    """`deploy-api`'s cap is derived ABOVE its retry loop, and nothing pinned it.
+
+    The loop is the reason that cap is hand-derived rather than a round multiple
+    of a measured duration: ``5 x (attempt bound + kill grace) + 4 x retry
+    sleep`` is a worst case nobody re-derives by eye. The health gate has a pin
+    of exactly this shape (`test_the_health_gate_budget_stays_under_the_cap_that
+    _kills_it`); this job had none, so `timeout -k 30s 11m` could be edited to
+    `15m` — making the loop's worst case 80.5 min against a 65-minute cap — with
+    every test still green.
+
+    Why it matters more here than anywhere else: a `timeout-minutes` kill ends
+    the job BEFORE `if: failure()` is evaluated, so the #2240 out-of-band alert
+    never runs and a LIVE, unhealthy release reports only as a red run. If the cap
+    is what kills attempt 5, the per-attempt bound — the whole point of the loop —
+    is no longer the bound, and the alert goes with it.
+
+    Read off the SHIPPED workflow rather than restated: the attempt count, the
+    per-attempt `timeout -k <grace> <bound>`, the retry sleep, and the cap.
+    """
+    raw = _WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(raw)
+
+    loop = re.search(
+        r"for attempt in ([0-9 ]+); do\n.*?timeout -k ([0-9]+)s ([0-9]+)m .*?\n"
+        r".*?sleep ([0-9]+)\n",
+        raw,
+        re.S,
+    )
+    assert loop, (
+        "the deploy-api retry loop is no longer a `for attempt in …; do` block with "
+        "`timeout -k <grace>s <bound>m` followed by a retry `sleep <n>` — the "
+        "arithmetic this pin recomputes has nothing to read. Restate the derivation "
+        "here if the loop is reshaped."
+    )
+    attempts = len(loop.group(1).split())
+    grace_min = int(loop.group(2)) / 60
+    bound_min = int(loop.group(3))
+    sleep_min = int(loop.group(4)) / 60
+
+    # No sleep is charged after the LAST attempt — the loop exits immediately, so
+    # only `attempts - 1` retries are paid for.
+    worst = attempts * (bound_min + grace_min) + (attempts - 1) * sleep_min
+
+    cap = workflow["jobs"]["deploy-api"].get("timeout-minutes")
+    assert isinstance(cap, int), (
+        f"deploy-api has no integer timeout-minutes ({cap!r}) — the retry loop's "
+        "worst case would be bounded by GitHub's 360-minute default, and a kill at "
+        "that point still skips if: failure() and silences the #2240 alert"
+    )
+    assert worst < cap, (
+        f"the deploy retry loop's worst case is {worst:g} min "
+        f"({attempts} x ({bound_min:g} + {grace_min:g}) + {attempts - 1} x "
+        f"{sleep_min:g}) but deploy-api is capped at {cap} min — the CAP would be "
+        "what kills the last attempt, so the per-attempt bound stops being the "
+        "bound and the `if: failure()` alert never runs. Either tighten the attempt "
+        "bound or raise the cap in the same commit."
+    )
+    # The other direction is a defect too: a cap that only BARELY clears the loop
+    # leaves nothing for the job's other steps, and one of those raises the alert.
+    assert worst + 0.5 < cap, (
+        f"deploy-api's {cap}-minute cap leaves {cap - worst:g} min over the retry "
+        "loop's worst case for the job's other thirteen steps (one of which raises "
+        "the #2240 alert) — the headroom is the point, not padding"
+    )
+
+
+def test_the_health_gate_budget_stays_under_the_cap_that_kills_it() -> None:
+    """The gate's worst case is DERIVED from its knobs and must fit the job cap.
+
+    `post-deploy-verify`'s `timeout-minutes` is the only thing that can end a
+    hung gate, and a `timeout-minutes` kill ends the job BEFORE `if: failure()`
+    is evaluated — so the #2240 out-of-band alert never runs and a LIVE,
+    unhealthy release reports as a red run with a truncated log. That makes the
+    relationship `gate worst case < cap` load-bearing, and it was PROSE ONLY:
+    the budget appears in `deploy-health-gate.sh`'s comment and in the job's
+    comment, and nothing recomputed it from the knobs. Raising `READY_TRIES`
+    (or adding a phase) would silently make the cap the bound again — the exact
+    failure the per-request bounds were added to remove.
+
+    The harness cannot catch this: it overrides `APP_PROBES` / `DB_TRIES` /
+    `READY_TRIES` / the sleeps per case, so it never sees the shipped defaults.
+    """
+    gate_path = _REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh"
+    gate = gate_path.read_text(encoding="utf-8")
+
+    worst = (
+        _gate_knob(gate, "APP_PROBES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_APP") + _gate_knob(gate, "APP_PROBE_SLEEP"))
+        + _gate_knob(gate, "DB_TRIES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_HEALTH") + _gate_knob(gate, "DB_SLEEP"))
+        + _gate_knob(gate, "READY_TRIES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_READY") + _gate_knob(gate, "READY_SLEEP"))
+    )
+
+    job = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["post-deploy-verify"]
+    cap_minutes = job.get("timeout-minutes")
+    assert isinstance(cap_minutes, int), (
+        f"post-deploy-verify has no integer timeout-minutes ({cap_minutes!r}) — the "
+        "gate's worst case would be bounded by GitHub's 360-minute default, and a "
+        "kill at that point still skips if: failure()"
+    )
+    assert worst < cap_minutes * 60, (
+        f"the gate's worst case is {worst} s ({worst / 60:.2f} min) but "
+        f"post-deploy-verify is capped at {cap_minutes} min — the CAP would be the "
+        "thing that ends a hung probe, and a timeout-minutes kill skips the #2240 "
+        "alert. Either bound the gate tighter or raise the cap in the same commit."
+    )
+
+
+def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
+    """The gate's BEHAVIOUR header must state the windows its knobs DERIVE.
+
+    The header said "poll for up to 3 min" for BOTH phase 2 and phase 3. That
+    was true while a phase's window was ``tries x sleep`` (``18 x 10 s = 180 s``)
+    and the per-request bounds added alongside this pin made it false: the
+    window is ``tries x (sleep + request bound)``, i.e. 270 s (4.5 min) and
+    414 s (6.9 min). The file then stated a poll window and its own refutation
+    ~100 lines apart, and the header understated phase 3 by 2.3x — the same
+    "a diagnosis that understates its own wait" defect the runtime messages
+    were fixed for, in the copy a maintainer reads when deciding whether a
+    phase budget is too tight.
+
+    Nothing pinned it, so it could be reverted green, and any knob change
+    re-opened it silently. This reads the SHIPPED defaults, recomputes each
+    window, and requires the header to state that window.
+    """
+    gate_path = _REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh"
+    gate = gate_path.read_text(encoding="utf-8")
+
+    header = gate[gate.index("# BEHAVIOUR"):gate.index("# CONTRACT (#4771)")]
+    # `BEHAVIOUR` numbers its phases `#   1. …`, `#   2. …`, `#   3. …`; the split
+    # keeps each phase's (possibly wrapped) prose in its own segment.
+    phases = re.split(r"\n#   \d\. ", header)
+    assert len(phases) == 4, f"expected 3 numbered phases in the header, got {phases}"
+
+    windows = [
+        _gate_knob(gate, "APP_PROBES") * (
+            _gate_knob(gate, "APP_PROBE_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_APP")),
+        _gate_knob(gate, "DB_TRIES") * (
+            _gate_knob(gate, "DB_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_HEALTH")),
+        _gate_knob(gate, "READY_TRIES") * (
+            _gate_knob(gate, "READY_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_READY")),
+    ]
+
+    # `strict=True` guards the WINDOW side, which nothing else does: the `len(phases) == 4` assert
+    # above already reds a header that gains a numbered phase (it fires before the zip runs), but a
+    # fourth entry added to `windows` — a new phase's window written while its header bullet was
+    # forgotten — would make a plain `zip` stop at the three phases it has and leave that window
+    # unchecked, silently. With `strict=True` the two SIDES cannot be edited apart. ⛔ It does not
+    # seal the pairing: an extra phase written WITHOUT `#   N. ` numbering is not split out (it stays
+    # inside the previous segment), so it slips both zip forms and the assert — a pre-existing gap
+    # in this pin's shape, not closed here.
+    for segment, seconds in zip(phases[1:], windows, strict=True):
+        stated = f"up to {seconds} s ({seconds / 60:.1f} min)"
+        assert stated in segment, (
+            f"the gate's BEHAVIOUR header does not state {stated!r} — the window "
+            "its own knobs derive. The header had to be corrected by hand once "
+            "(it claimed 3 min for a 270 s and a 414 s phase); restate the derived "
+            f"window, or change the knob and the header together. Header segment:\n{segment}"
+        )
+        # The stale claim, in the spelling that was there, must not return.
+        assert "3 min" not in segment and "3-minute" not in segment, (
+            "the gate's BEHAVIOUR header still says 3 min for a phase whose "
+            "derived window is not 180 s"
+        )

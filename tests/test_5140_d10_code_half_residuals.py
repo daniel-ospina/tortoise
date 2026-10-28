@@ -32,8 +32,19 @@ anchor), finding 9 (#5236), finding 11 (the ruling-B `:Source` guard).
     the NON-OVER-REACH arm: *"SETTING a genre where none is stored is how a
     document `:Source` is minted through these surfaces at all"*). Closing it is
     a decision about that contract, not a bugfix, so it is left to the owner.
-  * **finding 8** — no label-relabel migration shipped for pre-D10 `:Document`
-    nodes — and **finding 3's backlog-discovery half**, which depends on it.
+  * **finding 8** — CLOSED by `tortoise/migrate_kinds.py::relabel_legacy_documents`
+    (runs first in `_do_migrate`), and with it **finding 3's backlog-discovery
+    half for the foldable part of a LIVE graph**: once the pre-D10 `:Document`
+    population is folded into `:Source {url}`, the `doc_status='captured'` arm
+    the sweep already carries reaches it. Pinned by
+    `tests/test_5140_d10_relabel_migration.py`.
+    ⚠️ Two populations are NOT reached, and neither is a relabel's to fix:
+    (a) a document minted by `_event_plain_merge`'s `objectType='Document'`
+    branch carries NO clock, so the relabel refuses it (`undated`) rather than
+    invent §4.6's `ingestedAt` — an operator asserts the instant and re-runs;
+    (b) the same backlog on a REBUILT graph (the replay scrubs `doc_status` and
+    stamps the old `needs_extraction=false`, which reads as done) — a product
+    decision recorded on #5140.
   * the **`transcript` genre-vocabulary** decision (issue comment
     2026-10-22T00:49; `owner-decision` label).
 
@@ -105,10 +116,11 @@ def test_document_created_then_source_still_one_node(sdk_factory):
 def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
     """Non-over-reach: the resolver is IDENTITY for the two non-URL document-id
     shapes the INDEX and CLI paths emit — `doc_<rel-path>` from
-    `derive_document_id` (the underscore form: `doc_notes/5140.md`, not
-    `doc/notes/…`) and a BARE FILENAME, which is what the CLI passes
-    (`ingest.py` uses `args.transcript.name`; `corpus://…` is the index path's
-    SOURCE URL, not a document id). Their node keys must not move.
+    `derive_document_id` (the underscore form; the literal below is the
+    MIXED-CASE `doc_Notes/5140.md`, not `doc/notes/…`) and a BARE FILENAME,
+    which is what the CLI passes (`ingest.py` uses `args.transcript.name`;
+    `corpus://…` is the index path's SOURCE URL, not a document id). Their node
+    keys must not move.
 
     ⚠️ It asserts the identity PROPERTY as well as the key, and one literal is
     MIXED CASE, because the key alone cannot see the defect this guards: on a
@@ -136,9 +148,20 @@ def test_document_created_non_url_id_keeps_its_identity(sdk_factory):
 
 def test_document_created_replays_to_the_same_node(sdk_factory):
     """Durability: the resolved key and the identity props are written by the
-    FOLD, so a rebuild of the same record is a no-op — the node count must not
-    grow on replay, which is what a resolver applied only on the live path
-    would have produced."""
+    FOLD, so re-applying the SAME record must be a no-op — the node count must
+    not grow and the alias set must not accumulate the raw spelling again.
+
+    The alias half is the assertion that DISCRIMINATES; the node count does not
+    on its own, and this docstring no longer claims it does: a `MERGE` on a
+    constant key is one node however many times it runs, so a resolver applied
+    only on the live path would leave this count at 1 as well (#5140 review of
+    PR #9952 — the earlier "which is what a resolver applied only on the live
+    path would have produced" claimed a discrimination a constant `MERGE`
+    cannot have, and the case was green pre-fix by that PR's own base
+    measurement). What IS fold-owned is the `urlAliases` clause's dedup:
+    measured, dropping its `CASE WHEN $raw_url IN …` guard (leaving a bare
+    `coalesce(s.urlAliases, []) + [$raw_url]`) fails this test with the raw
+    spelling repeated three times."""
     sdk = sdk_factory()
     proj = sdk._get_proj()
     rec = {
@@ -152,9 +175,9 @@ def test_document_created_replays_to_the_same_node(sdk_factory):
     proj.apply(rec)
     rows = proj.g.query(
         "MATCH (s:Source) WHERE toLower(s.url) CONTAINS 'example.com/a/b' "
-        "RETURN count(s), collect(s.documentKind)"
+        "RETURN count(s), collect(s.documentKind), collect(s.urlAliases)"
     ).result_set
-    assert rows[0] == [1, ["report"]], rows
+    assert rows[0] == [1, ["report"], [[rec["id"]]]], rows
 
 
 def test_document_created_fragment_variants_collapse_to_one_node(sdk_factory):

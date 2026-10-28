@@ -505,7 +505,19 @@ class TestFoldMissWarning:
         """Green-pin: a journaled ObjectSuperseded with no journaled
         registration must fire the fold-miss warning at rebuild (caplog
         level, not string — the T4.4 reword must survive) and must NOT
-        fabricate the Object."""
+        fabricate the Object.
+
+        The run itself now PASSES: since #3590 D2 (#10107) a target the
+        journal never registered is exempt (`object-superseded-unregistered`,
+        still RECORDED by the run boundary) because live folded nothing either.
+        ⚠️ RETIRED CONTRACT: this test used to require
+        `NonFoldedEventsError` here. The refusal it pinned did not disappear —
+        it moved to a name the journal DID establish, and lives in
+        `tests/test_rebuild_parity_fail_loud_3585.py`
+        (`test_name_only_supersede_of_registered_then_deleted_name_still_refuses`,
+        `test_name_from_a_rename_counts_as_established_both_engines`). Do not
+        re-add the raise here: it would re-pin the exemption's own defect.
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t8.db"),
@@ -519,8 +531,7 @@ class TestFoldMissWarning:
                             supersedes_by="successor-name")
             import logging
             with caplog.at_level(logging.WARNING,
-                                 logger="tortoise.projection"), \
-                    pytest.raises(NonFoldedEventsError):
+                                 logger="tortoise.projection"):
                 proj.rebuild_all(str(events), confirm_destructive=True)
             assert any("fold" in r.message.lower() and
                        "match" in r.message.lower() for r in caplog.records), (

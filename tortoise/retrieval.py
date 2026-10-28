@@ -909,14 +909,19 @@ def _validity_marker(h: dict) -> str:
       - live hit with ``valid_from`` → ``[valid since <from>]``
       - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
         ``[valid <from> → <to>; expired <tx-date>]``
-      - an ENDED-but-un-datable window (``end_state == 'unknown'``, i.e.
-        ``validToPrecision='unknown'`` with no ``validTo``) →
+      - an ENDED-but-un-datable window (``end_state == 'unknown'``) →
         ``[valid since <from>; end unknown]`` (with ``expired_at`` →
         ``…; expired <tx-date>; end unknown``). #2350: the marker is
         interpolated into the reader evidence, so ``[valid since <from>]``
         asserts the claim is STILL TRUE — rendering an un-datable end that
         way would fabricate coverage, the exact hazard the 3-state end
-        exists to prevent.
+        exists to prevent. #9202 gives ``END_UNKNOWN`` TWO spellings — the
+        DECLARED ``validToPrecision='unknown'`` with no ``validTo``, and a
+        STORED ``validTo`` that names no instant (``"TBD"`` /
+        ``"2026-02-30"``) — and BOTH render this one form: a bound the state
+        calls un-datable is never interpolated as if it were a date
+        (``[valid 2024-01-01 → TBD]``, the #9741 residual). The state is
+        CONSUMED, never re-decided here — see :func:`_end_state_is_unknown`.
       - undated hits → NO validity marker (byte-identical rendering)
       - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
         ``"not-a-date"``) → the start clause is OMITTED, never interpolated
@@ -964,7 +969,19 @@ def _validity_marker(h: dict) -> str:
         vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(raw_vf) \
             else ""
         since = f" since {vfd}" if vfd else ""
-        if vt:
+        if _end_state_is_unknown(h):
+            # #2350/#9202/#9741: ENDED but un-datable. Both spellings of that
+            # one state land here — the declared marker AND a stored end that
+            # names no instant — so the stored text is never interpolated as a
+            # date and the window is never relabelled as still-true. Checked
+            # BEFORE the ``vt`` arm: a stored un-datable end is TRUTHY, so it
+            # used to take the bounded-window arm and print itself verbatim.
+            if ex:
+                exd = ex[:10] if len(ex) > 10 else ex
+                marks.append(f"[valid{since}; expired {exd}; end unknown]")
+            else:
+                marks.append(f"[valid{since}; end unknown]")
+        elif vt:
             vtd = vt[:10] if len(vt) > 10 else vt
             # the both-ends form never carried "since" — a start it cannot
             # name leaves only the arrow and the end.
@@ -974,14 +991,6 @@ def _validity_marker(h: dict) -> str:
                 marks.append(f"[valid {lead}→ {vtd}; expired {exd}]")
             else:
                 marks.append(f"[valid {lead}→ {vtd}]")
-        elif ((h.get("end_state") or "") == END_UNKNOWN
-              or (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN):
-            # #2350: ENDED but un-datable — never relabel as still-true.
-            if ex:
-                exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid{since}; expired {exd}; end unknown]")
-            else:
-                marks.append(f"[valid{since}; end unknown]")
         else:
             # No start recorded and an OPEN end: ``[valid]`` still states the
             # open-end reading (still-true) without asserting a start, which
@@ -989,6 +998,33 @@ def _validity_marker(h: dict) -> str:
             # would hide that a window was written at all.
             marks.append(f"[valid{since}]")
     return " ".join(marks)
+
+
+def _end_state_is_unknown(h: dict) -> bool:
+    """Does the validity layer say this hit's window END is un-datable?
+
+    The marker CONSUMES the resolved state — it never asks "does this stored
+    end name an instant?" a second time. ``validity.end_state`` is that
+    question's ONE home, and every window-consuming read path spreads its
+    verdict onto the hit through ``window_read_fields`` (#2350's ONE
+    read-projection home), so the state is already there to read (#9202).
+
+    Two places deciding the same question is exactly how the defect this
+    guards came to exist: the state said ``unknown`` while the renderer, which
+    read the raw bound instead, printed ``[valid 2024-01-01 → TBD]`` — reader
+    text asserting a date the state denies (#9741).
+
+    A hit that carries NO resolved state (hand-built, or a caller that never
+    went through the read-projection home) falls back to the DECLARED token,
+    which is the same vocabulary's own spelling of the state and needs no
+    parse to read. When the resolved state IS present it alone decides: the
+    token is the state's input, so preferring it could only contradict the
+    verdict already computed.
+    """
+    state = (h.get("end_state") or "").strip()
+    if state:
+        return state == END_UNKNOWN
+    return (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN
 
 
 def _bounds_an_instant(value: object) -> bool:

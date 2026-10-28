@@ -1114,9 +1114,13 @@ class TestSupabaseLaneSeam:
             self, client, dr_env, mem_storage, monkeypatch):
         """#2340: pre-fix this returned `{"teams": 0}` — a silent no-op SUCCESS
         that rebuilt no ACLs after a full-platform restore."""
+        from tortoise.acl_graph_users import AclProvisionResult, AclStatus
+
         monkeypatch.setattr(
             "tortoise.acl_graph_users.create_acl_user",
-            lambda graph_id, org_id: {"username": "u"})
+            lambda graph_id, org_id: AclProvisionResult(
+                AclStatus.PROVISIONED, username="u"),
+        )
         cp = self._fortify_supabase_lane(monkeypatch)
         r = client.post("/v1/internal/backups/acl-reconcile",
                         headers=INTERNAL_HEADERS)
@@ -2350,9 +2354,16 @@ class TestDrPurgeGraceGate:
 class TestDrAclReconcile:
     """#2313 folded delta: post-restore per-graph ACL rebuild — the endpoint
     replays create_acl_user (idempotent upsert) for every ACTIVE custom graph
-    of every eligible team; fail-soft on ACL-layer absence."""
+    of every eligible team; fail-soft on ACL-layer absence.
+
+    #8617 ruling 4: the report RECORDS the absence in the state it is actually
+    in (`provisioned` / `absent_by_design` / `denied` / `absent`) instead of
+    the single pre-#8617 `acl_absent_skipped` counter, which conflated "not
+    provisionable here" with "bare redis" with "the credential was refused"."""
 
     def test_acl_reconcile_covers_custom_graphs_and_is_fail_soft(self, client, dr_env, mem_storage, monkeypatch):
+        from tortoise.acl_graph_users import AclProvisionResult, AclStatus
+
         _seed_team("team_x", nodes=1)
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
@@ -2368,7 +2379,8 @@ class TestDrAclReconcile:
         calls: list = []
         monkeypatch.setattr(
             "tortoise.acl_graph_users.create_acl_user",
-            lambda graph_id, org_id: calls.append((graph_id, org_id)) or {"username": "u"},
+            lambda graph_id, org_id: calls.append((graph_id, org_id))
+            or AclProvisionResult(AclStatus.PROVISIONED, username="u"),
         )
         r = client.post(
             "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
@@ -2376,11 +2388,60 @@ class TestDrAclReconcile:
         body = r.json()
         assert body["status"] == "reconciled"
         org_res = body["results"]["team_x"]
-        assert org_res["custom_graphs_ok"] == 1
+        assert org_res["provisioned"] == 1
         assert org_res["default_skipped"] == 1
         # the ACTIVE custom graph is rebuilt; the tombstone is never touched
         assert ("g_a", "team_x") in calls
         assert ("g_dead", "team_x") not in calls
+
+    def test_acl_reconcile_reports_denied_apart_from_absent_by_design(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#8617 ruling 4: `denied` (a reachable server refused the credential —
+        the FalkorDB Cloud shape) and `absent_by_design` (this lane declares the
+        layer off) are DIFFERENT operator facts and must not collapse into one
+        counter. The pre-#8617 code reported a single `acl_absent_skipped` for
+        both, which is why nobody could see from the DR report which layer the
+        deployment actually had.
+
+        Mutation behind this test: fold the branch back to one `skipped`
+        counter (or drop the DENIED arm) — `denied` reads 0 and this reds,
+        while the existing fail-soft test stays green (it only exercises the
+        `absent`/`None` shape), which is exactly how the conflation survived.
+        """
+        from tortoise.acl_graph_users import AclProvisionResult, AclStatus
+
+        _seed_team("team_x", nodes=1)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        reg = sdk._get_registry()
+        reg.query("MATCH (t:Team {id:'team_x'}) SET t.backup_enabled = true")
+        reg.query(
+            "CREATE (g:Graph {id:'g_denied', org_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_denied', status:'active'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_off', org_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_off', status:'active'})")
+
+        def _replay(graph_id, org_id):
+            if graph_id == "g_denied":
+                return AclProvisionResult(
+                    AclStatus.DENIED, username="tenant_g_denied",
+                    detail="NOPERM … the credential is not allowed +ACL")
+            return AclProvisionResult(
+                AclStatus.ABSENT_BY_DESIGN, username="tenant_g_off",
+                detail="TORTOISE_ACL_LAYER=off")
+
+        monkeypatch.setattr("tortoise.acl_graph_users.create_acl_user",
+                            _replay)
+        r = client.post("/v1/internal/backups/acl-reconcile",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        org_res = r.json()["results"]["team_x"]
+        assert org_res["denied"] == 1, org_res
+        assert org_res["absent_by_design"] == 1, org_res
+        assert org_res["provisioned"] == 0, org_res
+        assert org_res["absent"] == 0, org_res
+        assert org_res["errors"] == [], org_res
 
     def test_acl_reconcile_requires_config(self, client, mem_storage):
         r = client.post(

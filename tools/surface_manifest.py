@@ -40,7 +40,11 @@ WHAT `check` DOES NOT PROVE — APPROVAL IS NOT MACHINE-CARRIED
     `docs/product/beta-sdk-surface.md` is a separate question, answered against the live
     surface by `tools/surface-target-check.py`.
 
-    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the
+    implementation cannot be the approved target; the target is read from
+    docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK
+    surface in tortoise/__all__.py (owner, 40 methods; cross-checked against
+    docs/product/beta-sdk-surface.md) — never from a count beside them.
 
 THE BASELINE IS VERIFIED AGAINST THE CODE, NOT AGAINST ITSELF
     `check` re-derives the whole baseline with the SAME function `cut` writes
@@ -215,12 +219,17 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 MANIFEST_HEADER = (
     "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.\n"
     "#\n"
-    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of what EXISTS today\n"
-    "# because the required `surface-guard` job compares the live class against them and is run\n"
-    "# from the BASE REF's copy — the set shrinks only when #4282 Phase 2 removes a method. The\n"
+    "# ROW SET vs APPROVAL. The `sdk:` rows are the frozen baseline of the public SDK surface\n"
+    "# as it exists today (`counts.sdk_public_methods`, derived \u2014 never typed into a comment)\n"    "# because the required `surface-guard` job compares the live class against them and is run\n"
+    "# from the BASE REF's copy \u2014 the set shrinks only when #4282 Phase 2 removes a method. The\n"
     "# APPROVAL is the per-row `approved` flag, cut from tortoise/__all__.py (40 names): a row\n"
-    "# with `approved: false` is migration backlog, not consent. An unapproved addition reds\n"
-    "# `tools/sdk_surface_declaration.py check` and the `approved` flag on a re-cut row.\n"
+    "# with `approved: false` is migration backlog, not consent. `approved` is a DERIVED row\n"
+    "# key, so a re-cut over a grown surface writes `approved: false` for the new method and\n"
+    "# property 12 compares two identical derived values — green by construction. What reds an\n"
+    "# unapproved addition in required CI is the `high_water_counts` growth pin below, enforced\n"
+    "# INDEPENDENTLY by the BASE-REF-pinned `tools/surface-guard.py` (its step 7); the full\n"
+    "# `tools/sdk_surface_declaration.py check` names the addition too, but its gap half is\n"
+    "# report-only in the required job.\n"
     "#\n"
     "# The top-level approval is READ from docs/product/canonical-mcp-tools.md (#4185) by\n"
     "# `tools/surface_manifest.py::read_approval` and copied into this file by a re-cut.\n"
@@ -229,10 +238,25 @@ MANIFEST_HEADER = (
     "#\n"
     "# `high_water_counts` is a GROWTH PIN, not a derivation: `cut` carries it forward and\n"
     "# `tools/surface-guard.py` reds when the live surface EXCEEDS it. Raising it is a\n"
-    "# deliberate, reviewable act in the approving PR — so a re-cut over a grown surface\n"
+    "# deliberate, reviewable act in the approving PR \u2014 so a re-cut over a grown surface\n"
     "# cannot be green by construction.\n"
     "#\n"
-    "# ⚠️ A re-cut emits ONLY this header, then the `yaml.safe_dump` of the derived document.\n"
+    "# RAISED 149 \u2192 150 on 2026-10-26 by PR #10053 (#4282 Phase 2.2 \u2014 the four merges as\n"
+    "# dispatchers). The three NEW public methods are `link_entities`, `update_knowledge`\n"
+    "# and `delete_knowledge`, and every one of them is a row of the owner's 40\n"
+    "# (`tortoise/__all__.py`, owner ruling 2026-09-21, approval record\n"
+    "# `docs/product/canonical-mcp-tools.md` \u2014 unchanged by this raise). So the approved\n"
+    "# list did NOT grow and the 138-name migration backlog did NOT grow: what grew is the\n"
+    "# IMPLEMENTATION of three names the owner already approved, which is exactly what\n"
+    "# #4282 Phase 2 is for. The arithmetic is 149 + 3 \u2212 2: `main` retired `graph_count`\n"
+    "# (now the internal `_graph_count`) and `org_list` in PR #10012 while this branch was\n"
+    "# open, and neither was ever an approved name, so the backlog is unchanged at 138.\n"
+    "# The alternative \u2014 land the dispatchers only once the narrow\n"
+    "# methods they supersede are retired \u2014 would make this phase wait on Phase 3 and is\n"
+    "# why the pin is raised HERE, explicitly, rather than silently by a re-cut (which\n"
+    "# carries a pin forward by design and can never raise it).\n"
+    "#\n"
+    "# \u26a0\ufe0f A re-cut emits ONLY this header, then the `yaml.safe_dump` of the derived document.\n"
     "# YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep\n"
     "# rationale here or in the docs, never in an ad-hoc comment in the body.\n"
     "#\n"
@@ -366,7 +390,11 @@ def _frontmatter(path: Path) -> dict:
 def read_approval(path: Path | None = None) -> dict:
     """The owner's approval — READ from `docs/product/canonical-mcp-tools.md`.
 
-    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 26/40, re-confirmed 2026-10-10).
+    OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the
+    implementation cannot be the approved target; the target is read from
+    docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK
+    surface in tortoise/__all__.py (owner, 40 methods; cross-checked against
+    docs/product/beta-sdk-surface.md) — never from a count beside them.
 
     The manifest used to carry `approval_status: pending-owner-approval` while the
     canonical list already recorded `approval_status: approved`, `approvedBy:
@@ -1133,7 +1161,7 @@ def build_doc(commit: str | None = None) -> dict:
     # than the gap: `tools/surface-guard.py` — the required gate that compares the live
     # class against these rows — is restored from the BASE REF in CI
     # (`.github/workflows/python-ci.yml` → `surface-guard`), so a baseline cut down to the
-    # 40 would red the required job on the 140 live methods that still exist until Phase 2
+    # 40 would red the required job on the 138 live methods that still exist until Phase 2
     # removes them. So the baseline keeps describing reality, the `approved` flag makes the
     # gap visible per row, and the honest red lives in `tools/sdk_surface_declaration.py
     # check` + `tools/surface-target-check.py`. An unreadable declaration is still a REFUSAL:
@@ -2393,10 +2421,15 @@ def cmd_check(args: argparse.Namespace) -> int:
     problems.extend(_derivation_problems(doc, derived))
 
     # 13. the DECLARED surface is the APPROVED one (#10034) ----------------------
-    # `build_doc` above proves the baseline was cut from a declaration that agrees with the
-    # class. It does not prove the declaration is the OWNER'S list: a re-cut over a grown
-    # or re-derived declaration would reproduce it faithfully. That check lives in
-    # `tools/sdk_surface_declaration.py`, and it is run HERE — from the required
+    # Property 12 (`build_doc` vs the committed artifact) does NOT prove the declaration is
+    # the OWNER'S list, and it cannot: `build_doc` walks `dir(TortoiseSDK)` for the row set
+    # and loads the declaration only to ANNOTATE each row (`approved: name in approved`).
+    # It never compares the two sets, so a live-but-undeclared method gets `approved: false`
+    # and a declared-but-absent name gets no row at all — a re-cut over a grown or
+    # re-derived declaration reproduces it faithfully, and `_derivation_problems` then
+    # compares the artifact against that same annotated derivation (a tautology after a
+    # re-cut, not a check against the class). The check that the declaration IS the owner's
+    # lives in `tools/sdk_surface_declaration.py`, and it is run HERE — from the required
     # `python-ci.yml::surface-guard` step that already runs this lint — rather than from a
     # new workflow step, so the gate is enforced by the existing required job. (A separate
     # step was the first draft; it needs the `workflow` scope on the pushing credential,
@@ -2407,10 +2440,13 @@ def cmd_check(args: argparse.Namespace) -> int:
     # deadlock — see the workflow comment), so a PR that edits `tools/surface_manifest.py` can
     # drop or neuter this call in the same commit. The pinned expansion gate still catches a new
     # public SDK method; it cannot see a re-cut approved LIST. That gap is why the declaration
-    # half is also asserted by tests on every code change (#10044).
+    # half is also asserted by tests on every code change (#10044), and why
+    # `tools/sdk_surface_declaration.py` is claimed by `SOURCE_PATTERNS["api"]` in
+    # `tools/ci_selection.py`: without that entry a gate-only diff selected NO surface and the
+    # required job executed the PR's own edited gate with none of its proofs having run.
 
     # The CONTRACT half runs here, in the required `surface-guard` job: the declaration must
-    # still be the owner's exact 40, in both directions. The GAP half (140 live methods off
+    # still be the owner's exact 40, in both directions. The GAP half (138 live methods off
     # the surface + 30 approved but unimplemented, today) is deliberately NOT a required-CI
     # failure — a permanently red required job is a permanently ignored one, and the gap is
     # already red in `tools/sdk_surface_declaration.py check` and in

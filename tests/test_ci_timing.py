@@ -4923,7 +4923,11 @@ def test_the_ratchet_uses_the_real_producer_and_its_pool() -> None:
     assert selection["test_files"] == "ALL"
 
     run_legs = set(ci_selection.fast_pool(manifest))
-    run_legs |= set(manifest.get("slow_files") or []) - ci_selection.carve_out_files(manifest)
+    # #10194: the slow half of the pool is `slow_gating_files()` — the ONE
+    # definition of the gating slow pool (slow - carve-out - non-gating lane).
+    # Spelling it out here as `slow_files - carve_out` was a second definition
+    # that silently kept the 43 lane files in the denominator.
+    run_legs |= ci_selection.slow_gating_files(manifest)
     on_demand = ci_selection.on_demand_files(manifest)
     # The pool must exclude what the gate never runs, and the restricted sum
     # must be strictly smaller — otherwise this ratchet is vacuous.

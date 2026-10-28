@@ -26,6 +26,23 @@ no-op — never a single point of failure. A server-reachable SETUSER failure
 raises :class:`AclLayerError` so the PROVISIONING mint (strict) rolls back
 (no graph without its ACL user); standalone key mints to existing graphs are
 fail-soft (the graph's user was created at graph-mint).
+
+#8617 (owner decision, 2026-10-26): the per-graph user is NOT provisionable on
+FalkorDB Cloud — no credential the app may hold carries ``+ACL`` there ("no
+preset grants ``+ACL``", and ``ACL`` is not in the allowed-commands list), so
+insisting on it blocked every hosted graph mint. The hosted lane therefore
+DECLARES the layer unavailable (``TORTOISE_ACL_LAYER=off``, ``fly.toml``)
+instead of discovering the refusal per mint; self-hosted/docker keep today's
+behaviour (``strict``, the default).
+
+Everything this module reports is a DISCRIMINATED :class:`AclProvisionResult`
+— ``provisioned`` / ``absent`` (no server URI, bare redis, or down mid-op) /
+``denied`` (a reachable server REFUSED the credential) / ``absent_by_design``
+(the lane declares the layer off) — never a bare ``None`` a caller can read as
+success. A refusal is :class:`AclLayerDenied`, deliberately NOT an
+:class:`AclLayerError` subclass: a credential we are not allowed to use must
+never roll back a hosted mint (ruling 3), while a real recipe failure on a
+DECLARED-strict layer still does.
 """
 
 from __future__ import annotations
@@ -33,11 +50,22 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import urlparse
 
 logger = logging.getLogger("tortoise.acl")
 
 _SUPPORTED_URI_SCHEMES = {"docker", "redis", "rediss"}
+
+#: The ONE setting that declares this deployment's ACL-layer posture (#8617).
+#: ``off`` — the layer is not provisionable here (FalkorDB Cloud): never
+#: attempt it, report ``absent_by_design``. ``best_effort`` — attempt it, never
+#: roll a mint back on failure. ``strict`` (DEFAULT) — today's behaviour: a
+#: reachable-but-failing layer raises and the provisioning mint rolls back.
+ACL_LAYER_ENV = "TORTOISE_ACL_LAYER"
+ACL_LAYER_MODES = ("off", "best_effort", "strict")
+_ACL_LAYER_DEFAULT = "strict"
 
 # The exact command allowlist — never widen without re-verifying key specs
 # (GRAPH.LIST registers firstkey=0 → key-pattern ACL never applies, #2652).
@@ -48,8 +76,142 @@ _GRAPH_COMMANDS = ("+GRAPH.QUERY", "+GRAPH.RO_QUERY", "+PING")
 
 
 class AclLayerError(RuntimeError):
-    """ACL create failed while the server is reachable — a real recipe or
-    permission failure (NOT a down layer: down/absent → fail-soft no-op)."""
+    """ACL create failed while the server is reachable — a real recipe failure
+    (NOT a down layer: down/absent → fail-soft no-op, and NOT a permission
+    refusal — see :class:`AclLayerDenied`). On a DECLARED-strict layer this is
+    the one class the provisioning mint rolls back on."""
+
+
+class AclLayerDenied(RuntimeError):
+    """A REACHABLE server refused the credential (#8617).
+
+    Deliberately NOT an :class:`AclLayerError` subclass: ``hosted_api``'s
+    rollback arms are ``isinstance(e, AclLayerError)``, and the owner ruling
+    (2026-10-26, issue #8617) is explicit that a hosted graph mint must NOT be
+    rolled back because a user we are not allowed to create was not created.
+    Keeping the types disjoint makes that a property of the type graph rather
+    than of every call site remembering to special-case it.
+
+    ``create_acl_user`` does not let this escape: it returns
+    ``AclStatus.DENIED``, which the mint hook records and continues past."""
+
+
+class AclStatus(StrEnum):
+    """The discriminated outcome of :func:`create_acl_user` (#8617 ruling 4).
+
+    The four states are REPORTED, never inferred: ``ABSENT`` (no server URI /
+    bare redis / down mid-op) and ``ABSENT_BY_DESIGN`` (this lane declares the
+    layer off) and ``DENIED`` (a reachable server refused the credential) are
+    three different facts about the deployment, and an operator reading a
+    reconcile report must be able to tell them apart.
+    """
+
+    PROVISIONED = "provisioned"
+    ABSENT = "absent"
+    DENIED = "denied"
+    ABSENT_BY_DESIGN = "absent_by_design"
+
+
+class FalkorProbe(StrEnum):
+    """Four-state ``MODULE LIST``/capability probe (#8617).
+
+    ``ABSENT`` — the server ANSWERED and has no graph module (bare redis):
+    nothing to protect, a boundary. ``UNREACHABLE`` — the probe could not
+    complete (down, timeout, connection reset): a TRANSIENT FAULT. Reporting it
+    as "absent" *without a distinguishing reason* would certify an outage as a
+    deployment fact — which is why this state exists (the caller still carries
+    it as ``ABSENT`` + ``layer_down``). ``DENIED`` — the
+    server ANSWERED and refused the probe: the credential lacks
+    ``+MODULE|LIST``, which is a fact about the CREDENTIAL, not about the
+    server. Conflating these was the silent-degradation class #8617 paid for.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNREACHABLE = "unreachable"
+    DENIED = "denied"
+
+
+# The absence REASONS (#10093). Each implies a DIFFERENT operator action: a
+# boundary (`declared_off`, `no_graph_module`), a deployment fact (`no_uri`), a
+# credential fault (`probe_denied`, `setuser_denied`) or an INCIDENT
+# (`layer_down`, `probe_unreadable`). One number cannot say which.
+#
+# There are SEVEN, and they do not all land in the same counter. The reconcile
+# report's ``absent_reasons`` histogram decomposes the ``absent`` STATUS, so
+# ``no_uri`` / ``no_graph_module`` / ``layer_down`` reach it — and so do
+# ``probe_unreadable`` and the ``unknown`` fallback, which exist precisely so a
+# probe state with no mapping is a VISIBLE fault rather than a boundary.
+# ``declared_off`` is counted in ``absent_by_design``; ``probe_denied`` and
+# ``setuser_denied`` in ``denied``.
+REASON_DECLARED_OFF = "declared_off"
+REASON_NO_URI = "no_uri"
+REASON_NO_GRAPH_MODULE = "no_graph_module"
+REASON_PROBE_DENIED = "probe_denied"
+REASON_LAYER_DOWN = "layer_down"
+REASON_SETUSER_DENIED = "setuser_denied"
+REASON_PROBE_UNREADABLE = "probe_unreadable"
+
+
+@dataclass(frozen=True)
+class AclProvisionResult:
+    """What :func:`create_acl_user` achieved — a discriminated result, not a
+    bare ``None`` (#8617 ruling 4). ``username``/``graph`` are always filled
+    (they are derivable); ``password`` is set only when one was written."""
+
+    status: AclStatus
+    username: str | None = None
+    password: str | None = None
+    graph: str | None = None
+    detail: str = ""
+    reason: str = ""
+
+    @property
+    def provisioned(self) -> bool:
+        return self.status is AclStatus.PROVISIONED
+
+
+def layer_mode() -> str:
+    """The DECLARED ACL-layer posture (#8617): ``off`` | ``best_effort`` |
+    ``strict``.
+
+    Default ``strict`` = the pre-#8617 behaviour, so nothing changes for a
+    self-hosted deployment that never sets the variable. An unrecognised value
+    warns and stays ``strict`` — a typo must not silently disarm the layer
+    (silence is exactly the failure mode this issue is about)."""
+    raw = (os.environ.get(ACL_LAYER_ENV) or "").strip().lower()
+    if not raw:
+        return _ACL_LAYER_DEFAULT
+    if raw not in ACL_LAYER_MODES:
+        logger.warning(
+            "%s=%r is not one of %s — treating it as %r (#8617). Fix the "
+            "setting: an unrecognised value must not silently disarm the "
+            "per-graph ACL layer.", ACL_LAYER_ENV, raw,
+            "/".join(ACL_LAYER_MODES), _ACL_LAYER_DEFAULT)
+        return _ACL_LAYER_DEFAULT
+    return raw
+
+
+def layer_provisionable() -> bool:
+    """False when this deployment DECLARES the ACL layer unavailable.
+
+    #8617: on FalkorDB Cloud no credential the app may hold carries ``+ACL``,
+    so the hosted lane declares ``off`` once (``fly.toml``) instead of
+    discovering the refusal on every graph mint. Self-hosted and the docker
+    test lane keep creating the user — nothing about that recipe changes."""
+    return layer_mode() != "off"
+
+
+def _is_permission_refusal(exc: BaseException) -> bool:
+    """True when a redis ``ResponseError`` is an ACL/permission REFUSAL rather
+    than a recipe/command error.
+
+    redis-py surfaces an ACL denial as ``NOPERM this user has no permissions to
+    run the '<cmd>' command`` (and, for a denied key, ``NOPERM ... to access a
+    key``); the generic recipe failure (an unknown rule, a syntax error) says
+    nothing about permissions and must stay an :class:`AclLayerError`."""
+    msg = str(exc).lower()
+    return "noperm" in msg or "no permissions" in msg
 
 
 def _username_for(graph_id: str) -> str:
@@ -99,9 +261,13 @@ def _admin_client():
     and correctly carries no note (``is_instance_unavailable`` excludes it).
     What was missing before this seam is the mechanism class and the read-back
     instruction; the prefix this module already logged said "connection
-    failure". A first-command failure inside :func:`_falkordb_present` is still
-    swallowed there with no log at all — pre-existing, and outside this wiring
-    change's scope. The HEDGE arm is the one this channel gets, deliberately:
+    failure". A failure inside :func:`_falkordb_present` no longer vanishes:
+    since #8617 a permission refusal there logs the refusal (it is the
+    ``denied`` state, a fact about the credential), while an unreachable
+    server answers ``unreachable`` and LOGS the outage — carried as ``absent``
+    with ``reason=layer_down``, so an outage can never be mistaken for the
+    ``no_graph_module`` boundary. The HEDGE arm is the one this
+    channel gets, deliberately:
     every verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
     ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
     to classify and answers ``None``. The ACL bearer commands are also not
@@ -146,25 +312,42 @@ def _admin_client():
     )
 
 
-def _falkordb_present(client) -> bool:
-    """Bare redis (no falkordb module) has ACL but no graph commands — the
-    per-graph layer is meaningless there (no-op, fail-soft)."""
+def _falkordb_present(client) -> FalkorProbe:
+    """Four-state capability probe (#8617, #10093): ``present`` / ``absent`` /
+    ``unreachable`` / ``denied``.
+
+    Bare redis (no falkordb module) has ACL but no graph commands — the
+    per-graph layer is meaningless there (``absent``: nothing to protect). A
+    server that could not be REACHED is ``unreachable`` — a transient fault
+    about the SERVER, never a boundary. A server that ANSWERED with a
+    permission refusal is ``denied``: a fact about the CREDENTIAL, and the
+    FalkorDB Cloud shape. Only a ``present`` probe lets the caller attempt the
+    SETUSER."""
     try:
         rows = client.execute_command("MODULE", "LIST") or []
-        tokens: list = []
-        for row in rows:
-            if not isinstance(row, (list, tuple)):
-                tokens.append(row)
-                continue
-            for t in row:
-                tokens.append(t)
-        flat = b" ".join(
-            t if isinstance(t, bytes) else str(t).encode()
-            for t in tokens if t is not None
-        )
-        return b"graph" in flat
-    except Exception:
-        return False
+    except Exception as e:
+        if _is_permission_refusal(e):
+            logger.warning(
+                "MODULE LIST refused by the server (%s) — the ACL credential "
+                "lacks +MODULE|LIST (#8617): %s", type(e).__name__, e)
+            return FalkorProbe.DENIED
+        # down/timeout/reset — fail-soft, never a SPOF, but NOT "absent": an
+        # outage must not be reported as a deployment boundary (#10093).
+        logger.warning("MODULE LIST could not complete (%s) — the server is "
+                       "unreachable: %s", type(e).__name__, e)
+        return FalkorProbe.UNREACHABLE
+    tokens: list = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            tokens.append(row)
+            continue
+        for t in row:
+            tokens.append(t)
+    flat = b" ".join(
+        t if isinstance(t, bytes) else str(t).encode()
+        for t in tokens if t is not None
+    )
+    return FalkorProbe.PRESENT if b"graph" in flat else FalkorProbe.ABSENT
 
 
 def _acl_save(client) -> None:
@@ -309,14 +492,23 @@ def _user_exists_on(client, username: str) -> bool:
         return False
 
 
-def create_acl_user(graph_id: str, org_id: str) -> dict | None:
+def create_acl_user(graph_id: str, org_id: str) -> AclProvisionResult:
     """Create/upsert the per-graph ACL user (hardened recipe, D1).
 
-    Returns {username, password, graph} on success. None when the ACL layer
-    is absent (no server URI / bare redis / down) — fail-soft, never a SPOF.
-    Raises AclLayerError when the server is REACHABLE but the SETUSER fails
-    (a real recipe/permission problem) — the strict provisioning caller
-    rolls back (no graph without its ACL user).
+    Returns an :class:`AclProvisionResult` — ``provisioned`` /
+    ``absent_by_design`` / ``absent`` / ``denied`` (#8617 ruling 4). There is no
+    ``None`` return any more: the caller cannot mistake an absence for a
+    success by omission.
+
+    ``absent_by_design`` is DECLARED (``TORTOISE_ACL_LAYER=off``) and short-
+    circuits BEFORE any server contact, so the hosted lane does not rediscover
+    the Cloud refusal on every mint. ``absent`` covers no URI / bare redis /
+    a connection failure mid-op (fail-soft, never a SPOF). ``denied`` means a
+    reachable server refused the credential — it is REPORTED, and it never
+    raises: ruling 3 forbids rolling back a hosted mint for a user we are not
+    allowed to create. A real recipe failure (:class:`AclLayerError`) still
+    raises, and the provisioning mint rolls back when the layer is declared
+    strict.
 
     ONE live secret per graph + exact command/key state (second-model
     S2/S3): _setuser issues a FULL ``reset`` before rebuilding, so every
@@ -325,42 +517,99 @@ def create_acl_user(graph_id: str, org_id: str) -> dict | None:
     password when present; a fresh one is generated otherwise (the reset
     kills any orphaned prior secret — no ``>``-append accumulation).
     Supabase/hosted mode is create-once: further mints no-op when the user
-    exists and return ``password: None`` (INTENTIONAL — the hosted
-    credential story is C5's / the platform manages DB users; callers must
-    not treat None as an error; per-mint throwaway secrets would accumulate
-    live, never-revoked credentials).
+    exists and report ``provisioned`` with ``password: None`` (INTENTIONAL —
+    the hosted credential story is C5's / the platform manages DB users;
+    per-mint throwaway secrets would accumulate live, never-revoked
+    credentials; the STATUS is what callers read, never the password's
+    presence).
     """
-    client = _admin_client()
-    if client is None:
-        return None
-    if not _falkordb_present(client):
-        return None
-    _ensure_default_user_secured(client)
+    # The id guards run FIRST: they are fail-closed whatever the declared
+    # posture (a rule-injection primitive is refused, not silently skipped).
     username = _username_for(graph_id)
     graph_name = _graph_namespace(org_id, graph_id)
+    if not layer_provisionable():
+        return AclProvisionResult(
+            status=AclStatus.ABSENT_BY_DESIGN, username=username,
+            graph=graph_name, reason=REASON_DECLARED_OFF,
+            detail=(f"{ACL_LAYER_ENV}={layer_mode()} — the per-graph ACL "
+                    "layer is declared unavailable in this deployment "
+                    "(#8617: FalkorDB Cloud grants no credential +ACL)"))
+    client = _admin_client()
+    if client is None:
+        return AclProvisionResult(
+            status=AclStatus.ABSENT, username=username, graph=graph_name,
+            reason=REASON_NO_URI,
+            detail="no server URI (embedded store) — no ACL layer to write")
+    probe = _falkordb_present(client)
+    if probe is not FalkorProbe.PRESENT:
+        if probe is FalkorProbe.DENIED:
+            status, reason = AclStatus.DENIED, REASON_PROBE_DENIED
+        elif probe is FalkorProbe.UNREACHABLE:
+            status, reason = AclStatus.ABSENT, REASON_LAYER_DOWN
+        elif probe is FalkorProbe.ABSENT:
+            status, reason = AclStatus.ABSENT, REASON_NO_GRAPH_MODULE
+        else:  # a probe state added later with no mapping — pinned by a test
+            # NEVER fall through to "bare redis, nothing to protect": a state we
+            # cannot classify is an UNREADABLE probe, not a boundary. This arm
+            # exists so the next enum member cannot silently become the boundary
+            # this whole change is about (#10093 review).
+            status, reason = AclStatus.ABSENT, REASON_PROBE_UNREADABLE
+        detail = {
+            FalkorProbe.DENIED: "MODULE LIST refused — the credential cannot "
+                                "read the server's capability",
+            FalkorProbe.UNREACHABLE: "the server could not be reached mid-op",
+            FalkorProbe.ABSENT: "server has no graph module (bare redis)",
+        }.get(probe, "the probe returned an unrecognised state")
+        return AclProvisionResult(
+            status=status, username=username, graph=graph_name, reason=reason,
+            detail=detail)
+    _ensure_default_user_secured(client)
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
         if _user_exists_on(client, username):
             # create-once: no per-mint password churn (hosted defers the
             # credential story to C5 — the platform manages DB users).
-            return {"username": username, "password": None,
-                    "graph": graph_name}
+            return AclProvisionResult(
+                status=AclStatus.PROVISIONED, username=username,
+                password=None, graph=graph_name)
         password = os.urandom(24).hex()
-        if not _setuser(client, username, graph_name, password):
-            return None  # layer down mid-op — fail-soft
-        _acl_save(client)
-        return {"username": username, "password": password,
-                "graph": graph_name}
+        return _setuser_result(client, username, graph_name, password,
+                               store=None)
     # Registry (selfhost) mode: reuse the stored password when present (the
     # full-reset upsert keeps ONE live secret either way — no exists-read
     # TOCTOU, no append churn).
     stored = _stored_acl_password(org_id, graph_id)
     password = stored if stored is not None else os.urandom(24).hex()
-    if not _setuser(client, username, graph_name, password):
-        return None  # layer down mid-op — fail-soft
-    _registry_store_credential(org_id, graph_id, username, password)
+    return _setuser_result(
+        client, username, graph_name, password,
+        store=lambda: _registry_store_credential(org_id, graph_id, username,
+                                                 password))
+
+
+def _setuser_result(client, username: str, graph_name: str, password: str,
+                    *, store) -> AclProvisionResult:
+    """Run the SETUSER and translate its three outcomes into the result.
+
+    ``denied`` and ``absent`` are RECORDED (they do not raise); a real recipe
+    failure still raises :class:`AclLayerError`. ``store`` (the credential
+    persistence step) runs only on success — a refused user has no credential
+    to store."""
+    try:
+        ok = _setuser(client, username, graph_name, password)
+    except AclLayerDenied as e:
+        return AclProvisionResult(status=AclStatus.DENIED, username=username,
+                                  graph=graph_name,
+                                  reason=REASON_SETUSER_DENIED, detail=str(e))
+    if not ok:
+        return AclProvisionResult(
+            status=AclStatus.ABSENT, username=username, graph=graph_name,
+            reason=REASON_LAYER_DOWN,
+            detail="connection failure mid-op — the ACL layer went away")
+    if store is not None:
+        store()
     _acl_save(client)
-    return {"username": username, "password": password, "graph": graph_name}
+    return AclProvisionResult(status=AclStatus.PROVISIONED, username=username,
+                              password=password, graph=graph_name)
 
 
 def _setuser(client, username: str, graph_name: str, password: str) -> bool:
@@ -373,16 +622,23 @@ def _setuser(client, username: str, graph_name: str, password: str) -> bool:
     unconditionally: re-asserting the same stored password is churn-free
     (same single secret).
 
-    Returns True on success. Raises AclLayerError on a server-side
-    ResponseError (a real recipe/permission failure — the strict caller
-    rolls back). Connection/timeout failures log + return False
-    (layer-down mid-op is fail-soft — never a SPOF, D3)."""
+    Returns True on success. A server-side ResponseError SPLITS (#8617):
+    a permission refusal raises :class:`AclLayerDenied` (recorded, never a
+    rollback — ruling 3), any other recipe failure raises
+    :class:`AclLayerError` (the strict provisioning caller rolls back).
+    Connection/timeout failures log + return False (layer-down mid-op is
+    fail-soft — never a SPOF, D3)."""
     cmd = ["ACL", "SETUSER", username, "reset", "on", f">{password}",
            f"~{graph_name}", *_GRAPH_COMMANDS]
     import redis as redis_py
     try:
         client.execute_command(*cmd)
     except redis_py.ResponseError as e:
+        if _is_permission_refusal(e):
+            raise AclLayerDenied(
+                f"ACL SETUSER refused for graph {graph_name} "
+                f"(user={username}) — the credential is not allowed to manage "
+                f"ACL users: {e}") from e
         raise AclLayerError(
             f"ACL SETUSER failed for graph {graph_name} (user={username}): "
             f"{e}") from e

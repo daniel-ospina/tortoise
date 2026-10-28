@@ -440,9 +440,21 @@ def _validate_metric_values(metrics: dict, where: str, issues: list[str]) -> Non
 
 
 def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict,
-                run_fixtures_hash: str, run_judge_pin: str | None = None) -> str:
+                run_fixtures_hash: str, run_judge_pin: str | None = None,
+                push_grounded: bool = True) -> str:
     """The --compare verdict for a run against the committed baseline
     (same contract as W2-b, harness vocabulary).
+
+    ``push_grounded`` says whether the push gold can express POINTER IDENTITY
+    on the replay cells at all (``runner.push_gold_grounding`` — computed from
+    the gold + the cell, never configured).  The push precision floor is
+    applied only when it can: the committed push gold names the symbolic ids
+    the fixtures were authored with (``pt_lumen_boundary`` …), which no cell
+    can mint, so every precision the graded reflex can produce is 0.000 by
+    construction — a floor with no signal would read a structural zero as a
+    quality regression forever, and would never activate when the gold IS
+    fixed.  The kta / false-fire bars are unaffected (they grade the fire
+    decision, which the gold expresses directly).
 
     Verdicts:
     * INCONCLUSIVE — fixtures_hash / resolved_config / judge_pin mismatch
@@ -488,7 +500,7 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict,
             return VERDICT_REGRESSION
         if run_metrics.get("false_fire_rate", 0.0) > FALSE_FIRE_TOLERANCE:
             return VERDICT_REGRESSION
-        if run_metrics.get("push_precision", 1.0) < PUSH_PRECISION_FLOOR:
+        if push_grounded and run_metrics.get("push_precision", 1.0) < PUSH_PRECISION_FLOOR:
             return VERDICT_REGRESSION
     if run_metrics.get("source_isolation_violations", 0) > SOURCE_ISOLATION_TOLERANCE:
         return VERDICT_REGRESSION

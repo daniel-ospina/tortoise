@@ -234,22 +234,117 @@ below is green.
 user** (`PUT …/users/{username}`), so the old credential still works — zero
 downtime so far.
 
-   ⛔ **Do not assume a preset is sufficient — a `Write`-preset user is not.**
-   This URI becomes the app's `TORTOISE_DB_URI` (`entrypoint.sh` builds it from
-   `FALKORDB_CLOUD_URI`), and `tortoise/acl_graph_users.py::_admin_client()`
-   uses those same credentials as its **admin** connection to provision each
-   graph's per-graph ACL user: `ACL GETUSER` / `ACL SETUSER … reset` /
-   `ACL DELUSER` / `ACL SAVE` (`_ensure_default_user_secured`, `_user_exists_on`,
-   `_setuser`, `drop_acl_user`), behind a `MODULE LIST` capability probe
-   (`_falkordb_present`). The requirement is therefore `_GRAPH_COMMANDS`
-   **plus `+MODULE|LIST` and `+ACL`** — that file is the requirement's home, and
-   the vendor's presets meet neither ("No preset grants `+ACL`"; only **Admin**
-   adds `+MODULE|LIST`). A preset that misses them does not fail loudly: with
-   `MODULE LIST` denied, `create_acl_user()` returns `None` and the mint
-   succeeds with **no per-graph ACL user** — the C4/#2113 isolation layer
-   silently absent. Which credential the Cloud app's ACL provisioning can
-   actually use is **#8617**; until that is settled, do not narrow the ACL below
-   what `tortoise/acl_graph_users.py` requires.
+   ⛔ **On FalkorDB Cloud the per-graph ACL user is NOT provisionable, and the
+   app no longer tries.** `TORTOISE_ACL_LAYER = "off"` in `fly.toml`'s `[env]`
+   (owner decision 2026-10-26, **#8617**): no database credential the app may
+   hold carries `+ACL` — the vendor's presets do not grant it and `ACL` is not
+   in the allowed-commands list — so every attempt was a refusal, and before
+   the decision **every hosted graph mint rolled back** (dashboard *Create
+   graph* 503'd on production `e1e3e80`; the decision re-checked the mechanism
+   at `origin/main@fffcc7c0` — see #8617). With the layer
+   declared off, `create_acl_user()` answers `absent_by_design` *before* it
+   contacts the server, the graph mints, and the absence is **recorded**: one
+   log line per process per absence kind, and distinct `absent_by_design` /
+   `denied` / `absent` / `provisioned` counters in
+   `POST /v1/internal/backups/acl-reconcile`, with `absent_reasons`
+   (`no_uri` / `no_graph_module` / `layer_down`, summing to `absent`) naming
+   WHICH absence the bare `absent` total would otherwise hide. (`unknown` and
+   `probe_unreadable` can appear there too — treat either as a CODE DEFECT, not
+   as an operator state: a path returned `absent` without classifying it.) On
+   this lane the only reachable counter is `absent_by_design`, for every custom
+   graph.
+
+   **What that costs, stated plainly:** on the hosted product there is **no
+   database-level second wall** between graphs. What isolates a graph there is
+   our own code (a key is bound to one graph and every request is checked
+   against it) plus the separate `org_{org_id}_{gid}` namespace. Do not
+   describe the hosted lane as having the per-graph ACL layer — it does not.
+
+   **So the credential in `FALKORDB_CLOUD_URI` must cover the app's DATA path —
+   and one measurement: `GRAPH.MEMORY USAGE`.** The console's **`Write`** preset
+   covers the data path — `+GRAPH.QUERY +GRAPH.RO_QUERY +GRAPH.EXPLAIN
+   +GRAPH.PROFILE +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING`, plus the key
+   verbs (`DEL` / `RESTORE` / `RENAME`) and `EXISTS` (the SDK's retry presence
+   probe). It does **not** cover the per-org
+   storage meter (`tortoise/graph_storage.py`, driven by the backup sweep): the
+   vendor makes `GRAPH.MEMORY` **Admin-only**, so on the `Write` preset every
+   org's `graph_storage_mb` reads `0.0` — permanently and silently, because a
+   failed measurement records nothing and the read side maps an absent row to
+   zero (`metering._zero_view`). That figure is the MB overage input (#5331,
+   #4495), so a quiet zero is not harmless.
+
+   ⛔ **Neither preset is right here.** `Write` alone zeroes the storage meter
+   (above); `Admin` fixes it but hands a production data-plane credential
+   `+FLUSHALL +GRAPH.CONFIG +MEMORY +MONITOR +SLOWLOG +BGREWRITEAOF` to buy the
+   one grant it needs. Send a **custom ACL: the `Write` string plus
+   `+GRAPH.MEMORY`** — the API takes a raw ACL string (`POST …/users`; there is
+   no preset field). That is the minimum that runs the data path, the restore
+   path and the storage meter.
+
+   It does **not** need:
+
+   - `+ACL` — the one grant the platform refuses; requiring it is what broke
+     graph creation.
+   - `+MODULE|LIST` — **optional ON THIS LANE, and not worth `Admin`.** The ACL
+     capability probe does not run here at all (the layer is declared off, so
+     `create_acl_user` returns before any server contact), unlike the
+     self-hosted lane where it is required. Two other probes DO read
+     `MODULE LIST`, and a refusal degrades them *safely*, not wrongly:
+     `cypher_guard`'s engine-version probe reads UNKNOWN on `NOPERM` and then
+     takes the conservative `WITH *` barrier (a measured no-op on the engines
+     that already bind, re-probed after a TTL), and the projection's version
+     probe falls back to `INFO server` and then to "undetermined" (no version
+     gate). `+MODULE|LIST` exists only in the `Admin` preset, which would hand a
+     production data-plane credential `+FLUSHALL +GRAPH.CONFIG +MEMORY
+     +MONITOR +SLOWLOG` — a larger blast radius than the conservative barrier.
+     Leave it out of the custom ACL.
+
+   Two grants are easy to drop from a hand-written "query-only" ACL, and both
+   fail LATE: **`+GRAPH.COPY`** (restore/drill swaps issue it on this lane —
+   `hosted_backup.restore_backup`), and **`+GRAPH.MEMORY`** (the storage meter,
+   which fails soft and therefore fails SILENTLY).
+
+   **Self-hosted is unchanged** (#8617 ruling 2). `TORTOISE_ACL_LAYER` unset
+   (the default, `strict`) still creates the per-graph user on every graph
+   mint, and *there* the **app** credential genuinely needs:
+
+   - **the vendor's `Write` preset string, VERBATIM** (the vendor's ACL page
+     prints its exact string; there is no console on a self-hosted server to
+     copy from — it already carries `GRAPH.QUERY`,
+     `GRAPH.RO_QUERY`, `GRAPH.LIST`, `GRAPH.DELETE`, `GRAPH.COPY`, `EXISTS`,
+     `INFO` and the key verbs), **plus `+GRAPH.MEMORY`** for the storage meter.
+     ⛔ Do **not** hand-write the set from a prose list, including the one in the
+     Cloud bullet: an enumeration can silently omit a verb the app does issue
+     and the omission fails LATE and QUIET — `EXISTS` is the SDK's retry
+     presence probe, and a refusal there makes the retry gate refuse to retry a
+     graph-abort and report the graph state as UNKNOWN (`sdk.py`, #7685/#7357).
+     And do **not** read `_GRAPH_COMMANDS` as this requirement: it is the
+     allowlist granted to each per-graph **tenant** user (`+GRAPH.QUERY
+     +GRAPH.RO_QUERY +PING`), which is how a self-hosted app credential ends up
+     unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
+   - **`+ACL`** — to create and rotate per-graph users at all;
+   - **`+MODULE|LIST` — REQUIRED to have the layer here.** It gates
+     `_falkordb_present`, and a refusal makes `create_acl_user` return `denied`
+     **before any `ACL SETUSER`** — so not one per-graph user is created for any
+     graph, while every mint stays green (the probe DOES log
+     `MODULE LIST refused … — the ACL credential lacks +MODULE|LIST`, so a grep
+     for it is the tell). MEASURED on this head: a `NOPERM` on `MODULE LIST` leaves the
+     server having seen `MODULE LIST` and nothing else (`status=denied`,
+     `reason=probe_denied`). That is the silent-degradation shape this whole
+     change exists to end, so it is in the list of grants the APP credential
+     needs even though the MINT alone would succeed without it. Read a refusal
+     from the `denied` counter plus its `MODULE LIST refused …` log line — the
+     reconcile breaks down `absent` by reason, not `denied`. (Only the two
+     VERSION probes degrade safely without this grant; see the Cloud bullet.)
+
+   So the self-hosted app ACL is: the vendor's `Write` string, **plus
+   `+GRAPH.MEMORY`**, **`+ACL`**, **`+MODULE|LIST`** (and `+BGSAVE` if
+   `tortoise backup` runs against this credential — the CLI issues it, and a
+   denial is loud and never corrupts the file backup). The *mechanism* that
+   consumes these lives in `tortoise/acl_graph_users.py` (`_falkordb_present`,
+   `_setuser`, `layer_mode`) — that module is where the recipe is implemented,
+   not a list of grants to copy, and `_GRAPH_COMMANDS` inside it is the TENANT
+   user's allowlist.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.
@@ -306,7 +401,7 @@ documented exception, not a silent one:
 |---|---|---|
 | `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
 | `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
-| `JEV_API_KEY` | `tools/collision_preflight.py` (`$JEV_API_KEY`, else the repo-root `.env`) | the pre-dispatch gate is a local tool — the repo-root `.env` is its documented home (declared in `.env.example`) |
+| ⚠️ `TYPESAFE_API_KEY` — **declared for documentation only; do NOT put it in `.env`** (legacy name: `JEV_API_KEY`) | the fleet's Jev callers — `agent-infra/scripts/turn-classify.py`, `ask-owner.py`, `lane-actions.py` (via `state/lane-verdict.py`); real endpoint `api.typesafe.ai` | ⛔ **the 0600 store `~/.pi/agent/jev-config.json` is the key's HOME — none of those callers reads this `.env`, and nothing in THIS repo reads the variable at all** (the one consumer that did was deleted by #8175). `.env.example` declares the NAME for documentation; the callers resolve `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the store. ⛔ **The deployed copy under `~/.pi/agent/scripts/` is a DERIVED artifact, not authored source:** `pi-bootstrap/setup.sh` copies `turn-classify.py`/`ask-owner.py`/`lane-actions.py` out of the agent-infra checkout, so running it from an **unmigrated** checkout silently reinstalls the lookalike caller — measured 2026-10-26 21:32, when an already-migrated trio was overwritten that way. The caller leg MERGED in agent-infra#2859 (`9205ab47a`) — a bootstrap from a checkout that predates it still reinstalls the lookalike caller, so fast-forward that checkout before running `pi-bootstrap/setup.sh` and assert EVERY caller with `grep -rn 'JEV_URL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py` — each carries its own constant, so one file's answer says nothing about the other two. ⛔ Until 2026-10-26 these callers billed against `jevtypesafeai.com`, a lookalike host that is NOT the vendor's API (tortoise#7864) |
 | `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
 
 **Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;
@@ -2655,8 +2750,11 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    - **wait for the deploy job, not the run, then unset** — a `deploy-hosted`
      **run** can end RED with `[env]` already applied: since #4538 the separate,
      fail-closed `post-deploy-verify` job can leave the run red *after*
-     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and
-     `concurrency: cancel-in-progress` can cancel a run after that step too.
+     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and a newer push
+     landing while a `deploy-hosted` run is still **pending** supersedes it —
+     `cancel-in-progress: false` (since #10155) stops a RUNNING deploy being
+     cancelled, but a shared group holds one pending run and the newest push
+     takes it.
      Require the `deploy-api` job's Deploy step to succeed — unsetting against a
      deploy that did **not** apply `[env]` drops the value. Only then run
      `flyctl secrets unset <NAME> --app tortoise-y4mjjq`;
@@ -2798,6 +2896,67 @@ in `deploy-api` are fail-closed and a per-gate alert would leave the same silenc
 on the rest; and it is one issue per **failing step** rather than one per run,
 because a key carrying `${{ github.run_id }}` files a new issue on every failing
 run (#2706).
+
+### 8.7 When production runs an old commit — the staleness detector (#10109)
+
+**The gap it closes.** 2026-10-26: production ran **7 commits behind**
+`origin/main` for ~9 hours while every readiness signal stayed green —
+`deploy-hosted` was red on every run (4 cancelled by its own
+`cancel-in-progress: true`, plus a migration-drift gate failing closed), but a
+deploy that cannot land **declines nothing**, and every existing instrument is a
+decline channel. This is the positive reading that was missing.
+
+- **Workflow:** `.github/workflows/deploy-staleness.yml` (schedule `7,37 * * * *` + `workflow_dispatch`;
+  its OWN concurrency group, `cancel-in-progress: false`, and NOT `push: main` — see the workflow header
+  for why it cannot be starved by the same group that ate the deploys).
+- **Logic:** `.github/scripts/check-deploy-staleness.sh` — reads the deployed commit from the public
+  `GET /v1/version` (`commit_sha`, baked by `deploy-hosted.yml` as `TORTOISE_GIT_SHA`), compares it
+  to `origin/main` with `git merge-base --is-ancestor`, and states the distance
+  `deployed=<sha> main=<sha> behind=<n> behind_deployable=<n> deployable_age_h=<n> deployable_age_s=<n>`.
+  Fails (red + ONE deduped issue) when the deployed commit diverged from main, when the revision cannot
+  be read — an unreadable revision is a RED, never a pass — when the deploy trigger's `on.push.paths`
+  cannot be parsed **unambiguously** (a PARTIAL path set would under-count the deployable lag and read
+  green while deployable commits wait, so it is a RED too) — or on **either** of two bounds:
+  - **count:** more than `vars.DEPLOY_STALENESS_MAX_BEHIND` **deployable** commits behind (default
+    **2**). *Deployable* = touching `on.push.paths` of `deploy-hosted.yml`, read from that workflow at
+    run time (never a second copy). A merge confined to `docs/`, `skills/`, `tools/`, `.github/`,
+    `website/` or `operations/` (or to `tests/` other than `tests/sample_transcript.txt`, which the
+    image copies) advances main **without deploying anything** by the pipeline's own
+    declared policy, so it is not staleness — counting it was ~14% false red over the last 300 commits
+    of main (20 false-red windows), and an alarm that cries wolf is the defect this check exists to
+    prevent.
+  - **age:** the OLDEST undeployed deployable commit older than `vars.DEPLOY_STALENESS_MAX_AGE_HOURS`
+    (default **6 h**). This is the *"the deploy is missing for ≥ T hours"* arm, and it is the one that
+    catches the #10109 shape a count bound alone reports **green forever**: one pending deployable
+    commit that never deploys. Stateless — the age comes from the commit's own committer date, not
+    from any previous tick's memory. The verdict is decided on **seconds** and `deployable_age_h` is
+    floored, so `deployable_age_s` is printed as well: an alert past the bound must never appear to
+    sit at it.
+  Both bounds are plain integers; a mangled value warns and falls back to its default rather than
+  disabling the arm.
+- **Harness:** `bash .github/scripts/check-deploy-staleness.test.sh` (the `Deploy staleness detector (#10109)`
+  step of `ops-harnesses`).
+
+**The invariant, in one sentence.** The commit production is running must be an
+ancestor of `origin/main`, and the distance must be stated. The check states it
+even when green, so the bound being approached is visible before it is crossed.
+
+**What to do when it fires.** Read the issue's `reason=` first — it names which bound crossed.
+
+- `reason=behind-deployable` — too many **deployable** commits are waiting. Check
+  `gh run list --workflow deploy-hosted.yml --limit 20`: red/cancelled deploys are the cause, and for
+  a migration-drift block the remediation is the one §8.6 prints (resolve `OUT OF ORDER` first, then
+  `gh workflow run supabase-deploy.yml --ref main`) — **never** a `supabase migration repair`, never a
+  DDL, never a production action by a lane. If there is **no run at all** for the pending commits, the
+  deploy was never triggered — look at the trigger's path filter, not the deploy's logs.
+- `reason=behind-too-long` — the count is within bound but the oldest deployable commit has been
+  undeployed past the age bound. Same investigation; the difference is that this is the *"deploys
+  stopped landing"* signal, not a burst of merges.
+- `behind=` vs `behind_deployable=` — `behind` is every commit on main, `behind_deployable` is the
+  ones that can actually change the deployment. A large `behind` with `behind_deployable=0` is **not**
+  staleness (the pipeline deliberately does not redeploy for those), and the check reports it green.
+- A *diverged* `deployed=` sha (not an ancestor) is a different failure from lag: the app is running a
+  revision main does not contain — compare the sha against `git log` before assuming a deploy backlog.
 
 ## 9. Restore a lost cache graph from the record (#9556 / R8)
 
@@ -3326,19 +3485,41 @@ happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
-   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
-   an org-wide / session / legacy / OAuth key, the self-host registry lane
-   (`record_writer.record_tenant_for` returns `None` by design), and the
-   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
-   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   `no_tenant` is ALSO the designed outcome where nothing names a graph at all —
+   but since #10046 (API keys since #10025) that is **no longer a credential
+   class**, so do NOT read it as one. What still emits it by design: the
+   self-host registry lane (`record_writer.record_tenant_for` returns `None` by
+   design — a graph-bound key that resolves through no control plane), and an
+   org with NO nameable active `kind='default'` row. (The onboarding-seed and
+   background-indexing runners are NOT one of those since #10047: they build
+   their own SDK and never see the request's credential, so
+   `hosted_api._bind_default_graph_record_tenant` supplies that row at their own
+   construction site.) On the hosted REST, MCP and OAuth lanes a `no_tenant`
+   from a `tt_`/`tk_` key, a session/JWT credential or an `oat_` token therefore
+   means the default row could not be named (missing, tombstoned, another org's,
+   unreadable) or the tenant read was lost — a **fail-and-fix**, not a designed
+   state (#9188/#9192, #10046).
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
-   **graph-bound** — its own writes cannot land in `no_tenant` — and attribute any
-   `no_tenant` growth inside the window to a specific request through recipe 1's
-   log line rather than to the capture. Growth with no log line to attribute it
-   to is a fail-and-fix; the route is never `TORTOISE_RECORD_SINGLE_TENANT`, which
-   the #9192 cross-tenant note below forbids.
+   **graph-bound** — a graph-bound **control-plane** credential cannot land in
+   `no_tenant` (the self-host registry lane above is a graph-bound key that
+   resolves through no control plane, so its writes are counted there by
+   design) — and treat `no_tenant` growth as the residual it then is: it is a
+   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
+   not appear. ⛔ **Do
+   not try to attribute that growth per request from the log.** The line an
+   unbound capture produces carries the env-pair diagnosis and **no** request
+   identity and no record type — and `no_tenant` has a second emission, for a
+   malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
+   two requests apart. (Of the four `record_writer` reasons, `circuit_open` is the
+   only one that carries the record type; `malformed_dsn` and `write_failed` carry
+   the exception text instead, and the SDK's `no_journal` line names the record
+   type inside its exception text.)
+   A bar that required per-request attribution would be unexecutable and would
+   red a healthy deployment on its default branch. The route is never
+   `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
+   forbids.
 
 ⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
 versioned `[env]` entry is a committed credential; and a Fly **secret** shadows

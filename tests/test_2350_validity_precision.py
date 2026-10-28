@@ -644,8 +644,10 @@ def test_reader_marker_omits_a_start_that_names_no_instant():
         assert bogus not in open_marker, open_marker
         assert "since" not in open_marker, open_marker
         assert open_marker == "[valid]"
-        # the END half is untouched (#9202 owns whether an un-datable END
-        # changes) — only the start clause is omitted.
+        # the END half is #9202's question and is read from the resolved
+        # state — see
+        # ``test_reader_marker_states_an_undatable_end_as_unknown``; what this
+        # test pins is that the START clause is omitted either way.
         assert _validity_marker({"valid_from": bogus,
                                  "end_state": "unknown"}) == \
             "[valid; end unknown]"
@@ -653,6 +655,114 @@ def test_reader_marker_omits_a_start_that_names_no_instant():
         assert _validity_marker({"valid_from": bogus,
                                  "valid_to": "2026-06-12"}) == \
             "[valid → 2026-06-12]"
+
+
+#: Every spelling #9202's 2026-10-25 owner ruling names as an UN-DATABLE end —
+#: the ruling's own enumeration, not a sample of it (the same six
+#: ``tests/test_validity_windows.py`` sweeps for the READ half). They disagree
+#: about truthiness (``""`` vs ``"TBD"``), about digits (``"   "``,
+#: ``"1719792000"``) and about shape (``"2026-02-30"`` looks exactly like the
+#: ISO date beside it) — each difference is a way for a gate keyed on the raw
+#: text to pass by accident.
+_UN_DATABLE_END_SPELLINGS = [
+    ("TBD", "text-placeholder"),
+    ("", "empty-value"),
+    ("   ", "whitespace"),
+    ("not-a-date", "plain-nonsense"),
+    ("2026-02-30", "impossible-calendar-date"),
+    ("1719792000", "epoch-as-string"),
+]
+
+
+@pytest.mark.parametrize(
+    ("stored_end", "_why"), _UN_DATABLE_END_SPELLINGS,
+    ids=[why for _end, why in _UN_DATABLE_END_SPELLINGS],
+)
+def test_reader_marker_states_an_undatable_end_as_unknown(stored_end, _why):
+    """#9741 (render half): the marker CONSUMES the end state #9202 computes.
+
+    ``_validity_marker`` kept its own notion of a dated end ("``valid_to`` is
+    truthy"), so a STORED end that names no instant — the state #9202's owner
+    ruling calls ``END_UNKNOWN`` — took the bounded-window arm and printed
+    itself as a date: ``[valid 2024-01-01 → TBD]``. The reader was told the
+    window closed at ``TBD`` while the reply beside it said ``end_state:
+    "unknown"``. Two places deciding the same question is what produced it, so
+    the fix reads the state (``validity.end_state``, spread onto every hit by
+    ``window_read_fields``) instead of deciding again from the bound.
+
+    Both spellings of that one state now render the ONE form #2350 defined for
+    it, and the stored text does not reach the reader at all. Discriminating:
+    the ``==`` assertion below fails on the unfixed head for the four spellings
+    that survive the renderer's ``.strip()`` — ``TBD``, ``not-a-date``,
+    ``2026-02-30``, ``1719792000`` (``[valid 2024-01-01 → <raw>]``, the pre-fix
+    shape); the two that are falsey once trimmed (``""`` and ``"   "``)
+    already routed to the ``end unknown`` arm and are kept so the class stays
+    covered.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import window_read_fields
+
+    # (0) non-vacuous: the state the renderer must consume IS ``unknown``, and
+    # the raw value really is on the hit (a renderer printing the bound would
+    # print it — the pre-fix shape).
+    state = window_read_fields("2024-01-01", stored_end, None, None)
+    assert state["end_state"] == "unknown", stored_end
+    hit = {"valid_from": "2024-01-01", "valid_to": stored_end, **state}
+    marker = _validity_marker(hit)
+    assert marker == "[valid since 2024-01-01; end unknown]", (stored_end, marker)
+    if stored_end.strip():
+        assert stored_end.strip() not in marker, (stored_end, marker)
+
+    # the transaction-time expiry still survives the state arm (#2350: it is a
+    # different datum from the validity end).
+    assert _validity_marker({**hit, "expired_at": "2026-07-01T10:00:00+00:00"}) \
+        == "[valid since 2024-01-01; expired 2026-07-01; end unknown]"
+
+    # CONTROL — a DATED end keeps the byte-identical bounded window. The fix
+    # withholds an un-datable bound; it does not stop windows from ending.
+    dated_state = window_read_fields("2024-01-01", "2024-06-01", None, None)
+    assert dated_state["end_state"] == "known"
+    assert _validity_marker({**hit, "valid_to": "2024-06-01", **dated_state}) \
+        == "[valid 2024-01-01 → 2024-06-01]"
+
+
+def test_reader_marker_on_the_search_wire_states_an_undatable_end(lane):
+    """#9741 end-to-end: the state reaches the renderer from the SURFACE.
+
+    The pure-function pin above builds the hit itself, so it would still pass
+    if the search wire stopped carrying ``end_state``/``valid_to_precision``
+    (the renderer would fall back or print the raw bound again). This reads
+    the marker off a hit produced by the PUBLIC write and the scan decoration —
+    the path the ask lane renders.
+
+    ⚠️ **The un-datable fixture is a PRE-2026-10-26 row, written directly** (#9202
+    merged after this pin was written): the shaping ruling makes
+    ``create_point(validTo="TBD")`` store the canonical un-datable form — no end
+    plus the declared marker — instead of the literal, so a LITERAL end on the
+    wire can now only come from a graph written before the ruling. Every
+    assertion below is unchanged: the renderer's contract is the same for both
+    spellings, which is the property this pin exists to protect.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    un_datable = sdk.create_point("statement", "un-datable end",
+                                 validFrom="2024-01-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'",
+        params={"i": un_datable["id"]})
+    dated = sdk.create_point("statement", "dated end",
+                             validFrom="2024-01-01", validTo="2024-06-01")
+    hits = {r["id"]: r for r in _scan(sdk)}
+    hit = hits[un_datable["id"]]
+    # non-vacuous: the raw bound IS on the wire the renderer consumes, and the
+    # state beside it already says the end cannot be pinned.
+    assert hit["valid_to"] == "TBD"
+    assert hit["end_state"] == "unknown"
+    assert _validity_marker(hit) == "[valid since 2024-01-01; end unknown]"
+    # control: the same surface still renders a dated end as a bounded window.
+    assert _validity_marker(hits[dated["id"]]) == \
+        "[valid 2024-01-01 → 2024-06-01]"
 
 
 def test_reader_marker_control_keeps_an_orderable_start_byte_identical():
@@ -930,8 +1040,17 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     The issue asked that the both-ends consequence be stated EXPLICITLY rather
     than discovered: a declaration on a PRESENT-but-unorderable ``validTo``
     (accepted by the same write boundary, which only refuses a declaration on an
-    ABSENT end) also resolves to no precision. Measured through the public write
-    so a future edit to either end's plumbing reddens this.
+    ABSENT end) also resolves to no precision.
+
+    ⚠️ **The fixture is a PRE-2026-10-26 row, written directly.** Under the
+    #9202 shaping ruling a caller ``validTo="TBD"`` is SHAPED (no value + the
+    declared ``unknown`` marker), so this pair can no longer be produced by the
+    public write: shaping would leave a concrete ``validToPrecision`` beside an
+    absent bound, and the #2350 precision gate refuses that pair. The row here is
+    the one that exists on graphs written BEFORE the ruling, which is exactly the
+    population this read property is about — and every assertion below is
+    unchanged, because the ruling deliberately left the read path (and those
+    rows) alone.
 
     ``end_state`` stays ``known`` for a DATED bound (the control below).
     Whether a stored-but-un-datable END should report ``END_UNKNOWN`` was
@@ -940,8 +1059,11 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     """
     sdk, _events = lane
     p = sdk.create_point("statement", "declared end on no instant",
-                         validFrom="2024-06-01", validTo="TBD",
-                         validToPrecision="year")
+                         validFrom="2024-06-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) "
+        "SET n.validTo = 'TBD', n.validToPrecision = 'year'",
+        params={"i": p["id"]})
     props = _window_props(sdk, p["id"])
     assert props["validTo"] == "TBD", props
     assert props["validToPrecision"] == "year", props
@@ -1094,8 +1216,13 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
     sdk, _events = lane
     from tortoise.assembly import docker_walker_port
 
+    # A PRE-2026-10-26 row, written directly: the shaping ruling (#9202) makes
+    # the public write store the canonical un-datable form instead, and the read
+    # property pinned here is about rows that carry the literal value.
     p = sdk.create_point("statement", "unorderable end",
-                         validFrom="2024-01-01", validTo="TBD")
+                         validFrom="2024-01-01")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'", params={"i": p["id"]})
     assert _props(sdk, p["id"])["validTo"] == "TBD"
 
     # 1. get_historical_knowledge (raw bound)
