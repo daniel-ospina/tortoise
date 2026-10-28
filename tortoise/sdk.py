@@ -4841,7 +4841,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # `update_point` and `update_entity` still call it here, under this name.
 
 
-def _point_fts_indexed_fields() -> list:
+def _point_fts_indexed_fields() -> list[str]:
     """#10122: the fields the Point FULLTEXT index actually HOLDS.
 
     Read off ``projection._FULLTEXT_INDEX_LABEL_FIELDS`` — the table that
@@ -4925,18 +4925,40 @@ def _warn_point_name_not_lexically_indexed(props: dict, *, door: str,
             return content
         return props.get(field)
 
-    if any(needle in _lexical_text(_indexed_value(field)) for field in fields):
+    # ⛔ TOKEN-LEVEL, NOT SUBSTRING (#10122 review P2). The lexical leg answers
+    # with an OR-UNION of the query's tokens (``build_or_query``), so a name
+    # whose tokens are SCATTERED through ``content`` is findable — a substring
+    # test called that uncovered and the message then asserted an absence that
+    # does not hold (measured: content "the probe was a write for capstone and
+    # 9664 rows" answers a query for name "capstone-9664 write probe"). The
+    # honest condition is DISJOINT token sets: not one token of the name appears
+    # in the text this write indexes. Anything short of that only costs RANK,
+    # which is not what an advisory may promise.
+    from tortoise.sparse import tokenize_sparse_query
+
+    name_tokens = set(tokenize_sparse_query(str(name), keep_numeric=True))
+    indexed_tokens: set[str] = set()
+    for field in fields:
+        indexed_tokens.update(tokenize_sparse_query(
+            _lexical_text(_indexed_value(field)), keep_numeric=True))
+    if not name_tokens or (name_tokens & indexed_tokens):
         return
+    # The roster is DERIVED from the same table, so a label that gains (or
+    # loses) a ``name`` index changes this sentence with the index.
+    other_labels = sorted(
+        label for label, label_fields in _FULLTEXT_INDEX_LABEL_FIELDS
+        if label != "Point" and "name" in label_fields)
     _logger.warning(
-        "%s: this Point stores name=%r, but the Point fulltext index holds "
-        "%s only — a lexical query for that name will NOT find this point "
-        "(#10122, measured on both the embedded and the server lane). Put the "
-        "identifier in `content` or in `search_keys`: `name` is not "
-        "lexically indexed on a Point (Event/Subject/Object do index it). "
-        "The write is accepted as-is — warn-not-block, #1934. Coverage was "
-        "compared against the %s text THIS write supplies, so a partial "
-        "update cannot see what the node already stores.",
-        door, name, "/".join(fields), "/".join(fields),
+        "%s: this Point stores name=%r, but NONE of that name's tokens appear "
+        "in the text the Point fulltext index holds (%s) — so a query for the "
+        "name can only match this point through other evidence, and will not "
+        "rank on the name itself (#10122). Put the identifier in `content` or "
+        "in `search_keys`: `name` is not lexically indexed on a Point (%s do "
+        "index it). The write is accepted as-is — warn-not-block, #1934. "
+        "Coverage was compared against the %s text THIS write supplies, so a "
+        "partial update cannot see what the node already stores.",
+        door, name, "/".join(fields),
+        "/".join(other_labels) or "no other label", "/".join(fields),
     )
 
 
@@ -9584,8 +9606,6 @@ class TortoiseSDK:
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).
         # ⛔ Advisory only: it never refuses and never touches `props`.
-        _warn_point_name_not_lexically_indexed(props, door="create_point",
-                                               content=content)
         # E4 (#5007): the span is an ADDRESS — enforce the all-or-nothing /
         # ordered / in-range rule HERE as well as on the `Point` model. These
         # two props ride the generic passthrough, so without this a caller
@@ -9610,6 +9630,12 @@ class TortoiseSDK:
         # #2350 (E-prec): the per-end precision declaration is validated by the
         # same fresh-create rule (no stored opposite to merge).
         _refuse_inconsistent_validity_precision(self._get_proj().g, props)
+        # #10122 review P3: the advisory runs AFTER the refusal gates above —
+        # a create that these refuse writes nothing, and advising about a write
+        # that never happened is crying wolf (the same discipline
+        # ``update_entity`` documents for its own door).
+        _warn_point_name_not_lexically_indexed(props, door="create_point",
+                                               content=content)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -14399,10 +14425,20 @@ class TortoiseSDK:
                                 reject_claim_class=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
-        # #10122: same advisory as `create_point`. An update that carries ONLY
-        # `name` cannot be compared with the stored text (no graph read is added
-        # for an advisory), and the message says so.
-        _warn_point_name_not_lexically_indexed(props, door="update_point")
+        # #10122: same advisory as `create_point`, but only for a point that
+        # EXISTS — an update that matches nothing writes nothing, and warning
+        # about a write that never happened is crying wolf (#10122 review P3;
+        # `update_entity` already gates its door this way). The probe fires
+        # ONLY when the update carries `name`, which is the rare shape, so a
+        # plain update pays nothing.
+        if props.get("name") is not None:
+            _name_target_exists = self._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)",
+                params={"id": id},
+            ).result_set[0][0]
+            if _name_target_exists:
+                _warn_point_name_not_lexically_indexed(props,
+                                                       door="update_point")
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
         # update may not leave a half span, an inverted pair or an
         # out-of-range offset on the node. The pair is all-or-nothing, so an

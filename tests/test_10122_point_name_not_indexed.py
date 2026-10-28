@@ -221,3 +221,76 @@ def test_the_name_only_point_is_invisible_to_the_fts_leg(sdk):
         f"the #8486 measurement released first: flip this assertion "
         f"DELIBERATELY, together with the index change, not to make this "
         f"green. title={_TITLE!r}")
+
+
+# ── review round 1: the token-level condition, and the two crying-wolf shapes ──
+
+def test_scattered_name_tokens_in_content_do_not_warn(sdk, caplog):
+    """A name whose tokens are SCATTERED through content is findable — SILENCE.
+
+    #10122 review P2: the lexical leg answers with an OR-UNION of the query's
+    tokens, so this shape is retrievable (measured: returned at score 1.33).
+    The first implementation compared SUBSTRINGS, warned here, and its message
+    asserted an absence that did not hold. The condition is DISJOINT token
+    sets, nothing weaker.
+
+    FAIL VALUE: revert the coverage test to a substring/whole-name comparison
+    and this reds with the advisory present.
+    """
+    with caplog.at_level(logging.WARNING):
+        created = sdk.create_point(
+            "statement",
+            "the probe was a write for capstone and 9664 rows, all four tokens",
+            name="capstone-9664 write probe",
+        )
+    assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
+    assert not _advisories(caplog), (
+        "the name's tokens all appear in content, so a query for the name CAN "
+        f"reach this point — no advisory belongs here: {[r.message for r in caplog.records]}")
+
+
+def test_a_partial_token_overlap_does_not_warn(sdk, caplog):
+    """Even ONE shared token is enough to reach the record — SILENCE.
+
+    The advisory promises a MISS; anything short of disjoint sets only costs
+    rank, which is not what it may claim. Same mutation as above.
+    """
+    with caplog.at_level(logging.WARNING):
+        created = sdk.create_point(
+            "statement", "the probe was a write for capstone",
+            name="capstone-9664 write probe")
+    assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
+    assert not _advisories(caplog), (
+        "one of the name's tokens IS in content, so the record is reachable: "
+        f"{[r.message for r in caplog.records]}")
+
+
+def test_update_point_miss_does_not_warn(sdk, caplog):
+    """An update that matches nothing writes nothing, so it must not advise.
+
+    #10122 review P3: `update_point("no-such-id", name=…)` returned `{}` and
+    still warned, while `update_entity` gates its own door on the match.
+
+    FAIL VALUE: drop the existence probe before the advisory and this reds.
+    """
+    with caplog.at_level(logging.WARNING):
+        out = sdk.update_point("no-such-point-10122", name="capstone-9664 x")
+    assert out == {}, f"FIXTURE NOT REACHED: expected a miss, got {out}"
+    assert not _advisories(caplog), (
+        "a miss writes nothing, so there is nothing to advise: "
+        f"{[r.message for r in caplog.records]}")
+
+
+def test_the_point_index_field_set_is_pinned():
+    """#10122 Indicator 2: pin WHICH fields the Point index holds.
+
+    Without this, adding any other field (a `title`) would red nothing, and
+    adding `name` would only red the behavioural pin — this states the set the
+    ruling depends on, so a future change has to face it explicitly.
+    """
+    from tortoise.projection import _FULLTEXT_INDEX_LABEL_FIELDS
+
+    assert dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"] == ["content", "search_keys"], (
+        "the Point fulltext field set changed — the #10122 ruling (option A: "
+        "warn, do NOT index `name`) and the #8486 measurement gate both rest "
+        "on this exact set")
