@@ -516,6 +516,15 @@ def test_a_record_seam_failure_still_writes_the_artifact(monkeypatch, tmp_path) 
     report = json.loads(out.read_text())
     assert report["sessions"] == 1 and report["turns"] == 1
     assert report["refused"] == "connection terminated at s2"
+    # ⛔ A REFUSAL artifact names the same three facts the success artifact does.
+    # This branch filed the INSTANCE under `graph` while the success path filed
+    # the graph NAME there, so one tool meant two things by one key — and the
+    # refusal is the artifact an operator reads while deciding which graph to
+    # re-run against. Measured: mutating this branch back to `"graph": shown`
+    # reds this test alone.
+    assert report["graph"] == "g", report
+    assert report["instance"] == "shown", report
+    assert report["record_tenant"] == {"org_id": "o", "graph_id": "gid"}, report
 
 
 def test_a_commit_failure_is_a_refusal_with_an_artifact_not_a_traceback(
@@ -1468,6 +1477,16 @@ def test_the_record_floor_reads_both_homes_for_the_tenant(monkeypatch) -> None:
     # BOTH homes, and the tenant is the pair it was told to use.
     assert "public.session " in seen["sql"]
     assert "public.session_narrative" in seen["sql"]
+    # ⛔ The MARK leg, pinned by the SQL itself. `turn_max_index` names no column,
+    # so it is read out of the `public.session` props tail — and the two legs of
+    # the UNION make the narrative half select a literal `NULL`. Nothing above
+    # distinguishes the real expression from that NULL: the fold test supplies
+    # the mark POSITIONALLY from the fake cursor, so collapsing this projection
+    # to `NULL` would leave the suite green while the mark term of the
+    # three-term max became `max(attached, count)` — the lowering this function
+    # exists to prevent, reachable for any record whose mark exceeds its count.
+    # Measured: replacing the projection with `NULL` reds this test alone.
+    assert "props->>'turn_max_index'" in seen["sql"], seen["sql"]
     assert seen["params"] == ("o", "gid", "o", "gid")
     assert seen["closed"] is True
     # The LARGEST value either home holds is the floor; a NULL is "nothing held"
@@ -1730,6 +1749,41 @@ def test_main_reads_the_floor_for_the_tenant_it_was_told_to(monkeypatch, tmp_pat
                           "gid", "--journal", str(journal), "--out",
                           str(out)]) == 0
     assert seen == [("postgresql://u:p@db/record", "o", "gid")]
+
+
+def test_the_artifact_names_the_graph_it_read_not_the_instance(
+        monkeypatch, tmp_path) -> None:
+    """`graph` names the GRAPH; the endpoint goes under its own key.
+
+    ⛔ The artifact is what an operator reads immediately before an IRREVERSIBLE
+    delete, and `--graph` is one of the three independent arguments the evidence
+    is supposed to name rather than leave to be re-derived from the command
+    line. `_connect` returns `host:port` as its second value, so writing it under
+    `graph` left `--graph` named NOWHERE in the artifact: two different graphs on
+    one FalkorDB instance produced a byte-identical `graph` field, and the two
+    sibling artifacts disagreed about what that key means (the census writes
+    `"graph": graph_name`). The endpoint is still recorded — as `instance`, the
+    fact it actually is — and carries no credentials (`_connect` returns
+    `host:port` plus a TLS marker only).
+    """
+    _main_harness(monkeypatch, _FakeGraph(
+        sessions=[(1, "s1", {})],
+        turns=[(1, "s1_t0", {"id": "s1_t0", "pointKind": "event"}, ["s1"])]))
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@db/record")
+    journal = tmp_path / "graph.jsonl"
+    journal.write_text("{}\n")
+    monkeypatch.setattr(copy_mod, "_journal_emit",
+                        lambda *a, **k: (lambda sid, events: 1))
+    out = tmp_path / "summary.json"
+    assert copy_mod.main(["--graph", "g", "--org-id", "o", "--graph-id",
+                          "gid", "--journal", str(journal), "--out",
+                          str(out)]) == 0
+    report = json.loads(out.read_text())
+    assert report["graph"] == "g", report
+    assert report["instance"] == "shown", report
+    # The tenant pair the run wrote under is still named beside them, so the
+    # evidence carries all three arguments rather than trading one for another.
+    assert report["record_tenant"] == {"org_id": "o", "graph_id": "gid"}, report
 
 
 def test_a_blocking_anomaly_makes_the_run_exit_nonzero(monkeypatch, capsys) -> None:

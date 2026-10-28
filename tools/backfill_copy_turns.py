@@ -431,7 +431,7 @@ def _record_floor(dsn: str, org_id: str, graph_id: str) -> dict[str, dict]:
         #
         # ⛔ `RecordProjectionError` IS IN THIS TUPLE, and it is the one that
         # matters most. `scope_connection` is the call immediately above, and it
-        # raises that class (`record_projection.py:495`) — NOT a
+        # raises that class (`record_projection._apply_tenant_scope`) — NOT a
         # `RecordWriteError` and NOT a `RecordServeError` — for the two
         # conditions an operator is most likely to hit: a tenant GUC that did not
         # take, and a connection role that BYPASSES the policies. Reporting those
@@ -573,7 +573,7 @@ def build_session_event(session_id: str, props: dict, *, turn_count: int,
     # merely hoped for: a graph property naming this column with a null value
     # would otherwise reach `_split_properties`, which snake-cases it into
     # `col_values["created_at"] = None` with no value filter
-    # (`record_projection.py:1452-1462`) — the blanking write this paragraph
+    # (`record_projection._split_properties`) — the blanking write this paragraph
     # forbids, while `copy_phase` reported the same session under
     # `created_at_absent`. Popping EVERY spelling that names the column is what
     # makes the claim true of a present null and not only of an absent key.
@@ -1216,7 +1216,16 @@ def main(argv: list[str] | None = None) -> int:
         # the code the census uses for the same class (exit 2, no artifact).
         partial = getattr(exc, "stats", None)
         if partial is not None:
-            partial.update({"graph": shown, "dry_run": args.dry_run,
+            # ⛔ The SAME three facts the success path names, under the same keys:
+            # `graph` is the graph READ, `instance` is the `host:port` it was read
+            # from. A refusal is the artifact an operator reads while deciding
+            # which graph to re-run against, so filing the endpoint under `graph`
+            # here (as this branch did while the success path was fixed) would
+            # have one tool meaning two different things by one key — and would
+            # leave `--graph` named nowhere in the very artifact that asks the
+            # operator to choose a graph.
+            partial.update({"graph": args.graph, "instance": shown,
+                            "dry_run": args.dry_run,
                             "record_tenant": {"org_id": args.org_id,
                                               "graph_id": args.graph_id},
                             # Committed before the refusal, so the partial
@@ -1233,7 +1242,14 @@ def main(argv: list[str] | None = None) -> int:
         # Not measured, and said so — never 0, which reads as "measured: none".
         stats["positions_measured"] = None
         stats.pop("positioned", None)
-    stats["graph"] = shown
+    # ⛔ The GRAPH READ, by name — not the instance it was read from. `shown` is
+    # the `host:port` endpoint `_connect` returns, and filing it here put two
+    # different graphs on one instance behind a byte-identical `graph` field in
+    # the artifact an operator reads before an IRREVERSIBLE delete — and made
+    # this artifact disagree with the census's, which writes `"graph":
+    # graph_name`. The endpoint is still recorded, under its own key.
+    stats["graph"] = args.graph
+    stats["instance"] = shown
     stats["dry_run"] = args.dry_run
     # The RECORD tenant this run wrote under, in its own artifact: `--graph`,
     # `--org-id` and `--graph-id` are three independent arguments, and the
