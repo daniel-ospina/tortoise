@@ -231,8 +231,10 @@ const out = { scenario };
 
 if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario === "mint_ok"
     || scenario === "mint_cross_origin" || scenario === "mint_no_secret"
-    || scenario === "mint_foreign_attempt" || scenario === "mint_null_owner") {
-  const seeded = ["mint_ok", "mint_cross_origin", "mint_no_secret", "mint_foreign_attempt", "mint_null_owner"];
+    || scenario === "mint_foreign_attempt" || scenario === "mint_null_owner"
+    || scenario === "mint_twice") {
+  const seeded = ["mint_ok", "mint_cross_origin", "mint_no_secret", "mint_foreign_attempt",
+                  "mint_null_owner", "mint_twice"];
   // #10208: the mint now requires the ELECTRONIC key the creating browser holds. Every mint
   // scenario sends the right one unless it is explicitly testing a wrong/absent key.
   const MINT_KEY = opts.attemptKey === undefined ? "test-attempt-key" : opts.attemptKey;
@@ -270,9 +272,24 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
   const mintBody = opts.omitKey ? { state: "state-xyz" } : { state: "state-xyz", attempt_key: MINT_KEY };
-  const res = await tokenRoute.onRequestPost({ request: post("/api/consent/token", mintBody, headers), env: e });
-  out.status = res.status;
-  out.body = await res.json();
+  if (scenario === "mint_twice") {
+    // TWO mints of ONE attempt in ONE process: separate `_run`s would each build a fresh in-memory
+    // database, so asserting on them proves nothing about re-minting the SAME row.
+    const first = await tokenRoute.onRequestPost(
+      { request: post("/api/consent/token", mintBody, headers), env: e });
+    out.first = { status: first.status, body: await first.json() };
+    const second = await tokenRoute.onRequestPost(
+      { request: post("/api/consent/token", mintBody, headers), env: e });
+    out.second = { status: second.status, body: await second.json() };
+    out.rowsAfter = e.SESSIONS.tables.consent_attempts;
+    out.status = out.second.status;
+    out.body = out.second.body;
+  } else {
+    const res = await tokenRoute.onRequestPost(
+      { request: post("/api/consent/token", mintBody, headers), env: e });
+    out.status = res.status;
+    out.body = await res.json();
+  }
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
@@ -1049,13 +1066,23 @@ def test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_recovery() -> None:
     stronger bound. Making the attempt single-use would be a step-2/step-3 contract change, and this
     test is what forces that to be a decision rather than an accident.
     """
-    first = _run("mint_ok")
+    out = _run("mint_twice")
+    first, second = out["first"], out["second"]
     assert first["status"] == 200, first
-    second = _run("mint_ok")
     assert second["status"] == 200, (
-        f"a re-mint was refused, so step 4's post-spend recovery is broken: {second['body']}")
+        f"a re-mint of the SAME attempt was refused, so step 4's post-spend recovery is broken: "
+        f"{second['body']}")
     assert first["body"]["token"] != second["body"]["token"], (
         "the same assertion was returned twice — a replayed token, not a fresh jti")
+    assert len(out["rowsAfter"]) == 1, (
+        "the second mint created a second attempt row — the re-mint must reuse the recorded one")
+
+    # ⚠️ ONE PROCESS, ONE DATABASE. This test previously called `_run("mint_ok")` twice, which spawns
+    # a fresh Node process and a fresh in-memory `DatabaseSync` per call — it asserted 200/200 about
+    # two UNRELATED flows and could never red for a single-use mutation. `mint_twice` drives both
+    # requests inside one driver run, so this now pins the real behaviour: the attempt is not
+    # consumed, and making it single-use (the deferred contract change named in §2.2 and
+    # `consent_token.py`) would red this instead of shipping silently into step 4.
 
 
 def test_the_four_refusals_are_byte_identical() -> None:
