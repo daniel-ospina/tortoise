@@ -2650,22 +2650,73 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # This is the class the sibling no-nameable-row VERDICT pin already closes
     # ("so it is a fail-and-fix as well"), and the same reason the `circuit_open`
     # EVIDENCE is pinned above: a claim whose consequence is unpinned is prose.
+    # The alternation accepts the synonyms a truthful edit may pick (`designed
+    # outcome` / `designed state`) — the F3 class in assertion form is an
+    # improving reword that reds a pin whose message names a claim it kept.
     assert re.search(
-        r"a \*\*fail-and-fix\*\*, not a designed\s+state \(#10046\)", flat
+        r"a \*\*fail-and-fix\*\*, (?:not|rather than)\s+a designed\s+(?:state|outcome) "
+        r"\(#10046\)",
+        flat,
     ), (
         "the #10046 arm's VERDICT is unpinned — 'a **designed state**, not a "
         "fail-and-fix' leaves every other pin green (measured), which tells an "
         "operator to IGNORE genuine `no_tenant` growth from a session/JWT or "
         "OAuth `oat_` credential"
     )
+    # The EVIDENCE, as PRESENCE plus CONTENT — never as symbol order or grammar.
+    # Measured (#10083 review, P2): an order-anchored pattern red BOTH a reorder
+    # and a `both put the` insertion, i.e. two improving edits, while accepting
+    # `row NAME on the credential` — an assertion of the opposite of #10025's
+    # ruling (`default_graph_id_for` reads `.id` and filters `status='active'`;
+    # `record_tenant_for` refuses the `default` sentinel and demands a real
+    # `g_<hex>`), which would send a reader to check the row's NAME — always
+    # `default` on the healthy row — and clear real growth. Each symbol occurs
+    # exactly once in the section, so presence cannot be satisfied elsewhere —
+    # but the FIELD CLAUSE does not: it is word-for-word the ORG-WIDE arm's
+    # sentence too (`resolve_api_key` puts the org's active `kind='default'` row
+    # id on the credential as `default_graph_id`, line ~3515), so a bare
+    # section-wide search let the #10046 arm's clause be DELETED, reworded to
+    # `row on the credential`, or inverted to `puts no default_graph_id on the
+    # credential at all` with the suite GREEN (measured, #10083 review P2).
+    # Bind the clause to ITS OWN arm by proximity to the symbol only it names —
+    # 56 chars on the current text, 538 to the org-wide copy — which keeps the
+    # reorder / `both put the` tolerance above.
+    assert "`hosted_api._session_user_org`" in flat, (
+        "the #10046 arm names no session-lane resolution site, so a reader cannot "
+        "check WHY a session/JWT credential is no longer designed residue"
+    )
+    assert "`oauth.resolve_oauth_access_token`" in flat, (
+        "the #10046 arm names no OAuth resolution site, so a reader cannot check "
+        "WHY an `oat_` credential is no longer designed residue"
+    )
     assert re.search(
-        r"`hosted_api\._session_user_org` and `oauth\.resolve_oauth_access_token` "
-        r"put\s+the",
+        r"`oauth\.resolve_oauth_access_token`\s+.{0,100}?`kind='default'` row id "
+        r"on the credential as\s+`default_graph_id`",
         flat,
     ), (
-        "the #10046 arm names no resolution site, so a reader cannot check WHY "
-        "neither credential class is designed residue — the two symbols ARE the "
-        "evidence, and dropping them leaves the verdict resting on nothing"
+        "the #10046 arm does not say WHICH field is stamped (bound to that arm's "
+        "own sentence, not the org-wide one) — #10025's ruling is that the id is "
+        "identity and the name is a label, so 'the row' without `row id` sends "
+        "the reader to qualify on the name"
+    )
+    # `re.I`: the inversion is the CLAIM (`name` instead of `id`), not the case
+    # of the word. Case-sensitive, the same inversion in ordinary lowercase read
+    # GREEN (measured). Safe against the doc's legitimate `row NAME` at ~3565
+    # ("never a row NAME — the minted row is named `default`"): that occurrence
+    # has no "on the credential" tail.
+    assert not re.search(r"row name on the credential", flat, re.I), (
+        "the #10046 arm says the row's NAME is stamped — the opposite of #10025's "
+        "id-vs-name ruling, and the healthy row is NAMED `default`, so a reader "
+        "checking the name clears real growth"
+    )
+    # ... and the graph-bound remedy's own EVIDENCE, for the same reason the
+    # `circuit_open` evidence is pinned above: deleting the fail-soft clause leaves
+    # the qualifier `except when tenant resolution itself faults` standing on
+    # nothing, with the suite green (measured, #10083 review P2).
+    assert re.search(r"`hosted_api\._resolve_record_tenant` is fail-soft, #5148", flat), (
+        "the graph-bound remedy's fault exception states no evidence, so a reader "
+        "cannot check that a resolution fault is what makes a bound capture land "
+        "in `no_tenant`"
     )
     assert not re.search(r"carries no\s+`default_graph_id` at all", flat), (
         "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10046 "
@@ -2787,6 +2838,47 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10087 "
         "'deliberately NOT bound' claim is back. The claim it stood on is pinned "
         "positively by the `NOT one of those sources either` assertion above"
+    )
+    # ⛔ The runners arm's VERDICT and MECHANISM, for the reason the #10046 arm
+    # needed both (#10083 review P2, measured): the stance sentence above survived
+    # `i.e. the same fail-and-fix as an org-wide key` → `i.e. a designed outcome,
+    # not a fault`, `they carry the org's DEFAULT-graph tenant` → `they carry no
+    # tenant at all`, and deletion of the `_bind_default_graph_record_tenant`
+    # evidence — every one GREEN. That inverts the arm's conclusion while its
+    # stance sentence still reads correctly, i.e. it tells an operator to IGNORE a
+    # real control-plane fault on the seed / indexing lanes.
+    assert re.search(
+        r"is therefore a control-plane (?:fault|failure) \(no[^)]*\), i\.e\. "
+        r"the same fail-and-fix as\s+an org-wide key",
+        flat,
+    ), (
+        "the runners arm's VERDICT is unpinned — 'i.e. a designed outcome, not a "
+        "fault' leaves every other pin green (measured), which reads a real "
+        "control-plane fault on the seed / indexing lanes as designed residue"
+    )
+    assert not re.search(r"designed (?:outcome|residue), not a fault", flat), (
+        "REVERT-DETECTOR (one measured inversion, not a class): the runners arm is "
+        "stated backwards — a `no_tenant` there is a control-plane fault, so "
+        "calling it designed residue is the fail-open read the bound exists to close"
+    )
+    assert re.search(
+        r"bound by\s+`hosted_api\._bind_default_graph_record_tenant` \(#10047\) "
+        r"from the SAME\s+`kind='default'` `public\.graphs` row an org-wide key is "
+        r"named from",
+        flat,
+    ), (
+        "the runners arm names no binding site, so a reader cannot check WHY those "
+        "lanes are bound — deleting the mechanism leaves the verdict resting on "
+        "nothing (measured green at the previous head)"
+    )
+    assert re.search(
+        r"so they carry the org's DEFAULT-graph tenant from\s+their own construction "
+        r"site",
+        flat,
+    ), (
+        "the runners arm stops saying those lanes CARRY a tenant — the fact the "
+        "arm's verdict rests on. Inverted to 'they carry no tenant at all' it reads "
+        "as designed residue with every other pin green (measured)"
     )
     # The ⚠️ list files the self-host registry lane under "a credential that names
     # no graph", while the sentence below calls that same lane "the one graph-bound
@@ -3013,10 +3105,18 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # message is not a defect and is not forbidden; what is pinned is that these
     # three — the ones `hosted_api`/`supabase_control` actually emit — are named,
     # and that the count word still agrees with the member count.
-    _excl_c = flat[
-        flat.index("(c) The tenant-RESOLUTION faults"):
-        flat.index("⛔ **`no_journal` and `seam_unimportable` ARE in it**")
-    ]
+    # `partition`, NEVER `.index()`: the closing heading is prose no assertion
+    # pins, so a reword of it made this a `ValueError: substring not found`
+    # ERROR at collection — before any assertion ran, on an edit that changed no
+    # claim (measured, #10083 review P2). Absent marker now WIDENS the window
+    # (all the member pins still measure, and a widened window can only make a
+    # `not re.search` red for inspection) instead of crashing.
+    _excl_c = flat.partition("(c) The tenant-RESOLUTION faults")[2]
+    _excl_c, _closed, _ = _excl_c.partition(
+        "⛔ **`no_journal` and `seam_unimportable` ARE in it**"
+    )
+    if not _closed:
+        _excl_c = _excl_c[:2500]
     _msgs = (r"could not resolve the record tenant for this request",
              r"could not resolve the DEFAULT-graph record tenant for org",
              r"graphs default-row read failed — the record tenant stays unnamed")
@@ -3028,6 +3128,52 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     assert len(_msgs) == 3 and re.search(r"three MESSAGES", _excl_c), (
         "the exclusion (c) no longer presents exactly the three emitted messages "
         "under a matching count"
+    )
+    # ⛔ The ENUMERATION is not the ARGUMENT. Measured (#10083 review P2): the
+    # count and the three literals were pinned, but the two sentences that make
+    # the enumeration do any work were not — `none of which this grep matches` →
+    # `which this grep matches`, `NEITHER of the other two is logged at all` →
+    # `BOTH … are logged as well`, and `IS in the grep` → `is NOT in the grep`
+    # were all GREEN. Each inversion tells an operator that an empty recipe-1 read
+    # clears a real resolution fault, which is the fail-open the widened `grep -E`
+    # in the bound exists to prevent.
+    # The CLASS, not one idiom: `none of which this grep matches` / `which this
+    # grep does not match` / `of which this grep matches none` / `none of which
+    # are matched by this grep` all state the same ruling, and each reword red
+    # the single-idiom pin with a message accusing the doc of the inversion it
+    # had just kept (measured, #10083 review P2 — the F3 class again). The
+    # inversion is caught by the `(?:all|each) of which` detector below, so
+    # accepting the class costs no discrimination.
+    assert re.search(
+        r"three MESSAGES,?\s+(?:none of which\s+this grep\s+matches"
+        r"|which\s+this grep\s+does not match"
+        r"|of which\s+this grep\s+matches none"
+        r"|none of which\s+are matched by this grep)",
+        _excl_c,
+    ), (
+        "exclusion (c) no longer says these three faults are OUTSIDE recipe 1's "
+        "grep — inverted, it tells the reader an empty recipe-1 read clears them"
+    )
+    assert not re.search(r"three MESSAGES, (?:all|each) of which this grep", _excl_c), (
+        "exclusion (c) claims the three resolution faults ARE in recipe 1's grep, "
+        "which is false — recipe 1 greps `the record write did not happen`"
+    )
+    assert re.search(
+        r"so on a default-row read fault neither of the other two is\s+logged at all",
+        _excl_c,
+        re.I,
+    ), (
+        "exclusion (c) drops the consequence that makes `graphs default-row read "
+        "failed` special — `default_graph_id_for` swallows its exception, so on "
+        "that fault NEITHER hosted_api message is emitted and a grep of just "
+        "those two reads empty on a real fault"
+    )
+    assert re.search(
+        r"\(`the record write did not happen \(no_tenant\)`\) IS in the grep", _excl_c
+    ), (
+        "exclusion (c) stops distinguishing the refusal (which IS in the grep) "
+        "from the fault (which is not) — inverted, a reader counts the growth as "
+        "the fault or dismisses the line as missing"
     )
     # ⛔ POLARITY, not vocabulary: the negation must GOVERN the attribution verb
     # ("Do not try to attribute…", "cannot attribute", "never assign"), or the
