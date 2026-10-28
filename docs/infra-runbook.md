@@ -401,7 +401,7 @@ documented exception, not a silent one:
 |---|---|---|
 | `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
 | `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
-| `JEV_API_KEY` | `tools/collision_preflight.py` (`$JEV_API_KEY`, else the repo-root `.env`) | the pre-dispatch gate is a local tool — the repo-root `.env` is its documented home (declared in `.env.example`) |
+| ⚠️ `TYPESAFE_API_KEY` — **declared for documentation only; do NOT put it in `.env`** (legacy name: `JEV_API_KEY`) | the fleet's Jev callers — `agent-infra/scripts/turn-classify.py`, `ask-owner.py`, `lane-actions.py` (via `state/lane-verdict.py`); real endpoint `api.typesafe.ai` | ⛔ **the 0600 store `~/.pi/agent/jev-config.json` is the key's HOME — none of those callers reads this `.env`, and nothing in THIS repo reads the variable at all** (the one consumer that did was deleted by #8175). `.env.example` declares the NAME for documentation; the callers resolve `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the store. ⛔ **The deployed copy under `~/.pi/agent/scripts/` is a DERIVED artifact, not authored source:** `pi-bootstrap/setup.sh` copies `turn-classify.py`/`ask-owner.py`/`lane-actions.py` out of the agent-infra checkout, so running it from an **unmigrated** checkout silently reinstalls the lookalike caller — measured 2026-10-26 21:32, when an already-migrated trio was overwritten that way. The caller leg MERGED in agent-infra#2859 (`9205ab47a`) — a bootstrap from a checkout that predates it still reinstalls the lookalike caller, so fast-forward that checkout before running `pi-bootstrap/setup.sh` and assert EVERY caller with `grep -rn 'JEV_URL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py` — each carries its own constant, so one file's answer says nothing about the other two. ⛔ Until 2026-10-26 these callers billed against `jevtypesafeai.com`, a lookalike host that is NOT the vendor's API (tortoise#7864) |
 | `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
 
 **Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;
@@ -2750,8 +2750,11 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    - **wait for the deploy job, not the run, then unset** — a `deploy-hosted`
      **run** can end RED with `[env]` already applied: since #4538 the separate,
      fail-closed `post-deploy-verify` job can leave the run red *after*
-     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and
-     `concurrency: cancel-in-progress` can cancel a run after that step too.
+     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and a newer push
+     landing while a `deploy-hosted` run is still **pending** supersedes it —
+     `cancel-in-progress: false` (since #10155) stops a RUNNING deploy being
+     cancelled, but a shared group holds one pending run and the newest push
+     takes it.
      Require the `deploy-api` job's Deploy step to succeed — unsetting against a
      deploy that did **not** apply `[env]` drops the value. Only then run
      `flyctl secrets unset <NAME> --app tortoise-y4mjjq`;
@@ -3482,11 +3485,20 @@ happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
-   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
-   an org-wide / session / legacy / OAuth key, the self-host registry lane
-   (`record_writer.record_tenant_for` returns `None` by design), and the
-   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
-   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   `no_tenant` is ALSO the designed outcome where nothing names a graph at all —
+   but since #10046 (API keys since #10025) that is **no longer a credential
+   class**, so do NOT read it as one. What still emits it by design: the
+   self-host registry lane (`record_writer.record_tenant_for` returns `None` by
+   design — a graph-bound key that resolves through no control plane), and an
+   org with NO nameable active `kind='default'` row. (The onboarding-seed and
+   background-indexing runners are NOT one of those since #10047: they build
+   their own SDK and never see the request's credential, so
+   `hosted_api._bind_default_graph_record_tenant` supplies that row at their own
+   construction site.) On the hosted REST, MCP and OAuth lanes a `no_tenant`
+   from a `tt_`/`tk_` key, a session/JWT credential or an `oat_` token therefore
+   means the default row could not be named (missing, tombstoned, another org's,
+   unreadable) or the tenant read was lost — a **fail-and-fix**, not a designed
+   state (#9188/#9192, #10046).
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture

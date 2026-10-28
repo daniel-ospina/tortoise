@@ -3242,8 +3242,14 @@ def paid_vs_selected_cli(args) -> int:
         # and that is exactly why the guard belongs here rather than a comment:
         # the day it is populated is the day the ratio silently inflates.
         full_pool |= set(manifest.get("push_extra") or [])
-        full_pool |= (set(manifest.get("slow_files") or [])
-                      - ci_selection.carve_out_files(manifest))
+        # #10194/#10206: the GATING slow pool, not `slow_files - carve_out`.
+        # `slow_files` is now a DECLARATION that still carries the five eval
+        # files the gate no longer runs, so spelling the subtraction by hand
+        # here would put 315.4 s of tests the gate never runs into the
+        # denominator (65 files / ~1713.5 s instead of 60 / ~1398.1 s) and the
+        # calibration ratio would read systematically cheap. One definition:
+        # `slow_gating_files()`.
+        full_pool |= ci_selection.slow_gating_files(manifest)
     try:
         run = fetch_run(args.repo, args.run_id)
         jobs = fetch_jobs(args.repo, args.run_id)

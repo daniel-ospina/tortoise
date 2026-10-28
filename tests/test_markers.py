@@ -858,6 +858,18 @@ def test_no_redirect_stems_registry_exact():
         # working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_bm25_lexical_8488",
+        # #10122: the Point `name` advisory (a stored-but-unfindable identifier)
+        # and the FTS-gap evidence. The module carries module-level
+        # `pytestmark = pytest.mark.embedded_only` — the lane the defect was
+        # MEASURED on — so the exemption's load-bearing reason is the SKIP (a
+        # URI-set lane skips every case) *and* the REDIRECT (each case builds an
+        # embedded `TortoiseSDK(tmp_path)`; a server lane would certify the
+        # advisory against a graph the file does not target). The third leg of
+        # the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the change — this pin
+        # reding on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_10122_point_name_not_indexed",
         # #9209: the write handle's NON-CYPHER verbs. The suite's
         # `sdk_with_journal` fixture asserts `proj._is_embedded` and counts
         # real nodes on that embedded projection, and the module carries

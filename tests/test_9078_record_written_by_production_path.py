@@ -1154,8 +1154,12 @@ def test_the_seam_writes_nothing_from_a_scratch_buffer(monkeypatch):
     before = dict(monitoring.record_non_journal_skip_counts())
     failures_before = dict(monitoring.record_write_failure_counts())
     with use_record_tenant(ORG, GRAPH):
-        assert record_writer.write_live_record(
-            {"type": "PointAdded", "id": "p1"}, durable=False) is None
+        _declined = record_writer.write_live_record(
+            {"type": "PointAdded", "id": "p1"}, durable=False)
+    # #8447: the refusal is REPORTED, not only counted — and it is not the
+    # `None` an unarmed deployment returns, so the caller can tell them apart.
+    assert _declined is not None and _declined.applied is False, _declined
+    assert _declined.refusal == "no_durable_journal", _declined
     after = dict(monitoring.record_non_journal_skip_counts())
     failures_after = dict(monitoring.record_write_failure_counts())
     assert after.get("no_durable_journal", 0) > before.get(
@@ -1709,7 +1713,8 @@ def test_an_unproven_position_is_counted_warned_and_never_claimed(
     skipped_before = dict(monitoring.record_non_journal_skip_counts())
     unproven_before = monitoring.record_position_unproven_count()
     with use_record_tenant(ORG, GRAPH):
-        assert record_writer.write_live_record(record, durable=False) is None
+        _declined = record_writer.write_live_record(record, durable=False)
+    assert _declined is not None and _declined.applied is False, _declined
     assert monitoring.record_position_unproven_count() == unproven_before, (
         "the non-durable lane was counted as an unproven POSITION — it has no "
         "journal at all and belongs on no_durable_journal")
@@ -1753,7 +1758,9 @@ def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatc
     before = dict(monitoring.record_write_failure_counts())
     with use_record_tenant(ORG, GRAPH):
         for _ in range(5):
-            assert record_writer.write_live_record({"type": "PointAdded"}) is None
+            _refused = record_writer.write_live_record({"type": "PointAdded"})
+            # #8447: refused writes REPORT it (never the unarmed `None`).
+            assert _refused is not None and _refused.applied is False, _refused
     after = dict(monitoring.record_write_failure_counts())
 
     assert len(attempts) == 1, (
@@ -1771,22 +1778,36 @@ def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatc
 
     monkeypatch.setattr(record_writer, "write_records", _refuse)
     with use_record_tenant(ORG, GRAPH):
-        assert record_writer.write_live_record({"type": "PointAdded"}) is None
+        _refused = record_writer.write_live_record({"type": "PointAdded"})
+    assert _refused is not None and _refused.refusal == "write_failed", _refused
     assert record_writer._breaker_is_open() is False, (
         "a refused record tripped the breaker — the connection was fine")
 
-    # The breaker also HEALS: a success closes it, so a recovered record writes
-    # again without a restart.
+    # The breaker also HEALS: it is a monotonic DEADLINE
+    # (`LIVE_WRITE_BREAKER_SECONDS`), so the window expiring re-opens the door —
+    # and while it is open the door refuses BEFORE attempting a write, so a
+    # success cannot be what opens it inside one test. `_close_live_breaker()`
+    # stands in for that expiry (it is also what a real success calls).
     monkeypatch.setattr(record_writer, "write_records",
                         lambda records, **kwargs: record_writer.RecordWrite(
                             outcome=record_writer.RecordWriteOutcome.APPLIED,
                             events=len(records)))
     record_writer._trip_live_breaker()
     with use_record_tenant(ORG, GRAPH):
-        assert record_writer.write_live_record({"type": "PointAdded"}) is None
+        _open_refused = record_writer.write_live_record({"type": "PointAdded"})
+    assert _open_refused is not None and _open_refused.applied is False, \
+        _open_refused
+    assert _open_refused.refusal == "circuit_open", _open_refused
     record_writer._close_live_breaker()
     with use_record_tenant(ORG, GRAPH):
-        assert record_writer.write_live_record({"type": "PointAdded"}) is not None
+        _healed = record_writer.write_live_record({"type": "PointAdded"})
+    # ⛔ `is not None` is NO LONGER this leg's claim (#8447, review cycle 2):
+    # every refusal arm returns a REFUSED `RecordWrite`, so a non-None value no
+    # longer distinguishes a write that HAPPENED from one that was REFUSED —
+    # such an assertion passes on a mutant that leaves the breaker open and
+    # refuses every write. `applied` is the one check that means "the row
+    # exists", and it is what "a recovered record writes again" claims.
+    assert _healed is not None and _healed.applied is True, _healed
     assert record_writer._breaker_is_open() is False
 
 
@@ -1811,7 +1832,8 @@ def test_a_metrics_failure_cannot_escape_the_live_seam(monkeypatch):
 
     monkeypatch.setattr(monitoring, "record_record_write_failure", _boom)
     # No tenant in scope ⇒ the seam takes its counting path, which must swallow.
-    assert record_writer.write_live_record({"type": "PointAdded"}) is None
+    _refused = record_writer.write_live_record({"type": "PointAdded"})
+    assert _refused is not None and _refused.refusal == "no_tenant", _refused
 
 
 def test_the_record_connection_is_bounded(monkeypatch):
@@ -2575,12 +2597,10 @@ def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
                           "default_graph_id": "g_default"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], bound
 
-    # A credential that carries NO such field stays refused: session/PAT
-    # (`_session_user_org` resolves `org_id` + tier only) and OAuth `oat_`
-    # (`resolve_oauth_access_token` never calls `resolve_api_key`). Naming those
-    # is #10046's scope (a RESOLUTION gap at the credential), and until it is
-    # wired the write is refused `no_tenant` rather than filed under a tenant
-    # nobody named.
+    # A credential that carries NO such field stays refused. Since #10046 the
+    # RESOLVERS stamp it for every class (session/JWT and OAuth too), so a
+    # dict without it is a credential whose org had no nameable default row —
+    # the fail-closed direction, not a class left unwired.
     hosted_api._data_sdk({"org_id": "org-a"})
     assert bound == [("org-a", "g_row"), ("org-a", "g_default")], (
         f"a field-less request bound a tenant nobody named: {bound}")
@@ -2682,12 +2702,108 @@ def test_the_seam_refuses_a_malformed_carried_tenant(monkeypatch):
     malformed = (("", ""), ("org-a", ""), ("", "g_row"), ("org-a",),
                  ("org-a", "g_row", "extra"), ("org-a", None), "org-a", 7)
     for bad in malformed:
-        assert record_writer.write_live_record(
-            {"type": "PointAdded", "id": "p1"}, seq=1, tenant=bad) is None, bad
+        _refused = record_writer.write_live_record(
+            {"type": "PointAdded", "id": "p1"}, seq=1, tenant=bad)
+        assert _refused is not None and _refused.applied is False, (_refused, bad)
+        assert _refused.refusal == "no_tenant", (_refused, bad)
     assert calls == [], calls
     after = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
     assert after - before == len(malformed), (
         f"a malformed carried tenant was not counted as a refusal: {before} → {after}")
+
+
+def test_a_refused_live_write_is_visible_to_its_caller(monkeypatch):
+    """#8447: a REFUSAL must not return the value an UNARMED deployment returns.
+
+    The measured instance (issue #8447, 2026-10-26): an org-wide credential
+    carries `graph_id = NULL`, `record_tenant()` resolves to `None`, the door
+    counted `no_tenant` and returned `None` — which is ALSO this door's spelling
+    for "not armed, nothing attempted, off by policy". Zero rows written, zero
+    connections opened, and the producer holding the `None` could not tell that
+    from a healthy unarmed deployment: the failure lived only in
+    `monitoring.metrics()["record_write_failures"]`, which the producer does not
+    read.
+
+    This is the counterfactual's guard, not its repair: what is written is
+    unchanged (`write_records` is never called), and only the REPORT changes.
+
+    Mutation: `return None` for the `no_tenant` arm — every assertion below
+    reddens, and the door goes back to answering a refusal with the unarmed
+    value.
+    """
+    for env in (record_writer.RECORD_ORG_ENV, record_writer.RECORD_GRAPH_ENV,
+                record_writer.RECORD_SINGLE_TENANT_ENV):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "write_records", lambda *a, **k: pytest.fail(
+        "a refused tenant reached the seam"))
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
+        "a refused tenant opened a socket"))
+
+    before = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
+    write = record_writer.write_live_record({"type": "PointAdded", "id": "p1"})
+    after = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
+
+    assert write is not None, (
+        "the refusal returned None — the SAME value an unarmed deployment "
+        "returns, so the caller cannot tell 'refused, nothing stored' from "
+        "'off by policy' (#8447)")
+    assert write.applied is False, f"a refused write reported itself applied: {write}"
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED, write
+    # ...and WHY, in the counter's own vocabulary — one word list, not two.
+    assert write.refusal == "no_tenant", write
+    assert after == before + 1, (
+        f"the refusal left the metric behind: no_tenant {before} -> {after}")
+
+    # The other half of the contract: an UNARMED deployment still answers `None`
+    # (nothing was attempted — byte-identical to the pre-record deployment), so
+    # the value keeps exactly one meaning on this door rather than gaining a
+    # second one by accident.
+    monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
+    assert record_writer.write_live_record({"type": "PointAdded"}) is None
+
+
+def test_a_malformed_dsn_is_reported_by_the_live_door(monkeypatch):
+    """#8447: the `malformed_dsn` arm REPORTS the refusal too, and carries the
+    caller's own position instead of rewinding the watermark.
+
+    The gap this closes is a REAL one, not a symmetry argument: the armed-
+    but-malformed shape is the first thing an operator hits when arming, and
+    before this the live door answered it with the SAME `None` an unarmed
+    deployment returns. The sibling test at
+    `test_a_malformed_dsn_on_the_journal_less_lane_is_counted` cannot pin this
+    arm: it goes through `sdk.capture_session` on the journal-less lane, whose
+    seam call never reaches `write_live_record`.
+
+    Mutation: `return None` on this arm — the first assertion reddens. Drop the
+    `seq` carry in `_refused` — the watermark assertion reddens with (1, 0), a
+    rewind from position 7.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "mysql://not-postgres/nope")
+    monkeypatch.setattr(record_writer, "write_records", lambda *a, **k: pytest.fail(
+        "a malformed DSN reached the seam"))
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
+        "a malformed DSN opened a socket"))
+
+    before = dict(monitoring.record_write_failure_counts()).get("malformed_dsn", 0)
+    write = record_writer.write_live_record(
+        {"type": "PointAdded", "id": "p1"}, seq=7)
+    after = dict(monitoring.record_write_failure_counts()).get("malformed_dsn", 0)
+
+    assert write is not None, (
+        "the malformed-DSN refusal returned None — the SAME value an unarmed "
+        "deployment returns (#8447)")
+    assert write.outcome is record_writer.RecordWriteOutcome.REFUSED, write
+    assert write.refusal == "malformed_dsn", write
+    # ARMED and not reached: the degraded term, never the healthy one.
+    assert write.status == "degraded", write.status
+    assert (write.first_seq, write.last_seq) == (7, 6), (
+        "a refusal must report the caller's own position (last_seq == seq - 1, "
+        f"this class's 'nothing consumed' spelling) — got {write.first_seq}/"
+        f"{write.last_seq}, so a consumer applying last_seq + 1 rewinds to 1")
+    assert after == before + 1, (
+        f"the refusal left the metric behind: malformed_dsn {before} -> {after}")
 
 
 def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):

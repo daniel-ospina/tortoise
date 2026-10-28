@@ -136,8 +136,15 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 | `changes` | 27 | 0.38 | 0.58 | 1.25 | 5 |
 | `manifest-integrity` | 28 | 0.28 | 0.33 | 0.40 | 5 |
 | `workflow-lint` | 32 | 0.19 | 0.26 | 0.30 | 5 |
+| `ci-introduced-failure` (#9984) | — | not yet measured | — | — | 15 |
 | **`packs-compile`** | 19 | 0.60 | 0.76 | 0.80 | **15 (was none)** |
 | **`python-ci-gate`** (REQUIRED) | 34 | 0.00 | 0.02 | 0.02 | **15 (was none)** |
+
+`ci-introduced-failure` is on the merge path (it is the one job `python-ci-gate`
+delegates a failed test arm to), so its cap is what bounds a stalled required check
+when the predicate job is what wedged. It has no p50/p95 here yet because it landed
+after this sample was taken — take a fresh measurement (`filter=all`, completed jobs
+only, §2's command) before moving the cap, rather than inferring one from a sibling.
 
 ⚠ `test-record-postgres` is the one pre-existing cap that sits closest to its work (15.43 m
 against a 20 m cap). Left unchanged — a measured max under its cap is not a defect — but if it
@@ -185,6 +192,7 @@ the 360-minute default.
 | `ai-review-gate` | `ai-review-gate-<PR number>` | true | Already compliant; `pull_request_target` only, so every run is PR-keyed. |
 | `drift-guard` | `drift-guard-<ref>` | true | Already compliant; `pull_request` + `workflow_dispatch`. |
 | `post-merge-validation` | `postmerge-validation` (constant) | false | Serialises; superseded *pending* runs are still dropped by GitHub (§1), which is why `main-lint` keyed its own group on `github.sha`. |
+| `deploy-hosted` | `deploy-hosted` (constant) | false | A RUNNING deploy is never cancelled (#10155; #10109 / #10152 were the stale-production class — production fell hours behind because later merges killed the deploy in flight). A PENDING one is still superseded by the newest push (§4), which is the residual `supabase-deploy`'s flip watcher reports as `UNKNOWN` rather than as a failed flip. The group must stay constant: `supabase-deploy` dispatches this workflow and then watches that run (#3627). |
 | `ci-queue-health` | `ci-queue-health` | false | Deliberate: two governors would cancel each other's kept runs. |
 
 `github.ref` is what makes this branch-scoped: `refs/pull/N/merge` on PRs, `refs/heads/main` on

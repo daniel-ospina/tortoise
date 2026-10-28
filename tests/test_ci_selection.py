@@ -680,8 +680,22 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
     Asserted on the SURFACE and the guard FILE, not on non-emptiness: every
     one of these diffs selects its surface without the census entry, so a bare
     `surfaces` check can only pass.
+
+    ⛔ #10194 REVERSED THE SECOND HALF, DELIBERATELY (owner decision A,
+    2026-10-27): `tests/eval/**` is now the NON-GATING lane, so the census no
+    longer runs on any PR — a diff to `tortoise/retrieval.py` selects 158 files
+    and NONE of them is the census. The surface mapping this test was built to
+    prove is still correct and still asserted; what it must now also assert is
+    the CONSEQUENCE, so nobody reads a green PR as "the census ran". The
+    published §2.3 readings can go stale until evals reopen; that is the cost
+    the owner accepted, and it is recorded here rather than left to be
+    rediscovered. Reachable from `eval-suite-manual.yml`, never from a merge.
     """
+    from tools.ci_selection import on_demand_files
     guard = "eval/write_path/test_value_span_census_2684.py"
+    assert guard in on_demand_files(load_manifest()), (
+        f"{guard} must be in the non-gating lane — #10194 took the eval subtree "
+        "out of the merge gate; if it left the lane it is gating again")
     for changed, surface in (
             ("tortoise/extractor_v2.py", "core"),
             ("tortoise/retrieval.py", "sdk"),
@@ -695,10 +709,11 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
             f"{changed} selects {r['surfaces']}, not {surface} — the premise "
             "of this pin changed; re-derive it"
         )
-        assert guard in r["test_files"], (
-            f"{changed} does not select {guard} — the census sleeps on the "
-            "diff that can out-date the numbers it publishes "
-            f"(selected: {r['test_files']})"
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert guard not in selected, (
+            f"{changed} selects {guard} again — a non-gating lane file is back "
+            "on a pre-merge leg, which is the regression #10194 exists to "
+            f"prevent (selected: {sorted(selected)[:8]} ...)"
         )
 
 
@@ -2225,13 +2240,22 @@ def test_tools_longmem_change_selects_eval_not_tier1():
     assert r["full"] is False
     assert r["surfaces"] == ["eval"]
     # #6137 moved `eval/retrieval/test_run.py` out of the fast pool into the
-    # slow legs, so the witness that "eval was selected" is another eval file
-    # that stayed — and the moved one is asserted to still run PRE-MERGE, one
-    # leg over (a relocation that dropped it instead would be a coverage loss,
-    # which is the whole thing #6137 must not do).
-    assert "eval/retrieval/test_1348.py" in r["test_files"]
+    # slow legs, so the witness that "eval was selected" had to be another eval
+    # file that stayed.
+    # #10194 moved BOTH of them into the non-gating lane, so the witness is now
+    # an `eval`-surface file that is NOT under the eval/longmem subtrees —
+    # `test_measure_ask_distilled.py` (registered on `eval`, at the top of
+    # `tests/`). The property under test is unchanged: an eval-harness diff must
+    # select the eval surface's tests and must NOT collapse to tier-1 smoke.
+    # What changed is that the subtree's own files no longer ride along, which
+    # is asserted here rather than merely allowed.
+    assert "test_measure_ask_distilled.py" in r["test_files"], r["test_files"]
+    assert "eval/retrieval/test_1348.py" not in r["test_files"], (
+        "eval/ files are the non-gating lane (#10194) — they must not reach a "
+        "tier-2 fast shard")
     assert "eval/retrieval/test_run.py" not in r["test_files"]
-    assert "eval/retrieval/test_run.py" in r["slow_selected"] and r["slow_run"] is True
+    assert "eval/retrieval/test_run.py" not in r["slow_selected"], (
+        "#10194: a lane file must not ride the tier-2 slow leg either")
     assert set(r["test_files"]) != _tier1()
 
 
@@ -4320,8 +4344,14 @@ def test_expensive_eval_integration_is_in_the_on_demand_lane():
 def test_slow_files_emitted_on_every_return_path():
     # #1371: the changes job reads slow_files from every selection mode — a
     # missing key would KeyError the nightly/schedule run or empty test-slow.
+    # #10194: the emitted set is the GATING pool (`slow_gating_files()`: slow
+    # minus carve-out minus the non-gating lane), because the changes job feeds
+    # `slow_matrix`/the legs straight out of it. Asserting the raw config list
+    # would pin the pool that the legs deliberately no longer run.
+    from tools.ci_selection import slow_gating_files
     m = load_manifest()
-    expected = set(m["slow_files"])
+    expected = set(slow_gating_files(m))
+    assert expected, "the gating slow pool must not be empty — vacuous otherwise"
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4340,9 +4370,12 @@ def test_diff_gate_keys_emitted_on_every_return_path():
     slow_run / slow_selected / carve_out_run — the changes job echoes them,
     so a missing key would KeyError the echo (or the nightly run) and
     silently mis-gate a leg. slow_selected must always be a subset of
-    slow_files - carve_out (test-slow's committed leg set)."""
+    slow_gating_files() (test-slow's leg set: slow minus carve-out minus the
+    non-gating lane, #10194)."""
+    from tools.ci_selection import slow_gating_files
+
     m = load_manifest()
-    leg_set = set(m["slow_files"]) - set(m["carve_out"])
+    leg_set = set(slow_gating_files(m))
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4355,7 +4388,7 @@ def test_diff_gate_keys_emitted_on_every_return_path():
         for key in ("slow_run", "slow_selected", "carve_out_run"):
             assert key in r, f"missing {key} for {changed}/{event}"
         assert set(r["slow_selected"]) <= leg_set, \
-            f"slow_selected must be subset of slow_files - carve_out ({changed}/{event})"
+            f"slow_selected must be subset of slow_gating_files() ({changed}/{event})"
 
 
 def test_docs_only_skips_slow_and_carve_out():
@@ -4378,10 +4411,21 @@ def test_docs_only_skips_slow_and_carve_out():
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
     """#2147/#2148: push/schedule/unknown-path/shared-module -> full:
     test-slow AND test-carve-out run, and slow_selected is the whole
-    committed leg set (slow_files - carve_out) — the trunk + nightly
-    backstop is never weakened by the PR-shape gates."""
+    committed leg set — the trunk + nightly backstop is never weakened by the
+    PR-shape gates.
+
+    #10194: the leg set is `slow_gating_files()` (slow - carve-out - the
+    non-gating lane). The backstop claim survives the membership change — the
+    pool the legs run is still the WHOLE of that pool — but it no longer means
+    "every slow_files entry": five eval files stay declared slow and are
+    subtracted, exactly the way carve-out files already were."""
+    from tools.ci_selection import slow_gating_files
     m = load_manifest()
-    leg_set = sorted(set(m["slow_files"]) - set(m["carve_out"]))
+    leg_set = sorted(slow_gating_files(m))
+    assert leg_set, "the full selection's slow leg must not be empty"
+    assert len(leg_set) < len(m["slow_files"]), (
+        "this test is about the pool the legs actually run; if it equals the "
+        "raw config list the subtraction has stopped happening")
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4430,11 +4474,17 @@ def test_tier2_carve_out_run_when_surface_owns_carve_files():
 
 def test_full_mode_selection_unchanged():
     # #1371: push/schedule full mode keeps its exact contract (test_files ALL)
-    # and only gains the slow_files key.
+    # and only gains the slow_files key. #10194: the emitted slow pool is the
+    # GATING pool, so the count is compared against the same accessor the
+    # emitter reads — never the raw config list.
+    from tools.ci_selection import slow_gating_files
     r = _sel([], "push")
     assert r["full"] is True
     assert r["test_files"] == "ALL"
-    assert len(r["slow_files"]) == len(load_manifest()["slow_files"])
+    assert len(r["slow_files"]) == len(slow_gating_files(load_manifest()))
+    assert len(slow_gating_files(load_manifest())) < len(load_manifest()["slow_files"]), (
+        "the gating pool must be a strict subset of the declared slow files, "
+        "or #10194's lane subtraction stopped happening")
 
 # ── #1429: auto-registration of unlisted test files ──────────────────────
 
@@ -4900,7 +4950,9 @@ def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
     #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
-    from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
+    from tools.ci_selection import (  # noqa: I001
+        ENV_BROKEN_FILES, on_demand_files, push_legs,
+    )
     m = load_manifest()
     legs = push_legs(m)
     carve = {f.replace(".py", "") for f in m["carve_out"]}
@@ -4912,9 +4964,18 @@ def test_push_legs_partitions_every_classified_file():
     fast = {f.replace(".py", "") for f in classified if f not in m["slow_files"]}
     fast |= {f.replace(".py", "") for f in m.get("push_extra", [])}
     broken = {f.replace(".py", "") for f in ENV_BROKEN_FILES}
+    # #10194: the non-gating lane is a subtraction from the fast pool just like
+    # the carve-out, and it is read from the ONE accessor (a literal list here
+    # would be a second definition of the lane that could drift from the one
+    # `fast_pool()` subtracts — the partition would then fail for the right
+    # reason at the wrong time).
+    lane = {f[:-3] if f.endswith(".py") else f for f in on_demand_files(m)}
+    assert lane, "the lane must be non-empty, or this subtraction proves nothing"
+    assert set().union(*(set(s["files"]) for s in legs["shards"])) & lane == set(), (
+        "a non-gating lane file reached a push shard")
     # #6135: the fast pool is partitioned across N shards, not two halves.
     shards = [set(s["files"]) for s in legs["shards"]]
-    assert set().union(*shards) == fast - broken - carve
+    assert set().union(*shards) == fast - broken - carve - lane
     assert sum(len(s) for s in shards) == len(set().union(*shards)), "leg overlap"
     # carve-out files never ride the docker legs (fast OR slow)
     for shard in shards:
@@ -5308,8 +5369,27 @@ def test_no_required_check_names_a_fast_leg():
     # leg — so adding a leg cannot orphan anything it requires
     assert "test" in gate["needs"]
     assert not [n for n in gate["needs"] if str(n).startswith("test (")], gate["needs"]
-    # the rollup is job-id keyed, not leg-name keyed
-    assert "join(needs.*.result, ' ')" in gate["steps"][0]["run"]
+    # the rollup is job-id keyed, not leg-name keyed. ONE step does the rollup and it
+    # is the sole author of the verdict: `python-ci-gate` still has EXACTLY ONE step
+    # (#9984 kept it that way on purpose — the two checkouts, this repo and the pinned
+    # agent-infra holding the shared predicate, live in the SEPARATE
+    # `ci-introduced-failure` job, because a `uses:`/`with:`/`env:` step added to this
+    # aggregate would widen the shim defence the capstone pin enforces). So the pin
+    # names the property that matters — exactly one step, and exactly one reader of
+    # the join — instead of a positional index. (A previous revision of this comment
+    # claimed the two checkouts sat ahead of the rollup in THIS job; they never did,
+    # and that false premise is what made loosening the positional check look
+    # justified.)
+    assert len(gate.get("steps") or []) == 1, (
+        "python-ci-gate must stay a ONE-step aggregate — an extra step can export "
+        f"BASH_ENV or mask the rollup's exit code (#9984 review); got {[s.get('name') for s in gate.get('steps') or []]}")
+    rollup_steps = [s for s in gate.get("steps", [])
+                    if "join(needs.*.result, ' ')" in (s.get("run") or "")]
+    assert len(rollup_steps) == 1, (
+        "exactly one step must own the `needs.*.result` rollup — two readers means "
+        f"two verdicts; got {len(rollup_steps)}")
+    assert rollup_steps[0]["run"] == gate["steps"][0]["run"], (
+        "the rollup step must BE the aggregate's only step, not a sibling of one")
     # the merge queue's only merge condition is the aggregate. Comments MAY
     # name a leg as history (several do, deliberately) — the ENFORCED lines
     # must not.
@@ -6653,7 +6733,7 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     `durations` map on every run, so a slow file that grows reds THIS instead of
     silently restoring the merge ceiling:
 
-      * coverage — the legs partition `slow_files - carve_out` exactly, once
+      * coverage — the legs partition `slow_gating_files()` exactly, once
         each (no gap, no duplicate);
       * balance — no leg exceeds its fair share by more than the house
         `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
@@ -6679,7 +6759,8 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         f"a slow file rides more than one leg: "
         f"{sorted({f for f in flat if flat.count(f) > 1})}")
     assert set(flat) == set(slow_leg_files(m)), (
-        "the slow legs must cover slow_files - carve_out exactly: "
+        "the slow legs must cover slow_gating_files() "
+        "(slow_files - carve_out - the non-gating lane, #10194) exactly: "
         f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
         f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
     # balance: no leg above its fair share by more than the house band
@@ -6789,12 +6870,15 @@ def test_9017_block_states_the_derived_split_not_the_2_leg_era():
 
     Its per-file table is still a valid measurement (run 39165691659) but the
     SPLIT narrative wrapped around it is not: #9539 replaced the committed pair
-    with legs DERIVED from that same map (`slow_files - carve_out` LPT-packed
+    with legs DERIVED from that same map (`slow_gating_files()` — slow minus
+    carve-out minus the non-gating lane since #10194 — LPT-packed
     into `slow_shards` = 5). In the present tense, "the LPT pack of that map into
     two legs of 18.945m / 18.933m" and "2.11x the heavier leg" both contradict
     the lane the reader is about to configure — including the number the per-leg
-    `matrix.watchdog_minutes` follow-up would size the 40m literal against (the
-    heavier DERIVED leg is 7.58m, 5.3x, not 18.95m at the 2.0x floor). This is
+    `matrix.watchdog_minutes` follow-up would size the 40m literal against (at
+    the time of that review the heavier DERIVED leg was 7.58m, 5.3x, not 18.95m
+    at the 2.0x floor; #10194 has since taken 5.26m out of the pool, so the live
+    figure must be RE-DERIVED, never quoted). This is
     exactly the rotation the durations header asks for, and the same failure this
     block's own history records ("they rot on every re-cut, and this comment has
     now been wrong twice for that reason").
@@ -7263,7 +7347,8 @@ def test_diff_gated_jobs_consume_changes_outputs():
     surfaces' slow files run. test-slow's matrix is the selector's
     `${{ fromJSON(needs.changes.outputs.slow_matrix) }}` — there are NO
     literal rows to keep in sync; the in-workflow drift-guard step pins the
-    union of the EXPANDED legs to slow_files - carve_out (#9539)."""
+    union of the EXPANDED legs to slow_gating_files() (#9539; slow minus
+    carve-out minus the non-gating lane since #10194)."""
     wf = _load_python_ci()
     # job-level gates
     assert wf["jobs"]["test-slow"]["if"] == \
@@ -7321,7 +7406,8 @@ def test_diff_gated_jobs_consume_changes_outputs():
             assert rel not in seen, f"slow leg entry {rel} rides two legs"
             seen.add(rel)
     assert seen == {f + ".py" for f in slow_leg_files(load_manifest())}, (
-        "the legs must cover slow_files - carve_out exactly (no gap, no dup)")
+        "the legs must cover slow_gating_files() exactly (no gap, no dup): slow "
+        "minus carve-out minus the non-gating lane")
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
@@ -8119,7 +8205,18 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         # a given leg is a check that does not observe it (#5219). And every red
         # must NAME its leg — that is #9240's deliverable, and the reason these
         # assertions inspect `out` rather than only the exit code.
-        for red in ("failure", "cancelled"):
+        #
+        # ⛔ SPLIT BY CLASS SINCE #9984, and the split is the contract, not a
+        # concession. `cancelled` (below) still reds on the aggregate's own authority:
+        # a leg that never ran produced NO failure set, so there is nothing to compare
+        # against main and nothing that could make it pre-existing. `failure` does reach
+        # the introduced-failure predicate, which asks the RAIL's question about the
+        # same tree — so its exit code now comes from the predicate, and the assertion
+        # that matters is the FAIL-CLOSED one: with no measurable baseline (the
+        # harness's env renders neither `PR_HEAD` nor `EVENT_NAME`) the predicate
+        # refuses and the check still exits 1. Deleting the delegation would make this
+        # vector exit 0 — which is exactly what the assertion catches.
+        for red in ("cancelled",):
             for leg in job_names:
                 bad = dict(green)
                 bad[leg] = red
@@ -8140,6 +8237,121 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 assert "❌ 1 leg(s) did not pass" in out, (
                     f"the summary must count exactly one red leg, unpadded; got "
                     f"{out!r}")
+
+        # ── THE INTRODUCED-FAILURE PREDICATE (#9984) ──────────────────────
+        # A failed SHARD is now delegated to `ci-introduced-failure` (a separate job,
+        # see the workflow): the aggregate asks whether that verdict job SUCCEEDED.
+        # Everything else about a red leg is unchanged — it is still named, and the
+        # check still cannot go green on a red tree without that verdict.
+        PREDICATE = "ci-introduced-failure"
+        assert PREDICATE in job_names, (
+            "the aggregate must consume the introduced-failure verdict as a need — "
+            "otherwise a failed shard has no adjudicator and #9984's predicate is "
+            "either missing or asked by nothing")
+
+        #: The arms a failed TEST can be excused on. Declared in the aggregate's own
+        #: script (`DEFERRABLE_LEGS`) and pinned against the verdict job's `needs:` by
+        #: tests/test_ci_new_failure_gate.py, so this harness reads it from the script
+        #: instead of restating it.
+        deferrable = re.search(r'^\s*DEFERRABLE_LEGS="([^"]+)"', script, re.M)
+        assert deferrable, (
+            "the aggregate must declare `DEFERRABLE_LEGS` — the arms a failed test can "
+            "be excused on (#9984); without it every failed leg is excusable or none is")
+        DEFERRABLE = set(deferrable.group(1).split())
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 0, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` certified must PASS the "
+                "required check — an exit 1 here means the delegation was deleted and "
+                f"the old \"does anything fail?\" predicate is back (#9984); got {out!r}")
+            assert "certified every failing id" in out and leg in out, (
+                f"the excused leg must be NAMED, or the operator cannot tell why a red "
+                f"shard merged (#9240/#9984); got {out!r}")
+
+        # (b) the SAME red shard with the verdict job RED: the aggregate fails, and the
+        #     verdict job is the leg it names. This is the case the old predicate got
+        #     right, and it must stay right — a real PR-caused failure still blocks.
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            bad[PREDICATE] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` did NOT certify must FAIL "
+                f"the required check; got {out!r}")
+            assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, (
+                f"the verdict job must be NAMED as the refusing leg; got {out!r}")
+
+        # (b2) `timed_out` is DELEGATED exactly like `failure` (#9984 review). The
+        #      delegating case is `failure|timed_out`, and the two halves must agree:
+        #      the aggregate delegates a timed-out shard, AND the verdict job's own
+        #      step runs for it (pinned structurally by
+        #      tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_
+        #      every_class_the_aggregate_delegates — a `success` from a verdict job
+        #      whose step never ran is not a certification).
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 0, (
+                f"a `timed_out` for `{leg}` must be delegated exactly like `failure` — "
+                "an exit 1 here means the delegating case lost its `timed_out` half; "
+                f"got {out!r}")
+            assert "certified every failing id" in out and leg in out, out
+        #      ... and, like `failure`, it is NEVER delegable on a non-test arm.
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 1, (
+                f"a `timed_out` for `{leg}` must never be excused by the test-failure "
+                f"verdict — it is not a test arm (#9984); got {out!r}")
+            assert "not a test arm" in out, out
+
+        # (c) the verdict job is the ONE failure that can never be deferred: deferring
+        #     it would make the verdict ask itself (a red verdict, excused by itself).
+        bad = dict(green)
+        bad[PREDICATE] = "failure"
+        rc, out = _verdict(bad)
+        assert rc == 1, (
+            "a red `ci-introduced-failure` must red the required check even when no "
+            f"other leg failed — it is the refusal itself; got {out!r}")
+        assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, out
+        assert "certified every failing id" not in out, (
+            f"a red verdict must never be reported as a certification; got {out!r}")
+
+        # (c2) a NON-test arm is never delegable: `surface-guard` red is a surface
+        #      expansion, not a trunk red, and a verdict about test ids says nothing
+        #      about it. (This is also what keeps a drift-gate failure a hard block.)
+        assert set(job_names) - DEFERRABLE, "there must be a non-deferrable arm to assert on"
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{leg}` failure must NEVER be excused by the test-failure verdict — "
+                f"it is not a test arm (#9984); got {out!r}")
+            assert f"::error::leg '{leg}'" in out and "not a test arm" in out, out
+
+        # (d) and it must be fail-closed about its own absence: a verdict job that was
+        #     CANCELLED or SKIPPED certifies nothing, so a red shard cannot be excused.
+        for verdict_result in ("cancelled", "skipped"):
+            bad = dict(green)
+            bad["test"] = "failure"
+            bad[PREDICATE] = verdict_result
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{verdict_result}` `{PREDICATE}` must not excuse a red shard — an "
+                f"absent verdict is not a clean one (#9984 constraint 1); got {out!r}")
+            assert f"::error::leg '{PREDICATE}'" in out, out
 
         # An always-run leg has NO selector that can decline it, so a `skipped`
         # one is a lost shard. This is the half of "`skipped` is not a pass"
@@ -8203,11 +8415,20 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         two["test-slow"] = "cancelled"
         rc, out = _verdict(two)
         assert rc == 1
-        assert "::error::leg 'test' reported 'failure'" in out, out
+        assert "test: reported 'failure'" in out, out
         assert "::error::leg 'test-slow' was CANCELLED" in out, out
-        assert out.count("::error::leg ") == 2, (
-            f"each red leg gets its own line; got {out!r}")
-        assert "❌ 2 leg(s) did not pass" in out, out
+        assert out.count("::error::leg ") == 1, (
+            "each HARD-red leg gets its own error line, and a delegated one gets a "
+            f"plain line; got {out!r}")
+        # `test` is DELEGATED (#9984) and `test-slow` is a lost shard: the aggregate
+        # names both and refuses on its own authority, because a cancelled leg
+        # certifies nothing and no verdict could excuse it. The delegation is a
+        # plain line, not an `::error::` — an error annotation would claim a refusal
+        # the gate is not making.
+        assert "❌ 1 leg(s) did not pass" in out, out
+        assert "::error::leg 'test-slow'" in out, out
+        assert "test: reported 'failure'" in out and "delegated" in out, (
+            f"a delegated failure must say so plainly; got {out!r}")
 
         # A duplicate row inspected twice is ONE red leg and must be counted
         # once — a copy-paste must not inflate the operator's summary.
@@ -8219,13 +8440,16 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             "could not find the `test` row to duplicate — the fixture is stale")
         dup_src = script.replace(row_line, f"{row_line}\n{row_line}", 1)
         one_red = dict(green)
-        one_red["test"] = "failure"
+        # `cancelled`, not `failure`: a delegated failure is excused by a green
+        # verdict (#9984), so a HARD-red class is what proves the count de-duplicates.
+        one_red["test"] = "cancelled"
         rc, out = _verdict(one_red, src=dup_src)
         assert rc == 1, (
             "a duplicated row must not hide its own red; got "
             f"rc={rc} {out!r}")
         assert "❌ 1 leg(s) did not pass" in out, (
-            f"the summary must count LEGS, not rows; got {out!r}")
+            "the summary must count LEGS, not rows — a duplicated row inspected "
+            f"twice is ONE red leg; got {out!r}")
 
         # The `failure|cancelled` sweep must stay REACHABLE (#9240 review: it
         # was dead code behind the deleted distinct-count guard). A red result
@@ -8238,6 +8462,33 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         assert "no leg row named it" in out, (
             "the unrowed-need red must come from the identity-blind sweep, i.e. "
             f"the sweep must be reachable; got {out!r}")
+
+        # That sweep's `cancelled` half must be reachable even while ANOTHER leg is
+        # delegated (#9984 review). Gating the whole sweep on `RED_LEGS` being empty
+        # disabled the `cancelled` half too — and `cancelled` can never be delegated
+        # (the leg loop reds on it by name), so all the gate did was let a leg that
+        # never ran pass the required check once a deferrable leg was adjudicated.
+        delegated_plus_lost = dict(green)
+        delegated_plus_lost["test"] = "failure"
+        rc, out = _verdict(delegated_plus_lost, extra=("cancelled",))
+        assert rc == 1, (
+            "a `cancelled` need with no leg row must red the required check even while "
+            f"a delegable `failure` is being adjudicated; got {out!r}")
+        assert "no leg row named it" in out, out
+
+        # ... and so must its `failure` half (#9984 review). The gate on that half is a
+        # COUNT (`RESULT_FAILS > ROW_FAILS`), not `RED_LEGS` being empty: emptiness asked
+        # the wrong question, because it holds whenever ANY leg was delegated — so an
+        # un-rowed `failure` need hid behind an unrelated delegated leg and the check
+        # printed "did not introduce it" over a leg the row table never looked at
+        # (measured pre-fix: rc=0). `extra=("failure",)` is a need that reached `needs:`
+        # with no row; `test=failure` is the delegable leg that used to mask it.
+        rc, out = _verdict(delegated_plus_lost, extra=("failure",))
+        assert rc == 1, (
+            "an un-rowed `failure` need must red the required check even while ANOTHER "
+            f"leg is delegated — otherwise the last-resort sweep is blinded in its own "
+            f"case; got {out!r}")
+        assert "no leg row named it" in out, out
 
 
 def test_required_gate_covers_the_long_legs():
@@ -8535,7 +8786,24 @@ def test_write_path_measurement_source_edit_selects_eval():
     Watched RED before the entry existed (`surfaces == ['core']`, neither pin
     in `test_files`), GREEN after — mutation-real, not a tautology: deleting
     the SOURCE_PATTERNS entry reproduces the red.
+
+    ⛔ #10194 SUPERSEDES THE `eval`-HALF ASSERTIONS (owner decision A,
+    2026-10-27). The two `eval`-registered pins are under `tests/eval/**`, i.e. in
+    the NON-GATING lane, so they no longer run on any PR — the very thing this
+    test was written to guarantee. The SOURCE_PATTERNS mapping is unchanged and
+    still asserted (a change to `score_qualifiers.py` still selects `core` +
+    `eval`), and the `core` half still gates. What is asserted instead of the
+    eval pins is that they are ABSENT, so a green PR is never read as "the rule
+    was pinned"; the write-path measurements can therefore drift until evals
+    reopen. Reachable from `eval-suite-manual.yml`.
     """
+    from tools.ci_selection import on_demand_files
+    lane = on_demand_files(load_manifest())
+    for pin in ("eval/write_path/test_score_qualifiers.py",
+                "eval/write_path/test_write_path_corpus.py"):
+        assert pin in lane, (
+            f"{pin} must be in the non-gating lane — its subtree is out of the "
+            "merge gate (#10194)")
     cases = (
         # the rule itself — the decisive one: `evaluate_branches`/`verdict_label`
         "tests/eval/write_path/score_qualifiers.py",
@@ -8554,15 +8822,16 @@ def test_write_path_measurement_source_edit_selects_eval():
             f"`eval` surface that owns its pinning tests (and keep `core`, whose "
             f"tests read the same sources); got {r['surfaces']}")
         selected = set(r["test_files"]) | set(r["slow_selected"])
-        assert "eval/write_path/test_score_qualifiers.py" in selected, (
-            f"the test that pins the pre-registered rule must run on {changed}; "
-            f"selected {sorted(selected)}")
-        assert "eval/write_path/test_write_path_corpus.py" in selected, (
-            f"the corpus counts §10's verdict is computed on must be pinned on "
-            f"{changed}; selected {sorted(selected)}")
+        assert not (selected & lane), (
+            f"a non-gating lane file reached a pre-merge leg on {changed}: "
+            f"{sorted(selected & lane)[:5]}")
         assert "test_extractor_v2.py" in selected, (
             "the core-registered importer of tests.eval.write_path.runner must "
             f"still run on {changed}; selected {sorted(selected)}")
+        # The eval pins no longer run on a PR (see the docstring) — assert the
+        # absence so the loss is a pinned fact, not an inference from a count.
+        assert "eval/write_path/test_score_qualifiers.py" not in selected
+        assert "eval/write_path/test_write_path_corpus.py" not in selected
 
 
 def test_ask_sealed_corpus_source_edit_selects_eval():
@@ -8580,7 +8849,20 @@ def test_ask_sealed_corpus_source_edit_selects_eval():
 
     Watched RED before the entry existed (surfaces == ['core'], neither pin in
     test_files), GREEN after.
+
+    ⛔ #10194 SUPERSEDES THE `eval/ask/` PIN ASSERTION (owner decision A,
+    2026-10-27): `eval/ask/test_ask_corpus.py` is in the NON-GATING lane, so it
+    no longer runs on a PR. The `tests/eval/ask/` SOURCE_PATTERNS mapping is
+    unchanged and still asserted; the exit-bar pin
+    (`test_measure_ask_distilled.py`, registered on `eval` at the top of
+    `tests/`, NOT under the lane) still gates, and is asserted to. The sealed
+    corpus's own contract is now pinned only by the manual eval lane.
     """
+    from tools.ci_selection import on_demand_files
+    lane = on_demand_files(load_manifest())
+    assert "eval/ask/test_ask_corpus.py" in lane, (
+        "the sealed corpus's contract test must be in the non-gating lane "
+        "(#10194) — if it left the lane it is gating again")
     cases = (
         # the hash scope / manifest gate / sealed loaders
         "tests/eval/ask/corpus.py",
@@ -8597,12 +8879,15 @@ def test_ask_sealed_corpus_source_edit_selects_eval():
             "eval surface that owns its pinning tests; got "
             + str(r["surfaces"]))
         selected = set(r["test_files"]) | set(r["slow_selected"])
-        assert "eval/ask/test_ask_corpus.py" in selected, (
-            "the corpus contract tests must run on " + changed + "; selected "
-            + str(sorted(selected)))
+        assert not (selected & lane), (
+            f"a non-gating lane file reached a pre-merge leg on {changed}: "
+            f"{sorted(selected & lane)[:5]}")
         assert "test_measure_ask_distilled.py" in selected, (
             "the exit-bar tests must run on " + changed + "; selected "
             + str(sorted(selected)))
+        assert "eval/ask/test_ask_corpus.py" not in selected, (
+            "the sealed-corpus contract test is in the non-gating lane "
+            "(#10194) — a green PR must not be read as \"the corpus was pinned\"")
 
 
 def test_tortoise_api_change_selects_api_and_core():
@@ -10609,13 +10894,43 @@ def test_the_on_demand_lane_is_not_silently_empty():
 
 
 def test_a_lane_file_still_on_a_gated_leg_is_reported():
-    # The silent-and-expensive direction: a file in the lane AND in slow_files
-    # is still on the merge path, so the lane saves nothing while reading as if
-    # it did. leg_coverage_issues is the only thing that can see this.
+    """The silent-and-expensive direction: a lane file that is STILL on a gating
+    leg, so the lane saves nothing while reading as if it did.
+
+    #10194 changed what can go wrong here, and the check follows: the lane now
+    legitimately OVERLAPS `slow_files` (five eval files keep their `durations`
+    weight and their classification; the LEG drops them), exactly as slow
+    carve-out files do. So a config-set overlap is no longer a defect — the
+    defect is a lane file appearing in the pool a gating leg is built from,
+    which `slow_gating_files()` is the single definition of.
+
+    The mutation this pins is therefore the DEFINITION regressing, not the
+    config: patch `slow_gating_files` back to `slow_files - carve_out` (drop the
+    lane subtraction — the exact edit a later reader makes when the lane
+    subtraction looks redundant) and the report must name the file. Without this
+    test the check would be vacuous, because with the shipped definition the
+    intersection is empty BY CONSTRUCTION.
+    """
     m = load_manifest()
     still_slow = dict(m, slow_files=[*list(m["slow_files"]), THE_EXPENSIVE_EVAL])
-    hits = [i for i in leg_coverage_issues(still_slow) if "on-demand/slow overlap" in i]
-    assert hits, "a lane file still in slow_files must be reported"
+    # With the shipped definition the lane is subtracted, so no issue is raised.
+    assert not [i for i in leg_coverage_issues(still_slow) if "leaked" in i], (
+        "a lane file in `slow_files` is now legitimate (the LEG subtracts it) — "
+        "reporting it would red a correct manifest and invite deleting the "
+        "lane entry")
+
+    import tools.ci_selection as cs
+    original = cs.slow_gating_files
+    try:
+        cs.slow_gating_files = lambda mf: (  # type: ignore[assignment]
+            set(mf.get("slow_files") or []) - set(mf.get("carve_out") or []))
+        hits = [i for i in leg_coverage_issues(still_slow) if "leaked" in i]
+    finally:
+        cs.slow_gating_files = original  # type: ignore[assignment]
+    assert hits, (
+        "with the lane subtraction REMOVED from slow_gating_files() a lane file "
+        "is back on a gating slow leg, and this check must say so — if it "
+        "passes, the guard cannot fire for the regression it names")
     assert THE_EXPENSIVE_EVAL in hits[0]
 
 

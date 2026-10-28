@@ -2432,6 +2432,11 @@ class TestCommitPointsGate:
             **TEST_TEAM, "max_points": limit}
 
     @staticmethod
+    def _set_limits(**overrides) -> None:
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, **overrides}
+
+    @staticmethod
     def _seed_points(n: int) -> None:
         for i in range(n):
             _team_sdk()._get_proj().g.query(
@@ -2463,6 +2468,105 @@ class TestCommitPointsGate:
                       params={"sid": session_id}).result_set[0][0]
         return int(sess), int(ev), int(src)
 
+    def test_session_cap_is_not_the_org_limit_gate(self, client):
+        """#4051: the SESSION cap must not be consulted as a stand-in for the
+        org limit — a `max_sessions` an org could never satisfy must not refuse.
+
+        This is the removal's pin. Before it, the lane called
+        `_check_org_limit(org, "sessions")` ahead of the points gate: with
+        `max_sessions: 0` (a value that WOULD refuse) and existing Sessions, the
+        commit 402'd on a limit that #4010 made unenforceable — a guard reading
+        a number that cannot bind. Mutation REDs this: re-add that call.
+        """
+        self._set_limits(max_points=10000, max_sessions=0)
+        for i in range(3):
+            _team_sdk()._get_proj().g.query(
+                "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+                params={"sid": f"sProxyCap{i}"},
+            )
+        r = _commit(client, _raw_payload(0, session_id="sProxyCap", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 200, (
+            "a session cap refused a commit — the removed proxy is back: "
+            f"{r.text}")
+        assert self._chain_counts("sProxyCap") == (1, 1, 1)
+
+    def test_unreadable_max_points_refuses_and_mints_nothing(self, client):
+        """#4051: the org limit is read from its OWN source, and a value that
+        cannot be READ is refused — a miss is never a pass.
+
+        Scope, stated precisely: this drives the GATE's input through a
+        dependency-overridden limits dict. That override is a TEST SEAM — it
+        exercises the gate's refusal contract independently of what any one
+        production lane happens to put in the dict, which is the property that
+        keeps the contract from depending on a lane's resolver.
+        WHICH lanes arrive raw and which die earlier is stated ONCE, in
+        `quota.enforce_org_limit`'s SCOPE note — not restated here (copies
+        of that inventory drifted apart inside this change; a copy claiming the
+        `/v1/index/docs` documents gate arrives raw survived three review rounds,
+        and it is false: that lane is handled by the DERIVED branch, and
+        `resolve_org_limits` coerces `int(mp)` before any gate). It pins the
+        gate's refusal contract — name the field, write nothing — and NOT an
+        end-to-end corrupt-column path on this lane: the commit lane's own
+        dependency (`get_current_org_gated`) coerces `max_points` with `int(mp)`
+        first, so a corrupt STORED value here fails earlier, in auth, as an
+        unnamed 500. That resolver gap is tracked as #10136.
+
+        Before the gate validated its input the same dict escaped as a bare
+        `TypeError` — refused by accident, naming nothing, and outside the
+        `QuotaCheckError` contract every caller handles. Mutation REDs this:
+        delete the `int(limit)` validation in `quota.enforce_org_limit`.
+        """
+        self._set_limits(max_points="unreadable")
+        r = _commit(client, _raw_payload(0, session_id="sUnreadable", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 500, (
+            f"an unreadable org limit was not refused: {r.status_code} {r.text}")
+        detail = str(r.json()["detail"])
+        assert "max_points" in detail and "unreadable" in detail, (
+            f"the refusal must NAME the unreadable surface, got: {detail}")
+        assert self._chain_counts("sUnreadable") == (0, 0, 0)
+
+    def test_missing_max_points_refuses_and_mints_nothing(self, client):
+        """#4051: the presence contract RIDES on `max_points` now, so a limits
+        dict that OMITS the key must still refuse — and name it.
+
+        Removing `_check_org_limit(org, "sessions")` removed this lane's OTHER
+        presence check: it 500'd a limits dict with no `max_sessions` key
+        (#310 GAP-B). The removal is only honest while the surviving check is
+        pinned HERE — otherwise a later edit that made the points gate skip a
+        MISSING `max_points` ("a miss is never a pass") would leave this lane
+        with no fail-closed org gate at all, and every other test on the lane
+        would stay green (they all supply the key). Mutation REDs this: make
+        the missing-key branch in `quota.enforce_org_limit` `return` instead of
+        raise — the commit then 200s and mints the chain.
+
+        ⚠️ IT DOES NOT DISCRIMINATE THIS CHANGE, and says so rather than letting
+        a green run imply it: for a limits dict with no `max_points` at all, the
+        PRE-change tree also 500s naming `max_points` (the old
+        `_check_org_limit(org, "sessions")` ran first and `enforce_org_limit`'s
+        missing-key raise fires on whichever limit is asked for). Measured, not
+        assumed: revert both source files to `origin/main` and this test still
+        PASSES while
+        `test_session_cap_is_not_the_org_limit_gate` and
+        `test_unreadable_max_points_refuses_and_mints_nothing` both RED. It is a
+        guard-rail against a FUTURE edit, not evidence for this one.
+        """
+        limits = dict(TEST_TEAM)
+        del limits["max_points"]
+        app.dependency_overrides[get_current_org] = lambda: limits
+        r = _commit(client, _raw_payload(0, session_id="sMissingMaxPoints",
+                                         points=[], entities=[],
+                                         provenance_refs=[]))
+        assert r.status_code == 500, (
+            "a limits dict with no max_points key passed the gate: "
+            f"{r.status_code} {r.text}")
+        detail = str(r.json()["detail"])
+        assert "max_points" in detail, (
+            f"the refusal must NAME the missing field, got: {detail}")
+        assert self._chain_counts("sMissingMaxPoints") == (0, 0, 0), (
+            "the refused commit minted nodes")
+
     def test_at_max_points_refused_and_mints_nothing(self, client):
         """#4051: with the org AT max_points, a `points: []` commit — the
         cheapest possible loop iteration — 402s and mints no
@@ -2482,8 +2586,8 @@ class TestCommitPointsGate:
         assert self._chain_counts("sGateAt") == (0, 0, 0), (
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
             "a :CommitRecord with status='partial' IS merged before the gate "
-            "(`store.acquire(..., status='partial')`, hosted_api.py:13006, which "
-            "runs ahead of the gate at :13061); replay-safe, and invisible to "
+            "(`store.acquire(..., status='partial')`, hosted_api.py:17865, which "
+            "runs ahead of the gate at :17968); replay-safe, and invisible to "
             "_chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 
@@ -2504,15 +2608,15 @@ class TestCommitPointsGate:
         (QuotaCheckError) — never a silent pass", and that is the property the
         new gate site must inherit.
 
-        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM THE SESSIONS SITE. The lane
-        calls `_check_org_limit(org, "sessions")` (:13023) BEFORE the #4051
-        points gate (:13061), and BOTH call the same `enforce_org_limit` — so a
-        patch that fails EVERY resource makes the SESSIONS gate raise the 500
-        first and the request never reaches the new site. That was the first cut
-        of this test, and it pinned nothing: with only the points gate made to
-        swallow its 500 it stayed GREEN (verified by mutation). The patch below
-        raises for `resource == "points"` only, so the sessions gate passes and
-        the 500 can come from the new site alone.
+        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM ANY OTHER `_check_org_limit`
+        SITE in the handler. The patch below raises for `resource == "points"`
+        only, so every other resource-gate call passes and the 500 can come from
+        the points site alone. (When this test was written the lane still called
+        `_check_org_limit(org, "sessions")` first — a patch that failed EVERY
+        resource made the sessions gate raise the 500 and the request never
+        reached the points site, so that first cut pinned nothing and stayed
+        GREEN under mutation. #4051 has since removed the sessions call; the
+        resource filter is what keeps this test measuring the site it names.)
         """
         import tortoise.quota as quota_mod
         from tortoise.quota import QuotaCheckError
@@ -2524,7 +2628,7 @@ class TestCommitPointsGate:
         # re-raises server exceptions) — proving nothing.
         def _boom(org, resource, *, slot_credit=0, **kwargs):
             if resource != "points":
-                return  # the sessions gate must PASS — see the docstring
+                return  # every other resource-gate site must PASS — see the docstring
             raise QuotaCheckError("count unavailable")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _boom)

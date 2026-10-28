@@ -42,7 +42,13 @@ FALKORDB_AVAILABLE = False
 try:
     _probe_uri = os.environ.get("TORTOISE_DB_URI") or _live_utils.legacy_uri(
         "tortoise_test_5140_relabel")
-    _probe = FalkorProjection.from_uri(_probe_uri)
+    # `graph_name=` is passed explicitly (#10164, the new-test-file registration
+    # rule): the probe only constructs and closes, so it can never DETACH, and
+    # naming its graph keeps the census (`test_derived_names`
+    # `test_from_uri_sites_resolve_test_prefixed`) honest without a declaration
+    # that would have to be re-cut when this probe changes shape.
+    _probe = FalkorProjection.from_uri(
+        _probe_uri, graph_name="tortoise_test_5140_relabel_probe")
     _probe.close()
     FALKORDB_AVAILABLE = True
 except Exception:
@@ -75,13 +81,27 @@ def _live_uri(test_graph: str) -> str:
 
 
 @pytest.fixture()
-def graph():
+def graph(monkeypatch):
     """A private test graph + the SDK whose migration a caller would run."""
     if not FALKORDB_AVAILABLE:
         pytest.skip("live FalkorDB not reachable")
     name = f"test_5140_relabel_{os.urandom(4).hex()}"
     uri = _live_uri(name)
-    proj = FalkorProjection.from_uri(uri)
+    # ⛔ TWO HANDLES, ONE DATABASE (#10164). `proj` seeds the node and reads it
+    # back; `sdk` is the object `relabel_legacy_documents` runs the migration
+    # through, and it does NOT read `_live_uri()` — it resolves its target from
+    # `TORTOISE_DB_URI` (`tortoise/sdk.py:7481`) and falls back to the EMBEDDED
+    # path when that is unset (`:7502` → `resolve_db_path()`). On a URI-less
+    # lane — every tier-2 PR leg — those were two DIFFERENT databases, so the
+    # seed landed in the provisioned service, the migration ran against an
+    # empty embedded graph, and 19 cases here reported "the relabel did
+    # nothing" on a migration that is green.
+    #
+    # The fix is the shape #10164 names as acceptable — make the SDK FOLLOW the
+    # URI rather than inventing a parallel one (same as `tests/test_ingest.py`).
+    # This keeps the coverage on BOTH lanes; a skip would not.
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    proj = FalkorProjection.from_uri(uri, graph_name=name)
     proj.g.query("MATCH (n) DETACH DELETE n")
     sdk = TortoiseSDK(graph_name=name)
     try:

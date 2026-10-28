@@ -1,0 +1,171 @@
+# eval-suite (manual, non-gating) — ⚠️ THIS WORKFLOW IS MANUAL AND NOT A GATE.
+#
+# It runs `tests/eval/**` + `tests/longmem_eval/**` (42 files / 1 097 test
+# functions at f8970b53) — the subtree #10194 took OUT of the merge-gating
+# shards by owner decision A (2026-10-27). **No branch protection rule and no
+# `.mergify.yml` condition names it, and it cannot become one by accident: it
+# has no `push`, no `pull_request` and no `schedule` trigger, so it can only run
+# when a human dispatches it.**
+#
+# WHY IT EXISTS AT ALL
+# Removing a test from the gate must never be the same edit as removing it from
+# the suite: a calibration instrument that is never run is documentation. The
+# files still RUN — here — and a file under either subtree is reachable from
+# THIS workflow's resolver by construction, which
+# `tests/test_10194_eval_suite_non_gating.py` asserts both ways (nothing in the
+# gating set, everything reachable here).
+#
+# WHY THE FILES ARE NOT LISTED HERE
+# The list lives in `config/ci-surfaces.yml` `on_demand:` as the two subtree
+# entries `eval/**` + `longmem_eval/**`, expanded against disk by
+# `tools/ci_selection.py::on_demand_files()`. A second copy of 42 paths is a
+# second place to forget — and the failure mode of forgetting is silent in the
+# worst direction (a NEW eval test file would run nowhere at all while the gate
+# reported green). `--non-gating-subtree-files` is that one accessor's output —
+# emitted as pytest-pathable `tests/…` entries, because the run step below hands
+# them straight to pytest from the repo root. (Verified live: a tests-RELATIVE
+# list — `eval/ask/test_ask_corpus.py` — does not exist at the repo root, pytest
+# exits 4 on path validation, and the lane would run ZERO files on every
+# dispatch while resolving a perfectly good list. The accessor stays
+# tests-relative; the VERB does the prefixing, matching what
+# `tools/run_affected.sh --print` emits.)
+#
+# WHY THE DOCKER SHAPE (and not the embedded one the on-demand lane uses)
+# These are the SAME files, so they get the SAME environment they had inside the
+# gating shards: the passworded FalkorDB service on an ephemeral host port, the
+# full-run URI shape (TORTOISE_DB_URI + TORTOISE_TEST_EXPECT_URI), the pinned
+# dense embedder, and the team-stray sweep. Running them embedded instead would
+# be a different environment reporting under the same names — a red here would
+# say something about the harness, not about the product. `evals-on-demand.yml`
+# keeps the embedded shape for ITS lane (`eval/retrieval/test_integration.py`,
+# the perf file); it does not run these subtrees.
+#
+# The `gating` words matter: this workflow is not in `python-ci-gate`'s `needs`,
+# it is skipped-not-failed on every PR (it never triggers), and a red here
+# blocks nothing.
+
+name: eval-suite (manual, non-gating)
+
+on:
+  # workflow_dispatch ONLY. No `push`, no `pull_request`, no `schedule`: the
+  # owner has evals paused until the eval-affecting issues land, and a schedule
+  # would re-enter them into a daily/periodic lane on a shared runner without a
+  # decision. Scheduled execution is a decision for whoever reopens evals; adding
+  # one here would be this lane deciding it.
+  workflow_dispatch:
+    inputs:
+      subset:
+        description: >-
+          Optional extra pytest args (e.g. `-k leakage`, `tests/eval/ask`).
+          Leave blank to run the whole subtree.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same rule as the on-demand lane: a long, expensive, manual job on a shared
+  # repo — never let two stack up.
+  group: eval-suite-manual-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  eval-suite:
+    runs-on: ubuntu-latest
+    # Bounded on purpose. These files sat inside shards wrapped in
+    # `timeout -s INT -k 10 19m|30m|46m`; 180 m is a generous ceiling for the
+    # WHOLE subtree in one process, not a promise that it fits (the gating
+    # shards are gone precisely because per-file cost here is unruly).
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # pyproject requires-python >= 3.12
+
+      - uses: ./.github/actions/install-cpu-torch
+
+      - name: Install package + test extras
+        run: pip install -e '.[test,embeddings]'
+
+      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          # The SHARED v2 key (python-ci's), so this lane warms the same cache
+          # the gate uses instead of downloading a second copy per run.
+          key: hf-embedding-cache-v2-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v2-
+
+      - name: Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval leg
+        # These files were fast-pool members, i.e. they ran in a job that owned
+        # "the embedder is present". Unprovisioned, the retrieval-eval arms fail
+        # closed on a keyword-only read path and the red would read like a code
+        # regression (#2985). Same provisioner, attempts and backoff as the gate.
+        env:
+          TORTOISE_EMBEDDER_WATCHDOG_S: "330"
+        timeout-minutes: 6
+        run: |
+          exec python3 tools/embedder_provision.py --attempts 3 --backoff 5
+
+      - name: Provision FalkorDB services on ephemeral host ports (#6673)
+        # `uri_graph` stays EMPTY: the URI is computed below with the test-prefixed
+        # graph path, exactly as the fast job does on a full run.
+        uses: ./.github/actions/falkordb-provision
+
+      - name: Compute the docker URI (the full-run shape the gating shards used)
+        run: |
+          echo "TORTOISE_DB_URI=docker://:falkordb@localhost:${TORTOISE_TEST_DOCKER_PORT:?the #6673 provision step did not export it}/tortoise_test_matrix" >> "$GITHUB_ENV"
+          echo "TORTOISE_TEST_EXPECT_URI=1" >> "$GITHUB_ENV"
+          # A dedicated fresh-per-job container: the journal-blind team_* stray
+          # sweep is safe here (same opt-in the gate uses on its docker lane).
+          echo "SWEEP_TEAM_STRAYS=1" >> "$GITHUB_ENV"
+
+      - name: Resolve the non-gating eval subtrees
+        id: lane
+        env:
+          # Passed via env, never interpolated into the script body: `run:` with
+          # `${{ }}` inside it is the classic workflow-script injection vector.
+          INPUT_SUBSET: ${{ inputs.subset }}
+        run: |
+          python3 tools/ci_selection.py --non-gating-subtree-files > /tmp/lane.txt
+          if [ ! -s /tmp/lane.txt ]; then
+            echo "::error::resolved an EMPTY file list — the non-gating subtrees"
+            echo "::error::in config/ci-surfaces.yml matched nothing. Refusing to"
+            echo "::error::report a green run that executed no eval file at all."
+            exit 1
+          fi
+          echo "resolved $(wc -l < /tmp/lane.txt) eval test file(s):"
+          cat /tmp/lane.txt
+          # Fail closed on a path that does not exist: pytest would exit 4 on
+          # path validation and run nothing, which reads as a harness failure
+          # rather than "the resolver emitted a shape the run step cannot use".
+          # Belt to the guard test's braces (that test stats the same paths).
+          missing=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || { echo "::error::resolved '$f' does not exist from the repo root"; missing=1; }
+          done < /tmp/lane.txt
+          [ "$missing" -eq 0 ] || exit 1
+          if [ -n "$INPUT_SUBSET" ]; then
+            echo "extra pytest args: $INPUT_SUBSET"
+          fi
+          printf '%s' "$INPUT_SUBSET" > /tmp/subset.txt
+
+      - name: Run the eval suite (NOT a gate)
+        run: |
+          echo "⚠️  manual, non-gating run — this result blocks no merge (#10194)"
+          # Paths are passed explicitly so a file that no longer exists FAILS
+          # (pytest exits 4 on a nonexistent path) instead of the lane being
+          # silently reduced to the files that do. The list is `tests/…`-
+          # prefixed by the resolver above, which is the form pytest needs from
+          # this cwd.
+          python -m pytest $(tr '\n' ' ' < /tmp/lane.txt) $(cat /tmp/subset.txt) \
+            -p no:cacheprovider --durations=25
+
+      - name: Teardown FalkorDB services
+        if: always()
+        uses: ./.github/actions/falkordb-teardown
