@@ -36,13 +36,13 @@ issue's tasks 2, 4 and 5.
 
 Today the consent page is the **only** auth flow that works, and it works by an inline supabase-js client
 that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-token`, written at
-`oauth.py:2434`, domain literal at `oauth.py:2272`). Measured state:
+`oauth.py:2430`, domain literal at `oauth.py:2268`). Measured state:
 
 | Fact | Evidence |
 |---|---|
-| The page mints session material client-side | `supabaseClient.auth.signInWithPassword` / `signInWithOAuth`, `oauth.py:2654-2834` |
-| The page reads the session back out of the cookie | `storage: cookieStorage, storageKey: COOKIE_NAME`, `oauth.py:2453-2454` |
-| The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2852-2859`; `/oauth/consent/preview` `oauth.py:2530-2536` |
+| The page mints session material client-side | `supabaseClient.auth.signInWithPassword` / `signInWithOAuth`, `oauth.py:2650-2830` |
+| The page reads the session back out of the cookie | `storage: cookieStorage, storageKey: COOKIE_NAME`, `oauth.py:2449-2450` |
+| The page POSTs the raw `access_token` as a bearer | `/oauth/consent` `oauth.py:2848-2855`; `/oauth/consent/preview` `oauth.py:2526-2532` |
 | The AS accepts **only** that bearer — it has no other identity source | `verify_session_jwt(request)` (`session_auth.py:588-643`) reads `request.headers.get("Authorization", "")` (`:600`) and nothing else. ⚠️ Measured BEFORE §9 step 2: `POST /oauth/consent` also accepts a bound consent token now — see §10 *Redemption*. `/oauth/consent/preview` remains bearer-only |
 | `/oauth/authorize` carries **no** identity | `GET /oauth/authorize` (`@app.get("/oauth/authorize")` in `hosted_api.py`) — the authorize handler reads query params only |
 
@@ -158,7 +158,7 @@ the split is:
 | Mitigation | What it stops |
 |---|---|
 | **(ii) the binding above** | the attacker cannot *reuse* an assertion across flows: an assertion minted in flow X is inert in flow Y, so a stolen or replayed token cannot be steered into the attacker's `code_challenge`/`state`. This is the only half that bounds replay **and** cross-flow substitution. |
-| **(i) attested client identity — OPEN** | the remaining half: the *human* decision. Fixation survives (ii) whenever the victim is induced to visit the attacker's authorize URL *fresh*, so the victim must be able to tell **who** they are approving. Today the page renders `client_name` **from the client's own metadata document**: DCR lets an attacker register `client_name: "Claude"` (`register_client`, `oauth.py:1004`) and the page prints it verbatim (`oauth.py:2598-2599`) — *"Claude wants to access your Tortoise MCP surface."* That is the phishing surface. Requires an allowlist/attestation of client identity before the page asserts any name. **Filed as [#8218](https://github.com/daniel-ospina/tortoise/issues/8218)** — `SCOPE.md` §9 class 4(i) is explicitly assigned to #3524 but is absent from the issue body, so a separate ticket is what keeps it tracked. |
+| **(i) attested client identity — OPEN** | the remaining half: the *human* decision. Fixation survives (ii) whenever the victim is induced to visit the attacker's authorize URL *fresh*, so the victim must be able to tell **who** they are approving. Today the page renders `client_name` **from the client's own metadata document**: DCR lets an attacker register `client_name: "Claude"` (`register_client`, `oauth.py:1014`) and the page prints it verbatim (`oauth.py:2594-2595`) — *"Claude wants to access your Tortoise MCP surface."* That is the phishing surface. Requires an allowlist/attestation of client identity before the page asserts any name. **Filed as [#8218](https://github.com/daniel-ospina/tortoise/issues/8218)** — `SCOPE.md` §9 class 4(i) is explicitly assigned to #3524 but is absent from the issue body, so a separate ticket is what keeps it tracked. |
 
 **Not mitigated by design, recorded plainly:** an attacker who can run script on the AS origin can drive the
 mint route. That is not new authority — that origin already serves the page that approves consents — but the
@@ -173,10 +173,10 @@ consolidation dropped their citation block. Confirmed against today's code:
 
 | # | Property (`SCOPE.md` §4 W3) | Authoritative anchor (CONFIRMED) | Server-side equivalent that exists today | Gap |
 |---|---|---|---|---|
-| 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2547` (`let previewInFlight`), `oauth.py:2649` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2671` | `token.ts` — the module-level `inFlightRefreshes` map keyed by handle: concurrent callers for one handle share ONE provider refresh and all await it (same-isolate single-flight); the CAS `… AND refresh_token = ?5` is the cross-isolate half, and its loser **re-reads the winner's token** instead of clobbering it | none |
-| 2 | **refresh-once** — a refresh must not be issued twice concurrently | `oauth.py:2549` (`staleRefreshes`), `:2652`, `:2657-2665` (≤1 per stale cycle) | `token.ts::invalidateCachedToken` (`cooldownMs = 30_000`) bounds invalidations to one per window; the 60 s `REFRESH_SKEW_MS` cache keeps the hot path off the provider; and `inFlightRefreshes` dedupes concurrent refreshes (property 1) | none — **load-bearing assumption:** two racing ISOLATES are safe only because GoTrue tolerates ~10 s of refresh-token reuse. The in-flight map is per isolate and the CAS makes the write safe, but neither can un-spend a token another isolate has already presented. |
-| 3 | **never-sign-out** — a transient failure must never clear the session (the #3485 class) | `oauth.py:2556` (*"NEVER call the auth logout API here"*; function at `:2555`), `:2669` (`showExpiredSignin`, never a refresh-token revoke) | `token.ts` — `getAccessTokenForSession` (`:134`) and `refreshAndPersist` (`:191`) keep `no_session` (401) and `unavailable` (503) distinct: reason returns at `:152`, `:163`, `:200`, `:206`, `:208`; `isRefreshTokenDead(refreshed.status, refreshed.error)` (`:205`) — a `403`/`404`/`400` from the provider is **infrastructure**, not a dead session | none |
-| 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:3057-3066` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2660-2665`) | **DELIVERED, routed** — `decideConsentAdvance` (`website/apps/dashboard/functions/_shared/auth/consent-flow.ts`) | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. **DELIVERED (#3524 §9 step 3): the route that calls it is `functions/api/consent/start.ts`, and the mint it advances to is `functions/api/consent/token.ts`. Behaviourally tested end-to-end by `tests/test_oauth_consent_bff_routes.py`, including a token minted in TypeScript being accepted by the Python verifier.** |
+| 1 | **single-flight** — one in-flight auth attempt per flow, the others await it | `oauth.py:2557` (`let previewInFlight`), `oauth.py:2659` (`if (previewInFlight) return previewInFlight;`), `oauth.py:2681` | `token.ts` — the module-level `inFlightRefreshes` map keyed by handle: concurrent callers for one handle share ONE provider refresh and all await it (same-isolate single-flight); the CAS `… AND refresh_token = ?5` is the cross-isolate half, and its loser **re-reads the winner's token** instead of clobbering it | none |
+| 2 | **refresh-once** — a refresh must not be issued twice concurrently | `oauth.py:2559` (`staleRefreshes`), `:2662`, `:2667-2675` (≤1 per stale cycle) | `token.ts::invalidateCachedToken` (`cooldownMs = 30_000`) bounds invalidations to one per window; the 60 s `REFRESH_SKEW_MS` cache keeps the hot path off the provider; and `inFlightRefreshes` dedupes concurrent refreshes (property 1) | none — **load-bearing assumption:** two racing ISOLATES are safe only because GoTrue tolerates ~10 s of refresh-token reuse. The in-flight map is per isolate and the CAS makes the write safe, but neither can un-spend a token another isolate has already presented. |
+| 3 | **never-sign-out** — a transient failure must never clear the session (the #3485 class) | `oauth.py:2566` (*"NEVER call the auth logout API here"*; function at `:2565`), `:2679` (`showExpiredSignin`, never a refresh-token revoke) | `token.ts` — `getAccessTokenForSession` (`:134`) and `refreshAndPersist` (`:191`) keep `no_session` (401) and `unavailable` (503) distinct: reason returns at `:152`, `:163`, `:200`, `:206`, `:208`; `isRefreshTokenDead(refreshed.status, refreshed.error)` (`:205`) — a `403`/`404`/`400` from the provider is **infrastructure**, not a dead session | none |
+| 4 | **auto-advance** — progress the flow without requiring a manual click | `oauth.py:3067-3076` (`onAuthStateChange` `INITIAL_SESSION`/`SIGNED_IN` → `runConsentFlow`), with the in-flight guard held across the stale cycle (`:2670-2675`) | **DELIVERED, routed** — `decideConsentAdvance` (`website/apps/dashboard/functions/_shared/auth/consent-flow.ts`) | the bridge replaces the event with a deterministic state: one credentialed mint call decides *signed-in* vs *go to `/auth?next=…`*, and the return to the consent URL **is** the advance. There is no session-change event to wait on, so "the user must not have to reload" becomes a property of the redirect chain, not of a listener. **DELIVERED (#3524 §9 step 3): the route that calls it is `functions/api/consent/start.ts`, and the mint it advances to is `functions/api/consent/token.ts`. Behaviourally tested end-to-end by `tests/test_oauth_consent_bff_routes.py`, including a token minted in TypeScript being accepted by the Python verifier.** |
 
 **Consequence for the implementation.** Properties 1–3 are already implemented server-side by the BFF
 (#3522/#4054) — the bridge's job for them is to *route the consent page onto that path* and delete the
@@ -200,7 +200,7 @@ The mint requires the browser to reach the session origin even though the consen
 
 ## 5. Task 2 — RFC 8414 `authorization_endpoint` stability: VERIFIED
 
-`authorization_server_metadata(base)` (`oauth.py:2114-2133`) emits `"authorization_endpoint": base +
+`authorization_server_metadata(base)` (`oauth.py:2110-2129`) emits `"authorization_endpoint": base +
 "/oauth/authorize"`, where `base = _oauth_base(request) = str(request.base_url).rstrip("/")`
 (`_oauth_base`, a function in `hosted_api.py`), served at both
 `@app.get("/.well-known/oauth-authorization-server")` and its `/mcp` twin (both in `hosted_api.py`).
@@ -220,7 +220,7 @@ The mint requires the browser to reach the session origin even though the consen
 
 ## 6. Task 5 — sign-in fallback origin: **NOT allowlisted, and the record is what is wrong**
 
-The consent page's provider sign-in passes `redirectTo: authorizeReturnTo()` (`oauth.py:2820`), which is
+The consent page's provider sign-in passes `redirectTo: authorizeReturnTo()` (`oauth.py:2816`), which is
 `window.location.origin + "/oauth/authorize" + <sanitised search>` — i.e. **`https://api.premiselabs.co/
 oauth/authorize?…`**. GoTrue refuses a `redirect_to` it does not recognise, and Supabase matches
 allowlist entries by string (wildcards only where placed).
@@ -251,19 +251,19 @@ required. That is a second, independent reason the bridge is the right shape.
 
 ## 7. Deletion set + ordering guard
 
-`SCOPE.md` §7 lists `oauth.py:2299-2528` (the inline adapter family) as one of **6 files across 4
+`SCOPE.md` §7 lists `oauth.py:2295-2524` (the inline adapter family) as one of **6 files across 4
 families** — and carries the guard: **do NOT delete it before #3524 ships.** The replacement *is* this
 bridge plus the page rewrite. Deleted by this issue when the bridge lands (not by this doc):
 
 | Item | Where |
 |---|---|
-| the inline `cookieStorage` adapter + the aux-store probe chain | `oauth.py:2299-2528` |
-| `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2256-2279` (`:2256`, `:2271`, `:2272`, `:2273`, `:2279`), `:2434`, `:2444` |
-| the supabase-js CDN `<script>` + `createClient` + `flowType: "pkce"` + `detectSessionInUrl` | `oauth.py:2230-2232`, `:2451-2461` |
-| `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2730-3080` |
-| `onAuthStateChange` (property 4's anchor) | `oauth.py:3071` |
+| the inline `cookieStorage` adapter + the aux-store probe chain | `oauth.py:2295-2524` |
+| `COOKIE_NAME`/`COOKIE_DOMAIN`/`COOKIE_PATH`/`SIZE_GUARD`/`SIZE_CAP` and both `document.cookie` writers | `oauth.py:2252-2275` (`:2252`, `:2267`, `:2268`, `:2269`, `:2275`), `:2430`, `:2440` |
+| the supabase-js CDN `<script>` + `createClient` + `flowType: "pkce"` + `detectSessionInUrl` | `oauth.py:2226-2228`, `:2447-2457` |
+| `pkceIncapable`/`CAPABILITY`/`renderCapability`, the provider + email sign-in handlers, `showTerminalFallback`, `sanitiseUrl`, `loadParams`/`LOAD_TRANSIENT` | `oauth.py:2726-3076` |
+| `onAuthStateChange` (property 4's anchor) | `oauth.py:3067` |
 
-**`SCOPE.md` §10 item:** `oauth.py:2272` hardcodes `COOKIE_DOMAIN = ".premiselabs.co"`, and Gate 4 required
+**`SCOPE.md` §10 item:** `oauth.py:2268` hardcodes `COOKIE_DOMAIN = ".premiselabs.co"`, and Gate 4 required
 that scope to be **configuration, not a literal**, so the Python surface and the BFF cannot disagree about
 cookie scope. The bridge deletes the literal outright, which discharges the item in full — parameterising a
 cookie that this issue removes would be churn against a doomed line. **Recorded as a decision, not an
@@ -299,7 +299,7 @@ attempted as one blind pass:
 
 | Remaining step | Why it is its own unit |
 |---|---|
-| 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261027120001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3`s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
+| 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261027120001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3’s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
 | 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
 | 4. The page rewrite (delete §7's rows, keep the org picker + the #5734 refusal copy, add the mint call and the terminal-loop guard) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
@@ -357,7 +357,7 @@ old cookie is the "strictly worse than not starting" state.
 | **Issuer** | `CONSENT_TOKEN_ISSUER` (optional; default `https://app.premiselabs.co`) is the `iss` the AS accepts — the knob a preview deployment sets so it verifies its OWN mint. Read per call, never cached at import. |
 | **TTL / replay** | `exp = iat + 120 s` (leeway ≤30 s) **and** a single-use `jti`; neither substitutes for the `bind` set. |
 | **Redemption** | `POST /oauth/consent` (`@app.post("/oauth/consent")` in `hosted_api.py`) — TWO identity sources as of §9 step 2: the bearer (`verify_session_jwt`, `session_auth.py:588`) or a `consent_token` in the body verified by `tortoise/consent_token.verify_consent_token`. |
-| **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2114`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |
+| **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2110`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |
 | **CORS** | new, exact-origin to the AS origin, on the mint route only. The BFF carries none today; `/oauth/token` must never become reachable through it (`SCOPE.md` §9 class 3). |
 | **Bindings to declare** | `CONSENT_TOKEN_SECRET` (`config/required-bindings.yml`, `tortoise-dashboard`), checked pre-deploy by `tools/check_pages_bindings.py` (the #3616 gate). |
 | **Verified by execution** | `tests/test_oauth_consent_bridge.py` (RFC 8414 stability + the allowlist record). |
