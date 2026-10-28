@@ -10874,6 +10874,57 @@ def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
         )
 
 
+def test_orphan_assert_steps_hand_the_gate_the_counted_argv():
+    """#1005 (epic #1647 E2E-7): the count is HOST-WIDE; the argv is what makes
+    a server attributable to THIS run.
+
+    `--count` alone cannot tell another job's server (or a sibling `pytest -n`
+    worker's) from this run's, and redding that difference failed PASSING runs
+    (9 counted vs left=8, pytest rc 0). The gate can only make the distinction
+    if the workflow hands it the counted servers' argv, so each step must
+    produce that file from `$PIDS` and pass it — and a `ps` failure must be a
+    FAILED probe, never an empty file that silently reads as "all foreign".
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, (
+        f"expected the three 'Assert no redislite orphans' steps, found "
+        f"{len(steps)} — this pin must not pass vacuously"
+    )
+    for s in steps:
+        body = "\n".join(
+            line
+            for line in s["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert ': > "$ARGV"' in body, (
+            f"step {s.get('name')!r} must truncate the argv file before the "
+            f"probe, so a stale file from an earlier attempt cannot attribute "
+            f"this run's count (#1005)"
+        )
+        assert 'ps -ww -o pid=,args= -p "$PIDLIST"' in body, (
+            f"step {s.get('name')!r} must read the counted servers' argv with "
+            f"`ps -ww -o pid=,args= -p` (#1005)"
+        )
+        assert "tr -s '[:space:]' ','" in body, (
+            f"step {s.get('name')!r} must normalise pgrep's newline-separated "
+            f"pids to a comma list: GNU `ps -p` REJECTS a newline list with "
+            f"'process ID list syntax error' (measured on the self-hosted "
+            f"Linux cells) while BSD `ps` tolerates it, so without this the "
+            f"Linux legs write an EMPTY argv file and every server reads as "
+            f"unattributable (#1005)"
+        )
+        assert '[ "$arc" -eq 0 ]' in body and "ps failed" in body, (
+            f"step {s.get('name')!r} must fail closed on a `ps` error: an "
+            f"empty argv would attribute every counted server to another "
+            f"process and hide this run's own residue (#1005)"
+        )
+        assert '--argv "$ARGV"' in body, (
+            f"step {s.get('name')!r} must pass --argv to the gate — the gate "
+            f"warns rather than reds when the attribution is unavailable, so a "
+            f"dropped flag would silently retire the leak check (#1005)"
+        )
+
+
 def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
     """#4740 review 5: each empty-selection block must WRITE the no-pytest
     report to the very path the orphan gate is handed.

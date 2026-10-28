@@ -3568,10 +3568,20 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 # `reaped + exited + left >= before`; before #6984 the identity omitted
 # `exited`, so it read a server that shut itself down as a broken sweep and
 # refused green runs (before=28, reaped=16, left=11, pytest rc 0).
-_HYGIENE_REPORT_FIELDS = ("reaped", "exited", "cleared", "left", "before")
+#
+# #1005 (epic #1647 E2E-7): `own_left` is the post-sweep count of live servers
+# attributable to THIS RUN — those whose argv carries a socket path under one of
+# the run's own session temp roots. `left` is a HOST-WIDE pgrep: on a shared
+# runner it also counts servers started by other concurrent jobs, and under
+# `pytest -n` by other workers, so it is not a population this run owns. The CI
+# gate compares `own_left` against the servers IT can attribute to the same
+# roots; that pair is the same population at two moments, which `COUNT <= left`
+# never was (it produced 9-vs-8 and 22-vs-14 false reds on passing runs).
+_HYGIENE_REPORT_FIELDS = (
+    "reaped", "exited", "cleared", "left", "before", "own_left")
 
 
-def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
+def _hygiene_report(reaped, cleared, left, before, exited, own_left) -> dict:
     """Build the session-end hygiene report the CI orphan gate consumes (#4740).
 
     ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
@@ -3586,6 +3596,10 @@ def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
     sweep. Derived as a complement it would be a tautology; it is measured at
     the dead-pid branch in :func:`reap` precisely so the identity stays
     falsifiable.
+    ``own_left`` (#1005) is the count of live servers attributable to THIS RUN
+    at the same post-sweep seam as ``left`` — see :func:`own_live_server_count`.
+    `None` means the attribution could not be measured (no run roots, or the
+    probe failed), never a plausible 0.
     Keeping the construction out of ``_sweep`` also leaves no local report
     literal there for a dead branch or a subscript store to bypass (the
     round-5 pin's hole).
@@ -3596,6 +3610,7 @@ def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
         "cleared": cleared,
         "left": left,
         "before": before,
+        "own_left": own_left,
     }
     return {f: values[f] for f in _HYGIENE_REPORT_FIELDS}
 
@@ -3662,12 +3677,63 @@ def live_embedded_server_count() -> int | None:
     residue rather than read a timeout/missing-pgrep as "nothing left". This
     is a module-level function, not a closure in `tests/conftest.py`, so it is
     unit-testable by monkeypatching `_pgrep_redis_servers_or_none`.
+
+    ⚠️ This is a HOST-WIDE count (#1005): on a shared runner it also counts the
+    servers of every other concurrent job, and under `pytest -n` those of every
+    other worker. It is a measurement of the PROCESS TABLE, not of this run's
+    residue — use :func:`own_live_server_count` for the attributable number.
     """
     probe = _pgrep_redis_servers_or_none()
     return None if probe is None else len(probe)
 
 
-def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> dict:
+def own_live_server_count(roots, probe=None, cmdline_of=None) -> int | None:
+    """Live embedded servers attributable to THIS RUN, or None if unmeasured.
+
+    #1005 (epic #1647 E2E-7): the CI orphan gate used to compare its own
+    host-wide `pgrep` count against the sweep's host-wide `left`, and red when
+    the counter read HIGHER. That comparison is not a population this run owns:
+    `left` is a snapshot taken inside one pytest process, the counter runs
+    later from the runner shell, and in between any OTHER process on the host —
+    a concurrent CI job on the same self-hosted runner, or a sibling
+    ``pytest -n`` worker — can start servers. Both directions of the real false
+    reds are that shape: 9 counted against left=8, and 22 against left=14, both
+    on runs whose tests passed.
+
+    Attribution is by SOCKET PATH, not ancestry: a redislite server daemonizes,
+    so its parent is gone, but its argv always carries the socket path (or the
+    config file that names it) inside the session temp root it was started
+    from. ``roots`` is therefore the run's own session-root set, and a server is
+    ours iff its argv contains one of those roots as a path prefix. Servers
+    started by another run live under a DIFFERENT root and can never be
+    mistaken for ours — which is exactly the distinction the gate needs before
+    it may call a residue a leak.
+
+    Returns None (never 0) when there is no attribution key, when the probe
+    failed, or when argv cannot be read for every live pid — an unmeasured
+    residue must not read as "nothing left".
+    """
+    prefixes: list[str] = []
+    for root in roots or ():
+        if isinstance(root, str) and root.strip():
+            prefixes.append(root.rstrip("/") + "/")
+    if not prefixes:
+        return None  # no attribution key: unmeasured, NOT zero
+    probe = _pgrep_redis_servers_or_none if probe is None else probe
+    cmdline_of = _cmdline if cmdline_of is None else cmdline_of
+    pids = probe()
+    if pids is None:
+        return None
+    count = 0
+    for pid in pids:
+        args = cmdline_of(pid) or ""
+        if any(prefix in args for prefix in prefixes):
+            count += 1
+    return count
+
+
+def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
+                           own_probe=None) -> dict:
     """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
 
     Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
@@ -3680,11 +3746,19 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     threaded from the same call — the natural exits the sweep observed — and
     is what keeps the gate's identity from reading a self-shutdown as a
     broken sweep.
+
+    ``own_probe`` (#1005) is called ONCE, immediately after the post-sweep
+    `left` reading, and supplies `own_left` — the count of live servers this RUN
+    owns, as opposed to the host-wide `left`. Same seam, same instant, different
+    population: that is what lets the gate compare like with like. Absent
+    (`None`) means the report cannot attribute, which the gate treats as
+    unmeasured rather than as zero.
     """
     before = probe()
     reaped, cleared, exited = sweep_until_cleared(run_one, deadline, clock)
     left = probe()
-    return _hygiene_report(reaped, cleared, left, before, exited)
+    own_left = own_probe() if own_probe is not None else None
+    return _hygiene_report(reaped, cleared, left, before, exited, own_left)
 
 
 def _zero_client_state_read() -> dict:

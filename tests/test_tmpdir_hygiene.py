@@ -395,6 +395,95 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         shutil.rmtree(live, ignore_errors=True)
 
 
+# ── #1005 (epic #1647 E2E-7): the RUN-scoped root registry ─────────────────
+# The CI orphan gate may only call a residue a leak if it can attribute the
+# server to THIS run, and the attribution key is the run's session temp roots.
+# Under `pytest -n` a run owns one root per worker process, and the hygiene
+# report is written by whichever worker exits last — so every process appends
+# its root to a run-keyed registry at install time, before it can spawn a
+# server. These tests pin that contract; without it the last writer would see
+# only its own root and a sibling worker's leak would read as foreign.
+
+
+def test_run_roots_records_the_installed_root_under_the_run_uid():
+    from tests._tmpdir_hygiene import (
+        run_registry_path,
+        run_roots,
+        run_uid,
+    )
+
+    assert run_uid(), "a run id is always defined (never an empty key)"
+    assert run_registry_path().endswith(run_uid())
+    root = session_tmpdir()
+    assert root is not None
+    assert root in run_roots(), (
+        "the installed session root must be readable as one of this run's "
+        "roots — it is the attribution key the orphan gate binds to (#1005)"
+    )
+
+
+def test_run_roots_is_run_scoped_not_a_shared_pile(tmp_path, monkeypatch):
+    """A root recorded by ANOTHER run must never be attributed to this one.
+
+    Two concurrent pytest runs on one host each own their roots; if the
+    registry were global, the gate would attribute a neighbour's server to us
+    and red a green run — the exact defect the registry exists to prevent.
+    """
+    import tests._tmpdir_hygiene as hygiene
+
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
+    mine = str(tmp_path / "tt_mine")
+    theirs = str(tmp_path / "tt_theirs")
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-aaa")
+    hygiene.record_run_root(mine)
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-bbb")
+    hygiene.record_run_root(theirs)
+
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-aaa")
+    as_aaa = hygiene.run_roots()
+    assert mine in as_aaa, "run-aaa's own root must be visible to it"
+    assert theirs not in as_aaa, (
+        "another run's root is NOT ours to attribute — it is the population "
+        "the gate must read as foreign (#1005)"
+    )
+    assert session_tmpdir() in as_aaa, (
+        "the live session root is always included, by design: a failed "
+        "registry write must not make this run unable to attribute its OWN "
+        "servers (that would silently loosen the gate)"
+    )
+
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-bbb")
+    as_bbb = hygiene.run_roots()
+    assert theirs in as_bbb and mine not in as_bbb, (
+        "the registry is keyed per run in BOTH directions — neither run may "
+        "see the other's roots"
+    )
+
+
+def test_record_run_root_is_additive_and_never_raises(tmp_path, monkeypatch):
+    """Every worker's root lands in one file; concurrent appends must not lose
+    a sibling's root (the O_APPEND contract), and a write failure degrades to
+    the gate's unattributable path instead of failing the suite."""
+    import tests._tmpdir_hygiene as hygiene
+
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-ccc")
+    hygiene.record_run_root(str(tmp_path / "tt_gw0"))
+    hygiene.record_run_root(str(tmp_path / "tt_gw1"))
+    roots = hygiene.run_roots()
+    assert str(tmp_path / "tt_gw0") in roots
+    assert str(tmp_path / "tt_gw1") in roots, (
+        "the second worker's append must not clobber the first's — both roots "
+        "are needed to attribute the whole run"
+    )
+
+    # A directory that cannot be created is an OSError, not a suite failure.
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR",
+                        str(tmp_path / "tt_blocker" / "sub"))
+    (tmp_path / "tt_blocker").write_text("not a directory")
+    hygiene.record_run_root(str(tmp_path / "tt_gw2"))  # must not raise
+
+
 def test_host_coordination_is_host_scoped_and_lock_is_sweep_scoped():
     """The two surfaces #3752 must keep distinct.
 

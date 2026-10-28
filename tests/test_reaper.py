@@ -6140,9 +6140,9 @@ def test_hygiene_report_threads_cleared_verbatim():
         _hygiene_report,
     )
 
-    assert _hygiene_report(0, False, 1, 5, 0)["cleared"] is False
-    assert _hygiene_report(1, True, 13, 22, 3)["cleared"] is True
-    report = _hygiene_report(0, False, 1, 5, 0)
+    assert _hygiene_report(0, False, 1, 5, 0, 4)["cleared"] is False
+    assert _hygiene_report(1, True, 13, 22, 3, 9)["cleared"] is True
+    report = _hygiene_report(0, False, 1, 5, 0, 4)
     assert set(report) == set(_HYGIENE_REPORT_FIELDS)
     assert tuple(report) == _HYGIENE_REPORT_FIELDS
 
@@ -6208,7 +6208,7 @@ def test_build_end_sweep_report_reads_probe_before_and_after_the_sweep():
         "the probe must be called exactly twice — before the sweep, then after"
     )
     assert report == {"reaped": 1, "exited": 0, "cleared": True,
-                      "left": 3, "before": 5}
+                      "left": 3, "before": 5, "own_left": None}
     assert tuple(report) == _HYGIENE_REPORT_FIELDS
 
 
@@ -6288,7 +6288,102 @@ def test_build_end_sweep_report_threads_observed_natural_exits():
         clock=lambda: 1000.0)
     assert report["exited"] == 4
     assert report == {"reaped": 0, "exited": 4, "cleared": True,
-                      "left": 6, "before": 6}
+                      "left": 6, "before": 6, "own_left": None}
+
+
+# ── #1005 (epic #1647 E2E-7): the ATTRIBUTED population ──────────────────
+# The CI orphan gate used to compare its own HOST-WIDE pgrep count with the
+# sweep's HOST-WIDE `left` and red when the counter read higher. Those are two
+# populations separated by a process boundary and by time, so on a shared
+# self-hosted runner (a dozen jobs in one process table) and under `pytest -n`
+# (several workers per run) the counter legitimately reads higher: measured
+# 9-vs-8 on a run whose pytest rc was 0, and 22-vs-14 on another. The fix is an
+# attribution key — the run's own session temp roots — so the gate can tell
+# "another process started it" from "this run leaked it". These tests pin the
+# producer half of that contract.
+
+
+def test_own_live_server_count_attributes_by_session_root():
+    """A server counts for this run only when its argv carries our root.
+
+    Attribution is by SOCKET PATH, not ancestry: a redislite server daemonizes,
+    so its parent is gone by the time anyone asks. Its argv always names the
+    socket (or the config file naming it) inside the temp root of the run that
+    started it — which is exactly what a concurrent job's or a sibling worker's
+    server does NOT carry.
+    """
+    from tortoise.embedded_reaper import own_live_server_count
+
+    cmds = {
+        11: ("/x/redislite/bin/redis-server /tmp/tt_ours/a/redis.conf"),
+        12: "/x/redislite/bin/redis-server --unixsocket /tmp/tt_ours/b/redis.socket",
+        13: "/x/redislite/bin/redis-server unixsocket:/tmp/tt_ours_c/redis.socket",
+        21: "/x/redislite/bin/redis-server /tmp/tt_other/a/redis.conf",
+        22: "/x/redislite/bin/redis-server --unixsocket /tmp/tt_other/b/redis.socket",
+    }
+    count = own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: list(cmds), cmdline_of=cmds.get)
+    assert count == 2, (
+        "only the two servers under /tmp/tt_ours may be attributed to this run "
+        "— /tmp/tt_ours_c is a DIFFERENT root (a prefix, not a parent), and "
+        "/tmp/tt_other is another run's"
+    )
+
+
+def test_own_live_server_count_is_unmeasured_without_a_root_or_probe():
+    """No attribution key, or a failed probe, is None — never a plausible 0.
+
+    The gate treats an attributable 0 as "this run left nothing", so a missing
+    key or a timed-out pgrep must not be readable as one: that is the same
+    fail-open the `left: null` shape exists to prevent.
+    """
+    from tortoise.embedded_reaper import own_live_server_count
+
+    assert own_live_server_count([]) is None
+    assert own_live_server_count(["", "   "]) is None
+    assert own_live_server_count(["/tmp/tt_ours"], probe=lambda: None) is None
+    assert own_live_server_count(
+        ["/tmp/tt_ours"], probe=lambda: [1], cmdline_of=lambda pid: "") == 0
+
+
+def test_build_end_sweep_report_threads_the_own_probe():
+    """`own_left` is the OWN-probe reading taken AFTER the post-sweep `left`.
+
+    Order is load-bearing: `own_left` is the bound the gate compares its later
+    count against, so it must be the LATEST attributed reading of the run, not
+    the pre-sweep one. The call log makes a swapped or duplicated read visible.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    calls: list[str] = []
+
+    def probe():
+        calls.append("host")
+        return 6
+
+    def own_probe():
+        calls.append("own")
+        return 4
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=1030.0, probe=probe,
+        clock=lambda: 1000.0, own_probe=own_probe)
+    assert calls == ["host", "host", "own"], (
+        "the attributed reading must come after BOTH host readings (before, "
+        f"then left); got {calls}"
+    )
+    assert report["own_left"] == 4
+    assert report["left"] == 6
+
+
+def test_own_left_is_none_when_the_producer_cannot_attribute():
+    """A builder with no own_probe reports None, not 0 (unmeasured ≠ none)."""
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=1030.0, probe=lambda: 3,
+        clock=lambda: 1000.0)
+    assert report["own_left"] is None
 
 
 def test_conftest_sweep_returns_build_end_sweep_report():
@@ -6397,10 +6492,19 @@ def test_conftest_sweep_returns_build_end_sweep_report():
     )
     call = builder_return.value
     assert isinstance(call, ast.Call)  # narrows the type for the reader
-    assert len(call.args) == 3 and call.keywords == [], (
-        "the builder call must pass exactly 3 positional arguments and no "
-        "keywords — the sweep lambda, the deadline, and the live-server "
-        "probe; any other arity leaves an argument unpinned (#4740)"
+    assert len(call.args) == 3, (
+        "the builder call must pass exactly 3 positional arguments — the sweep "
+        "lambda, the deadline, and the live-server probe; any other arity "
+        "leaves an argument unpinned (#4740)"
+    )
+    # #1005: exactly ONE keyword is allowed, `own_probe=` — the run-scoped
+    # attribution read the gate's leak red depends on. Its shape is pinned
+    # below the way the positional probe is: an un-attributing own_probe (a
+    # constant, a bare name, the HOST-WIDE count) would hand the gate a
+    # population this run does not own and restore the false red.
+    assert [kw.arg for kw in call.keywords] == ["own_probe"], (
+        "the builder call's only keyword must be `own_probe` (#1005); got "
+        f"{[kw.arg for kw in call.keywords]}"
     )
     sweep_lambda, deadline_arg, probe_arg = call.args
     assert (
@@ -6425,6 +6529,25 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         "argument 3 must be `embedded_reaper.live_embedded_server_count` — "
         "the real probe; a fabricated probe (e.g. `lambda: 999`) hands the "
         "gate a bound the run never measured (#4740)"
+    )
+    own_probe = call.keywords[0].value
+    assert (
+        isinstance(own_probe, ast.Lambda)
+        and isinstance(own_probe.body, ast.Call)
+        and isinstance(own_probe.body.func, ast.Attribute)
+        and own_probe.body.func.attr == "own_live_server_count"
+        and isinstance(own_probe.body.func.value, ast.Name)
+        and own_probe.body.func.value.id == "embedded_reaper"
+        and len(own_probe.body.args) == 1
+        and isinstance(own_probe.body.args[0], ast.Call)
+        and isinstance(own_probe.body.args[0].func, ast.Name)
+        and own_probe.body.args[0].func.id == "run_roots"
+    ), (
+        "`own_probe` must be `lambda: embedded_reaper.own_live_server_count("
+        "run_roots())` — the run-scoped attribution probe. Anything else (the "
+        "host-wide `live_embedded_server_count`, a constant, or a probe over "
+        "an ad-hoc path list) gives the gate a population this run does not "
+        "own, which is exactly the #1005 false red"
     )
     undocumented = [
         n for n in returns

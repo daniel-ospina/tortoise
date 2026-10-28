@@ -1629,10 +1629,38 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              [ "$arc" -eq 0 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
 
       - name: Stop FalkorDB services (#6673)
         # Last step + always(): a failed or cancelled job must not leave a
@@ -2186,10 +2214,38 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              [ "$arc" -eq 0 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
@@ -2995,10 +3051,38 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              [ "$arc" -eq 0 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
       - name: Upload carve-out log (measurement artifact, #1477)
         if: always()
         continue-on-error: true
