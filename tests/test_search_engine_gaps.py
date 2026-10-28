@@ -646,6 +646,66 @@ class TestRunVectorQuery:
         assert "CALL db.idx.vector.queryNodes" in graph.query_calls[0][0]
         assert "vec.euclideanDistance" in graph.query_calls[1][0]
 
+    # ── #10121: the recency column, and the tie it feeds ────────────
+
+    def test_both_index_signatures_carry_the_recency_column(self):
+        """#10121: BOTH `_sig_cypher` forms must project the recency column.
+
+        The Python sort reads the recency column as ``row[2]`` and falls back to
+        ``''`` (oldest) when a row shape has none. That fallback is what makes a
+        missing projection SILENT: the leg keeps working and every row that
+        signature returns degrades to the id-only tie — the exact two-branch
+        disagreement #10121 fixed (the index branch sorting ``(distance, id
+        ASC)`` while the scan branch used the recency tie).
+
+        Nothing else in the suite can see it: the ``#6214`` cases above and the
+        docker-lane tie pin all return 2-COLUMN rows, so ``len(row) > 2`` is
+        false there and the column is never read. Measured (round-8 review):
+        deleting ``AS recency`` from signature A alone red NO test.
+
+        So this asserts the projection in the STRINGS — sig A (the default
+        preference) and sig B via the signature-failure retry.
+        """
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
+            (["a", 0.5, "2026-01-01T00:00:00"], None),
+        ])
+
+        run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert len(graph.query_calls) == 2, (
+            "expected the sig-A attempt and its sig-B retry, got "
+            f"{len(graph.query_calls)} call(s)")
+        for index, call in enumerate(graph.query_calls):
+            cypher = call[0]
+            signature = "A" if index == 0 else "B"
+            assert "CALL db.idx.vector.queryNodes" in cypher
+            assert "AS recency" in cypher, (
+                f"index signature {signature} stopped projecting the recency "
+                "column (#10121): the Python tie then silently degrades to "
+                f"id-only for every row this signature returns: {cypher}")
+
+    def test_index_branch_tie_follows_the_recency_column_not_the_id(self):
+        """#10121: equal distances are tied by RECENCY, then id.
+
+        ``old``/``new`` are chosen so an id-only tie-break would ALSO put
+        ``old`` first (``'old' > 'new'``, and the id key is DESC) — the recency
+        column has to REVERSE that, which is the only way this pin can tell the
+        two rules apart.
+        """
+        graph = SimpleMockGraph(result_set=[
+            ("new", 0.5, "2026-01-01T00:00:00"),
+            ("old", 0.5, "2020-01-01T00:00:00"),
+        ])
+
+        out = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert [pid for pid, _score in out] == ["new", "old"], (
+            "the index branch ignored the recency column and tied on the id "
+            "key instead — that is the two-branch disagreement #10121 fixed "
+            f"(got {[pid for pid, _score in out]})")
+
     # ── #1359: dual queryNodes signatures ────────────────────────────
 
     def test_docker_mode_signature_a_fails_signature_b_succeeds(self):

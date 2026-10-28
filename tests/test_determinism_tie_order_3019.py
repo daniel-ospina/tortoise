@@ -315,8 +315,13 @@ _QUERY_VERBS = frozenset({"query", "ro_query", "_query", "profile",
 #: blessed call sites — which is why this cannot rot into a stale inventory.
 #:
 #: * ``IN $ids`` / ``IN $op_ids`` — an ID-ANCHORED batch read: the caller already
-#:   chose the rows, so the DB's row order is not a ranking of anything (its
-#:   callers index by id).
+#:   chose the rows, so the DB's row order is not consumed as a rank (every one of
+#:   these returns an id-keyed dict/set and never reads a row POSITION). Note what
+#:   this does NOT claim: a ``LIMIT`` inside such a read still picks its MEMBERS in
+#:   engine order, so which peers survive a per-op cap is DB-order — pre-existing
+#:   and out of #10121's scope (search_engine.py:4204, a ``CALL { … LIMIT $per_op }``
+#:   with no ORDER BY, whose members are the Q2-crit-covered set), but it is not
+#:   "ordering is irrelevant", which this comment said before round 8.
 #: * ``RETURN count(`` — an aggregate: one row comes back, nothing to rank.
 #: * ``{id: $`` — a single-row id lookup.
 #: * ``LIMIT 1`` — a single-row read by construction.
@@ -557,9 +562,15 @@ def test_every_leg_query_carries_a_secondary_sort_key():
         # `recency_key_expr('node')` as a COLUMN), so the text the census can see
         # here is empty. The branch sorts in PYTHON, by the shared
         # `recency_tie_key` (search_engine.py:2495), which is the two-branch
-        # agreement this PR exists for; the helper's own text is pinned by
-        # `tests/test_search_engine_gaps.py::TestRunVectorQuery` and by the
-        # ast census inside `test_vector_index_branch_ranks_by_the_shared_key`.
+        # agreement this PR exists for; the helper's own text is pinned by the
+        # two `tests/test_search_engine_gaps.py::TestRunVectorQuery` cases that
+        # read the COLUMN (`test_both_index_signatures_carry_the_recency_column`
+        # for both signatures' `AS recency`, and
+        # `test_index_branch_tie_follows_the_recency_column_not_the_id` for the
+        # tie it feeds). Round-8 review: this comment originally named a test
+        # that does not exist, and none of the `#6214`-era cases could see the
+        # column at all — they return 2-column rows, so the recency read fell to
+        # its `''` default and deleting `AS recency` from signature A red nothing.
         ("_query_nodes", ""):
             "cypher returned by the nested _sig_cypher helper; ranked in PYTHON "
             "by recency_tie_key — no ORDER BY by design",
