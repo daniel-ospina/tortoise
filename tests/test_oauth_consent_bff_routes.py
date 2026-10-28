@@ -36,6 +36,7 @@ import json
 import re
 import subprocess
 import tempfile
+import urllib.parse
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -80,16 +81,52 @@ const CONSENT = process.argv[2];
 const scenario = process.argv[3];
 const opts = JSON.parse(process.argv[4] || "{}");
 
+import { DatabaseSync } from "node:sqlite";
+
 const tokenRoute = await import(CONSENT + "/token.ts");
 const startRoute = await import(CONSENT + "/start.ts");
+const attemptKeyHash = (await import(CONSENT + "/../../_shared/auth/consent-bridge.ts")).attemptKeyHash;
 
 const NOW = Date.now();
 
 // A D1 stand-in: the tables these two routes touch, over in-memory rows. `meta.changes`
 // counts what the WHERE matched, as D1 does (a CAS that matches nothing must report 0).
+const CONSENT_SCHEMA = `CREATE TABLE consent_attempts (
+  state TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,
+  code_challenge TEXT NOT NULL, scope TEXT, resource TEXT, user_id TEXT,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, attempt_key_hash TEXT);`;
+
 class FakeD1 {
-  constructor(tables) { this.tables = tables || { sessions: [], consent_attempts: [] }; }
+  constructor(tables) {
+    this.tables = tables || { sessions: [], consent_attempts: [] };
+    this._sqlite = null;
+  }
   exec() { return Promise.resolve(); }
+  // ⛔ `consent_attempts` runs on REAL SQLite (node:sqlite), not a hand-written interpreter.
+  // The interpreter this replaced restated the SQL's owner rule in JavaScript, and when the two
+  // drifted the suite stayed green while the shipped statement was last-writer-wins — a whole
+  // round of review found the takeover and the double could not have (it encoded the bypass).
+  // Letting the engine decide means the CASE / COALESCE / RETURNING semantics tested are the ones
+  // D1 will run; `this.tables.consent_attempts` is then only a MIRROR for the assertions.
+  _db() {
+    if (this._sqlite) return this._sqlite;
+    const db = new DatabaseSync(":memory:");
+    db.exec(CONSENT_SCHEMA);
+    const ins = db.prepare(
+      "INSERT INTO consent_attempts (state,client_id,redirect_uri,code_challenge,scope,resource," +
+      "user_id,created_at,expires_at,attempt_key_hash) VALUES (?,?,?,?,?,?,?,?,?,?)");
+    for (const r of this.tables.consent_attempts || []) {
+      ins.run(r.state, r.client_id, r.redirect_uri, r.code_challenge, r.scope ?? null,
+              r.resource ?? null, r.user_id ?? null, r.created_at ?? 0, r.expires_at ?? 0,
+              r.attempt_key_hash ?? null);
+    }
+    this._sqlite = db;
+    return db;
+  }
+  _mirror() {
+    this.tables.consent_attempts = this._db().prepare("SELECT * FROM consent_attempts").all()
+      .map((r) => ({ ...r }));
+  }
   prepare(sql) {
     const db = this;
     return { bind: (...args) => ({
@@ -98,56 +135,27 @@ class FakeD1 {
       all: () => Promise.resolve({ results: db._rows(sql, args) }),
     })};
   }
-  _table(sql) {
-    if (/FROM sessions/.test(sql)) return "sessions";
-    if (/consent_attempts/.test(sql)) return "consent_attempts";
-    return null;
+  _isConsent(sql) { return /consent_attempts/.test(sql) && !/FROM sessions/.test(sql); }
+  _consent(sql, args) {
+    const stmt = this._db().prepare(sql);
+    const out = /^\s*(SELECT|INSERT|DELETE|UPDATE)/i.test(sql) && /RETURNING|^\s*SELECT/i.test(sql)
+      ? { rows: stmt.all(...args) }
+      : { run: stmt.run(...args) };
+    this._mirror();
+    return out;
   }
   _rows(sql, args) {
-    const t = this._table(sql);
-    if (!t) return [];
-    const rows = this.tables[t] || (this.tables[t] = []);
-    if (t === "sessions") return rows.filter((r) => r.handle === args[0] && r.revoked === 0);
-    if (/WHERE state = \?1/.test(sql)) return rows.filter((r) => r.state === args[0]);
-    return rows;
+    if (this._isConsent(sql)) {
+      const out = this._consent(sql, args);
+      return out.rows ?? [];
+    }
+    const rows = this.tables.sessions || (this.tables.sessions = []);
+    if (/FROM sessions/.test(sql)) return rows.filter((r) => r.handle === args[0] && r.revoked === 0);
+    return [];
   }
   _first(sql, args) { const rows = this._rows(sql, args); return rows.length ? { ...rows[0] } : null; }
   _run(sql, args) {
-    if (/INSERT INTO consent_attempts/.test(sql)) {
-      const rows = this.tables.consent_attempts;
-      const [state, client_id, redirect_uri, code_challenge, scope, resource, user_id, created_at, expires_at] = args;
-      const existing = rows.find((r) => r.state === state);
-      if (existing) {
-        // ⛔ THIS DOUBLE DELEGATES THE OWNER RULE TO THE SQL IT IS GIVEN, it does not restate it.
-        // The real statement writes `user_id=COALESCE(consent_attempts.user_id, excluded.user_id)`
-        // — the EXISTING value first, which is what makes the first known owner win. A double that
-        // hardcoded "only overwrite with non-null" would keep the suite green if that COALESCE were
-        // deleted, and the order is the whole property: `excluded` first is last-writer-wins, which
-        // lets a SECOND identity take over a flow someone else began (the very bypass
-        // `test_a_second_identity_cannot_take_over_a_flow_by_re_entering_it` exists to catch).
-        if (/COALESCE\(\s*consent_attempts\.user_id\s*,\s*excluded\.user_id\s*\)/i.test(sql)) {
-          // FIRST known owner wins: fills an ownerless row, never re-assigns a known one.
-          if (existing.user_id == null) existing.user_id = user_id;
-        } else if (/user_id\s*=\s*COALESCE/i.test(sql)) {
-          // the other order is last-writer-wins — the double must model WHICH order, or the
-          // difference is invisible to every test that goes through it.
-          if (user_id != null) existing.user_id = user_id;
-        } else {
-          existing.user_id = user_id;
-        }
-        existing.expires_at = expires_at;
-        return { meta: { changes: 1 } };
-      }
-      rows.push({ state, client_id, redirect_uri, code_challenge, scope, resource, user_id, created_at, expires_at });
-      return { meta: { changes: 1 } };
-    }
-    if (/DELETE FROM consent_attempts/.test(sql)) {
-      const [now, limit] = args;
-      const rows = this.tables.consent_attempts;
-      const dead = rows.filter((r) => r.expires_at < now).slice(0, limit);
-      this.tables.consent_attempts = rows.filter((r) => !dead.includes(r));
-      return { meta: { changes: dead.length } };
-    }
+    if (this._isConsent(sql)) return this._consent(sql, args).run ?? { meta: { changes: 0 } };
     return { meta: { changes: 0 } };
   }
 }
@@ -184,6 +192,11 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     || scenario === "mint_cross_origin" || scenario === "mint_no_secret"
     || scenario === "mint_foreign_attempt" || scenario === "mint_null_owner") {
   const seeded = ["mint_ok", "mint_cross_origin", "mint_no_secret", "mint_foreign_attempt", "mint_null_owner"];
+  // #10208: the mint now requires the ELECTRONIC key the creating browser holds. Every mint
+  // scenario sends the right one unless it is explicitly testing a wrong/absent key.
+  const MINT_KEY = opts.attemptKey === undefined ? "test-attempt-key" : opts.attemptKey;
+  const seededHash = opts.seededKeyHash === undefined
+    ? await attemptKeyHash("test-attempt-key") : opts.seededKeyHash;
   const e = env({
     noSecret: scenario === "mint_no_secret",
     SESSIONS: new FakeD1({
@@ -195,7 +208,8 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
              // The cold-browser row has NO owner yet; the foreign row belongs to someone else.
              user_id: scenario === "mint_foreign_attempt" ? "user-2"
                : (scenario === "mint_null_owner" ? null : "user-1"),
-             created_at: NOW, expires_at: NOW + 900_000 }]
+             created_at: NOW, expires_at: NOW + 900_000,
+             attempt_key_hash: seededHash }]
         : [],
     }),
   });
@@ -210,7 +224,8 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
-  const res = await tokenRoute.onRequestPost({ request: post("/api/consent/token", { state: "state-xyz" }, headers), env: e });
+  const mintBody = opts.omitKey ? { state: "state-xyz" } : { state: "state-xyz", attempt_key: MINT_KEY };
+  const res = await tokenRoute.onRequestPost({ request: post("/api/consent/token", mintBody, headers), env: e });
   out.status = res.status;
   out.body = await res.json();
 } else if (scenario.startsWith("start_")) {
@@ -752,6 +767,33 @@ def test_the_redirect_uri_rule_agrees_with_the_AS() -> None:
     assert accepted == {True, False}, f"the table is one-sided: {accepted}"
 
 
+def test_the_loopback_verdict_does_not_depend_on_the_interpreter_patch_level(monkeypatch) -> None:
+    """The mapped-loopback verdict is OURS, not the interpreter's (gh-117566).
+
+    `test_the_redirect_uri_rule_agrees_with_the_AS` above carries the mapped-loopback rows, and it is
+    therefore only a real guard on interpreters where the stdlib is WRONG. Before CPython 3.12.7
+    `IPv6Address.is_loopback` was `self._ip == 1`, so `::ffff:127.0.0.1` was NOT loopback; from 3.12.7
+    it is. CI resolves `python-version: '3.12'` to the LATEST patch, i.e. the fixed one — so without
+    this test, deleting `_is_loopback`'s `ipv4_mapped` normalisation reds nothing anywhere and the
+    regression returns invisibly.
+
+    Pin the VERDICT, not the interpreter: force the pre-3.12.7 semantics and require our rule to be
+    unaffected in both directions (a mapped loopback is loopback; a mapped private address is not).
+    """
+    import ipaddress
+
+    from tortoise.oauth import _is_loopback
+
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_loopback", property(lambda self: self._ip == 1))
+    assert _is_loopback("::ffff:127.0.0.1") is True, (
+        "a mapped loopback was refused on the interpreter's say-so — `_is_loopback` no longer "
+        "normalises `ipv4_mapped` itself, so the verdict returns to depending on the PATCH level"
+    )
+    assert _is_loopback("::ffff:10.0.0.1") is False, (
+        "a mapped private address was accepted as loopback — the normalisation over-reached"
+    )
+
+
 def test_the_BFF_is_stricter_than_the_AS_only_where_a_parse_differs_hopelessly() -> None:
     """The named, one-directional divergence — pinned so it cannot grow into a class.
 
@@ -834,6 +876,89 @@ def test_the_native_scheme_allowlist_is_the_same_set_on_both_halves() -> None:
     uris = [f"{scheme}://client.example/cb" for scheme in sorted(as_schemes)]
     for row in _run("redirect_uri_table", uris=uris)["verdicts"]:
         assert row["accepted"], f"the BFF refuses the AS's own native scheme: {row}"
+
+
+def _key_from(location: str | None) -> str:
+    """The attempt key the route handed back in its `/auth?next=` return target."""
+    assert location, "the cold-browser leg must answer a redirect, not a body"
+    next_param = urllib.parse.parse_qs(urllib.parse.urlsplit(location).query)["next"][0]
+    keys = urllib.parse.parse_qs(urllib.parse.urlsplit(next_param).query).get("attempt_key")
+    assert keys, f"the return target carries NO attempt key: {next_param!r}"
+    return keys[0]
+
+
+def test_the_ownerless_window_is_closed_by_the_attempt_key() -> None:
+    """#10208: the flow belongs to a BROWSER, not to whoever knows the `state`.
+
+    Before this, the cold-browser row was mintable — and owner-claimable — by any signed-in
+    identity that named the `state`: visitor A starts a flow with no session (row `user_id` NULL),
+    B issues ONE signed-in `GET /api/consent/start?…&state=<A's state>` and becomes the "first known
+    owner", A's return leg can no longer fill the row, A's mint answers 403, and B mints an
+    assertion asserting B bound to A's `redirect_uri`/`code_challenge`/`state`.
+
+    The row now carries the hash of a key only A's browser holds (it rides in the return target —
+    never a cookie, per §2.3), the key is insert-only, and BOTH the owner fill and the mint are
+    gated on it. Measured here end to end, on real SQLite: the fill is refused for B, the mint is
+    refused for B, and A's own return leg still fills it.
+    """
+    # 1. A starts the flow cold. The row exists with no owner and WITH a key hash.
+    a_entry = _run("start_cold_browser")
+    assert a_entry["status"] == 302, a_entry
+    row = a_entry["attempts"][0]
+    assert row["user_id"] is None, "the cold-browser row must start ownerless"
+    assert row["attempt_key_hash"], "the attempt was recorded WITHOUT a key — nothing to prove"
+    a_key = _key_from(a_entry["location"])
+
+    # 2. B, signed in as somebody else, names the same `state` with NO key. The row must stay
+    #    ownerless — B is not the browser that created it — and B is refused before consent.
+    b = _run("start_signed_in", seededAttempts=a_entry["attempts"], sessionUserId="user-2")
+    assert b["status"] == 403, (
+        "a second identity was ADVANCED into a flow it does not hold — it would reach the AS's "
+        f"consent page and then be unable to mint: {b}")
+    assert b["body"] == {"error": "no_authorize_attempt", "reason": "flow_not_yours"}, b["body"]
+    assert b["attempts"][0]["user_id"] is None, (
+        f"a second identity CLAIMED the ownerless row — owner is now {b['attempts'][0]['user_id']!r}")
+    assert b["attempts"][0]["attempt_key_hash"] == row["attempt_key_hash"], (
+        "the attempt key was ROTATED by a later caller — rotation is the takeover")
+
+    # 3. B cannot mint for it either, key or no key: the row is ownerless AND B holds no key.
+    assert _run("mint_null_owner", sessionUserId="user-2", omitKey=True)["status"] == 403
+    assert _run("mint_null_owner", sessionUserId="user-2", attemptKey="b-guess")["status"] == 403
+
+    # 4. A's return leg (signed in as A, carrying the key) fills the owner and advances.
+    a_back = _run("start_signed_in", seededAttempts=b["attempts"],
+                  params=dict(_PARAMS, attempt_key=a_key))
+    assert a_back["status"] == 302, f"A's own return leg was refused: {a_back}"
+    assert "api.premiselabs.co/oauth/authorize" in (a_back["location"] or ""), a_back["location"]
+    assert a_back["attempts"][0]["user_id"] == "user-1", (
+        f"the legitimate owner could not fill their own flow: {a_back['attempts'][0]}")
+
+
+def test_the_mint_requires_the_key_the_creating_browser_holds() -> None:
+    """The owner column alone cannot fail closed — an ownerless row minted for anyone (#10208)."""
+    # The right key: minted.
+    assert _run("mint_ok")["status"] == 200
+    # Absent, wrong, and "right key but the row predates the column" are the SAME 403 — so the
+    # route is not an oracle telling a guesser their `state` is real.
+    assert _run("mint_ok", omitKey=True)["status"] == 403
+    assert _run("mint_ok", attemptKey="not-the-key")["status"] == 403
+    assert _run("mint_ok", seededKeyHash=None)["status"] == 403
+
+
+def test_the_owner_fill_is_refused_by_a_FOREIGN_key_even_when_the_owner_is_known() -> None:
+    """Insert-only key + gated fill: the second identity cannot even rewrite an OWNED row."""
+    seeded = [{
+        "state": "state-xyz", "client_id": "client-abc",
+        "redirect_uri": "https://client.example/cb",
+        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "scope": "mcp", "resource": None, "user_id": "user-1",
+        "created_at": 0, "expires_at": 0, "attempt_key_hash": "a" * 64,
+    }]
+    out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-2",
+               params=dict(_PARAMS, attempt_key="b-attempt-key"))
+    assert out["status"] == 403, out
+    assert out["attempts"][0]["user_id"] == "user-1", out["attempts"][0]
+    assert out["attempts"][0]["attempt_key_hash"] == "a" * 64, out["attempts"][0]
 
 
 def test_the_redirect_uri_is_forwarded_BYTE_FOR_BYTE_to_the_AS() -> None:

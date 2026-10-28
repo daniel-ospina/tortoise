@@ -404,8 +404,9 @@ projects:
         type: env_vars
         envs: [production]
         note: >-
-          The `iss` the mint stamps (§2.1). Defaults to APP_ORIGIN /
-          https://app.premiselabs.co. A preview deployment must set it to its
-          OWN origin so the AS it talks to accepts the mint; the value must
-          match CONSENT_TOKEN_ISSUER on that API or every redemption is
-          `401 invalid_token`.
+          The `iss` the mint stamps (§2.1). Defaults to
+          https://app.premiselabs.co and to NOTHING else — the mint does not
+          read APP_ORIGIN, so setting that binding never moves `iss`.
+          A preview deployment must set it to its OWN origin so the AS it talks
+          to accepts the mint; the value must match CONSENT_TOKEN_ISSUER on
+          that API or every redemption is `401 invalid_token`.

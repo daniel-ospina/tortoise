@@ -44,7 +44,11 @@ import {
   readCookie,
 } from "../../_shared/auth/session";
 import { getAccessTokenForSession } from "../../_shared/auth/token";
-import { mintConsentToken, readConsentAttempt } from "../../_shared/auth/consent-bridge";
+import {
+  attemptKeyHash,
+  mintConsentToken,
+  readConsentAttempt,
+} from "../../_shared/auth/consent-bridge";
 
 /** The AS origin — the ONE origin allowed to call this route with credentials. */
 export function consentAsOrigin(env: Env): string {
@@ -145,6 +149,12 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     // `state` is the attempt's identity (§2.2 binds it), so a mint without one names no flow.
     return corsJson(env, origin, { error: "invalid_request", message: "state is required." }, 400);
   }
+  // The per-attempt key is what proves this caller is the BROWSER that started the flow (#10208).
+  // Without it, an ownerless row — the cold-browser case — was mintable by anyone who named the
+  // `state`, so the owner check below could not fail closed. Absent is not an error to explain in
+  // detail: the same 403 as a foreign flow, because a different answer would tell a guesser that
+  // their `state` was real.
+  const attemptKey = typeof body.attempt_key === "string" ? body.attempt_key : "";
 
   // ── the session: `__Host-session` is the ONLY identity input to this route ──────────
   const handle = readCookie(request, SESSION_COOKIE);
@@ -185,6 +195,14 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return corsJson(env, origin, { error: "unavailable", reason: "consent_store_unavailable" }, 503);
   }
   if (!attempt) {
+    return corsJson(env, origin, { error: "no_authorize_attempt" }, 403);
+  }
+  // ⛔ THE FLOW BELONGS TO A BROWSER, not to whoever knows the `state` (#10208). Comparing two
+  // hashes, so the response cannot be used as an oracle for the key itself: a missing key, a wrong
+  // key, and a row written before the column existed all answer the SAME 403 as an unrecorded flow.
+  const presented = attemptKey === "" ? null : await attemptKeyHash(attemptKey);
+  if (presented === null || attempt.attempt_key_hash === null
+      || presented !== attempt.attempt_key_hash) {
     return corsJson(env, origin, { error: "no_authorize_attempt" }, 403);
   }
   if (attempt.user_id && attempt.user_id !== row.user_id) {

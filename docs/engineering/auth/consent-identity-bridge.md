@@ -117,6 +117,28 @@ required, and neither substitutes for `bind`.
    unreachable — never a sign-out (property 3, below);
 4. mints the token (§2.1) and returns `{token, exp}`. The session's access token never leaves the server.
 
+**The attempt row, and why `user_id` alone cannot make a flow private.** `consent_attempts` (keyed by
+`state`) is how the mint knows which flow a token is for, and `user_id` is what lets it refuse a flow a
+different identity began. That column is NOT sufficient on its own, and the first two attempts at it were
+both bypassable, which is worth recording because each looked complete:
+
+* **last-writer-wins** (`COALESCE(excluded, existing)`) let a second signed-in identity overwrite a
+  recorded owner with one `GET`;
+* **first-known-owner-wins** (`COALESCE(existing, excluded)`) protects an OWNED row — but the
+  **ownerless** window is the one the cold browser creates on every entry, so the first signed-in
+  identity to name the `state` simply BECAME the owner; and because an ownerless row minted for anyone,
+  gating the fill alone re-opened the hole through the mint.
+
+The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
+`/api/consent/start` mints a per-attempt key on the entry leg (32 random bytes), stores **only its
+SHA-256** on the row, and carries the raw key in the `selfPath` **return target**; the owner fill and the
+mint both require it. The key is INSERT-ONLY — a later caller can never rotate it, because rotation *is*
+the takeover — and a missing, wrong, or pre-column key answers the SAME `403 no_authorize_attempt` as an
+unrecorded flow, so the route is not an oracle for guessing a `state`.
+⛔ A scoped cookie holding the nonce is **not** available here: the bridge's rule is that the two origins
+are reconciled **by the token, never by a second cookie**. The return target is the only carrier that
+keeps that rule.
+
 **The `jti` store.** Single-use needs shared state, because the AS is multi-instance. Options, in order of
 preference: **(a)** a `consent_tickets` table in the existing D1 `SESSIONS` database (the minting side is
 already there and the BFF already bootstraps its own schema idempotently — `ensureSchema`,
@@ -301,7 +323,7 @@ attempted as one blind pass:
 |---|---|
 | 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261027120001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3’s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
-| 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
+| 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip, the per-attempt key that closes the ownerless window, and the startup pin `tests/test_oauth_consent_bridge.py::test_startup_installs_the_SHARED_register`) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
 | 4. The page rewrite (delete §7's rows, keep the org picker + the #5734 refusal copy, add the mint call and the terminal-loop guard) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. `SCOPE.md` §9 class 4(i) — attested client identity | a product decision (which clients are attested, and what an unattested one may claim), filed separately |
 

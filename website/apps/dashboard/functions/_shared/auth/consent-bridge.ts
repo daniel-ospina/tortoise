@@ -268,6 +268,12 @@ export interface ConsentAttempt {
   user_id: string | null;
   created_at: number;
   expires_at: number;
+  /**
+   * SHA-256 of the per-attempt key the CREATING browser holds (null on a row written before this
+   * column existed). The raw key is never stored: a database read must not yield a credential for
+   * somebody else's in-flight consent.
+   */
+  attempt_key_hash: string | null;
 }
 
 /**
@@ -289,8 +295,17 @@ export async function ensureConsentAttemptTable(db: D1Database): Promise<void> {
       "resource TEXT, " +
       "user_id TEXT, " +
       "created_at INTEGER NOT NULL, " +
-      "expires_at INTEGER NOT NULL);",
+      "expires_at INTEGER NOT NULL, " +
+      "attempt_key_hash TEXT);",
   );
+  // `CREATE TABLE IF NOT EXISTS` cannot add a COLUMN to a table that already exists, and SQLite
+  // has no `ADD COLUMN IF NOT EXISTS` — so a database bootstrapped by an earlier runtime build
+  // needs the ALTER, and the duplicate-column error IS the "already there" answer.
+  try {
+    await db.exec("ALTER TABLE consent_attempts ADD COLUMN attempt_key_hash TEXT;");
+  } catch {
+    // already present
+  }
   await db.exec(
     "CREATE INDEX IF NOT EXISTS idx_consent_attempts_expires " +
       "ON consent_attempts(expires_at);",
@@ -305,35 +320,60 @@ export async function ensureConsentAttemptTable(db: D1Database): Promise<void> {
  * happens BEFORE sign-in on a cold browser — the very case #3524 was reopened for — and the
  * return leg re-records the same row (`state` is the key) with the resolved owner.
  *
- * Idempotent on `state`: a re-entry must not create a second row for one flow, and must never
- * overwrite a known owner — neither with `null` nor with a DIFFERENT identity. Hence the COALESCE
- * prefers the EXISTING value: `COALESCE(consent_attempts.user_id, excluded.user_id)` fills the
- * ownerless cold-browser row on the return leg (nothing is lost — it was NULL) while a second
- * identity that re-ENTERS this route for someone else's `state` cannot take the flow over. The
- * other order (`excluded` first) is last-writer-wins, which makes the mint's foreign-owner refusal
- * unreachable by one GET: B re-enters A's flow, the row becomes B's, and B then mints an assertion
- * asserting B bound to A's redirect_uri/code_challenge/state — identity injection into a flow A
- * began.
+ * ⛔ AND THE OWNER IS ONLY RECORDED BY THE BROWSER THAT CREATED THE ATTEMPT (#10208). The owner
+ * column alone was not enough: first-known-owner-wins protects a row that already HAS an owner,
+ * so the OWNERLESS window stayed claimable — B's single signed-in `GET /api/consent/start` on a
+ * flow A began cold became the first known owner, A's return leg could no longer fill the row,
+ * A's mint answered 403, and B minted an assertion for A's `redirect_uri`/`code_challenge`/`state`.
+ * So every row carries the hash of a per-attempt key that only the creating browser holds (it rides
+ * in the return target, never in a cookie — §2.3 reconciles by the token, not a second cookie),
+ * and the fill below is gated on it.
+ *
+ * Idempotent on `state`: a re-entry must not create a second row for one flow, the key is
+ * INSERT-ONLY (a re-entry can never rotate it — rotation would be the takeover, one line down),
+ * and the owner is filled only when the presented key matches.
+ *
+ * Returns whether the CALLER's key is the row's key. `start` uses it to decide whether that key may
+ * be handed back in the return target at all: a key this request does not own must never be
+ * propagated into someone else's URL.
  */
 export async function recordConsentAttempt(
   db: D1Database,
-  attempt: Omit<ConsentAttempt, "created_at" | "expires_at">,
+  attempt: Omit<ConsentAttempt, "created_at" | "expires_at" | "attempt_key_hash">,
+  attemptKey: string | null,
   now = Date.now(),
-): Promise<ConsentAttempt> {
+): Promise<{ row: ConsentAttempt; owns_flow: boolean }> {
   await ensureConsentAttemptTable(db);
+  const keyHash = attemptKey === null ? null : await attemptKeyHash(attemptKey);
   const row: ConsentAttempt = {
     ...attempt,
     created_at: now,
     expires_at: now + CONSENT_ATTEMPT_TTL_S * 1000,
+    attempt_key_hash: keyHash,
   };
-  await db
+  // ONE statement decides both properties, so neither can be lost to a refactor of the other:
+  //
+  //   * `attempt_key_hash` is INSERT-ONLY (`COALESCE(existing, excluded)` — a later caller cannot
+  //     rotate it, which is what would let B take a flow over merely by naming its `state`);
+  //   * `user_id` is filled ONLY when the presented key hashes to the stored one. `excluded` first
+  //     would be last-writer-wins (identity injection); the CASE is what makes a foreign caller's
+  //     write a no-op on the owner column rather than a refusal — a refusal here would tell an
+  //     attacker whether their `state` guess landed on a real flow.
+  const back = await db
     .prepare(
       "INSERT INTO consent_attempts " +
-        "(state,client_id,redirect_uri,code_challenge,scope,resource,user_id,created_at,expires_at) " +
-        "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) " +
+        "(state,client_id,redirect_uri,code_challenge,scope,resource,user_id,created_at," +
+        "expires_at,attempt_key_hash) " +
+        "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) " +
         "ON CONFLICT(state) DO UPDATE SET " +
-        "user_id=COALESCE(consent_attempts.user_id, excluded.user_id), " +
-        "expires_at=excluded.expires_at",
+        "attempt_key_hash=COALESCE(consent_attempts.attempt_key_hash, excluded.attempt_key_hash), " +
+        "user_id=CASE " +
+        "WHEN consent_attempts.attempt_key_hash IS NOT NULL " +
+        "AND consent_attempts.attempt_key_hash = excluded.attempt_key_hash " +
+        "THEN COALESCE(consent_attempts.user_id, excluded.user_id) " +
+        "ELSE consent_attempts.user_id END, " +
+        "expires_at=excluded.expires_at " +
+        "RETURNING attempt_key_hash",
     )
     .bind(
       row.state,
@@ -345,14 +385,32 @@ export async function recordConsentAttempt(
       row.user_id,
       row.created_at,
       row.expires_at,
+      row.attempt_key_hash,
     )
-    .run();
+    .first<{ attempt_key_hash: string | null }>();
   // Opportunistic bounded collection, exactly like `sweepExpiredFlows`: an ABANDONED flow
   // reaches no completion, so without this the table only grows. Never throws — collection is
   // housekeeping on a user path and must not fail the flow.
   await sweepExpiredConsentAttempts(db, now).catch(() => 0);
-  return row;
+  const stored = back?.attempt_key_hash ?? null;
+  return { row, owns_flow: keyHash !== null && stored === keyHash };
 }
+
+/** SHA-256 hex of an opaque attempt key. The raw key never lands in the database. */
+export async function attemptKeyHash(key: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", utf8(key));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** A fresh attempt key: 32 random bytes, base64url — the encoding both halves already share. */
+export function newAttemptKey(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return b64url(bytes);
+}
+
+/** The query parameter the attempt key travels in, on the return leg only. */
+export const ATTEMPT_KEY_PARAM = "attempt_key";
 
 /** Delete expired attempts, bounded, never throwing (the `sweepExpiredFlows` contract). */
 export async function sweepExpiredConsentAttempts(
@@ -391,7 +449,7 @@ export async function readConsentAttempt(
   const row = await db
     .prepare(
       "SELECT state,client_id,redirect_uri,code_challenge,scope,resource,user_id," +
-        "created_at,expires_at FROM consent_attempts WHERE state = ?1",
+        "created_at,expires_at,attempt_key_hash FROM consent_attempts WHERE state = ?1",
     )
     .bind(state)
     .first<ConsentAttempt>();

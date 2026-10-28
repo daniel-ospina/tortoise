@@ -47,7 +47,12 @@ import {
   type SessionOutcome,
   decideConsentAdvance,
 } from "../../_shared/auth/consent-flow";
-import { recordConsentAttempt, redirectUriProblem } from "../../_shared/auth/consent-bridge";
+import {
+  ATTEMPT_KEY_PARAM,
+  newAttemptKey,
+  recordConsentAttempt,
+  redirectUriProblem,
+} from "../../_shared/auth/consent-bridge";
 
 /** The authorize params this route accepts. `response_type` is implied (`code`). */
 export interface ValidatedParams {
@@ -180,22 +185,36 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     }
   }
 
-  // ── record the attempt on BOTH legs ──────────────────────────────────────────────────
+  // ── the attempt: recorded on BOTH legs, and BOUND TO THIS BROWSER (#10208) ──────────
   // On the way in it is an attempt with no owner yet (the visitor may sign in next). On the
   // way back it re-records the SAME row (`state` is the key) with the resolved owner. Doing it
   // on the return leg is what makes "the request is gone" recoverable rather than fatal: the
   // URL the browser came back with IS enough to re-establish the flow, PKCE challenge included.
+  //
+  // ⛔ The owner is only filled by the browser holding this attempt's key, and the key travels in
+  // the RETURN TARGET — not a cookie: §2.3 reconciles the two origins by the token, never by a
+  // second cookie. Without it, an ownerless cold-browser row was claimable by any signed-in
+  // identity that named the `state`: it became the "first known owner", the legitimate visitor's
+  // return leg could no longer fill the row, and the intruder could mint for it.
+  const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
+  const attemptKey = presentedKey || newAttemptKey();
+  let ownsFlow = false;
   if (env.SESSIONS) {
     try {
-      await recordConsentAttempt(env.SESSIONS, {
-        state: validated.state,
-        client_id: validated.client_id,
-        redirect_uri: validated.redirect_uri,
-        code_challenge: validated.code_challenge,
-        scope: validated.scope,
-        resource: validated.resource,
-        user_id: userId,
-      });
+      const recorded = await recordConsentAttempt(
+        env.SESSIONS,
+        {
+          state: validated.state,
+          client_id: validated.client_id,
+          redirect_uri: validated.redirect_uri,
+          code_challenge: validated.code_challenge,
+          scope: validated.scope,
+          resource: validated.resource,
+          user_id: userId,
+        },
+        attemptKey,
+      );
+      ownsFlow = recorded.owns_flow;
     } catch {
       // A store fault must not become a sign-out, and must not silently drop the flow.
       return json({ error: "unavailable", reason: "consent_store_unavailable" }, { status: 503 });
@@ -204,11 +223,25 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "unavailable", reason: "session_store_unavailable" }, { status: 503 });
   }
 
+  // A signed-in visitor who does NOT hold this attempt's key is looking at somebody else's flow
+  // (or lost theirs). Refuse HERE, before the AS renders a consent page: advancing would let the
+  // visitor approve a flow they cannot mint for, and the flow would then die after consent — the
+  // exact shape the raw-`state` fix removed one field over. A 403, not a terminal state: no
+  // retry can make this flow theirs.
+  if (!ownsFlow && userId !== null) {
+    return json({ error: "no_authorize_attempt", reason: "flow_not_yours" }, { status: 403 });
+  }
+
   // ── the decision (property 4) ───────────────────────────────────────────────────────
   // `auth_url` returns to THIS route, carrying `consent_retry=1` as the loop guard's carrier.
   // `safeNext` is what keeps it a same-origin path rather than an open redirect.
   const selfParams = new URLSearchParams(url.search);
   selfParams.set(CONSENT_RETRY_PARAM, "1");
+  // The key MUST ride back: it is the only proof that the browser returning from sign-in is the
+  // one that started the flow. Set only when it IS this attempt's key — a key the request merely
+  // guessed must never be propagated into a URL this route hands out.
+  if (ownsFlow) selfParams.set(ATTEMPT_KEY_PARAM, attemptKey);
+  else selfParams.delete(ATTEMPT_KEY_PARAM);
   const selfPath = `${url.pathname}?${selfParams.toString()}`;
   const returnPath = safeNext(selfPath, appOrigin(env)) ?? "/welcome";
   const authUrl = new URL("/auth", appOrigin(env));
