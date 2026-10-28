@@ -1173,8 +1173,18 @@ def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
 
     The CONNECTION-scoped entry point to :func:`_lifecycle_events`, for a door
     that holds a connection rather than a cursor (``record_serve.read_node``).
-    ``target`` narrows to the events that could name one Object — a single-row
-    read must not scan a tenant's whole history to answer one row.
+    ``target`` narrows to the events that could name one Object, so a
+    single-row read folds only the events that could POSSIBLY name it.
+
+    ⚠️ What that buys is bounded, and it is not "avoids a scan": the predicate
+    is on `payload` expressions, while the table's only index is
+    `idx_journal_event_node (org_id, graph_id, node_label, node_key)`
+    (`20261012000001_record_event_stream.sql:141`) — keyed on the event's OWN
+    subject, not on the Objects it names. The narrowing therefore filters rows
+    AFTER the scope scan; it narrows the Python fold, not the read. Worth
+    saying plainly because the cheaper-sounding claim invites the next reader
+    to raise the single-row `LIMIT` or drop the predicate believing either is
+    an index win.
     """
     cur = _rp.scope_connection(conn, org_id)
     return _lifecycle_events(cur, org_id=org_id, graph_id=graph_id,

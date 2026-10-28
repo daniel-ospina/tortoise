@@ -720,7 +720,10 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     # that stopped at `node_from_row` would answer a connector-tracked Object
     # without the status a `rebuild_from_record` materializes, breaking this
     # function's own "the same map" contract. Narrowed to the events that can
-    # name THIS Object: a single-row read must not scan a tenant's history.
+    # name THIS Object: a single-row read folds only the events that could
+    # possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
+    # only index is keyed on the event's own subject, so the predicate filters
+    # after the scope scan (see `read_lifecycle_events`).
     target = node.props.get("name")
     if label in EVENT_STREAM_FOLDS and isinstance(target, str) and target:
         node = apply_event_stream_folds(
