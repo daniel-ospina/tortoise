@@ -460,9 +460,10 @@ class TestReadPath:
         the dense leg's (``LEXICAL_WEIGHT_MAX``), so the arm RE-RANKS within the
         pool rather than vaulting past the dense leg's whole list — that is the
         recorded production balance (``{"vector": 1.5}``, k=60, #1657) and
-        moving it is a measurement decision (#8486), not a lane's. So the
-        FUSED rank claim is "does not regress" (below), and the STRICT claim is
-        the one the arm actually makes: the target's LEXICAL rank.
+        moving it is a measurement decision (#8486), not a lane's. So BOTH
+        claims below are strict on this fixture — the fused POSITION and the
+        target's LEXICAL rank — and the re-measurement in the next paragraph is
+        why the fused one is strict again rather than "does not regress".
 
         Mutation: drop the ``raw_results["fts"] = _bm25_hits`` assignment (the
         lexical arm disabled) → the lexical score assertions below go red.
@@ -495,7 +496,9 @@ class TestReadPath:
         What stays STRICT is the arm's own mechanism: with the gate on the
         target carries the strongest lexical score (1.3863 vs 0.5754 for every
         topic doc) and therefore the best LEXICAL rank — asserted below, and it
-        is what the arm is for. The fused-rank claim is "does not regress".
+        is what the arm is for. The fused POSITION must clear strictly too
+        (measured 5/5 -> 3/5 at this head, asserted below): a ``<=`` there would
+        be satisfied by an arm that changes nothing.
         """
         sdk, target = _e2e_sdk()
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")

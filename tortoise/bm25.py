@@ -137,9 +137,13 @@ LEXICAL_WEIGHT_MAX = 1.0
 #: ``no`` / ``off`` disables it, and an unset, blank or GARBAGE value keeps the
 #: DEFAULT — a typo must never silently change which scorer a read uses.
 #:
-#: ⛔ ORDERING: enable is only correct ON TOP OF the arm's own tie fix (#10121,
-#: PR #10150 — ``bm25_rank`` ties oldest-first, so it truncates the NEWEST match
-#: at ``limit``). This PR must not merge before #10150.
+#: ⛔ ORDERING, now SATISFIED: enabling the arm was only correct ON TOP OF
+#: the arm's own tie fix — ``bm25_rank`` used to tie ``(-score, id)`` ASCENDING
+#: (oldest-first), which truncated the NEWEST match at ``limit``. #10121 / PR
+#: #10150 carries that fix and it is PRESENT in this tree (``bm25_rank`` sorts
+#: through ``search_engine.recency_tie_key``, newest-first, id last), so the
+#: default may be ON. Do not re-tie ``bm25_rank`` oldest-first without also
+#: reverting this default.
 BM25_DEFAULT_ENABLED = True
 
 
