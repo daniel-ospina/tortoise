@@ -1799,22 +1799,27 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  * classes are ranked BEFORE age — a **filed** entry's content is already on the
  * wire (and Pi's own session log still holds it locally), while an **unfiled**
  * entry is the only copy of a conversation the user never got into the graph.
- * Age alone inverted that priority exactly where the backlog was OLDER than the
- * successes, the shape a keyless window (`no TORTOISE_API_KEY`) or a saturated
- * backoff leaves behind (measured in #6388's 2026-10-18 comment: ~990 entries
- * frozen in backoff while newer sessions filed fine), so the cap reaped the
- * backlog it exists to deliver. Within a class the order is UNCHANGED (oldest
- * first), so a spool with nothing filed behaves exactly as before — and the cap
- * still bounds the disk either way: when every candidate is undelivered, the
- * oldest undelivered entry is reaped and the record says so. Mirrors
+ * Age alone inverts that priority whenever a MIXED spool holds a backlog older
+ * than its successes, which is the shape any partial drain leaves behind: a
+ * drain that files the newer sessions while older ones stay deferred (saturated
+ * backoff; a keyless window whose entries are only retried once a key appears)
+ * appends the successes ABOVE the backlog, and the cap then reaps the backlog it
+ * exists to deliver. Within a class the order is UNCHANGED (oldest first), so a
+ * spool with nothing filed behaves exactly as before — and the cap still bounds
+ * the disk either way: when every candidate is undelivered, the oldest
+ * undelivered entry is reaped and the record says so. Mirrors
  * `capture_spool.py::prune_spool` (the two legs share one directory).
  *
  * A quarantined turn log (`quarantineLog`) has no meta, so it is absent from the
  * meta scan and from `spoolEntryBytes`: its bytes are counted HERE and it is
- * evicted (oldest first, by mtime) before any live entry. Without this, the byte
- * ceiling stopped applying the moment a meta was quarantined and the spool could
- * grow past it without bound (#8531 review). The eviction is a real loss and is
- * recorded like any other bound eviction.
+ * evicted (oldest first, by mtime) before any live entry, filed or not. Without
+ * this, the byte ceiling stopped applying the moment a meta was quarantined and
+ * the spool could grow past it without bound (#8531 review). An orphan goes first
+ * because it is the SAFEST loss of the three: a corrupt meta moved it out of
+ * every scan, so no drain can file it and no reader can list it, while a live
+ * entry — filed or not — still has a surface that can deliver it. The eviction
+ * is still a real loss, and its record names it in the same `loss` vocabulary
+ * the live entries use (#6388).
  */
 export function pruneSpool(
   dir: string,
@@ -1841,8 +1846,12 @@ export function pruneSpool(
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
     orphans.reduce((sum, path) => sum + fileSize(path), 0);
-  // Quarantined logs go FIRST: they are already unreachable to every surface,
-  // while an entry can still be filed by the next drain.
+  // Quarantined logs go FIRST, ahead of even the class ordering below: an orphan
+  // is already unreachable to every surface (a corrupt meta moved it aside, so
+  // no drain can file it and no reader can list it), while a live entry — filed
+  // or not — still has a surface that can deliver it. It is therefore the SAFEST
+  // loss of all, and the record says so in the same `loss` vocabulary the live
+  // entries use (#6388).
   for (const orphan of orphans) {
     if (total <= bounds.maxTotalBytes) break;
     const size = fileSize(orphan);
@@ -1850,7 +1859,9 @@ export function pruneSpool(
       recordDiscard(dir, {
         session_id: `orphan:${basename(orphan)}`,
         reason: DISCARD_BYTES_EXCEEDED,
-        detail: `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}`,
+        detail:
+          `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}` +
+          "; evicted a quarantined log (UNREACHABLE, never filed: its meta was corrupt)",
       }),
     );
     try {

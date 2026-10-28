@@ -202,12 +202,12 @@ def test_the_count_bound_reaps_a_FILED_entry_before_an_UNFILED_one(tmp_path):
     The spool is a delivery queue, not an age-ordered cache: a filed entry's
     content is already on the wire (and the Pi/Claude session log still holds
     it locally), while an unfiled entry is the ONLY copy of a conversation the
-    user never got into the graph. Pure oldest-first inverted that priority
-    whenever the backlog was older than the successes — exactly the shape a
-    keyless window (`no TORTOISE_API_KEY`) or a saturated backoff leaves behind
-    (measured on the box in #6388's 2026-10-18 comment: ~990 entries frozen in
-    backoff while newer sessions filed fine), so the cap reaped the backlog it
-    was supposed to deliver.
+    user never got into the graph. Pure oldest-first inverts that priority in a
+    MIXED spool — one whose backlog is older than its successes, which any
+    partial drain produces: newer sessions file while older ones stay deferred
+    (saturated backoff; a keyless window retried once a key appears) — and the
+    cap then reaps the backlog it was supposed to deliver. This test builds
+    exactly that shape, which is the shape the fix is about.
 
     MUTATION THAT REDS THIS: rank by age alone (drop the filed-first class from
     `prune_spool`'s sort key) -> the UNFILED `backlog` entry is reaped and the
@@ -3030,8 +3030,15 @@ def test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling(tmp_p
     out = prune_spool(tmp_path, keep, Bounds(
         max_entries=1000, max_total_bytes=ceiling, max_entry_bytes=1 << 20))
     assert not orphan.exists(), "the orphan must be reaped under the byte ceiling"
-    assert any(d["reason"] == "spool_total_bytes_exceeded"
-               and d["session_id"].startswith("orphan:") for d in out), out
+    reaped = [d for d in out if d["session_id"].startswith("orphan:")]
+    assert reaped and reaped[0]["reason"] == "spool_total_bytes_exceeded", out
+    # #6388: the orphan record names its class too. It goes FIRST among the
+    # three classes (unreachable to every surface — a corrupt meta moved it out
+    # of every scan), so an operator must not have to infer that from the order.
+    assert "UNREACHABLE, never filed" in reaped[0]["detail"], (
+        "the ledger must say which class of loss a quarantined log is: "
+        "unreachable, not merely undelivered"
+    )
 
 
 def test_a_non_dict_terminal_marker_does_not_strand_the_entry(tmp_path):

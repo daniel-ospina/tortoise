@@ -422,9 +422,10 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     carried across turns, so a growing session is retried on the backoff clock
     rather than once per turn. That converts immediate loss into a BOUNDED,
     DEFERRED one: `SPOOL_MAX_ENTRIES` / `SPOOL_MAX_TOTAL_BYTES` still apply, and
-    `prune_spool` evicts oldest-first with a recorded reason, so an org that
-    stays over quota does eventually lose the oldest captures — visibly, on the
-    discard ledger, never silently. Retry is the safe direction here: the
+    `prune_spool` evicts with a recorded reason — the already-filed class first,
+    then oldest-first within a class — so an org that stays over quota does
+    eventually lose its oldest UNDELIVERED captures, visibly, on the discard
+    ledger, never silently. Retry is the safe direction here: the
     asymmetry is a bounded, recorded deferral versus irreversible unlink of the
     only copy.
 
@@ -1552,23 +1553,28 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     classes are ranked BEFORE age. A **filed** entry's content is already on the
     wire (and the harness's own session log still holds it locally), while an
     **unfiled** entry is the only copy of a conversation the user never got into
-    the graph. Ranking by age alone inverted that priority exactly where the
-    backlog was OLDER than the successes — the shape a keyless window (``no
-    TORTOISE_API_KEY``) or a saturated backoff leaves behind (measured in
-    #6388's 2026-10-18 comment: ~990 entries frozen in backoff while newer
-    sessions filed fine), so the cap reaped the very backlog it exists to
-    deliver. Within a class the order is UNCHANGED (oldest first), so a spool
-    with nothing filed behaves exactly as before, and the cap still bounds the
-    disk either way: when every candidate is undelivered, the oldest undelivered
-    entry is reaped and the record says so.
+    the graph. Ranking by age alone inverts that priority whenever a MIXED spool
+    holds a backlog older than its successes, which is the shape any partial
+    drain leaves behind: a drain that files the newer sessions while older ones
+    stay deferred (saturated backoff; a keyless window whose entries are only
+    retried once a key appears) appends the successes ABOVE the backlog, and the
+    cap then reaps the very backlog it exists to deliver. Within a class the
+    order is UNCHANGED (oldest first), so a spool with nothing filed behaves
+    exactly as before, and the cap still bounds the disk either way: when every
+    candidate is undelivered, the oldest undelivered entry is reaped and the
+    record says so.
 
     A quarantined turn log (``_quarantine_log``) has no meta, so it is absent
     from the meta scan and from ``_entry_bytes``: its bytes are counted HERE and
-    it is evicted (oldest first, by mtime) before any live entry. Without this,
-    the byte ceiling stopped applying the moment a meta was quarantined and the
-    spool could grow past it without bound — one full transcript per corrupt
-    meta, each up to ``max_entry_bytes`` (#8531 review). The eviction is a real
-    loss and is recorded like any other bound eviction.
+    it is evicted (oldest first, by mtime) before any live entry, filed or not.
+    Without this, the byte ceiling stopped applying the moment a meta was
+    quarantined and the spool could grow past it without bound — one full
+    transcript per corrupt meta, each up to ``max_entry_bytes`` (#8531 review).
+    An orphan goes first because it is the SAFEST loss of the three: a corrupt
+    meta moved it out of every scan, so no drain can file it and no reader can
+    list it, while a live entry — filed or not — still has a surface that can
+    deliver it. The eviction is still a real loss, and its record names it in
+    the same ``loss`` vocabulary the live entries use (#6388).
     """
     discards: list[dict] = []
     metas, _ = list_spool_metas(root)
@@ -1580,8 +1586,12 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     count = len(metas)
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
     total += sum(_file_size(path) for path in orphans)
-    # Quarantined logs go FIRST: they are already unreachable to every surface,
-    # while an entry can still be filed by the next drain.
+    # Quarantined logs go FIRST, ahead of even the class ordering below: an
+    # orphan is already unreachable to every surface (a corrupt meta moved it
+    # aside, so no drain can file it and no reader can list it), while a live
+    # entry — filed or not — still has a surface that can deliver it. It is
+    # therefore the SAFEST loss of all, and the record says so in the same
+    # `loss` vocabulary the live entries use (#6388).
     for orphan in orphans:
         if total <= bounds.max_total_bytes:
             break
@@ -1589,7 +1599,11 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         discards.append(record_discard(root, {
             "session_id": f"orphan:{orphan.name}",
             "reason": DISCARD_BYTES_EXCEEDED,
-            "detail": f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}",
+            "detail": (
+                f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
+                "; evicted a quarantined log (UNREACHABLE, never filed: its meta"
+                " was corrupt)"
+            ),
         }))
         with contextlib.suppress(OSError):
             orphan.unlink()

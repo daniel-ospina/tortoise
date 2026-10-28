@@ -1801,11 +1801,11 @@ test("the count bound reaps a FILED entry before an UNFILED one (#6388)", async 
   // The spool is a DELIVERY QUEUE, not an age-ordered cache: a filed entry's
   // content is already on the wire (and Pi's own session log still holds it),
   // while an unfiled entry is the ONLY copy of a conversation the user never got
-  // into the graph. Pure oldest-first inverted that priority whenever the
-  // backlog was older than the successes — exactly the shape a keyless window
-  // (`no TORTOISE_API_KEY`) or a saturated backoff leaves behind (measured in
-  // #6388's 2026-10-18 comment: ~990 entries frozen in backoff while newer
-  // sessions filed fine), so the cap reaped the backlog it exists to deliver.
+  // into the graph. Pure oldest-first inverts that priority in a MIXED spool —
+  // one whose backlog is older than its successes, which any partial drain
+  // produces: newer sessions file while older ones stay deferred (saturated
+  // backoff; a keyless window retried once a key appears) — and the cap then
+  // reaps the backlog it exists to deliver. This test builds exactly that shape.
   //
   // MUTATION THAT REDS THIS: rank by age alone (drop the filed-first class from
   // `pruneSpool`'s comparator) → the UNFILED `backlog` entry is reaped and the
@@ -1920,11 +1920,17 @@ test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisib
   const ceiling = spoolEntryBytes(spool, keep) + 1024;
   pruneSpool(spool, keep, { maxEntries: 1000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
   assert.equal(existsSync(orphan), false, "the orphan must be reaped under the byte ceiling");
+  const reaped = readDiscards(spool).filter((d) => d.session_id.startsWith("orphan:"));
   assert.ok(
-    readDiscards(spool).some(
-      (d) => d.reason === "spool_total_bytes_exceeded" && d.session_id.startsWith("orphan:"),
-    ),
+    reaped.some((d) => d.reason === "spool_total_bytes_exceeded"),
     "the eviction must be recorded",
+  );
+  // #6388: the orphan record names its class too. It goes FIRST among the three
+  // classes (unreachable to every surface — a corrupt meta moved it out of every
+  // scan), so an operator must not have to infer that from the order.
+  assert.ok(
+    reaped[0].detail.includes("UNREACHABLE, never filed"),
+    `the ledger must say which class of loss a quarantined log is: ${reaped[0].detail}`,
   );
 });
 
