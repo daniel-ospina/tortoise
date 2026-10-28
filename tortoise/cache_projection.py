@@ -1345,11 +1345,20 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     ``org_id`` this reader is about to filter on — one value, so the predicate
     and the policies cannot disagree — and refuses a connection whose role
     bypasses RLS, which a read-only door needs at least as much as a writer.
+
+    ``labels`` is DECLARED `Iterable`, so it is materialised ONCE here, before
+    anything iterates it (#10258 review, P2). The event-stream fold is gated on
+    membership in this set, and a generator caller — the canonical
+    `(l for l in …)` form — would have been drained by the node loop, leaving
+    the gate `False`, `lifecycle_events` empty, and every connector-tracked
+    Object back to the #10198 defect (an absent `status` reads LIVE) with no
+    raise, no log and no signal.
     """
+    labels_t = tuple(labels)
     nodes: list[RecordNode] = []
     relations: list[RecordRelation] = []
     cur = _rp.scope_connection(conn, org_id)
-    for label in labels:
+    for label in labels_t:
         table = NODE_TABLES[label]
         # #10017 R2: the tier is a COLUMN, not a reader's opinion. A turn row is
         # `record_only` — §9.1 keeps raw turns outside the graph — and the cache
@@ -1407,7 +1416,7 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     # already being read, and CARRIED on the view so a caller that re-projects
     # this view folds by the same events rather than by nothing.
     events: tuple[LifecycleEvent, ...] = ()
-    if "Object" in set(labels):
+    if "Object" in labels_t:
         events = _lifecycle_events(cur, org_id=org_id, graph_id=graph_id)
     return RecordView(nodes=apply_event_stream_folds(nodes, events),
                       relations=tuple(relations), lifecycle_events=events)

@@ -1465,6 +1465,47 @@ def test_a_nested_envelope_event_still_folds_the_lifecycle():
         conn, org_id="o", graph_id="g", target="issue-9") == ()
 
 
+def test_the_fold_survives_a_one_shot_label_iterable():
+    """`labels` is declared `Iterable`, so a GENERATOR must fold too (#10258).
+
+    The single-Object gate on the event-stream fold used to read `set(labels)`
+    AFTER the node loop had already drained the iterable. For the canonical
+    generator caller — `(label for label in …)` — that set was EMPTY, the gate
+    was `False`, and `lifecycle_events` came back `()`, so every
+    connector-tracked Object lost its `status` and `live._terminal_excluded`
+    read the ABSENT value as LIVE: exactly the #10198 defect this change
+    exists to remove, with no raise, no log and no signal.
+
+    Both production call sites pass a tuple, so this was latent rather than
+    live — but the parameter is declared `Iterable` and the failure is silent,
+    which is how it stays latent until it is not.
+    """
+    rows = {
+        "object": [{"id": "o-1", "name": "issue-1", "object_kind": "issue",
+                    "props": {}}],
+        "journal_event": [
+            {"seq": 1, "event_kind": "github.issue.open",
+             "object_name": "issue-1", "about_entities": None,
+             "about_entities_camel": None},
+            {"seq": 2, "event_kind": "github.issue.closed",
+             "object_name": "issue-1", "about_entities": None,
+             "about_entities_camel": None},
+        ],
+    }
+    tuple_view = cp.read_record_view(_FakeConn(rows), org_id="o", graph_id="g")
+    gen_view = cp.read_record_view(
+        _FakeConn(rows), org_id="o", graph_id="g",
+        labels=(label for label in cp.NODE_TABLES))
+    # The gate: the generator caller reads the SAME stream, not an empty one.
+    assert [e.seq for e in gen_view.lifecycle_events] == [1, 2], (
+        "the label iterable was consumed before the `Object` gate read it — "
+        "a generator caller folds NO events, silently")
+    # …and therefore the same status, on the same nodes.
+    assert tuple(gen_view.nodes) == tuple(tuple_view.nodes)
+    obj = next(n for n in gen_view.nodes if n.label == "Object")
+    assert obj.props["status"] == "completed"
+
+
 def test_both_about_entities_spellings_are_preferred_not_unioned():
     """The live fold PREFERS one spelling; the reader must not union them.
 
