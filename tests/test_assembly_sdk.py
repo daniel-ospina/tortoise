@@ -1421,5 +1421,3 @@ def test_ago_relative_ask_assembled_contract(sdk, monkeypatch):
     empty = run_ask_assembled(sdk, "what did I do 2 weeks ago?",
                               question_date=Q_DATE)
     assert empty.fired is False and empty.evidence == ""
-
-

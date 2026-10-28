@@ -302,7 +302,34 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
 #: Every way a cypher reaches the graph in this module. `ro_query` is the
 #: read-only verb `cypher_guard` wraps; matching only `query` would let a leg
 #: written against it slip past the census entirely (#10121 round-5 review).
-_QUERY_VERBS = frozenset({"query", "ro_query", "_query"})
+#: `profile` executes the statement (it returns a plan PLUS runs it) and
+#: `execute_command` can carry a raw `GRAPH.QUERY` (see
+#: `tortoise/projection/__init__.py::_HANDLE_MUTATING_VERBS`, which lists all six
+#: so "what is a query verb" cannot drift between readers). `explain` PLANS and
+#: never executes, so it is deliberately absent — it cannot return rows.
+_QUERY_VERBS = frozenset({"query", "ro_query", "_query", "profile",
+                          "execute_command"})
+
+#: Markers that make a read non-ranking BY ITS OWN SHAPE, so a missing ORDER BY
+#: is correct rather than a defect. Each is a property of the read, not a list of
+#: blessed call sites — which is why this cannot rot into a stale inventory.
+#:
+#: * ``IN $ids`` / ``IN $op_ids`` — an ID-ANCHORED batch read: the caller already
+#:   chose the rows, so the DB's row order is not a ranking of anything (its
+#:   callers index by id).
+#: * ``RETURN count(`` — an aggregate: one row comes back, nothing to rank.
+#: * ``{id: $`` — a single-row id lookup.
+#: * ``LIMIT 1`` — a single-row read by construction.
+#:
+#: A read with NONE of these and no ORDER BY is a leg returning rows in DB order
+#: — exactly the unordered leg #3019 found — and it FAILS this census.
+_ANCHORED_READ_MARKERS: tuple[str, ...] = (
+    "IN $ids",
+    "IN $op_ids",
+    "RETURN count(",
+    "{id: $",
+    "LIMIT 1",
+)
 
 
 def test_every_leg_query_carries_a_secondary_sort_key():
@@ -321,9 +348,14 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     line-splitting cannot hide a clause — and it counts what it found, so a
     census that sees nothing says so instead of passing.
 
-    FAIL VALUE: a leg with a bare primary key (e.g. ``ORDER BY hops ASC``) or a
-    hand-written second key (``... , n.id ASC``) — the first leaves the tie to DB
-    row order, the second re-introduces the oldest-first truncation #10121 fixed.
+    FAIL VALUE: a leg with a bare primary key (e.g. ``ORDER BY hops ASC``), a
+    hand-written second key (``... , n.id ASC``), or NO ordering at all — the
+    first leaves the tie to DB row order, the second re-introduces the
+    oldest-first truncation #10121 fixed, the third is the unordered-leg shape
+    #3019 found. The no-ordering arm is judged too (round-6 review): a read with
+    no ``ORDER BY`` must carry an id-anchor/aggregate marker from
+    ``_ANCHORED_READ_MARKERS`` or be declared in ``UNORDERED_ALLOWED``, so a leg
+    that omits ordering cannot pass silently.
     """
     import ast
 
@@ -388,8 +420,10 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     # INVERTED CHECK (#10121 review): the f-string scan above cannot see a leg
     # whose cypher is a plain string, a concatenation or ``.format(...)``. This
     # walks every ``.query(cypher, ...)`` call site instead and requires that any
-    # cypher containing ORDER BY also calls the shared tie — so a NEW leg is
-    # covered by construction, since it cannot reach the graph without a query.
+    # cypher containing ORDER BY also calls the shared tie, AND that a cypher
+    # WITHOUT one is an id-anchored/aggregate read or a declared exception — so a
+    # NEW leg is covered by construction, since it cannot reach the graph without
+    # a query.
     def _literal_text(node: ast.AST) -> str:
         return "".join(
             child.value for child in ast.walk(node)
@@ -511,10 +545,31 @@ def test_every_leg_query_carries_a_secondary_sort_key():
             "for cypher in epistemic_label_queries(template) — no ORDER BY",
     }
 
+    # Reads whose cypher carries NO literal text at all, so the census cannot
+    # read a clause out of them. Keyed by (enclosing function, first 40 chars of
+    # the literal text — "" when there is none) and deliberately a dict, for the
+    # same reason as DYNAMIC_ALLOWED: adding an entry is a visible act in review
+    # and the size assertion keeps the hole from growing unnoticed (#10121
+    # review round 6).
+    UNORDERED_ALLOWED = {
+        # ("_query_nodes", "") — the vector index branch. Its cypher is RETURNED
+        # by the nested `_sig_cypher(sig)` helper (two signatures, both wrapping
+        # `recency_key_expr('node')` as a COLUMN), so the text the census can see
+        # here is empty. The branch sorts in PYTHON, by the shared
+        # `recency_tie_key` (search_engine.py:2495), which is the two-branch
+        # agreement this PR exists for; the helper's own text is pinned by
+        # `tests/test_search_engine_gaps.py::TestRunVectorQuery` and by the
+        # ast census inside `test_vector_index_branch_ranks_by_the_shared_key`.
+        ("_query_nodes", ""):
+            "cypher returned by the nested _sig_cypher helper; ranked in PYTHON "
+            "by recency_tie_key — no ORDER BY by design",
+    }
+
     checked = 0
     wandering: list[str] = []
     unresolvable: list[str] = []
     duplicated: list[str] = []
+    anchored: list[str] = []
     seen_clauses: list[str] = []
     resolved_ids: set[int] = set()
     for node in ast.walk(tree):
@@ -563,6 +618,21 @@ def test_every_leg_query_carries_a_secondary_sort_key():
             resolved_ids.add(id(resolved))
         text = _literal_text(cypher)
         if "ORDER BY" not in text:
+            # A NO-ORDER-BY site is judged, never skipped (#10121 review round
+            # 6: the old `continue` here made this census blind to the exact
+            # shape #3019 found — a leg with no ``ORDER BY`` AT ALL — and to any
+            # clause whose ORDER BY arrived through an unresolved helper or a
+            # ``name + "..."`` concatenation, so the PR's "fails closed on a new
+            # leg" claim was not what the code did).
+            func_name = getattr(_scope_of(node.lineno), "name", "<module>")
+            if any(marker in text for marker in _ANCHORED_READ_MARKERS):
+                anchored.append(func_name)
+                continue
+            if (func_name, "" if not text.strip() else text.strip()[:40]) \
+                    not in UNORDERED_ALLOWED:
+                wandering.append(
+                    f"{func_name}: no ORDER BY and no id-anchor/aggregate marker: "
+                    f"{text.strip()[:100] or '<no literal text>'}")
             continue
         checked += 1
         seen_clauses.append(_literal_text(cypher).strip()[:120])
@@ -578,6 +648,12 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     assert not duplicated, (
         "two legs resolved to the SAME cypher assignment, so one of them was "
         f"never judged (#10121 review): {duplicated}")
+    assert anchored, (
+        "FIXTURE NOT REACHED: not one id-anchored/aggregate read was recognised, "
+        "so the no-ORDER-BY arm of this census judged nothing")
+    assert len(UNORDERED_ALLOWED) == 1, (
+        "the no-ORDER-BY allow-list grew — every ADDED entry is a read this "
+        f"census can no longer see: {UNORDERED_ALLOWED}")
     assert len(DYNAMIC_ALLOWED) == 1, (
         "the unresolvable-name allow-list grew — every entry is a leg the "
         f"census cannot see: {DYNAMIC_ALLOWED}")
@@ -585,8 +661,11 @@ def test_every_leg_query_carries_a_secondary_sort_key():
         "the census could not resolve these cypher variables in their own "
         f"function scope, so it cannot judge them: {unresolvable}")
     assert not wandering, (
-        "an ORDER BY reached the graph without the shared recency tie. This is "
+        "a read reached the graph either with an ORDER BY that lacks the shared "
+        "recency tie, or with NO ordering and no id-anchor/aggregate marker (a "
+        "leg returning rows in DB order — the shape #3019 found). This is also "
         "the shape the f-string scan cannot see (a plain string, a "
-        "concatenation, ``.format``) — the leg is either leaving its tie to DB "
-        f"row order or re-inventing the oldest-first key #10121 removed: {wandering}"
+        "concatenation, ``.format``, or a helper call) — the leg is either "
+        "leaving its tie to DB row order or re-inventing the oldest-first key "
+        f"#10121 removed: {wandering}"
     )

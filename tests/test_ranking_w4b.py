@@ -987,7 +987,7 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
         f"FIXTURE PREMISE BROKEN: the contested twin must sit at the 0 end of "
         f"the normalization span (it has {two_hot['similarity']}, calm has "
         f"{two_calm['similarity']}). The tie-break is recency-then-id DESC "
-        f"(#10121), so the mask order in ``_seed_twin_conflict`` decides which "
+        f"(＃10121), so the mint order in ``_seed_twin_conflict`` decides which "
         f"twin lands at 0 — the page still spans {{0,1}}, but this fixture no "
         f"longer measures the comment's 1.4286 requirement")
 
