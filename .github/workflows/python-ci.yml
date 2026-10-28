@@ -3684,9 +3684,151 @@ jobs:
         if: always()
         uses: ./.github/actions/postgres-teardown
 
+  # ── "DID THIS PR INTRODUCE A FAILURE?" (#9984) ──────────────────────────────
+  # The required check used to ask "does anything fail anywhere?". Because it is ONE
+  # check aggregating every shard, a single pre-existing trunk red red'd it for EVERY
+  # PR — measured 2026-10-25: main green in 26 of its 27 Python CI jobs, the one red
+  # (#9979) red'd all 11 open PRs including ones touching nothing near it, and the
+  # repo-wide merge rate went to zero for ~8 hours on idle machines. The rail already
+  # asks the right question and exempts a failure main itself is red for; this job asks
+  # the same question of the same tree, with the same code.
+  #
+  # IT IS A SEPARATE JOB, NOT A STEP ON THE AGGREGATE, for two structural reasons:
+  #   * the aggregate's whole design is that its `needs:`+LEGS table IS its claim, and
+  #     it carries NO checkout and NO tooling — a step that runs repo code there would
+  #     be the first, which is why its step list is digest-pinned by
+  #     tests/test_capstone_preregistration_9075.py (a step in that job can export
+  #     `BASH_ENV` and make the required check exit 0 over a red leg);
+  #   * the verdict needs a checkout of THIS repo and of a PINNED agent-infra, and
+  #     giving the aggregate those steps is exactly the surface that pin refuses.
+  # So the aggregate consumes this job as one more need, and treats ITS result as the
+  # one failure that can never be deferred (a verdict cannot ask itself).
+  #
+  # `needs:` MUST STAY EQUAL to the aggregate's DEFERRABLE_LEGS — the predicate can only
+  # adjudicate a leg it waited for. The equality is pinned in both directions by
+  # `tests/test_ci_new_failure_gate.py`, because a drift either excuses a leg the verdict
+  # never looked at (a false PASS on the required check) or waits for a leg it can never
+  # excuse (a no-op verdict).
+  ci-introduced-failure:
+    # `always()`: this must run when the legs FAILED — that is the only case it exists
+    # for. Without it the default `success()` would skip it on exactly the red runs.
+    if: always()
+    # EXACTLY the arms that produce a TEST failure set — the only class #9984 lets the
+    # predicate excuse. The gate's own deferrable set is this same list (pinned by
+    # tests/test_ci_new_failure_gate.py), so a leg cannot be excused by a verdict that
+    # never waited for it (which would pass a red leg), and a leg cannot be waited for
+    # and never excused (which would make the verdict a no-op).
+    #
+    # ⛔ NOT `manifest-integrity`: a job on the path to the test matrix must not depend
+    # on the drift gate, or a drift would SKIP the matrix instead of failing it
+    # (#2656, pinned by test_drift_gate_cannot_skip_the_test_matrix).
+    needs: [test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres]
+    runs-on: ubuntu-latest
+    # Bounded: this job feeds the REQUIRED aggregate, and it makes a handful of API
+    # reads. A stalled GitHub must not hold `python-ci-gate` pending for hours.
+    timeout-minutes: 15
+    # Reading the run's jobs and their step logs is the whole requirement. Explicit, so
+    # a repository-setting drift cannot silently widen the token this check uses.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The rail's predicate, at a PIN. Unpinned, this job would track agent-infra
+      # `main` and could go red on a change nobody in this repo reviewed — on the
+      # surface every PR's merge depends on.
+      - name: Check out the shared CI predicate (pinned, #9984)
+        uses: actions/checkout@v4
+        with:
+          repository: daniel-ospina/agent-infra
+          path: .ci-predicate
+          ref: 0b8cfa37ea73c6b6b47db10c6bc32921d3b2d904
+
+      # #9018: this job shells out to `gh`, which is simply ABSENT on the fallback
+      # pool's minimal non-login PATH — where it reads as a test failure and is not
+      # one. Provide the tool or fail NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+
+      # Only when a leg actually FAILED: on an all-green run there is nothing to
+      # adjudicate, and on a `push` run the module refuses by design (see below). A
+      # `cancelled` leg is not in this set — the aggregate reds on that class itself,
+      # and a leg that never ran has no failure set to compare.
+      #
+      # ⛔ THE CONDITION MUST NAME EVERY CLASS THE AGGREGATE DELEGATES (#9984 review).
+      # The aggregate delegates BOTH `failure` and `timed_out` for a deferrable leg, and
+      # `contains()` is EXACT-ELEMENT membership over the joined array — so
+      # `always() && contains(needs.*.result, 'failure')` left a `timed_out` delegation
+      # with NO adjudicator: this job still RUNS (it is `always()`), its predicate step
+      # is SKIPPED, every remaining step succeeds, and the aggregate reads that
+      # job-level `success` as a certification — the required check goes GREEN on a PR
+      # whose shard timed out, with no comparison against main at all. Joined to the
+      # aggregate's own delegable set by
+      # `tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_every_class_the_aggregate_delegates`.
+      - name: Was a leg's failure introduced by this PR? (#9984)
+        if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'timed_out')) }}
+        env:
+          # `GH_TOKEN` is what the jobs/logs API reads. `github.token` carries exactly
+          # the `actions: read` this job declares — no wider.
+          GH_TOKEN: ${{ github.token }}
+          # The event payload, passed as ENV rather than inline: the values are only
+          # meaningful on `pull_request`, and a `push` invocation is refused by the
+          # module on purpose (below).
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          # ⛔ THE RED LEGS, FROM THE `needs` THIS JOB ALREADY WAITED FOR (#9984 review).
+          # `--red-legs` is the ONLY switch that turns on the module's "a red leg with
+          # NO failing job in the listing is unobservable" net, and nothing passed it:
+          # with it empty, `failing_jobs()` scopes to EVERY job and a red leg whose
+          # failed job is absent from the listing (or ended on a conclusion this module
+          # does not map) left `failed == []`, so `evaluate` took its "nothing failed →
+          # CLEAN" branch and this job's `success` certified a delegated red leg. That
+          # is the precise false PASS the module's own docstring promises cannot happen
+          # ("a listing that names no failing job for a red leg — each is 2, never 0").
+          # Derived from `toJSON(needs)` rather than a hand-kept list, so there is no
+          # second copy of the leg table to drift — the objection the `--red-legs`
+          # docstring raises against a caller passing its own table.
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -u
+          # `scripts/` is a MACHINE-LOCAL pointer (#9475: gitignored, NOT tracked — a
+          # git symlink cannot hold `$AGENT_INFRA_PATH`), so the runner has no copy of
+          # the rail's `ci-failure-set.sh` / `ci_exemption.py`. They are checked out
+          # from the pin above because the gate must ask the RAIL's question with the
+          # RAIL's code: a second implementation of "NEW failure" here would drift from
+          # the one the merge path enforces, and the drift would be discovered at 3
+          # a.m. by a lane (#9984 constraint 7).
+          #
+          # ── THE DECLARED BOUNDARY: PR-only ────────────────────────────────
+          # On `push`, "no new failure relative to main" is VACUOUS (the tree IS main)
+          # and main's redness is the baseline every PR is compared against — so the
+          # module REFUSES a push invocation and exits 2. That fails this job, which
+          # reds the aggregate, which keeps the old push behaviour: any red leg still
+          # reds the required check on main. Deliberate — the post-merge alarm must not
+          # be the thing this predicate silences.
+          #
+          # FAIL CLOSED: every non-zero from the module fails this job, including its
+          # "unmeasurable" exit — an unreadable baseline, an unreadable job log, a
+          # missing checkout. A missing check is not a green check.
+          rc=0
+          RED_LEGS=$(python3 -c 'import json,os; needs=json.loads(os.environ["NEEDS_JSON"]); print(" ".join(k for k,v in sorted(needs.items()) if (v or {}).get("result") in ("failure","timed_out")))')
+          python3 .github/scripts/new-failure-gate.py evaluate \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --head "$PR_HEAD" \
+            --event "$EVENT_NAME" \
+            --red-legs "$RED_LEGS" \
+            --agent-infra .ci-predicate || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::#9984 the introduced-failure predicate did not certify this tree (exit $rc) — a NEW failure, or a failure set that could not be measured; merge blocked"
+            exit 1
+          fi
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard]
+    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard, ci-introduced-failure]
     runs-on: ubuntu-latest
     # #3239 shape, and the most expensive instance of it: this IS the required
     # check (`merge_conditions` in .mergify.yml), and it carried no cap at all.
@@ -3702,6 +3844,15 @@ jobs:
         run: |
           RESULTS="${{ join(needs.*.result, ' ') }}"
           echo "matrix results: $RESULTS"
+          # #9984: the arms a failed TEST can be excused on, and the job that decides
+          # it. Both are plain shell vars, deliberately: this script must stay
+          # renderable by its own harness in tests/test_ci_selection.py, which refuses
+          # a script carrying a GitHub expression it cannot substitute.
+          # ⛔ THE TWO MUST AGREE (pinned by tests/test_ci_new_failure_gate.py): the
+          # verdict job's `needs:` is exactly this list, so it waits for every arm it
+          # can excuse and excuses nothing it did not wait for.
+          PREDICATE_JOB="ci-introduced-failure"
+          DEFERRABLE_LEGS="test test-slow test-carve-out test-concurrency-falkor packs-compile test-track-b test-d14-hosted-api test-record-postgres"
 
           #    `skipped` is NOT a pass by default. A docs-only diff legitimately
           #    skips the matrix, so a leg the SELECTOR declined may skip — but a
@@ -3729,11 +3880,25 @@ jobs:
           #    un-named.
           #
           #    Fail-closed is preserved and made explicit per class:
-          #      failure          -> red, named
+          #      failure          -> named, then handed to the INTRODUCED-FAILURE
+          #                          PREDICATE (#9984); red unless every failing id is
+          #                          main's own, and red CLOSED on any unmeasurable
           #      cancelled        -> red, named (a cancelled leg certifies nothing)
           #      empty (#5219)    -> red, named (a missing leg is not a pass)
           #      skipped+selected -> red, named (a lost shard is not a pass)
           #      skipped+declined -> pass (the selector declined this leg)
+          #
+          #    WHY `failure` IS THE ONE CLASS THAT IS HANDED ON (#9984). The gate used
+          #    to ask "does anything fail anywhere?". Because it is ONE required check
+          #    aggregating every shard, a single pre-existing trunk red red'd it for
+          #    every PR in the repo — measured 2026-10-25: main green in 26 of its 27
+          #    jobs, the one red (#9979) red'd all 11 open PRs including ones touching
+          #    nothing near it, and the repo-wide merge rate went to zero for ~8 hours
+          #    on idle machines. The rail already asks the right question and exempts a
+          #    failure main itself has; this hands the same tree to the same code.
+          #    What is NOT exemptible is unchanged and checked FIRST: a leg that never
+          #    ran (cancelled / skipped-while-selected / no result) can never be
+          #    excused as "pre-existing", because it produced no failure set at all.
           LEGS_FILE="$(mktemp)"
           cat > "$LEGS_FILE" <<'LEGS'
           changes|${{ needs.changes.result }}|-
@@ -3748,6 +3913,7 @@ jobs:
           test-d14-hosted-api|${{ needs.test-d14-hosted-api.result }}|-
           test-record-postgres|${{ needs.test-record-postgres.result }}|-
           surface-guard|${{ needs.surface-guard.result }}|-
+          ci-introduced-failure|${{ needs.ci-introduced-failure.result }}|-
           LEGS
 
           # Fail closed by construction, and NAME the leg while doing it: every
@@ -3758,6 +3924,11 @@ jobs:
           # twice; the loop itself never skips a red row, so a duplicate cannot
           # mask one.
           FAILED_LEGS=""
+          # #9984: the legs whose only complaint is "something failed". They are named
+          # HERE (so an operator still sees which shard is red) and then adjudicated by
+          # the predicate below. They are NOT in FAILED_LEGS: a red shard whose every
+          # failing id is main's own is not this PR's problem.
+          RED_LEGS=""
           while IFS='|' read -r leg result selected; do
             if [ -z "$leg" ]; then
               continue
@@ -3782,6 +3953,24 @@ jobs:
                 echo "::error::leg '$leg' reported NO RESULT (empty) — the #5219 missing-leg shape is not a pass; merge blocked"
                 FAILED_LEGS="$FAILED_LEGS$leg "
                 ;;
+              failure|timed_out)
+                # #9984: a failed TEST arm is adjudicated by `ci-introduced-failure`,
+                # which asks the rail's question about this same tree. The deferrable set
+                # is `$DEFERRABLE_LEGS` and nothing else: a non-test gate (surface,
+                # manifest, workflow-lint, or the verdict job itself) can never be
+                # excused as "pre-existing", and the verdict job in particular must not
+                # be deferred — that would make the verdict ask itself.
+                case " $DEFERRABLE_LEGS " in
+                  *" $leg "*)
+                    echo "  $leg: reported '$result' (selector: selected='$selected') — delegated to the introduced-failure predicate (#9984)"
+                    RED_LEGS="$RED_LEGS$leg "
+                    ;;
+                  *)
+                    echo "::error::leg '$leg' reported '$result' (selector: selected='$selected') — not a test arm, so it is not delegable; merge blocked"
+                    FAILED_LEGS="$FAILED_LEGS$leg "
+                    ;;
+                esac
+                ;;
               *)
                 echo "::error::leg '$leg' reported '$result' (selector: selected='$selected') — merge blocked"
                 FAILED_LEGS="$FAILED_LEGS$leg "
@@ -3800,16 +3989,54 @@ jobs:
           fi
 
           # Defence in depth (#5219): the plain sweep over `needs.*.result` is
-          # identity-BLIND — it cannot say WHICH leg — so it is the last resort for
-          # a failing/cancelled result that reached `needs:` with no row at all.
+          # identity-BLIND — it cannot say WHICH leg — so it is the last resort for a
+          # failing/cancelled result that reached `needs:` with NO row at all.
           # The invariant itself is owned by `.github/scripts/check-required-set.py
           # ::check_gate_legs` (run inside `manifest-integrity`, whose failure the
           # loop above already reports by name) and by
           # `tests/test_required_set_sync.py` at test time; this is the narrowest
           # third layer, and the only one still reachable if that guard is itself
           # what drifted (pinned by tests/test_ci_selection.py).
-          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+          # ⛔ `cancelled` IS SWEPT UNCONDITIONALLY (#9984 review). It can never be
+          # delegated — the leg loop above reds on that class by name — so a
+          # `cancelled` result still in `$RESULTS` without a row is drift, and gating
+          # the WHOLE sweep on `RED_LEGS` being empty made a delegated `failure`
+          # elsewhere blind this layer to a leg that never ran. Measured pre-fix: a
+          # `cancelled` need whose row was deleted passed rc=0 as soon as one
+          # deferrable leg was delegated.
+          # ⛔ THE `failure` HALF IS GATED ON A COUNT, NOT ON `RED_LEGS` BEING EMPTY
+          # (#9984 review). `RED_LEGS` is non-empty whenever ANY deferrable leg is
+          # delegated — which is a different question from "did every `failure` in
+          # `$RESULTS` reach this loop as a row?". Gating on emptiness therefore
+          # blinded this layer in its OWN case: an un-rowed `failure` need, plus any
+          # OTHER delegated leg, took the sweep to rc=0 and the check printed
+          # "did not introduce it" over a leg the row table never looked at
+          # (measured: `extra=('failure',)` + `test=failure` → rc=0 pre-fix).
+          # Comparing counts closes that without re-redding the delegated class: the
+          # sweep fires exactly when more failure/timed_out results arrived than rows
+          # claim them, which is precisely "a result with no row".
+          # Both halves stay LITERAL — `failure|cancelled` is pinned as a line of code
+          # (#9240), so the literal survives here even though the gate moved.
+          RESULT_FAILS=$(printf '%s\n' $RESULTS | grep -cxE 'failure|timed_out' || true)
+          ROW_FAILS=$(awk -F'|' '$2 == "failure" || $2 == "timed_out" { n++ } END { print n+0 }' "$LEGS_FILE")
+          if echo "$RESULTS" | grep -qE 'cancelled' \
+             || { [ "$RESULT_FAILS" -gt "$ROW_FAILS" ] && echo "$RESULTS" | grep -qE 'failure|cancelled'; }; then
             echo "::error::a need reported failure-or-cancelled but no leg row named it — the leg table above has drifted from needs:; merge blocked"
+            rm -f "$LEGS_FILE"
             exit 1
           fi
-          echo "✅ every declared leg ran to success, or was declined by the selector"
+
+          # ── THE VERDICT (#9984) ─────────────────────────────────────────────
+          # A failed shard is no longer this check's problem on its own: it delegated
+          # to `ci-introduced-failure`, which asked the RAIL's question about the same
+          # tree (the same `ci_exemption.py decide` the merge path enforces). If that
+          # job did not SUCCEED, its own row above already put it in FAILED_LEGS and we
+          # never reach here — so arriving with RED_LEGS means every failed shard was
+          # certified as main's own pre-existing red.
+          rm -f "$LEGS_FILE"
+          if [ -n "$RED_LEGS" ]; then
+            RED_COUNT=$(printf '%s\n' $RED_LEGS | sort -u | wc -l | tr -d ' ')
+            echo "✅ $RED_COUNT leg(s) failed ($RED_LEGS), and $PREDICATE_JOB certified every failing id as main's own pre-existing red — this PR did not introduce it (#9984)"
+          else
+            echo "✅ every declared leg ran to success, or was declined by the selector"
+          fi
