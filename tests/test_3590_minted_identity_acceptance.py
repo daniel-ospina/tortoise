@@ -876,6 +876,63 @@ def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
     assert _status_of(proj, "Object", buried) == "superseded"
 
 
+def test_a_lifecycle_event_on_a_doubly_held_name_is_not_a_green_run(sdk):
+    """#3590 review, finding 1 (fail-OPEN): the THIRD arm of the exemption.
+
+    The two tests above pin the ends — no carrier at all (non-exempt refusal)
+    and terminal-only carriers (bounded no-op). The middle case was pinned
+    NOWHERE and it is the dangerous one: same-name coexistence is LEGAL (D2 /
+    #8864), so a lifecycle event whose declared ``object`` is held by TWO OR
+    MORE *live* entities can be written through the ordinary door
+    (``_register_referenced_entity`` returns early for a name any carrier
+    holds).
+
+    FAILS IF: the exemption is granted from the ANY-status probe
+    (``all_name_holder_ids``) instead of the LIVE count — measured at the head
+    this test was written for: ``mention=True`` for two live holders, so the
+    re-resolve recorded the EXEMPT ``unfolded-mention``, ``object_id`` stayed
+    ``None``, no status write happened, ``refused_events()`` was empty, and the
+    run was GREEN over a state-moving fold that moved nothing. The recorded
+    bound is explicit: "a fold that MUST MOVE an entity's state can never take
+    this exemption" (``identity-decision.md``).
+    """
+    from tortoise.projection import _replay_write_scope
+    from tortoise.projection.nonfolded import (
+        SHAPE_AMBIGUOUS_ENTITY_NAME,
+        collect_non_folded,
+        refused_events,
+    )
+
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Dup", _server_id="id-dup-live-a",
+                         is_episodic=False)
+    client.create_entity("object", "Dup", _server_id="id-dup-live-b",
+                         is_episodic=False)
+    assert sorted(_name_ids(proj, "Object", "Dup")) == [
+        "id-dup-live-a", "id-dup-live-b"], (
+        "fixture did not produce the legal two-LIVE-carrier state")
+
+    with _replay_write_scope(), collect_non_folded() as entries:
+        proj.apply({"type": "EventRecorded", "eventId": "ev-life-amb",
+                    "event": {"eventId": "ev-life-amb",
+                              "eventKind": "venture:disbursement",
+                              "object": "Dup"}})
+    shapes = [e.shape for e in entries]
+    assert SHAPE_AMBIGUOUS_ENTITY_NAME in shapes, (
+        "a lifecycle event whose declared target is held by 2+ LIVE entities "
+        "took the EXEMPT mention shape instead of the non-exempt identity "
+        f"miss: {shapes}")
+    assert refused_events(entries), (
+        "a state-moving fold miss over an ambiguous target FAILED to fail "
+        f"the run: {[str(e) for e in entries]}")
+    # Nothing was moved: the ambiguity is not silently resolved by picking one.
+    for oid in ("id-dup-live-a", "id-dup-live-b"):
+        assert _status_of(proj, "Object", oid) != "in_progress", (
+            "the fold MOVED one carrier's state out of an ambiguous target: "
+            f"{oid}")
+
+
 def test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions(
         sdk, tmp_path: Path):
     """#3590 round-5 review P1-3: the ONE door D9 did not reach is recorded.

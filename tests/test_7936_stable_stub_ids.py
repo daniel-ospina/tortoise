@@ -1,7 +1,12 @@
-"""#7936 — the name-stub id must be a pure function of the journal.
+"""#7936 — the entity view must be a pure function of the journal.
 
-`_event_plain_merge` (`tortoise/projection/entities.py`) mints the `:Object` /
-`:Subject` name stubs an `EventRecorded` implies with a **random** `ulid()`.
+⚠️ The premise below is the PRE-#3590 one, kept as the record of what this
+file was written to catch; the ``_STUB_TARGETS`` matrix further down states
+what replaced it (the projection mints NOTHING — D9 — so replay is stable
+because there is no fold-time id to be random).
+
+`_event_plain_merge` (`tortoise/projection/entities.py`) minted the `:Object`
+/ `:Subject` name stubs an `EventRecorded` implies with a **random** `ulid()`.
 The graph fold is MERGE-by-name, so the *node* is stable — but its `id`
 property is not: replaying ONE journal twice mints a different stub id each
 time.
@@ -17,13 +22,13 @@ built rather than of the JOURNAL — so every legitimate `rebuild_all` would rea
 `action` sends the operator hunting an unjournalled writer that does not
 exist. The issue's own last comment records this measurement.
 
-The fix is that the stub id is the SAME identity the canonical entity path
-already mints — `tortoise.ids.entity_name_id(label, name)` (the helper
-`tortoise/sdk.py` has carried since #452/#1315, here promoted to the neutral
-`tortoise/ids.py` so the fold can read it without importing the SDK). It is
-deterministic, so the entity view becomes a pure function of the journal; and
-it EQUALS the id a generic `ObjectRegistered`/`SubjectAdded` for that name
-carries, so the canonical registration is a no-op rather than a re-key.
+The fix #7936 landed was that the stub id was made the SAME identity the
+canonical entity path already minted — `tortoise.ids.entity_name_id(label,
+name)`, deterministic, so the entity view was a pure function of the journal.
+⛔ #3590 then RETIRED that id entirely (an id derived from a name is not an
+identity, R1) and the mint with it (D9): the property this file pins survives
+— the view must not move across replays of one journal — while the mechanism
+that produced it is gone, which is why the matrix below asserts the INVERSE.
 
 #1155-P1 is preserved unchanged and is NOT about the randomness: the ruling is
 that the stub MERGE writes `id` **ON CREATE only**, so a late stub cannot
@@ -159,22 +164,16 @@ def test_the_graph_entity_view_is_a_pure_function_of_the_journal(
         sdk.close()
 
 
-@pytest.mark.parametrize("label,name", _STUB_TARGETS)
-def test_a_stub_carries_the_canonical_entity_name_id(
-        tmp_path: Path, label: str, name: str):
-    """The stub id IS the id the canonical entity path mints for that name.
-
-    Owning one identity is what makes the later generic registration a no-op
-    (rather than a re-key), and it is the shape `_check_refs` already reserves
-    for entity ids.
-    """
-    sdk, events = _journal(tmp_path, _STUB_EVENT)
-    try:
-        _rebuild(sdk, events)
-        ids = _stub_ids(sdk)
-        assert ids[(label, name)] == node_id(sdk, label, name), ids
-    finally:
-        sdk.close()
+# ⛔ #3590 DELETED `test_a_stub_carries_the_canonical_entity_name_id` here.
+# It asserted `ids[(label, name)] == node_id(sdk, label, name)` — i.e. that a
+# replayed mention MINTED a node whose id is the name-derived canonical one.
+# The file's own rewritten premise three tests above states the inverse (D9:
+# the projection is not the minter), so the two could never both hold: the
+# migrated matrix takes the `(label, name) not in ids` branch and this sibling
+# raised `KeyError` on all three parameters (`_stub_ids` returns only nodes
+# that EXIST). Applying the recorded decision rather than a compromise: a
+# property that can only pin a retired mint is deleted, and the inverse matrix
+# above is the single statement of what the fold does now.
 
 
 def test_a_later_canonical_id_still_wins_over_the_stub(tmp_path: Path):
