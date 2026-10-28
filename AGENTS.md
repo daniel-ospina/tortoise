@@ -14,13 +14,13 @@
 > uv run python tools/link_agent_infra_scripts.py           # create/repair scripts/ -> $AGENT_INFRA_PATH/scripts
 > uv run python tools/link_agent_infra_scripts.py --check   # assert it (exit 0 = resolves, 1 = missing/dangling/wrong target, 2 = no agent-infra checkout)
 > uv run python tools/link_agent_infra_scripts.py --pin-check  # assert the CHECKOUT is the pinned tree (exit 0 = at/carries the pin or no pin recorded, 1 = drift, 2 = cannot verify)
+> ```
 >
 > `--check` answers "does the pointer resolve"; `--pin-check` answers "is the tree behind it the
 > one this box is pinned to" (`$HARNESS_PIN` / `~/.pi/agent/state/HARNESS-PIN`). The second
 > question is the one #10114 cost 18–25 PRs across three outages to learn to ask: a correct link
 > into a checkout older than the pin read as a healthy setup. `--check` now prints that drift as a
 > `!` note (its exit code is unchanged — the link IS correct), and `--pin-check` makes it a verdict.
-> ```
 
 ---
 

@@ -878,10 +878,18 @@ class TestPinAgreement:
     def test_pin_check_never_touches_the_pointer(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:
-        """The assertion mode must not create a link as a side effect of being asked."""
+        """The assertion mode must not create a link as a side effect of being asked.
+
+        The verdict is asserted FIRST: a bare negative is satisfied by any early exit — argparse
+        rejecting an unknown flag on the pre-fix tool, a ``ConfigError``, a crash in ``pin_state``
+        — so without it the test cannot tell "the assertion mode ran and changed nothing" from
+        "the tool never ran".
+        """
         pin = git_commit(git_infra, "the pinned commit")
         env = self._env(self._home(tmp_path, pin))
-        self._pin_check(repo, git_infra, env)
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: ok" in result.stdout, result.stdout
         assert not os.path.lexists(repo / "scripts"), (
             "--pin-check materialised the pointer; an assertion mode must change nothing"
         )
