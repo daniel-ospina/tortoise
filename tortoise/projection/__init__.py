@@ -12099,14 +12099,28 @@ class FalkorProjection(
             # REFUSAL only, and for the refusal the JOURNAL-END key is the
             # right predicate: `rebuild_all` does fold it, so refusing here
             # would be a false refusal.
+            #
+            # ⛔ #3590: `_survives` reads the ID limb ONLY. Both surviving
+            # halves used to suppress the refusal, which was correct while the
+            # fold had a name branch (`MATCH (o:Object {name:$name})`) — a
+            # surviving NAME then really was a target `rebuild_all` would fold.
+            # That branch is RETIRED: `_fold_object_superseded` now issues
+            # `MATCH (o:Object {id:$id})` and nothing else, so a name-only
+            # record misses on EVERY engine, including `rebuild_all`'s sweep.
+            # Counting the name as "the sweep will fold it" made the three
+            # engines disagree on ONE journal — measured on
+            # `[ObjectRegistered(obj-5285-a, TERM), ObjectSuperseded(name=TERM)
+            # ×2]`: `rebuild_all` raised `NonFoldedEventsError`
+            # (`object-superseded-miss`, the name WAS established) while
+            # `rebuild(log)` and `recover_from_log` finished GREEN with the
+            # Object still `live`. R8 requires one journal → one disposition.
+            # A surviving name is no longer evidence of anything: the record
+            # carries no address the fold can use.
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0 and journal_object_surviving is not None:
-                _cids, _cnames = journal_object_surviving
+                _cids, _ = journal_object_surviving
                 _oid, _oname = ev.get("id"), ev.get("name")
-                _survives = (
-                    (isinstance(_oid, str) and _oid in _cids)
-                    or (isinstance(_oname, str) and bool(_oname)
-                        and _oname in _cnames))
+                _survives = isinstance(_oid, str) and _oid in _cids
                 _deleted = (isinstance(_oid, str)
                             and journal_object_deleted is not None
                             and _oid in journal_object_deleted)

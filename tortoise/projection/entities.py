@@ -4168,6 +4168,18 @@ class _EntityHandlers:
         = no Object matched (missing Object / stale id / no id+name
         supplied), distinct from a successful fold without a separate
         existence pre-query.
+
+        #3590 RETIRED the id→name fallback: the fold addresses the target's ID
+        only. A legacy/stale id that matches nothing is NOT re-resolved by name
+        (under same-name coexistence a name-keyed fold supersedes a DIFFERENT
+        incarnation — #3573's burial class), and an id-less record is
+        unaddressable. Neither arm fabricates an address here: the miss is
+        recorded by ONE shared classifier — ``classify_terminalizer_miss``
+        driven by ``_supersede_name_unregistered`` — which exempts the bounded
+        ``object-superseded-unregistered`` case (D2, adopted on #3590: the
+        journal established NEITHER limb, so live and replay agree by
+        construction) and refuses ``object-superseded-miss`` whenever the name
+        WAS established (a reachable target was genuinely missed).
         """
         oid = ev.get("id")
         name = ev.get("name")
@@ -4235,23 +4247,19 @@ class _EntityHandlers:
             # DIFFERENT incarnation (#3573's burial class). It also forced
             # `_update_entity` to WITHHOLD rename records (#3377/#4769): a
             # journaled rename moves the name before this fold's deferred sweep
-            # runs, so the fallback stopped matching. An id-less supersede
-            # record is unaddressable — record it and fold nothing.
-            from tortoise.projection.nonfolded import (
-                SHAPE_UNREGISTERED_REFERENCE,
-                record_non_folded,
-            )
-            # ``nonfolded.record_non_folded`` takes ``(shape, **fields)`` where
-            # the fields are ``NonFoldedEvent``'s own — ``label``/``candidates``/
-            # ``detail``. There is a SECOND ``record_non_folded`` with a different
-            # signature (``entity_identity``'s ``(label, name, candidate_ids,
-            # shape=)``); passing this one ``name=``/``ids=``/``context=`` raises
-            # ``TypeError`` INSIDE the fold — i.e. after a rebuild has already
-            # wiped the graph, the fail-closed path crashes instead of recording.
-            record_non_folded(SHAPE_UNREGISTERED_REFERENCE, label="Object",
-                              candidates=(),
-                              detail=f"name={name!r} context=ObjectSuperseded "
-                                     "without an id")
+            # runs, so the fallback stopped matching.
+            # ⛔ Fold NOTHING here and record NOTHING here: the miss is
+            # classified ONE level up, by the same predicate the sweep and
+            # `check_consistency` use (`classify_terminalizer_miss` +
+            # `_supersede_name_unregistered`). Recording a non-exempt
+            # `unregistered-reference` at this site — an earlier draft of this
+            # branch did — refuses a journal the recorded D2 exemption covers
+            # (`object-superseded-unregistered`: the journal established
+            # NEITHER limb, so live and replay agree by construction) and that
+            # `rebuild()` folds, i.e. one journal, two engines, opposite
+            # verdicts. The classifier keeps the refusal where it belongs: a
+            # name the journal DID establish still records the non-exempt
+            # `object-superseded-miss`.
             return (0, 0)
         result = self.g.query(
             "MATCH (o:Object {id:$id}) " + live,
@@ -4987,11 +4995,32 @@ class _EntityHandlers:
         #     the tree that minted the ghost.
         if (name and object_is_entity and not object_id and not matched_any
                 and (declared or builtin_status is not None)):
-            from tortoise.entity_identity import all_name_holder_ids
+            # ⛔ The exemption is decided by the LIVE count, not by "any
+            # holder exists" (#3590 review, finding 1 — fail-open).
+            # `all_name_holder_ids` is ANY-status, so `mention=bool(_held)` was
+            # TRUE for a name held by TWO OR MORE LIVE carriers — the exact
+            # case the recorded bound forbids taking the exemption on
+            # (`identity-decision.md`: "a fold that must MOVE an entity's state
+            # can never take this exemption"). It left a lifecycle event that
+            # moved NOTHING behind a green run: `object_id` stayed None, no
+            # target was built, no `status_fold_unapplied` fired, and the only
+            # record was the EXEMPT `unfolded-mention`.
+            # So `mention=True` — the bounded, non-fatal NO-OP — is granted
+            # ONLY to the terminal-only arm (carriers exist, none live: the
+            # entity IS registered, this fold may not resurrect it, R5). With
+            # any LIVE holder the re-resolve is NON-exempt and records the
+            # identity miss (`ambiguous-entity-name` for 2+, or
+            # `unregistered-reference` for a live-but-id-less carrier), which
+            # fails the run.
+            from tortoise.entity_identity import (
+                all_name_holder_ids,
+                live_name_holder_ids,
+            )
             _held = all_name_holder_ids(self.g, "Object", name)
-            object_id = resolve_fold_name(self.g, "Object", name,
-                                         context="status fold object",
-                                         mention=bool(_held))
+            _live_holders = live_name_holder_ids(self.g, "Object", name)
+            object_id = resolve_fold_name(
+                self.g, "Object", name, context="status fold object",
+                mention=bool(_held) and not _live_holders)
         if builtin_status is not None and object_id:
             # Guarded on the RESOLVED ID, not on `name` (#3590). A name is not an
             # identity any more, so a name-keyed write here would move EVERY
