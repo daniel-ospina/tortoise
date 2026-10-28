@@ -348,11 +348,12 @@ UNBACKED_REASON = {
 #
 # beta's "### Removed" row filed `promote_point`, `set_point_baseline`, `list_drafts` and
 # `quarantine_batch` as *reachable* without NAMING a destination, so they rendered as an
-# open finding. Three of the project's own docs
+# open finding. `list_drafts` is now DELETED (#4282), so the record carries the remaining
+# three. Three of the project's own docs
 # disagreed about the fold:
 #   * `canonical-mcp-tools.md` row 17 (owner-approved 2026-09-18): `revise_knowledge`
 #     ABSORBS `promote_point` and `set_point_baseline`;
-#   * `beta-sdk-surface.md` (approved 2026-09-21): all four under "### Removed", no
+#   * `beta-sdk-surface.md` (approved 2026-09-21): all of them under "### Removed", no
 #     destination — and it SPLIT `revise_knowledge` into `update_knowledge` +
 #     `supersede_knowledge`, so the approved absorber's NAME no longer exists;
 #   * `bridge-table.md` (generated): `refresh_confidence`, which `sdk-rename-table.md`
@@ -361,9 +362,12 @@ UNBACKED_REASON = {
 # The convergent shape (lifecycle/confidence state as a FIELD on the general update,
 # selected by a filter on the general list) agrees with the owner's recorded ruling that
 # "retract is a temporal FIELD on update, not a separate verb". Each entry carries its
-# AUTHORITY, because two of the four rest on an owner-ruled absorption and two only on
-# beta's own row clause — that difference is exactly what decides whether the item is
-# still genuinely owner-open.
+# AUTHORITY, and `C6_MCP_BACKED` DECLARES which of them rest on the owner-ruled
+# absorption rather than only on beta's own row clause — that difference is exactly what
+# decides whether the item is still genuinely owner-open. It is declared rather than
+# inferred from the AUTHORITY prose (which is authored and rewordable) and rather than
+# typed into the rendered count (which is how a deletion left the sentence claiming four
+# sources for three rows).
 # ─────────────────────────────────────────────────────────────────────
 C6_FOLD: dict[str, tuple[str, str]] = {
     "promote_point": (
@@ -382,6 +386,11 @@ C6_FOLD: dict[str, tuple[str, str]] = {
         "a FIELD",
     ),
 }
+
+#: The C6 members whose AUTHORITY is the owner-approved MCP list's own absorption, as
+#: opposed to only beta's row clause. Declared so the rendered split cannot drift from
+#: the record; `_validate_rows` refuses a name that is no longer a fold row.
+C6_MCP_BACKED: tuple[str, ...] = ("promote_point", "set_point_baseline")
 
 # ─────────────────────────────────────────────────────────────────────
 # CITATIONS. A citation carries an ANCHOR that LOCATES a REGION of the named doc; the
@@ -1517,6 +1526,10 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
         errs.append(f"STALE BRIDGE DETERMINATION: {m} no longer diverges from "
                     f"{BRIDGE_DOC.name} — remove it")
 
+    for name in sorted(set(C6_MCP_BACKED) - set(C6_FOLD)):
+        errs.append(f"C6 AUTHORITY STALE: {name} is declared MCP-backed but is not a C6 "
+                    f"fold row")
+
     # 10. C6's fold record must agree with Part A. A record that drifted from the table
     #     it records is worse than none: it would claim a destination the surface does
     #     not carry.
@@ -1822,6 +1835,11 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
             + ", ".join(f"`{g}`" for g in empty_groups) + ".",
         ]
 
+    # The split is ARITHMETIC over C6_FOLD and its DECLARED authority partition, not a
+    # typed number: `list_drafts` was deleted by #4282, and the old hard-coded
+    # "two … two" then claimed four authority sources for three rows.
+    _c6_on_mcp = sum(1 for name in C6_FOLD if name in C6_MCP_BACKED)
+
     out += [
         "",
         "### C6 — the lifecycle/confidence fold (the former `CONTESTED` rows)",
@@ -1835,8 +1853,10 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "the convergent shape — lifecycle/confidence **state as a field** on the general",
         "update, selected by a **filter** on the general list — and it agrees with the",
         "owner's recorded ruling that retraction “is a temporal FIELD on update, not a",
-        "separate verb”. Each row names its AUTHORITY: two rest on the owner-approved MCP",
-        "list's own absorption, two only on beta's row clause — which is what decides",
+        "separate verb”. Each row names its AUTHORITY: "
+        f"{_c6_on_mcp} rest on the owner-approved MCP",
+        f"list's own absorption, {len(C6_FOLD) - _c6_on_mcp} only on beta's row clause "
+        "— which is what decides",
         "whether the item is still genuinely owner-open.",
         "",
         "| Method | Destination | Authority |",
@@ -1889,6 +1909,7 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "```",
         "",
     ]
+
     return "\n".join(out)
 
 

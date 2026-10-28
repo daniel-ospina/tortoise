@@ -1,7 +1,8 @@
 """#3664 — capture attaches the Session / turns / claims to entities, durably.
 
-The defect: ``TortoiseSDK.capture_session`` (the SDK write path) never ran the
-#1727 Task-12 entity-linking pass that ``hosted_api._capture_session_impl``
+The defect: ``TortoiseSDK.capture_session`` (the SDK write path, since deleted by
+#4282) never ran the #1727 Task-12 entity-linking pass that
+``hosted_api._capture_session_impl``
 has always run — so a self-hosted capture landed with no
 ``(Session)-[:aboutObject]->(Object)`` / ``(turn Point)-[:aboutObject]->``
 (Object)`` edge. And the edges that *were* written (the extractor's claim →

@@ -1,7 +1,8 @@
 """#3551 — the shared ``_write_session_and_turns`` primitive.
 
 Behaviour-preserving extraction: this file proves the two server capture
-writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK.capture_session``)
+writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK.capture_session``
+— the SDK door was deleted by #4282, so only W1 remains to exercise)
 each delegate the ``:Session`` MERGE / turn store to ONE primitive, and that the
 extraction did not change a byte of what either lane writes.
 
