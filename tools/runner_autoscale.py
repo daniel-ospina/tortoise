@@ -24,8 +24,10 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   it up as a fallback. It does NOT reverse the parts the owner did not reopen: the fallback
   LABEL stays gate-following (see `resolve_labels`), and nothing here relabels, removes, or
   re-ranks an existing runner -- with ONE exception, a version-pinned hosted label
-  (`VERSION_PINNED_HOSTED_LABEL`), which re-registration DROPS so this pool can never hold a pin
-  that four observer jobs depend on to escape it (see `_preserve_labels`).
+  (`VERSION_PINNED_HOSTED_LABEL`), which re-registration DROPS, so a pin attached out of band cannot
+  survive the next repair. The invariant stays OBSERVED, not enforced: nothing reads the LIVE label
+  set (`docs/ops/ci-runner-x64.md:67`), so re-measure it after any runner is registered (see
+  `_preserve_labels`).
 
 THE CEILING IS A PREDICATE, NOT A NUMBER
     ceiling = min(core_ceiling, runners_live + headroom_by_memory)

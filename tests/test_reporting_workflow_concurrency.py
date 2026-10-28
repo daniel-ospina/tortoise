@@ -4381,8 +4381,12 @@ def test_a_workflow_edit_keeps_its_steps() -> None:
 
     So the pin above needs a companion that answers the question the pin cannot:
     is the workflow still a workflow? Cheap invariants, checked on the four
-    observers (which is where the splice happened), not on all 40 files — a
-    step-count floor and the presence of the keys every job in this repo needs.
+    observers (which is where the splice happened), not on all 39 workflow files
+    — a step-count floor, the payload step by name, and the keys all four
+    observers carry (job-level ``timeout-minutes`` is required of "python-ci.yml"'s
+    jobs and of jobs emitting a required merge context
+    (``tests/test_ci_selection.py:6561``), NOT repo-wide: 35 of the tree's 88 jobs
+    have none).
     """
     required_job_keys = {"runs-on", "timeout-minutes", "steps"}
     for name, job_id in FLEET_OBSERVER_WORKFLOWS.items():
