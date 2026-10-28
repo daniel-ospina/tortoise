@@ -164,18 +164,69 @@ _tortoise_candidate_python() {
 # is no `.venv` beneath it — the venv that OWNS the tree is the one marked by
 # `pyvenv.cfg`, found by walking up (bounded), the same way the seams' own wheel
 # probe does (#2385).
+# The interpreter this seam would RUN the module dir "$1" with, or nothing when
+# there is none. THIS is the precedence: `_tortoise_dir_runnable` accepts a
+# candidate exactly when something can run it, and the seam's own resolution
+# takes its interpreter from HERE — so ACCEPTANCE and EXECUTION cannot disagree.
+# They did (#4848 review): the predicate blessed a wheel tree through the
+# `pyvenv.cfg` walk-up and an active `$VIRTUAL_ENV` while the resolution
+# ladders knew neither, so a candidate the guard had just called RUNNABLE was
+# then refused as un-runnable — or, in the codex/cursor seams, crashed at an
+# unset `PYTHON_BIN` BEFORE the refusal could record its breadcrumb. One
+# predicate, one answer.
+_tortoise_dir_python() {
+  local dir="${1:-}" probe depth found
+  if [ -n "${PYTHON_BIN:-}" ]; then
+    printf '%s\n' "$PYTHON_BIN"
+    return 0
+  fi
+  if [ -n "$dir" ] && _tortoise_py_qualifies "$dir/.venv/bin/python"; then
+    printf '%s\n' "$dir/.venv/bin/python"
+    return 0
+  fi
+  probe="$dir"
+  depth=0
+  while [ "$depth" -lt 5 ]; do
+    if [ -z "$probe" ] || [ "$probe" = "/" ]; then
+      break
+    fi
+    if [ -f "$probe/pyvenv.cfg" ]; then
+      if _tortoise_py_qualifies "$probe/bin/python"; then
+        printf '%s\n' "$probe/bin/python"
+        return 0
+      fi
+      break
+    fi
+    probe="${probe%/*}"
+    depth=$((depth + 1))
+  done
+  if [ -n "${VIRTUAL_ENV:-}" ] && _tortoise_py_qualifies "$VIRTUAL_ENV/bin/python"; then
+    printf '%s\n' "$VIRTUAL_ENV/bin/python"
+    return 0
+  fi
+  found="$(command -v python3 2>/dev/null || true)"
+  if _tortoise_py_qualifies "$found"; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  return 1
+}
+
+# 0 when this seam can actually RUN the checkout at "$1". Holding `tortoise/`
+# is not that (#4848): the tree must offer an entry point this guard accepts. A
+# WHEEL install resolves a module dir INSIDE a venv's site-packages, where there
+# is no `.venv` beneath it — the venv that OWNS the tree is the one marked by
+# `pyvenv.cfg`, found by walking up (bounded), the same way the seams' own wheel
+# probe does (#2385). The console-script legs stay here because a seam that
+# resolves `TORTOISE_BIN` runs the SCRIPT, not an interpreter; every interpreter
+# leg lives in `_tortoise_dir_python` alone, so acceptance and execution share
+# one answer instead of two that can drift (#4848 review).
 _tortoise_dir_runnable() {
   local dir="${1:-}" probe depth
   if [ -z "$dir" ]; then
     return 1
   fi
-  if [ -n "${PYTHON_BIN:-}" ]; then
-    return 0
-  fi
   if _tortoise_bin_qualifies "$dir/.venv/bin/tortoise"; then
-    return 0
-  fi
-  if _tortoise_py_qualifies "$dir/.venv/bin/python"; then
     return 0
   fi
   probe="$dir"
@@ -188,18 +239,43 @@ _tortoise_dir_runnable() {
       if _tortoise_bin_qualifies "$probe/bin/tortoise"; then
         return 0
       fi
-      if _tortoise_py_qualifies "$probe/bin/python"; then
-        return 0
-      fi
       break
     fi
     probe="${probe%/*}"
     depth=$((depth + 1))
   done
-  if [ -n "${VIRTUAL_ENV:-}" ] && _tortoise_py_qualifies "$VIRTUAL_ENV/bin/python"; then
-    return 0
-  fi
-  _tortoise_py_qualifies "$(command -v python3 2>/dev/null || true)"
+  _tortoise_dir_python "$dir" >/dev/null 2>&1
+}
+
+# JSON-escape "$1" for a breadcrumb `detail`/`harness` field. A capture error is
+# arbitrary server text and DOES contain double quotes (the 504 body is
+# `{"detail":"…"}`), and #4848 splices FILESYSTEM PATHS into the same field — a
+# backslash (legal on macOS/Linux) or a quote turns the record into invalid
+# JSON. That is not cosmetic: `session verify` cannot tell an unparseable
+# breadcrumb from NO breadcrumb (`session_verify.py` returns None on ValueError),
+# so an inert install would report as PROVEN — the #4314 inversion this file
+# exists to prevent. Order matters: backslash FIRST, then the quote, then the
+# control characters (each insertion adds its own backslash, so escaping the
+# backslash last would double-escape it). The C0 set matters for more than
+# cosmetics: `sessions import` ALREADY writes this same file with `json.dumps`
+# on its own failure branches, so an unescaped tab or CR here would REPLACE a
+# valid breadcrumb with an unparseable one and destroy the evidence this change
+# exists to preserve (#4714). BS and FF use their JSON escapes rather than being
+# dropped — escaping is lossless, and a discarded byte is evidence lost. PURE
+# SHELL: this must run where python3 does not exist, which is precisely the
+# branch it reports on.
+_tortoise_json_escape() {
+  local esc="${1:-}"
+  esc="${esc//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
+  esc="${esc//$'\n'/\\n}"
+  esc="${esc//$'\r'/\\r}"
+  esc="${esc//$'\t'/\\t}"
+  esc="${esc//$'\b'/\\b}"
+  esc="${esc//$'\f'/\\f}"
+  esc="$(printf '%s' "$esc" | tr -d '\000-\010\013\014\016-\037')"
+  printf '%s' "$esc"
+  return 0
 }
 
 # The clause a refusal splices in when a candidate was found but could not be
@@ -242,6 +318,11 @@ fi
 _record_breadcrumb() {
   local detail="$1"
   local receipt_dir crumb_dir stamp
+  # #4848: the refusal splices a FILESYSTEM PATH into `detail`, so an unescaped
+  # backslash or quote would make the record unparseable — and an unparseable
+  # breadcrumb reads as NO breadcrumb, i.e. as a healthy install. One escaper,
+  # shared by every seam (it lives in the guard block above).
+  detail="$(_tortoise_json_escape "$detail")"
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
   # Normalize to pathlib's `.parent` semantics (#4373): a trailing slash or a
   # trailing `/.` must not make this writer and the reader disagree about the
@@ -322,17 +403,21 @@ fi
 # for the package is never chosen — that is exactly how a missing venv used to
 # degrade to a stock-macOS 3.9 and die inside the CLI. `PYTHON_BIN` from the
 # ENVIRONMENT is an explicit operator override and is honoured as-is.
+# #4848 review: the precedence is `_tortoise_dir_python` — the SAME one
+# `_tortoise_dir_runnable` accepted the candidate on — so a dir the guard just
+# blessed can never be left without the interpreter that blessed it (a wheel
+# install whose venv is found only by the `pyvenv.cfg` walk-up was accepted and
+# then reported as un-runnable).
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [ -z "$PYTHON_BIN" ]; then
-  if [ -n "$TORTOISE_MODULE" ] && _tortoise_py_qualifies "$TORTOISE_MODULE/.venv/bin/python"; then
-    PYTHON_BIN="$TORTOISE_MODULE/.venv/bin/python"
-  elif [ -n "$TORTOISE_VENV" ] && _tortoise_py_qualifies "$TORTOISE_VENV/bin/python"; then
-    PYTHON_BIN="$TORTOISE_VENV/bin/python"
-  elif [ -n "${VIRTUAL_ENV:-}" ] && _tortoise_py_qualifies "$VIRTUAL_ENV/bin/python"; then
-    PYTHON_BIN="$VIRTUAL_ENV/bin/python"
-  elif _tortoise_py_qualifies "$(command -v python3 2>/dev/null || true)"; then
-    PYTHON_BIN="$(command -v python3 || true)"
-  fi
+  PYTHON_BIN="$(_tortoise_dir_python "${TORTOISE_MODULE:-}" || true)"
+fi
+# The owning venv resolved from a console script is an EQUIVALENT route to the
+# same tree (#2385) and stays as its own leg for the case where only the binary
+# was found.
+if [ -z "$PYTHON_BIN" ] && [ -n "$TORTOISE_VENV" ] \
+   && _tortoise_py_qualifies "$TORTOISE_VENV/bin/python"; then
+  PYTHON_BIN="$TORTOISE_VENV/bin/python"
 fi
 
 PATH_TORTOISE="$(command -v tortoise || true)"

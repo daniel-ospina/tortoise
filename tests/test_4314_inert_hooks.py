@@ -1046,7 +1046,8 @@ def test_the_interp_guard_block_is_byte_identical_across_the_seams():
     # text move together (a hard-coded floor in a seam is what re-stales).
     assert block.count('_TORTOISE_MIN_PY="') == 1, block
     for fn in ("_tortoise_py_qualifies", "_tortoise_script_interp",
-               "_tortoise_bin_qualifies", "_tortoise_dir_runnable",
+               "_tortoise_bin_qualifies", "_tortoise_dir_python",
+               "_tortoise_dir_runnable", "_tortoise_json_escape",
                "_tortoise_unusable_reason"):
         assert f"{fn}() {{" in block, fn
 
@@ -1062,6 +1063,7 @@ def test_every_seam_declares_the_guard_exactly_once(hook):
     assert text.count(_GUARD_BEGIN) == 1, hook
     assert text.count(_GUARD_END) == 1, hook
     for line in ("_tortoise_py_qualifies() {", "_tortoise_dir_runnable() {",
+                 "_tortoise_dir_python() {", "_tortoise_json_escape() {",
                  "_tortoise_unusable_reason() {"):
         starts = [ln for ln in text.splitlines() if ln.startswith(line)]
         assert len(starts) == 1, (hook.name, line)
@@ -1240,3 +1242,238 @@ def test_the_claude_seam_refuses_a_stale_checkout_the_same_way(tmp_path):
     assert str(stale) in detail, detail
     assert "3.9.6" in detail, detail
     assert "tortoise needs Python" in detail, detail
+
+
+# ── #4848 review: acceptance and execution must be ONE predicate ──────────
+#
+# The guard's acceptance predicated on interpreter legs (`pyvenv.cfg` owning
+# venv, active `$VIRTUAL_ENV`) that three seams' resolution ladders did not
+# know. A candidate the guard had just called RUNNABLE was then refused as
+# un-runnable — or, where `PYTHON_BIN` was left unset, the seam died at
+# `unbound variable` BEFORE it could record the refusal, which is silent
+# no-capture: the exact class #4848 exists to remove.
+
+_WORKER_SEAMS = [
+    ("codex-hooks/session-end.sh", "TORTOISE_CODEX_PAYLOAD"),
+    ("cursor-hooks/session-end.sh", "TORTOISE_CURSOR_PAYLOAD"),
+]
+
+
+def _logging_python(venv: Path, log: Path, *, version: str = "3.12.0") -> Path:
+    """A QUALIFYING interpreter that records every invocation.
+
+    It qualifies on the guard's own probe and reports ``version``; everything
+    else is a no-op exit 0, so a test can tell "the capture leg was REACHED
+    under this interpreter" without needing a runnable ``tortoise`` package.
+    """
+    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    py = venv / "bin" / "python"
+    py.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "INVOKED %s\\n" "$*" >> {log}\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        '    *version_info*) exit 0 ;;\n'
+        f"    *platform.python_version*) printf '%s\\n' '{version}'; exit 0 ;;\n"
+        "  esac\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8")
+    py.chmod(0o755)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    return py
+
+
+def _wheel_install(tmp_path: Path, log: Path) -> tuple[Path, Path]:
+    """A WHEEL layout: the module dir lives INSIDE a venv's ``site-packages``,
+    so the venv that OWNS it is found only by the bounded ``pyvenv.cfg`` walk-up
+    (PEP 405) — there is no ``.venv`` beneath the module dir."""
+    venv = tmp_path / "owning-venv"
+    _logging_python(venv, log)
+    module = venv / "lib" / "python3.12" / "site-packages"
+    (module / "tortoise").mkdir(parents=True)
+    (module / "tortoise" / "__init__.py").write_text("", encoding="utf-8")
+    return venv, module
+
+
+@pytest.mark.parametrize("seam,payload_env", _WORKER_SEAMS,
+                         ids=[s for s, _ in _WORKER_SEAMS])
+def test_a_wheel_install_runs_under_the_venv_that_owns_it(
+        tmp_path, seam, payload_env):
+    """A wheel install's module dir is accepted through the ``pyvenv.cfg``
+    walk-up — so the seam must RUN it with that venv's interpreter. It did not:
+    none of the resolution ladders knew the owning venv, `PYTHON_BIN` was left
+    UNSET, and under ``set -u`` the worker aborted at ``PYTHON_BIN: unbound
+    variable`` with rc=1 and NO breadcrumb. ``main`` at least recorded a
+    ``capture-failure`` there, so this was a regression against the issue's own
+    "evidence, not silence" contract.
+
+    Mutation: resolve the interpreter any way other than
+    ``_tortoise_dir_python`` (the pre-review ladders) — the owning-venv path has
+    no interpreter, the run dies before the capture, and this REDs on the missing
+    ``sessions`` invocation."""
+    hook = REPO_ROOT / "tortoise" / seam
+    home = tmp_path / "home"
+    homedir = home / (".codex" if seam.startswith("codex") else ".cursor") / "hooks"
+    homedir.mkdir(parents=True)
+    installed = homedir / "session-end.sh"
+    shutil.copy(hook, installed)
+    installed.chmod(0o755)
+
+    log = tmp_path / "capture.log"
+    _venv, module = _wheel_install(tmp_path, log)
+    (home / ".tortoise").mkdir(parents=True)
+    (home / ".tortoise" / "hook-src-dir").write_text(str(module) + "\n",
+                                                    encoding="utf-8")
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")  # stock-macOS ambient python3
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps({
+        "session_id": "sid-4848-wheel", "transcript_path": str(transcript),
+        "cwd": str(home)}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["/bin/bash", str(installed), "--worker"], text=True,
+        capture_output=True, timeout=30,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path), payload_env: str(payload)})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "unbound variable" not in proc.stderr, proc.stderr
+    body = _wait_for(lambda: log.is_file()
+                     and "tortoise.__main__" in log.read_text(encoding="utf-8"))
+    assert body, (
+        "the owning venv was accepted but never used to run the capture — the "
+        f"seam did not reach `sessions import`: {log.read_text(encoding='utf-8') if log.is_file() else '(no invocation at all)'}")
+    crumbs = home / ".tortoise" / "capture-errors"
+    assert not crumbs.exists(), (
+        f"a refusal was recorded although a qualifying interpreter was in hand: "
+        f"{sorted(p.name for p in crumbs.iterdir())}")
+
+
+def test_the_claude_seam_runs_under_a_virtualenv_it_accepted(tmp_path):
+    """``_tortoise_dir_runnable`` accepts a checkout on an ACTIVE
+    ``$VIRTUAL_ENV`` whose interpreter qualifies. Three claude seams then
+    resolved ``PYTHON_BIN`` without that leg and refused — naming the very
+    interpreter they had just accepted as the one that *cannot run it*:
+
+        "... the interpreter available is 3.12.0 at <venv>/bin/python and cannot
+         run it (tortoise needs Python 3.12+), and captured nothing."
+
+    A 3.12 named as unusable against a 3.12 floor, a remedy ("create that
+    checkout's venv") that is wrong for the cause, and a capture dropped that the
+    guard had already blessed — while codex/cursor on the same host captured.
+
+    Mutation: drop the ``$VIRTUAL_ENV`` leg from ``_tortoise_dir_python`` — the
+    refusal comes back and this REDs."""
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    hook = home / ".claude" / "hooks" / "session-end.sh"
+    shutil.copy(CLAUDE_HOOK, hook)
+    hook.chmod(0o755)
+
+    # A source checkout that holds the package but has NO `.venv` of its own.
+    src = _module_dir(tmp_path / "src")
+    log = tmp_path / "capture.log"
+    venv = tmp_path / "active-venv"
+    _logging_python(venv, log)
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = _run_claude_hook(
+        hook, home, transcript=transcript,
+        path=f"{bindir}:/usr/bin:/bin",
+        extra_env={"VIRTUAL_ENV": str(venv), "TORTOISE_SRC_DIR": str(src)})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _wait_for(lambda: log.is_file()
+                     and "tortoise.__main__" in log.read_text(encoding="utf-8")), (
+        "the checkout was accepted on the ACTIVE venv and then refused: "
+        f"{log.read_text(encoding='utf-8') if log.is_file() else '(no invocation)'}")
+    crumbs = home / ".tortoise" / "capture-errors"
+    assert not crumbs.exists(), (
+        "a false refusal was recorded for a candidate the guard accepted: "
+        f"{[p.read_text(encoding='utf-8') for p in crumbs.iterdir()]}")
+
+
+@pytest.mark.parametrize("seam,payload_env", _WORKER_SEAMS,
+                         ids=[s for s, _ in _WORKER_SEAMS])
+def test_a_refusal_naming_a_hostile_path_is_still_valid_json(
+        tmp_path, seam, payload_env):
+    """#4848 splices a FILESYSTEM PATH into the refusal's ``detail``. A backslash
+    is legal in a macOS/Linux path and a ``"`` closes the JSON string early, so a
+    writer that interpolates ``detail`` raw emits INVALID JSON. That is not
+    cosmetic: ``session_verify._local_capture_error`` returns ``None`` on
+    ``ValueError``, i.e. an unparseable breadcrumb is indistinguishable from NO
+    breadcrumb, so an inert install reports PROVEN — the #4314 inversion this
+    whole file exists to prevent. Five of the seven seams were raw while codex's
+    and cursor's ``session-end`` escaped, which is the same "one-sided fix" class.
+
+    Mutation: interpolate ``detail`` raw — ``json.loads`` REDs with
+    ``Invalid \\escape``."""
+    hook = REPO_ROOT / "tortoise" / seam
+    home = tmp_path / "home"
+    homedir = home / (".codex" if seam.startswith("codex") else ".cursor") / "hooks"
+    homedir.mkdir(parents=True)
+    installed = homedir / "session-end.sh"
+    shutil.copy(hook, installed)
+    installed.chmod(0o755)
+
+    # A dir that HOLDS the package but offers nothing to run it with, at a path
+    # that needs escaping in both directions.
+    stale = tmp_path / 'weird\\dir "quoted"' / "stale"
+    _module_dir(stale)
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps({
+        "session_id": "sid-4848-esc", "transcript_path": str(transcript),
+        "cwd": str(home)}), encoding="utf-8")
+
+    proc = subprocess.run(
+        ["/bin/bash", str(installed), "--worker"], text=True,
+        capture_output=True, timeout=30,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path), payload_env: str(payload),
+             "TORTOISE_SRC_DIR": str(stale)})
+    assert proc.returncode == 0, proc.stderr
+
+    harness = "codex" if seam.startswith("codex") else "cursor"
+    crumb = home / ".tortoise" / "capture-errors" / f"{harness}-install.json"
+    assert _wait_for(lambda: crumb.is_file()), (
+        "the refusal was not recorded at all — no evidence, no diagnosis")
+    raw = crumb.read_text(encoding="utf-8")
+    body = json.loads(raw)  # the assertion: unescaped writers raise here
+    assert str(stale) in body["detail"], body
+    assert body["kind"] == "install-inert", body
+
+
+@pytest.mark.parametrize("hook", _HOOK_SCRIPTS, ids=_hook_id)
+def test_every_breadcrumb_writer_escapes_through_the_shared_helper(hook):
+    """ONE escaper, in the byte-identical guard block, used by EVERY writer.
+
+    The defect the behaviour tests above pin was seven writers and two escaping
+    behaviours, so a seam could be JSON-safe while its sibling was raw. The two
+    behaviour tests can only drive the seams whose stdin contract this suite
+    already knows; this pins the property for all seven, and it fails the moment
+    one seam keeps a private escape chain (or none)."""
+    text = hook.read_text(encoding="utf-8")
+    assert "_tortoise_json_escape() {" in text, hook
+    assert '_tortoise_json_escape "$detail"' in text, (
+        f"{hook.name} interpolates `detail` without the shared escaper")
+    if '"harness": "%s"' in text:
+        assert '_tortoise_json_escape "$harness"' in text, (
+            f"{hook.name} interpolates `harness` without the shared escaper")
+    assert text.index('_tortoise_json_escape "$detail"') < text.rindex(
+        '"detail": "%s"'), f"{hook.name}: the escaper must run BEFORE the writer"
