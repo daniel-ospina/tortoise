@@ -779,7 +779,7 @@ def test_the_cache_gate_docstring_names_the_hit_path_exception():
 def _census(**over) -> dict:
     """A CURRENT-shape manifest: #10137's contribution cells present."""
     m = _manifest(operators=3, factors=3, points_off_neutral=10,
-                  no_op_reason=None)
+                  points_moved_off_neutral=0, no_op_reason=None)
     m.update(over)
     return m
 
@@ -1099,6 +1099,112 @@ def test_an_unread_coverage_census_does_not_decide_the_posture():
         requested=True)
     assert summary["inert_questions"][0]["reason"] == mp.INERT_UNMEASURED
     assert summary["neutral_questions"] == []
+
+
+def test_an_all_inert_run_never_publishes_a_measured_zero_contribution():
+    """RED: the run-level contribution cells read the SUMMED buckets, and an
+    all-inert run has empty buckets — which ``bool(points) or not unread`` read
+    as "measured, and it measured 0". So the exact run #10137 targets (every
+    question EP-inert, nothing ever reads a contribution census) published
+    ``points_off_neutral: 0``, a fabricated number printed by the very cell that
+    exists to expose fabricated numbers.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _unmeasured_manifest(
+            operators=0, factor_edges=0)},
+         {"question_id": "q2", "belief_activation": {"ep_ran": False,
+                                                     "error": "boom"}},
+         {"question_id": "q3"}],               # no manifest at all
+        requested=True)
+    assert summary["questions_inert"] == 3
+    assert summary["points_off_neutral"] is None
+    assert summary["points_moved_off_neutral"] is None
+
+
+def test_the_run_level_cell_does_not_depend_on_the_question_type_split():
+    """RED: an inert-only bucket arrived at the old predicate as
+    ``points_off_neutral or not points_off_neutral_unread`` → ``0 or not 0`` →
+    ``True``, so a bucket that measured NOTHING cast a vote for "this run was
+    measured". One inert question was therefore enough to publish
+    ``points_off_neutral: 0`` — beside its own
+    ``questions_contribution_unknown: 1`` — for the same evidence that
+    publishes ``null`` when the two questions happen to share a type.
+
+    The published contribution figure must depend on the EVIDENCE, never on
+    the shape of the ``by_question_type`` split (measured: every LongMemEval
+    run carries several types).
+    """
+    resumed = {"question_id": "q1",
+               "belief_activation": {"ep_ran": True, "points_with_ep": 4}}
+    inert = {"question_id": "q2"}                     # no manifest at all
+    one_type = mp.summarize_belief_activation(
+        [{**resumed, "question_type": "single-session-user"},
+         {**inert, "question_type": "single-session-user"}],
+        requested=True)
+    two_types = mp.summarize_belief_activation(
+        [{**resumed, "question_type": "single-session-user"},
+         {**inert, "question_type": "multi-session"}],
+        requested=True)
+    for summary in (one_type, two_types):
+        assert summary["points_off_neutral"] is None
+        assert summary["points_moved_off_neutral"] is None
+        assert summary["points_off_neutral_unread"] == 1
+        assert summary["questions_contribution_unknown"] == 1
+    assert one_type["points_off_neutral"] == two_types["points_off_neutral"]
+
+
+def test_a_measured_all_neutral_run_still_publishes_a_zero():
+    """The control for the fix above: never publish ``0`` when nothing was
+    read, but do not turn every zero into UNKNOWN either. A covered graph whose
+    every posterior is the neutral mean DID measure zero contribution — that is
+    the number #10137 is about, and it must stay a number."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _census(
+            points_off_neutral=0, points_moved_off_neutral=0)}],
+        requested=True)
+    assert summary["questions_neutral"] == 1
+    assert summary["points_off_neutral"] == 0
+    assert summary["points_moved_off_neutral"] == 0
+
+
+def test_an_unknown_coverage_census_is_never_summed_as_a_measured_zero():
+    """RED: ``points_with_ep`` / ``points_unmeasured`` degrade to UNKNOWN when
+    their read fails, and they are the cells the per-question verdict is built
+    from. The summed family treated only the GRAPH census as UNKNOWN-able, so a
+    failed coverage read was published as ``0`` — "0 claims carry EP state" —
+    while the very same report classified that question ``unmeasured``.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _census(
+            points_with_ep=None, points_unmeasured=None)},
+         {"question_id": "q2", "belief_activation": _census(
+            points_with_ep=4, points_unmeasured=1)}],
+        requested=True)
+    assert summary["points_with_ep"] == 4          # the MEASURED cells only
+    assert summary["points_with_ep_unread"] == 1   # ...and it says how partial
+    assert summary["points_unmeasured"] == 1
+    assert summary["points_unmeasured_unread"] == 1
+    assert summary["inert_questions"] == [
+        {"question_id": "q1", "question_type": "",
+         "reason": mp.INERT_UNMEASURED}]
+    # nothing measured at all → UNKNOWN, not a complete-looking 0
+    only_unknown = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _census(
+            points_with_ep=None, points_unmeasured=None)}],
+        requested=True)
+    assert only_unknown["points_with_ep"] is None
+    assert only_unknown["points_with_ep_unread"] == 1
+    # ...and an ABSENT cell is UNKNOWN for the same reason as a ``None`` one:
+    # the fail-open manifest carries no census because none was read, so
+    # reading the omission as a measured ``0`` would be the same fabrication.
+    fail_open = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": {"ep_ran": False,
+                                                     "error": "boom"}}],
+        requested=True)
+    assert fail_open["points_with_ep"] is None
+    assert fail_open["points_with_ep_unread"] == 1
+    assert fail_open["points_unmeasured"] is None
+    assert fail_open["points_unmeasured_unread"] == 1
 
 
 def test_a_partial_census_sum_says_how_partial_it_is():

@@ -6,6 +6,7 @@ call it is asked to make.
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -327,6 +328,47 @@ def test_off_neutral_agrees_with_read_confidence_over_a_population():
     # sanity: the population really does contain both sides (c1 0.75, c3 0.75,
     # c4's per-field coalesce 2/3 — and c2 stays neutral)
     assert epa.points_off_neutral(rows) == 3
+
+
+def test_a_non_finite_posterior_is_never_a_contribution():
+    """``abs(nan - 0.5) > 1e-6`` is ``False``, so an undefined mean is kept out
+    of the CONTRIBUTION population only by the shape of that comparison. The
+    explicit finiteness guard makes the exclusion a property of the VALUE, so a
+    change to ``NEUTRAL_MEAN``/``NEUTRAL_EPS`` cannot silently reclassify a
+    malformed posterior as a contribution.
+
+    Reachable through the canonical read: ``inf/inf`` is ``nan``.
+
+    ⚠️ Residual, tracked in #10210: this does NOT remove such a claim from the
+    per-QUESTION ``neutral_questions`` population, which is derived from
+    ``points_off_neutral == 0`` with ``points_with_ep > 0`` — "covered, and
+    moved nothing" — because the census has no "state present but unusable"
+    fact to report. That needs a new cell, not a predicate.
+    """
+    assert math.isnan(epa.read_confidence({"posterior_alpha": float("inf"),
+                                           "posterior_beta": float("inf")}))
+    rows = [["c1", float("nan"), 1.0, None, None],
+            ["c2", float("inf"), float("inf"), None, None]]
+    assert epa.off_neutral_ids(rows) == set()
+    assert epa.points_off_neutral(rows) == 0
+
+
+def test_a_claim_state_read_that_saw_no_rows_is_unknown_not_a_zero():
+    """RED: a state read that matched NOTHING published "the belief layer ran
+    and moved nothing" on every graph.
+
+    ``_SELECT_CLAIM_EP_STATES`` and ``_COUNT_POINTS_WITH_EP`` carry the SAME
+    WHERE clause, so a state read returning ZERO rows while the coverage census
+    counted claims carrying EP state is provably a BROKEN read (a wrong
+    predicate, a projection that dropped the cells) — never a measured zero. It
+    is the silent-zero hazard this census exists to close, one layer below the
+    counts, where ``_scalar_or_none`` already guards the single-cell reads.
+    """
+    sdk, _graph = _make(["c1"], operators=2, with_ep=3, ep_rows=[])
+    manifest = epa.activate_beliefs(sdk)
+    assert manifest["points_with_ep"] == 3          # coverage WAS measured
+    assert manifest["points_off_neutral"] is None   # the state read was not
+    assert manifest["points_moved_off_neutral"] is None
 
 
 def test_manifest_carries_the_contribution_cells():

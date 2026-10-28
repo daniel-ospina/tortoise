@@ -236,7 +236,9 @@ describe what THAT pass did.
 `methodology.measurement_posture.activation` then carries
 `questions_off_neutral` / `points_off_neutral` / `points_moved_off_neutral`
 and the graph census (`operators`, `factor_edges` — `null` when unread, with the
-`*_unread` counts and `questions_contribution_unknown` beside them), the
+`*_unread` counts and `questions_contribution_unknown` beside them; the coverage
+cells `points_with_ep` / `points_unmeasured` follow the same rule, each with its
+own `*_unread` companion), the
 enumerated `inert_questions` (`question_id`, `question_type`, `reason` ∈
 `no_operators` / `no_ep_factors` / `stale_run_guard` / `activation_failed` /
 `no_manifest` / `unmeasured`), the enumerated `neutral_questions` (measured,

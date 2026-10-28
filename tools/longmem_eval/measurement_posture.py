@@ -64,12 +64,31 @@ BELIEF_LAYER_VALUES: frozenset[str] = frozenset({
 })
 
 #: Manifest keys summed over the run by :func:`summarize_belief_activation`.
-#: ``operators`` / ``factor_edges`` (#10137) are deliberately NOT here — a graph
-#: census that was never read is UNKNOWN, and summing it would publish a
-#: fabricated ``0`` (see the block after this loop).
+#: The CENSUS cells are deliberately NOT here — a census that was never read is
+#: UNKNOWN, and summing it would publish a fabricated ``0`` (see
+#: :data:`_UNKNOWN_PER_MANIFEST_KEYS` and the block after this loop).
 _SUMMED_KEYS = (
     "points_promoted",
     "operators_promoted",
+)
+
+#: Summed cells a manifest may carry as UNKNOWN (``None``). They sum over the
+#: MEASURED cells only and publish an ``<key>_unread`` count beside the sum, so
+#: a partial figure cannot be mistaken for a complete measurement.
+#:
+#: The family is not only the GRAPH census (#10137 review 3, P2):
+#: ``points_with_ep`` / ``points_unmeasured`` degrade to UNKNOWN the same way
+#: when their read fails (``ep_activation._census``), and they are the cells
+#: the per-question verdict is built from — a ``None`` there summed as ``0``
+#: publishes "0 claims carry EP state" for a census that was never read.
+#:
+#: ONE rule for all four: an ABSENT cell is UNKNOWN exactly like a ``None`` one.
+#: A fail-open manifest (``{"ep_ran": False, "error": ...}``) omits them, and
+#: that census was never read — reading the omission as a measured ``0`` is the
+#: same fabrication, one shape over.
+_UNKNOWN_PER_MANIFEST_KEYS = (
+    "operators",
+    "factor_edges",
     "points_with_ep",
     "points_unmeasured",
 )
@@ -77,8 +96,10 @@ _SUMMED_KEYS = (
 # ── #10137: WHY a question has no measured contribution ──────────────────
 # The state (``activated``/``partial``/``inert``/``unknown``) says HOW MUCH of
 # the run is covered. These reasons say WHY the rest is not — enumerated, per
-# question, never inferred from a green run. Three of them are structural
-# (nothing EP can do), which is exactly the distinction a fix needs.
+# question, never inferred from a green run. ONE of them is structural
+# (nothing EP can do), which is exactly the distinction a fix needs:
+# :data:`INERT_REASONS_STRUCTURAL` is the machine-readable form of that and
+# yields exactly one reason.
 
 #: The graph has no operator node AND no direct IMPL/NAND edge, so no factor
 #: reaches a claim: EP-inert for ever, whatever the arm does (#10137). Both
@@ -288,17 +309,19 @@ def summarize_belief_activation(
     }
     for key in _SUMMED_KEYS:
         summary[key] = sum(_as_int(m.get(key, 0)) for m in manifests)
-    # #10137: the GRAPH CENSUS is the one summed family that can be UNKNOWN per
-    # manifest. An unknown cell must not sum as a 0 — that is how a run
-    # publishes "this graph has no operators" without having read a census — so
-    # the sum covers the MEASURED cells only and the unread count is published
-    # beside it. A partial sum that does not say how partial it is would be
-    # indistinguishable from a complete measurement (#10137 review 2, P1).
-    for census_key in ("operators", "factor_edges"):
-        values = [_optional_int(m.get(census_key)) for m in manifests]
+    # #10137: a census cell that is UNKNOWN per manifest must not sum as a 0 —
+    # that is how a run publishes "this graph has no operators" without having
+    # read a census — so the sum covers the MEASURED cells only and the unread
+    # count is published beside it. A partial sum that does not say how partial
+    # it is would be indistinguishable from a complete measurement (#10137
+    # review 2, P1). A cell that is ABSENT is UNKNOWN for the same reason as a
+    # ``None`` one — the fail-open manifest omits every census cell because
+    # none was read — so the four keys share ONE rule.
+    for key in _UNKNOWN_PER_MANIFEST_KEYS:
+        values = [_optional_int(m.get(key)) for m in manifests]
         known = [v for v in values if v is not None]
-        summary[census_key] = sum(known) if known else None
-        summary[f"{census_key}_unread"] = len(values) - len(known)
+        summary[key] = sum(known) if known else None
+        summary[f"{key}_unread"] = len(values) - len(known)
 
     # ── #10137: the POPULATIONS, enumerated per question ──────────────
     inert: list[dict[str, Any]] = []
@@ -389,23 +412,30 @@ def summarize_belief_activation(
     # belief layer FAILED while every enumerated view excluded it (measured:
     # summary 11 vs buckets 4), so two derivations of one number disagreed
     # inside one report. Deriving from the buckets makes the reconciliation a
-    # structural property rather than a hope — and `None` (UNKNOWN) when the
-    # population measured none of it, with the unread counts beside it
-    # (#10137 review 2, P1).
-    measured_off = [b for b in by_type.values()
-                    if b["points_off_neutral"] or not b[
-                        "points_off_neutral_unread"]]
+    # structural property rather than a hope.
+    #
+    # #10137 review 3 (P1): the None/0 decision is made on the MEASURED
+    # POPULATION, not on the summed cells. "No bucket has points or unread" is
+    # also true of a run where EVERY question was inert — nothing reads the
+    # contribution census there, so the empty buckets summed to a published
+    # `points_off_neutral: 0`, i.e. exactly the fabricated "measured zero" the
+    # issue exists to stop, printed by the very cell meant to expose it. A
+    # bucket contributes a measurement when it classified a question with the
+    # cell read.
+    off_measured = any(
+        b["questions_measured"] > b["questions_contribution_unknown"]
+        for b in by_type.values())
     summary["points_off_neutral"] = (
         sum(b["points_off_neutral"] for b in by_type.values())
-        if measured_off else None)
+        if off_measured else None)
     summary["points_off_neutral_unread"] = sum(
         b["points_off_neutral_unread"] for b in by_type.values())
-    measured_moved = [b for b in by_type.values()
-                      if b["points_moved_off_neutral"] or not b[
-                          "points_moved_off_neutral_unread"]]
+    moved_measured = any(
+        b["questions_measured"] > b["points_moved_off_neutral_unread"]
+        for b in by_type.values())
     summary["points_moved_off_neutral"] = (
         sum(b["points_moved_off_neutral"] for b in by_type.values())
-        if measured_moved else None)
+        if moved_measured else None)
     summary["points_moved_off_neutral_unread"] = sum(
         b["points_moved_off_neutral_unread"] for b in by_type.values())
     summary["questions_contribution_unknown"] = sum(

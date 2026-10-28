@@ -53,6 +53,7 @@ be unit-tested without a database.
 """
 from __future__ import annotations
 
+import math
 import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
@@ -215,25 +216,14 @@ def _chunks(items: list, size: int):
         yield items[start:start + size]
 
 
-def _scalar(result_set) -> int:
-    """First cell of a single-row count query, 0 when absent."""
-    if not result_set or not result_set[0]:
-        return 0
-    try:
-        return int(result_set[0][0])
-    except (TypeError, ValueError):
-        return 0
-
-
 def _scalar_or_none(result_set) -> int | None:
     """First cell of a single-row count query, ``None`` when it was not read.
 
-    The UNKNOWN-preserving twin of :func:`_scalar` (#10137 review, P1). ``_scalar``
-    maps an absent/empty/unparseable result set to ``0``, which is right for a
-    cell where 0 and "could not read" are the same published fact — and WRONG
-    for the operator census, where ``0`` is published as a named STRUCTURAL
-    cause. A count query that returned no row failed; it did not measure a
-    zero.
+    A lossy "absent result set → ``0``" twin deliberately does NOT exist here
+    (#10137 review 3, P3): ``0`` is a MEASUREMENT of the operator census, where
+    it is published as a named STRUCTURAL cause, so the two readings cannot
+    share a number. A count query that returned no row failed; it did not
+    measure a zero.
     """
     if not result_set or not result_set[0]:
         return None
@@ -262,10 +252,21 @@ def _census(g, query: str) -> int | None:
         return None
 
 
-def _census_ids(g, query: str) -> set[str] | None:
-    """:func:`_census` for the claim-state read — a SET of ids, or UNKNOWN."""
+def _census_ids(g, query: str) -> tuple[set[str], int] | None:
+    """:func:`_census` for the claim-state read — ``(ids, rows_read)``, or
+    UNKNOWN.
+
+    The ROW COUNT is returned beside the ids deliberately (#10137 review 3,
+    P2): ``rows_read == 0`` while the coverage census reports claims carrying
+    EP state is provably a BROKEN read — the two queries share one WHERE
+    clause — whereas the id set alone cannot tell an all-neutral graph (a
+    legitimate empty set) from a query that matched nothing. Without it a
+    wrong predicate reports "the belief layer ran and moved nothing" on every
+    graph, the silent zero this census exists to close.
+    """
     try:
-        return off_neutral_ids(g.query(query).result_set)
+        rows = g.query(query).result_set or ()
+        return off_neutral_ids(rows), len(rows)
     except Exception as exc:  # noqa: BLE001, RUF100
         logger.warning(
             "activate_beliefs: claim-state census failed, reporting UNKNOWN: "
@@ -276,8 +277,8 @@ def _census_ids(g, query: str) -> set[str] | None:
 def _optional_int(value) -> int | None:
     """A manifest cell that may be genuinely UNKNOWN (``None``).
 
-    Distinct from :func:`_scalar` on purpose: a count that could not be read
-    must not become a fabricated ``0``. ``0`` from :data:`_COUNT_OPERATORS`
+    A count that could not be read must not become a fabricated ``0``. ``0``
+    from :data:`_COUNT_OPERATORS`
     is a MEASUREMENT ("this graph mints no operators"); a stub or older SDK
     that never reported the cell is not.
     """
@@ -300,7 +301,21 @@ def points_off_neutral(rows) -> int:
 
     A row whose state is absent/malformed (``read_confidence`` returns
     ``None``) is NOT counted: unmeasured is not a contribution, and it is
-    already visible as ``points_unmeasured``.
+    already visible as ``points_unmeasured``. A NON-FINITE mean is excluded
+    explicitly (#10137 review 3, P2): ``abs(nan - 0.5) > 1e-6`` is ``False``,
+    so before the guard an undefined posterior was kept out of the
+    CONTRIBUTION population only by floating-point accident — a silent
+    dependency on the comparison, not on the value.
+
+    ⚠️ RESIDUAL, deliberately not closed here: a claim whose persisted
+    parameters are non-finite still counts as COVERED (``points_with_ep``
+    counts EP state, not usable EP state), so its question still lands in
+    ``neutral_questions`` — "the belief layer ran and moved nothing" — because
+    that population is derived per QUESTION from ``points_off_neutral == 0``
+    with ``points_with_ep > 0``, not from any per-row verdict. Closing it needs
+    an "unusable persisted state" census cell feeding ``points_unmeasured``;
+    that is a new cell with its own reconciliation, tracked in #10210 rather
+    than smuggled in as a one-line predicate change.
     """
     return len(off_neutral_ids(rows))
 
@@ -331,7 +346,7 @@ def off_neutral_ids(rows) -> set[str]:
             continue
         mean = read_confidence({"posterior_alpha": pa, "posterior_beta": pb,
                                 "ep_alpha": ea, "ep_beta": eb})
-        if mean is None:
+        if mean is None or not math.isfinite(mean):
             continue
         if abs(mean - NEUTRAL_MEAN) > NEUTRAL_EPS:
             ids.add(str(pid))
@@ -496,9 +511,10 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
             points_promoted, operators_promoted, exc, exc_info=True)
 
     # ── 3. EP-state census (post-pass) ────────────────────────────────
-    # The coverage cells were `_scalar` (0 on an absent result set) while the
-    # contribution cells were already UNKNOWN-aware — the same defect one layer
-    # down, and worse: `points_with_ep == 0` DRIVES the per-question verdict and
+    # The coverage cells used to read a bare `result_set[0][0]` (0 on an absent
+    # result set) while the contribution cells were already UNKNOWN-aware — the
+    # same defect one layer down, and worse: `points_with_ep == 0` DRIVES the
+    # per-question verdict and
     # the run's posture, so a failed read was published as "nothing was
     # measured" (#10137 review 2, P1). Every census read degrades to UNKNOWN.
     total = _census(g, _COUNT_POINTS_TOTAL)
@@ -516,15 +532,26 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     # (#10137 review, P1).
     operators = _census(g, _COUNT_OPERATORS)
     factor_edges = _census(g, _COUNT_FACTOR_EDGES)
-    off_neutral_after = _census_ids(g, _SELECT_CLAIM_EP_STATES)
-    off_neutral = (len(off_neutral_after)
-                   if off_neutral_after is not None else None)
+    after = _census_ids(g, _SELECT_CLAIM_EP_STATES)
+    # A claim-state read that saw ZERO rows while the coverage census — the
+    # SAME WHERE clause — counted claims carrying EP state is PROVABLY a
+    # broken read, not a measured zero (#10137 review 3, P2). `_scalar_or_none`
+    # closes this for the count cells; a row-set read needs its own check,
+    # because an empty set is also the legitimate answer for an all-neutral
+    # graph and those two must not be published as one number.
+    if after is not None and with_ep and after[1] == 0:
+        logger.warning(
+            "activate_beliefs: claim-state census returned 0 rows while "
+            "points_with_ep=%d — broken read, reporting UNKNOWN instead of a "
+            "fabricated off-neutral 0", with_ep)
+        after = None
+    off_neutral = (len(after[0]) if after is not None else None)
     # The CONTRIBUTION proper: claims NEWLY off the neutral mean. UNKNOWN when
     # the pass did not run or when EITHER census read failed — a baseline we
     # could not take cannot yield a contribution count.
     moved_off_neutral = (
-        len(off_neutral_after - off_neutral_before)
-        if ep_ran and off_neutral_after is not None
+        len(after[0] - off_neutral_before[0])
+        if ep_ran and after is not None
         and off_neutral_before is not None else None)
     # The pass's OWN operator selection (full mode's accumulated count), not
     # the health surface's per-batch `_last_operator_count`.
