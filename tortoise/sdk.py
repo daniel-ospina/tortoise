@@ -4870,8 +4870,10 @@ def _lexical_text(value) -> str:
     return " ".join(str(value).split()).casefold()
 
 
-def _warn_point_name_not_lexically_indexed(props: dict, *, door: str,
-                                           content: str | None = None) -> None:
+def _warn_point_name_not_lexically_indexed(
+    props: dict, *, door: str, content: str | None = None,
+    stored_text: str | None = None,
+) -> None:
     """#10122: advise, at the write door, that a Point's ``name`` is NOT
     lexically indexed. Warn, never block (#1934's precedent for a declaration
     gap) — and never mutates ``props``, because the node still stores it.
@@ -4941,24 +4943,50 @@ def _warn_point_name_not_lexically_indexed(props: dict, *, door: str,
     for field in fields:
         indexed_tokens.update(tokenize_sparse_query(
             _lexical_text(_indexed_value(field)), keep_numeric=True))
-    if not name_tokens or (name_tokens & indexed_tokens):
+    # ⛔ THE STORED TEXT IS PART OF THE COMPARISON when the door could read it
+    # (#10122 round-2 review P2). An UPDATE that carries only ``name`` supplies
+    # no indexed text at all, so a payload-only comparison fired on EVERY such
+    # update — while the sentence claimed something about the index it had not
+    # looked at (measured: stored content "the body mentions capstone heavily",
+    # `update_point(pid, name="capstone-9664")` warned, and the sentence was
+    # false). With ``stored_text`` threaded in, both the verdict and the
+    # sentence are about the same thing.
+    if stored_text:
+        indexed_tokens.update(tokenize_sparse_query(
+            _lexical_text(stored_text), keep_numeric=True))
+    if not name_tokens:
+        # A name that yields NO token at all (stopwords only, or one-character
+        # segments like "R&D") is unfindable lexically for a different reason —
+        # the QUERY tokenizes to nothing, so it cannot be found however the
+        # index is built. Deliberately silent: advising to move such a name
+        # into `content` would not make it findable, so the advice would be
+        # wrong. Documented rather than implied.
+        return
+    if name_tokens & indexed_tokens:
         return
     # The roster is DERIVED from the same table, so a label that gains (or
     # loses) a ``name`` index changes this sentence with the index.
     other_labels = sorted(
         label for label, label_fields in _FULLTEXT_INDEX_LABEL_FIELDS
         if label != "Point" and "name" in label_fields)
+    if not other_labels:
+        label_clause = "no other label indexes it"
+    elif len(other_labels) == 1:
+        label_clause = f"{other_labels[0]} indexes it"
+    else:
+        label_clause = f"{'/'.join(other_labels)} index it"
+    where = ("the text the Point fulltext index holds" if stored_text
+             else "the text THIS write supplies for those fields (it carries "
+                  "the other fields' text, so this cannot see what the node "
+                  "already stores)")
     _logger.warning(
         "%s: this Point stores name=%r, but NONE of that name's tokens appear "
-        "in the text the Point fulltext index holds (%s) — so a query for the "
-        "name can only match this point through other evidence, and will not "
-        "rank on the name itself (#10122). Put the identifier in `content` or "
-        "in `search_keys`: `name` is not lexically indexed on a Point (%s do "
-        "index it). The write is accepted as-is — warn-not-block, #1934. "
-        "Coverage was compared against the %s text THIS write supplies, so a "
-        "partial update cannot see what the node already stores.",
-        door, name, "/".join(fields),
-        "/".join(other_labels) or "no other label", "/".join(fields),
+        "in %s (%s) — so a lexical query for the name can only reach this "
+        "point through other evidence, and will not rank on the name itself "
+        "(#10122). Put the identifier in `content` or in `search_keys`: "
+        "`name` is not lexically indexed on a Point (%s). The write is "
+        "accepted as-is — warn-not-block, #1934.",
+        door, name, where, "/".join(fields), label_clause,
     )
 
 
@@ -14425,20 +14453,6 @@ class TortoiseSDK:
                                 reject_claim_class=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
-        # #10122: same advisory as `create_point`, but only for a point that
-        # EXISTS — an update that matches nothing writes nothing, and warning
-        # about a write that never happened is crying wolf (#10122 review P3;
-        # `update_entity` already gates its door this way). The probe fires
-        # ONLY when the update carries `name`, which is the rare shape, so a
-        # plain update pays nothing.
-        if props.get("name") is not None:
-            _name_target_exists = self._get_proj().g.query(
-                "MATCH (n:Point {id:$id}) RETURN count(n)",
-                params={"id": id},
-            ).result_set[0][0]
-            if _name_target_exists:
-                _warn_point_name_not_lexically_indexed(props,
-                                                       door="update_point")
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
         # update may not leave a half span, an inverted pair or an
         # out-of-range offset on the node. The pair is all-or-nothing, so an
@@ -14460,6 +14474,29 @@ class TortoiseSDK:
         # the same merge, so a one-sided update cannot leave a marker beside a
         # bound it contradicts.
         _refuse_inconsistent_validity_precision(proj.g, props, point_id=id)
+        # #10122: the advisory, AFTER the refusal gates above (a refused update
+        # writes nothing, so advising about it is crying wolf — the discipline
+        # `create_point` and `update_entity` already follow) and reading the
+        # STORED text, because the verdict must be about the index, not about
+        # the payload a name-only update does not carry (round-1 + round-2 P2).
+        # Fires only when the update carries a string `name`, so a plain update
+        # pays nothing.
+        if isinstance(props.get("name"), str):
+            # Aggregations ONLY, so this is one row on a hit AND on a miss —
+            # a mixed ``count(n), n.content`` projection groups implicitly and
+            # returned an EMPTY result set on the miss (the round-2 pin caught
+            # it as an IndexError).
+            _name_row = proj.g.query(
+                "OPTIONAL MATCH (n:Point {id:$id}) "
+                "RETURN count(n), "
+                "coalesce(head(collect(n.content)), ''), "
+                "coalesce(head(collect(n.search_keys)), '')",
+                params={"id": id},
+            ).result_set[0]
+            if _name_row[0]:
+                _warn_point_name_not_lexically_indexed(
+                    props, door="update_point",
+                    stored_text=f"{_name_row[1]} {_name_row[2]}")
         # #5240: `content`'s None boundary is decided ONCE, here, before any
         # consumer reads the key — because the consumers disagreed. The
         # derived-hash line below tested KEY PRESENCE (``"content" in props``)

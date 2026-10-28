@@ -294,3 +294,42 @@ def test_the_point_index_field_set_is_pinned():
         "the Point fulltext field set changed — the #10122 ruling (option A: "
         "warn, do NOT index `name`) and the #8486 measurement gate both rest "
         "on this exact set")
+
+
+def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
+    """A name-only UPDATE must read the STORED text, not just its own payload.
+
+    #10122 round-2 review P2: an update that carries only `name` supplies no
+    indexed text at all, so a payload-only comparison fired on EVERY such
+    update — while the sentence claimed something about the index it had not
+    looked at (measured: stored content "the body mentions capstone heavily",
+    `update_point(pid, name="capstone-9664")` warned, and the sentence was
+    false). The door now reads the stored content + search_keys.
+
+    FAIL VALUE: drop `stored_text=` from the update door and this reds.
+    """
+    created = sdk.create_point(
+        "statement", "the body mentions capstone heavily, and 9664 too")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING):
+        sdk.update_point(pid, name="capstone-9664")
+    assert not _advisories(caplog), (
+        "the STORED content already carries the name's tokens, so the record is "
+        f"reachable by its name — no advisory belongs here: "
+        f"{[r.message for r in caplog.records]}")
+
+
+def test_a_name_only_update_on_a_point_without_its_tokens_still_warns(sdk, caplog):
+    """The other direction: stored text that does NOT carry the name still warns.
+
+    Without this, "always silent on an update" would pass the test above.
+
+    FAIL VALUE: silence unconditionally on the update door and this reds.
+    """
+    created = sdk.create_point("statement", "an unrelated body about curtains")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING):
+        sdk.update_point(pid, name="capstone-9664")
+    assert len(_advisories(caplog)) == 1, (
+        "the stored text carries none of the name's tokens, so the advisory is "
+        f"correct here: {[r.message for r in caplog.records]}")
