@@ -552,6 +552,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_cli_extraction",
+    # #10121: the recency-tie pins build per-test embedded `TortoiseSDK(<tmpfile>)`
+    # stores and read the tie ORDER back off them (the sweep, the id-less
+    # `:Object`/legacy-id regressions), so the module is `embedded_only` and a
+    # URI-set lane would either skip every case or redirect the construction to
+    # the shared server — the #4047/#4524 shape. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_10121_recency_tie",
 )
 
 _HAS_FALKOR: bool | None = None

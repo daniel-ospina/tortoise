@@ -336,12 +336,23 @@ class TestVectorIndexApiConsumption:
         assert "$query_vec, $limit" not in qn[0]    # sig A not attempted
 
     def test_run_vector_query_procedure_api_uses_signature_a_first(self):
-        """vector_index_api='procedure' → sig A attempted first (unchanged)."""
+        """vector_index_api='procedure' → sig A attempted first (unchanged).
+
+        The ORDER assertion below is the shared tie's, not this test's subject
+        (#10121): signature A's rows carry no readable distance (the mock
+        returns one column per row, so ``float(row[1])`` raises and both rows
+        are annotated ``None``), so the equal — absent — distance falls through
+        to the recency-then-id key, which is ``DESC`` on every label. That puts
+        ``near-2`` first where the pre-#10121 ``(distance, id ASC)`` pass put
+        ``near-1``. Determinism is what this test needs from the order; the
+        direction is pinned behaviourally in
+        ``tests/test_10121_recency_tie.py``.
+        """
         graph = _EngineGraph(vector_api="procedure")
         hits = run_vector_query(
             graph, self.QUERY_VEC, limit=10, is_embedded=False,
             vector_index_api="procedure")
-        assert [h[0] for h in hits] == ["near-1", "near-2"]
+        assert [h[0] for h in hits] == ["near-2", "near-1"]
         qn = [c for c in graph.calls if "querynodes" in c.lower()]
         assert len(qn) == 1
         # #6214: sig A now also carries vecf32($query_vec) — for the

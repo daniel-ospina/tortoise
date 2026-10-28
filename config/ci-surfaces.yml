@@ -1900,6 +1900,15 @@ surfaces:
   # exits 1 with `manifest drift: ['test_9391_replay_window_raw_query_width.py']`,
   # and `fast_pool()` is manifest-derived, so the pins would run in NO leg.
   - test_9391_replay_window_raw_query_width.py
+  # #10121: the recency tie every ranking leg shares. `core` is the right arm
+  # for the same reason the rows above state — the file pins
+  # `tortoise/search_engine.py` (a SHARED_MODULE, so a diff to it already runs
+  # the full matrix) and `tortoise/bm25.py`; both fall through to `core`, and
+  # the subject is the read funnel every surface uses. Without this row
+  # `python3 tools/ci_selection.py --integrity` exits 1 with
+  # `manifest drift: ['test_10121_recency_tie.py']`, and `fast_pool()` is
+  # manifest-derived, so the pins would run in NO leg.
+  - test_10121_recency_tie.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -7177,6 +7186,20 @@ carve_out:
 # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
 # DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
 - test_cli_extraction.py
+# #10121: the recency-tie pins (the acceptance sweep at N ∈ {10, 50, 119, 130,
+# 200}, the id-less `:Object` and legacy-id regressions, the `updatedAt`-beats-
+# `createdAt` ordering). The module is `pytestmark = pytest.mark.embedded_only`
+# and its fixture builds per-test embedded `TortoiseSDK(<tmpfile>)` stores, so on
+# a URI-set lane it would be collected and SKIPPED in full — a permanently green,
+# permanently unexecuted gate (the #4047/#4524 shape) — and a redirected
+# construction would assert tie order against the shared server instead of the
+# lane the sweep was measured on. Routed here so the URI-unset carve-out job runs
+# it as designed; the stem is mirrored in
+# `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
+# The `core` surface row above is KEPT: a file legitimately sits in both.
+- test_10121_recency_tie.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
