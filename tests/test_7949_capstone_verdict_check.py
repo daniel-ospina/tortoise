@@ -949,8 +949,13 @@ def test_two_verdict_blocks_is_a_usage_error_not_a_stale_green(tmp_path, capsys)
 # conflating them is what made the original observer tests vacuous (#9080
 # review F2/P1). ``_extractor_result`` is ``extractor_v2.extract_session_v2``'s
 # OWN return; ``_receipt`` is what ``TortoiseSDK.capture_session`` — the entry
-# point the probe actually drives — hands back. The probe holds the SECOND one,
-# and it carries ``stats`` only (#9116).
+# point the probe actually drives — hands back. The probe holds the SECOND one.
+#
+# #9116's seam is what reconciles them: ``_capture_step_witness`` copies the
+# stages' own facts onto the receipt's ``stats`` key, so ``_seam_receipt`` below
+# is the object a CURRENT ``capture_session`` returns — built by calling the real
+# SDK helper, never by hand (a hand-built witness could not red when the SDK
+# stops producing one, which is the whole point of pinning this).
 def _extractor_result(**over) -> dict:
     """``extract_session_v2``'s return — NOT what the probe is handed."""
     result = {
@@ -966,7 +971,9 @@ def _extractor_result(**over) -> dict:
                        "operators": [1]},
         "vet": {"enabled": True, "s2": {"kept": 3}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3}, "union": {}},
-        "search": {"found": []},
+        "search": {"mode": "docker", "degraded": False, "reason": None,
+                   "queries_run": 15, "entities": [{"id": "o_1"}],
+                   "points": [], "events": []},
         "payload": {"points": []},
     }
     for k, v in over.items():
@@ -977,14 +984,46 @@ def _extractor_result(**over) -> dict:
     return result
 
 
+def _seam_receipt(**over) -> dict:
+    """A CURRENT ``capture_session`` receipt — built by the real SDK seam.
+
+    ``tortoise.sdk._capture_stats_with_step_witness`` is the production code that
+    puts ``stats["step_witness"]`` on the receipt (#9116), so calling it here
+    makes every assertion below a statement about shipped behaviour: let the SDK
+    stop copying a stage's block and these tests red.
+    """
+    from tortoise.sdk import _capture_stats_with_step_witness
+
+    out = _extractor_result(**over)
+    return {
+        "session_id": "capstone_abc123",
+        "turns": 1,
+        "extracted": 15,
+        "points": [],
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+        "diagnostics": [],
+        "stats": _capture_stats_with_step_witness(out, 15),
+        "capture_redactions": 0,
+    }
+
+
 def _receipt(**over) -> dict:
-    """``capture_session``'s receipt, VERBATIM from ``tortoise/sdk.py``.
+    """A ``capture_session`` receipt that carries NO ``step_witness``.
 
     The keys are the ``resp`` literal the SDK builds (minus the additive
-    protocol keys, which merge flat and add no pipeline surface). A test that
-    shapes this fixture differently from that literal is asserting a
-    contract the caller can never satisfy — which is the vacuity this file
-    was caught in.
+    protocol keys, which merge flat and add no pipeline surface) with the
+    ``stats`` sub-key the seam adds REMOVED — i.e. the receipt a REPLAY, a
+    keyless capture or the M2 lane returns. A test that shapes this fixture
+    differently from that literal is asserting a contract the caller can never
+    satisfy — which is the vacuity this file was caught in.
+
+    It is not "the receipt" any more: since #9116's seam a v2 receipt carries
+    ``stats["step_witness"]``. Keeping this shape is what lets the tests below
+    hold BOTH arms apart — a receipt with no seam must still witness the four
+    steps ``stats`` carries and be refused for the four that need the seam.
     """
     result = {
         "session_id": "capstone_abc123",
@@ -1013,49 +1052,51 @@ def _receipt(**over) -> dict:
     return result
 
 
-def test_all_eight_steps_are_observable_when_the_full_surface_is_passed():
-    """The observer CAN map eight steps — given ``extract_session_v2``'s return.
+def test_all_eight_steps_are_observable_on_the_object_the_probe_holds():
+    """#9116, the acceptance: 8/8 through the REAL entry point's receipt.
 
-    This is the capability half, and it is NOT evidence about the shipped run:
-    the probe is handed ``capture_session``'s receipt (next test). Kept because
-    the day #9116 lands a seam, this is the shape it must carry.
+    Both halves are the shipped code — ``tortoise.sdk._capture_stats_with_step
+    _witness`` builds the ``stats`` the SDK puts on the receipt, and the probe's
+    ``observe_steps`` reads it. Non-vacuity: at the pre-fix head this receipt
+    carried no ``step_witness``, so the four steps that need it were absent and
+    this equality reds.
     """
-    seen = probe.observe_steps(_extractor_result())
+    result = _seam_receipt()
+    assert "step_witness" in result["stats"], sorted(result["stats"])
+    seen = probe.observe_steps(result)
     assert set(seen) == set(cvc.STEPS), sorted(set(cvc.STEPS) - set(seen))
     assert all(isinstance(v, str) and v for v in seen.values())
 
 
-def test_the_shipped_receipt_observes_exactly_the_four_steps_it_carries():
-    """#9116, pinned: on the REAL receipt four steps are unobservable.
+def test_a_receipt_with_no_seam_still_witnesses_the_four_stats_carry():
+    """The other arm: no seam ⟹ four steps, and the gap NAMED as the instrument.
 
-    Non-vacuity: this is the assertion the old suite lacked. Pass the receipt
-    (what ``capture_session`` returns) and the four off-receipt witnesses are
-    absent; re-add any of them to the receipt and the equality reds, which is
-    what makes ``UNOBSERVABLE_STEPS`` a measurement rather than a comment.
+    A replay, a keyless capture and the M2 lane all return a receipt with no
+    ``step_witness``. Those four are then unobservable, and that must be stated
+    as the missing surface (``STEPS_NEEDING_WITNESS``) rather than as a pipeline
+    that skipped VET/classify/search/commit.
     """
     seen = probe.observe_steps(_receipt())
     assert set(seen) == {"S0", "S1", "S2.1", "S5"}, sorted(seen)
-    assert set(probe.UNOBSERVABLE_STEPS) == set(cvc.STEPS) - set(seen)
-    # and NOT one of the unobservable steps is quietly satisfied by a
-    # same-named key the receipt happens to carry
-    assert "extraction" not in probe.observe_steps.__code__.co_consts
+    assert set(probe.STEPS_NEEDING_WITNESS) == set(cvc.STEPS) - set(seen)
 
 
-def test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared():
-    """The contract between the observer and the entry point it reads (#9116).
+def test_every_witness_block_observe_steps_reads_is_produced_by_the_seam():
+    """The contract between the observer and the seam that feeds it (#9116).
 
-    Derives BOTH sides from source, so neither can drift behind a comment:
-      * the READ set — every ``result.get("X")`` / ``result["X"]`` in
-        ``observe_steps`` — must equal ``probe.WITNESS_KEYS``;
-      * the RECEIPT set — the keys of the ``resp = {...}`` literal in
-        ``TortoiseSDK.capture_session`` — must cover every witness key that is
-        not explicitly declared off-receipt, and must NOT contain one that is.
+    Derives BOTH sides from code, so neither can drift behind a comment:
+      * the READ set — every ``w.get("X")`` in ``observe_steps`` — must equal
+        ``probe.WITNESS_KEYS``;
+      * the PRODUCED set — the top-level keys of
+        ``tortoise.sdk._capture_step_witness``'s return, called on a real
+        ``extract_session_v2``-shaped ``out`` — must cover every one of them.
 
-    Mutations that red it: add an undeclared ``result.get("foo")``; drop
-    ``stats`` from the receipt literal; declare a key off-receipt that the
-    receipt does in fact carry (over-declaring would hide a real witness).
+    Mutations that red it: read an undeclared ``w.get("foo")``; let the SDK drop
+    a block from the witness; rename a block on either side.
     """
     import ast
+
+    from tortoise.sdk import _capture_step_witness
 
     tree = ast.parse(PROBE.read_text())
     fn = next(n for n in ast.walk(tree)
@@ -1068,68 +1109,109 @@ def test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared():
         if node.func.attr != "get" or len(node.args) != 1:
             continue
         target, key = node.func.value, node.args[0]
-        if (isinstance(target, ast.Name) and target.id == "result"
+        if (isinstance(target, ast.Name) and target.id == "w"
                 and isinstance(key, ast.Constant) and isinstance(key.value, str)):
             read.add(key.value)
     assert read == set(probe.WITNESS_KEYS), (
         sorted(read ^ set(probe.WITNESS_KEYS)), "observer read set != declared")
 
-    sdk_src = (_REPO / "tortoise/sdk.py").read_text()
-    sdk_tree = ast.parse(sdk_src)
-    capture = next(n for n in ast.walk(sdk_tree)
-                   if isinstance(n, ast.FunctionDef)
-                   and n.name == "capture_session")
-    resp_literals = [n.value for n in ast.walk(capture)
-                     if isinstance(n, ast.Assign)
-                     and any(isinstance(t, ast.Name) and t.id == "resp"
-                             for t in n.targets)
-                     and isinstance(n.value, ast.Dict)]
-    assert len(resp_literals) == 1, (
-        "capture_session's receipt literal moved or multiplied — re-derive "
-        "this contract, do not delete it")
-    receipt_keys = {k.value for k in resp_literals[0].keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-    # ``**({...} if cond else {})`` — the SDK adds ``report_url`` conditionally.
-    # Follow every dict-unpack expression and take its own string keys, so a
-    # conditional key is COUNTED rather than silently skipped.
-    for key, value in zip(resp_literals[0].keys, resp_literals[0].values,
-                          strict=True):
-        if key is not None:
-            continue
-        for nested in ast.walk(value):
-            if isinstance(nested, ast.Dict):
-                receipt_keys |= {k.value for k in nested.keys
-                                 if isinstance(k, ast.Constant)
-                                 and isinstance(k.value, str)}
+    produced = _capture_step_witness(_extractor_result(), committed=15)
+    assert set(probe.WITNESS_KEYS) <= set(produced), (
+        sorted(set(probe.WITNESS_KEYS) - set(produced)),
+        "the observer reads a witness block the seam does not produce")
+    # the dead branch the review found: neither side names a receipt key that
+    # does not exist, so a "just copy the extractor's keys" fix cannot sneak in
+    assert "extraction" not in produced
+    # and the block that carries the one fact no fallback can supply
+    assert "queries_run" in produced["search"]
 
-    off = set(probe.WITNESS_KEYS_OFF_RECEIPT)
-    assert off <= set(probe.WITNESS_KEYS), "off-receipt keys must be witnesses"
-    assert not (off & receipt_keys), (
-        sorted(off & receipt_keys),
-        "declared OFF the receipt but the receipt carries it — over-declaring "
-        "hides a witness #9116 may already have fixed")
-    assert set(probe.WITNESS_KEYS) - off <= receipt_keys, (
-        sorted((set(probe.WITNESS_KEYS) - off) - receipt_keys),
-        "the observer reads a key the receipt does not carry, and it is not "
-        "declared off-receipt")
-    # the dead branch the review found: `capture_session` returns no such key
-    assert "extraction" not in receipt_keys
+
+def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch):
+    """#9116, the WIRING: the real ``capture_session`` returns the seam's record.
+
+    Everything above builds the receipt by calling the helper directly, so none of
+    it can tell whether ``_extract_session_v2`` — the production assembly —
+    actually puts the helper's output on the receipt. This drives the real entry
+    point over the deterministic mock extractor and reads the receipt it hands
+    back.
+
+    Mutation that reds it: revert the meta fold to ``"stats": out.get("stats")``
+    (the pre-fix line) and the ``step_witness`` key disappears from a REAL
+    capture.
+
+    ⚠️ It asserts **7 of 8**, not 8: the mock's classify pass is ENABLED and does
+    NO work (``{'enabled': True, 's2': {}, 'union': {}}``), so S2.3 is not
+    witnessed — and must not be. Claiming it would be the "OFF population under an
+    ON label" failure the bundle already paid for once (#9823). What S2.3 needs is
+    a run whose classify pass assigns kinds, not a looser rule here.
+    """
+    import uuid as _uuid
+
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_VET", "1")
+    monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
+    graph = f"capstone_9116_e2e_{_uuid.uuid4().hex[:10]}"
+    sdk = TortoiseSDK(graph_name=graph)
+    try:
+        receipt = sdk.capture_session(
+            [{"role": "user",
+              "content": ("Daniel Ospina at Premise Labs decided on 2026-10-10 "
+                          "to adopt the Postgres record as the system of "
+                          "record; the rollout is owned by Ana Ruiz.")}],
+            session_id=graph)
+    finally:
+        sdk.close()
+
+    assert receipt.get("ok") is True, receipt.get("errors")
+    stats = receipt.get("stats") or {}
+    witness = stats.get("step_witness")
+    assert isinstance(witness, dict) and witness, (
+        "the production capture path does not put stats['step_witness'] on the "
+        f"receipt — the #9116 seam is not wired into _extract_session_v2's meta "
+        f"fold (stats keys: {sorted(stats)})")
+    assert set(witness) == set(probe.WITNESS_KEYS), (
+        sorted(set(probe.WITNESS_KEYS) ^ set(witness)))
+
+    seen = probe.observe_steps(receipt)
+    assert set(seen) == set(cvc.STEPS) - {"S2.3"}, sorted(set(cvc.STEPS) - set(seen))
+    # S2.3's absence is the PASS's own answer, quoted from its block
+    assert witness["classify_later"]["s2"] == {}, witness["classify_later"]
+    assert witness["vet"]["s2"], witness["vet"]
+    assert witness["search"]["queries_run"], witness["search"]
+    assert witness["commit"]["payload_produced"] is True, witness["commit"]
 
 
 def test_a_vet_disabled_pass_does_not_observe_s2_2():
     """The flag-off arm runs no S2.2 — so its table cannot claim S2.2."""
-    seen = probe.observe_steps(_extractor_result(vet={"enabled": False, "s2": {}}))
+    seen = probe.observe_steps(_seam_receipt(vet={"enabled": False, "s2": {}}))
     assert "S2.2" not in seen
+    # and the other seven are still witnessed: one gated pass is not a reason
+    # to lose the run's other evidence
+    assert set(seen) == set(cvc.STEPS) - {"S2.2"}, sorted(seen)
 
 
 def test_a_classify_disabled_pass_does_not_observe_s2_3():
-    seen = probe.observe_steps(_extractor_result(
+    seen = probe.observe_steps(_seam_receipt(
         classify_later={"enabled": False, "s2": {}, "union": {}}))
     assert "S2.3" not in seen
 
 
+def test_a_flag_on_pass_with_no_activity_is_not_s2_2():
+    """`enabled: true` with empty counters is the flag, not the pass (#9823).
+
+    The shape an idled (empty embed list) or fail-open pass leaves. Counting it
+    would report an 8/8 from a run whose VET pass never ran — the "OFF
+    population under an ON label" failure one layer up.
+    """
+    seen = probe.observe_steps(_seam_receipt(
+        vet={"enabled": True, "s2": {}, "union": {}}))
+    assert "S2.2" not in seen
+
+
 def test_a_pass_without_a_payload_does_not_observe_s6():
-    seen = probe.observe_steps(_extractor_result(payload=None))
+    seen = probe.observe_steps(_seam_receipt(payload=None))
     assert "S6" not in seen
 
 
@@ -1160,26 +1242,87 @@ def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypat
                        "--out", str(out)])
     assert code == 5, code
     reason = cvc.extract_block(out.read_text())["run"]["reason"]
-    assert "#9116" in reason, reason
     assert "INSTRUMENT gap" in reason, reason
-    for step in probe.UNOBSERVABLE_STEPS:
+    for step in probe.STEPS_NEEDING_WITNESS:
         assert step in reason, (step, reason)
     assert "NOT the pipeline" in reason, reason
+    # and it says WHICH surface is missing, so the next lane does not have to
+    # re-derive it: the receipt carries no step_witness block at all
+    assert "step_witness" in reason, reason
 
 
-def test_a_green_branch_is_unreachable_until_9116_lands(tmp_path, monkeypatch):
-    """G6 is dead code by construction while the receipt carries no witnesses.
+def test_a_g5_refusal_on_a_seam_receipt_blames_the_pipeline_not_the_seam(
+        tmp_path, monkeypatch):
+    """The other arm (#9116): with the seam PRESENT, an absent step is the run's.
 
-    This is the fact the bundle must not hide: no run of this probe can emit a
-    COMPLETED table, so no row can ever be GREEN — even with every dependency
-    closed. Pinned so the day #9116 lands the seam this test reds and forces
-    the README/Reproduce update with it.
+    A v2 receipt carries ``stats["step_witness"]``. If a step is then
+    unobserved it is because that stage produced nothing or was gated off — a
+    PIPELINE finding, quoted from the witness's own values. Conflating the two
+    arms is what sent the epic's readers to the wrong issue in the first place.
     """
-    assert set(probe.UNOBSERVABLE_STEPS), "the gap must be named"
-    full = probe.observe_steps(_extractor_result())
-    receipt = probe.observe_steps(_receipt())
-    assert len(receipt) < len(full)
-    assert set(cvc.STEPS) - set(receipt) == set(probe.UNOBSERVABLE_STEPS)
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            # VET gated off: the seam is here and says so
+            return _seam_receipt(vet={"enabled": False, "s2": {}, "union": {}})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g5-seam.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "S2.2" in reason, reason
+    # the PIPELINE arm, not the instrument one
+    assert "INSTRUMENT gap" not in reason, reason
+    assert "PIPELINE" in reason, reason
+    # and the witness's own values are quoted, so the reader can act on it
+    assert '"enabled": false' in reason, reason
+    assert "step_witness" in reason, reason
+
+
+def test_a_completed_run_is_reachable_now_that_the_seam_landed(
+        tmp_path, monkeypatch):
+    """#9116's acceptance, end to end: G5 passes and G6 emits a table.
+
+    Before the seam this was unreachable — the run refused at G5 for EVERY
+    input, so no row could ever be GREEN and G6 was dead code. The pre-fix
+    version of this test pinned that unreachability; this one pins the other
+    side, so the gate cannot silently regress to refusing every run.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _seam_receipt()
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g6.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 0, (code, out.read_text()[-800:])
+    record = cvc.extract_block(out.read_text())
+    assert record["run"]["status"] == "COMPLETED", record["run"]
+    assert record["run"]["steps_observed"] == list(cvc.STEPS), record["run"]
+    assert not record["run"].get("steps_unobserved"), record["run"]
+    assert {row["evidence_kind"] for row in record["rows"]} == {"measurement"}
+    # every step a table is built from was OBSERVED in this pass
+    assert set(record["run"]["steps_required"]) == set(cvc.STEPS)
 
 
 def test_a_completed_run_does_not_blame_the_preregistration_it_just_read():

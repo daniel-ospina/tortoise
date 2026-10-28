@@ -60,8 +60,19 @@ def _sdk_line_naming(code: str) -> int:
     return hits[0]
 
 
-#: The meta fold's cite, in the exact shape the probe's causes print it.
-_META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('\"stats\": out.get(\"stats\")')}"
+#: The #9116 seam's SYMBOL — what a cause names instead of a line.
+#:
+#: A line cite was the right shape while the seam did not exist: the cause had to
+#: send the next lane to the one line that DROPPED the block, and
+#: `_sdk_line_naming` re-derived it so it could not re-stale. Now that the fold
+#: CALLS the seam, what a reader can act on is the helper, and a symbol cannot
+#: re-stale at all.
+_SEAM_SYMBOL = "_capture_step_witness"
+
+#: The fold's CALL SITE, re-derived from the tree (never typed) — the line that
+#: decides whether the seam reaches the receipt at all.
+_META_FOLD_CITE = ("tortoise/sdk.py:" + str(_sdk_line_naming(
+    "_capture_stats_with_step_witness(out, len(extracted))")))
 
 
 def _load():
@@ -708,7 +719,7 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     # The refusal names WHERE the OFF block was found, so a reader can tell
     # "absent" (the #9116 cause) from "present and off" (this cause).
     assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
-    assert _META_FOLD_CITE not in unobserved["S2.2"], unobserved["S2.2"]
+    assert _SEAM_SYMBOL not in unobserved["S2.2"], unobserved["S2.2"]
 
 
 def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
@@ -778,7 +789,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
         assert "never that the pass ran" in cause, cause
-        assert _META_FOLD_CITE not in cause, cause
+        assert _SEAM_SYMBOL not in cause, cause
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
@@ -851,25 +862,16 @@ def test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass():
 
 
 def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
-    """The cause is MEASURED, and it names the layer that actually drops it.
+    """The cause is MEASURED, and it names the SEAM that did not reach the run.
 
-    The shipped constant said "the receipt's stats carries 20 keys" — a number
-    nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8883-8887) and `result["classify_later"]` (:8873-8879). The
-    drop is the meta fold at `tortoise/sdk.py:13282` — **re-derived from the tree at
-    this head, never from the other side of a merge.** Both this branch and `main`
-    move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
-    insert above it too; #9202's own branch moved it by 4), so any typed number is
-    stale on the next merge and a merge that "takes the newer side" silently
-    restores it. `_META_FOLD_CITE` therefore READS the line out of `sdk.py` on
-    every run (`_sdk_line_naming`) instead of typing it — the cause must still name
-    the fold's real line, it just cannot re-stale. The cite was
-    `:12196` until an earlier round, and `:12738` until #9952 (`43a6eee6a`, the
-    `:Source` MERGE-key resolver
-    adopting S0a/S0b) moved the fold 6 lines down, so
-    each round the bundle sent the #9116 fixer somewhere else. Getting it wrong sends
-    the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
-    claim nothing supports.
+    The shipped constant once said "the receipt's stats carries 20 keys" — a
+    number nothing counted. The cause must count what it inspected and name the
+    thing that is missing. Since #9116 landed, the missing thing is the seam
+    itself (``_capture_step_witness``, called at the meta fold), so the cause
+    names the SYMBOL: a line cite cannot re-stale, and the helper is what a
+    reader can act on now that the fold calls it rather than dropping the block.
+    The fold's own line is still re-derived from the tree by the module constant,
+    so a lane that moves the call site is told rather than silently misled.
     """
     stats = {"edus": 10, "chunks": 1, "search_queries": 5,
              "search_degraded": False, "operator_endpoints_minted": 0,
@@ -881,11 +883,73 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert _META_FOLD_CITE in cause, cause
-    assert "tortoise/extractor_v2.py:8883-8887" in cause, cause
-    assert "tortoise/sdk.py:12197" not in cause, cause
+    assert _SEAM_SYMBOL in cause, cause
+    assert "no receipt carries stats['step_witness']" in cause, cause
+    assert "INSTRUMENT gap" in cause, cause
     assert "20 keys" not in cause, cause
-    assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
+    assert _SEAM_SYMBOL in unobserved["S2.3"], unobserved["S2.3"]
+    # the fold's call site is still resolvable at this head (the pin that would
+    # red if the seam stopped being CALLED at all)
+    assert _META_FOLD_CITE.removeprefix("tortoise/sdk.py:").isdigit()
+
+
+def test_the_seam_witnesses_eight_of_eight_with_no_probe_edit_to_the_rule():
+    """#9116's acceptance in the MEASUREMENT lane: the seam makes S2.2/S2.3 real.
+
+    The pre-fix lane could witness 6 of 8 and had to say so. This builds the
+    ``stats`` exactly as the SDK now does — by calling the production
+    ``_capture_step_witness``, not by hand — and requires 8/8 with the witness
+    read for the two steps that were missing.
+    """
+    from tortoise.sdk import _capture_stats_with_step_witness
+
+    out = {
+        "stats": {**_FULL_STATS, "search_queries": 15,
+                  "search_degraded": False},
+        "story_arc": "A narrative.",
+        "s2_embed": {"entities": [1], "events": [1], "points": [1],
+                     "operators": []},
+        "vet": {"enabled": True, "s2": {"kept": 3}, "union": {}},
+        "classify_later": {"enabled": True, "s2": {"assigned": 3},
+                           "union": {}},
+        "search": {"mode": "docker", "degraded": False, "queries_run": 15,
+                   "entities": [], "points": [], "events": []},
+        "payload": {"entities": [1], "events": [1], "points": [2],
+                    "operators": [1]},
+    }
+    stats = _capture_stats_with_step_witness(out, 2)
+    surfaces = {"vet": None, "classify_later": None}
+    runs = [_run(stats=stats, stats_keys=sorted(stats), surfaces=surfaces,
+                 receipt_keys=["ok", "stats"])]
+    observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
+    assert list(observed) == list(measure.STEPS), (
+        sorted(measure.STEPS) and [s for s in measure.STEPS if s not in observed])
+    assert not unobserved, unobserved
+    # and the two that needed the seam name WHERE they found it
+    assert "stats['step_witness']['vet']" in observed["S2.2"], observed["S2.2"]
+    assert "stats['step_witness']['classify_later']" in observed["S2.3"], (
+        observed["S2.3"])
+
+
+def test_the_seam_present_but_incomplete_is_a_seam_defect_not_a_pass_finding():
+    """Three states, three causes: absent, present-but-incomplete, present-and-off.
+
+    A seam on the receipt that does not carry its block is a defect in
+    ``_capture_step_witness``; blaming the pass would send the next lane to the
+    extractor, and blaming the instrument (as the absent arm does) would hide a
+    half-landed seam behind the same words.
+    """
+    stats = {**_FULL_STATS, "search_queries": 5, "step_witness": {"map": {}}}
+    runs = [_run(stats=stats, stats_keys=sorted(stats),
+                 receipt_keys=["ok", "stats"])]
+    observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
+    assert "S2.2" not in observed
+    cause = unobserved["S2.2"]
+    assert "INCOMPLETE" in cause, cause
+    assert _SEAM_SYMBOL in cause, cause
+    assert "no receipt carries" not in cause, cause
+    assert "did NOT run" not in cause, cause
+
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1226,10 +1290,10 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12402", "sdk.py:12683", "sdk.py:2368", "edges.py:467",
+        "sdk.py:12522", "sdk.py:12803", "sdk.py:2368", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
-    r"SUPERSEDED and its file is gone": ("sdk.py:12197",),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12317",),
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
@@ -1244,9 +1308,13 @@ _BUNDLE_HISTORICAL = {
 #                        that grows one line past the block it names reds
 #   ("contains", tok)   — the cited end line carries this token
 _BUNDLE_RULES = (
-    ("the meta fold S2.2/S2.3 are dropped at", "sdk",
-     ('"stats": out.get', "meta fold", "same fold", "dropped at", "must target"),
-     ('"stats": out.get("stats")',), "line", None),
+    # The fold that now CALLS the #9116 seam. Before the seam landed this rule
+    # named `"stats": out.get("stats")` (the line that dropped the block); the
+    # cite is the same fold and a different claim, so the anchors moved with it.
+    ("the meta fold that calls the #9116 seam", "sdk",
+     ('"stats": _capture_stats_with_step_witness', "meta fold", "same fold"),
+     ('"stats": _capture_stats_with_step_witness(out, len(extracted))',),
+     "line", None),
     ("the call that writes the references edge", "sdk",
      ("proj.link_source_to_event(",),
      ("proj.link_source_to_event(",), "line", None),
@@ -1526,7 +1594,7 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     """
     table = (
         "| **`#9664` capstone — the onboarding journey** — see `sdk.py:9` | x |\n"
-        "| **`#7949` / `#9080` capstone — the closing rule** — dropped at "
+        "| **`#7949` / `#9080` capstone — the closing rule** — the meta fold "
         "`sdk.py:3` | y |\n"
     )
     rows = table.splitlines()
@@ -1541,7 +1609,10 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     assert _bundle_in_scope("README.md", rows[0])
 
     sdk = ["x"] * 9
-    sdk[2] = '            "stats": out.get("stats") or {},'   # line 3: the meta fold
+    # line 3: the meta fold that CALLS the #9116 seam (it used to be the line
+    # that dropped the block — the rule's anchors moved with the fix)
+    sdk[2] = ('            "stats": _capture_stats_with_step_witness('
+              'out, len(extracted)),')
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         doc = root / "00_index.md"

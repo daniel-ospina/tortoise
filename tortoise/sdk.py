@@ -5651,6 +5651,126 @@ def _attach_source_change_notices(resp: dict, meta: dict) -> None:
         resp["source_change_notices"] = notices
 
 
+# #9116: the receipt sub-key the per-step witness rides in. It lives INSIDE the
+# existing ``stats`` key and is deliberately NOT a new top-level receipt key:
+# the receipt is the product's public write contract (the MCP/SDK surface), and
+# growing it is a decision the owner takes — while ``stats`` is already the
+# receipt's documented ADDITIVE telemetry key ("#2335 WI-1a: stats is ALWAYS
+# present on the receipt (additive meta contract)"). A sub-key inherits that
+# contract, reaches the hosted receipt for free (``hosted_api`` reads
+# ``meta["stats"]`` — so the two lanes cannot drift), and adds no verb.
+_STEP_WITNESS_KEY = "step_witness"
+
+#: The embed-list lanes the witness counts. Counts, never the structures: the
+#: receipt is serialized on the hosted lane and returned to every SDK caller,
+#: so carrying ``payload``/``embed_list``/``search`` themselves would multiply
+#: the receipt's size to answer a question counts answer.
+_STEP_EMBED_KINDS = ("entities", "events", "points", "operators")
+
+
+def _step_embed_counts(block) -> dict[str, int]:
+    """Per-lane item counts of an embed-list block ({} for a non-dict)."""
+    if not isinstance(block, dict):
+        return {}
+    return {k: len(block.get(k) or []) for k in _STEP_EMBED_KINDS}
+
+
+def _capture_step_witness(out: dict, *, committed: int) -> dict:
+    """#9116: the facts that let a caller witness each extractor step in ONE pass.
+
+    ``extract_session_v2`` returns ``vet``/``classify_later``/``search``/
+    ``payload`` (its per-stage evidence surfaces), but ``_extract_session_v2``
+    forwarded only ``stats`` — so a caller that drives the real entry point
+    (``capture_session``) could see S0/S1/S2.1/S5 and none of S2.2/S2.3/S3/S6.
+    The capstone probe (``docs/evidence/7949-capstone/probes/capstone_run.py``)
+    hit exactly that: its G5 requires all eight, so it refused for every input
+    and reported the gap as an INSTRUMENT defect.
+
+    This is the seam: one bounded witness record, derived from the SAME ``out``
+    object the pipeline returned (never a wrapper — #7949/E4 forbids
+    monkeypatching the pipeline to watch it), placed under
+    ``meta["stats"]["step_witness"]``.
+
+    It carries FACTS, not a verdict: no step id is graded here. Each block
+    names the values that prove its stage ran (``vet.s2``/``vet.union`` — the
+    VET gate's own stats; ``classify_later`` — the classify passes' own stats;
+    ``search.queries_run``/``degraded`` — S3's own report;
+    ``commit.payload_produced``/``committed`` — the Layer-1 payload's presence
+    plus the count the write loop actually committed). The caller decides what
+    it witnessed, which is what keeps the observation independent of the thing
+    observed.
+
+    Bounded by construction: counts and the stage's OWN small stats dicts only
+    — never ``payload``, ``embed_list`` or the search rows.
+    """
+    stats = out.get("stats") or {}
+    llm = stats.get("llm") or {}
+    by_stage = llm.get("by_stage") or {}
+    vet = out.get("vet") or {}
+    classify = out.get("classify_later") or {}
+    search = out.get("search") or {}
+    payload = out.get("payload")
+    s4 = stats.get("s4_merge") or {}
+    return {
+        # S0 — the reader segmented the source (the values already on stats,
+        # mirrored so the witness is readable on its own).
+        "reader": {"edus": stats.get("edus"), "chunks": stats.get("chunks")},
+        # S1 — the first LLM call reached; ``story_arc`` is its product.
+        "story": {"by_stage_s1": bool(by_stage.get("s1")),
+                  "story_arc_chars": len(out.get("story_arc") or "")},
+        # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
+        # is S2's own output; ``embed_list`` is what S4 left of it).
+        "map": {"items": _step_embed_counts(
+            out.get("s2_embed") if out.get("s2_embed") is not None
+            else out.get("embed_list"))},
+        # S2.2 — the VET gate's own evidence surface (#5005). ``enabled`` False
+        # is a real answer: a flag-off pass ran no S2.2.
+        "vet": {"enabled": bool(vet.get("enabled")),
+                "s2": vet.get("s2") or {}, "union": vet.get("union") or {}},
+        # S2.3 — the classify passes' own evidence surface (#1695 Task 5).
+        "classify_later": {"enabled": bool(classify.get("enabled")),
+                           "s2": classify.get("s2") or {},
+                           "union": classify.get("union") or {}},
+        # S3 — the graph search's own report. ``queries_run`` is the budget it
+        # actually spent (0 on the extractor's two skip paths, where the
+        # backend is absent or embedded — a state the capstone's own G2 refuses
+        # before the pass runs) and ``degraded`` says an ATTEMPTED search failed
+        # rather than resolved.
+        "search": {"mode": search.get("mode"),
+                   "degraded": search.get("degraded"),
+                   "reason": search.get("reason"),
+                   "queries_run": search.get("queries_run"),
+                   "hits": {k: len(search.get(k) or [])
+                            for k in ("entities", "points", "events")}},
+        # S5 — the merge's item accounting (the same numbers E4 reads).
+        "merge": {"merged_items": s4.get("merged_items"),
+                  "s2_items": s4.get("s2_items"),
+                  "s4_items": s4.get("s4_items")},
+        # S6 — the Layer-1 payload was produced AND its points went through the
+        # commit loop (``committed`` is what the write loop actually resolved —
+        # 0 when every point folded onto an existing canonical, which is a
+        # commit, not a skip).
+        "commit": {"payload_produced": payload is not None,
+                   "entities": len((payload or {}).get("entities") or []),
+                   "events": len((payload or {}).get("events") or []),
+                   "points": len((payload or {}).get("points") or []),
+                   "operators": len((payload or {}).get("operators") or []),
+                   "committed": committed},
+    }
+
+
+def _capture_stats_with_step_witness(out: dict, committed: int) -> dict:
+    """``out["stats"]`` + the #9116 step witness, as a NEW dict.
+
+    A copy on purpose: the extractor's own ``stats`` dict stays exactly what the
+    extractor said, so an eval/harness reader that holds ``out`` cannot see a
+    receipt-only key appear under it.
+    """
+    stats = dict(out.get("stats") or {})
+    stats[_STEP_WITNESS_KEY] = _capture_step_witness(out, committed=committed)
+    return stats
+
+
 def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
                               turns: int, meta: dict) -> None:
     """#2335 WI-1d: the structured observation leg — ONE JSON line per
@@ -13279,7 +13399,7 @@ class TortoiseSDK:
             # eval lane already surfaces it via ingest_v2; the product
             # lane dropped it here. error_census is a TOP-LEVEL out key
             # (sibling of stats) — folded separately when needed.
-            "stats": out.get("stats") or {},
+            "stats": _capture_stats_with_step_witness(out, len(extracted)),
             # #2335 WI-1a: error_census is a TOP-LEVEL extractor key
             # (sibling of stats) — folded alongside so the observation leg
             # and diagnostics can read it from the meta contract.

@@ -57,7 +57,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8873-8879`` and
 ``result["vet"]`` at ``:8883-8887``); they are dropped at the meta fold,
-``tortoise/sdk.py:13282`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:13402`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -148,7 +148,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13563`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13683`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +163,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13563 "
+    "the capture path at tortoise/sdk.py:13683 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -754,6 +754,11 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     return results
 
 
+#: The receipt's ``stats`` sub-key the SDK copies the per-stage blocks onto
+#: (#9116 — ``_capture_step_witness`` in ``tortoise/sdk.py``). One name, so the
+#: probe and the seam cannot spell it differently.
+STEP_WITNESS_KEY = "step_witness"
+
 #: The two stat keys a #9116 surface carries when its pass did WORK. Required for
 #: ANY witness: the flag alone is not evidence (see :func:`_pass_ran`).
 _WITNESS_STATS = ("s2", "union")
@@ -866,8 +871,10 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
     """The first ``key`` surface a run CARRIES that SAYS its pass ran, and where.
 
     Looks where the surface would legitimately land — the extractor's top-level
-    key on the receipt, then the stats block — and NOWHERE else: a witness read
-    off a wrapper's state is the instrumentation E4's row forbids.
+    key on the receipt, the stats block, and (since #9116's seam landed) the
+    ``stats["step_witness"]`` sub-key the SDK copies onto the receipt — and
+    NOWHERE else: a witness read off a wrapper's state is the instrumentation
+    E4's row forbids.
 
     Returns ``(block, where, refusal)``. ``block`` is non-``None`` only when a
     surface in that place states the pass ran (:func:`_pass_ran`); otherwise
@@ -891,6 +898,13 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
         candidates = (
             (f"receipt[{key!r}]", surfaces.get(key)),
             (f"stats[{key!r}]", (run.get("stats") or {}).get(key)),
+            # #9116 seam: ``stats["step_witness"][key]`` — where the shipped
+            # SDK now copies the stage's own block (`_capture_step_witness` in
+            # tortoise/sdk.py, a sub-key of the ``stats`` key the receipt
+            # already carried). Looked for LAST so a lane that still gets the
+            # extractor's own top-level key is read from there.
+            (f"stats['step_witness'][{key!r}]",
+             ((run.get("stats") or {}).get(STEP_WITNESS_KEY) or {}).get(key)),
         )
         for where_prefix, block in candidates:
             if not isinstance(block, dict) or not block:
@@ -1208,6 +1222,46 @@ def _stat_total(stats_list: list[dict], key: str) -> int:
     return sum(int(s.get(key) or 0) for s in stats_list)
 
 
+def _seam_cause(runs: list[dict], stats_keys: list[str], stats_key_total: int,
+                receipt_keys: list[str], key: str) -> str:
+    """Why a step with a KNOWN landed seam still has no witness (#9116).
+
+    Three states, and they send a reader to three different places, so the line
+    reports which one this run is in rather than one message for all three:
+
+      * the receipt carries **no** ``stats['step_witness']`` at all — the seam
+        did not run (extraction never reached ``_extract_session_v2``, or the
+        capture was a replay/keyless lane). Measured, not assumed: the receipt's
+        own key inventory is printed beside it.
+      * the receipt carries the seam but **not this block** — the seam is
+        present and incomplete, which is a defect in ``_capture_step_witness``.
+      * the third possibility — the block is here and says the pass did not do
+        work — never reaches this function; ``_witness_block`` returns a
+        REFUSAL for it, and that message is the pass's own.
+    """
+    with_seam = [run["session_id"] for run in runs
+                 if isinstance((run.get("stats") or {}).get(STEP_WITNESS_KEY),
+                               dict)]
+    measured = (f"Measured on this run: inspected {stats_key_total} stats "
+                f"key(s) across {len(runs)} receipt(s) "
+                f"[{', '.join(stats_keys) or 'none'}] and "
+                f"{len(receipt_keys)} receipt top-level key(s) "
+                f"[{', '.join(receipt_keys) or 'none'}]")
+    if not with_seam:
+        return (
+            f"{measured}; no receipt carries stats[{STEP_WITNESS_KEY!r}], so the "
+            f"#9116 seam that copies result[{key!r}] onto the receipt ("
+            f"`_capture_step_witness`, called at the meta fold in "
+            f"_extract_session_v2) did not reach this capture. This is an "
+            f"INSTRUMENT gap, NOT the pipeline skipping the step; reading a "
+            f"wrapper instead is the instrumentation E4's row forbids")
+    return (
+        f"{measured}; stats[{STEP_WITNESS_KEY!r}] IS present on "
+        f"{len(with_seam)} of {len(runs)} receipt(s), but it carries no "
+        f"{key!r} block — the seam is present and INCOMPLETE, which is a defect "
+        f"in _capture_step_witness (tortoise/sdk.py), not in the pass")
+
+
 def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     """The EIGHT steps, each read off the object that carries it.
 
@@ -1283,23 +1337,9 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.2"] = (
             f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process and read it "
             f"back from os.environ (the `arm:` line above is that read-back), "
-            f"so the pass was ENABLED for this run — and whether it then DID any "
-            f"work is NOT observable through this surface, which is exactly why "
-            f"the surface is missing: a flag-on block that idles (an empty list, "
-            f"or a failed fail-open pass) is indistinguishable from this one, so "
-            f"this run does not claim the pass ran. Its surface EXISTS one layer "
-            f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8883-8887. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13282 (\"stats\": out.get(\"stats\") "
-            f"or {{}} inside _extract_session_v2 — the sibling key is not "
-            f"copied). Measured on this run: "
-            f"inspected {stats_key_total} stats key(s) across {len(ran)} "
-            f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
-            f"{len(receipt_keys)} receipt top-level key(s) "
-            f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13282 is the line its fix "
-            f"must target; reading a wrapper instead is the instrumentation "
-            f"E4's row forbids")
+            f"so the pass was ENABLED for this run — and this receipt carries no "
+            f"surface that says whether it then DID any work. "
+            f"{_seam_cause(runs, stats_keys, stats_key_total, receipt_keys, "vet")}")
 
     classify_block, classify_where, classify_refusal = _witness_block(
         runs, "classify_later")
@@ -1317,20 +1357,9 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.3"] = (
             f"UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process "
             f"and read it back from os.environ (the `arm:` line above is that "
-            f"read-back), so the pass was ENABLED for this run — and whether it "
-            f"then DID any work is NOT observable through this surface, which is "
-            f"exactly why the surface is missing: a flag-on block that idles (no "
-            f"classify items, or a failed fail-open pass) is indistinguishable "
-            f"from this one, so this run does not claim the pass ran. Its "
-            f"surface EXISTS one layer down: extract_session_v2 emits "
-            f"result['classify_later'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8873-8879. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13282 "
-            f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
-            f"Measured on this run: the same {stats_key_total} stats key(s) and "
-            f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
-            f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13282 is the line its fix must target")
+            f"read-back), so the pass was ENABLED for this run — and this "
+            f"receipt carries no surface that says whether it then DID any work. "
+            f"{_seam_cause(runs, stats_keys, stats_key_total, receipt_keys, 'classify_later')}")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
