@@ -414,9 +414,22 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   it does not do, and its measured cost: `docs/architecture/S2-DECISION-SEAM.md`. **Do not rebuild it.**
   ⛔ **The previous use is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
-  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0` (the pin
-  survives the move: the fleet's DEPLOYED callers send that same version to `api.typesafe.ai`, and the
-  agent-infra source caught up in #2859), prompt version
+  lane taking ownership of the issue's work?") — model `jev-1.13.0` at the time this was
+  measured. The fleet's model constant is `jev-latest` by owner ruling 2026-10-27, and the
+  switch **landed** in agent-infra#2914 (merged 2026-10-27), so agent-infra `main` sends the
+  alias as well. What can still lag is a COPY: the three deployed JEV callers under
+  `~/.pi/agent/scripts/` — `turn-classify.py`, `ask-owner.py`, and `lane-actions.py` (which
+  carries no constant of its own and sends `LV.JEV_MODEL` from `state/lane-verdict.py`) — are
+  DERIVED from an agent-infra checkout, so they mirror whatever that checkout held WHEN
+  BOOTSTRAPPED — a bootstrap from a checkout that predates that merge reverts
+  them to the pin (observed 2026-10-27 12:52), a derivation artefact rather than a decision. So
+  name which checkout YOUR copies came from; do not assume the pin means the fleet was never moved.
+  `~/.pi/agent/state/lane-verdict.py` is the exception: bootstrap never writes `state/`, so it
+  is hand-maintained and a pin there is an edit, not a derivation (a box without that file has
+  nothing to assert there). Assert all three after any bootstrap:
+  `grep -rn 'JEV_MODEL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py`
+  (three paths — a bare `grep 'JEV_MODEL ='` reads stdin and answers nothing). Either way a measurement
+  of this seam must name its model rather than assume one. Prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
   `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
@@ -560,6 +573,42 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 - Branch naming: `feat/`, `fix/`, `chore/` prefixes
 - PRs auto-merge by default (no staging hold unless `deploy:staging` label)
 - Pre-commit hook enforces agent-infra version sync via `.husky/pre-commit`
+
+### ⛔ HARD RULE: Every lane leaves a `WORKTREE-REPORT.md` — silence is not a result
+
+**Owner ruling, 2026-10-28 (#10220, relayed verbatim):** *"every lane writes
+`WORKTREE-REPORT.md` before it exits: worktree + branch, files changed, each suite run with
+pass/fail/skip counts, the commands used, and anything it could not do … name the file exactly
+`WORKTREE-REPORT.md`, put it at the worktree root, and include the suite commands verbatim (the
+verifier has no other way to tell 'ran 37 tests' from 'wrote 37')."*
+
+The reason it is a rule and not advice: a lane's outcome used to live **only in its reply**. Two
+measured lanes (#8933 stage 1, #10122) finished complete and green, ran past the 660-second
+silence threshold, returned *nothing at all*, and were recovered only because a human guessed to
+run `git status` inside `.worktrees/`. A file on disk survives a truncated reply; a message does
+not.
+
+```bash
+uv run python tools/worktree_report.py init --issue <N>          # FIRST, before any test run
+uv run python tools/worktree_report.py run --cmd '<the exact command you would type>'
+uv run python tools/worktree_report.py note --not-done '<what you could not do, and why>'
+uv run python tools/worktree_report.py check                     # 0 green · 3 red-but-valid · 1 invalid
+```
+
+- ⛔ **Never hand-write the report, and never assert a count.** The tool derives pass/fail/skip
+  from the output it captured, and has no flag that could accept a number from you — that is the
+  whole point of the artifact, and `check` re-parses the log to enforce it. A hand-written report
+  fails `state-missing`.
+- `init` is written BEFORE the first suite, so a lane that is killed mid-run still leaves its
+  worktree, branch and file list behind — that is the recovery artifact, not the final summary.
+- A **red** suite is recorded honestly and is valid evidence (`check` exits `3`, never `0`), so
+  never drop a failing suite from the report to make it look green.
+- Its files (`WORKTREE-REPORT.md`, `.worktree-report/`) are gitignored and never committed: they
+  describe the working tree, not the product.
+
+**Scope, so this is not duplicated:** this rule is the *producer*. The merge-path refusal to merge
+a lane whose report is missing/empty/unevidenced is `agent-infra#2977` (`merge-one.sh`), which
+calls `worktree_report.py check` rather than re-implementing the format.
 
 ### Testing
 
