@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### A lifecycle carrier can no longer be written without the status it implies (#10192)
+
+`update_entity(<object|subject>, supersededBy=…)` and `update_entity(…,
+supersededAt=…)` were ACCEPTED and left the node `status='live'`, while
+`public.object_current_status` / `public.subject_current_status` derive the
+status from the carriers alone
+(`CASE WHEN superseded_by IS NOT NULL OR superseded_at IS NOT NULL THEN
+'superseded'`). The record therefore answered `'superseded'` for a node the
+graph held `'live'`, and #9974's record-sourced rebuild faithfully turned that
+into a **wrong graph**: a live entity came back TERMINAL — dropped from recall
+and unresolvable by name. The same was reachable through the CREATE door
+(`create_object(name, props={'supersededBy': …})`, whose `_upsert_object`
+MERGEs ON MATCH and therefore reaches an existing node) and with an
+empty-string pointer (`'' IS NOT NULL`, so the record reads it as a
+supersession while it names no successor).
+
+Both entity doors now REFUSE a bare carrier with a `ValueError` that names the
+coherent write — `status='superseded'` together with the carriers, in ONE call
+— and the refusal is atomic: nothing is written to the graph and no
+`EntityMutated` record is appended, so the receiver (the record's only
+producer) never sees the carrier. The coherent triple, a born-superseded
+create, and the record-carried un-supersede (`status='live'` with the carriers
+set to `None`) all stay writable, as does a `supersededBy` prop on a
+non-lifecycle label (`:Point` / `:Source` / `:Event`). The record's views and
+the cache's `DERIVED_FROM_RECORD` are unchanged: the divergence is closed at
+the write door, not by a second fold. Rows written before this guard are
+legacy-only and are not backfilled (a census is required first).
+
 ### The commit payload's three uncapped collections are now bounded (#4051)
 
 `POST /v1/sessions/commit` bounds its payload per type — points, entities,

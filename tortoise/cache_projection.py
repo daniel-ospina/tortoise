@@ -397,9 +397,10 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
 #:   express un-superseded"; it can, via the carriers.
 #: * **⚠️ NOT SOUND FOR A CARRIER SET WITHOUT THE STATUS FOLD — a LIVE-WRITER
-#:   divergence, measured and OWNED BY #10192.** A carrier present does NOT imply
-#:   the node's `status` is `'superseded'`. Measured on a live engine at this
-#:   head, all three ACCEPTED by `update_entity`:
+#:   divergence, measured, and CLOSED AT THE WRITE DOOR by #10192.** A carrier
+#:   present does NOT imply the node's `status` is `'superseded'`. Measured on a
+#:   live engine at this head, all three were ACCEPTED by `update_entity` (and a
+#:   fourth by `create_object`) before #10192:
 #:
 #:       update_entity(obj, supersededBy='v2')                  -> status='live', supersededBy='v2'
 #:       update_entity(obj, supersededAt='2026-01-01T00:00:00Z') -> status='live', supersededAt='…'
@@ -407,15 +408,26 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:       update_entity(obj, status='superseded', supersededBy='p-v2') -> status='superseded'  (the coherent pair)
 #:
 #:   The record writes the carrier (`op=supersede` is the classifier's reading of
-#:   that write), so a rebuild would materialize a TERMINAL node for an entity
-#:   the live graph holds LIVE — `live._terminal_excluded` drops it from recall
-#:   and `entity_identity.resolve_entity_id` refuses its name. BOTH carriers are
+#:   that write), so a rebuild materialized a TERMINAL node for an entity the live
+#:   graph holds LIVE — `live._terminal_excluded` dropped it from recall and
+#:   `entity_identity.resolve_entity_id` refused its name. BOTH carriers were
 #:   exposed; the empty-carrier case is the one this table escapes (see (b)
-#:   above), and the non-empty cases are #10192's, which owns the fix (a write-door
-#:   coherence guard vs a change to the record's fold — its decision, not this
-#:   table's). This table does not try to compensate: it cannot see the graph, and
-#:   inventing a second rule here would give the cache and the record two
-#:   different folds — the defect #9974 is about.
+#:   above), and the non-empty cases were #10192's.
+#:   **#10192 LANDED AS A WRITE-DOOR REFUSAL, not as a change to either fold**
+#:   (`sdk._refuse_bare_lifecycle_carrier`, on BOTH entity doors — `_update_entity`
+#:   and `_create_entity`, whose `_upsert_object` MERGEs ON MATCH). The three
+#:   incoherent shapes are now `ValueError` and write NOTHING to either store, so
+#:   the row this bullet warns about is no longer MINTABLE through a tenant door.
+#:   ⚠️ WHAT THAT DOES **NOT** CHANGE, stated so this bound is not read as closed
+#:   everywhere: (i) rows written BEFORE the guard still exist in a record DB and
+#:   a rebuild of one still materializes a terminal node for a live entity — a
+#:   backfill is a census-first decision no lane has data for
+#:   (`TORTOISE_RECORD_DSN` unset here), and the census query is on #10192;
+#:   (ii) the answer in this table is UNCHANGED and must stay that way — it
+#:   cannot see the graph, and inventing a second rule here would give the cache
+#:   and the record two different folds, the defect #9974 is about; (iii) the
+#:   record's own `IS NOT NULL` predicate is untouched, so a legacy blank-carrier
+#:   row is still over-reported by the view.
 #: * **NOT DERIVED — `superseded`, and every other `restatus` value
 #:   (`deprecated`/`archived`/`retracted`/`draft`), plus the event-kind
 #:   vocabularies.** `superseded` is named FIRST because it is the value this
