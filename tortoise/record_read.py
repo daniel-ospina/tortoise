@@ -563,6 +563,16 @@ def served_turn_count(*, answer: "TurnAnswer | None", served: int,
       cannot arrive on this arm: its older turns live in the RECORD, and the
       record is exactly what is unreachable.
 
+    ⛔ ``turn_max_index`` IS DELIBERATELY NOT ONE OF THE CLAIMS, though both doors
+    already hold it and it is the only datum that describes the whole id space.
+    It is a CEILING witness (``_shortfall`` refuses a record that stops below it),
+    while ``expected`` is a FLOOR: folding the mark in as ``turn_max_index + 1``
+    makes the graph-only stale-superset state (4 nodes, ``turn_count=2``,
+    ``turn_max_index=3`` — the shape the sibling hosted pins build) compute
+    ``served == expected`` and SERVES exactly the transcript the bullet above
+    refuses. The count answers "is any turn missing"; the mark answers "is there
+    a row the session does not own", and one number cannot answer both.
+
     ``expected`` is deliberately the max rather than either store alone: an
     append's older turns predate arming, so their count lives on the record's
     side, while a mid-capture refusal leaves the record's own count short of the
