@@ -2363,3 +2363,185 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                     "auto }}` companion. The id selector out-ranks "
                     "`.beat.pe-on`, so the visibility-gated rule is defeated "
                     "and the beat can never receive the scroll gesture.")
+
+
+class TestARenderedCodeElementGetsAMonoFace:
+    """A page that renders `<code>`/`<pre>` must give the ELEMENT a mono family (#6870).
+
+    `TestMonospaceStackRendersAsAMonoFace` proves every *declaration* is right, and
+    that is not enough: a `<code>` or `<pre>` element with NO matching rule inherits
+    nothing — the user-agent's `font-family: monospace` beats inheritance — so it
+    renders in Courier even when `--mono` is perfect everywhere in the file.
+
+    That is exactly how the blog renderer and the 404 page survived the first pass:
+    measured with CDP `CSS.getPlatformFontsForNode`, the blog's `<code>`/`<pre>` and
+    `website/404.html`'s `<code>` were **Courier** while every sibling page was
+    **Menlo**, because those two files rendered the element and never styled it.
+
+    Scope is the self-contained page: a file carrying its own `<style>` block, i.e.
+    the marketing pages, the 404, and the blog renderer's inline sheet. A React
+    component styled by a separate stylesheet is out of scope — this test cannot see
+    across files, and pretending otherwise would pin nothing.
+
+    WHAT THIS PINS: every self-contained page that renders `<code>`/`<pre>` carries a
+    rule naming that element whose family resolves to a mono face. That is the shape
+    the defect had — the element existed and nothing styled it.
+
+    WHAT IT DOES NOT PIN, stated because a guard is trusted for what it claims: CSS is
+    not modelled, it is pattern-matched. It does not evaluate `@media`/`@supports`
+    conditions or a `<style media=…>` attribute, does not model `<noscript>`, does not
+    parse CSS strings (so a `/*` inside `content:"…"` is treated as a comment), and
+    reads `font-family` plus the `font:` shorthand rather than resolving the cascade.
+    A page could therefore satisfy it and still render Courier under some condition.
+    Each of those is latent — no page in this tree carries such a shape — and closing
+    them properly means parsing CSS, not adding a fifth regex.
+
+    Three ways an earlier version of this guard went GREEN over a page that renders a
+    non-mono face, each closed here:
+
+    1. **Inert text.** It read the file as text, so a `/* … */` comment inside the
+       sheet, a `<style>` inside an HTML comment, a `<style>` inside a `<script>`
+       string, and a `<style>` inside `<template>` each counted as styling. The
+       document is blanked for comments, script bodies and template bodies before any
+       sheet is read.
+    2. **`var(--mono)` with nothing to resolve to.** The token was accepted without
+       asking whether the page defines `--mono` at all, or whether the value it
+       defines is a mono face (`--mono: Georgia, serif` passed). The declaration is
+       now resolved through the page's own definitions, two hops, and must land on a
+       mono face.
+    3. **A rule that styles the element only in context.** `.art-body pre code` — and
+       `pre.anything code` — says nothing about an inline `<code>` in a paragraph, so
+       that pairing is skipped; everything else is the cascade.
+
+    Three ways it wrongly REFUSED a correct page, all closed: a rule wrapped in
+    `@media`, a `font-family: var(--code-font)` indirection, and the element with a
+    class or attribute (`code.inline{…}`). The rule match is innermost-only, the
+    indirection resolves, a `font:` shorthand naming a mono face is accepted, and the
+    last compound may carry a class/id/attribute/pseudo.
+
+    Known residual, deliberately not modelled: a page rendering `<code>` **only**
+    inside `<pre>` is refused, because the `pre code` pairing is skipped
+    unconditionally. No page in this tree is shaped that way.
+    """
+
+    SUFFIXES = (".html", ".css", ".js", ".ts", ".jsx", ".tsx")
+    RENDERS_CODE = re.compile(r"<(code|pre)\b", re.IGNORECASE)
+    #: only the page's own sheet is author CSS for this guard. Inert text is stripped
+    #: first: `<script>` strings, `<template>` bodies (not rendered), HTML comments.
+    STYLE = re.compile(r"<style[^>]*>(.*?)</style>", re.DOTALL | re.IGNORECASE)
+    INERT = re.compile(r"<script\b[^>]*>.*?</script>|<template\b[^>]*>.*?</template>",
+                       re.DOTALL | re.IGNORECASE)
+    COMMENT = re.compile(r"/\*.*?\*/|<!--.*?-->", re.DOTALL)
+    #: INNERMOST rules only: a body containing `{` means the match is an at-rule
+    #: prelude wrapping another rule, and the inner one is the rule that styles it
+    RULE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.DOTALL)
+    #: `font-family` and the `font:` shorthand — the shorthand smuggles a family past
+    #: a font-family-only scan, the lesson the sibling class already learned
+    FAMILY = re.compile(r"(?:font-family|font)\s*:\s*([^;}]*)", re.IGNORECASE)
+    VAR_DEF = re.compile(r"(--[\w-]+)\s*:\s*([^;}]*)")
+    VAR_REF = re.compile(r"var\(\s*(--[\w-]+)\s*(?:,([^)]*))?\)", re.IGNORECASE)
+    #: the selector's LAST compound must be the element itself — `.code{}` is the big
+    #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets
+    ELEMENT = re.compile(r"(?:code|pre|kbd|samp)", re.IGNORECASE)
+    #: the element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
+    #: `<code>`, so only a following TAG character disqualifies the compound
+    ELEMENT_LAST = re.compile(r"(?:code|pre|kbd|samp)(?![a-zA-Z0-9_-])", re.IGNORECASE)
+    TAG = re.compile(r"([a-zA-Z][\w-]*)")
+    #: a real face, NOT the `monospace` keyword: on macOS Chrome that keyword IS
+    #: Courier, which is the defect. The sibling guard requires Menlo by name for the
+    #: same reason, and accepting the keyword let `var(--mono, monospace)` pass with
+    #: `--mono` undefined or set to a serif.
+    MONO = ("menlo", "sfmono", "sf mono")
+
+    def _is_mono(self, value, defined, depth=0):
+        """Does `value` name a mono face, once the page's own tokens are resolved?"""
+        v = value.strip().lower()
+        if v in ("inherit", "unset", "initial", "revert"):
+            # inheriting is the failing case for an element with no author rule: the
+            # UA `monospace` sheet would win. A parent that IS mono is out of scope.
+            return False
+        if any(m in v for m in self.MONO):
+            return True
+        if depth < 2:
+            for name, fallback in self.VAR_REF.findall(v):
+                resolved = defined.get(name.lower())
+                if resolved is not None and self._is_mono(resolved, defined, depth + 1):
+                    return True
+                if fallback and self._is_mono(fallback, defined, depth + 1):
+                    return True
+        return False
+
+    def _elements_styled_mono(self, css):
+        """The element names (`code`, `pre`) that some rule gives a mono family."""
+        defined = {name.lower(): value for name, value in self.VAR_DEF.findall(css)}
+        # the LAST matching rule wins the cascade, so a later
+        # `code{font-family:inherit}` must un-style it, not be ignored
+        last_family = {}
+        for selectors, body in self.RULE.findall(css):
+            families = self.FAMILY.findall(body)
+            if not families:
+                continue
+            family = families[-1]
+            for sel in selectors.split(","):
+                parts = re.split(r"[\s>+~]+", sel.strip())
+                last = parts[-1]
+                match = self.ELEMENT_LAST.match(last)
+                if not match:
+                    continue
+                # the compound may carry a class/id/attr/pseudo — the ELEMENT is the tag
+                element = match.group(0).lower()
+                # `pre code` (and `pre.anything code`) styles code *inside* pre; it is
+                # not the generic style for an inline <code>, so it must not decide it
+                if element == "code" and len(parts) > 1:
+                    tag = self.TAG.match(parts[-2])
+                    if tag and tag.group(1).lower() == "pre":
+                        continue
+                last_family[element] = family
+        return {e for e, fam in last_family.items() if self._is_mono(fam, defined)}
+
+    def test_no_self_contained_page_renders_code_or_pre_unstyled(self):
+        repo = Path(__file__).resolve().parent.parent
+        offenders, checked = [], 0
+        for path in self._sources(repo):
+            text = path.read_text(errors="replace")
+            if not self.RENDERS_CODE.search(text):
+                continue
+            # blank the whole DOCUMENT first: a `<style>` inside a `<script>` string, a
+            # `<template>` body, or an HTML comment is inert, and blanking only the
+            # extracted sheets missed the last two
+            css = "\n".join(self.STYLE.findall(
+                self.COMMENT.sub(" ", self.INERT.sub(" ", text))))
+            if not css.strip():
+                continue
+            checked += 1
+            # per element, not "some rule somewhere": the blog styled `pre` and left
+            # inline `code` to the UA sheet, which passed a set-level check
+            rendered = {e.lower() for e in self.RENDERS_CODE.findall(text)}
+            missing = sorted(rendered - self._elements_styled_mono(css))
+            if missing:
+                offenders.append(f"{path.relative_to(repo)} ({', '.join('<' + m + '>' for m in missing)})")
+        assert checked >= 3, (
+            f"only {checked} self-contained page(s) found — the scan is not looking at the right tree")
+        assert not offenders, (
+            "these pages render these elements but no rule in their own <style> gives the ELEMENT "
+            "a mono family, so the user-agent's `monospace` applies and macOS Chrome renders Courier "
+            "(issue #6870):\n  " + "\n  ".join(offenders) +
+            "\nAdd e.g. `code{font-family:var(--mono)}` AND make sure that page defines `--mono` as a "
+            "mono face (an undefined var() invalidates the declaration and the element inherits).")
+
+    @staticmethod
+    def _sources(repo):
+        # os.walk with a pruned `dirnames`, NOT `rglob`: rglob materialises the whole
+        # tree, `node_modules` included, before any filter can run (see the sibling
+        # class's note — it is the same walk, and the same cost).
+        skip = {"node_modules", "dist"}
+        for root_name in ("website", "apps"):
+            root = repo / root_name
+            # fail closed: a missing root would narrow the scan silently
+            assert root.is_dir(), f"{root_name}/ is gone — update ROOTS in this guard"
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in skip]
+                for name in filenames:
+                    if Path(name).suffix not in TestARenderedCodeElementGetsAMonoFace.SUFFIXES:
+                        continue
+                    yield Path(dirpath) / name
