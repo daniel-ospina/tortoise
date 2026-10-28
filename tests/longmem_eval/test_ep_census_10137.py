@@ -213,6 +213,42 @@ def test_a_direct_claim_to_claim_factor_edge_is_counted(sdk):
         e["reason"] for e in summary["inert_questions"]]
 
 
+def test_a_hybrid_op_type_claim_reads_operator_shaped_not_structural(sdk):
+    """The DOCUMENTED consequence of copying the engine's operator predicate.
+
+    ``is_operator = true OR op_type IS NOT NULL`` also admits a hybrid
+    ``create_point(op_type=…)`` CLAIM — the engine's operator-side selections
+    use exactly that predicate (`ep.py:1456`, `:1804`, `:1870`, `:2573`) while
+    ``ep._non_operator`` admits the same node as a CLAIM on the participant
+    side, so one node can be in both populations. The narrow
+    ``is_operator IS NULL AND op_type IS NOT NULL`` spelling was REJECTED (it
+    would make the census disagree with the engine's own selection); this pin
+    exists so the choice is intentional and a future editor taking the narrower
+    spelling has to change a test that says why.
+
+    Consequence: an edge-less hybrid reads ``operators: 1`` + ``factor_edges:
+    0`` → ``no_ep_factors`` ("operators exist, none reached the window"), NOT
+    the structural ``no_operators``. Non-structural is the safe side for a
+    verdict that routes a fix.
+    """
+    sdk.create_point("statement", "hybrid claim", dedup=False,
+                     status="live", op_type="IMPL")
+
+    manifest = _manifest_of(sdk)
+
+    assert manifest["operators"] == 1     # operator-SHAPED, per the engine
+    assert manifest["factor_edges"] == 0  # ...but no factor reaches a claim
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": manifest}],
+        requested=True)
+    assert [e["reason"] for e in summary["inert_questions"]] == [
+        mp.INERT_NO_EP_FACTORS]
+    # ...and that reason is NOT the structural one, so the verdict routes a fix
+    # at the arm/pass, never at extraction.
+    assert mp.INERT_NO_EP_FACTORS not in mp.INERT_REASONS_STRUCTURAL
+
+
 def test_the_census_agrees_with_the_canonical_read(sdk):
     """The off-neutral count is derived FROM ``read_confidence`` over the
     graph's own rows, so the two surfaces cannot disagree.

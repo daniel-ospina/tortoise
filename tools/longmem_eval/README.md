@@ -211,7 +211,7 @@ summary publishes the **populations** built from them:
 
 | cell (per question) | reads | why it exists |
 |---|---|---|
-| `operators` | graph census of operator nodes, over the ENGINE's predicate (`is_operator` OR `op_type`) | a MEASURED `0` means no operator node exists — and, with `factor_edges` also `0`, nothing EP does can ever reach a claim (STRUCTURAL) |
+| `operators` | graph census of operator nodes, over the ENGINE's predicate (`is_operator` OR `op_type`) | a MEASURED `0` means no operator-shaped node exists — and, with `factor_edges` also `0`, nothing EP does can ever reach a claim (STRUCTURAL). ⚠️ the engine's predicate also admits a hybrid `create_point(op_type=…)` CLAIM, so one node can appear here AND in the claim censuses; `no_operators` therefore means "no operator-SHAPED node", and an edge-less hybrid lands on `no_ep_factors` (the non-structural, safe side) |
 | `factor_edges` | census of DIRECT `IMPL`/`NAND` edges — claim → claim, operator-mediated edges (premise→op→conclusion) excluded | an edge between two claims with no operator node between them is still a factor (#888 W5), so a STRUCTURAL verdict needs BOTH to be a measured `0` |
 | `points_off_neutral` | claims whose persisted posterior mean is not `0.50` (ε `1e-6`; computed from `read_confidence`, never re-implemented in Cypher) | the STATE census — an IMPL-only graph over uniform priors reads `0` while `points_with_ep` covers every claim |
 | `points_moved_off_neutral` | claims that were NOT off-neutral before this pass and are after it | the CONTRIBUTION proper: a claim given a non-uniform baseline sits off the neutral mean with EP never having run, so a bare off-neutral count would credit the pass with a prior it did not create |

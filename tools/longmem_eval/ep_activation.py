@@ -133,6 +133,31 @@ NEUTRAL_EPS = 1e-6
 #: ``op_type``-only operators that EP consumes as factors, so it would publish
 #: "this graph mints no operators" for a graph whose operators are merely
 #: spelled differently.
+#:
+#: ⚠️ THE SAME PREDICATE ALSO ADMITS A HYBRID CLAIM — and that is the ENGINE's
+#: own ambiguity, reproduced faithfully rather than resolved here. A hybrid
+#: ``create_point(op_type=...)`` node is ``is_operator = false`` WITH
+#: ``op_type``: the operator-side selections admit it (`ep.py:1456`, `:1804`,
+#: `:1870`, `:2573` — all four spell this exact predicate), and
+#: `ep._non_operator` admits the SAME node as a CLAIM on the participant side
+#: (`ep.py:114-118`: "``is_operator = false`` — the modern plain Point AND the
+#: hybrid … are CLAIMS"). So one node can appear in BOTH this census and
+#: ``points_with_ep`` / ``points_unmeasured``.
+#:
+#: Consequences, stated so a reader does not over-read the cell:
+#: * ``no_operators`` means "no operator-SHAPED node", not "no
+#:   ``is_operator = true`` node". A graph whose only operator-shaped node is
+#:   an edge-less hybrid reads ``operators: 1`` + ``factor_edges: 0`` and is
+#:   diagnosed ``no_ep_factors`` ("operators exist, none reached the window") —
+#:   truthful, and the NON-structural side, which is the safe direction for a
+#:   verdict that routes a fix.
+#: * The narrower ``is_operator IS NULL AND op_type IS NOT NULL`` spelling was
+#:   REJECTED: it would make this census disagree with the engine's own
+#:   operator selection, which is the definition the cell exists to report.
+#: * Reachability is narrow and stated: no in-repo writer passes ``op_type`` to
+#:   ``create_point`` (``ingest_v2`` mints real operators via
+#:   ``create_operator``), so a benchmark run cannot hit the overlap; a graph
+#:   built through the public ``create_point(op_type=…)`` shape can.
 _COUNT_OPERATORS = (
     "MATCH (o:Point) "
     "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
