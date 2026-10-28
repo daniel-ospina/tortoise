@@ -678,9 +678,11 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
 
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
-    carrier) — #9974. So the schema's refused names CAN appear here, synthesized
-    rather than stored, and a consumer must not read their presence as "the
-    record holds a column for this": ``_refused('object')`` still lists
+    carrier) — #9974 — **plus** the same `status` derived from the record's EVENT
+    STREAM where a connector/pack lifecycle names the Object (#10198, an
+    `EVENT_STREAM_FOLDS` member). So the schema's refused names CAN appear here,
+    synthesized rather than stored, and a consumer must not read their presence
+    as "the record holds a column for this": ``_refused('object')`` still lists
     `status`. That is the projection's contract for a record-sourced node (the
     same map a `rebuild_from_record` materializes), and it is what makes this
     read agree with the rebuilt cache instead of silently dropping a lifecycle
@@ -693,7 +695,13 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     names a row can yield is decided in ONE place (that table's bound, not a
     second rule here).
     """
-    from .cache_projection import NODE_TABLES, node_from_row
+    from .cache_projection import (
+        EVENT_STREAM_FOLDS,
+        NODE_TABLES,
+        apply_event_stream_folds,
+        node_from_row,
+        read_lifecycle_events,
+    )
 
     table = NODE_TABLES.get(label)
     if table is None:
@@ -706,7 +714,21 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
                     key_column=NODE_KEY_COLUMN, key=key)
     if row is None:
         return None
-    return dict(node_from_row(label, row).props)
+    node = node_from_row(label, row)
+    # #10198: the connector/pack lifecycle half of the same `status` cache is
+    # derived from the record's EVENT STREAM, which no row carries — so a read
+    # that stopped at `node_from_row` would answer a connector-tracked Object
+    # without the status a `rebuild_from_record` materializes, breaking this
+    # function's own "the same map" contract. Narrowed to the events that can
+    # name THIS Object: a single-row read must not scan a tenant's history.
+    target = node.props.get("name")
+    if label in EVENT_STREAM_FOLDS and isinstance(target, str) and target:
+        node = apply_event_stream_folds(
+            (node,),
+            read_lifecycle_events(conn, org_id=org_id, graph_id=graph_id,
+                                  target=target),
+        )[0]
+    return dict(node.props)
 
 
 def read_point(conn: Any, *, org_id: str, graph_id: str,
