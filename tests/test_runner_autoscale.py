@@ -789,8 +789,10 @@ def test_repair_preserves_the_labels_the_runner_already_has(env):
     """Re-registering keeps the runner's own labels (minus the host-derived ones).
 
     A derived set drops a custom/tier label (and the fallback label when it is engaged), so every
-    workflow targeting it queues forever — a "repair" that removes capacity, and a label change
-    the work order forbids (review round 1, finding 3).
+    workflow targeting it queues forever — a "repair" that removes capacity, and it is the
+    DERIVATION that the work order forbids (review round 1, finding 3). A version-pinned hosted
+    label is the one label dropped on purpose, not kept — see
+    `test_repair_never_hands_the_pool_a_version_pinned_hosted_label`.
     """
     e = env(
         pool=[("r1", "offline", False, "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,gpu")],

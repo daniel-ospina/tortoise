@@ -4222,8 +4222,11 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 # Two independent reasons a tick is lost; the first is this file's subject and
 # the second is why the pin has to be a LABEL, not a flag:
 #
-#   1. `runs-on: ubuntu-latest` resolves to the repo's SELF-HOSTED pool, so the
-#      governor queues behind every test shard in the fleet;
+#   1. `runs-on: ubuntu-latest` is served by BOTH GitHub-hosted and this repo's
+#      self-hosted pool (the pool advertises it while the fallback is engaged), so a
+#      tick CAN land on the pool and queue behind every test shard in the fleet —
+#      measured 2026-10-27: of the 83 jobs these four workflows created, 81 were
+#      served by a GitHub-hosted runner and 2 by the pool;
 #   2. GitHub keeps ONE pending run per concurrency group, so each 10-minute
 #      tick cancels the previous PENDING tick while it waits — `cancel-in-progress:
 #      false` prevents cancelling a RUNNING governor and does nothing for a
@@ -4357,7 +4360,7 @@ def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() ->
             )
 
 
-def test_a_fleet_observer_pin_is_asserted_not_merely_written() -> None:
+def test_the_fleet_observer_roster_cannot_quietly_shrink() -> None:
     """A roster that drifts to empty would pass both tests above vacuously."""
     assert len(FLEET_OBSERVER_WORKFLOWS) >= 4, (
         "the observer roster shrank — if a workflow was renamed, update the "
@@ -4410,7 +4413,11 @@ def test_a_workflow_edit_keeps_its_steps() -> None:
 
 
 def test_every_fleet_observer_payload_step_is_name_pinned() -> None:
-    """A roster that drifts to empty would pass the pin above vacuously."""
+    """A payload-step roster that drifts from the observer roster is REPORTED here.
+
+    The equality is the guard: it names the workflow whose payload step went
+    unpinned, rather than being the thing that makes another test able to fail.
+    """
     assert set(FLEET_OBSERVER_PAYLOAD_STEP) == set(FLEET_OBSERVER_WORKFLOWS), (
         "the payload-step roster drifted from the observer roster — add the "
         "workflow's payload step name rather than deleting its entry"

@@ -23,7 +23,9 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   capacity is now a goal in its own right. So this file adds capacity openly instead of dressing
   it up as a fallback. It does NOT reverse the parts the owner did not reopen: the fallback
   LABEL stays gate-following (see `resolve_labels`), and nothing here relabels, removes, or
-  re-ranks an existing runner.
+  re-ranks an existing runner -- with ONE exception, a version-pinned hosted label
+  (`VERSION_PINNED_HOSTED_LABEL`), which re-registration DROPS so this pool can never hold a pin
+  that four observer jobs depend on to escape it (see `_preserve_labels`).
 
 THE CEILING IS A PREDICATE, NOT A NUMBER
     ceiling = min(core_ceiling, runners_live + headroom_by_memory)
@@ -1143,11 +1145,16 @@ def converge(
                 f"{c['name']} still offline after restart — re-registering with --replace"
             )
         try:
-            # ⛔ Re-registering KEEPS the labels the runner already carries. Deriving a fresh set
-            # drops any custom/tier label (and the fallback label, when it is engaged), so the
-            # workflows that target it queue forever — a "repair" that removes capacity. Only a
-            # runner absent from the pool (ORPHANED) has no labels to keep, and only that case
-            # derives them. ⛔ PER RUNNER, never a value cached from the previous iteration: that
+            # ⛔ Re-registering KEEPS the labels the runner already carries — EXCEPT a
+            # version-pinned hosted label (`VERSION_PINNED_HOSTED_LABEL`; the carve-out is spelled
+            # out in `_preserve_labels`). That one is DROPPED, because a job naming `ubuntu-24.04`
+            # wants the GitHub-hosted image and not this pool, so keeping the pin is how a label
+            # attached once out of band becomes permanent. Deriving a whole fresh set is still the
+            # failure this preserves against: it drops any custom/tier label (and the fallback
+            # label, when it is engaged), so the workflows that target it queue forever — a
+            # "repair" that removes capacity. Only a runner absent from the pool (ORPHANED) has no
+            # labels to keep, and only that case derives them.
+            # ⛔ PER RUNNER, never a value cached from the previous iteration: that
             # leaked one runner's set (including an other-arch marker) onto every later repair in
             # the same pass (round 2, finding 3). Host-derived labels (self-hosted/Linux/X64/ARM64)
             # cannot be set by hand and are filtered out of what is preserved.
