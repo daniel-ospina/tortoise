@@ -17,6 +17,8 @@ Usage
 -----
     uv run python tools/link_agent_infra_scripts.py            # create/repair the link
     uv run python tools/link_agent_infra_scripts.py --check    # assert it, change nothing
+    uv run python tools/link_agent_infra_scripts.py --pin-check  # assert the CHECKOUT is the
+                                                                # tree this box is pinned to
 
 Exit codes
 ----------
@@ -24,6 +26,16 @@ Exit codes
     1  the link is missing, dangling, or points somewhere else (``--check``: a failure)
     2  config error — no agent-infra checkout with a ``scripts/`` dir could be found, or an
        explicit ``--infra`` was passed and has none (it is AUTHORITATIVE, never a first try)
+
+``--pin-check`` answers a DIFFERENT question — is the checkout behind this pointer the tree this
+box is PINNED to (``$HARNESS_PIN`` / ``~/.pi/agent/state/HARNESS-PIN``)? It never touches the
+link: 0 = the checkout is at the pin or carries it, **or** this machine records no pin (said out
+loud, never silence); 1 = drift (behind / diverged / the pin commit is absent from the checkout);
+2 = cannot verify (the pin file is empty or unreadable, or the checkout is not a git repo).
+
+``--check`` deliberately keeps the pointer-only contract above: a CORRECT link into a stale
+checkout is exit 0. The staleness is then reported as a ``!`` note on stderr, because the defect
+this closes (#10114) is a setup step that reads green over a tree the box does not run.
 
 Exit 2 is deliberately distinct from 1: "the pointer is wrong" and "there is nothing on this
 machine to point AT" are different repairs, and collapsing them is how a stale checkout gets
@@ -47,11 +59,40 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import contextlib
 import os
+import re
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LINK_NAME = "scripts"
+
+#: The harness pin record — the SAME file agent-infra's ``install.sh`` writes and
+#: ``harness-up``/``multi-repo-controller.sh`` read (``HARNESS_PIN`` there, ``$HARNESS_PIN`` here).
+#: It names the commit the box's controller RUNS, which is not necessarily the commit
+#: ``$AGENT_INFRA_PATH`` happens to be at (#10114 measured 23 commits of daylight between them).
+PIN_ENV = "HARNESS_PIN"
+PIN_RELATIVE = Path(".pi") / "agent" / "state" / "HARNESS-PIN"
+#: A ``git`` that hangs must not hang a setup step. Every call here is local and offline.
+GIT_TIMEOUT = 20
+
+#: A pin record must LOOK like a commit id. A corrupted or truncated pin is "cannot verify",
+#: never "your checkout is stale" — the second verdict sends an operator to
+#: `git checkout <garbage>`, which is a worse failure than the one being reported.
+PIN_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+#: ``pin_state`` verdicts. The drift three are the ones that make ``--pin-check`` exit 1; the
+#: cannot-verify two are exit 2; ``ok`` and ``no-pin`` are the only passes, and ``no-pin`` is
+#: always STATED — an unanswered question is not a clean one.
+PIN_OK = "ok"
+PIN_NO_PIN = "no-pin"
+PIN_UNREADABLE = "unreadable"
+PIN_NOT_A_REPO = "not-a-repo"
+PIN_ABSENT = "pin-absent"
+PIN_BEHIND = "behind"
+PIN_DIVERGED = "diverged"
+PIN_DRIFT = frozenset({PIN_ABSENT, PIN_BEHIND, PIN_DIVERGED})
+PIN_CANNOT_VERIFY = frozenset({PIN_UNREADABLE, PIN_NOT_A_REPO})
 
 # Tools this repo names in its own docs and hooks. Only used to make a *stale checkout* legible
 # (`diagnose` asks agent-infra whether it has them); never to gate the link itself — the link
@@ -110,6 +151,129 @@ def resolve_infra(explicit: str | None) -> Path:
     )
 
 
+def default_pin_path() -> Path:
+    """Where this machine records its harness pin. A function, not a constant.
+
+    ``Path.home()`` is resolved at CALL time: every test here redirects ``HOME`` (and CI has
+    none), so a module-level constant would freeze the pin path of whichever machine imported
+    the module first — the class of bug where a check silently answers for the wrong box.
+    """
+    return Path.home() / PIN_RELATIVE
+
+
+def resolve_pin(explicit: str | None) -> Path | None:
+    """The harness pin file to compare against, or ``None`` when nothing records one.
+
+    ``--pin`` is AUTHORITATIVE (passed but missing is a caller error, reported by ``pin_state``
+    as unreadable — never silently replaced by the default). Otherwise ``$HARNESS_PIN``, then
+    the box-wide record ``~/.pi/agent/state/HARNESS-PIN``. ``None`` means this machine records
+    no pin at all: a GitHub runner, a fresh dev box, or a clone of agent-infra that was never
+    installed as a harness. That is an ANSWER ("unrecorded"), not a pass and not a failure.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    env = os.environ.get(PIN_ENV)
+    if env:
+        return Path(env).expanduser()
+    default = default_pin_path()
+    return default if default.exists() else None
+
+
+def _git(infra: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """Run ``git -C <infra> …``; ``None`` when git itself could not be run."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(infra), *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
+    """Classify ``infra`` against the harness pin. Returns ``(state, detail)``.
+
+    The decision is ANCESTRY, never a commit count (``git merge-base --is-ancestor``, the
+    primitive this repo already binds itself to in ``.github/scripts/check-deploy-staleness.sh``:
+    "NEVER a commit count for the DECISION"). Counts appear only as the STATED distance.
+
+    Why this exists (#10114): three times in one session a stale copy of a harness script
+    silently disabled the PR-repair fleet — ``pr-doctor.py`` (Oct 20, no ``research_section``),
+    then ``objective.py`` twice — and each time the only signal was an ``rc`` in a log nobody was
+    reading. ``$AGENT_INFRA_PATH`` pointing at an older tree than the pin is the same defect one
+    layer up, and on the box this was measured on it is live: the checkout is 23 commits behind
+    the pin, and every setup step reads green over it.
+    """
+    if pin is None:
+        return PIN_NO_PIN, (
+            f"no harness pin recorded (no {default_pin_path()}, no ${PIN_ENV}, no --pin) — "
+            "cannot say whether this checkout is the tree this box runs"
+        )
+    try:
+        sha = pin.read_text().strip()
+    except OSError as exc:
+        return PIN_UNREADABLE, f"the pin record {pin} cannot be read ({exc}) — cannot verify"
+    if not sha:
+        # ⛔ An EMPTY pin is not "no pin". The file exists and says nothing, so the box cannot
+        # name the commit it runs; reading that as "unpinned" would be the false pass this whole
+        # module is against.
+        return PIN_UNREADABLE, (
+            f"the pin record {pin} is EMPTY — it names no commit, and an empty pin is not "
+            "'no pin'; refusing to call this verified"
+        )
+    if not PIN_SHA_RE.match(sha):
+        return PIN_UNREADABLE, (
+            f"the pin record {pin} holds {sha[:40]!r}, which is not a commit id — a corrupted "
+            "pin cannot say which tree this box runs; refusing to call this verified"
+        )
+
+    head = _git(infra, "rev-parse", "--verify", "HEAD")
+    if head is None or head.returncode != 0:
+        return PIN_NOT_A_REPO, (
+            f"{infra} is not a git checkout (or git cannot read it), so it cannot be compared "
+            f"with the pin {sha[:12]} — cannot verify"
+        )
+    head_sha = head.stdout.strip()
+
+    present = _git(infra, "cat-file", "-e", f"{sha}^{{commit}}")
+    if present is None or present.returncode != 0:
+        return PIN_ABSENT, (
+            f"{infra} does not contain the pinned commit {sha[:12]} — the checkout predates the "
+            "pin, so anything resolved through it is older than what this box runs"
+        )
+
+    if head_sha == sha:
+        return PIN_OK, f"{infra} is AT the pin {sha[:12]}"
+    contains = _git(infra, "merge-base", "--is-ancestor", sha, head_sha)
+    if contains is not None and contains.returncode == 0:
+        return PIN_OK, f"{infra} ({head_sha[:12]}) carries the pin {sha[:12]}"
+    behind = _git(infra, "merge-base", "--is-ancestor", head_sha, sha)
+    if behind is not None and behind.returncode == 0:
+        distance = _git(infra, "rev-list", "--count", f"{head_sha}..{sha}")
+        count = (
+            distance.stdout.strip() if distance is not None and distance.returncode == 0 else "?"
+        )
+        return PIN_BEHIND, (
+            f"{infra} ({head_sha[:12]}) is {count} commits BEHIND the pin {sha[:12]} — every "
+            "file resolved through it is older than what this box runs"
+        )
+    return PIN_DIVERGED, (
+        f"{infra} ({head_sha[:12]}) and the pin {sha[:12]} have DIVERGED — neither is an "
+        "ancestor of the other, so it is not the tree this box runs"
+    )
+
+
+def pin_remedy(infra: Path, pin: Path | None) -> str:
+    """The command that actually fixes drift, so the finding is actionable on its face."""
+    sha = "<pin>"
+    if pin is not None:
+        with contextlib.suppress(OSError):
+            sha = pin.read_text().strip() or "<pin>"
+    return f"cd {infra} && git fetch origin && git checkout {sha}"
+
+
 def link_state(dest: Path, src: Path) -> tuple[str, str]:
     """Classify ``dest`` against ``src``. Returns ``(state, detail)``.
 
@@ -133,7 +297,7 @@ def link_state(dest: Path, src: Path) -> tuple[str, str]:
     return "real-file", f"{dest} is a real file, not a link to {src}"
 
 
-def diagnose(infra: Path) -> list[str]:
+def diagnose(infra: Path, pin: Path | None = None) -> list[str]:
     """Explain *why* a documented tool is still missing, beyond the link itself.
 
     The link can be perfect and ``scripts/admin-merge.sh`` still absent: the pointer resolves to
@@ -141,6 +305,11 @@ def diagnose(infra: Path) -> list[str]:
     was 1341 commits behind ``origin/main`` and contained 16 of the 182 scripts upstream has,
     including none of the three this repo's docs name. A tool that reports "link ok" and leaves
     that unspoken reproduces the issue it was written to close, one layer down.
+
+    The PIN half is the same lesson one layer up (#10114): a checkout can carry every documented
+    tool and still not be the tree this box RUNS. Measured on a live box, ``$AGENT_INFRA_PATH``
+    was 23 commits behind ``HARNESS-PIN`` and this function said nothing, because presence of the
+    three tools was the only question it asked. Presence is not provenance.
     """
     notes: list[str] = []
     missing = [t for t in DOCUMENTED_TOOLS if not (infra / LINK_NAME / t).exists()]
@@ -155,6 +324,16 @@ def diagnose(infra: Path) -> list[str]:
                 f"({infra} is a git checkout — compare it with origin/main before trusting any "
                 "'not found' from this repo's docs.)"
             )
+
+    state, detail = pin_state(infra, pin)
+    if state in PIN_DRIFT:
+        notes.append(
+            f"{detail}. The link is correct and the CHECKOUT is not the tree this box runs — "
+            f"run `{Path(__file__).name} --pin-check` to make that a verdict, or fix it: "
+            f"{pin_remedy(infra, pin)}"
+        )
+    elif state in PIN_CANNOT_VERIFY:
+        notes.append(f"pin: UNKNOWN — {detail}")
     return notes
 
 
@@ -198,9 +377,25 @@ def main(argv: list[str] | None = None) -> int:
         description="Materialise the machine-local `scripts` symlink from $AGENT_INFRA_PATH (#9475)."
     )
     parser.add_argument("--check", action="store_true", help="assert, do not change anything")
+    parser.add_argument(
+        "--pin-check",
+        action="store_true",
+        help=(
+            "assert the CHECKOUT is the tree this box is pinned to (HARNESS-PIN): 0 = at/contains "
+            "it or no pin recorded, 1 = drift, 2 = cannot verify. Never touches the link"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="report the action, change nothing")
     parser.add_argument("--repo", default=str(REPO_ROOT), help="repo root (default: this checkout)")
     parser.add_argument("--infra", default=None, help="agent-infra checkout (default: $AGENT_INFRA_PATH); authoritative when passed")
+    parser.add_argument(
+        "--pin",
+        default=None,
+        help=(
+            f"harness pin record (default: ${PIN_ENV}, then ~/{PIN_RELATIVE}); authoritative when "
+            "passed"
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="only exit status and errors")
     args = parser.parse_args(argv)
 
@@ -208,19 +403,34 @@ def main(argv: list[str] | None = None) -> int:
     try:
         infra = resolve_infra(args.infra)
         src = infra / LINK_NAME
+        pin = resolve_pin(args.pin)
+
+        if args.pin_check:
+            # The one mode that answers the PIN question as a verdict. It always prints the
+            # verdict — including `no-pin`, which is an answer ("nothing records a pin here"),
+            # because silence is exactly what made the #10114 outages expensive.
+            state, detail = pin_state(infra, pin)
+            print(f"pin: {state} — {detail}")
+            if state in PIN_DRIFT:
+                print(f"  remedy: {pin_remedy(infra, pin)}", file=sys.stderr)
+                return 1
+            if state in PIN_CANNOT_VERIFY:
+                return 2
+            return 0
+
         if args.check:
             state, detail = link_state(dest, src)
             if not args.quiet:
                 print(f"{state}: {detail}")
-                for note in diagnose(infra):
-                    print(f"  ! {note}", file=sys.stderr)
+            for note in diagnose(infra, pin):
+                print(f"  ! {note}", file=sys.stderr)
             return 0 if state == "ok" else 1
         action = materialise(dest, src, dry_run=args.dry_run)
+        for note in diagnose(infra, pin):
+            print(f"  ! {note}", file=sys.stderr)
         if not args.quiet:
             print(action)
             print(f"  agent-infra: {infra}")
-            for note in diagnose(infra):
-                print(f"  ! {note}", file=sys.stderr)
         return 0
     except ConfigError as exc:
         print(f"⛔ {exc}", file=sys.stderr)

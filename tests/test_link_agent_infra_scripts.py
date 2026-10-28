@@ -668,3 +668,280 @@ class TestDriftGateCheckCommand:
         )
         # And the vendored copy was respected, not deleted.
         assert (repo / "scripts" / "local-tool.sh").exists()
+
+
+def git_commit(infra: Path, message: str) -> str:
+    """Commit whatever is in ``infra`` and return the new HEAD sha.
+
+    A throwaway ``git init`` tree, never this checkout: the pin comparison is about a CHECKOUT's
+    ancestry, so the fixture has to BE a checkout. Identity is passed per-invocation so a machine
+    with no ``user.email`` configured does not turn this into an environment test.
+    """
+    # A commit needs a change: append a line so each call is a distinct tree state (a bare
+    # `commit` after another commit fails with "nothing to commit", which would make every
+    # multi-commit fixture below an error instead of a scenario).
+    with (infra / "commit.log").open("a") as fh:
+        fh.write(message + "\n")
+    subprocess.run(["git", "-C", str(infra), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(infra), "-c", "user.email=test@example.com",
+         "-c", "user.name=test", "commit", "-q", "-m", message],
+        check=True, capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(infra), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.fixture()
+def git_infra(fake_infra: Path) -> Path:
+    """``fake_infra`` as a real git checkout with one commit, branch ``main``."""
+    subprocess.run(
+        ["git", "-C", str(fake_infra), "init", "-q", "-b", "main"],
+        check=True, capture_output=True,
+    )
+    git_commit(fake_infra, "initial")
+    return fake_infra
+
+
+class TestPinAgreement:
+    """#10114 — a correct link into a checkout that is NOT the pinned tree is the silent no-op.
+
+    Measured on the box this was written on (2026-10-28): ``$AGENT_INFRA_PATH`` HEAD ``91a3b29b``
+    was **23 commits behind** ``~/.pi/agent/state/HARNESS-PIN`` (``7ab68295…``), carried every
+    tool this repo documents, and both ``--check`` and ``diagnose()`` reported nothing — so a lane
+    materialised ``scripts/`` into a tree the box does not run. These tests pin the answer to the
+    question that was never asked, in BOTH directions: a stale checkout must be named, and a
+    checkout that carries the pin must not be (a guard that cries drift on a healthy tree is the
+    other way this fails).
+    """
+
+    def _home(self, tmp_path: Path, pin: str | None = None) -> Path:
+        """A HOME with (or without) the box-wide pin record, and nothing else inherited."""
+        home = tmp_path / "home"
+        state = home / ".pi" / "agent" / "state"
+        state.mkdir(parents=True)
+        if pin is not None:
+            (state / "HARNESS-PIN").write_text(pin + "\n")
+        return home
+
+    def _env(self, home: Path, **extra: str) -> dict[str, str]:
+        """The real environment minus any pin it happens to carry.
+
+        Load-bearing: this machine HAS a ``HARNESS-PIN``, so a test that inherited it would
+        compare a throwaway fixture against a real pin and pass or fail for the wrong reason.
+        """
+        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": ""}
+        env.update(extra)
+        return env
+
+    def _pin_check(self, repo: Path, infra: Path, env: dict[str, str], *args: str):
+        return run_tool(
+            "--pin-check", "--repo", str(repo), "--infra", str(infra), *args, env=env
+        )
+
+    def test_a_checkout_at_the_pin_passes_and_says_which_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+    def test_a_checkout_that_carries_the_pin_passes(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The pin need not be HEAD: a checkout AHEAD of it still contains the pinned bytes."""
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "work after the pin")
+        env = self._env(self._home(tmp_path, pin))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "carries the pin" in result.stdout, result.stdout
+
+    def test_a_checkout_BEHIND_the_pin_is_exit_1_and_names_the_distance(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The measured #10114 shape: the box is pinned ahead of the tree `scripts/` resolves to."""
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "BEHIND" in result.stdout, result.stdout
+        assert "1 commits BEHIND" in result.stdout, (
+            f"the stated distance is missing, so the finding is not actionable: {result.stdout}"
+        )
+        assert "git checkout" in result.stderr, (
+            f"no remedy printed — a drift finding without its fix is a mystery: {result.stderr}"
+        )
+
+    def test_a_DIVERGED_checkout_is_exit_1(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """Neither an ancestor: not behind, not ahead — a different line entirely."""
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", "-b", "other"],
+            check=True, capture_output=True,
+        )
+        other = git_commit(git_infra, "a local line main never took")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", "main"], check=True, capture_output=True
+        )
+        pin = git_commit(git_infra, "the pinned line")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", other], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "DIVERGED" in result.stdout, result.stdout
+
+    def test_a_checkout_that_predates_the_pin_entirely_is_drift_not_unknown(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The Aug-7 trap: the pin is not even an OBJECT in the checkout.
+
+        This is the case a naive `rev-list --count` reports as `0` (it counts nothing that is
+        reachable) and reads as current — the false pass this whole test class exists against.
+        """
+        env = self._env(self._home(tmp_path, "0" * 40))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "does not contain the pinned commit" in result.stdout, result.stdout
+
+    def test_an_EMPTY_pin_is_cannot_verify_not_no_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A pin file that exists and says nothing must never read as "unpinned".
+
+        The file is the box's own statement about the commit it runs; empty means the statement
+        is broken, which is exit 2 (cannot verify), never the ``no-pin`` pass.
+        """
+        env = self._env(self._home(tmp_path, ""))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "EMPTY" in result.stdout, result.stdout
+
+    def test_a_pin_named_but_missing_is_cannot_verify(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--pin`` is AUTHORITATIVE: a missing file must not fall back to the default record."""
+        env = self._env(self._home(tmp_path))
+        missing = tmp_path / "no-such-pin"
+        result = self._pin_check(repo, git_infra, env, "--pin", str(missing))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert str(missing) in result.stdout, result.stdout
+
+    def test_a_non_git_checkout_is_cannot_verify(self, repo: Path, fake_infra: Path, tmp_path: Path) -> None:
+        """`~/orchestrator` on the measured box had no `.git` at all — that is UNKNOWN, not OK."""
+        env = self._env(self._home(tmp_path, "a" * 40))
+        result = self._pin_check(repo, fake_infra, env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "not a git checkout" in result.stdout, result.stdout
+
+    def test_no_pin_recorded_is_a_STATED_pass_not_silence(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A GitHub runner records no pin. That is an answer, so it is printed — not assumed."""
+        env = self._env(self._home(tmp_path))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" in result.stdout, result.stdout
+        assert "no harness pin recorded" in result.stdout, result.stdout
+
+    def test_the_env_pin_is_honoured(self, repo: Path, git_infra: Path, tmp_path: Path) -> None:
+        """``HARNESS_PIN`` is the harness's own variable name — not an invented one."""
+        base = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        git_commit(git_infra, "the pin the env names")
+        pin_file = tmp_path / "elsewhere-pin"
+        pin_file.write_text(base + "\n")
+        env = self._env(self._home(tmp_path), HARNESS_PIN=str(pin_file))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "carries the pin" in result.stdout, result.stdout
+
+    def test_pin_check_never_touches_the_pointer(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The assertion mode must not create a link as a side effect of being asked."""
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        self._pin_check(repo, git_infra, env)
+        assert not os.path.lexists(repo / "scripts"), (
+            "--pin-check materialised the pointer; an assertion mode must change nothing"
+        )
+
+    def test_check_still_passes_on_a_stale_checkout_but_no_longer_stays_silent(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--check``'s documented contract is the POINTER (AGENTS.md), so it must stay 0.
+
+        The defect was never that the pointer was wrong — it was that a correct pointer into a
+        stale tree read as "setup is fine". So the exit code is unchanged and the staleness is
+        now a ``!`` note, which is what a lane actually sees during setup.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+        run_tool("--repo", str(repo), "--infra", str(git_infra), env=env)
+
+        result = run_tool("--check", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "BEHIND" in result.stderr, (
+            f"a correct link into a stale checkout reported nothing on stderr: {result.stderr!r}"
+        )
+        assert "--pin-check" in result.stderr, (
+            "the note does not name the mode that turns it into a verdict"
+        )
+
+    def test_materialise_names_the_drift_it_still_proceeds_through(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A stale checkout does not block SETUP (the link is correct), but it is never silent."""
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path, pin))
+        result = run_tool("--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert (repo / "scripts").is_symlink()
+        assert "BEHIND" in result.stderr, result.stderr
+
+    def test_a_corrupted_pin_is_cannot_verify_not_a_stale_checkout(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A pin that is not a commit id must not be reported as drift.
+
+        Both branches of that mistake are expensive: "behind" sends an operator to
+        `git checkout <garbage>`, and "ok" would be the false pass this module exists against.
+        """
+        env = self._env(self._home(tmp_path, "not-a-sha"))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "not a commit id" in result.stdout, result.stdout
