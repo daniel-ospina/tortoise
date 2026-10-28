@@ -28,6 +28,8 @@ import { captureClaimForHarness, captureStatusLabelForHarness } from './captureS
 // (harnessDisclosureDom.test.jsx) can render them; main.jsx cannot be imported
 // by a test (it mounts the whole application at module scope).
 import { HarnessStatusCard } from './harnessStatusCard.jsx'
+import { feedStateOf } from './securityAlerts.js'
+import { SecurityAlertsPanel } from './securityAlertsPanel.jsx'
 import { setupGuide } from './setupGuide.js'
 // #2005 (W9): the resume/entry-step derivation shared by the wizard's re-entry
 // doors — ONE function so the Setup pill, the re-entry card and the Settings
@@ -3170,6 +3172,22 @@ function claimIntentInFlight() {
   // list comes from the session-authed /v1/team/alerts.
   const [suspended, setSuspended] = React.useState(null)
   const [alerts, setAlerts] = React.useState([])
+  const [alertsSaturated, setAlertsSaturated] = React.useState(false)
+  // #10156: "we could not read the alerts" is a THIRD state, not an empty feed.
+  // The panel unmounts on an empty list, so without this an outage renders as an
+  // all-clear on the one screen whose job is not to hide incidents (round-23
+  // review finding).
+  const [alertsUnavailable, setAlertsUnavailable] = React.useState(false)
+  // #10156: the pending episode + the per-episode error. ONE row is disabled at
+  // a time via `ackPending`, but that is a UI convention, NOT a single-flight
+  // lock: clicking two rows starts two writes, and the first to finish clears
+  // `ackPending`, re-enabling the other mid-write. Harmless (the server is
+  // idempotent per episode and the list is re-read from the server afterwards) —
+  // the earlier comment claimed enforcement the code does not have.
+  // `ackError` is per-episode and the row shows it inline: a dismissal that
+  // fails silently teaches the customer the button is broken.
+  const [ackPending, setAckPending] = React.useState(null)
+  const [ackError, setAckError] = React.useState(null)
 
   function suspendedFromDetail(detail) {
     return detail && typeof detail === 'object' && detail.code === 'SUSPENDED' ? detail : null
@@ -5421,10 +5439,85 @@ function claimIntentInFlight() {
       // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
       const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
       if (res.ok) {
-        const d = await res.json()
-        setAlerts(d.alerts || [])
+        // #10156: the three facts the feed can carry — rows, `scan_saturated`
+        // (the server's scan was CUT, so an empty feed may still hide alerts;
+        // round-8 review finding) and `unavailable` (the read itself failed, so
+        // "no alerts" would be an all-clear we cannot back; round-23 finding).
+        // Parsed by `feedStateOf`, which is where they are TESTED — this
+        // component has no unit coverage, so logic kept here is logic that can
+        // regress silently (a mutant that dropped `unavailable` survived the
+        // whole dashboard suite).
+        const feed = feedStateOf(await res.json())
+        setAlerts(feed.alerts)
+        setAlertsSaturated(feed.saturated)
+        setAlertsUnavailable(feed.unavailable)
+      } else {
+        // A non-2xx is a FAILED read, not an empty feed.
+        setAlertsUnavailable(true)
       }
-    } catch { /* best-effort — alert history never blocks the dashboard */ }
+    } catch {
+      // Best-effort — alert history never blocks the dashboard — but the panel
+      // must be able to say it could not look.
+      setAlertsUnavailable(true)
+    }
+  }
+
+  async function acknowledgeAlert(alert) {
+    // #10156: the acknowledgement is persisted SERVER-side (an abuse_events
+    // row keyed by the episode), never in a cookie or this component's state —
+    // a dismissal that evaporates on the next device, reload or deploy is not
+    // a dismissal. So the local list is only updated from a CONFIRMED write:
+    // the row is re-fetched, not optimistically hidden, because hiding a row
+    // the server did not record would re-show it on the next poll and read as
+    // a broken control.
+    const tid = orgIdRef.current
+    if (!tid || !alert || !alert.episode) return
+    setAckError(null)
+    setAckPending(alert.episode)
+    try {
+      const res = await fetch(`${API_BASE}/v1/team/alerts/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // `rendered_at` is what this render actually showed, sent as an
+        // ASSERTION (the server derives the window itself). If the episode has
+        // moved past it on the incident register, the server refuses with 409
+        // instead of writing a dismissal that would also cover the newer row —
+        // e.g. a second suspension that arrived after the render.
+        body: JSON.stringify({
+          org_id: tid,
+          episode: alert.episode,
+          rendered_at: alert.at || undefined,
+        }),
+      })
+      if (!res.ok) {
+        // A REFUSAL is not a transient failure, and telling the reader to "try
+        // again" on one is the same unactionable-remedy defect this change
+        // exists to remove (review nit). The statuses below are the ones the
+        // route actually returns: 403 (role), 404 (episode no longer in our
+        // feed), 409 (the episode moved on since this render), 422 (missing
+        // org_id/episode), 503 (store failure — that one IS retryable).
+        // The 409 is deliberately NOT a retry: what the reader saw is no longer
+        // current, so the honest next step is to look at what is.
+        const refusal = {
+          403: 'Only an owner or admin can acknowledge an alert.',
+          404: 'That alert is no longer in the feed — reload to refresh.',
+          409: 'This alert changed since it was shown — reload to see what is current.',
+          422: 'That alert could not be identified — reload to refresh.',
+        }[res.status]
+        setAckError({
+          episode: alert.episode,
+          message: refusal
+            || 'Could not save that acknowledgement — try again.',
+        })
+        if (refusal) await loadAlerts(tid)
+        return
+      }
+      await loadAlerts(tid)
+    } catch {
+      setAckError({ episode: alert.episode, message: 'Could not save that acknowledgement — try again.' })
+    } finally {
+      setAckPending(null)
+    }
   }
 
   async function completeLogin(key) {
@@ -11080,21 +11173,23 @@ function claimIntentInFlight() {
           </div>
         )}
 
-        {tab === 'overview' && alerts.length > 0 && (
-          <section className="overview" aria-label="Security alerts">
-            <h2>Security alerts</h2>
-            <p className="dim small">Suspicious activity detected on this Organization. Revoke any key you don't recognize.</p>
-            <ul>
-              {alerts.map((a, i) => (
-                <li key={i}>
-                  {/* #5425/round 7: `type` is our internal enum (recovery_velocity,
-                      flag, read_velocity) — the customer reads the human LABEL. */}
-                  <strong>{a.label || a.type}</strong> — {a.message}{' '}
-                  <span className="dim small">{a.at ? new Date(a.at).toLocaleString() : ''}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
+        {tab === 'overview' && (alerts.length > 0 || alertsSaturated || alertsUnavailable) && (
+          // #10156: TWO REGISTERS, never one list. The old block rendered every
+          // entry under "Security alerts / Suspicious activity detected on this
+          // Organization. Revoke any key you don't recognize." — including
+          // notify-only read-velocity observations, which changed nothing, were
+          // a month old, and were one continuous bout counted thirteen times.
+          // The panel owns the split, the ages and the episode counts; the copy
+          // decisions and their tests live in `securityAlerts.js`.
+          <SecurityAlertsPanel
+            alerts={alerts}
+            scanSaturated={alertsSaturated}
+            unavailable={alertsUnavailable}
+            onAcknowledge={acknowledgeAlert}
+            ackPending={ackPending}
+            ackError={ackError}
+            canAcknowledge={isOwnerAdmin}
+          />
         )}
         {tab === 'overview' && team === null && (
           // #1841: frames-first — the overview grid renders IMMEDIATELY as
