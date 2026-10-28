@@ -133,9 +133,11 @@ def _record_carried(groups: list[list[dict]]) -> list[dict]:
 
     Each capture's per-turn `PointAdded` records become ONE `TurnsRecorded`
     carrier holding those very snapshots — placed where the first of them was,
-    so journal ORDER is unchanged. The stale sweep's `PointRetracted` for a turn
-    goes with them (there is no turn node left to retract); its hard-delete
-    `EntityMutated` survives, because that is what removes the record ROW.
+    so journal ORDER is unchanged. The stale sweep's hard-delete `EntityMutated`
+    survives, because that is what removes the record ROW. A `PointRetracted`
+    for a turn id is dropped if one is ever present — the producer's sweep call
+    is payload-only, so it journals NOTHING — and the filter is here so a re-cut
+    journal can never model a record the writer does not emit.
     """
     turn_ids = {r["point"]["id"] for g in groups for r in g
                 if r.get("type") == "PointAdded" and _is_turn(r)}
@@ -338,15 +340,43 @@ def test_a_carrier_with_no_turn_set_is_REFUSED_not_a_silent_no_op():
             rp.mutations_for(carrier, org_id="o", graph_id="g")
 
 
-def test_the_stale_sweep_records_the_removal_once_on_the_record_only_lane(
-        tmp_path, monkeypatch):
-    """§6 — a shorter re-capture removes the ROW, and stops there.
+def _graph_event_payloads(proj, type_: str) -> list[dict]:
+    """Every `:GraphEvent` row of *type_* in this graph, decoded.
 
-    The graph holds no turn node, so `PointRetracted` ("the node is gone") is a
-    false statement on that lane; the honest record is the `EntityMutated`
-    op=delete, whose fold is the hard delete of the row. Emitting both would be
-    two records for one removal (#3300), and dropping both would let a replay
-    resurrect the orphan the sweep removed (#1920).
+    The store `poll_events` serves from, and the ONLY place the sweep's
+    `PointRetracted` (payload-only ⇒ never journalled) can be observed at all.
+    """
+    return [json.loads(row[0]) for row in proj.g.query(
+        "MATCH (e:GraphEvent {type:$t}) RETURN e.payload",
+        params={"t": type_}).result_set]
+
+
+def test_the_stale_sweep_keeps_the_feed_PAIR_and_records_the_removal_once(
+        tmp_path, monkeypatch):
+    """§6 — a shorter re-capture removes the ROW, and the FEED stays PAIRED.
+
+    Two stores, one meaning each (#3300), exactly as `delete_point` does it:
+
+    * the `:GraphEvent` / `poll_events` stream is a THIRD store, and it is
+      unchanged: this lane still emits a payload-only `PointAdded` per turn, so
+      a subscriber sees the ADDITIONS — and the sweep's payload-only
+      `PointRetracted` is what tells that same subscriber the turn is gone. ⛔
+      This is the half a guard once removed, and its ONLY measured effect was to
+      drop this row: a consumer then held a turn that appears and never leaves
+      (the #1920 orphan class, moved onto the change feed), while
+      `docs/event-catalog.md` still named the sweep as a hard-delete
+      `PointRetracted` producer.
+    * the JSONL journal gets the `EntityMutated` op=delete — the RECORD's hard
+      delete of the `public.point` ROW — and NO `PointRetracted`: that call
+      passes a payload only (`point=None and id=None`), so `_emit_event`
+      returns before the append and journals nothing. One removal, one record,
+      one subscriber row — no #3300 double-delete is possible here.
+
+    Non-vacuity (this is why the test was rewritten): every feed assertion below
+    reads the STORE the change lives in. The earlier version asserted only on
+    `_journal(path)`, which could not observe the change at all — the call never
+    wrote a JSONL line — so it passed unchanged on the code it was meant to
+    redden.
     """
     monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -366,8 +396,24 @@ def test_the_stale_sweep_records_the_removal_once_on_the_record_only_lane(
         proj = sdk._get_proj()
         turn_node_ids = [i for i in _node_ids(proj)
                          if i.startswith(f"{SESSION}_t")]
+        added = [(p or {}).get("id")
+                 for p in _graph_event_payloads(proj, "PointAdded")]
+        retracted = [(p or {}).get("id")
+                     for p in _graph_event_payloads(proj, "PointRetracted")]
     finally:
         sdk.close()
+
+    # The FEED: the additions are still announced (unchanged by #10067)...
+    assert {f"{SESSION}_t0", f"{SESSION}_t1"} <= set(added), (
+        f"the record-only lane stopped announcing its turns to poll_events "
+        f"(added={added})")
+    # ...and the sweep is announced on the SAME surface, exactly once.
+    assert retracted == [f"{SESSION}_t1"], (
+        "the stale-turn sweep must leave ONE `PointRetracted` subscriber row "
+        f"for the swept turn — a feed that shows an addition and never its "
+        f"removal is one-sided (got {retracted})")
+
+    # The JOURNAL: the removal is the hard-delete RECORD, and nothing else.
     journal = _journal(path)
     swept = [r for r in journal
              if r.get("type") == "EntityMutated" and r.get("op") == "delete"
@@ -376,10 +422,10 @@ def test_the_stale_sweep_records_the_removal_once_on_the_record_only_lane(
     assert not [r for r in journal
                 if r.get("type") == "PointRetracted"
                 and str(r.get("id") or "").startswith(f"{SESSION}_t")], (
-        "a node-lifecycle retraction was journalled for a turn that was never "
-        "a graph node")
+        "a node-lifecycle retraction reached the JSONL for a turn that was "
+        "never a graph node — its fold tombstones, the wrong meaning here")
     # Non-vacuity: the graph really does hold no turn node on this lane, so the
-    # `PointRetracted` above would have retracted nothing.
+    # feed's `PointRetracted` retracts no node and the ROW is the only state.
     assert not turn_node_ids, turn_node_ids
 
 
@@ -472,6 +518,64 @@ def test_the_encoded_vector_branch_carries_its_identity_STAMPS(sdk):
         assert snapshot["embedding"], "the encoded vector did not ride"
         assert snapshot["embedding_text_hash"], (
             "the stamp must name the text the vector describes (#4194)")
+
+
+def test_the_CARRIER_branch_stamps_its_encoded_vector_too(tmp_path, monkeypatch):
+    """§7 — the same contract on the branch Step 7 CREATED.
+
+    The stamps reach a journalled snapshot through `_emit_event`'s `point=`
+    argument. The carrier rides `turns=` → `**extra`, which bypasses that arm —
+    so a carrier could keep `embedding` and drop `embedding_model` /
+    `embedding_revision` / `embedding_text_hash`, exactly what
+    `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` says the carrier must carry
+    VERBATIM (a vector with no origin is the silent model change #5004/R1
+    forbids). The graph half of this file cannot see it: it captures with no
+    embedder, so every snapshot's `embedding` is `None`.
+
+    Non-vacuity: pre-fix the carrier snapshots carry exactly
+    `TURNS_SNAPSHOT_KEYS` here, so this reddens on the code it replaced — the
+    encoded-vector pin above stayed green because it reads the UNARMED lane.
+    """
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10067")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10067")
+    from tortoise.sdk import TortoiseSDK, _write_capture_turns
+
+    path = tmp_path / "cap" / "events.jsonl"
+    path.parent.mkdir(parents=True)
+    sdk = TortoiseSDK(db_path=str(tmp_path / "cap.db"),
+                      event_log_path=str(path))
+    try:
+        _capture(sdk, TURNS)
+        _write_capture_turns(
+            sdk._get_proj(), sdk, SESSION, TURNS, now=NOW,
+            turn_embs=[[0.1, 0.2], [0.3, 0.4]], turn_offset=2)
+    finally:
+        sdk.close()
+    carriers = [r for r in _journal(path)
+                if r.get("type") == rp.TURNS_RECORD_TYPE]
+    assert len(carriers) == 2, (
+        f"expected one carrier per capture, got {len(carriers)}")
+    encoded = carriers[-1]["turns"]
+    expected = rp.TURNS_SNAPSHOT_KEYS | {
+        "embedding_model", "embedding_revision", "embedding_text_hash"}
+    for snapshot in encoded:
+        assert set(snapshot) == expected, (
+            "a carrier snapshot that ENCODED a vector must carry its identity "
+            f"stamps: got {sorted(snapshot)} — without them the replay has a "
+            "vector with no origin")
+        assert snapshot["embedding"], "the encoded vector did not ride"
+        assert snapshot["embedding_text_hash"] == _stamped_text_hash(snapshot["content"])
+
+
+def _stamped_text_hash(content: str) -> str:
+    """The stamp's own text hash, so the assertion is not `non-empty`."""
+    from tortoise.sdk import _content_hash
+
+    return _content_hash(content)
 
 
 def test_a_PRESERVED_vector_carries_the_flag_and_withholds_the_identity(sdk):

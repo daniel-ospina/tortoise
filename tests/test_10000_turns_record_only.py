@@ -237,3 +237,53 @@ def test_an_armed_record_that_cannot_name_a_tenant_keeps_the_turns_in_the_graph(
     assert seam.point_contents() == ["[user] a", "[assistant] b"], (
         "the fallback must journal the NODE-CREATING record, because the graph "
         "is the store that holds these turns")
+
+
+def test_a_tenant_CARRIED_on_the_sdk_arms_the_record_only_lane(sdk, monkeypatch):
+    """#10067 review P1 — the HOSTED REST shape: by-value tenant, no scope.
+
+    The capability read used to ask `record_writer.record_tenant()`, which sees
+    the ambient scope and the declared single-tenant env pair and NOTHING else —
+    while the seam applies the CARRIED tenant first (it is handed
+    `tenant=self._record_tenant`). The hosted REST lane carries by value and
+    enters no ambient scope by design (`_bind_record_tenant`, `_data_sdk`), so on
+    that lane the read answered "no tenant" and the writer kept the turns in the
+    GRAPH for a record that was accepting every row: the record-only tier
+    silently reverted on the one multi-tenant capture lane, re-creating exactly
+    what #10067 exists to end.
+
+    This fixture is the production shape — DSN set, journal set, NO scope and NO
+    declared pair — and the only arming is `_bind_record_tenant`. Every assertion
+    is on a STORE, so the test cannot be satisfied by a flag: the graph holds no
+    turn node, the journal carries the carrier (and no per-turn `PointAdded`),
+    and the seam was really handed the transcript.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.delenv(record_writer.RECORD_SINGLE_TENANT_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_ORG_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_GRAPH_ENV, raising=False)
+    # Non-vacuity: the AMBIENT question really is unanswered here, so the only
+    # thing that can arm the record-only lane is the carrier on the SDK.
+    assert record_writer.record_tenant() is None
+
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    sdk._bind_record_tenant("org-10067", "graph-10067")
+    proj = sdk._get_proj()
+    _capture(sdk, "carried-tenant-session", [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"}])
+
+    assert sdk_mod._capture_turn_ids(proj, "carried-tenant-session") == [], (
+        "the record CAN attribute this write (the tenant is carried on the SDK), "
+        "so the graph must keep no turn node — otherwise the record-only tier "
+        "does not reach the hosted REST lane at all")
+    assert [r for r in seam.records if r.get("type") == "TurnsRecorded"], (
+        "the capture journalled no record carrier, so the record holds no turn "
+        "rows and the transcript lives nowhere")
+    assert not [r for r in seam.records if r.get("type") == "PointAdded"], (
+        "a NODE-CREATING per-turn record was journalled on the record-only lane "
+        "— the #10067 defect")
+    assert seam.point_contents() == ["[user] a", "[assistant] b"]

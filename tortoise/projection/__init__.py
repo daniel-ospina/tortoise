@@ -7526,8 +7526,10 @@ _NO_PROJECTION_FOLD = frozenset({
     # ⚠️ The measured consequence, so nobody reads this entry as "replayed
     # elsewhere": with a carrier present a replay completes and reports success
     # having folded NO turn state — which is the ruling (the record is the home),
-    # not a gap. Nothing emits the type yet, so no journal can hold one before
-    # step 7 turns the producer over.
+    # not a gap. ✅ The PRODUCER is live since #10067: `sdk._write_capture_turns`
+    # journals ONE of these per capture on the record-only lane, so a journal
+    # really can hold one and the `else` arm above is reachable from production
+    # traffic (it was not before step 7).
     "TurnsRecorded",
 })
 

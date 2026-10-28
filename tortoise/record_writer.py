@@ -819,6 +819,52 @@ def record_tenant() -> tuple[str, str] | None:
     return None
 
 
+def record_tenant_effective(
+        carried: tuple[str, str] | None = None) -> tuple[str, str] | None:
+    """THE tenant a live write is filed under: **carried > scope > env pair**.
+
+    ONE resolution, so the two places that must agree cannot drift apart: the
+    seam that FILES the write (:func:`write_live_record`) and the producer that
+    decides WHETHER the record can hold its data at all
+    (``sdk._write_capture_turns``'s capability read, #10067).
+
+    They asked two different questions once, and it was a silent data-shape
+    defect: the producer asked :func:`record_tenant` — scope and env pair ONLY —
+    while the seam applied the CARRIED tenant first. On the hosted REST lane,
+    which carries its tenant BY VALUE on the SDK it opens and enters no ambient
+    scope by design (:func:`tortoise.hosted_api._data_sdk`), that meant the
+    producer answered "no tenant" (⇒ keep the turns in the GRAPH) for a write
+    the record was accepting the whole time — the record-only tier reverted on
+    the one lane built for multi-tenancy, with nothing failing and no counter
+    moving (#10067 review P1).
+
+    ``carried`` is that caller-resolved ``(org_id, graph_id)`` — the answer of
+    the SAME request that chose the graph this write landed in. ``None`` (the
+    default) is the historical behaviour, byte-identical: nothing is carried and
+    the scope/env answer stands, so every #9192 fail-closed rule is untouched.
+
+    ⚠️ VALIDITY IS NOT THIS FUNCTION'S JOB. A HALF or non-string pair is still
+    refused at the seam as it always was (``no_tenant``, #9188 review F4), with
+    its own specific warning. A caller that needs "would the seam ACCEPT this"
+    asks :func:`is_usable_tenant` as well — precedence and validity are two
+    questions, and merging them would weaken the seam's refusal.
+    """
+    return carried if carried is not None else record_tenant()
+
+
+def is_usable_tenant(tenant: object) -> bool:
+    """Is *tenant* a ``(org_id, graph_id)`` pair of NON-EMPTY strings?
+
+    The seam's own admissibility test, extracted so the capability read that
+    decides WHETHER to hand the record a write cannot believe a shape the seam
+    will refuse (a half pair, a list, an empty id): believing it would skip the
+    graph write for a write the record declines, i.e. the transcript in neither
+    store — the #10067 defect itself.
+    """
+    return (isinstance(tenant, tuple) and len(tenant) == 2
+            and all(isinstance(part, str) and part for part in tenant))
+
+
 def _refused_tenant_env_note() -> str:
     """Why the env pair did not arm this write — and what to do instead.
 
@@ -1301,10 +1347,8 @@ def write_live_record(record: Mapping[str, Any], *,
             "replay could reproduce the row: %s", record.get("type"),
         )
         return _refused("no_durable_journal", seq)
-    tenant = tenant if tenant is not None else record_tenant()
-    if tenant is not None and not (
-            isinstance(tenant, tuple) and len(tenant) == 2
-            and all(isinstance(part, str) and part for part in tenant)):
+    tenant = record_tenant_effective(tenant)
+    if tenant is not None and not is_usable_tenant(tenant):
         # The seam's ONLY injection point must not be its weakest carrier: an
         # empty/half pair would be unpacked straight into `write_records` and
         # file the row under a tenant nobody named (#9188 review F4).

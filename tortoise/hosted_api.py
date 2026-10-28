@@ -18674,19 +18674,32 @@ def _record_unavailable() -> HTTPException:
     forbids — a refusal rendered as a legitimate empty answer, with the only
     signal in a WARNING the caller never reads.
 
-    ⚠️ "JOURNALING" is load-bearing, and `_record_holds_turns` does NOT test it:
-    that predicate asks only whether the DSN is set (``return _dsn() is not
-    None``), while the WRITE side asks the same capability question with THREE
-    conjuncts — a configured journal, the DSN, and a tenant it can NAME for the
-    write (`tortoise/sdk.py` `_write_capture_turns`, #10067) — because a turn
-    record is
-    gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
-    write door declines `no_durable_journal` and the GRAPH keeps the turns, so
-    "the graph keeps only the counters" is a property of armed+journaling, not
-    of arming alone. This refusal's own behaviour is unaffected there: the guard
-    at the bottom of the read measures the fallback against the Session's own
+    ⚠️ "JOURNALING" (and "TENANT") are load-bearing, and `_record_holds_turns`
+    does NOT test either: that predicate asks only whether the DSN is set
+    (``return _dsn() is not None``), while the WRITE side asks the same
+    capability question with THREE conjuncts — a configured journal, the DSN,
+    and a tenant it can NAME for the write (`tortoise/sdk.py`
+    `_write_capture_turns`, #10067) — because a turn record is gated on a
+    configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the write door
+    declines `no_durable_journal` and the GRAPH keeps the turns, so "the graph
+    keeps only the counters" is a property of armed+journaling, not of arming
+    alone. This refusal's own behaviour is unaffected there: the guard at the
+    bottom of the read measures the fallback against the Session's own
     ``turn_count``, and on that config the graph holds all of them, so a
     complete copy is still served 200.
+
+    ⛔ THE DIVERGENCE HAS TWO TRIGGERS, not one, and the SECOND is #10067's
+    (#10067 review P2). The first is armed-but-NOT-journaling, above. The second
+    is **armed + journaling + NO NAMABLE TENANT** — a multi-tenant process with
+    no request scope and no declared single-tenant pair (`record_tenant()` →
+    `None`): the writer correctly keeps the turns in the GRAPH (`no_tenant`,
+    #9188 F4, so the record takes nothing), while this read still asks the record
+    and serves `turn_points: []` for a session whose graph holds every turn —
+    the fix turning a LOST transcript into an INVISIBLE one. Naming it here is
+    the point: the shared predicate is #10021's ("the store is decided by what
+    the write did"), and a reader who does not see the tenant trigger re-derives
+    the gap later. The observable is `get_session_detail` / `list_sessions` on
+    that shape.
 
     The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
     repealed: a graph copy that is COMPLETE against the Session's own

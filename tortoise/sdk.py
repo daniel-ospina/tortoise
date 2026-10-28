@@ -2659,22 +2659,40 @@ def _write_capture_turns(
     #
     # #10067 ("capture records dropped"): the third conjunct is the TENANT, and
     # it is the difference between a capability and a guess. `write_live_record`
-    # refuses an ARMED write it cannot attribute (`no_tenant`, #9188 F4 — an
-    # ambient scope or the declared single-tenant pair), so on a deployment that
-    # is `armed` but cannot NAME a tenant for this write, the first two
-    # conjuncts said "the record has it" while the record took nothing: the
-    # turn then lived in neither store and the capture still reported success.
-    # `record_tenant()` is the SAME resolution the seam itself uses and is
-    # decidable without a socket, so the decision and the write cannot disagree
-    # about who this write belongs to. A refusal that only the SOCKET can
-    # discover (unreachable, breaker open) is deliberately NOT tested here —
-    # that half is #10021's ("the store is decided by what the write did"), and
-    # the journal carrier it leaves behind is what heals it on replay.
+    # refuses an ARMED write it cannot attribute (`no_tenant`, #9188 F4), so on a
+    # deployment that is `armed` but cannot NAME a tenant for this write, the
+    # first two conjuncts said "the record has it" while the record took nothing:
+    # the turn then lived in neither store and the capture still reported
+    # success.
+    #
+    # ⛔ AND IT MUST BE THE SEAM'S OWN PRECEDENCE — **carried > scope > env pair**
+    # — not just `record_tenant()`. `record_tenant()` reads the ambient scope and
+    # the declared single-tenant pair; it cannot see the tenant CARRIED on this
+    # SDK, which `write_live_record` applies FIRST (it is passed
+    # `tenant=self._record_tenant`). The hosted REST lane carries by value and
+    # enters no ambient scope by design (`_bind_record_tenant`,
+    # `hosted_api._data_sdk`), so asking the ambient question there answered
+    # "no tenant" for a write the record was accepting — and this lane sent the
+    # turns to the GRAPH, re-creating exactly what #10067 exists to end, on the
+    # one lane built for multi-tenancy, with nothing failing (#10067 review P1).
+    # `record_writer.record_tenant_effective` is now the ONE resolution both
+    # sides call, so the decision and the write cannot drift again; the
+    # capability is decidable without a socket, and `is_usable_tenant` refuses
+    # the shapes the seam refuses rather than believing a tenant it would reject.
+    # A refusal that only the SOCKET can discover (unreachable, breaker open) is
+    # deliberately NOT tested here — that half is #10021's ("the store is decided
+    # by what the write did"), and the journal carrier it leaves behind is what
+    # heals it on replay.
+    from tortoise.record_writer import is_usable_tenant as _is_usable_tenant
     from tortoise.record_writer import record_dsn as _record_dsn
-    from tortoise.record_writer import record_tenant as _record_tenant
-    _record_holds_turns = (sdk._get_event_log() is not None
-                           and _record_dsn() is not None
-                           and _record_tenant() is not None)
+    from tortoise.record_writer import (
+        record_tenant_effective as _record_tenant_effective,
+    )
+    _record_holds_turns = (
+        sdk._get_event_log() is not None
+        and _record_dsn() is not None
+        and _is_usable_tenant(
+            _record_tenant_effective(sdk._record_tenant)))
     # The JOURNALLED shape follows the WRITE that actually happened, not the
     # capability read above: the carrier below is emitted only when the graph
     # keeps no node, so a `PointAdded` and a turn node are never out of step in
@@ -2720,9 +2738,10 @@ def _write_capture_turns(
             stale = [_capture_turn_id(session_id, _i)
                      for _i in range(_first_live, prior_turn_max_index + 1)]
         # Which store the removal targets is the same capability question as the
-        # write above: with the record holding the turns there is no node to
-        # delete, and the record delete is the `PointRetracted` +
-        # `EntityMutated` pair emitted below (folded as a hard delete).
+        # write above: with the record holding the turns there is no NODE to
+        # delete. The REMOVAL still reaches both stores, on each one's own
+        # terms: the `PointRetracted` store-only subscriber row + the
+        # `EntityMutated` op=delete JSONL record (see the loop below).
         if stale and not _record_holds_turns:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -2773,8 +2792,9 @@ def _write_capture_turns(
     # ``EntityMutated`` op=delete, whose fold (``_delete_entity_by_id``) is
     # the hard delete. Without it a rebuild replays the FIRST capture's
     # ``PointAdded`` records for the deleted ids and resurrects every orphan;
-    # ``PointRetracted`` is deliberately NOT emitted (its fold tombstones,
-    # the wrong meaning for a removal — #3300/#3299).
+    # ``PointRetracted`` is deliberately NOT emitted as a JSONL RECORD (its
+    # fold tombstones, the wrong meaning for a removal — #3300/#3299); the
+    # payload-only emit below is the subscriber row, and it journals nothing.
     for tid in stale:
         # Two stores, one meaning each (#3300), mirroring ``delete_point``:
         # the turn write made every turn visible as a ``PointAdded``
@@ -2783,17 +2803,24 @@ def _write_capture_turns(
         # op=delete record the replay folds — NOT ``PointRetracted``, whose
         # fold tombstones (the wrong meaning for a removal).
         #
-        # #10067: `PointRetracted` is a NODE-CREATING-LIFECYCLE record and the
-        # turn it names was never a graph node here, so on the record-only lane
-        # it retracts nothing in the graph while its RECORD effect deletes the
-        # `public.point` row — the end state the sweep wants, but reached by a
-        # record whose stated meaning (`the graph node is gone`) is false. The
-        # honest record for this lane is the `EntityMutated` op=delete below: its
-        # fold is the hard delete of the ROW, and the graph has no node to
-        # remove. Emitting both would also double-delete, i.e. two records for
-        # one removal (#3300).
-        if not _journal_turn_carrier:
-            sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
+        # #10067 review P1: `PointRetracted` here was NEVER a record and is
+        # therefore NOT gated on which store holds the turns. The call passes a
+        # PAYLOAD only, no `point=`/`id=` kwarg, so `_emit_event` returns before
+        # the JSONL append (`if point is None and id is None`): it journals
+        # NOTHING, and its only effect is the `:GraphEvent` subscriber row. The
+        # record half of this removal is the `EntityMutated` op=delete below —
+        # whose fold IS the hard delete of the row — so there is no double-delete
+        # and no #3300 violation to avoid.
+        #
+        # ⛔ IT MUST STAY UNCONDITIONAL, and the reason is the pairing the
+        # paragraphs above state: this lane still emits a payload-only
+        # `PointAdded` per turn so `poll_events` keeps every addition row. A
+        # consumer that recorded "`sess_t1` exists" must learn it was swept, or
+        # the feed carries a one-sided lifecycle — a turn that appears and never
+        # leaves — which is the #1920 orphan class moved onto the change feed and
+        # contradicts `docs/event-catalog.md`'s hard-delete row. Suppressing this
+        # emission was measured to be the diff's ONLY effect on the feed.
+        sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")
     _turn_snapshots: list[dict] = []
     for i, _turn in enumerate(windowed):
@@ -2864,6 +2891,32 @@ def _write_capture_turns(
         # line loggable at all: `_emit_event` skips an event with neither
         # `point` nor `id` ("nothing meaningful to log").
         from tortoise.record_projection import TURNS_RECORD_TYPE
+
+        # ⛔ EVERY OTHER journalled snapshot reaches `stamp_journal_embedding`
+        # through `_emit_event`'s `point=` arm. These ride `**extra`, which
+        # bypasses that arm entirely — so without this pass a carrier kept
+        # `embedding` and dropped its identity (`embedding_model` /
+        # `embedding_revision` / `embedding_text_hash`): a vector with no origin,
+        # which is the silent model change #5004/R1 forbids, and exactly what
+        # `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` says the carrier must
+        # carry VERBATIM. It also restores the NORMALISATION net (a non-finite or
+        # implausibly long vector is downgraded to `None` with a warning, never
+        # silently — `json` would happily write `NaN` into a journal line).
+        # `creating=True`: a vector here was computed from the content in THIS
+        # write; a PRESERVED one carries `embedding_preserved`, which suppresses
+        # the attestation inside the stamp for the same reason it does on the
+        # `point=` arm. Fail-soft like the `point=` arm: the write already
+        # happened, so an unimportable seam must not fail the capture — what is
+        # lost is the stamps, and PRESENCE IS OWNERSHIP still holds.
+        try:
+            from .embeddings import stamp_journal_embedding
+        except Exception:  # noqa: BLE001, RUF100
+            stamp_journal_embedding = None
+        if stamp_journal_embedding is not None:
+            _turn_snapshots = [
+                stamp_journal_embedding(dict(_snap), creating=True)
+                for _snap in _turn_snapshots
+            ]
 
         for i, _turn_snapshot in enumerate(_turn_snapshots):
             sdk._emit_event(
