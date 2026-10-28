@@ -47,7 +47,11 @@ name: ci-queue-health
 # and prints `was CI: FLOOD(...) -> cleared N of M`. `PR-STARVED` (no PR run
 # executing, a queued PR run past the age floor, and no trim-safe offender to
 # blame) is an `::warning` at exit 0: the state is real, and there is nothing the
-# governor may cancel. `PR-UNWITNESSED` (the feed was cut at its page cap, so the
+# governor may cancel. `PR-BACKLOGGED` (PR CI IS executing, and a queued PR run has
+# waited past the wait budget — the shape that used to print `CI: OK`, measured
+# 2026-10-28 on #10237) is an `::warning` at exit 0 for the same reason: the queue
+# is made of the PR work the governor must not touch. `PR-UNWITNESSED` (the feed
+# was cut at its page cap, so the
 # oldest queued runs — the end the age clause needs — were never read) is also an
 # `::warning` at exit 0: it names what was NOT measured instead of inferring
 # health. Neither can block a merge, because a `schedule`-event run is
@@ -152,8 +156,8 @@ jobs:
           # only inside a summary nobody opens. The tool's exit code already follows
           # its REPORTED verdict (1 = a FLOOD still stands, 2 = could not measure),
           # so `rc` is a payload-derived alarm; the verdict is read as well for the
-          # PR-STARVED / PR-UNWITNESSED warnings, which are real states with no
-          # action available.
+          # PR-STARVED / PR-BACKLOGGED / PR-UNWITNESSED warnings, which are real
+          # states with no action available.
           #
           # ⛔ THE STATE LINE GOES IN THE MESSAGE, NEVER IN A `title=` PROPERTY.
           # GitHub parses a workflow command's property section as `key=value`
@@ -171,8 +175,16 @@ jobs:
             echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
           elif [ "$verdict" = "PR-STARVED" ]; then
             echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+          elif [ "$verdict" = "PR-BACKLOGGED" ]; then
+            # #10237 ask 3 — "the job must fail loudly rather than hang". A queue
+            # that IS serving PR work while the backlog behind it waits past the
+            # measured budget is the shape that used to read `CI: OK` (measured
+            # 2026-10-28T17:47Z: pr_running=2, pr_queued=32, oldest 527 min).
+            # Nothing here is cancellable — the queue is made of the PR work the
+            # governor exists to protect — so the alarm is this annotation.
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. Nothing was cancelled (the queue is PR work itself); the lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
             echo "::warning::${state} — the queued feed was cut at the page cap while no PR-event run is executing, so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; raise --max-pages to read further back."
           fi
-          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED or PR-UNWITNESSED (warned); 1 = FLOOD stands; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED or PR-UNWITNESSED (all four warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"

@@ -263,7 +263,12 @@ same step with the same tail is the investigation.
 ## 6. What this does NOT do
 
 - **It does not bound queue wait.** §1. No `timeout-minutes` can. The lever there is capacity and
-  queue governance (`tools/ci_queue_health.py`, #9115).
+  queue governance (`tools/ci_queue_health.py`, #9115). That tool's `PR-BACKLOGGED` state is what
+  reports the wait itself: a queued PR run older than its wait budget while PR CI is *still*
+  executing is no longer `OK` (#10237 — it printed `CI: OK(queued=54, pr_running=2, pr_queued=32)`
+  with the oldest queued PR run at 527 minutes). The budget's default is derived from this
+  document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
+  measured-normal population rather than on it.
 - **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 28) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question.

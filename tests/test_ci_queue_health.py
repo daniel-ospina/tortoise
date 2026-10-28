@@ -712,3 +712,122 @@ def test_an_unnamed_verdict_is_never_exit_0(monkeypatch):
     monkeypatch.setattr(Q, "read_health",
                         lambda *a, **k: dataclasses.replace(flood, verdict="SOMETHING-NEW"))
     assert Q.main([]) == Q.EXIT_UNMEASURABLE
+
+
+# ── PR-BACKLOGGED: PR CI IS being served, and the backlog is still past ────
+# ── anything the queue was ever measured to do (#10237) ───────────────────
+
+def serving_pr_runs(count=2, age_seconds=60):
+    """`count` PR-event runs that are EXECUTING — the state the old clause saw."""
+    return starving_pr_runs(count, age_seconds=age_seconds)
+
+
+def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
+    """The measured shape of #10237, 2026-10-28T17:47Z.
+
+    `tools/ci_queue_health.py` on the live repo read:
+
+        CI: OK(queued=54, pr_running=2, pr_queued=32)   oldest PR run waited 527 min
+
+    — i.e. a clean bill of health for a repo whose REQUIRED `python-ci-gate`
+    answers in hours. The starve witness requires `pr_running == 0`, which is the
+    one thing a saturated-but-moving queue never is, so the verdict that exists to
+    say "PR CI is not running" could not fire in exactly the state that wall
+    produces. `OK` is a claim about the QUEUE being healthy; one executing PR run
+    is not evidence that the queued PR work is being served at a usable rate.
+    """
+    health = classify(starving_pr_runs(20, age_seconds=527 * 60),
+                      in_progress=serving_pr_runs(2))
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.verdict != Q.OK
+    assert health.pr_running == 2
+    assert health.pr_queued == 20
+    assert health.state_line == (
+        "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, oldest=31620s)"
+    )
+
+
+def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
+    """Same reasoning as PR-STARVED: measured, real, and nothing may be cancelled.
+
+    The governor's whole action surface is a trim-safe OFFENDER's queued runs, and
+    a backlogged queue is BY DEFINITION made of the PR work the governor exists to
+    protect. A red run nobody can clear by acting is not an alarm, it is noise, so
+    the alarm is the state line and the workflow's annotation.
+    """
+    health = classify(starving_pr_runs(20, age_seconds=9000),
+                      in_progress=serving_pr_runs(1))
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.trimmable == ()
+    assert Q.EXIT_FOR[Q.PR_BACKLOGGED] == Q.EXIT_OK
+    # ... and it is NOT threaded into the per-PR STARVED report: `starves_pr` is a
+    # claim about ABSENCE ("no PR run is executing"), which is not this state.
+    assert health.starves_pr is False
+
+
+def test_a_pr_backlog_inside_the_wait_budget_is_ok():
+    """The false-alarm bound: a busy queue that starts PR work promptly is healthy."""
+    health = classify(starving_pr_runs(20, age_seconds=1800),
+                      in_progress=serving_pr_runs(2))
+    assert health.verdict == Q.OK
+    assert not any("PR-BACKLOGGED" in r for r in health.reasons)
+
+
+def test_the_pr_wait_budget_is_configurable():
+    """The floor is a measurement, so the measurement can move it without code."""
+    inside = classify(starving_pr_runs(20, age_seconds=1800),
+                      in_progress=serving_pr_runs(2), max_pr_wait_seconds=900)
+    assert inside.verdict == Q.PR_BACKLOGGED
+    outside = classify(starving_pr_runs(20, age_seconds=1800),
+                       in_progress=serving_pr_runs(2), max_pr_wait_seconds=7200)
+    assert outside.verdict == Q.OK
+    assert inside.pr_wait_budget_seconds == 900
+    assert outside.pr_wait_budget_seconds == 7200
+
+
+def test_a_starved_queue_is_starved_not_backlogged():
+    """`pr_running == 0` keeps PR-STARVED: the two states are not interchangeable."""
+    health = classify(starving_pr_runs(20, age_seconds=9000))
+    assert health.verdict == Q.PR_STARVED
+    assert not any("PR-BACKLOGGED" in r for r in health.reasons)
+
+
+def test_a_truncated_feed_still_reports_a_witnessed_backlog():
+    """A positive claim survives truncation — this run WAS read, and it waited."""
+    health = classify(flood_queued(4) + starving_pr_runs(2, age_seconds=9000),
+                      in_progress=serving_pr_runs(1), truncated=True)
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.verdict != Q.PR_UNWITNESSED
+
+
+def test_the_default_wait_budget_sits_past_the_measured_max_first_job_wait():
+    """The default is DERIVED from a measurement, not chosen for convenience.
+
+    `docs/ops/ci-wall-clock.md` §1 measured, over 54 `python-ci` runs on
+    2026-10-27, the wait for a run's FIRST job to start: p50 29.9 min, p95
+    77.0 min, MAX 81.9 min. A budget at or under that max would fire on the
+    measured-normal population and become an annotation nobody reads; 90 min is
+    the first round number past it, so the state fires only beyond anything the
+    queue has been observed to do.
+    """
+    assert Q.DEFAULT_MAX_PR_WAIT_SECONDS == 90 * 60
+    assert Q.DEFAULT_MAX_PR_WAIT_SECONDS > 81.9 * 60
+
+
+def test_the_cli_plumbs_the_wait_budget_and_reports_it(monkeypatch, capsys):
+    seen = {}
+
+    def fake_read_health(repo, **kwargs):
+        seen.update(kwargs)
+        return classify(starving_pr_runs(20, age_seconds=9000),
+                        in_progress=serving_pr_runs(1),
+                        max_pr_wait_seconds=kwargs["max_pr_wait_seconds"])
+
+    monkeypatch.setattr(Q, "read_health", fake_read_health)
+    assert Q.main(["--json", "--max-pr-wait-seconds", "900"]) == Q.EXIT_OK
+    assert seen["max_pr_wait_seconds"] == 900
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PR-BACKLOGGED"
+    # the applied budget is DECLARED, so a reader can tell a raised floor from a
+    # queue that got better
+    assert payload["pr_wait_budget_seconds"] == 900

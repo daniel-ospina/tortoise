@@ -20,7 +20,7 @@ said ``queued``, pr-doctor said ``no idle lane``, the heartbeat said
 the reason lives one level UP from every per-commit reading: in the repo's
 QUEUE. This tool measures that level.
 
-FIVE STATES, DELIBERATELY NOT INTERCHANGEABLE
+SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
 --------------------------------------------
   ABSENT      per SHA — no check-run / no run exists at this head. Waiting
               cannot clear it (``tools/ci_verdict.py`` ``no-verdict``;
@@ -30,6 +30,24 @@ FIVE STATES, DELIBERATELY NOT INTERCHANGEABLE
   FLOOD       per REPO — the queue is dominated by one non-PR workflow while PR
               work is starved of slots. THIS tool's state, and the only one that
               no per-commit reading can produce.
+  PR-BACKLOGGED
+              per REPO — PR CI IS executing, and a queued PR-event run has waited
+              past ``max_pr_wait_seconds``. The SERVING half of the starvation
+              class, and the one state a saturated-but-moving queue produces: the
+              other two starvation witnesses both require ``pr_running == 0``,
+              which is precisely what a pool that serves two PR runs while twenty
+              wait behind them never is. Measured 2026-10-28T17:47Z (#10237):
+              ``CI: OK(queued=54, pr_running=2, pr_queued=32)`` with the oldest
+              queued PR run at **527 minutes** — a clean bill of health printed
+              for a repo whose REQUIRED ``python-ci-gate`` answers in hours. It has
+              no action available (a backlogged queue is MADE of the PR work the
+              governor exists to protect), so it is WARNED about, never acted on,
+              and exits 0 for the same reason PR-STARVED does. ``starves_pr`` is
+              False: that predicate asks about ABSENCE, and this state is about
+              RATE. #10237 ask 3 — "the job must fail loudly rather than hang" —
+              is exactly this state; GitHub's own only bound is a 24-hour queued-
+              job cancellation (Actions limits, "Job queue time"), which for a
+              required merge check is indistinguishable from a hang.
   PR-STARVED  per REPO — no PR-event run is executing and a queued PR-event run
               has waited past ``min_age_seconds``, but the queue's largest share
               is NOT a trim-safe offender (it is PR work itself, or a workflow no
@@ -142,6 +160,9 @@ Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
      state line stays available in ``pre_action_state_line`` with ``cleared``
      naming the difference. ``PR-STARVED`` is also 0: the state is real and
      warned about, but no action is available (nothing trim-safe to blame).
+     ``PR-BACKLOGGED`` is 0 for exactly that reason — the queue is made of the PR
+     work the governor must not touch, so there is nothing to cancel, and the
+     alarm is its state line plus the workflow's annotation.
      ``PR-UNWITNESSED`` is 0 for the same reason — an action already happened
      before the verdict was reached, and the honest claim is "not witnessed",
      which is warned about rather than turned into a red run nobody can clear by
@@ -157,6 +178,13 @@ Usage:
   uv run python tools/ci_queue_health.py                 # measure, print the state line
   uv run python tools/ci_queue_health.py --json          # machine-readable
   uv run python tools/ci_queue_health.py --apply         # measure AND unjam a trim-safe flood
+
+``OK`` is the ONLY healthy state, and it now means what it says: no starvation
+witnessed, no backlog past the wait budget. Both halves of the starvation class
+have their own witness — ABSENT-of-execution (``PR-STARVED``) and RATE
+(``PR-BACKLOGGED``) — because a queue that serves two PR runs while twenty wait
+behind them is neither "running" nor "not running", and the tool used to report
+that shape as ``OK`` (measured 2026-10-28, #10237).
 """
 from __future__ import annotations
 
@@ -190,6 +218,11 @@ from typing import Any
 OK = "OK"
 FLOOD = "FLOOD"
 PR_STARVED = "PR-STARVED"
+#: PR CI IS executing and the backlog behind it is past the wait budget. The
+#: SERVING half of the starvation class — see the module docstring. Distinct from
+#: PR_STARVED (which means nothing of the PR work is executing at all): the two are
+#: true of different queues, and neither may be inferred from the other.
+PR_BACKLOGGED = "PR-BACKLOGGED"
 #: A truncated feed with no PR-event run executing: starvation is neither
 #: witnessed nor DISPROVED, so this is not ``OK``. See the truncation note in the
 #: module docstring — the runs endpoint is newest-first and cannot be asked for
@@ -206,13 +239,33 @@ EXIT_UNMEASURABLE = 2
 #: workflow's `::warning`, not by a red run that no one can act on.
 #: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
 #: and no action can clear it, so it is announced (state line + `::warning`).
+#: PR-STARVED is a MEASURED state (never UNKNOWN) with no action available, so it
+#: shares EXIT_OK's code — it is announced by its own state line and the
+#: workflow's `::warning`, not by a red run that no one can act on.
+#: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
+#: and no action can clear it, so it is announced (state line + `::warning`).
+#: PR-BACKLOGGED joins them for the same reason PR-STARVED did: its whole content
+#: is "a queued PR run waited N minutes", and the only thing this tool may cancel
+#: is a trim-safe OFFENDER's run — a backlogged queue is made of the PR work it
+#: must never touch. A red run nobody can clear by acting is noise, not an alarm;
+#: the alarm is the state line plus the workflow annotation.
 EXIT_FOR = {
     OK: EXIT_OK,
     FLOOD: EXIT_FLOOD,
     PR_STARVED: EXIT_OK,
+    PR_BACKLOGGED: EXIT_OK,
     PR_UNWITNESSED: EXIT_OK,
     UNKNOWN: EXIT_UNMEASURABLE,
 }
+
+#: How long a queued PR-event run may wait while PR CI is STILL executing before
+#: the queue is not healthy. DERIVED, not chosen: `docs/ops/ci-wall-clock.md` §1
+#: measured the wait for a run's FIRST job to start over 54 `python-ci` runs on
+#: 2026-10-27 — p50 29.9 min, p95 77.0 min, **max 81.9 min**. A budget at or under
+#: that max would fire on the measured-NORMAL population and become an annotation
+#: nobody reads, so this is the first round number past it. `--max-pr-wait-seconds`
+#: moves it from a fresh measurement; it is not a tuning knob for a quiet queue.
+DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0
 
 #: The verdicts that name a MEASURED PR starvation: PR work has a queued run that
 #: has waited past the age floor and nothing of it is executing. They differ only
@@ -222,6 +275,7 @@ EXIT_FOR = {
 #: that is NOT in this set (OK, UNKNOWN, PR-UNWITNESSED) must never produce a
 #: per-PR STARVED claim: each of those leaves starvation unmeasured or disproved.
 STARVING_VERDICTS = frozenset({FLOOD, PR_STARVED})
+#: (PR-BACKLOGGED is deliberately NOT a member — see `QueueHealth.starves_pr`.)
 
 REPO_DEFAULT = "daniel-ospina/tortoise"
 GH_BIN = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
@@ -321,6 +375,10 @@ class QueueHealth:
     #: offender must tie or beat it: a queue whose bulk is PR runs is not a
     #: reporting-workflow flood, it is PR CI doing its job (slowly).
     global_max_queued: int = 0
+    #: The wait budget that produced (or declined) PR-BACKLOGGED, so a reader can
+    #: tell a raised floor from a queue that got better, and so a JSON consumer
+    #: never has to guess which threshold a reading was taken against.
+    pr_wait_budget_seconds: float | None = None
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
@@ -355,6 +413,16 @@ class QueueHealth:
                 f"CI: PR-STARVED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}{waited})"
             )
+        if self.verdict == PR_BACKLOGGED:
+            # `oldest` is the WHOLE claim here — it is the measurement that says the
+            # backlog is past the budget — so it is never optional in this line,
+            # unlike PR-STARVED where absence of a timestamp is reachable.
+            oldest = self.oldest_pr_queued_age_seconds
+            waited = f", oldest={oldest:.0f}s" if oldest is not None else ""
+            return (
+                f"CI: PR-BACKLOGGED(queued={self.queued_total}, "
+                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}{waited})"
+            )
         # `pr_queued` is on the non-FLOOD line too: an `OK` that hid a long PR
         # backlog would be the same "slow CI" reading this tool exists to replace.
         return (
@@ -372,6 +440,12 @@ class QueueHealth:
         They differ only in whether the governor has something to trim, which is not
         what the per-PR report is asking. Everything else (OK, UNKNOWN,
         PR-UNWITNESSED) leaves starvation unmeasured or disproved and is False.
+
+        PR-BACKLOGGED is False on purpose: this predicate asserts an ABSENCE ("no
+        PR-event run is executing"), and a backlogged queue is the case where PR CI
+        IS executing — just too slowly to answer. Folding it in would make the
+        per-PR report claim "CI is not running" about a repo where it demonstrably
+        is, which is a false statement in the instrument that exists to refuse them.
         """
         return self.verdict in STARVING_VERDICTS
 
@@ -387,6 +461,7 @@ class QueueHealth:
             "pr_running": self.pr_running,
             "pr_queued": self.pr_queued,
             "oldest_pr_queued_age_seconds": self.oldest_pr_queued_age_seconds,
+            "pr_wait_budget_seconds": self.pr_wait_budget_seconds,
             "truncated": self.truncated,
             "reasons": list(self.reasons),
             "trimmable": [run.id for run in self.trimmable],
@@ -450,6 +525,7 @@ def classify_queue(
     keep: int = 5,
     max_cancel: int = 20,
     truncated: bool = False,
+    max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
 ) -> QueueHealth:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
@@ -505,6 +581,26 @@ def classify_queue(
         else None
     )
 
+    # Is PR starvation WITNESSED while PR CI IS still executing? The witness above
+    # requires `pr_running == 0`, which a saturated pool never is: it serves a
+    # couple of PR runs while a day's worth wait behind them, and the tool printed
+    # `OK` for exactly that (measured 2026-10-28T17:47Z, #10237: OK with
+    # `pr_running=2`, `pr_queued=32`, oldest `527` min). The witness here is the
+    # WAIT — a queued PR run past `max_pr_wait_seconds` is beyond anything the queue
+    # was measured to do (`docs/ops/ci-wall-clock.md` §1: max 81.9 min) — and it
+    # needs no truncation guard, because it is a POSITIVE claim about a run that was
+    # read (the same reason PR-STARVED survives a truncated feed).
+    backlogged_wait: float | None = (
+        oldest_pr_age
+        if (
+            pr_running > 0
+            and pr_queued_runs
+            and oldest_pr_age is not None
+            and oldest_pr_age >= max_pr_wait_seconds
+        )
+        else None
+    )
+
     reasons: list[str] = [
         f"queued={len(queued)} in_progress={len(in_progress)}"
         + (" (truncated feed: counts are a LOWER BOUND)" if truncated else ""),
@@ -542,11 +638,34 @@ def classify_queue(
             "pr_running": pr_running,
             "pr_queued": len(pr_queued_runs),
             "oldest_pr_queued_age_seconds": oldest_pr_age,
+            "pr_wait_budget_seconds": max_pr_wait_seconds,
             "truncated": truncated,
             "reasons": tuple(reasons),
         }
         base.update(override)
         return QueueHealth(**base)
+
+    def healthy() -> QueueHealth:
+        """`OK` — but only when PR work is not merely QUEUED BEHIND other PR work.
+
+        Every clause that used to return `OK` returns through here. `OK` is a claim
+        about the QUEUE, and "one PR run is executing" is not evidence that the
+        queued PR runs are being served: with 2 executing and 20 queued, the tool
+        printed a clean bill of health while the required gate answered in hours.
+        The backlog witness speaks only about a wait that WAS read, so it is
+        available wherever `OK` was — including under a truncated feed, which is
+        why it is not routed through the `PR-UNWITNESSED` degradation.
+        """
+        if backlogged_wait is None:
+            return health(OK)
+        reasons.append(
+            f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
+            f"queued PR-event run has waited {backlogged_wait:.0f}s "
+            f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
+            f"checks cannot answer inside that wait. Nothing was trimmed: a "
+            f"backlogged queue is made of the PR work the governor must protect"
+        )
+        return health(PR_BACKLOGGED)
 
     def no_flood() -> QueueHealth:
         """Not a trimmable flood — but is PR CI STARVED anyway?
@@ -557,7 +676,7 @@ def classify_queue(
         blamed (and so can't be trimmed). It is its own state, never `OK`.
         """
         if starved_wait is None:
-            return health(OK)
+            return healthy()
         # NAME THE CLAUSE THAT ACTUALLY DECLINED. The dominance floor and the
         # allow-list are different questions, and asserting "not a trim-safe
         # offender" for a leader that IS in TRIM_SAFE (and declined only because
@@ -600,7 +719,7 @@ def classify_queue(
             f"not a flood: {pr_running} PR-event run(s) are executing, so PR CI is "
             "being served"
         )
-        return health(OK)
+        return healthy()
     if not pr_queued_runs:
         # Nothing was waiting on PR CI. That is NOT evidence of health, and it is
         # deliberately not reported as starvation either: the honest answer is
@@ -621,7 +740,7 @@ def classify_queue(
             f"not a flood: the oldest queued PR-event run is {oldest_pr_age:.0f}s old, "
             f"below min_age_seconds={min_age_seconds:.0f}"
         )
-        return health(OK)
+        return healthy()
 
     reasons.append(
         f"FLOOD: '{offender}' holds {offender_queued} of {len(queued)} queued runs, no "
@@ -731,6 +850,7 @@ def read_health(
     keep: int = 5,
     max_cancel: int = 20,
     max_pages: int = DEFAULT_MAX_PAGES,
+    max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
 ) -> QueueHealth:
     """Measure the repo's queue. Raises ``MeasureError`` — never returns OK unread."""
     queued, queued_truncated = read_runs(repo, "queued", max_pages)
@@ -744,6 +864,7 @@ def read_health(
         keep=keep,
         max_cancel=max_cancel,
         truncated=queued_truncated or running_truncated,
+        max_pr_wait_seconds=max_pr_wait_seconds,
     )
 
 
@@ -783,7 +904,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "The REPO-LEVEL CI queue state (#9115) — FLOOD names the workflow that "
             "is starving PR CI; PR-STARVED says PR CI is not running with nothing "
-            "trim-safe to blame. Exit: 0 OK/PR-STARVED, 1 FLOOD, 2 could not measure."
+            "trim-safe to blame; PR-BACKLOGGED says PR CI IS running and the "
+            "backlog behind it is past any measured wait (#10237). Exit: 0 "
+            "OK/PR-STARVED/PR-BACKLOGGED, 1 FLOOD, 2 could not measure."
         ),
     )
     parser.add_argument("--repo", default=REPO_DEFAULT, help="owner/name")
@@ -795,6 +918,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--min-dominant-queued", type=int, default=5)
     parser.add_argument("--min-age-seconds", type=float, default=180.0)
+    parser.add_argument(
+        "--max-pr-wait-seconds",
+        type=float,
+        default=DEFAULT_MAX_PR_WAIT_SECONDS,
+        help=(
+            "how long a queued PR-event run may wait while PR CI is still executing "
+            "before the queue is PR-BACKLOGGED (default derived from the measured "
+            "max first-job wait, docs/ops/ci-wall-clock.md §1)"
+        ),
+    )
     parser.add_argument("--keep", type=int, default=5, help="newest queued runs of the offender to keep")
     parser.add_argument("--max-cancel", type=int, default=20, help="cap on cancellations per invocation")
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
@@ -809,6 +942,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "keep": args.keep,
         "max_cancel": args.max_cancel,
         "max_pages": args.max_pages,
+        "max_pr_wait_seconds": args.max_pr_wait_seconds,
     }
     try:
         health = read_health(args.repo, **measure_kwargs)
