@@ -835,9 +835,6 @@ surfaces:
   # #1349/#2938 silent-drop class), and the file would red
   # `tools/ci_selection.py --integrity` as unclassified.
   - test_connector_oauth_flow.py
-  # #1370: dual-registered with `core` — the same test file covers the hosted
-  # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
-  - test_subject_binding_1370.py
   - test_verbatim_span.py  # #5007: the fourth layer's SPAN link is a POINTER into the Source's raw text, not a payload — schema all-or-nothing + node round-trip + the "no verbatim text on the node" trap (registered here with test_commit_schema.py: it guards the same contract, and `tortoise/sdk.py` selects this surface)
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
@@ -1290,7 +1287,11 @@ surfaces:
   # W3-a (#2099): the hermetic harness contract layer (tests/eval/harness/).
   # Its real-replay gate is GONE with `sdk.capture_session` (#4282) — see the
   # note in `tests/eval/harness/runner.py`; the corpus and receipt-schema
-  # contracts these two files pin survive and still run.
+  # contracts these files pin survive and still run. `test_harness_benchmark.py`
+  # SURVIVES with the receipt-driven `run` leg removed, so it stays registered:
+  # dropping the entry would leave a live test file selected by no surface
+  # (`--integrity` red).
+  - eval/harness/test_harness_benchmark.py
   - eval/harness/test_harness_schema.py
   - eval/harness/test_harness_corpus.py
   # W3-b (#2100): the why-layer suite gate — seeds the shared E2E-1
@@ -1421,17 +1422,9 @@ surfaces:
   # operator surface for the config third state); a __main__-only PR would
   # otherwise select `api` and never run it.
   - test_rebuild_config_preservation.py
-  # #5163: the three CALLERS of the #2714 installed-pack gate — the
-  # classify-later kind index, the S1 summary enforcer and the HOSTED COMMIT
-  # DOOR (`tortoise/hosted_api.py`, which this surface owns). A hosted_api.py
-  # change selects `api`, so this registration runs the door's 422 assertion.
-  # `core` is the arm that actually fires for a value_extractor.py /
-  # commit_schema.py / kind_classifier.py / extractor_v2.py change (the default
-  # surface); the `classify` arm is a selection that NAMES that surface (it has
-  # no SOURCE_PATTERNS entry), while `sdk` is also reachable from a source
-  # change via SOURCE_PATTERNS["sdk"] — and `tortoise/sdk.py` itself is a
-  # SHARED_MODULE (full matrix). See tools/ci_selection.py.
-  - test_vocab_gating_callers_5163.py
+  # #5163's caller arm (test_vocab_gating_callers_5163.py) was DELETED by #4282: every
+  # arm it pinned ran through `sdk.capture_session`. The #2714 gate it guarded survives
+  # and is still pinned by the hosted-door tests this surface owns.
   # #4653: the :GraphEventMeta watermark across the same wipe+replay —
   # `:GraphEventMeta` is export-skipped by the `api` surface (hosted_api
   # `_EXPORT_SKIP_LABELS`), so a change to that classifier alone must still
@@ -2525,7 +2518,6 @@ surfaces:
   # `test_5048_retract_instant_recorded.py` above: it builds its own embedded
   # `TortoiseSDK` (`tmp_path` db + journal), so it needs no server.
   - test_4282_dated_retraction_durability.py
-  - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
   - test_comove_dispatch_3627.py
   - test_fleet_state.py
@@ -2757,12 +2749,9 @@ surfaces:
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
   - test_source_kind_runtime_registration.py
-  # #1370: write-time subject binding — the confidence-gated, fail-closed
-  # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
-  # under `core` like its sibling binder guard (test_capture_entity_attachment_
-  # 3664.py) and the unpatterened engine modules it exercises (subject_binding,
-  # session_link, projection/entities, sdk). It also covers hosted_api.py.
-  - test_subject_binding_1370.py
+  # #1370's binder arm (test_subject_binding_1370.py) was DELETED by #4282; the
+  # write-time subject-binding pass it pinned still runs on the hosted lane, and
+  # `test_capture_entity_attachment_3664.py` above still covers it there.
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
   # #8743/#8816: the wrangler pin's shape in `.github/workflows/ci.yml` and
@@ -3518,7 +3507,6 @@ surfaces:
   # the right reason.
   - test_consistency_divergence_5011.py
   - test_consolidation_4way.py
-  - test_control_plane.py
   - test_crash_recovery.py
   - test_crash_recovery_e2e.py
   - test_cross_lens_candidates.py
@@ -4425,7 +4413,6 @@ surfaces:
   # literals and it needs neither index kind. DB-free: reads declarations only.
   - test_5407_index_label_parity.py
   - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
-  - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   # #4199: the dense leg's material is judged against the READ's own kind
   # scope, not the whole label. Registered here because this file pins the
   # unpatterned engine module `tortoise/search_engine.py`
@@ -4655,7 +4642,6 @@ surfaces:
   # owns it; `core` is the default home, the same surface as the E6 window
   # suite directly above.
   - test_invalidate_inverted_window_5358.py
-  - test_value_extractor.py
   # #2725: venture domain pack — manifest scope, corpus kind coverage, the
   # Objects-hold-state/supersede shape, and the two orthogonal pack-fit layers
   # (per-graph approval vs per-item classification). Mostly DB-free; the
@@ -4764,6 +4750,12 @@ surfaces:
   # seeded graph in-process on the embedded lane (an explicit db_path beats an
   # env URI), so it belongs here and not in `uri_requiring`.
   - test_framework_middleware.py
+  # W2-b (#2098): BPRE write-path gate — core fallback catches engine
+  # code with no surface mapping (tortoise/session_import/ parsers etc.).
+  # `test_write_path_benchmark.py` SURVIVES with the receipt-driven `run` leg
+  # and its #4860 failover arm removed (#4282); the deterministic replay gate
+  # it still carries is live, so the entry stays.
+  - eval/write_path/test_write_path_benchmark.py
   # #2121: the Hermes seam — the shipped plugin template
   # (tortoise/hermes-plugin/) and the session-store parser
   # (tortoise/session_import/parsers.py) name no SOURCE_PATTERNS surface, so a
@@ -4818,11 +4810,8 @@ surfaces:
   # then never run (the #1349/#3332 silent-drop class). Dual-registered with
   # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
   - test_2884_ep_state_journaled.py
-  # #5163: the arm that actually fires — `core` is the default surface for a
-  # `tortoise/value_extractor.py` / `commit_schema.py` / `kind_classifier.py` /
-  # `extractor_v2.py` change (none is in SOURCE_PATTERNS), and this file pins
-  # the CALLERS of the #2714 gate those modules carry. Dual with `api`.
-  - test_vocab_gating_callers_5163.py
+  # #5163's core arm (test_vocab_gating_callers_5163.py) was DELETED by #4282 — see the
+  # note under `api` above.
   # queue_resweep (#5215 merge-throughput work): guards `tools/queue_resweep.py`,
   # the recoverable hand-pass that re-requests `@mergifyio queue` for PRs whose
   # entry conditions are already met once the base gate opens. The tool lives
@@ -5955,7 +5944,7 @@ surfaces:
   # itself is not in SOURCE_PATTERNS["sdk"]; this arm is additionally selected
   # directly by the SOURCE_PATTERNS["sdk"] sources (tortoise/models.py,
   # ids.py, crypto.py, retrieval.py, ...). Dual with `api`/`core`.
-  - test_vocab_gating_callers_5163.py
+  # #5163's sdk arm (test_vocab_gating_callers_5163.py) was DELETED by #4282.
   # #5213: `tortoise/projection/edges.py` IS a SOURCE_PATTERNS["sdk"] source, so
   # this arm owns the pin for the anchor's `ON CREATE`-only mechanism (the
   # measured pre-emption half) and for the `create_edge` signatures. DUAL with
@@ -6034,7 +6023,7 @@ surfaces:
   # `tortoise/kind_classifier.py` or `tortoise/extractor_v2.py` change selects
   # `core`, NOT `classify` — this arm covers a selection that names `classify`
   # directly. Dual with `api`/`core`/`sdk`.
-  - test_vocab_gating_callers_5163.py
+  # #5163's classify arm (test_vocab_gating_callers_5163.py) was DELETED by #4282.
   - test_kind_eval_set.py
   eval:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
@@ -6118,7 +6107,6 @@ surfaces:
   - bench/test_degradation_chain.py
   - bench/test_roundrobin.py
   - bench/test_smoke_embedded.py
-  - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
   - test_4199_dense_scope_coverage.py  # #4199: dual with `core` — this file's outcome records are gated on `tortoise/embeddings.py`'s embedder singleton (a healthy embedder over an un-embedded scope is the defect), and that module selects the eval surface
   - test_5321_embedder_accessor_liveness.py  # #5321: dual with `core` — the invariant under test lives in `tortoise/embeddings.py` (an `eval` SOURCE_PATTERN: `get()` returns the loaded inner encoder, so the `show_progress_bar` call sites bind), while the core-fallback callers it drives are not selected by this surface. Dropping this arm would leave the accessor unguarded on an embeddings.py-only diff.
   - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
@@ -6641,7 +6629,7 @@ slow_files:
 - test_about_edges.py
 - test_billing.py
 - test_cli_context.py
-- test_control_plane.py
+- eval/harness/test_harness_benchmark.py
 - test_dream.py
 - test_embedded_concurrency.py
 - test_enumeration_surfaces.py
@@ -7335,7 +7323,7 @@ durations:
   test_license_surface_consumer.py: 0.3
   test_7949_capstone_measure.py: 0.2  # #9080: What it covers: the measurement probe's pure contract — bar parsing out of the frozen record, the verdict arithmetic, the table shape and the artifact checks — plus the probe's own honesty rules (the arm that is FORCED and read back, a witness that needs the pass to have DONE WORK, the E3 census's two anchor directions, the Point-denominator composition and the derivation figure over the writer class, the E3 row note's historical clause which must carry NO live count and NO typed ratio, the shipped log's two copies of that note agreeing byte-for-byte, the README's not-established bullet quoting the operator counts the log actually measured, and the one-scored-log rule with the newest chosen by `# generated:` stamp); DB-free, network-free, LLM-free; 46 cases 2.3 s measured for the first 44 on this host 2026-10-23; `test_the_durations_row_quotes_the_case_count_it_weights` pins the count so this note cannot describe a smaller file than ships. Refresh from the first post-merge sweep that includes it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_7818_plan_record_5362.py: 0.1  # #7818/#5362: MEASURED by the 2026-10-26 sweep (run 40259128208), which replaced the first-cut default this row carried while no artifact covered it (dropped here per the block rule above). Hermetic (one plan-doc read, no fixture/DB). Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found. Was 2.0.
-  test_7949_capstone_verdict_check.py: 11.1  # #9080 (#3400 trap): MEASURED by the 2026-10-26 sweep (run 40259128208), which replaced the first-cut default this row carried while no artifact covered it — a weight is a SHARD-LAYOUT input, so the sweep's reading, not a local one, decides which files share a shard. Provenance of that reading, NOT the weight itself: 110 tests (#4282 removed the `capture_session` receipt-contract probe, which read a method the SDK no longer has — the weight below was read on the 111-test file and one fewer subprocess-bound test is within its spread); 80 when the sum below was taken; the +23 are the #9089 reviews' bool-is-not-an-int, unhashable-criterion, README-citation and log-stamp regressions, the F3 malformed-pre-registration arms (each builds a throwaway repo, so those are subprocess-bound), the #9075-landing arms, the two V1/V3 vocabulary pins, the `--head`-tree pin, the unborn-HEAD pin, the deep-nesting pin and the V7/V10 measurement arms (including the absent-receipt shape) the later review rounds added, the probe-citation pin, and the #9080 measurement round's arms (the multi-artifact V7 declaration checks, the P1 citation pins, the REFUSED-is-not-RED vocabulary pin, and the corpus-spelling pin)), subprocess-bound (the `git cat-file`/`merge-base` ancestry assertions are not file scans like the `core`/`tier1` siblings), summed `testcase/@time` = 28.57-55.95s across runs at the PR head on 2026-10-20 (docker lane, `--junitxml`; wall 29.78-58.03s). The COUNT is re-derived with every revision (earlier revisions of this row quoted 40, 58, 70 and 75) and `test_the_durations_row_quotes_the_test_count_it_weights` pins it; the SUM is the CONTENDED shared host's reading (a quiet re-measure of the same file summed 4.10s), not a property of the file. That refresh has now happened (run 40259128208), so this note states the measurement's own basis. Do NOT drop the row without re-deriving the durations floor at that head. Was 2.0.
+  test_7949_capstone_verdict_check.py: 11.1  # #9080 (#3400 trap): MEASURED by the 2026-10-26 sweep (run 40259128208), which replaced the first-cut default this row carried while no artifact covered it — a weight is a SHARD-LAYOUT input, so the sweep's reading, not a local one, decides which files share a shard. Provenance of that reading, NOT the weight itself: 111 tests (unchanged by #4282: the observe-steps contract probe lost its RECEIPT half — the `capture_session` `resp = {...}` literal — but survives, re-pointed to the half that never depended on a writer, so the file still ships 111 and the count is unchanged; 80 when the sum below was taken; the +23 are the #9089 reviews' bool-is-not-an-int, unhashable-criterion, README-citation and log-stamp regressions, the F3 malformed-pre-registration arms (each builds a throwaway repo, so those are subprocess-bound), the #9075-landing arms, the two V1/V3 vocabulary pins, the `--head`-tree pin, the unborn-HEAD pin, the deep-nesting pin and the V7/V10 measurement arms (including the absent-receipt shape) the later review rounds added, the probe-citation pin, and the #9080 measurement round's arms (the multi-artifact V7 declaration checks, the P1 citation pins, the REFUSED-is-not-RED vocabulary pin, and the corpus-spelling pin)), subprocess-bound (the `git cat-file`/`merge-base` ancestry assertions are not file scans like the `core`/`tier1` siblings), summed `testcase/@time` = 28.57-55.95s across runs at the PR head on 2026-10-20 (docker lane, `--junitxml`; wall 29.78-58.03s). The COUNT is re-derived with every revision (earlier revisions of this row quoted 40, 58, 70 and 75) and `test_the_durations_row_quotes_the_test_count_it_weights` pins it; the SUM is the CONTENDED shared host's reading (a quiet re-measure of the same file summed 4.10s), not a property of the file. That refresh has now happened (run 40259128208), so this note states the measurement's own basis. Do NOT drop the row without re-deriving the durations floor at that head. Was 2.0.
   test_7950_capstone_probe.py: 3.1  # #7950: MEASURED by the 2026-10-26 sweep (run 40259128208), which replaced the first-cut default this row carried while no artifact covered it. WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it. The file is DB-free pure-function work, but it is NOT cheap: PR #9196 review P3 measured its 16 tests at 16.6-24.2s on the review host across runs, of which 14.3-19.3s is the S2 census pin this PR added (`test_the_s2_census_log_is_a_LIVE_measurement` re-tokenizes 241 `tortoise/` + 132 `tools/` files via `census_all(PROD_DIRS, TARGETS)`), so a first-cut default understated the file ~10x for the shard packer. The VALUE is now that sweep's reading, not a hand-picked number: a weight is a shard-layout input (the #9003-review pin on the #2818 row, `tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), so it is the refresher's to write. Was 2.0.
   test_9556_record_restore_verb.py: 2.0  # carried forward (not a full-file CI measurement) — new in #9556 (R8); a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419 convention) rather than a dev-box reading, which this map forbids as a SHARD-LAYOUT input. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (892/992 fast files) and `tools/ci_selection.py --integrity` red — the two `surfaces:` registrations do NOT cover it, exactly the #7950 row's case directly above. What the weight covers: the file's whole collected set (42 pins / 43 collected cases when this note was written; `--collect-only` is the authority), source-structural pins plus a handful of LIVE cache-graph pins (`shared_proj` + a per-test `test_9556_*` graph) — locally ~6 s for the whole file, but the live half pays the session's first-fixture cost (#3400), so a local reading here would misstate a shard-layout input. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep collects it. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.6s) is a LOWER bound; kept 2.0
   test_8066_served_skill_relay_ratchet.py: 3.6  # #8066: MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 782/869 = 89.99% — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor; conftest/collection setup is the once-per-leg cost the #3400 method attributes to no file — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.5
@@ -7383,7 +7371,6 @@ durations:
   # unregistered new test file reds `integrity_problems`, which is how it was
   # found (#4348 trap).
   test_framework_middleware.py: 2.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.2 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.5s) is a LOWER bound; kept 2.6
-  test_2952_degraded_read.py: 0.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.4
   test_quota.py: 14.3  # ci-timing top-15 2026-10-20 (run 39467226356); was 11.8
   test_no_legacy_token_path.py: 0.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.5
   test_dump_edge_asymmetry_3895.py: 0.8
@@ -7439,6 +7426,7 @@ durations:
   test_redirect_seam.py: 3.3
   eval/retrieval/test_gate_1349.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 26.7 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (13.6s) is a LOWER bound; kept 25.9
   eval/why_suite/test_why_suite_benchmark.py: 46.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 66.3
+  eval/harness/test_harness_benchmark.py: 38.8  # #4282: this file SURVIVES — its receipt-driven `run` leg and the #4860-style failover arm went with `sdk.capture_session`, and the contract half remains — so the reading below is the LAST PRE-REMOVAL one and is kept deliberately. Removing tests can only shrink a file, so 38.8 is an UPPER bound on its current work, never a lower one: the safe direction for the `test-slow` watchdog floor, which fails CLOSED on a slow-leg file with no row at all (`test_slow_leg_bounds_clear_the_committed_work`). ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 59.1. Refresh from the first post-merge sweep.
   test_commit_schema.py: 4.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.3
   test_onboarding_seed_endpoint.py: 46.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.0
   test_battery_r1_seed.py: 38.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 28.2 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (27.0s) is a LOWER bound; kept 38.5
@@ -7627,7 +7615,6 @@ durations:
   # keeps this out of the cold HF-model-load cost class. Refresh from the first
   # post-merge run.
   test_write_doors_9068.py: 4.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
-  test_value_extractor.py: 49.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 49.3
   test_venture_pack.py: 2.0  # carried forward (not a full-file CI measurement) — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.9s) is a LOWER bound; kept 2.0
   test_investment_portfolio_manager_pack.py: 3.7  # new in #9663; The row is REQUIRED, not cosmetic: the file is new to the fast pool, and an absent key drops `durations` coverage under the 90% floor — the map had one file of headroom (#3400 trap) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   # #2729: same rule as the entry directly above — unmeasured, carries the flat
@@ -8521,7 +8508,6 @@ durations:
   test_billing.py: 35.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8. #8946 added TEN tests (152 -> 162 at home) whose CI cost is ~0.4s, so this CI-measured weight is kept rather than replaced: the only readings available here were 137.02s and 167.49s on a loaded host, a 4x distortion of the same suite the CI run timed at 35.3s — which is exactly why this row prefers a CI junit measurement. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (32.8s) is a LOWER bound; kept 35.3
   test_cli_context.py: 6.6  # #9017 CI-junit 2026-10-18 (run 39165691659) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (5.3s) is a LOWER bound; kept 6.6
   test_config.py: 4.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.0
-  test_control_plane.py: 5.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.1
   test_cross_tenant_read_isolation.py: 3.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
   test_dream.py: 6.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.7
   test_embedded_concurrency.py: 131.0  # ci-timing top-15 2026-10-21 (run 39467226356): top-15 saw 9 of 15 testcases = 117.5s in the largest single job (not summed across legs), a LOWER bound; kept 131.0
@@ -8619,7 +8605,6 @@ durations:
   test_4125_legacy_session_source_migration.py: 5.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 185.0
   test_4542_retract_fold_decay.py: 1.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_4647_store_representable.py: 0.3
-  test_4716_capture_operator_ref_remap.py: 25.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.2
   test_4921_construct_lock.py: 113.9  # #4921: MEASURED (3 tests) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The run this note used to cite (114.13s summed, 60.06s slowest) is not this value's basis any more and is dropped rather than left pointing at a superseded sample (see the provenance rule above the block). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). — ci-timing top-15 2026-10-19 (run 39191149586); was 105.3 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (103.3s) is a LOWER bound; kept 113.9
   test_4999_vector_mechanism.py: 0.1
   test_8450_leg_raise_keeps_other_legs.py: 0.1  # #8450: 6 tests, DETERMINISTIC and hermetic (no DB, no embedder — the legs are monkeypatched doubles and `as_completed` is substituted, so nothing races the 500 ms cap). Test-time sum is under 0.05 s; the only wall the file adds is the shared conftest/embedder warm-up, which is not a per-file junit duration. Registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
@@ -8759,7 +8744,6 @@ durations:
   test_source_version_read_wiring_5199.py: 1.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.6
   test_source_version_entity_currency_5199.py: 0.6  # #5199: 13 tests, embedded lane (`TORTOISE_TEST_CARVE_OUT=1`); `test_8702_identity_skip_accounting.py` 5.0, `test_9256_lane_probe_attribution.py` 6.8, `test_8098_webhook_retry_sweep.py` 8.8, `test_9233_webhook_declared_lane.py` 14.0 (all `# unmeasured`, all local). The WEIGHT is the HIGHER end of the observed range on the rows' stated rule (never correct a weight downward without a CI junit reading, so a loaded leg cannot under-pack), not a hand-picked number. The flat 2.0s default is a row with NO reading; an absent row packs the file at it. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 7.5
   test_source_version_references_5199.py: 1.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.1
-  test_subject_binding_1370.py: 9.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 7.1
   test_subject_layer_read_surfaces_4889.py: 1.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_surface_guard_pin_4606.py: 0.9
   test_uri_requiring_selection.py: 87.4  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 60.0
@@ -9063,7 +9047,6 @@ durations:
   test_vecf32_overwrite_seams_4524.py: 1.6
   test_vector_write_seam_4520.py: 1.5
   test_verbatim_embedding_read_8316.py: 2.5
-  test_vocab_gating_callers_5163.py: 6.5
   test_webhook_delivery.py: 2.4
   test_write_path_unreachable_seam_5148.py: 1.2
 on_demand:

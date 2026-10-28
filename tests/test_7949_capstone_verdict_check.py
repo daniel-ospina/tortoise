@@ -1041,19 +1041,28 @@ def test_the_shipped_receipt_observes_exactly_the_four_steps_it_carries():
     assert "extraction" not in probe.observe_steps.__code__.co_consts
 
 
-def test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared():
-    """The contract between the observer and the entry point it reads (#9116).
+def test_every_witness_observe_steps_reads_is_declared():
+    """The observer's READ set is derived from source, not from a comment (#9116).
 
-    Derives BOTH sides from source, so neither can drift behind a comment:
-      * the READ set — every ``result.get("X")`` / ``result["X"]`` in
-        ``observe_steps`` — must equal ``probe.WITNESS_KEYS``;
+    The contract this test guarded had TWO sides:
+      * the READ set — every ``result.get("X")`` in ``observe_steps`` — must equal
+        ``probe.WITNESS_KEYS``;
       * the RECEIPT set — the keys of the ``resp = {...}`` literal in
-        ``TortoiseSDK.capture_session`` — must cover every witness key that is
-        not explicitly declared off-receipt, and must NOT contain one that is.
+        ``TortoiseSDK.capture_session``.
 
-    Mutations that red it: add an undeclared ``result.get("foo")``; drop
-    ``stats`` from the receipt literal; declare a key off-receipt that the
-    receipt does in fact carry (over-declaring would hide a real witness).
+    **The receipt side is gone, and this is why it could not be re-pointed.** The
+    receipt literal lived inside ``capture_session``, which #4282 deleted; the hosted
+    lane builds its OWN receipt (`hosted_api._capture_session_impl`) with a different
+    key set, so re-pointing would have re-labelled a different writer's contract as
+    the observer's rather than keeping this one. What survives is the half that never
+    depended on the writer, and it is the half that catches the mutation the original
+    test was written for (an undeclared ``result.get("foo")``):
+
+      * the read set still must equal ``WITNESS_KEYS``;
+      * ``WITNESS_KEYS_OFF_RECEIPT`` must still be a subset of it — over-declaring
+        still hides a witness;
+      * the deleted side must stay deleted: a `capture_session` reappearing reds here
+        so the receipt half is RE-DERIVED against it rather than silently unchecked.
     """
     import ast
 
@@ -1074,46 +1083,16 @@ def test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared():
     assert read == set(probe.WITNESS_KEYS), (
         sorted(read ^ set(probe.WITNESS_KEYS)), "observer read set != declared")
 
-    sdk_src = (_REPO / "tortoise/sdk.py").read_text()
-    sdk_tree = ast.parse(sdk_src)
-    capture = next(n for n in ast.walk(sdk_tree)
-                   if isinstance(n, ast.FunctionDef)
-                   and n.name == "capture_session")
-    resp_literals = [n.value for n in ast.walk(capture)
-                     if isinstance(n, ast.Assign)
-                     and any(isinstance(t, ast.Name) and t.id == "resp"
-                             for t in n.targets)
-                     and isinstance(n.value, ast.Dict)]
-    assert len(resp_literals) == 1, (
-        "capture_session's receipt literal moved or multiplied — re-derive "
-        "this contract, do not delete it")
-    receipt_keys = {k.value for k in resp_literals[0].keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-    # ``**({...} if cond else {})`` — the SDK adds ``report_url`` conditionally.
-    # Follow every dict-unpack expression and take its own string keys, so a
-    # conditional key is COUNTED rather than silently skipped.
-    for key, value in zip(resp_literals[0].keys, resp_literals[0].values,
-                          strict=True):
-        if key is not None:
-            continue
-        for nested in ast.walk(value):
-            if isinstance(nested, ast.Dict):
-                receipt_keys |= {k.value for k in nested.keys
-                                 if isinstance(k, ast.Constant)
-                                 and isinstance(k.value, str)}
-
     off = set(probe.WITNESS_KEYS_OFF_RECEIPT)
     assert off <= set(probe.WITNESS_KEYS), "off-receipt keys must be witnesses"
-    assert not (off & receipt_keys), (
-        sorted(off & receipt_keys),
-        "declared OFF the receipt but the receipt carries it — over-declaring "
-        "hides a witness #9116 may already have fixed")
-    assert set(probe.WITNESS_KEYS) - off <= receipt_keys, (
-        sorted((set(probe.WITNESS_KEYS) - off) - receipt_keys),
-        "the observer reads a key the receipt does not carry, and it is not "
-        "declared off-receipt")
-    # the dead branch the review found: `capture_session` returns no such key
-    assert "extraction" not in receipt_keys
+
+    # The receipt half's subject is deleted (see the docstring). Pin that, so a
+    # resurrected `capture_session` cannot quietly re-open an unchecked receipt.
+    sdk_src = (_REPO / "tortoise/sdk.py").read_text()
+    assert not re.search(r"^\s+def capture_session\(", sdk_src, re.M), (
+        "`capture_session` exists again: re-derive the RECEIPT half of this contract "
+        "against its `resp = {...}` literal instead of leaving the witness keys "
+        "unchecked against it")
 
 
 def test_a_vet_disabled_pass_does_not_observe_s2_2():
@@ -1572,8 +1551,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     was open, which is exactly the drift this test exists to catch.
 
     Non-vacuity: at the pre-fix head `sdk.py:10341` is a comment line inside
-    `_extract_session_v2`, so the `startswith("def …")` assertion reds, and
-    `:9358` carries no call to it, so the call-site assertion reds too.
+    `_extract_session_v2`, so the `startswith("def …")` assertion reds. The call-site
+    half was retired by #4282 (see (a)) and is replaced by the stronger pair of
+    assertions that no call site exists and that the README still says so.
     """
     readme = (PROBE.parents[1] / "README.md").read_text()
     sources = {
@@ -1581,16 +1561,31 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         "extractor_v2": (_REPO / "tortoise/extractor_v2.py").read_text().splitlines(),
     }
 
-    # (a) The entry-point cites: the def, the CALL site and the one-pass body.
-    sdk_cites = re.search(r"`sdk\.py:(\d+)`; called at `:(\d+)`", readme)
-    assert sdk_cites, "the sdk.py cite paragraph moved; re-derive it, do not drop the pin"
-    def_line, call_line = (int(n) for n in sdk_cites.groups())
+    # (a) The entry-point cite. Until #4282 this was TWO cites — the def and the call
+    # site — because the sentence named the SDK lane's only caller. `capture_session`
+    # was that caller and it is DELETED, so `_extract_session_v2` now has no call site
+    # to cite; the README says so, and both halves are pinned: the def cite must still
+    # resolve, and the sentence must still SAY there is no caller. Re-adding a
+    # `called at :N` cite is exactly the stale-cite drift this test exists to catch.
+    sdk_cite = re.search(r"`sdk\._extract_session_v2` \(`sdk\.py:(\d+)`\)", readme)
+    assert sdk_cite, "the sdk.py entry-point cite moved; re-derive it, do not drop the pin"
+    def_line = int(sdk_cite.group(1))
     assert sources["sdk"][def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
         f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
-    assert "self._extract_session_v2(" in sources["sdk"][call_line - 1], (
-        f"README cites the call at sdk.py:{call_line}, which is "
-        f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did not")
+    assert not re.search(r"`sdk\.py:\d+`; called at `:\d+`", readme), (
+        "the README cites a CALL SITE for _extract_session_v2 again; its only caller "
+        "(`capture_session`) was deleted by #4282, so such a cite names a line that "
+        "does not call it any more")
+    assert "ONLY caller" in readme, (
+        "the README no longer says `capture_session` was _extract_session_v2's only "
+        "caller — that sentence is what makes the single cite honest")
+    callers = [n for n, line in enumerate(sources["sdk"], 1)
+               if "self._extract_session_v2(" in line]
+    assert not callers, (
+        f"_extract_session_v2 has a call site again (sdk.py:{callers}) — the README's "
+        f"'ONLY caller … was deleted' claim is now false, and the call-site cite must "
+        f"be re-derived")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -2338,18 +2333,32 @@ def test_the_probes_line_citations_resolve_too():
     sites, and `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
     `README.md` — so a merge-up that moves `sdk.py` re-stales the probe silently, which is exactly
     how the earlier rounds went stale. Same check, other file.
+
+    #4282 deleted `capture_session`, the entry point's only caller, so the probe's cite is the
+    def alone; the call-site assertions became "no call site exists, and the probe says so".
     """
     probe = PROBE.read_text()
     sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
     extractor = (_REPO / "tortoise/extractor_v2.py").read_text().splitlines()
 
-    entry = re.search(r"``sdk\.py:(\d+)``, called at ``:(\d+)``", probe)
+    # Same retirement as the README test's (a): the call-site half of this cite went
+    # with `capture_session` (#4282), so the pin is the def cite PLUS the claim that
+    # there is no caller left — and it reds if either moves.
+    entry = re.search(r"``sdk\.py:(\d+)``", probe)
     assert entry, "the probe's sdk.py cite moved; re-derive it, do not drop the pin"
-    def_line, call_line = (int(n) for n in entry.groups())
+    def_line = int(entry.group(1))
     assert sdk[def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"probe cites the def at sdk.py:{def_line}, which is {sdk[def_line - 1].strip()!r}")
-    assert "self._extract_session_v2(" in sdk[call_line - 1], (
-        f"probe cites the call at sdk.py:{call_line}, which is {sdk[call_line - 1].strip()!r}")
+    assert not re.search(r"``sdk\.py:\d+``, called at ``:\d+``", probe), (
+        "the probe cites a CALL SITE for _extract_session_v2 again; its only caller "
+        "was deleted by #4282")
+    assert "only" in probe and "caller" in probe, (
+        "the probe no longer says the deleted `capture_session` was the only caller — "
+        "that sentence is what makes the single cite honest")
+    callers = [n for n, line in enumerate(sdk, 1) if "self._extract_session_v2(" in line]
+    assert not callers, (
+        f"_extract_session_v2 has a call site again (sdk.py:{callers}) — re-derive the "
+        f"call-site cite instead of leaving the probe stale")
 
     module_cite = re.search(r"``extractor_v2\.py:(\d+)``", probe)
     assert module_cite, "the probe's extractor_v2 entry cite is gone"

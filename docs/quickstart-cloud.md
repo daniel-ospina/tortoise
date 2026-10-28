@@ -187,8 +187,9 @@ is **per-surface**, not uniform (#3615):
   so requiring it here is unanswerable — and the tool description tells the
   agent to disclose the filing to you before it happens. This is a deliberate
   departure from the per-session-opt-in default; see the `OVERRIDES:` marker on
-  #3662. `TortoiseSDK.capture_session` is likewise ungated,
-  and it is **not** egress-free: it writes the graph backend named by
+  #3662. `TortoiseSDK.capture_session` was likewise ungated
+  — **deleted by #4282**, so it is no longer a way to capture, and the surviving
+  lane is `hosted_api._capture_session_impl` — and it was **not** egress-free: it writes the graph backend named by
   `TORTOISE_DB_URI` **and** sends each turn verbatim to the configured BYOK
   extractor provider (BYOK is the documented default), so a remote
   `redis://`·`rediss://` backend is itself a data-egress choice and the
@@ -302,7 +303,7 @@ silent until the session is imported explicitly: the Pi capture extension.
 
 **This is a local record, not the server's verdict.** A session extracted by
 another path since it was deferred — the hosted MCP `tortoise_session_capture`,
-or `TortoiseSDK.capture_session` — is not visible in the local ledger, so a
+or `TortoiseSDK.capture_session` (deleted by #4282) — is not visible in the local ledger, so a
 `not-processed` entry can be stale until the next `--process` replays it.
 
 ## 4. Use the REST API

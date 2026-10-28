@@ -1,19 +1,23 @@
 """#3551 — the shared ``_write_session_and_turns`` primitive.
 
-Behaviour-preserving extraction: this file proves the two server capture
-writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK.capture_session``
-— the SDK door was deleted by #4282, so only W1 remains to exercise)
+Behaviour-preserving extraction: this file proved the two server capture
+writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK.capture_session``)
 each delegate the ``:Session`` MERGE / turn store to ONE primitive, and that the
-extraction did not change a byte of what either lane writes.
+extraction did not change a byte of what either lane writes. **W2 is gone**: #4282
+deleted ``TortoiseSDK.capture_session``, so only W1 remains to exercise and the parity
+leg of that guarantee has no second lane to compare against — the two-lane claim is now
+one-lane, and this docstring says so instead of advertising a comparison that no longer
+runs.
 
-The load-bearing tests are ``test_sdk_writer_is_behaviour_equivalent`` and
-``test_hosted_writer_is_behaviour_equivalent_and_parity``: a refactor's
+The load-bearing test is ``test_hosted_writer_is_behaviour_equivalent``: a refactor's
 failure mode is a silent behaviour change that every "an id exists" test passes
-through, so those tests pin the EXACT pre-refactor Cypher/parameters recorded by
-running both lanes on a non-trivial turn list (odd roles, ``None`` content, and a
-newline). The pinning constants were captured from the pre-refactor tree
+through, so that test pins the EXACT pre-refactor Cypher/parameters recorded by
+running the surviving lane on a non-trivial turn list (odd roles, ``None`` content,
+and a newline). The pinning constants were captured from the pre-refactor tree
 (``877fa52d1``) by a query recorder — see the PR/report for the raw before/after
-diff (identical).
+diff (identical). Its former companion, ``test_sdk_writer_is_behaviour_equivalent``,
+pinned the same thing for W2 and was deleted with that lane (#4282); its constants
+went with it rather than being kept as a pin nothing exercises.
 
 ``machine_id`` / ``model`` are deliberately ASYMMETRIC (W1 writes them, W2 does
 not) and that asymmetry is RECORDED here as knowingly-absent, not fixed:
@@ -49,20 +53,15 @@ _CONV = [
     {"role": "user", "content": "fifth"},
 ]
 
-_SDK_SID = "equiv-sdk"
 _HOSTED_SID = "equiv-hosted"
 
-#: The pre-refactor W2 ``:Session`` MERGE text (no harness/actor/machine/model
-#: inputs supplied). Byte-identical after the extraction.
-_SDK_SESSION_CYPHER = (
-    "MERGE (s:Session {id:$sid}) SET "
-    "s.created_at=coalesce(s.created_at, $now), s.turn_count=$tc, "
-    "s.is_episodic=true, "
-    "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
-    "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"
-)
 #: The pre-refactor W1 ``:Session`` MERGE text — the SAME base clauses plus the
 #: conditional harness/machine_id/model clauses this request supplied.
+#:
+#: The sibling ``_SDK_SESSION_CYPHER`` pin went with the W2 lane: it recorded the SDK
+#: write path's own MERGE text, and `TortoiseSDK.capture_session` (its only writer) was
+#: deleted by #4282. It was left behind unread for one commit, so it is removed rather
+#: than kept as a pin nothing compares against.
 _HOSTED_SESSION_CYPHER = (
     "MERGE (s:Session {id:$sid}) SET "
     "s.created_at=coalesce(s.created_at, $now), s.turn_count=$tc, "
@@ -397,9 +396,16 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
 
 
 
-def test_hosted_writer_is_behaviour_equivalent_and_parity(client):
-    """W1 writes the EXACT pre-refactor Cypher/params; its parity with W2 over
-    the five disputed fields is asserted per-lane."""
+def test_hosted_writer_is_behaviour_equivalent(client):
+    """W1 writes the EXACT pre-refactor Cypher/params.
+
+    Until #4282 this asserted **parity with W2** over the five disputed fields, per lane.
+    W2 was the SDK lane (`TortoiseSDK.capture_session`), and that method is deleted, so the
+    parity leg no longer has a second lane to compare against: what remains is the
+    equivalence of the ONE surviving writer to the Cypher/params recorded before the #3551
+    extraction. The two-lane guarantee is therefore no longer a property this file can
+    hold — stated here rather than left implied by a docstring that still claimed it.
+    """
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     with _record_writes(sdk) as seen:
         r = client.post("/v1/sessions", json={
@@ -432,7 +438,9 @@ def test_hosted_writer_is_behaviour_equivalent_and_parity(client):
     # ── five disputed fields, per lane ─────────────────────────────────────
     sdk_props = _session_props(sdk, _HOSTED_SID)
     assert sdk_props["is_episodic"] is True
-    # W1 writes the client-claimed fields; W2 does not (see the SDK test).
+    # W1 writes the client-claimed fields. W2 did not — that half of the comparison
+    # went with `capture_session` (#4282), so these two assertions now pin W1's own
+    # behaviour rather than a difference between lanes.
     assert sdk_props["machine_id"] == "machine-abc"
     assert sdk_props["model"] == "claude-opus-4"
     # actor_user_id: neither lane has an actor in this test (no ContextVar on the
