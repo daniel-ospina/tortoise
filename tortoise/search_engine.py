@@ -1365,12 +1365,43 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
     (#3019's requirement — a rank-based fusion downstream cannot tolerate an
     unstable tie: it would pick a different pool every call).
 
-    ⚠️ "Total" is true wherever the label CARRIES its key: `:Point`, `:Source`
-    and `:Event` all do. The all-id-less `:Object` population (hosted stubs) is
-    the known residual — there `coalesce(id, '')` is a constant, so the order
-    inside that population is still engine row order (#3019's recorded gap).
-    What the guard changes there is that those rows move from the HEAD of the
-    window to its TAIL, so they stop displacing addressable rows.
+    ⚠️ "Total" is NOT the same claim as "recency decides", and nowhere is the
+    difference easier to lose than here. Where a stamp is CARRIED the recency
+    key is real and the order is total. Where it is NOT, the key is the
+    constant `''`, the engine silently defers to the next key (FalkorDB:
+    "for equal values, it will go to the next property in the ORDER BY
+    clause"), and the leg is ordered by `coalesce(<id_field>, '') DESC` —
+    total, but recency-free. Which population you are in is a **per-WRITER**
+    fact, not a per-label one (read off the writers, round-10 review):
+
+    * `:Point` — carries both: `createdAt`/`updatedAt` are seeded by
+      `create_point`'s `_create_map`, and a revision bumps `updatedAt`.
+    * `:Object` / `:Subject` — `createdAt` stamped ON CREATE by
+      `_upsert_object` / `_upsert_subject` (`coalesce($ca, $now)`).
+    * `:Event` — **split**. The journaled SDK doors synthesize `createdAt`
+      before the fold (`_apply_and_journal` / `_create_entity`, gated on
+      `type in _JOURNALED_ENTITY_EVENT_TYPES`), and `_EVENT_HANDLED`
+      deliberately omits the key so `_persist_extra_props` carries it onto the
+      node (#2788 — pinned by `tests/test_event_state_carrier_2788.py`). The
+      SESSION-INDEXER and connector raw writers set `startedAt` and no
+      `createdAt` at all (`sdk.py` session props), so those Events carry NO
+      recency stamp — and their `eventId` is `session_<id>`, not a minted
+      ULID, so the id fallback is not a clock either.
+    * `:Source` — `ingestedAt` is what these writers always stamp; a document
+      `:Source` carries `createdAt` only when its producer emits one (an
+      allowed extra prop, `_SOURCE_HANDLED`), and the structural stub
+      (`projection/edges.py`) carries `ingestedAt` alone.
+    * `:Object` stubs (hosted) — neither stamp AND no id: the original #3019
+      residual. `coalesce(id, '')` is a constant there too, so the order
+      inside that population is still engine row order; what the guard changes
+      is that those rows move from the HEAD of the window to its TAIL, so they
+      stop displacing addressable rows.
+
+    ⛔ Widening the key to the stamp the undated families DO carry
+    (`startedAt` for session/connector Events, `ingestedAt` for `:Source`)
+    would change the DECIDED expression on #10121 and is therefore NOT part of
+    this change — it is a reopen on that issue. Nothing here claims more than
+    the table above.
 
     ``coalesce(..., '')`` is load-bearing, not defensive. The engine sorts NULL
     as the LARGEST value, so a bare ``updatedAt DESC`` puts every UNDATED row at
@@ -1389,8 +1420,9 @@ def recency_tie_clause(alias: str, id_field: str) -> str:
     leg entirely — past the pool depth it carried no score at all, so no fusion
     weight, reranker or MMR could recover it. ``updatedAt`` before
     ``createdAt``: a tie should surface the LATEST REVISION (a dedup hit or
-    ``update_point`` bumps ``updatedAt``; a fresh row stamps both), and one
-    expression then covers episodic and semantic rows alike. Live operators
+    ``update_point`` bumps ``updatedAt``; a fresh row stamps both), so one
+    expression serves every family that carries EITHER stamp — and only those
+    (see the per-writer table above). Live operators
     carry NEITHER property (``projection/__init__.py``: "probe: None"), so they
     fall through to the id key — which for minted ids is creation order.
 
@@ -2781,7 +2813,11 @@ def run_structural_query(
             # with no secondary key the WHOLE leg is an unordered tie and the
             # caller's rank — hence the fused top-k — is DB row order.
             # #10121: shared recency tie — on a constant-scored leg the tie does
-            # all the work, so "newest first" is the whole ranking here.
+            # all the work, so "newest first" IS the whole ranking wherever the
+            # rows carry a stamp. Not every family does (see
+            # recency_tie_clause's per-writer table): a session/connector
+            # `:Event` carries none and its `eventId` is not a clock, so there
+            # the whole ranking is that id direction.
             f"ORDER BY {recency_tie_clause('n', id_field)} "
             f"LIMIT $limit"
         )

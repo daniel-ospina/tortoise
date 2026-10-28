@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -324,7 +325,14 @@ _QUERY_VERBS = frozenset({"query", "ro_query", "_query", "profile",
 #:   "ordering is irrelevant", which this comment said before round 8.
 #: * ``RETURN count(`` — an aggregate: one row comes back, nothing to rank.
 #: * ``{id: $`` — a single-row id lookup.
-#: * ``LIMIT 1`` — a single-row read by construction.
+#: * ``LIMIT 1`` (as a TOKEN) — a single-row read by construction. This one is a
+#:   PATTERN, not a substring: plain ``in`` matching let ``LIMIT 1`` match
+#:   ``LIMIT 10`` / ``LIMIT 100`` / ``LIMIT 1_000``, so a NEW unordered leg with
+#:   a ten-row cap was classified "id-anchored/aggregate" and skipped — the one
+#:   hole left in a guard that otherwise fails closed (#10121 round-10 review,
+#:   found at ``c23d35ca`` and still open at ``f255f49b6``). ``\b`` after the
+#:   digit is what closes it: the next char must not be a word char, and ``_``
+#:   is one, so ``1_000`` cannot pass either.
 #:
 #: A read with NONE of these and no ORDER BY is a leg returning rows in DB order
 #: — exactly the unordered leg #3019 found — and it FAILS this census.
@@ -333,8 +341,64 @@ _ANCHORED_READ_MARKERS: tuple[str, ...] = (
     "IN $op_ids",
     "RETURN count(",
     "{id: $",
-    "LIMIT 1",
 )
+
+#: The markers whose SUBSTRING form is ambiguous, held as patterns instead.
+_ANCHORED_READ_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"LIMIT\s+1\b"),
+)
+
+
+def _is_anchored_read(text: str) -> bool:
+    """Is this no-``ORDER BY`` cypher non-ranking BY ITS OWN SHAPE?
+
+    Factored out of the census so the classification itself is testable
+    (``test_a_bare_limit_is_not_an_id_anchor``): while it was inline, the
+    ``LIMIT 1``/``LIMIT 10`` hole could only be found by a reviewer reading the
+    marker list, which is how it survived to round 10.
+    """
+    if any(marker in text for marker in _ANCHORED_READ_MARKERS):
+        return True
+    return any(pattern.search(text) for pattern in _ANCHORED_READ_PATTERNS)
+
+
+@pytest.mark.parametrize("text", [
+    "MATCH (e:Event) RETURN e.eventId LIMIT 10",
+    "MATCH (e:Event) RETURN e.eventId LIMIT 100",
+    "MATCH (e:Event) RETURN e.eventId LIMIT 1_000",
+    "MATCH (e:Event) RETURN e.eventId LIMIT $cap",
+])
+def test_a_bare_limit_is_not_an_id_anchor(text):
+    """A MULTI-row cap must never be read as a single-row read.
+
+    #10121 round-10 review: the marker was the substring ``"LIMIT 1"``, which
+    matches ``LIMIT 10`` / ``LIMIT 100`` / ``LIMIT 1_000`` — so a NEW unordered
+    leg with a ten-row cap was filed as "id-anchored/aggregate" and skipped, the
+    one direction in which this census did not fail closed. FAIL VALUE: any of
+    these returning True.
+    """
+    assert not _is_anchored_read(text), (
+        f"{text!r} has no ORDER BY and is NOT a single-row read, so the census "
+        "must judge it (and fail it) rather than exempt it")
+
+
+@pytest.mark.parametrize("text", [
+    "MATCH (s:Source) WHERE s.url IN $ids RETURN s.url",
+    "MATCH (n) WHERE n.id IN $op_ids RETURN n.id",
+    "MATCH (n:Point) RETURN count(n)",
+    "MATCH (n:Point {id: $id}) RETURN n",
+    "MATCH (n:Point {id: $id}) RETURN n.id LIMIT 1",
+    "MATCH (n:Point {id: $id}) RETURN n.id LIMIT  1",
+    "MATCH (n:Point {id: $id}) RETURN n.id LIMIT\n    1",
+])
+def test_the_anchor_markers_still_recognise_genuinely_anchored_reads(text):
+    """The token fix must not cost the markers their real reads.
+
+    FAIL VALUE: a genuinely id-anchored/aggregate/single-row read returning
+    False — that turns the census into a false FAIL on the two live no-ORDER-BY
+    sites in ``search_engine.py``.
+    """
+    assert _is_anchored_read(text)
 
 
 def test_every_leg_query_carries_a_secondary_sort_key():
@@ -636,7 +700,7 @@ def test_every_leg_query_carries_a_secondary_sort_key():
             # ``name + "..."`` concatenation, so the PR's "fails closed on a new
             # leg" claim was not what the code did).
             func_name = getattr(_scope_of(node.lineno), "name", "<module>")
-            if any(marker in text for marker in _ANCHORED_READ_MARKERS):
+            if _is_anchored_read(text):
                 anchored.append(func_name)
                 continue
             if (func_name, "" if not text.strip() else text.strip()[:40]) \
