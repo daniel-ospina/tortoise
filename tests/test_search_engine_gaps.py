@@ -669,7 +669,13 @@ class TestRunVectorQuery:
         graph = MultiCallGraph([
             (None, Exception(
                 "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
-            (["a", 0.5, "2026-01-01T00:00:00"], None),
+            # a list of ROWS, not of scalars: `MockResultSet` hands `result_set`
+            # back verbatim, so a flat `["a", 0.5, "…"]` makes `run_vector_query`
+            # iterate three scalars as if each were a row — `len(0.5)` then
+            # raises OUTSIDE the inner try, the outer `except Exception` demotes
+            # the call to brute-force, and the `== 2` below reds unconditionally
+            # (round-9 review P1).
+            ([["a", 0.5, "2026-01-01T00:00:00"]], None),
         ])
 
         run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
@@ -686,25 +692,41 @@ class TestRunVectorQuery:
                 "column (#10121): the Python tie then silently degrades to "
                 f"id-only for every row this signature returns: {cypher}")
 
-    def test_index_branch_tie_follows_the_recency_column_not_the_id(self):
+    @pytest.mark.parametrize("rows,expected,reversing_rule", [
+        # the newest row holds the LARGEST id, so an `id ASC` tie — the rule
+        # #10121 removed — puts the OLD row first and this case reds on it.
+        ([("z-new", 0.5, "2026-01-01T00:00:00"),
+          ("a-old", 0.5, "2020-01-01T00:00:00")],
+         ["z-new", "a-old"], "id ASC (the pre-#10121 tie)"),
+        # mirrored: the newest row holds the SMALLEST id, so an `id DESC` tie
+        # inverts it. TWO cases because one cannot cover both directions: with
+        # two rows, `id ASC` and `id DESC` are the only two possible orders, so
+        # any single fixture's recency order must COINCIDE with one of them
+        # (round-9 review P2 — the first version's ids made an `id ASC` revert
+        # produce the same order as the recency tie, so it stayed green).
+        ([("a-new", 0.5, "2026-01-01T00:00:00"),
+          ("z-old", 0.5, "2020-01-01T00:00:00")],
+         ["a-new", "z-old"], "id DESC"),
+    ])
+    def test_index_branch_tie_follows_the_recency_column_not_the_id(
+            self, rows, expected, reversing_rule):
         """#10121: equal distances are tied by RECENCY, then id.
 
-        ``old``/``new`` are chosen so an id-only tie-break would ALSO put
-        ``old`` first (``'old' > 'new'``, and the id key is DESC) — the recency
-        column has to REVERSE that, which is the only way this pin can tell the
-        two rules apart.
+        Each case is built so that ONE id-only tie produces the opposite order,
+        which is the only way this pin can tell the two rules apart; the two
+        cases together reject an id-only tie in EITHER direction. Measured
+        against the shipped code (`recency_tie_key` + `reverse=True`): both
+        cases pass, and an `id ASC` tie reds case 1 while an `id DESC` tie reds
+        case 2.
         """
-        graph = SimpleMockGraph(result_set=[
-            ("new", 0.5, "2026-01-01T00:00:00"),
-            ("old", 0.5, "2020-01-01T00:00:00"),
-        ])
+        graph = SimpleMockGraph(result_set=rows)
 
         out = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
 
-        assert [pid for pid, _score in out] == ["new", "old"], (
-            "the index branch ignored the recency column and tied on the id "
-            "key instead — that is the two-branch disagreement #10121 fixed "
-            f"(got {[pid for pid, _score in out]})")
+        assert [pid for pid, _score in out] == expected, (
+            f"the index branch ignored the recency column and tied on the id "
+            f"key instead ({reversing_rule}) — that is the two-branch "
+            f"disagreement #10121 fixed (got {[pid for pid, _score in out]})")
 
     # ── #1359: dual queryNodes signatures ────────────────────────────
 
