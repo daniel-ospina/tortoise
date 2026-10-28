@@ -2688,11 +2688,13 @@ def _write_capture_turns(
     from tortoise.record_writer import (
         record_tenant_effective as _record_tenant_effective,
     )
+    # `getattr`: a caller may pass a minimal SDK stand-in (the journal-boundary
+    # suite does), and an absent carrier is exactly `None` — the ambient answer.
     _record_holds_turns = (
         sdk._get_event_log() is not None
         and _record_dsn() is not None
         and _is_usable_tenant(
-            _record_tenant_effective(sdk._record_tenant)))
+            _record_tenant_effective(getattr(sdk, "_record_tenant", None))))
     # The JOURNALLED shape follows the WRITE that actually happened, not the
     # capability read above: the carrier below is emitted only when the graph
     # keeps no node, so a `PointAdded` and a turn node are never out of step in
