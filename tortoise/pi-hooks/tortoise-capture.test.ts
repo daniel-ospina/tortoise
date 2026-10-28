@@ -1797,6 +1797,77 @@ test("the spool count bound evicts the OLDEST entry with a recorded reason", () 
   assert.equal(ledger[0].reason, "spool_count_exceeded");
 });
 
+test("the count bound reaps a FILED entry before an UNFILED one (#6388)", async () => {
+  // The spool is a DELIVERY QUEUE, not an age-ordered cache: a filed entry's
+  // content is already on the wire (and Pi's own session log still holds it),
+  // while an unfiled entry is the ONLY copy of a conversation the user never got
+  // into the graph. Pure oldest-first inverted that priority whenever the
+  // backlog was older than the successes — exactly the shape a keyless window
+  // (`no TORTOISE_API_KEY`) or a saturated backoff leaves behind (measured in
+  // #6388's 2026-10-18 comment: ~990 entries frozen in backoff while newer
+  // sessions filed fine), so the cap reaped the backlog it exists to deliver.
+  //
+  // MUTATION THAT REDS THIS: rank by age alone (drop the filed-first class from
+  // `pruneSpool`'s comparator) → the UNFILED `backlog` entry is reaped and the
+  // delivered one survives.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  // Age order is deterministic and puts the UNDELIVERED entry first: both
+  // carries sort equal by timestamp inside one clock tick, so `session_id` is
+  // the tiebreak.
+  writeSpoolEntry(spool, { ...snapshot("backlog"), turns: [{ role: "user", content: "b" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("delivered"), turns: [{ role: "user", content: "d" }] }, bounds);
+  const server = recordingServer();
+  const filed = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl: server.fetchImpl,
+    now: 1,
+    onlySessionId: "delivered",
+  });
+  assert.equal(filed.filed, 1, "the newer entry IS on the wire");
+  assert.equal(server.posts(), 1);
+
+  // The third entry crosses the ceiling: something must go.
+  writeSpoolEntry(spool, { ...snapshot("fresh"), turns: [{ role: "user", content: "f" }] }, bounds);
+
+  assert.equal(
+    readSpoolEntry(spool, "delivered"),
+    undefined,
+    "the already-filed entry is the SAFE loss and must be reaped first",
+  );
+  assert.ok(
+    readSpoolEntry(spool, "backlog"),
+    "never trade an undelivered conversation for disk space a delivered one gives back",
+  );
+  assert.ok(readSpoolEntry(spool, "fresh"), "the just-written entry is never evicted");
+  const evicted = readDiscards(spool).filter((d) => d.session_id === "delivered");
+  assert.equal(evicted.length, 1);
+  assert.equal(evicted[0].reason, DISCARD_COUNT_EXCEEDED);
+  assert.match(String(evicted[0].detail), /already filed/);
+});
+
+test("an UNFILED entry evicted at the cap says the loss was UNDELIVERED (#6388)", () => {
+  // The operator read `spool DISCARD <id> — spool_count_exceeded` as "the session
+  // that just started was dropped" and asked whether the cap discards the
+  // NEWEST. It never does (`keepSessionId` is excluded), but the line could not
+  // say WHICH class of loss it was. When every candidate is undelivered the cap
+  // must still reap (bounded disk is a promise too) — and say so, or an operator
+  // reads an evicted backlog as noise.
+  //
+  // MUTATION THAT REDS THIS: drop the class term from the discard `detail`.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  for (const sid of ["u1", "u2", "u3"]) {
+    writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, bounds);
+  }
+
+  assert.equal(readSpoolEntry(spool, "u1"), undefined, "the cap still bounds the spool");
+  const evicted = readDiscards(spool).filter((d) => d.session_id === "u1");
+  assert.equal(evicted.length, 1);
+  assert.match(String(evicted[0].detail), /UNDELIVERED/);
+  assert.ok(readSpoolEntry(spool, "u3"), "the just-written entry is never evicted");
+});
+
 test("the spool byte bound evicts with its own recorded reason", () => {
   const spool = tmpSpool();
   const chunk = [{ role: "user" as const, content: "y".repeat(2000) }];

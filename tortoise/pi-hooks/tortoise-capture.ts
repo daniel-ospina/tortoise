@@ -1790,9 +1790,24 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
 }
 
 /**
- * Enforce the spool's COUNT and BYTE ceilings, evicting the oldest entries.
+ * Enforce the spool's COUNT and BYTE ceilings, evicting the SAFEST loss first.
  * Excludes `keepSessionId` (the entry just written) so a write can never evict
- * itself. Returns one DiscardRecord per eviction, with the ceiling named.
+ * itself. Returns one DiscardRecord per eviction, with the ceiling named and
+ * the CLASS of loss recorded.
+ *
+ * #6388: the spool is a DELIVERY QUEUE, not an age-ordered cache, so the two
+ * classes are ranked BEFORE age — a **filed** entry's content is already on the
+ * wire (and Pi's own session log still holds it locally), while an **unfiled**
+ * entry is the only copy of a conversation the user never got into the graph.
+ * Age alone inverted that priority exactly where the backlog was OLDER than the
+ * successes, the shape a keyless window (`no TORTOISE_API_KEY`) or a saturated
+ * backoff leaves behind (measured in #6388's 2026-10-18 comment: ~990 entries
+ * frozen in backoff while newer sessions filed fine), so the cap reaped the
+ * backlog it exists to deliver. Within a class the order is UNCHANGED (oldest
+ * first), so a spool with nothing filed behaves exactly as before — and the cap
+ * still bounds the disk either way: when every candidate is undelivered, the
+ * oldest undelivered entry is reaped and the record says so. Mirrors
+ * `capture_spool.py::prune_spool` (the two legs share one directory).
  *
  * A quarantined turn log (`quarantineLog`) has no meta, so it is absent from the
  * meta scan and from `spoolEntryBytes`: its bytes are counted HERE and it is
@@ -1812,7 +1827,15 @@ export function pruneSpool(
   const ranked = metas
     .filter((m) => m.session_id !== keepSessionId)
     .map((m) => ({ meta: m, bytes: spoolEntryBytes(dir, m.session_id) }))
-    .sort((a, b) => compareAge(a.meta, b.meta));
+    .sort((a, b) => {
+      // #6388: the SAFE loss goes first — `entryFiled` is the SAME predicate the
+      // drain's skip clause uses, so "already on the wire" here means exactly
+      // what it means there. Within a class, oldest first (unchanged).
+      const aFiled = entryFiled(a.meta) ? 0 : 1;
+      const bFiled = entryFiled(b.meta) ? 0 : 1;
+      if (aFiled !== bFiled) return aFiled - bFiled;
+      return compareAge(a.meta, b.meta);
+    });
 
   let count = metas.length;
   let total =
@@ -1841,10 +1864,17 @@ export function pruneSpool(
     if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
     const reason =
       total > bounds.maxTotalBytes ? DISCARD_BYTES_EXCEEDED : DISCARD_COUNT_EXCEEDED;
+    // #6388: name the CLASS of loss. The discard line is the only surface a cap
+    // eviction has, and "spool has 1001 entries" alone read (fairly, from that
+    // text) as "something was dropped", with no way to tell the safe eviction
+    // from the irreversible one.
+    const loss = entryFiled(meta)
+      ? "; evicted an already filed entry (its content is on the wire)"
+      : "; evicted an UNDELIVERED entry (never filed)";
     const detail =
       reason === DISCARD_BYTES_EXCEEDED
-        ? `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}`
-        : `spool has ${count} entries > maxEntries=${bounds.maxEntries}`;
+        ? `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}${loss}`
+        : `spool has ${count} entries > maxEntries=${bounds.maxEntries}${loss}`;
     discards.push(discardEntry(dir, meta, reason, detail));
     count -= 1;
     total -= bytes;

@@ -1543,10 +1543,24 @@ def _attempts(meta: dict) -> int:
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
-    """Enforce COUNT and BYTE ceilings, evicting the OLDEST entries.
+    """Enforce COUNT and BYTE ceilings, evicting the SAFEST loss first.
 
     Never evicts ``keep_session_id`` (the entry just written). One discard
-    record per eviction, naming the ceiling.
+    record per eviction, naming the ceiling and which CLASS of loss it was.
+
+    #6388: the spool is a DELIVERY QUEUE, not an age-ordered cache, so the two
+    classes are ranked BEFORE age. A **filed** entry's content is already on the
+    wire (and the harness's own session log still holds it locally), while an
+    **unfiled** entry is the only copy of a conversation the user never got into
+    the graph. Ranking by age alone inverted that priority exactly where the
+    backlog was OLDER than the successes — the shape a keyless window (``no
+    TORTOISE_API_KEY``) or a saturated backoff leaves behind (measured in
+    #6388's 2026-10-18 comment: ~990 entries frozen in backoff while newer
+    sessions filed fine), so the cap reaped the very backlog it exists to
+    deliver. Within a class the order is UNCHANGED (oldest first), so a spool
+    with nothing filed behaves exactly as before, and the cap still bounds the
+    disk either way: when every candidate is undelivered, the oldest undelivered
+    entry is reaped and the record says so.
 
     A quarantined turn log (``_quarantine_log``) has no meta, so it is absent
     from the meta scan and from ``_entry_bytes``: its bytes are counted HERE and
@@ -1561,7 +1575,7 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     orphans = _orphan_paths(root)
     ranked = sorted(
         (m for m in metas if m.get("session_id") != keep_session_id),
-        key=_age_key,
+        key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
     count = len(metas)
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
@@ -1584,12 +1598,26 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         if count <= bounds.max_entries and total <= bounds.max_total_bytes:
             break
         size = _entry_bytes(root, meta["session_id"])
+        # #6388: name the CLASS of loss. The discard line is the only surface a
+        # cap eviction has, and "spool has 1001 entries" alone read (fairly, from
+        # that text) as "something was dropped", with no way to tell the safe
+        # eviction from the irreversible one.
+        loss = (
+            "; evicted an already filed entry (its content is on the wire)"
+            if _entry_is_filed(meta)
+            else "; evicted an UNDELIVERED entry (never filed)"
+        )
         if total > bounds.max_total_bytes:
             reason = DISCARD_BYTES_EXCEEDED
-            detail = f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
+            detail = (
+                f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
+                f"{loss}"
+            )
         else:
             reason = DISCARD_COUNT_EXCEEDED
-            detail = f"spool has {count} entries > max_entries={bounds.max_entries}"
+            detail = (
+                f"spool has {count} entries > max_entries={bounds.max_entries}{loss}"
+            )
         discards.append(_discard_entry(root, meta, reason, detail))
         count -= 1
         total -= size

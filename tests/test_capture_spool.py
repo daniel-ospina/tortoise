@@ -27,6 +27,7 @@ from tortoise.capture_spool import (
     Bounds,
     PostOutcome,
     Snapshot,
+    _entry_is_filed,
     backoff_delay,
     capture_key,
     classify_failure,
@@ -192,6 +193,81 @@ def test_the_count_bound_evicts_the_oldest_with_a_recorded_reason(tmp_path):
     ledger = read_discards(root)
     assert ledger[-1]["session_id"] == "s1"
     assert ledger[-1]["reason"] == "spool_count_exceeded"
+
+
+def test_the_count_bound_reaps_a_FILED_entry_before_an_UNFILED_one(tmp_path):
+    """#6388: at the ceiling, the safe loss goes first — a DELIVERED entry, not
+    the only copy of an undelivered conversation.
+
+    The spool is a delivery queue, not an age-ordered cache: a filed entry's
+    content is already on the wire (and the Pi/Claude session log still holds
+    it locally), while an unfiled entry is the ONLY copy of a conversation the
+    user never got into the graph. Pure oldest-first inverted that priority
+    whenever the backlog was older than the successes — exactly the shape a
+    keyless window (`no TORTOISE_API_KEY`) or a saturated backoff leaves behind
+    (measured on the box in #6388's 2026-10-18 comment: ~990 entries frozen in
+    backoff while newer sessions filed fine), so the cap reaped the backlog it
+    was supposed to deliver.
+
+    MUTATION THAT REDS THIS: rank by age alone (drop the filed-first class from
+    `prune_spool`'s sort key) -> the UNFILED `backlog` entry is reaped and the
+    delivered one survives.
+    """
+    root = tmp_path
+    bounds = Bounds(max_entries=2, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    # Age order is deterministic and puts the UNDELIVERED entry first: both
+    # carries would sort equal by timestamp inside one clock tick, so
+    # `session_id` is the tiebreak.
+    write_spool_entry(root, _snapshot("backlog", [{"role": "user", "content": "b"}]), bounds)
+    write_spool_entry(root, _snapshot("delivered", [{"role": "user", "content": "d"}]), bounds)
+    server = _Server()
+    filed = flush_spool(root, server.post, now=1.0, only_session_id="delivered")
+    assert filed.filed == 1 and server.posts == 1, "the newer entry IS on the wire"
+    assert _entry_is_filed(read_spool_meta(root, "delivered"))
+    assert not _entry_is_filed(read_spool_meta(root, "backlog"))
+
+    # The third entry crosses the ceiling: something must go.
+    write_spool_entry(root, _snapshot("fresh", [{"role": "user", "content": "f"}]), bounds)
+
+    assert read_spool_meta(root, "delivered") is None, (
+        "the already-filed entry is the SAFE loss and must be reaped first"
+    )
+    assert read_spool_meta(root, "backlog") is not None, (
+        "never trade an undelivered conversation for disk space we can get "
+        "from a delivered one"
+    )
+    assert read_spool_meta(root, "fresh") is not None
+    evicted = [d for d in read_discards(root) if d["session_id"] == "delivered"]
+    assert len(evicted) == 1
+    assert evicted[0]["reason"] == "spool_count_exceeded"
+    assert "already filed" in evicted[0]["detail"], (
+        "the ledger must name which class of loss this was: the log line is "
+        "the only surface a cap eviction has"
+    )
+
+
+def test_an_unfiled_entry_evicted_at_the_cap_says_it_was_UNDELIVERED(tmp_path):
+    """#6388 (2026-10-18 comment): the discard line must say the loss was real.
+
+    The operator read `spool DISCARD <id> — spool_count_exceeded` as "the session
+    that just started was dropped" and asked whether the cap discards the newest.
+    It never does (`keep_session_id` is excluded), but the line could not say
+    which class of loss it was. When EVERY candidate is undelivered the cap must
+    still reap (bounded disk is a promise too) — and say so, or an operator reads
+    an evicted backlog as noise.
+
+    MUTATION THAT REDS THIS: drop the class term from the discard `detail`.
+    """
+    root = tmp_path
+    bounds = Bounds(max_entries=2, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    for sid in ("u1", "u2", "u3"):
+        write_spool_entry(root, _snapshot(sid, [{"role": "user", "content": sid}]), bounds)
+
+    assert read_spool_meta(root, "u1") is None, "the cap still bounds the spool"
+    evicted = [d for d in read_discards(root) if d["session_id"] == "u1"]
+    assert len(evicted) == 1
+    assert "UNDELIVERED" in evicted[0]["detail"]
+    assert read_spool_meta(root, "u3") is not None, "the just-written entry is never evicted"
 
 
 def test_the_byte_bound_evicts_with_its_own_recorded_reason(tmp_path):
