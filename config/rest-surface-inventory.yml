@@ -477,6 +477,9 @@ routes:
   - method: GET
     path: /v1/team/alerts
     class: tenant
+  - method: POST
+    path: /v1/team/alerts/ack
+    class: tenant
   - method: PATCH
     path: /v1/team/dashboard-login
     class: tenant

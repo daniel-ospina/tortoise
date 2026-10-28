@@ -923,13 +923,21 @@ class TestAbuseOrderParam:
     def test_abuse_store_sends_the_postgrest_order_dialect(self):
         """Pin the transmitted ``order`` at the store's three descending
         sites. REDs per site when any is reverted to ``-created_at`` — the
-        wire-param assertion a fake-based test could never make."""
+        wire-param assertion a fake-based test could never make.
+
+        #10156 added a FOURTH read to ``recent_alerts`` — the acknowledgement
+        read. Round 3 gave it an ORDER as well (review nit: an unordered,
+        unbounded `alert_ack` read relies on PostgREST's silent `max_rows` to
+        stay finite, and if the bound ever bites it must bite on the OLDEST
+        acknowledgement — an ack that falls out of the read reappears as a
+        current row). So all four reads now carry an order, and the pin says so.
+        """
         from tortoise.abuse import SupabaseAbuseStore
         cp = self._CapturingCP()
         store = SupabaseAbuseStore(cp)
         store.latest_flag_at("t1", "point_create")  # newest flag + newest clear
         store.recent_alerts("t1")
-        assert cp.orders == ["created_at.desc"] * 3, cp.orders
+        assert cp.orders == ["created_at.desc"] * 4, cp.orders
         assert not any(o and o.startswith("-") for o in cp.orders)
 
     def test_captured_abuse_order_is_accepted_by_the_fake(self):
@@ -951,6 +959,12 @@ class TestAbuseOrderParam:
             {"org_id": "t1", "event_type": "flag", "rule": "point_create",
              "created_at": "2026-03-01T00:00:00+00:00"},
         ]})
+        # Every read #10156 makes is now ORDERED, including the acknowledgement
+        # read (round 3 gave it `created_at.desc` + a bound, so a cut can only
+        # ever drop the OLDEST acknowledgement). So this oracle cross-checks all
+        # four wire strings — nothing is excluded from it any more, which is
+        # strictly stronger than the count-pinned exclusion it replaces.
+        assert None not in cp.orders, cp.orders
         for order in cp.orders:
             rows = fake.query("abuse_events", select=["created_at"],
                               order=order)

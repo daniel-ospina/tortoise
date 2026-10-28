@@ -504,7 +504,11 @@ def resolve_org_limits(org_id: str) -> dict:
     the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
     that is PRESENT with value ``None`` means UNLIMITED (sessions is always
     this, for every tier — #4010); a MISSING key is fail-closed in
-    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource.
+    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource
+    EXCEPT the derived ``documents`` cap, whose branch reads ``max_points``
+    through ``limits.get`` and therefore SKIPS an absent key (an absent key and
+    an explicit ``None`` are indistinguishable there — this resolver always
+    emits the key, so the case is unreachable from here; #4051).
     A missing ATTRIBUTE on the row/column is resolved to a value here — it
     never leaves the key absent. (The pre-#4010 rule of the same shape was
     "missing attributes → defaults"; sessions has no default any more.)
@@ -1045,8 +1049,23 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         limits: resolved org limits dict (from resolve_org_limits or the
             authenticated caller). None → skip (stdio/operator, no org).
             A key that is PRESENT and None means UNLIMITED (skip); a MISSING
-            key is fail-closed (QuotaCheckError) for every resource — build
-            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010).
+            key is fail-closed (QuotaCheckError) — build the dict from
+            _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010). ⚠️ The one resource that
+            does NOT fail closed on a missing key is `documents`: its cap is
+            DERIVED from `max_points` by the branch below, which reads it with
+            `limits.get` and so cannot tell an absent key from an explicit
+            None — both skip. That branch is reached only from
+            `resolve_org_limits`, which always emits the key (#4051).
+            A value that cannot be READ as a number is fail-closed, names the
+            field, and is logged at ERROR (#4051) — a limit nobody can read is
+            never a pass. A value that IS readable is COERCED with `int()` and
+            then ENFORCED, so only an unreadable one is refused; the three
+            shapes differ and the difference is stated here because it is the
+            half a future reader would otherwise have to measure (#4051 review
+            rounds 5 and 6): an INTEGER-FORMATTED string is honoured
+            (`"1000"` → 1000), a float VALUE truncates (`10.9` → 10), and a
+            float-FORMATTED string (`"1000.0"`, `"1e3"`) is UNREADABLE -
+            `int()` refuses it and it is refused here too.
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
@@ -1082,7 +1101,20 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             return  # explicitly-None = unlimited
         try:
             max_points = int(max_points)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError (#4051 review round 2): a non-finite stored
+            # max_points is the SAME unreadable-limit class the generic path
+            # below refuses — this branch derives the documents cap from it, so
+            # it must not escape as an unmapped 500 either.
+            # ERROR level for the same reason as the generic path (#686): a
+            # money-gate data fault is not ops-invisible just because it was
+            # caught by the derived branch instead — and `_check_org_limit`'s
+            # own comment states that `quota` logged this refusal, which was
+            # only true of the generic path until now (#4051 review round 3).
+            _logger.error(
+                "quota limit unreadable (fail-closed): team=%s resource=%s "
+                "field=%s value=%r", org_id, "documents", "max_points",
+                max_points)
             raise QuotaCheckError(
                 f"team limits max_points invalid for documents resource "
                 f"({max_points!r})") from None
@@ -1113,7 +1145,61 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         # DEFAULT_MAX_SESSIONS` branch is deleted, not relocated.
         if limit_key in limits:
             return
+        # ERROR level, for the reason the unreadable-limit refusal below states:
+        # `_check_org_limit`'s docstring promises a data-fault refusal is logged
+        # with org_id and resource, and this one raised SILENTLY, so that caller
+        # demoted the whole class to DEBUG and the fault was ops-invisible. It
+        # matters more since #4051 removed the commit lane's `max_sessions`
+        # proxy: this is now the commit lane's ONLY presence gate, and a limits
+        # dict built without the key refuses every write (a real path —
+        # docs/plans/2026-09-11-2977-object-retraction.md records a live
+        # "quota check failed: team limits missing max_points" 500 from a stub
+        # team).
+        _logger.error(
+            "quota limit missing (fail-closed): team=%s resource=%s field=%s",
+            org_id, resource, limit_key)
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+    # #4051: the limit is read from the org's OWN source (the resolved
+    # `<limit_key>` value) — and a value that cannot be READ as a number is
+    # refused, never treated as unlimited. Before this, a non-numeric limit
+    # reached the comparison below and raised a bare `TypeError` OUT of the
+    # gate: refused only by accident, with no message naming the field, and
+    # invisible to every caller that handles the documented `QuotaCheckError`.
+    # ⚠️ SCOPE — this validates the dict the GATE IS GIVEN. It cannot fix a
+    # corrupt value that dies EARLIER or is coerced ELSEWHERE (both tracked as
+    # #10136). THE LANE INVENTORY LIVES HERE, ONCE — do not restate it at a
+    # caller or in a test docstring; copies drifted apart inside #4051's
+    # own change.
+    #   • ARRIVES RAW (this refusal owns it): `get_current_org_session` →
+    #     `_session_user_org` takes the Org node's `max_api_keys` UNCOERCED
+    #     (`_org_limits_from_node` passes `mak` straight through) into
+    #     `_check_org_limit(org, "api_keys")` at the key-mint / rotate sites. So
+    #     the gate must not assume its input is an int.
+    #   • DOES NOT ARRIVE — `documents`: it is handled by the DERIVED branch
+    #     above, which returns before this code, and its only caller feeds it
+    #     `resolve_org_limits`, which already coerces with `int(mp)` — a corrupt
+    #     stored value therefore dies in that resolver, before any gate.
+    #   • DOES NOT ARRIVE — the commit/capture lanes' auth resolvers coerce
+    #     `max_points` with `int(mp)` first, so a corrupt stored value dies in
+    #     AUTH; `create_graph` alone does its own `int(max_graphs)` with no call
+    #     to this helper; and `invite_to_org` reads NO limit at all (its seat
+    #     gate hardcodes the tier's number and refuses with a NAMED message), so
+    #     it has no unreadable-limit class to fail in.
+    # OverflowError is the same class as TypeError/ValueError (`int(float('inf'))`).
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError, OverflowError):
+        # ERROR level, like `_count_resource`'s own failure path (#686): this
+        # raises BEFORE the count, so it must not rely on that log — and the
+        # pre-change crash (a bare TypeError) DID reach `logger.exception` +
+        # Sentry, so a silent refusal here would downgrade a money-gate data
+        # fault to an ops-invisible 500 (#4051 review round 4).
+        _logger.error(
+            "quota limit unreadable (fail-closed): team=%s resource=%s "
+            "field=%s value=%r", org_id, resource, limit_key, limit)
+        raise QuotaCheckError(
+            f"team limits {limit_key} unreadable for resource {resource!r} "
+            f"({limit!r})") from None
     count = _count_resource(org_id, resource, sdk=sdk)
     # #4614: report what the gate COMPARED (post-credit), never a fresh count —
     # the refusal's numbers must be the ones that produced it.
