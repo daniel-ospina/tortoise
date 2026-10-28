@@ -2026,7 +2026,7 @@ async def _lifespan(app):
     _probe_sdk_reset()
 
     # ── #3524 §9 step 1: the consent token's single-use register is SHARED state
-    # (control plane, migration 20261027120001), not this process's memory. Installed here
+    # (control plane, migration 20261030000001), not this process's memory. Installed here
     # rather than at import because the AS runs several Fly machines: a register that only
     # one machine can see lets a replayed token mint a SECOND authorization code — the
     # replay §2.2's `jti` exists to bound. Idempotent and side-effect-free when the arm is

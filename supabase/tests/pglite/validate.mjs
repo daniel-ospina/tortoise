@@ -721,7 +721,7 @@ const suites = [
   // glob — a suite file that is not named here never runs, and "the suite exists"
   // is then mistaken for "the suite passes". Add the entry in the same commit as
   // the file.
-  '20261027120001_oauth_consent_tickets.sql',  // #3524
+  '20261030000001_oauth_consent_tickets.sql',  // #3524
   // #10025 — the default graph's stable-id row, and the ONE-live-default-row
   // invariant the singular `rows[0]` readers rely on: the partial unique index
   // is executed (a second live row is rejected, a tombstone beside an active one

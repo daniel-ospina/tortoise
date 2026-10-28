@@ -48,6 +48,7 @@ from tortoise.consent_token import (
     CONSENT_TOKEN_LEEWAY_S,
     ControlPlaneJtiStore,
     JtiStoreUnavailable,
+    ProcessLocalJtiStore,
     configure_consent_jti_store,
     consume_consent_jti,
     mint_consent_token,
@@ -157,6 +158,35 @@ def test_the_installer_installs_a_store_the_seam_accepts():
     with pytest.raises(TypeError):
         configure_consent_jti_store(type("Sync", (), {
             "consume": lambda self, jti, exp: True})())
+
+
+def test_the_seams_declared_type_is_the_seam_not_the_fallback():
+    """`consent_jti_store()` must be annotated with what it CAN return, not with the fallback.
+
+    The deployed AS installs a `ControlPlaneJtiStore` on every boot (`hosted_api._lifespan`), so
+    a return annotation of `ProcessLocalJtiStore` was false on the only path that runs in
+    production: a caller type-checking against it reaches for `_seen`/`_max_entries`, which the
+    deployed store does not have. `ruff` cannot see that and no other test disagreed with it, so
+    the annotation is pinned here — both stores must satisfy the seam's protocol, and the
+    annotated return type must be the protocol itself, which is what makes it honest for both.
+    """
+    import typing
+
+    declared = typing.get_type_hints(consent_token.consent_jti_store).get("return")
+    assert declared is consent_token.ConsentJtiStore, (
+        f"consent_jti_store() is annotated -> {declared!r}, not the seam's protocol; the deployed "
+        "store is a ControlPlaneJtiStore, so a narrower annotation is false where it matters"
+    )
+    assert typing.get_type_hints(consent_token.configure_consent_jti_store)["store"] == (
+        consent_token.ConsentJtiStore | None
+    )
+    # Both implementations satisfy the declared contract — the runtime check the annotation above
+    # claims. `runtime_checkable` makes this a real assertion rather than a type-checker claim.
+    for store in (ProcessLocalJtiStore(), ControlPlaneJtiStore(FakeControlPlane())):
+        assert isinstance(store, consent_token.ConsentJtiStore), (
+            f"{type(store).__name__} does not satisfy ConsentJtiStore — the seam's documented "
+            "`async consume(jti, expires_at) -> bool` contract"
+        )
 
 
 # ── every refusal is typed, and the 503 publishes no driver detail ─────────

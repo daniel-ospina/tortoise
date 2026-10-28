@@ -52,7 +52,7 @@ The `jti` register IS shared (§2.3, DELIVERED)
 * `ControlPlaneJtiStore` redeems the nonce against the control plane the AS already holds at the
   call site, and `hosted_api._lifespan` installs it at startup, so single-use holds across Fly
   machines rather than per process. The row store is `oauth_consent_tickets`
-  (`supabase/migrations/20261027120001_oauth_consent_tickets.sql`); the RPC decides the winner
+  (`supabase/migrations/20261030000001_oauth_consent_tickets.sql`); the RPC decides the winner
   with one `INSERT … ON CONFLICT DO NOTHING RETURNING`, because a read-then-write is a TOCTOU two
   machines can both win.
 * `ProcessLocalJtiStore` is therefore the seam's default only when nothing is installed (tests, a
@@ -105,6 +105,7 @@ import secrets as _secrets
 import threading
 import time
 from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 from tortoise.oauth import OAuthError, _redirect_uri_matches
 
@@ -495,6 +496,26 @@ class JtiStoreUnavailable(RuntimeError):
     """The register cannot answer, so single-use cannot be guaranteed — refuse (§2.3)."""
 
 
+@runtime_checkable
+class ConsentJtiStore(Protocol):
+    """The seam `configure_consent_jti_store` installs (§2.3) — the contract, as a TYPE.
+
+    Two implementations satisfy it: `ProcessLocalJtiStore` (the per-process fallback) and
+    `ControlPlaneJtiStore` (the SHARED one the deployed AS installs at startup). Annotating the
+    module global against this protocol rather than against the fallback is what keeps the
+    declared type honest on the only path that matters — a caller that type-checked against the
+    fallback would reach for `_seen`/`_max_entries`, which the deployed store does not have.
+
+    `consume` MUST be genuinely `async` (its redemption is a network call) and MUST raise
+    `JtiStoreUnavailable` when it cannot answer, rather than degrading to a permissive answer:
+    a register that cannot answer cannot guarantee single-use, so the caller refuses.
+    """
+
+    async def consume(self, jti: str, expires_at: float) -> bool:
+        """``True`` on FIRST use; ``False`` on replay; raises when it cannot answer."""
+        ...
+
+
 class ProcessLocalJtiStore:
     """A process-local single-use register — the seam's fallback, NOT the deployed posture.
 
@@ -580,7 +601,7 @@ class ControlPlaneJtiStore:
 
     ATOMICITY. `consume` is ONE `rpc_value` call to `consume_oauth_consent_ticket`, whose
     body is a single `INSERT … ON CONFLICT DO NOTHING RETURNING` (migration
-    `20261027120001_oauth_consent_tickets.sql`). A read-then-write would be a TOCTOU that
+    `20261030000001_oauth_consent_tickets.sql`). A read-then-write would be a TOCTOU that
     two machines can both win; with the constraint deciding, exactly one caller gets `true`.
     """
 
@@ -644,11 +665,16 @@ class ControlPlaneJtiStore:
 
 
 _jti_store_lock = threading.Lock()
-_jti_store: ProcessLocalJtiStore | None = None
+_jti_store: ConsentJtiStore | None = None
 
 
-def consent_jti_store() -> ProcessLocalJtiStore:
-    """The active register (§2.3). Lazily built so importing this module has no side effect."""
+def consent_jti_store() -> ConsentJtiStore:
+    """The active register (§2.3). Lazily built so importing this module has no side effect.
+
+    Returns the seam's type, not the fallback's: on the deployed AS this is a
+    `ControlPlaneJtiStore` (installed from `hosted_api._lifespan`), so annotating the fallback
+    here would be false on the only path that runs in production.
+    """
     global _jti_store
     with _jti_store_lock:
         if _jti_store is None:
@@ -656,12 +682,12 @@ def consent_jti_store() -> ProcessLocalJtiStore:
         return _jti_store
 
 
-def configure_consent_jti_store(store) -> None:
+def configure_consent_jti_store(store: ConsentJtiStore | None) -> None:
     """Install the register §9 step 1 provides (or ``None`` to rebuild the default).
 
     The seam exists so step 1 can land WITHOUT touching the endpoint or this verifier: whatever
-    object is installed must expose ``async consume(jti, expires_at) -> bool`` and raise
-    ``JtiStoreUnavailable`` when it cannot answer.
+    object is installed must satisfy `ConsentJtiStore` — ``async consume(jti, expires_at) -> bool``
+    — and raise ``JtiStoreUnavailable`` when it cannot answer.
     """
     global _jti_store
     if store is not None:

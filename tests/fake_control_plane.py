@@ -129,7 +129,7 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("blog_posts", "published_at"),
     ("blog_posts", "reviewed_at"),
     ("blog_posts", "updated_at"),
-    # #3524 steps 1/3 (migration 20261027120001): the shared consent-jti register.
+    # #3524 steps 1/3 (migration 20261030000001): the shared consent-jti register.
     # `expires_at` is the fence the prune compares and `redeemed_at` the audit instant —
     # both `timestamptz` in the migration, so a numeric write must be REFUSED here too
     # (the #4243 class: the fake accepting what PostgREST 400s).
