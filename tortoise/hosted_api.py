@@ -19038,9 +19038,15 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # what it publishes otherwise is the length of the transcript actually
     # served (`len(turns)`), never a window length that the list contradicts.
     #
-    # `!=`, not `<`: the stale-turn sweep is gated on the write predicate
-    # (`sdk.py:2696`), so a re-capture after arming leaves the OLDER node set in
-    # place, and that superset is as much "not this transcript" as a prefix is.
+    # `served < expected`, plus `served > expected` ONLY when the record did not
+    # answer (#10021 review P2, both halves): a transcript shorter than the
+    # larger claim is provably incomplete, while a transcript LONGER than every
+    # claim is the APPEND — its older turns sit in the record, its `turn_count`
+    # is the last WINDOW — and refusing it refused a whole, healthy transcript on
+    # both doors. The superset direction survives exactly on the graph-only
+    # fallback (`answer is None`), where a longer copy has no record to explain
+    # it and is the stale-turn-sweep shape instead. `record_read.served_turn_count`
+    # states the rule and the measurement; this comment names only the arm.
     #
     # `turn_count` is NOT collapsed to 0 when absent (`or 0`): KNOWN ZERO (a
     # capture that stored no turns) makes an empty copy the COMPLETE answer, while
@@ -19053,7 +19059,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # `turn_count` was ever written, so NEITHER a prefix NOR a superset can be
     # ruled out — and a non-empty copy served on that evidence is exactly the
     # `#8447` shape ("never a silently truncated result indistinguishable from a
-    # complete one"), which the `!=` arm above closes only where a count exists.
+    # complete one"), which the count arm above closes only where a count exists.
     # Serving the non-empty sub-case was the hole: it made "absent is
     # fail-closed" true only for the empty copy, and no test read it.
     #
@@ -19068,11 +19074,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so the count check
     #     assumes the offset-0 single-capture shape that is the only one wired
     #     today. An append leaves `offset + turn_count` rows against a window
-    #     length of `count`: the record's own `turn_count` covers them
-    #     (`record_read.served_turn_count` takes the LARGER claim), so a complete
-    #     append is served — and published with the length it actually serves.
-    #     Revisit when an append caller is wired (`tools/backfill_graph_turns.py:
-    #     503-520` already treats that shape as correct);
+    #     length of `count`, i.e. `served > expected` on a WHOLE transcript, and
+    #     that is now SERVED with the length it actually serves (#10021 review
+    #     P2 — before, `served != expected` refused it; the pins build the
+    #     writer's real shape, window count and all). Revisit when an append
+    #     caller is wired (`tools/backfill_graph_turns.py:503-520` already treats
+    #     that shape as correct);
     #   * over-block: a record outage on a session with no turns — including any
     #     session created without a capture — turns a truthful
     #     `200 {"turn_points": []}` into a 503. It needs the read to fail, and the

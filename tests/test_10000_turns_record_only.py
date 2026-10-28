@@ -552,8 +552,19 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
     shape); the OTHER direction — the record holding MORE than the session's
     window — is served, with `turns` describing what was served.
 
+    ⛔ THAT SECOND LEG BUILDS THE WRITER'S REAL APPEND SHAPE (#10021 review P2).
+    It used to give the answer `turn_count=4` beside a session `turn_count=2`,
+    i.e. a whole-run count no append produces (`sdk._write_session_and_turns`
+    stores the WINDOW length, and `SessionRecorded` puts that same value in
+    `public.session_narrative.turn_count`), so it passed on the single shape a
+    `served != expected` rule could not refuse. Both counts are the WINDOW now,
+    and the four rows are what the record holds: `served=4` against
+    `expected=max(2, 2)`.
+
     Mutation: drop the `if _turns_refusal:` raise (or publish `sess[2]`) — the
-    first arm stops raising and the second REDs on `turns == 4`.
+    first arm stops raising and the second REDs on `turns == 4`. Restore
+    `served != expected` in `record_read.served_turn_count` — the second arm
+    REDs with `RecordUnavailable`.
     """
     from tortoise.record_serve import RecordUnavailable
 
@@ -576,7 +587,8 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
         sdk.get_session("sdk-short")
 
     # …and the agreement direction: an armed APPEND leaves the record holding
-    # the whole run while `turn_count` is the last WINDOW.
+    # the whole run while `turn_count` is the last WINDOW — the record's own
+    # count is that same window length, which is what the writer stores.
     proj.g.query(
         "MERGE (s:Session {id:$sid}) "
         "SET s.created_at=$now, s.is_episodic=true, s.turn_count=2",
@@ -586,7 +598,7 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
         turns=tuple(record_read.Turn(
             turn_id=f"sdk-append_t{i}", index=i, content=f"[user] {i}",
             speaker="user") for i in range(4)),
-        turn_count=4, kind=record_read.TurnAnswer.COMPLETE, reason="turn rows")
+        turn_count=2, kind=record_read.TurnAnswer.COMPLETE, reason="turn rows")
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
                         lambda self, sid, **kw: whole)
     detail = sdk.get_session("sdk-append")
@@ -865,6 +877,77 @@ def test_a_short_record_answer_is_not_an_answer():
                                        session_id="sess", turn_max_index=1)
     assert answer.answered and len(answer.turns) == 2, (
         "a complete row set was refused")
+
+
+def test_the_served_count_refuses_a_shortfall_and_serves_an_append():
+    """⛔ #10021 review P2: the rule's DIRECTION, stated at the rule itself.
+
+    `served_turn_count` refused a transcript that is LONGER than every claim as
+    well as a shorter one (`served != expected`). Both claims are WINDOW
+    lengths — `sdk._write_session_and_turns` writes `turn_count = len(turns)` for
+    the window it is storing and `SessionRecorded` carries that value into
+    `public.session_narrative.turn_count` — so an append at `turn_offset=2`
+    leaves `offset + count` record rows against a claim of `count`, i.e.
+    `served > expected` on a WHOLE, HEALTHY transcript, and both doors turned it
+    into `RecordUnavailable` / 503. `session_turns` had already answered COMPLETE
+    for those very rows (the docstring of this module's own writer shape: window
+    count 2, four contiguous rows `_t0.._t3`, `turn_max_index=3`).
+
+    The superset direction survives where it is PROVABLE — the graph-only
+    fallback (`answer is None`, `read_failed`), one store, no record to explain
+    the extra rows (the stale-turn-sweep shape the sibling hosted tests pin).
+
+    Mutation: restore `if served != expected:` in `record_read.served_turn_count`
+    — the APPEND leg REDs with a refusal. Drop the `answer is None` half of the
+    superset arm — the GRAPH-ONLY leg REDs by serving it.
+    """
+    appended = record_read.TurnAnswer(
+        answered=True,
+        turns=tuple(record_read.Turn(turn_id=f"s_t{i}", index=i,
+                                     content="[user] x", speaker="user")
+                    for i in range(4)),
+        turn_count=2, kind=record_read.TurnAnswer.COMPLETE, reason="turn rows")
+
+    # APPEND — the writer's real shape: 4 rows, every claim is the window (2).
+    served, refusal = record_read.served_turn_count(
+        answer=appended, served=4, declared=2)
+    assert (served, refusal) == (4, ""), (
+        "a COMPLETE append was refused (served=4, both claims are the window "
+        f"length 2): {refusal!r}")
+
+    # AGREEMENT — the offset-0 single capture, the only shape wired today.
+    served, refusal = record_read.served_turn_count(
+        answer=appended, served=2, declared=2)
+    assert (served, refusal) == (2, ""), refusal
+
+    # SHORTFALL — still refused, in both claim directions.
+    served, refusal = record_read.served_turn_count(
+        answer=appended, served=2, declared=4)
+    assert served is None and "short copy" in refusal, refusal
+    short_record = record_read.TurnAnswer(
+        answered=False,
+        turns=(record_read.Turn(turn_id="s_t0", index=0,
+                                content="[user] a", speaker="user"),),
+        turn_count=4, kind=record_read.TurnAnswer.PARTIAL, reason="holds 1")
+    served, refusal = record_read.served_turn_count(
+        answer=short_record, served=3, declared=2)
+    assert served is None and "of the 4 turn(s)" in refusal, (
+        "a transcript short of the RECORD's own count was served: "
+        f"{(served, refusal)!r}")
+
+    # GRAPH-ONLY SUPERSET — one store, no record to explain the extra rows.
+    served, refusal = record_read.served_turn_count(
+        answer=None, served=4, declared=2, read_failed=True)
+    assert served is None and "stale superset" in refusal, (
+        "the graph-only fallback served a copy LONGER than the session's own "
+        f"count: {(served, refusal)!r}")
+
+    # UNARMED — the record was never consulted; nothing to reconcile.
+    served, refusal = record_read.served_turn_count(
+        answer=None, served=4, declared=2)
+    assert (served, refusal) == (2, ""), (
+        "an unarmed deployment's count is the session's own, unchanged from "
+        f"pre-#10000: {(served, refusal)!r}")
 
 
 def test_the_merge_serves_the_union_in_turn_order():

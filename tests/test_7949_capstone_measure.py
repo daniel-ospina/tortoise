@@ -734,9 +734,9 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8504` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8508`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8524`); the
+    `extractor_v2.py:8592` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return at `:8608`, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`); the
     VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
     `:8592`, `if vet_enabled and complete_list:` `:8714`). So the flag-ON +
     empty-list session emits `enabled: True` with empty counters and no pass ran —
@@ -782,7 +782,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8504" in vet_cause, vet_cause
+    assert "tortoise/extractor_v2.py:8592" in vet_cause, vet_cause
     assert ":8524" in vet_cause, vet_cause
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
@@ -793,7 +793,7 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8473" in classify_cause, classify_cause
+    assert "tortoise/extractor_v2.py:8561" in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
     assert ":8604" in classify_cause, classify_cause
     assert ":8607" in classify_cause, classify_cause
@@ -856,7 +856,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8883-8887) and `result["classify_later"]` (:8873-8879). The
-    drop is the meta fold at `tortoise/sdk.py:13563` — **re-derived from the tree at
+    drop is the meta fold at `tortoise/sdk.py:13785` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
@@ -882,7 +882,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
     assert _META_FOLD_CITE in cause, cause
-    assert "tortoise/extractor_v2.py:8883-8887" in cause, cause
+    assert "tortoise/extractor_v2.py:8971-8975" in cause, cause
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
@@ -938,7 +938,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2372",
+                     "BY CONSTRUCTION", "tortoise/sdk.py:2377",
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "
@@ -1155,7 +1155,7 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8504` and `:8524` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8592` and `:8612` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -1219,8 +1219,8 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13563`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8883-8887``
+# `tortoise/sdk.py:13785`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
+# ``tortoise/extractor_v2.py:8971-8975``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1331,7 +1331,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8504` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8592` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
@@ -1469,7 +1469,11 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `core_only=classify_later)`.
 
     Non-vacuity: re-staling a LIVE cite reds this test (measured: putting
-    `00_index.md`'s fold cite back to `12401` reds it). The RED COUNT is a
+    `00_index.md`'s fold cite back to `12401` reds it). ⛔ At the #10021 second
+    review-fix head the sweep is GREEN — `checked=50 failures=0` — because every
+    live cite was re-derived there, on the near side of the `origin/main` merge
+    that had moved `sdk.py` by 222 lines. (Before that re-derivation it was red
+    with the same 43 failures as `main`; see the paragraph below.) The RED COUNT is a
     property of the base, not of the rule set, so it is stamped with the commit it
     was measured at rather than asserted about `main`: 17 of the 44 cites red
     across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
@@ -1479,17 +1483,23 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     repaired. An earlier round quoted `26` and `five rules` as a standing fact
     about `main`; both went stale the moment the pins were repaired, which is why
     the numbers here name their base.
-    The `extractor_v2.py` cites are correct at this head, so those rules cannot red
-    on `main`; they are the tripwire for the NEXT insertion above the live cites
-    (the entry point, the classify flag, the vet flag — named by SYMBOL, never by
-    a number: a number quoted here would be the very drift this paragraph is
-    about, and it was, twice). They bite: with the README's vet-flag cite moved
+    The `extractor_v2.py` cites are re-derived at this head, so those rules are
+    the tripwire for the NEXT insertion above the live cites (the entry point, the
+    classify flag, the vet flag — named by SYMBOL, never by a number: a number
+    quoted here would be the very drift this paragraph is about, and it was,
+    twice). ⛔ THE OLD SENTENCE HERE SAID THEY "are correct at this head, so those
+    rules cannot red on `main`" — FALSE, and it was the false half: at `e0cf2d4cd`
+    (main) the sweep was red with 43 failures, the extractor's own growth having
+    moved every one of them (`extractor_v2.py:8504`/`:8873`/`:8883`/`:8396`/
+    `:8390-8393` all read comments), so a lane reading this paragraph was told the
+    extractor rules could not be what was red while they were most of it. They
+    bite: with the README's vet-flag cite moved
     to `7913`, `the vet flag` reds with `extractor_v2.py:7913 reads 'continue',
     which carries none of ['vet_enabled = (']` (measured at a head on which 7913
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13563` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:13785` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]

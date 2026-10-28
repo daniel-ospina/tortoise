@@ -4926,10 +4926,26 @@ class TestSessionDetail:
         An armed append leaves the record holding `offset + window` rows while
         `s.turn_count` is the WINDOW length, so publishing the window put a 2
         above a 4-row list — the same self-contradicting body from the other
-        side. The record's own count covers the whole run, so the union IS the
-        complete transcript: it is served, with its own length.
+        side. The union IS the complete transcript: it is served, with its own
+        length.
 
-        Mutation: publish `sess[2]` again — this REDs on `turns == 4`.
+        ⛔ THE SHAPE IS THE WRITER'S OWN, WINDOW COUNT AND ALL (#10021 review P2).
+        This pin used to build `narrative.turn_count = 4` — a value the writer
+        NEVER produces for an append (`sdk._write_session_and_turns` stores
+        `turn_count = len(turns)` for the window it is writing, and
+        `SessionRecorded` carries that same value into
+        `public.session_narrative.turn_count`), so the pin passed on the one
+        shape that `served != expected` could not refuse and `served_turn_count`
+        refused the real one. Every number here is what the writer actually
+        leaves after an append at `turn_offset=2`: four record rows `_t0.._t3`,
+        `s.turn_count = 2` (the last WINDOW), `s.turn_max_index = 3` (the
+        id-space end the append reaches), and the record's own
+        `turn_count = 2` — SAME as the session's, so `expected` is 2 against 4
+        served.
+
+        Mutation: publish `sess[2]` again — this REDs on `turns == 4`. Restore
+        the `served != expected` refusal in `record_read.served_turn_count` —
+        this REDs on the 503.
         """
         sid = "detail-record-appended-window"
         import tortoise.hosted_api as ha
@@ -4942,9 +4958,9 @@ class TestSessionDetail:
             "    s.turn_max_index=3",
             params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
 
-        # The record holds the whole run and says so; the session's 2 is the last
-        # append WINDOW.
-        conn = _ScopedRecordConn(narrative=[(None, None, 0, 4)])
+        # ⛔ The record's own count is the WINDOW length too, exactly as the
+        # writer leaves it — not a whole-run count, which no append produces.
+        conn = _ScopedRecordConn(narrative=[(None, None, 0, 2)])
         monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
         monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
@@ -4959,7 +4975,10 @@ class TestSessionDetail:
         ])
 
         r = client.get(f"/v1/sessions/{sid}")
-        assert r.status_code == 200, r.text[:300]
+        assert r.status_code == 200, (
+            "a COMPLETE append was refused — its four record rows are the whole "
+            "transcript and `turn_count` is only the last window: "
+            f"{r.status_code} {r.text[:300]}")
         body = r.json()
         assert len(body["turn_points"]) == 4, body["turn_points"]
         assert body["turns"] == 4, (

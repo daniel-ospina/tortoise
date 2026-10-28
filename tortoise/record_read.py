@@ -532,14 +532,36 @@ def served_turn_count(*, answer: "TurnAnswer | None", served: int,
     * **Otherwise the record was consulted**, so this body is a judgement about
       two stores. ``expected`` is the LARGEST claim either store makes: the
       session's window length AND the record's own ``turn_count``. A transcript
-      shorter than the larger claim is provably incomplete → refuse (an explicit
+      SHORTER than the larger claim is provably incomplete → refuse (an explicit
       error, ``#8447``'s sanctioned shape: a new reply FIELD would widen a public
       wire surface, which is owner approval and not a lane decision — see
       ``hosted_api._record_unavailable``).
-    * **A transcript that AGREES is published with its own length**, not with the
-      window length — an append leaves ``offset + count`` rows against a window
-      length of ``count``, and publishing the window there is the same
-      self-contradicting body from the other side.
+    * **A transcript LONGER than every claim is the APPEND, not a shortfall**, so
+      it is published with its own length (#10021 review P2). Both claims are
+      WINDOW lengths — `sdk._write_session_and_turns` writes
+      ``turn_count = len(turns)`` for the window it is storing, and that value is
+      what ``SessionRecorded`` carries into
+      ``public.session_narrative.turn_count``. An append at ``turn_offset=2``
+      therefore leaves ``offset + count`` record rows against a ``turn_count`` of
+      ``count``: on a HEALTHY, COMPLETE transcript ``served > expected``, and a
+      ``served != expected`` rule refused it on both doors. Measured on the real
+      writer shape (4 rows ``_t0.._t3``, ``narrative.turn_count=2``,
+      ``s.turn_count=2``, ``turn_max_index=3``):
+      ``served_turn_count(served=4, declared=2, answer.turn_count=2)`` returned
+      ``(None, 'the served transcript holds 4 of the 2 turn(s) …')`` while
+      ``session_turns`` had already answered COMPLETE for those same 4 turns.
+      ⛔ The direction matters, and this module's own bullets above are what
+      settle it: "an append leaves ``offset + count`` rows against a window
+      length of ``count``" is only a coherent sentence if a longer transcript is
+      SERVEABLE.
+    * ⛔ **BUT ONLY WHEN THE RECORD WAS CONSULTED.** ``answer is None`` with
+      ``read_failed`` is the GRAPH-ONLY fallback: one store, no second witness,
+      and the session's own count is all there is. A copy there that is LONGER
+      than that count is the stale-superset state the turn sweep can leave —
+      reachable whenever a shorter re-capture's sweep is skipped — and it is not
+      this session's transcript, so it is still refused (fail-closed). An append
+      cannot arrive on this arm: its older turns live in the RECORD, and the
+      record is exactly what is unreachable.
 
     ``expected`` is deliberately the max rather than either store alone: an
     append's older turns predate arming, so their count lives on the record's
@@ -562,10 +584,19 @@ def served_turn_count(*, answer: "TurnAnswer | None", served: int,
                 "turn_count, so no copy of this transcript can be proven "
                 "complete")
         return declared, ""
-    if served != expected:
+    if served < expected:
         return None, (
             f"the served transcript holds {served} of the {expected} turn(s) "
             "the two stores claim — a short copy is not a complete answer")
+    if served > expected and answer is None:
+        # The graph-only fallback: no record to attribute the extra rows to, so
+        # a copy longer than the session's own count is the stale superset the
+        # sweep can leave behind, not an append (see the docstring).
+        return None, (
+            f"the served transcript holds {served} turn(s) of the {expected} "
+            "the session claims, and the record did not answer — a copy longer "
+            "than the session's own count is a stale superset, not this "
+            "transcript")
     return served, ""
 
 
