@@ -57,7 +57,9 @@ from tortoise.projection import (
 )
 from tortoise.projection.nonfolded import (
     _NO_ADDRESS_REMEDY,
+    EXEMPT_SHAPES,
     NO_ADDRESS_INSTRUCTION,
+    SHAPE_EDGE_MESSAGE_MISS,
     NonFoldedEventsError,
     collect_non_folded,
     refused_events,
@@ -3535,3 +3537,51 @@ def test_a_mixed_abort_carries_both_remedies(env):
     r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
     assert "Reconcile the journal" in r["action"], r["action"]
     assert "supply the target's name or id" in r["action"], r["action"]
+
+
+_DECISION_DOC = (Path(__file__).resolve().parent.parent
+                 / "docs" / "epics" / "2026-09-10-2835-capability-registry"
+                 / "identity-decision.md")
+
+
+def test_the_decision_row_scopes_the_retired_edge_miss_justification_like_the_code():
+    """The `edge-message-miss` row states the SAME scope the code does.
+
+    FAILS IF: the row states the retirement of the A10 justification
+    unqualified — as it did before this pin (`is **RETIRED**: `#8499` landed
+    that fold, so a miss is no longer explained by a missing creation path and
+    every remaining occurrence is evidence of a real divergence`). That reading
+    is FALSE for the engine it does not name: `#8499` retired the justification
+    for `rebuild_all`, which folds `DirectEdgeCreated` in pass-2b, while the
+    one-record `apply()` engine has no pass-2b and still keeps
+    `DirectEdgeCreated` in `_APPLY_WARN_ONLY_TYPES` (`projection/__init__.py`),
+    so on `rebuild(log)` / `recover_from_log` a plain direct edge is still
+    legitimately absent for a missing-creation-path reason. An unqualified row
+    therefore tells an operator that this doc — the record a lane reads to
+    decide what the gate permits — declares a legitimately-absent edge a
+    divergence, and it contradicts the row BELOW it (`object-superseded-
+    unregistered`), which carves the one-record leg out explicitly.
+
+    REACHABLE: the row is committed prose; the assertion reads it. The premise
+    (that the code's own `EXEMPT_SHAPES` entry carries the two-engine split) is
+    asserted first, so a future edit to the code home reddens here instead of
+    silently retiring this pin.
+    """
+    prose = EXEMPT_SHAPES[SHAPE_EDGE_MESSAGE_MISS]
+    assert "RETIRED **for `rebuild_all`**" in prose, prose
+    assert "NOT retired for the one-record" in prose, prose
+
+    rows = [ln for ln in _DECISION_DOC.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("| `edge-message-miss` |")]
+    assert len(rows) == 1, f"expected exactly one edge-message-miss row: {rows}"
+    row = rows[0]
+    assert "RETIRED for `rebuild_all`" in row, (
+        f"the decision row does not scope the retirement to `rebuild_all`: {row}")
+    assert "NOT retired for the one-record `apply()` engine" in row, (
+        "the decision row omits the one-record `apply()` leg, which still has "
+        f"no pass-2b and keeps `DirectEdgeCreated` unfolded: {row}")
+    assert "every remaining occurrence is evidence of a real divergence" in row, row
+    # The unqualified construction is the defect: a retirement asserted with no
+    # engine named reads as true of every engine.
+    assert "is **RETIRED**:" not in row, (
+        f"the retirement is stated with no engine named: {row}")
