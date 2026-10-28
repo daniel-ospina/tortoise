@@ -4173,10 +4173,24 @@ def _has_class_negator(prefix: str) -> bool:
 
 
 def _class_marker_negated(sentence: str, match) -> bool:
-    """Does a NEGATOR govern the class marker at `match` — in front or behind?"""
-    return _has_class_negator(
-        _clause_before(sentence, match.start())
-    ) or bool(_POST_NEGATION_RE.search(_clause_at(sentence, match.start())))
+    """Does a NEGATOR govern the class marker at `match` — in front or behind?
+
+    The BEFORE half is predicate-scoped (`_marker_itself_negated`), not the
+    punctuation-window `_has_class_negator(_clause_before(...))` it used to be.
+    ⛔ The window form is wrong in BOTH directions, measured at `#10200` review
+    cycle 3: it CLEARED a class negation whenever an unrelated clause carried a
+    negator (*"Unlike `create_direct_edge`, which cannot name an about edge,
+    `sdk.supersede_point` re-materializes the set by property MAP"* red as `not
+    property MAP`), and it CLEARED the exemption direction's own contradiction
+    (*"…which never loses a value, is a counted MAP form writer"* was green) —
+    because three of this file's four call sites shared it. The AFTER half keeps
+    `_POST_NEGATION_RE` over the CLAUSE: `no longer` follows the whole predicate,
+    not the marker's span, so an `match.end()`-anchored test would miss
+    *"is a re-materializing writer no longer"*.
+    """
+    return _marker_itself_negated(sentence, match) or bool(
+        _POST_NEGATION_RE.search(_clause_at(sentence, match.start()))
+    )
 
 #: A declared false positive described as COUNTED — the same contradiction from
 #: the other side: an exemption the census counts is a writer described as
@@ -4185,6 +4199,16 @@ def _class_marker_negated(sentence: str, match) -> bool:
 EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
     "counted",
     "is one of them",
+    # ⛔ THE POST-NEGATED FORMS, which are the same claim in the documents' other
+    # voice: *"is a declared false positive no longer"*, *"is no longer a declared
+    # false positive"*, *"is no longer exempt"* all assert the exemption has BECOME
+    # counted. They were green in every spelling while `post_exemption`'s probe
+    # reported the direction as closed — its red came from a NEIGHBOUR marker
+    # elsewhere in the sentence, not from the post-negation form it named
+    # (`#10200` review, cycle 3, measured).
+    "false positive no longer",
+    "no longer a declared false positive",
+    "no longer exempt",
     # FLATTENED — and wider claims than the word "counted": an exemption
     # ASSERTED to carry the set by property map, or to re-materialize it, states
     # the same contradiction. These were measured green at the `#10200` head:
@@ -4418,11 +4442,21 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                     if symbol not in sentence:
                         continue
                     if role == "EXEMPT":
+                        # ⛔ `_marker_itself_negated`, not the clause-wide
+                        # `_denied_markers`: three of these markers SPELL a
+                        # negator of their own (`false positive no longer`, `no
+                        # longer a declared false positive`, `no longer exempt`),
+                        # so a clause-wide `no longer` search suppressed the very
+                        # claim it was pinning — every post-negated form stayed
+                        # green (`#10200` review, cycle 3, measured).
                         hits = [
                             marker
                             for marker in EXEMPT_COUNTED_MARKERS
                             if marker.lower() in low
-                            and not _denied_markers(sentence, (marker,))
+                            and any(
+                                not _marker_itself_negated(low, match)
+                                for match in re.finditer(re.escape(marker.lower()), low)
+                            )
                         ]
                     else:
                         hits = [
@@ -4437,11 +4471,9 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                             # as a denial reds it (`#10200` review). The scope is
                             # the MARKER'S OWN predicate — a negator elsewhere in
                             # the run must not excuse the denial (see
-                            # `_marker_itself_negated`).
-                            and any(
-                                not _marker_itself_negated(low, match)
-                                for match in re.finditer(re.escape(marker.lower()), low)
-                            )
+                            # `_marker_itself_negated`) — which is now the rule
+                            # in every branch, via `_class_marker_negated`.
+                            and not _denied_markers(sentence, (marker,))
                         ]
                         # ⛔ POLARITY: a NEGATED class marker denies the very
                         # class it names, and no `DENIAL_MARKERS` entry spells
@@ -4678,6 +4710,64 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "the rule cannot see an exemption described as counted, so the "
         "contradiction is pinned in one direction only"
     )
+    # … and the SAME contradiction in the documents' ordinary contrastive and
+    # relative clauses. ⛔ These were green in every spelling while the exemption
+    # direction still read polarity through the punctuation WINDOW: an unrelated
+    # negator in the first clause cancelled the denial (`#10200` review, cycle 3,
+    # measured). They now red through the same predicate-scoped rule the counted
+    # direction uses.
+    exemption_in_a_clause = (
+        (
+            "probe",
+            "Unlike `create_direct_edge`, which cannot name an about edge, "
+            "`projection._rebuild_all_replay` is counted among the six writers.",
+        ),
+        (
+            "probe",
+            "`projection._rebuild_all_replay`, which never loses a value, is a "
+            "counted MAP form writer.",
+        ),
+    )
+    assert all(
+        any("_rebuild_all_replay" in item for item in _denied_verdicts([sentence]))
+        for sentence in exemption_in_a_clause
+    ), (
+        "an unrelated negator cancels the exemption-is-counted denial, so the "
+        "contradiction ships in the documents' own contrastive/relative idiom "
+        "and the probe above reads as if the direction were closed"
+    )
+    # … and the mirror is TRUE prose: a counted writer in a contrastive or
+    # relative clause must NOT red as `not property MAP` just because another
+    # clause carries a negator. Before the scoping fix these two were RED, and the
+    # cheapest way for an editor to clear that is to weaken true prose.
+    true_prose_in_a_clause = (
+        (
+            "probe",
+            "Unlike `create_direct_edge`, which cannot name an about edge, "
+            "`sdk.supersede_point` re-materializes the set by property MAP.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point`, which never loses the value, carries the "
+            "set by property MAP.",
+        ),
+        (
+            "probe",
+            "`projection._fold_entity_linked_reason` does not originate it, "
+            "while `hosted_backup.restore_graph` re-materializes the set by "
+            "property MAP.",
+        ),
+    )
+    offenders_in_a_clause = [
+        offender
+        for sentence in true_prose_in_a_clause
+        for offender in _denied_verdicts([sentence])
+    ]
+    assert not offenders_in_a_clause, (
+        "a negator in another clause denies a class it does not govern, so TRUE "
+        "prose reds and an editor must weaken it — the failure mode rounds 2 and "
+        "3 filed at P2: " + repr(offenders_in_a_clause)
+    )
     # Probe 4: the NEGATED form of the class — the one-word paraphrase that was
     # green on BOTH legs at `#10200`'s head — must red here. It names no
     # `DENIAL_MARKERS` entry, which is exactly why leg 1's polarity fix alone
@@ -4827,19 +4917,34 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "a negator AFTER the class marker is not read, so the verdict can be "
         "denied by moving one adverb to the end of the clause"
     )
+    # ⛔ THE POST-NEGATED FORMS, pinned WITHOUT a neighbour to carry the red. The
+    # probe that used to sit here (*"… is a declared false positive no longer: it
+    # re-materializes the set"*) reported this direction as closed while its red
+    # came from `re materializ` in the trailing clause — measured: removing the
+    # post-negation mechanism left it green, and the bare sentence below was green
+    # in every spelling (`#10200` review, cycle 3). Each form is now its own
+    # sentence, so no other marker can produce the verdict.
     post_exemption = (
         (
             "probe",
             "`projection._rebuild_all_replay` is a declared false positive no "
-            "longer: it re-materializes the set.",
+            "longer.",
         ),
+        (
+            "probe",
+            "`projection._rebuild_all_replay` is no longer a declared false "
+            "positive.",
+        ),
+        ("probe", "`projection._rebuild_all_replay` is no longer exempt."),
     )
-    assert any(
-        "_rebuild_all_replay" in item
-        for item in _denied_verdicts(list(post_exemption))
+    assert all(
+        any("_rebuild_all_replay" in item for item in _denied_verdicts([sentence]))
+        for sentence in post_exemption
     ), (
-        "the exemption may be called counted by putting `no longer` after the "
-        "exemption marker, which is the direction the recorded decision forbids"
+        "the exemption may be called counted by moving the negation after the "
+        "exemption marker (`is a declared false positive no longer`, `is no "
+        "longer a declared false positive`, `is no longer exempt`), which is the "
+        "direction the recorded decision forbids"
     )
     # Probe 11: a comma before a COORDINATING conjunction separates CONJUNCTS, so
     # a negator in the first does not deny the class stated in the second. This is
@@ -5053,11 +5158,27 @@ def _declared_false_positive_counts(
                 for position, token in tokens
                 if position < phrase.start()
                 and phrase.start() - position <= _COUNT_WINDOW
-                and "." not in flat[position : phrase.start()]
+                # ⛔ ONE CLAUSE, not just one sentence (`#10200` review, cycle 3):
+                # `;`, `:`, `—` and `,` all separate the counts the guarded
+                # paragraph states, and a numeral from an earlier clause was still
+                # being attached to this phrase — *"6 writers, 3 by property MAP:
+                # the declared false positive is X"* read THREE.
+                and not any(
+                    brk in flat[position : phrase.start()] for brk in _CLAUSE_BREAKS
+                )
             ]
             if not before:
                 continue
             position, token = max(before)
+            # A statement about HISTORY is TRUE and stays writable, the same escape
+            # the denial leg carries (`#10200` review, cycle 3: the count leg had no
+            # history notion, so *"before `#9417` it held two declared false
+            # positives"* red).
+            if any(
+                history.lower() in _clause_at(flat.lower(), position)
+                for history in HISTORY_MARKERS
+            ):
+                continue
             number = int(token) if token.isdigit() else numbers[token]
             found.append((f"{label}: {flat[position:phrase.end()][:120]!r}", number))
     return found
@@ -5089,12 +5210,15 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
     Both are cheap to derive, so they are derived: the count from
     `NOT_AN_ABOUT_WRITER`, the ordinal from the population's width plus one.
     Covered spellings are stated rather than implied — the count as a cardinal
-    word (or "both") within 60 characters of "false positive(s)", and the
-    ordinal only in the *"A <ordinal> site is in the code today"* sentence, and
-    the count in DIGITS as well as in words because the guarded paragraph writes
-    every other count as a numeral. A
-    different spelling is outside this rule, which is why the rule says which
-    one it reads.
+    word (or "both"), or a numeral, in the SAME CLAUSE as "false positive(s)",
+    matched to the token NEAREST the phrase; the ordinal only in the *"A <ordinal>
+    site is in the code today"* sentence. The count is read in digits as well as
+    in words because the guarded paragraph writes every other count as a numeral,
+    and a count stated about HISTORY stays writable in the decision's own
+    vocabulary (`HISTORY_MARKERS`: `before`/`until #9417`) — a past-tense phrasing
+    outside that list (*"used to hold"*) is NOT covered, because widening it there
+    would widen the denial escape too. A different spelling is outside this rule,
+    which is why the rule says which one it reads.
     """
     sections = _census_sections()
     exemptions = len(NOT_AN_ABOUT_WRITER)
@@ -5149,6 +5273,37 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
     ] == [1, 1], (
         "a sentence that states other counts as numerals is read as a false-"
         "positive count of one of THEM, so the correct count reds as wrong"
+    )
+    # … and the numeral must be in the PHRASE'S OWN CLAUSE, not merely its own
+    # sentence: the guarded paragraph separates counts with `;`, `:` and `—` as
+    # well as `.` (`#10200` review, cycle 3, measured: 4/4/3 were read out of the
+    # clause before).
+    other_clause = (
+        (
+            "probe",
+            "6 writers, 3 by property MAP: the declared false positive is "
+            "`projection._rebuild_all_replay`.",
+        ),
+    )
+    assert _declared_false_positive_counts(list(other_clause)) == [], (
+        "a numeral from an EARLIER clause is attached to `declared false "
+        "positive`, so a sentence that states no count is read as stating one"
+    )
+    # … and a HISTORY-marked count is TRUE and must stay writable, the same escape
+    # the denial leg carries (`#10200` review, cycle 3: the count leg had none).
+    history_count = (
+        (
+            "probe",
+            "Before `#9417` the census held two declared false positives; it "
+            "holds one declared false positive now.",
+        ),
+    )
+    assert [
+        count
+        for _where, count in _declared_false_positive_counts(list(history_count))
+    ] == [1], (
+        "a history-marked count is read as a present-tense claim, so the "
+        "correction record the decision blesses reds for being true"
     )
     counts = _declared_false_positive_counts(sections)
     assert counts, (
@@ -5218,6 +5373,18 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the documents write the articled form "
         "(`drops the binder's confidence`), so the non-articled verb is absent "
         "by design until someone writes it"
+    ),
+    "false positive no longer": (
+        "contradiction vocabulary — the post-negated form of 'called counted', "
+        "absent until someone writes it"
+    ),
+    "no longer a declared false positive": (
+        "contradiction vocabulary — the same claim in pre-negated form, absent "
+        "until someone writes it"
+    ),
+    "no longer exempt": (
+        "contradiction vocabulary — the exemption denied rather than replaced, "
+        "absent until someone writes it"
     ),
 }
 
