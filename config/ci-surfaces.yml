@@ -4107,6 +4107,13 @@ surfaces:
   # made from the resolved endpoint KINDS (the route classifier alone cannot
   # see them). Registered with the ingest family it pins.
   - test_8499_point_mediated_routing.py
+  # #9749: the connection-attribute arms, judged by the EFFECTIVE route —
+  # `confidence`/`weight` on a promoted Point-bearing connection is a Phase-1
+  # violation (INGEST_CONTRACT §13 row 4), and on the operator-less DIRECT
+  # route ingest now forwards both into `create_direct_edge` instead of
+  # validating them and dropping them. Registered with the ingest family it
+  # pins.
+  - test_9749_connection_attribute_route.py
   - test_integration_search.py
   # #4780: the incident-kind registry's generated checks — runbook ⇄ code set
   # equality (both directions), the frozen string set, the emitted flag against a
