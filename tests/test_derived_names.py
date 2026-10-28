@@ -364,6 +364,14 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],
+    # #8933: module live-FTS availability probe — construct + `close()`, never a
+    # write, and the handle is never DETACHed. `_LANE_URI` is the job's env URI
+    # (test-prefixed in CI: `tortoise_test_matrix`) or, when unset, the
+    # `tortoise_test_identifier_8933` graph minted by `_live_utils.docker_uri`.
+    # Every OTHER `from_uri(` in this file is a per-test
+    # `graph_name=test_ident8933_<uuid>` handle, and those are the only handles
+    # the live cases read or write (#10203: the probe is what the census saw).
+    "test_identifier_tokens_8933.py": [r"from_uri\(_LANE_URI\)"],
     # #7813: the live lane's read-back helper `_stored_directions(uri)` opens a
     # `_live_utils.docker_uri(graph)` handle — the `tortoise_test_t7813_*` graph
     # minted by the calling test — and only MATCHes `o.direction` on it (no
