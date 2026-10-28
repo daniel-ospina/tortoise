@@ -932,6 +932,21 @@ doc home:
   count would destroy what the runs reported. The audit compares the recorded
   counter against the live edge count and reports the per-session under-count.
   **Recorded gap.**
+- **`turn_count` with no turn member at all — the store, not a shortfall
+  (#10000)** — after `#10011` the capture writer stores a turn's text and
+  vector in the **record** and writes **no turn node** whenever the record can
+  hold them, so on an armed deployment `turn_count` is truth about Postgres and
+  the graph has no episodic turn member to compare it against. A session with
+  **zero** turn nodes is therefore **ambiguous graph-side** — a correctly-stored
+  armed capture, or a genuine loss — and no query the graph can answer
+  separates them. Such sessions are reported in their own `turns_record_held`
+  bucket with `retro_quantifiable: False` (ids included, so the record can be
+  asked) rather than as a shortfall: the shortfall class is what a
+  retrofit/backfill acts on, and counting every armed capture into it would
+  read as a mandate to write the transcript back into the graph — the placement
+  §9.1/D1 of `STORAGE-ARCHITECTURE.md` forbids. Only the **partial** shortfall
+  (`0 < stored turns < turn_count`, which the graph does witness) stays in the
+  short class. **Not graph-quantifiable.**
 
 Each verdict's `where_recorded` field in `RETROFIT_VERDICTS` points at this
 section and at the `#3554 amendment` in
