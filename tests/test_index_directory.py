@@ -607,53 +607,6 @@ def test_progress_file_bounds(corpus, tmp_path, monkeypatch):
 
 # ── corpus_root resolution (§6.1 I6) + cross-entry-point (E2E-4) ───────
 
-def test_index_file_requires_corpus_root(tmp_path, monkeypatch):
-    c = tmp_path / "c"
-    c.mkdir()
-    f = c / "s.md"
-    f.write_text(SESSION_FIXTURE)
-    monkeypatch.delenv("TORTOISE_INGEST_BASE_DIR", raising=False)
-    sdk = _sdk()
-    try:
-        with pytest.raises(ValueError):
-            sdk.index_file(str(f), extract_metadata=False)
-        # with base-dir ancestor resolution → works
-        monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(tmp_path))
-        r = sdk.index_file(str(f), extract_metadata=False)
-        assert r["status"] == "indexed"
-    finally:
-        sdk.close()
-
-
-def test_cross_entry_point_convergence(corpus, tmp_path, monkeypatch):
-    # E2E-4 cross-entry-point variant: TORTOISE_INGEST_BASE_DIR = the corpus
-    # itself → index_file's corpus_root default resolution lands on the same
-    # root the directory sweep derives → SAME corpus:// url.
-    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
-    sdk = _sdk()
-    try:
-        r1 = sdk.index_file(str(corpus / "s1.md"), extract_metadata=False)
-        assert r1["status"] == "indexed"
-        r2 = sdk.index_directory(str(corpus), extract_metadata=False)
-        # the directory run derives the SAME corpus:// url for s1.md → that
-        # file skipped; the meeting + doc are new → indexed (one Source each)
-        assert r2["skipped"] == 1 and r2["indexed"] == 2
-        g = sdk._get_proj().g
-        # 3 corpus Sources + the strategy.md document Source (D10 §4.4)
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 4
-    finally:
-        sdk.close()
-
-
-def test_unknown_file_type_raises(corpus):
-    sdk = _sdk()
-    try:
-        with pytest.raises(ValueError):
-            sdk.index_file(str(corpus / "s1.md"), file_type="banana",
-                           corpus_root=str(corpus), extract_metadata=False)
-    finally:
-        sdk.close()
-
 
 # ── primary election (W4 duplicate-sessionId) ──────────────────────────
 
@@ -689,32 +642,6 @@ def test_duplicate_session_id_primary_election(corpus, lock_dir):
         # completeness — never a repair loop, E2E-14 re-run legs)
         r2 = sdk.index_directory(str(corpus), extract_metadata=False)
         assert r2["skipped"] == 4 and r2["indexed"] == 0 and r2["updated"] == 0
-    finally:
-        sdk.close()
-
-
-def test_index_file_duplicate_session_id(corpus, tmp_path, monkeypatch, lock_dir):
-    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(tmp_path))
-    sdk = _sdk()
-    try:
-        sdk.index_directory(str(corpus), extract_metadata=False)
-        # single-file mode on a DIFFERENT file whose sessionId already exists
-        # (primary=s1.md) → Source-only write; Event untouched; status skipped
-        # duplicate-sessionId (W4 row — never silent clobber, E2E-14)
-        other = corpus / "copy"
-        other.mkdir()
-        dup = other / "copy.md"
-        dup.write_text(SESSION_FIXTURE)
-        r = sdk.index_file(str(dup), extract_metadata=False,
-                           corpus_root=str(corpus))
-        assert r["status"] == "skipped"
-        assert "duplicate sessionId" in (r.get("reason") or "")
-        g = sdk._get_proj().g
-        ev = g.query(
-            "MATCH (e:Event {eventId:'session_abc123'}) RETURN e.source_file"
-        ).result_set
-        assert ev[0][0] == "s1.md"          # primary untouched
-        assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
     finally:
         sdk.close()
 
@@ -1184,75 +1111,6 @@ def test_e2e13_special_char_filenames_round_trip(tmp_path):
 
 # ── E2E-14 variants: first-writer, stem-collision, session-move,
 #    primary-flip, issues/prs fixture leg ───────────────────────────────
-
-def test_e2e14_first_writer_variant(tmp_path, monkeypatch, lock_dir):
-    """E2E-14 first-writer variant: index_file('sub/b.md') ALONE (no election
-    context) → creates the Event normally (first-writer-wins); a later sweep
-    treats the existing Event as election input and does not fork."""
-    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(tmp_path))
-    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
-    sub = c / "sub"; sub.mkdir()  # noqa: E702
-    b = sub / "b.md"
-    b.write_text("---\nsessionId: dup1\ntitle: B\n---\nBody B")
-    sdk = _sdk()
-    try:
-        r = sdk.index_file(str(b), extract_metadata=False,
-                           corpus_root=str(c))
-        assert r["status"] == "indexed"
-        g = sdk._get_proj().g
-        assert g.query("MATCH (e:Event {eventId:'session_dup1'}) RETURN count(e)"
-                       ).result_set[0][0] == 1
-        # a later sweep treats the existing Event as election input (the
-        # first sorted path owns it) and does NOT fork a second Event
-        (c / "a.md").write_text("---\nsessionId: dup1\ntitle: A\n---\nBody A")
-        r2 = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
-        assert g.query("MATCH (e:Event {eventId:'session_dup1'}) RETURN count(e)"
-                       ).result_set[0][0] == 1
-    finally:
-        sdk.close()
-
-
-def test_e2e14_stem_collision_leg(tmp_path, lock_dir):
-    """E2E-14 stem-collision leg (cycle-3): x/a.md + y/a.md, BOTH
-    session-classified with NO sessionId → both derive the fallback
-    'file_a' → primary-election discipline extended to DERIVED eventIds:
-    ONE Event session_file_a, props from the FIRST sorted rel-path
-    (x/a.md), 2 Sources, 1 edge, non-primary warned, re-run all-skipped."""
-    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
-    x = c / "x"; y = c / "y"; x.mkdir(); y.mkdir()  # noqa: E702
-    (x / "a.md").write_text("---\nfileType: agentSession\ntitle: XA\n---\nBody X")
-    (y / "a.md").write_text("---\nfileType: agentSession\ntitle: YA\n---\nBody Y")
-    sdk = _sdk()
-    try:
-        r = sdk.index_directory(str(c), extract_metadata=False)
-        g = sdk._get_proj().g
-        assert g.query("MATCH (e:Event {eventId:'session_file_a'}) RETURN count(e)"
-                       ).result_set[0][0] == 1
-        ev = g.query("MATCH (e:Event {eventId:'session_file_a'}) RETURN e.source_file"
-                     ).result_set
-        assert ev[0][0] == "x/a.md"          # first sorted rel-path owns it
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 2
-        assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
-                       ).result_set[0][0] == 1
-        # non-primary counted indexed (Source registered) — plan pins the
-        # non-primary 'indexed' bucket with a duplicate-sessionId warning;
-        # the merged implementation registers the Source + skips the Event
-        # (the election-suppressed unit still counts indexed per W4)
-        assert r["indexed"] == 2
-        # re-run → all skipped, state unchanged
-        r2 = sdk.index_directory(str(c), extract_metadata=False)
-        assert r2["skipped"] == 2
-        assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 1
-        # single-file mode on the non-primary → skipped duplicate-sessionId,
-        # Event byte-identical
-        r3 = sdk.index_file(str(y / "a.md"), extract_metadata=False,
-                            corpus_root=str(c))
-        assert r3["status"] == "skipped"
-        assert "duplicate sessionId" in (r3.get("reason") or "")
-        assert g.query("MATCH (e:Event {eventId:'session_file_a'}) RETURN count(e)"
-                       ).result_set[0][0] == 1
-    finally:
-        sdk.close()
 
 
 def test_e2e14_session_move_variant(tmp_path, lock_dir):

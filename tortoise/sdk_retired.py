@@ -13,7 +13,7 @@ users there is no telemetry to harvest and no caller to protect.
 
 WHY THIS IS A SMALL HAND-KEPT MAP, NOT A READ OF THE MIGRATION TABLE
 --------------------------------------------------------------------
-``tools/sdk_rename_table.py`` is the migration map: all 150 current names and their
+``tools/sdk_rename_table.py`` is the migration map: all 124 current names and their
 approved destinations, most of whose renames have **not** landed yet. Two reasons this
 map is separate and deliberately tiny:
 
@@ -104,6 +104,134 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "#4282 phase 2.3 (owner ruling 2026-10-25): DELETED. It returned every tenant "
         "on the account and had zero callers; the ruling ships no account-list call "
         "in beta, so there is deliberately no replacement to name."
+    ),
+    # ── #4282, the 26 surplus names (owner amendment 2026-10-27, PR #10187) ──────
+    #
+    # These are DELETIONS, not renames, for a reason that is about the TARGET surface
+    # and not about the old name: 15 of them have a recorded destination, but every one
+    # of those destinations is a Phase-2 target that has NO `def` on `TortoiseSDK`
+    # today (`mine_knowledge_from_session`, `check_confidence`, `explore_connections`,
+    # `index_sources_from_directory`, `manage_source_trust`, `register_source`,
+    # `create_entity`, `update_knowledge`, `adjust_relationship`, `refresh_confidence`).
+    # A hint must NAME something a caller can call, so none of the 15 can live in
+    # `RETIRED_SDK_METHODS`: its wording ("use TortoiseSDK.<target> instead") would be
+    # false today and `tests/test_sdk_retirement.py::test_every_replacement_exists`
+    # would red on it. The destination is recorded HERE, per name, which is the whole
+    # job of this table — an unrecorded departure is the failure it exists to prevent.
+    #
+    # The archive is tagged `archive/4282-surplus-sdk-methods` (17f604b054), so every
+    # body below is recoverable; the owner's ruling ships no alias layer and no
+    # deprecation warning (#3836 (c)).
+    #
+    # Recorded destination, no `def` yet (Phase 2) — 15:
+    "capture_session": (
+        "#4282 (2026-10-27): DELETED from the SDK surface. Recorded destination "
+        "`mine_knowledge_from_session`, an approved target with no `def` today, so there "
+        "is no surface name to point a hint at. The hosted lane keeps its own "
+        "`_capture_session_impl`, so the capability is not lost with the SDK name."
+    ),
+    "commit_session": (
+        "#4282 (2026-10-27): DELETED. Recorded destination "
+        "`mine_knowledge_from_session` — approved, not yet implemented, so no hint."
+    ),
+    "get_provenance_chain": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `check_confidence` (the "
+        "confidence view of a chain's provenance), approved with no `def` today."
+    ),
+    "retrieval_legs": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `check_confidence`; the "
+        "retrieval-leg breakdown is not a customer verb."
+    ),
+    "traverse": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `explore_connections`, "
+        "approved with no `def` today — so the graph walk is unreachable from the SDK "
+        "until Phase 2 lands that target."
+    ),
+    "get_org_structure": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `explore_connections`."
+    ),
+    "backfill_about_entities": (
+        "#4282 (2026-10-27): DELETED. Recorded destination "
+        "`index_sources_from_directory` — a backfill is the indexer run over history."
+    ),
+    "index_file": (
+        "#4282 (2026-10-27): DELETED. Recorded destination "
+        "`index_sources_from_directory`; the single-file form is the directory form of "
+        "one path."
+    ),
+    "backfill_sources": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `manage_source_trust`."
+    ),
+    "complete_source": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `register_source`."
+    ),
+    "batch_create_points": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `create_entity` — batch "
+        "creation is a `create_entity` call per point, not its own verb."
+    ),
+    "create_or_update_point": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `create_entity`; upsert "
+        "semantics are a flag on the create target, not a second verb."
+    ),
+    "list_drafts": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `update_knowledge` — the "
+        "lifecycle status is a FIELD, which is the C6 fold record's finding, kept in "
+        "`docs/product/canonical-sdk-methods.md` after the name left."
+    ),
+    "operator_action": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `adjust_relationship`; the "
+        "operator-action vocabulary was never in beta."
+    ),
+    "record_calibration": (
+        "#4282 (2026-10-27): DELETED. Recorded destination `refresh_confidence`, and "
+        "the name was UNSTAKEABLE rather than merely unbacked: recomputing confidence "
+        "is not recording that a calibration milestone passed, so the recorded "
+        "destination is a judgement, not a mapping."
+    ),
+    # No recorded destination at all — 11:
+    "apikey_list": (
+        "#4282 (2026-10-27): DELETED. The approved key surface is "
+        "`create_key`/`list_keys`/`revoke_key`; the beta ledger records NO destination "
+        "for this name (and `list_keys` has no `def` yet), so nothing is named here."
+    ),
+    "membership_list": (
+        "#4282 (2026-10-27): DELETED. The member surface is `add_member`/`list_members`/"
+        "`remove_member`; no destination is recorded for this name."
+    ),
+    "membership_delete": (
+        "#4282 (2026-10-27): DELETED. No recorded destination (the member surface "
+        "replaces the triplet wholesale; `remove_member` has no `def` yet)."
+    ),
+    "membership_update_role": (
+        "#4282 (2026-10-27): DELETED. No recorded destination."
+    ),
+    "invitation_create": (
+        "#4282 (2026-10-27): DELETED. Invitations are not in the beta surface; no "
+        "recorded destination."
+    ),
+    "invitation_accept": (
+        "#4282 (2026-10-27): DELETED. Invitations are not in the beta surface; no "
+        "recorded destination."
+    ),
+    "invitation_get_by_token": (
+        "#4282 (2026-10-27): DELETED. Invitations are not in the beta surface; no "
+        "recorded destination."
+    ),
+    "cleanup_expired_invitations": (
+        "#4282 (2026-10-27): DELETED. A scheduled maintenance sweep, not a customer "
+        "verb; no recorded destination."
+    ),
+    "migrate_orgs_to_registry": (
+        "#4282 (2026-10-27): DELETED. A one-off platform migration, not a customer "
+        "verb; no recorded destination."
+    ),
+    "org_update": (
+        "#4282 (2026-10-27): DELETED. Tenancy administration is a console operation in "
+        "the approved tenancy block; no recorded destination."
+    ),
+    "org_delete": (
+        "#4282 (2026-10-27): DELETED. Account closure is a console operation in the "
+        "approved tenancy block; no recorded destination."
     ),
 }
 

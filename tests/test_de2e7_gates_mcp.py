@@ -25,16 +25,6 @@ def sdk(tmp_path):
 
 
 class TestDe2e7:
-    def test_calibration_marker_set_unset(self, sdk):
-        """calibration_passed() False without the marker, True after
-        record_calibration, False again on a fresh DB."""
-        assert sdk.calibration_passed() is False
-        sdk.record_calibration(precision=0.85, sample_size=50,
-                               mean_grounding_delta=0.01)
-        assert sdk.calibration_passed() is True
-        fresh = TortoiseSDK(db_path=os.path.join(
-            tempfile.mkdtemp(), "fresh.db"))
-        assert fresh.calibration_passed() is False
 
     def test_check_gates_blocked_when_gate_a_open(self):
         res = check_gates(784, issue_body="Depends on: #320, #779",

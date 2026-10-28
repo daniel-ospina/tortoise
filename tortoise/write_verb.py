@@ -33,7 +33,8 @@ state the point stays ``dedup:"new"`` — never fabricated.
 
 Scope note (P3, review; COMPLETED W5 Phase A+B mirror-parity): the
 envelope is wired on the hosted capture surface AND the self-host SDK
-mirror (``sdk.capture_session``) — both speak ``memory_write_v1`` and both
+mirror (``sdk.capture_session``, deleted by #4282 — the shared ``write_verb``
+construction it used is what survives) — both speak ``memory_write_v1`` and
 enrich their per-point entries from ONE post-write graph read. The
 per-point entries are the ENRICHED raw extractor dicts (``id``-keyed, plus
 additive ``point_id``/``status``/``ep_updated``/``dedup``) —

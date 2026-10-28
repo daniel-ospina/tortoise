@@ -390,61 +390,8 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
 
 # ── neither caller holds independent MERGE text ────────────────────────────
 
-def test_neither_writer_holds_independent_merge_text():
-    """W1 and W2 call the primitive and carry no copy of the Session/turn text."""
-    for fn in (ha_mod._capture_session_impl, TortoiseSDK.capture_session):
-        src = inspect.getsource(fn)
-        assert "_write_session_and_turns" in src, (
-            f"{fn.__qualname__} does not call the shared primitive")
-        assert "MERGE (s:Session" not in src, (
-            f"{fn.__qualname__} still holds a :Session MERGE literal")
-        assert "s.created_at=coalesce(s.created_at, $now)" not in src, (
-            f"{fn.__qualname__} still holds the Session field list")
-        assert "s.turn_count=$tc" not in src, (
-            f"{fn.__qualname__} still holds the Session field list")
-        assert "_write_capture_turns(" not in src, (
-            f"{fn.__qualname__} bypasses the primitive for the turn store")
-    # And the primitive itself is the single entry point both share.
-    assert ha_mod._write_session_and_turns is sdk_mod._write_session_and_turns
-
 
 # ── behaviour equivalence (the refactor's real gate) ───────────────────────
-
-def test_sdk_writer_is_behaviour_equivalent(tmp_path):
-    """W2 writes the EXACT pre-refactor Cypher/params, and deliberately omits
-    machine_id/model."""
-    sdk = TortoiseSDK(db_path=str(tmp_path / "sdk.db"))
-    with _record_writes(sdk) as seen:
-        sdk.capture_session(_CONV, session_id=_SDK_SID)
-
-    session_cypher, session_params = seen["session_writes"][-1]
-    turn_cypher, turn_params = seen["turn_writes"][-1]
-    assert session_cypher == _SDK_SESSION_CYPHER
-    assert session_params == {
-        "sid": _SDK_SID, "now": "<NOW>", "tc": 5, "tmi": 4}
-    assert (hashlib.sha256(turn_cypher.encode()).hexdigest()
-            == _TURN_CYPHER_SHA256)
-    assert [r["id"] for r in turn_params["turns"]] == [
-        f"{_SDK_SID}_t{i}" for i in range(5)]
-    assert [r["speaker"] for r in turn_params["turns"]] == [
-        "user", "assistant", "weird", "unknown", "user"]
-    assert turn_params["redactions"] == 0
-    for got, want in zip(turn_params["turns"], _TURN_ROWS, strict=True):
-        assert got["c"] == want["c"]
-        assert got["ch"] == want["ch"]
-        assert got["k"] == want["k"]
-        assert got["s"] == want["s"]
-
-    # ── the SDK's machine_id/model absence is KNOWINGLY-ABSENT ─────────────
-    # derive_machine_id() is machine-local; the SDK/audit path has no server
-    # capture credential, so stamping it here would attribute the session to the
-    # machine that READ it, not the machine that CAPTURED it. Do NOT "fix" this
-    # into a write — the epic pins the audit-time retrofit later.
-    props = _session_props(sdk, _SDK_SID)
-    assert props["machine_id"] is None
-    assert props["model"] is None
-    assert props["is_episodic"] is True
-    assert props["actor_user_id"] is None
 
 
 def test_hosted_writer_is_behaviour_equivalent_and_parity(client):

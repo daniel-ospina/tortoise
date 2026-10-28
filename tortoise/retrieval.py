@@ -605,8 +605,9 @@ def resolve_pool_size(
 SESSION_TRANSCRIPT_KIND = "session-transcript"
 
 #: #2517 / C4: the PRODUCT's verbatim source-turn pointKind — the episodic
-#: turn Points written by ``TortoiseSDK.capture_session`` and the hosted
-#: ``POST /v1/sessions`` turn loop (both SET ``pointKind='event'``,
+#: turn Points written by the hosted ``POST /v1/sessions`` turn loop (and,
+#: before #4282 deleted it, by ``TortoiseSDK.capture_session``) — both SET
+#: ``pointKind='event'``,
 #: ``is_episodic=true`` and a ``[{role}] {content}`` body; see
 #: :func:`_is_turn_point`). This is the product's real verbatim material:
 #: ``session-transcript`` is written ONLY by the eval ingest lane

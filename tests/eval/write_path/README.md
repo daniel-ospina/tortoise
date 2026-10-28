@@ -1,5 +1,11 @@
 # W2 Write-Path Planted-Gold Corpus (issue #2097, W2-a)
 
+> ⛔ **The benchmark runner's `run` leg was REMOVED by #4282** (it drove each
+> session through the SDK's `capture_session`, which #4282 deleted). The corpus,
+> the gold, the schemas, the graders, the judge arms and the receipt contract
+> below all still exist and are still tested; what is gone is the replay that
+> produced a *run* receipt. See the module docstring in `runner.py`.
+
 Frozen planted-gold corpus for the **write-path benchmark** (epic #2080,
 W2): fictional agent sessions whose transcripts are planted with salient
 units carrying verbatim anchors, true-but-routine distractors, and

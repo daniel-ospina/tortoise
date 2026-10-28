@@ -216,7 +216,7 @@ from tortoise.sdk import (
     _stamp_capture_provenance,  # #9350: the journal-first capture provenance stamp door
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
-    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
+    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (the SDK capture_session caller was deleted by #4282)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -14541,9 +14541,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (`extraction_mode` "no-provider" + the additive warning). The key gates
     # EXTRACTION, not STORAGE: the stored turns are searchable with no key at
     # all (FTS is DB-side; the dense leg is a local model). The
-    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrors
-    # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
-    # pre-#3892 503-first refusal.
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrored
+    # sdk.capture_session (PR #4014) before #4282 deleted that method — the
+    # hosted lane no longer keeps the pre-#3892 503-first refusal.
     no_provider = not _llm_provider_available()
     # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
     # default ON; reaffirmed by 5737715963): extraction into memory is a
@@ -14625,7 +14625,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         org, session_id)
     # #5632: snapshot the LIFETIME journal-failure counter at the START of THIS
     # capture so the hosted receipt below discloses only appends that failed
-    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``).
+    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``,
+    # deleted by #4282).
     _journal_failures_before = sdk._journal_write_failures
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
@@ -14912,8 +14913,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     # #3086/#3551: the :Session MERGE and the episodic turn stream are written
     # by the ONE shared primitive (`sdk._write_session_and_turns`), also called
-    # by `sdk.capture_session` — so this lane and the SDK lane can no longer
-    # drift (the #1532 duplicated-store class). The primitive delegates the
+    # by `sdk.capture_session` until #4282 deleted it — so this lane and the SDK
+    # lane could no longer drift (the #1532 duplicated-store class). The primitive delegates the
     # batched turn write to `sdk._write_capture_turns`. Hosted additionally
     # adds quota/auth bounds + a pre-write estimate. NOTE the THIRD,
     # still-separate copy: tools/ask_spotcheck.py::seed_capture_turn_store

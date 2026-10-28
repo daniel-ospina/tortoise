@@ -587,7 +587,8 @@ def format_report(state: dict, *, provider: str | None = None,
         # THIS IS A LOCAL RECORD, NOT THE SERVER'S STATUS. The ledger is retired
         # only by the capture/re-import paths that come back through THIS
         # machine; a session later extracted by another path (the hosted MCP
-        # `tortoise_session_capture`, or `TortoiseSDK.capture_session`) is
+        # `tortoise_session_capture`, or, before #4282 deleted it, the SDK's
+        # `capture_session`) is
         # invisible here, so a `not-processed` line can be stale. Say so rather
         # than assert a state this surface cannot know — the server-side status
         # read is #3520's, deliberately not absorbed here.

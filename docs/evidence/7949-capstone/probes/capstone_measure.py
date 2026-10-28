@@ -57,7 +57,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8873-8879`` and
 ``result["vet"]`` at ``:8883-8887``); they are dropped at the meta fold,
-``tortoise/sdk.py:13282`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:11989`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -148,7 +148,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13563`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:12270`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +163,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13563 "
+    "the capture path at tortoise/sdk.py:12270 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -730,6 +730,21 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
                              f"no `conversation` turns ({type(turns).__name__}); "
                              "S0 would have nothing to read")
         started = time.time()
+        # ⛔ #4282 (owner ruling 2026-10-27) DELETED this lane's entry point:
+        # ``TortoiseSDK.capture_session`` was ``_extract_session_v2``'s only
+        # in-process caller. REFUSED is neither a pass nor a fail (the
+        # pre-registration says so in as many words), and a missing instrument is
+        # what this is — so the run stops here by name instead of raising
+        # ``AttributeError`` halfway through a corpus, and the message says what
+        # a re-derivation would need.
+        if not hasattr(sdk, "capture_session"):
+            raise SystemExit(
+                f"capstone-measure: REFUSED — `TortoiseSDK.capture_session` was "
+                f"deleted by #4282 (owner ruling 2026-10-27) and was "
+                f"`_extract_session_v2`'s only in-process caller, so session "
+                f"{sid} cannot be captured: the measurement lane needs a "
+                f"surviving door. REFUSED is neither a pass nor a fail, per the "
+                f"pre-registration.")
         receipt = sdk.capture_session(turns, session_id=sid)
         stats = receipt.get("stats") or {}
         results.append({
@@ -1290,14 +1305,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8883-8887. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13282 (\"stats\": out.get(\"stats\") "
+            f"the meta fold tortoise/sdk.py:11989 (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13282 is the line its fix "
+            f"#9116 is the seam, and tortoise/sdk.py:11989 is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1325,12 +1340,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8873-8879. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13282 "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:11989 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13282 is the line its fix must target")
+            f"tortoise/sdk.py:11989 is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "

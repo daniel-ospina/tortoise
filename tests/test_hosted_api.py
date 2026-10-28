@@ -35,7 +35,7 @@ from tortoise.hosted_api import (  # noqa: I001
     get_current_user,
     ForwardedProtoMiddleware,
 )
-from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
+from tortoise.sdk import TortoiseSDK
 
 from tests._verdict import require_answered, verdict_client
 
@@ -3030,7 +3030,6 @@ class TestListApiKeysSupabase:
         assert r.status_code == 401, r.text
 
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Session Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4058,72 +4057,6 @@ class TestSessionList:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["sessions"] == []
-
-    def test_sdk_session_read_parity_with_the_hosted_projection(self, client):
-        """#3557: the SDK's session read and the hosted read serve ONE
-        projection.
-
-        The capture lane writes a durable ``:Session`` node (plus a
-        ``sessionCaptured`` Event) and never an ``AgentSession`` Event, so
-        ``TortoiseSDK.get_session`` — which queried the indexer lane's Event
-        kind — returned ``None`` for every captured session: the read half of
-        the capture lane was missing. Both the list and the by-id hosted
-        surfaces must agree with it on the shared projection.
-
-        The assertion iterates ``SESSION_READ_FIELDS`` rather than a
-        hardcoded subset, and pins the hosted response KEY SETS against it,
-        so a field added to the SDK read or to either hosted handler fails
-        here instead of drifting silently. (The tuple itself is declared
-        SDK-side and imports nothing from ``tortoise/hosted_api.py``, whose
-        handlers spell their columns inline — the key-set assertion is what
-        binds the hosted side.)
-        """
-        captured = _ha_mod._make_sdk(namespace=TEST_ORG_ID).capture_session([
-            {"role": "user",
-             "content": "We decided to ship serve --http first."},
-        ])
-        session_id = captured["session_id"]
-
-        served = next(
-            row for row in client.get("/v1/sessions").json()["sessions"]
-            if row["id"] == session_id)
-        detail = client.get(f"/v1/sessions/{session_id}").json()
-
-        read = _ha_mod._make_sdk(namespace=TEST_ORG_ID).get_session(session_id)
-        assert read is not None, (
-            "the SDK session read must see a captured :Session — the capture "
-            "lane writes no AgentSession Event (#3557)")
-        # #3557 review (P2): the tuple is declared SDK-side; nothing imports
-        # it from ``tortoise/hosted_api.py``, whose handlers spell their
-        # columns inline. Pinning the hosted KEY SETS against it is what
-        # converts "a field added to one read surface without the other fails
-        # here" from a claim into a fact — a column ADDED to either handler
-        # (the likely drift direction) reddens these lines.
-        assert set(read) == set(detail) == set(SESSION_READ_FIELDS) | {
-            "actor_display", "turn_points", "extracted_points", "source"}
-        assert set(served) == set(SESSION_READ_FIELDS) | {"actor_display"}
-        for field in SESSION_READ_FIELDS:
-            # #3555: `extracted` is compared on ALL THREE surfaces now. It was
-            # excluded below this comment because the list endpoint computed
-            # that one field differently (legacy `pointKind IN
-            # ['decision','statement']` against the SDK/detail non-turn
-            # filter); the list now counts with the same predicate, so the
-            # exclusion is retired WITH the divergence instead of left to hide
-            # a re-divergence.
-            assert read[field] == served[field], (
-                f"{field} diverges between the SDK read ({read[field]!r}) "
-                f"and GET /v1/sessions ({served[field]!r})")
-            assert read[field] == detail[field], (
-                f"{field} diverges between the SDK read ({read[field]!r}) "
-                f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
-        # The hosted surfaces and the SDK read one node, so the shared field
-        # list is one vocabulary. A zero count would make the parity
-        # assertion vacuous — the mock extractor mints a TYPED point
-        # ('statement', a kind the legacy pair counted too), so this test
-        # binds SURFACE PARITY only; the predicate itself is discriminated by
-        # test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind
-        # (#3555).
-        assert read["extracted"] >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6333,7 +6266,6 @@ class TestMCPMount:
         )
 
 
-
 # ── Invite endpoints, registry path (selfhost; plan Task 4 flip) ────────────
 # The Supabase flip keeps the registry path for selfhost — these tests lock
 # the registry behavior + response contract so the env-gated branches can't
@@ -7406,29 +7338,6 @@ class TestCaptureSpeakerParity:
             "the hosted path must mark the cut too (#4897)")
 
 
-class TestCaptureStoredTurnParity:
-    def test_sdk_and_hosted_store_identical_turns(self, client, tmp_path):
-        """#1532 D1/D2: identical input -> identical stored turns (content +
-        speaker) on the SDK path and the hosted path — the shared window +
-        role helpers keep the two loops byte-identical."""
-        from tortoise.hosted_api import TortoiseSDK as _HASDK
-        from tortoise.sdk import TortoiseSDK
-        conv = [{"role": "user", "content": "prefix sentence. " + "x" * 6000},
-                {"role": None, "content": "short sentence here."},
-                {"role": 123, "content": "y"}]
-        # hosted capture
-        r = client.post("/v1/sessions", json={
-            "session_id": "byte-same", "conversation": conv})
-        assert r.status_code == 200, r.text[:200]
-        hosted_turns = _stored_turns(_HASDK(namespace=TEST_ORG_ID))
-        # sdk capture of the same conversation + session_id
-        sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
-        sdk.capture_session(conv, session_id="byte-same")
-        sdk_turns = _stored_turns(sdk)
-        assert sdk_turns == hosted_turns, (
-            f"SDK {sdk_turns!r} != hosted {hosted_turns!r}")
-
-
 class TestV2SessionFloodGate:
     def test_v2_estimate_trips_402_where_m2_would_pass(self, client):
         """#1532 D4: the v2-shaped gate (x3 — points + operators + entities/
@@ -8270,52 +8179,6 @@ class TestProvisioningService:
             os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig)
 
-    def test_key_driven_mint_201_envelope(self, tmp_path):
-        """E2E-1: a graphs:create-scoped owner key mints a graph + per-graph
-        key with the 201 envelope; plaintext revealed once; key is tk_."""
-        gen = self._setup(tmp_path, "pro", None)
-        sdk, tid, tc = next(gen)
-        try:
-            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/organizations/{tid}/graphs",
-                        json={"name": "acme-prod",
-                              "scopes": ["graphs:read", "graphs:write"]},
-                        headers={"Authorization": f"Bearer {key['api_key']}"})
-            assert r.status_code == 201, r.text
-            body = r.json()
-            assert body["revealed_once"] is True
-            assert body["key_plaintext"].startswith("tk_")
-            assert body["graph"]["name"] == "acme-prod"
-            assert body["graph"]["kind"] == "custom"
-            assert body["key"]["scopes"] == ["graphs:read", "graphs:write"]
-            assert body["key"]["graph_id"] == body["graph"]["id"]
-            # Reveal-once: listing keys never re-exposes plaintext
-            keys = sdk.apikey_list(tid)
-            for k in keys:
-                assert "key_plaintext" not in k
-            # minted key has deleg=0 (one-level-deep by construction)
-            gid = body["graph"]["id"]
-            node = sdk._get_registry().query(
-                "MATCH (k:APIKey {graph_id:$gid}) RETURN k.delegation_depth, "
-                "k.scopes, k.graph_id, k.id",
-                params={"gid": gid}).result_set[0]
-            assert node[0] == 0
-            assert node[1] == ["graphs:read", "graphs:write"]
-            assert node[2] == gid
-            # Envelope key.id matches the ACTUAL registry node id (C3
-            # revoke/shrink-by-id must hit the real node).
-            assert body["key"]["id"] == node[3]
-            # Envelope plaintext VERIFIES against the stored hash (a
-            # revealed key must actually work — registry apikey_create
-            # generates its own plaintext).
-            from tortoise.auth import verify_api_key
-            node_row = sdk._get_registry().query(
-                "MATCH (k:APIKey {id:$kid}) RETURN k.key_hash",
-                params={"kid": node[3]}).result_set
-            assert verify_api_key(body["key_plaintext"], node_row[0][0]) is True
-            assert node[2] == gid
-        finally:
-            gen.close()
 
     def test_mint_succeeds_when_the_acl_layer_is_declared_off(self, tmp_path,
                                                               monkeypatch):
@@ -8730,63 +8593,6 @@ class TestProvisioningService:
         finally:
             gen.close()
 
-    def test_forced_graph_write_failure_rolls_back_no_orphan(self,
-                                                            tmp_path,
-                                                            monkeypatch):
-        """D11 drill (code-review P1): a mint failure AFTER the graph write
-        must roll back — 500, no graph node, and NO orphan key bound to the
-        graph id (the graph-scoped revoke catches keys whose mint raised
-        after the key write committed, where the returned dict never
-        materialized)."""
-        import tortoise.hosted_api as ha_mod
-        gen = self._setup(tmp_path, "pro", None)
-        sdk, tid, tc = next(gen)
-        try:
-            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            # Force the KEY MINT to fail AFTER the graph write (the risky
-            # window: minted is None, so only graph-scoped revocation can
-            # clean up the half-landed key). Registry mode: make
-            # apikey_create raise after creating the node by breaking the
-            # BELONGS_TO edge query via a bad team lookup on the audit
-            # path is fragile — instead monkeypatch apikey_create to do the
-            # real write THEN raise.
-            orig = ha_mod.TortoiseSDK.apikey_create
-
-            def _failing_mint(self, org_id, created_by, **kw):
-                # Do the REAL mint (node + edge land), then raise —
-                # simulating an exception between the key write and the
-                # helper's return.
-                orig(self, org_id, created_by, **kw)  # real mint lands first
-                raise RuntimeError("simulated post-write mint failure")
-
-            monkeypatch.setattr(ha_mod.TortoiseSDK, "apikey_create",
-                                _failing_mint)
-            try:
-                r = tc.post(f"/v1/organizations/{tid}/graphs",
-                            json={"name": "doomed"},
-                            headers={"Authorization":
-                                     f"Bearer {key['api_key']}"})
-                assert r.status_code == 500, r.text
-            finally:
-                monkeypatch.undo()
-            # Graph rolled back (no node named doomed)
-            graphs = sdk.list_memory_graphs(tid)
-            assert not any(g["name"] == "doomed" for g in graphs), \
-                "graph survived a failed mint — orphan!"
-            # No ACTIVE key minted by the caller survives: the failing
-            # apikey_create DID land a key (created_by_key_id = caller
-            # key id) before raising — graph-scoped revocation must have
-            # revoked it. Revoked keys stay listed (revoked_at set), so
-            # assert revocation, not absence.
-            caller_key_id = key["id"]
-            orphans = [k for k in sdk.apikey_list(tid)
-                       if k.get("created_by_key_id") == caller_key_id
-                       and k.get("revoked_at") is None]
-            assert not orphans, \
-                f"active orphan key(s) after failed mint: {orphans}"
-        finally:
-            gen.close()
-
 
 class TestGraphLifecycle:
     """E2E-8 — delete soft-tombstone + cascade + quota release + name reuse
@@ -8796,53 +8602,6 @@ class TestGraphLifecycle:
         return tc.post(f"/v1/organizations/{tid}/graphs", json={"name": name},
                        headers={"Authorization": f"Bearer {key['api_key']}"})
 
-    def test_delete_cascade_release_reuse(self, tmp_path):
-        """Full E2E-8: delete → 204 → key 401 → slot freed (provision
-        succeeds) → same-name recreate 201 → default delete 403."""
-        gen = TestProvisioningService()._setup(tmp_path, "solo", 2)
-        sdk, tid, tc = next(gen)
-        try:
-            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            # 1st custom (2 of 2 reached)
-            r = self._provision(tc, tid, key, "g1")
-            assert r.status_code == 201, r.text
-            gid = r.json()["graph"]["id"]
-            minted_plaintext = r.json()["key_plaintext"]
-            # Envelope key.id is a REAL key (listable — the registry node id)
-            listed = [k["id"] for k in sdk.apikey_list(tid)]
-            assert r.json()["key"]["id"] in listed
-            # Delete with a graphs:delete-scoped key
-            delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])
-            r = tc.delete(f"/v1/graphs/{gid}?org_id={tid}",
-                          headers={"Authorization":
-                                   f"Bearer {delkey['api_key']}"})
-            assert r.status_code == 204, r.text
-            # Key 401 on next use (revoked cascade)
-            r = tc.get("/v1/points",
-                       headers={"Authorization":
-                                f"Bearer {minted_plaintext}"})
-            assert r.status_code == 401, r.text
-            # Same-name recreate after delete → 201 (tombstone doesn't squat;
-            # the freed slot is reused by the SAME name first — solo allows
-            # 1 custom, so this must come before the new-name provision).
-            r = self._provision(tc, tid, key, "g1")
-            assert r.status_code == 201, r.text
-            gid2 = r.json()["graph"]["id"]
-            assert gid2 != gid  # recreate = new node (tombstone kept)
-            # Delete the RECREATED graph → slot freed → new-name provision
-            r = tc.delete(f"/v1/graphs/{gid2}?org_id={tid}",
-                          headers={"Authorization":
-                                   f"Bearer {delkey['api_key']}"})
-            assert r.status_code == 204, r.text
-            r = self._provision(tc, tid, key, "g2")
-            assert r.status_code == 201, r.text
-            # Default graph delete → 403
-            r = tc.delete(f"/v1/graphs/default?org_id={tid}",
-                          headers={"Authorization":
-                                   f"Bearer {delkey['api_key']}"})
-            assert r.status_code == 403, r.text
-        finally:
-            gen.close()
 
     def test_registry_default_node_by_gid_403(self, tmp_path):
         """The registry kind='default' node carries a RANDOM gid (not the

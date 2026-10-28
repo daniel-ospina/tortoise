@@ -12,9 +12,8 @@ import tempfile  # noqa: F401
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest  # noqa: I001
+import pytest
 
-from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
 
 
@@ -34,10 +33,6 @@ class TestE2E1SignupProvision:
         # No max_teams field (user-level capability)
         assert "max_teams" not in team
 
-    def test_membership_owner_created(self, provision_test_user):
-        u = provision_test_user()
-        members = u["sdk"].membership_list(u["org_id"])
-        assert any(m.get("role") == "owner" for m in members)
 
     def test_api_key_hash_stored(self, provision_test_user):
         u = provision_test_user()
@@ -101,26 +96,6 @@ class TestE2E6EmptyState:
         u = provision_test_user(demo_seed=True)
         graphs = u["sdk"].list_memory_graphs(u["org_id"])
         assert len(graphs) >= 2  # default + demo
-
-
-class TestE2E10Decoupling:
-    """E2E-10: user↔team decoupling — one user, two teams."""
-
-    def test_user_memberships_two_teams(self):
-        # One SDK, two teams — the same user is a member of both (M:N)
-        import tempfile, os as _os  # noqa: E401, F811, I001
-        tmpdir = tempfile.mkdtemp()
-        sdk = TortoiseSDK(_os.path.join(tmpdir, "e2e.db"), namespace=f"test_e2e_decouple_{os.urandom(4).hex()}")
-        team_a = sdk.org_create("team-a")
-        team_b = sdk.org_create("team-b")
-        user_id = "shared-user-1"
-        sdk.membership_create(team_a["id"], user_id, "owner")
-        sdk.membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin
-        members_a = sdk.membership_list(team_a["id"])
-        members_b = sdk.membership_list(team_b["id"])
-        assert any(m.get("user_id") == user_id for m in members_a)
-        assert any(m.get("user_id") == user_id for m in members_b)
-        assert len(members_a) == 1 and len(members_b) == 1
 
 
 class TestE2E11TierLimits:

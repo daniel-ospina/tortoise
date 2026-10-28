@@ -341,9 +341,6 @@ UNBACKED_REASON = {
                           "group's beta target is `refresh_confidence` — “Recompute "
                           "confidence after changes”. Reputation scoring is not "
                           "confidence recomputation, and no other target absorbs it.",
-    "record_calibration": "Same group, same mismatch: `refresh_confidence` recomputes "
-                          "confidence; recording a calibration milestone is a different "
-                          "operation and has no target.",
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -384,10 +381,6 @@ C6_FOLD: dict[str, tuple[str, str]] = {
         "beta's own row: reachable through `update_knowledge`; the quarantine state is "
         "a FIELD",
     ),
-    "list_drafts": (
-        "list_knowledge",
-        "a filter on the general list: `list_knowledge(kind=…, status=…)`",
-    ),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -424,11 +417,7 @@ CITES: dict[str, tuple[str, str]] = {
     "r3_context": (BETA, "| `provenance`, `belief_timeline`, `session_context`, "
                          "`volunteer_context` | 4 | → `check_confidence` where they are "
                          "confidence context; `poll_events` where they are a timeline. |"),
-    "r3_canon": (CANON, "| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, "
-                        "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
-                        "`session_context`, `get_confidence`, `calibrate_summary`, "
-                        "`calibration_passed`, `get_provenance_chain`, `provenance`, "
-                        "`belief_timeline`, `get_historical_knowledge` |"),
+    "r3_canon": (CANON, "| R3 | `recall_beliefs` | #3 |"),
     "r4": (BETA, "| narrow readers (`get_session`, `get_events`, `get_owned_entities`, "
                  "`get_provenance_chain`, …) | ~8 | → `get_entity`, except where a "
                  "genuinely different shape is returned. |"),
@@ -480,7 +469,7 @@ CITES: dict[str, tuple[str, str]] = {
     # line, so the sentence it belonged to could be cut.
     "w2_rename": (CANON, "> ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` "
                          "(40 methods), not this document.**"),
-    "w3": (CANON, "| W3 | `register_source` | #11 | `create_source`, `complete_source` |"),
+    "w3": (CANON, "| W3 | `register_source` | #11 |"),
     "w3_cut": (BETA, "| `complete_source` | 1 | **Cut.** Its entire body populates "
                      "`contentHash`, `version`, `externalId` — fields `register_source` "
                      "already writes — and it has **zero callers in the repo**. |"),
@@ -489,10 +478,7 @@ CITES: dict[str, tuple[str, str]] = {
     "w4_rename": (BETA, "| `index_sources` (bare) | 1 | Renamed → "
                         "`index_sources_from_directory`, so the index/mine distinction "
                         "is unmissable. |"),
-    "w4_canon": (CANON, "| W4 | `index_files` | #12 | `index_file`, `index_directory`, "
-                        "`ingest_corpus`, `index_sessions`, `mine_corpus`, "
-                        "`reconcile_sessions`, `session_index_health`, "
-                        "`backfill_about_entities` |"),
+    "w4_canon": (CANON, "| W4 | `index_files` | #12 |"),
     "w4_mine": (BETA, "| `mine_corpus` | 1 | → `mine_knowledge_from_directory`. It is "
                       "the **batch form of `mine_knowledge_from_session`**, not a kind "
                       "of indexing. |"),
@@ -540,11 +526,7 @@ CITES: dict[str, tuple[str, str]] = {
                                 "+ **`record_decision`**. It was filing a *question* "
                                 "and calling it a decision. |"),
     "w11": (BETA, "| `update_point`, `update_entity` | 2 | → `update_knowledge`. |"),
-    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update_knowledge`, "
-                         "`update`, `update_point`, `update_entity`, `supersede`, "
-                         "`supersede_point`, "
-                         "`invalidate_point`, `retract_point`, `promote_point`, "
-                         "`set_point_baseline`, `list_drafts`, `quarantine_batch` |"),
+    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 |"),
     "w11_supersede": (BETA, "| `supersede`, `supersede_point` | 2 | "
                             "→ `supersede_knowledge`. They also **disagree** — "
                             "`supersede_point` carries a `valid_from` the other "
@@ -566,9 +548,7 @@ CITES: dict[str, tuple[str, str]] = {
     "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete_knowledge`, "
                         "`delete`, `delete_point`, `delete_entity`, "
                         "`delete_point_wrapped` | keep, collapse |"),
-    "w13_canon": (CANON, "| W13 | `stabilize_beliefs` | #19 | `dream`, "
-                        "`compute_confidence`, `compute_reputation`, "
-                        "`record_calibration` |"),
+    "w13_canon": (CANON, "| W13 | `stabilize_beliefs` | #19 |"),
     "w15": (BETA, "| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | "
                   "→ `adjust_relationship` for strength, `update_knowledge` for "
                   "annotation. `operator_action(**kwargs)` currently **accepts and "
@@ -691,10 +671,6 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "session_context": ("check_confidence", "r3_context"),
     "volunteer_context": ("check_confidence", "r3_context"),
     "get_confidence": ("check_confidence", "r3_canon"),
-    "retrieval_legs": ("check_confidence", "r3_canon"),
-    # The beta doc names get_provenance_chain as a narrow reader; the canonical
-    # inventory groups it with the recall/confidence reads. See the tension list.
-    "get_provenance_chain": ("get_entity", "r4"),
     # R4 — the one member that is already a target, and two the beta row omits.
     "get_entity": (UNCHANGED, "unchanged4"),
     "get_point": ("get_entity", "r4_canon"),
@@ -719,22 +695,16 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "list_sources": ("list_knowledge", "r6_list_sources"),
     # W1
     "create_entity": (UNCHANGED, "unchanged4"),
-    "create_or_update_point": ("create_entity", "w1_coup"),
-    "batch_create_points": ("write_knowledge_batch", "w1_batch"),
-    # W3
-    "complete_source": (DISCARDED, "w3_cut"),
     # W4
     "mine_corpus": ("mine_knowledge_from_directory", "w4_mine"),
     "index_directory": ("index_sources_from_directory", "w4_canon"),
     "index_sessions": ("index_sources_from_directory", "w4_index_sessions"),
-    "backfill_about_entities": (DISCARDED, "w8_backfill"),
     "reconcile_sessions": (DISCARDED, "w8_backfill"),
     # W8 — the beta row splits the group: the setter and the assessment fold into
     # `manage_source_trust`, the *read* goes to `list_sources` (which the beta doc
     # folds into `list_knowledge(kind='source')`). The canonical W8 grouping puts all
     # three under `manage_source_trust` and calls `get_source_reliability` a writer;
     # that conflict is recorded in C3.
-    "backfill_sources": (DISCARDED, "w8_backfill"),
     "get_source_reliability": ("list_knowledge", "w8"),
     # W9 — the one member the beta collapse row does not name.
     "create_edge": ("link_entities", "w9_canon"),
@@ -767,7 +737,6 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # that difference is recorded in C6, because it decides what is still owner-open.
     "promote_point": ("update_knowledge", "w11_lifecycle"),
     "set_point_baseline": ("update_knowledge", "w11_lifecycle"),
-    "list_drafts": ("list_knowledge", "w11_lifecycle"),
     "quarantine_batch": ("update_knowledge", "w11_lifecycle"),
     # W12 — two members the beta row omits.
     "delete": ("delete_knowledge", "w12_canon"),
@@ -777,7 +746,6 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "dream": ("refresh_confidence", "w13_canon"),
     "compute_confidence": ("refresh_confidence", "w13_canon"),
     "compute_reputation": (UNBACKED, ""),
-    "record_calibration": (UNBACKED, ""),
     # W15 — the beta collapse row splits by clause: strength to `adjust_relationship`,
     # annotation to `update_knowledge` (and beta's target row 25 repeats it: “Annotating
     # a link is `update_knowledge` on it”). The canonical W15 grouping puts all three
@@ -786,15 +754,12 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     # W17
     "close": (UNCHANGED, "unchanged4"),
     # N1 — the five the beta doc files as console plumbing.
-    "org_update": (DISCARDED, "n1_console"),
-    "org_delete": (DISCARDED, "n1_console"),
     "org_create": (UNBACKED, ""),
     "org_get": ("get_organisation_account", "n1_account"),
     # 2026-10-25 owner ruling (#4282): `org_list` is GONE, not folded. It ran
     # `MATCH (t:Team)` with no tenant filter — every customer's account — and had
     # zero callers. A scoped account list is NEW behaviour, so it has no row here.
     # See the OVERRIDES line on #4282 before adding one back.
-    "migrate_orgs_to_registry": (DISCARDED, "maintenance"),
     # N2
     "graph_delete": ("delete_memory_graph", "n2_rename"),
     # #4282 phase 2.3 landed these three targets and retired the four names they
@@ -813,17 +778,12 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "trash_graphs": (DISCARDED, "maintenance"),
     # N3
     "membership_create": ("add_member", "n3_members"),
-    "membership_list": ("list_members", "n3_members"),
-    "membership_delete": ("remove_member", "n3_members"),
     "membership_get": (DISCARDED, "n1_console"),
-    "membership_update_role": (DISCARDED, "n1_console"),
     # N4
     "apikey_create": ("create_key", "n4_keys"),
-    "apikey_list": ("list_keys", "n4_keys"),
     "apikey_revoke": ("revoke_key", "n4_keys"),
     "apikey_verify": (DISCARDED, "n1_console"),
     # N5 — the two that are maintenance, not invite UX.
-    "cleanup_expired_invitations": (DISCARDED, "maintenance"),
     "sweep_invite_ghost_memberships": (DISCARDED, "maintenance"),
 }
 
@@ -836,7 +796,6 @@ OVERRIDE: dict[str, tuple[str, str]] = {
 TENSIONS: list[tuple[str, str, str]] = [
     # (method, the destination the OTHER doc implies, citation showing it)
     ("get_owned_entities", "`explore_connections`", "t_r5"),
-    ("get_provenance_chain", "`check_confidence`", "t_r3"),
     ("get_historical_knowledge", "`check_confidence`", "t_r3"),
     ("list_sources", "`graph_overview`", "t_r6"),
     ("test_guard", "`graph_overview`", "t_r6"),
@@ -848,13 +807,8 @@ TENSIONS: list[tuple[str, str, str]] = [
     ("annotate_operator", "`adjust_relationship`", "t_w15"),
 ]
 TENSION_CITES: dict[str, tuple[str, str]] = {
-    "t_r3": (CANON, "| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, "
-                    "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
-                    "`session_context`, `get_confidence`, `calibrate_summary`, "
-                    "`calibration_passed`, `get_provenance_chain`, `provenance`, "
-                    "`belief_timeline`, `get_historical_knowledge` |"),
-    "t_r5": (CANON, "| R5 | `explore_connections` | #5 | `expand_relationships`, "
-                    "`traverse`, `get_owned_entities`, `get_org_structure` |"),
+    "t_r3": (CANON, "| R3 | `recall_beliefs` | #3 |"),
+    "t_r5": (CANON, "| R5 | `explore_connections` | #5 |"),
     "t_r6": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
                     "`list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, "
                     "`list_relations`, `list_topics`, `list_graphs`, `stale_points`, "
@@ -865,11 +819,8 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
                     "`graph_delete`, `restore_memory_graph`, `trash_graphs`, "
                     "`update_memory_graph`, `graph_key_ids`, "
                     "`graph_active_key_count` |"),
-    "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 | `assess_source`, "
-                    "`set_source_tier`, `get_source_reliability`, `backfill_sources` | "
-                    "keep — **`get_source_reliability` writes** |"),
-    "t_w15": (CANON, "| W15 | `adjust_relationship` | #21 | `operator_action`, "
-                     "`mitigate_operator`, `annotate_operator` | keep, collapse |"),
+    "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 |"),
+    "t_w15": (CANON, "| W15 | `adjust_relationship` | #21 |"),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -880,7 +831,6 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
 # ─────────────────────────────────────────────────────────────────────
 PHANTOMS: list[tuple[str, str, str]] = [
     # (name the doc uses, the real method it appears to mean, citation)
-    ("recall_legs", "retrieval_legs", "r3"),
     ("stale", "stale_points", "r6_aliases"),
     ("count_memory_graphs", "list_memory_graphs", "p_graph_count"),
     ("set_memory_graph_name", "update_memory_graph", "p_set_name"),
@@ -1860,12 +1810,15 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
     if empty_groups:
         out += [
             "",
-            "### C5 — canonical groups with no distinct member",
+            "### C5 — canonical groups with no live member",
             "",
-            "The inventory's group table has group labels whose members are expressed as",
-            "wildcards (`org_*`, `graph_*`, …) that expand to the same methods as the",
-            "control-plane families. They carry no distinct member, so the partition here",
-            "resolves each method to its family group: "
+            "A group carries no distinct member in one of two ways, and neither is a mapping",
+            "gap. Either its members are expressed as WILDCARDS (`org_*`, `graph_*`, …) that",
+            "expand to the same methods as the control-plane families, or its only member has",
+            "LEFT the public surface — a deletion recorded in the canonical doc's *Removed from",
+            "the surface* section, which keeps the group row as the design record of where that",
+            "capability went rather than deleting the rationale with the name. Either way the",
+            "partition here resolves each method to its family group: "
             + ", ".join(f"`{g}`" for g in empty_groups) + ".",
         ]
 

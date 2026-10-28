@@ -483,33 +483,6 @@ class TestDirectWriterSitesAreGuarded:
 
         return TortoiseSDK.__new__(TortoiseSDK)
 
-    def test_record_calibration_guards_its_numerics(self):
-        from unittest import mock
-
-        from tortoise.sdk import TortoiseSDK
-
-        sdk = self._bare_sdk()
-        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
-            with pytest.raises(ValueError) as exc:
-                TortoiseSDK.record_calibration(
-                    sdk, precision=0.75, sample_size=2**70,
-                    mean_grounding_delta=0.01)
-            assert "sample_size" in str(exc.value), str(exc.value)
-            assert not proj.return_value.g.query.called
-
-    def test_complete_source_guards_external_id(self):
-        from unittest import mock
-
-        from tortoise.sdk import TortoiseSDK
-
-        sdk = self._bare_sdk()
-        with mock.patch.object(
-            TortoiseSDK, "_resolve_source_url", autospec=True, return_value="u"
-        ), mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
-            with pytest.raises(ValueError) as exc:
-                TortoiseSDK.complete_source(sdk, "u", external_id=2**70)
-            assert "externalId" in str(exc.value), str(exc.value)
-            assert not proj.return_value.g.query.called
 
     def test_session_event_write_guards_frontmatter_message_count(self):
         """A YAML frontmatter int is arbitrary-precision; the graph would clamp
@@ -613,21 +586,6 @@ class TestNonFiniteDecimalNamesTheKeyBeforeTheRangeCheck:
         with pytest.raises(ValueError) as exc:
             TortoiseSDK.mitigate_operator(sdk, "op1", "why", strength=D("NaN"))
         assert "strength" in str(exc.value), str(exc.value)
-
-    def test_record_calibration(self):
-        from unittest import mock
-
-        from tortoise.sdk import TortoiseSDK
-
-        sdk = self._bare()
-        with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
-            with pytest.raises(ValueError) as exc:
-                TortoiseSDK.record_calibration(
-                    sdk, precision=D("NaN"), mean_grounding_delta=0.01,
-                    sample_size=1)
-            assert "precision" in str(exc.value), str(exc.value)
-            # the guard must precede the range/gate checks and the write.
-            assert not proj.return_value.g.query.called
 
 
 class TestDirectWriterSitesAreGuardedRoundTwo:

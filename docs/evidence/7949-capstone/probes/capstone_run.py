@@ -15,8 +15,8 @@ the corrected reading:
 
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
-   ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:12454``, called at ``:11491``) →
+   ``TortoiseSDK.capture_session`` (deleted by #4282, and it was the only
+   caller) → ``sdk._extract_session_v2`` (``sdk.py:11161``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8396``) calls
    ``_edus_from_conversation`` (S0, ``:8507``), ``run_s1`` (S1, ``:8540``),
    ``run_s2`` (S2.1, ``:8564``), ``_run_vet_pass`` (S2.2, ``:8593``),
@@ -894,6 +894,21 @@ def main(argv: list[str] | None = None) -> int:
 
     sdk = TortoiseSDK()
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
+    # ⛔ #4282 (owner ruling 2026-10-27) DELETED the entry point this gate drives:
+    # ``TortoiseSDK.capture_session`` was ``_extract_session_v2``'s ONLY
+    # in-process caller, so no door is left that runs the eight steps in one
+    # pass. The probe REFUSES — a missing instrument is not a product verdict,
+    # the same distinction §4.4 draws for the receipt — and this is the one line
+    # to change when a durable door lands (tracked by the coverage-loss issue the
+    # deleting PR links, #4282).
+    if not hasattr(sdk, "capture_session"):
+        return refuse(
+            "the entry point this capstone drives — `TortoiseSDK.capture_session` "
+            "— was DELETED by #4282 and was `_extract_session_v2`'s only caller, "
+            "so no in-process door runs the eight steps in one pass: G4 is "
+            "UNREACHABLE. That is an INSTRUMENT gap, not a verdict on the "
+            "pipeline; re-deriving this table needs a surviving door.",
+            prereg_ok=True, code=4, corpus=corpus)
     try:
         captured = sdk.capture_session(turns, session_id=session_id)
         # The receipt IS the only surface. ``capture_session`` never returns an

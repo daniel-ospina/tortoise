@@ -562,52 +562,6 @@ class TestTortoiseHealthTruth:
             assert "no_sdk_registered" not in str(result)
             assert isinstance(result.get("graph_size"), int)
 
-    def test_tortoise_health_probes_team_graph_not_registry(self, tmp_path,
-                                                             monkeypatch):
-        """The tool's db/graph_size come from the SERVED team graph — probing
-        the registry namespace would auto-create/report a different graph
-        (#669 discipline: health probes never open the registry namespace).
-        Seed one point as the team, then assert graph_size reflects it."""
-        from tortoise.mcp_server import create_http_app
-
-        # Deterministic embedded env (mirrors the quota fixtures): the team
-        # graph lives on this DB, so graph_size is asserted against the same
-        # store the request-scoped SDK serves.
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        db = str(tmp_path / "health.db")
-        monkeypatch.setenv("TORTOISE_DB_PATH", db)
-        reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.org_create("health-truth-team")
-        reg.org_update(team["id"], max_points=1000)
-        key = reg.apikey_create(team["id"], "h")["api_key"]
-
-        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                              _registry_sdk=reg)
-        tc = _mounted_test_client(app)
-        tc.headers.update({
-            "Authorization": f"Bearer {key}",
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        })
-        with tc:
-            # Seed through the served surface (create_point resolves the same
-            # team SDK the health probe uses).
-            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
-                                     "method": "tools/call",
-                                     "params": {"name": "tortoise_create_point",
-                                                "arguments": {"kind": "statement",
-                                                              "content": "health-truth seed"}}})
-            assert r.status_code == 200, r.text
-            assert "error" not in str(body), body
-            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
-                                     "method": "tools/call",
-                                     "params": {"name": "tortoise_health",
-                                                "arguments": {}}})
-            assert r.status_code == 200, r.text
-            result = self._tool_result(body)
-            assert result.get("status") == "ok", body
-            assert result.get("graph_size") >= 1, body
-
 
 # ── GET /mcp metadata ───────────────────────────────────────────────────────
 
@@ -2017,23 +1971,6 @@ class TestQuotaEnforcement:
         with tc:
             yield tc, reg, key, tid
 
-    def _set_max_points(self, reg_sdk, org_id, value):
-        reg_sdk.org_update(org_id, max_points=value)
-
-    def test_create_point_blocked_at_cap(self, quota_client):
-        """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        self._set_max_points(reg_sdk, tid, 0)  # at/over cap
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_create_point",
-                       "arguments": {"kind": "statement", "content": "quota test"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        result = body.get("result", {})
-        content = result.get("content", [])
-        text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-        assert "limit reached" in text, f"expected quota error, got: {body}"
 
     def test_create_point_below_cap_succeeds(self, quota_client):
         """Below cap: the write succeeds (no quota error)."""
@@ -2049,55 +1986,6 @@ class TestQuotaEnforcement:
         assert "limit reached" not in text, f"unexpected quota error: {text}"
         assert "error" not in text, f"unexpected error: {text}"
 
-    def test_quota_holds_with_rate_limit_disabled(self, quota_client, monkeypatch):
-        """The quota gate HOLDS when the rate limiter is disabled."""
-        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        self._set_max_points(reg_sdk, tid, 0)
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_create_point",
-                       "arguments": {"kind": "statement", "content": "x"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
-        assert "limit reached" in text
-
-    def test_cross_team_isolation(self, quota_client):
-        """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        team_b = reg_sdk.org_create("quota-team-b")
-        key_b = reg_sdk.apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
-        self._set_max_points(reg_sdk, tid, 0)  # team A at cap
-
-        payload_a = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_create_point",
-                       "arguments": {"kind": "statement", "content": "a"}},
-        }
-        r, body_a = _mcp_post(tc, payload_a)
-        text_a = "".join(c.get("text", "") for c in body_a.get("result", {}).get("content", []))
-        assert "limit reached" in text_a, f"team A should be blocked: {text_a}"
-
-        from tortoise.mcp_server import create_http_app
-        app_b = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                                _registry_sdk=reg_sdk)
-        tc2 = _mounted_test_client(app_b)
-        tc2.headers.update({
-            "Authorization": f"Bearer {key_b}",
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        })
-        with tc2:
-            payload_b = {
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "tortoise_create_point",
-                           "arguments": {"kind": "statement", "content": "b ok"}},
-            }
-            r, body_b = _mcp_post(tc2, payload_b)  # noqa: RUF059
-            text_b = "".join(c.get("text", "") for c in body_b.get("result", {}).get("content", []))
-            assert "limit reached" not in text_b, f"team B should not be blocked: {text_b}"
-            assert "error" not in text_b, f"team B unexpected error: {text_b}"
 
     def test_dream_removed_from_http(self, quota_client):
         """tortoise_dream must not be discoverable or callable over HTTP."""
@@ -2116,41 +2004,6 @@ class TestQuotaEnforcement:
         text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
         assert "-32004" in text or "not available over HTTP" in text, f"expected excluded error: {body}"
 
-    def test_assess_source_blocked_at_cap(self, quota_client):
-        """#684: tortoise_assess_source is quota-gated — blocked at cap."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        self._set_max_points(reg_sdk, tid, 0)  # at/over cap
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_assess_source",
-                       "arguments": {"url": "https://example.com",
-                                     "assessor": "test-agent",
-                                     "score": 0.5,
-                                     "rationale": "quota test"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        result = body.get("result", {})
-        content = result.get("content", [])
-        text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-        assert "limit reached" in text, f"expected quota error, got: {body}"
-
-    def test_file_human_approval_blocked_at_cap(self, quota_client):
-        """#684: tortoise_file_human_approval is quota-gated — blocked at cap."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        self._set_max_points(reg_sdk, tid, 0)  # at/over cap
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_file_human_approval",
-                       "arguments": {"approver_id": "subj-1",
-                                     "artifact_id": "doc-1",
-                                     "point_ids": ["p-1"],
-                                     "decision_content": "approved"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        result = body.get("result", {})
-        content = result.get("content", [])
-        text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-        assert "limit reached" in text, f"expected quota error, got: {body}"
 
     def test_file_human_approval_below_cap_succeeds(self, quota_client):
         """#684: tortoise_file_human_approval works below the cap."""

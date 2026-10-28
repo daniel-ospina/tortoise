@@ -61,7 +61,7 @@ aboutObjects: tortoise, how-to-use-tortoise
 > **Why this draft names no verb.** `#9675`'s own recorded sequencing — the
 > `owner-decision` line *"Sequenced after #4282 Phase 3 for any tool name"* —
 > governs the rewrite, and Phase 3 has **not** landed: measured at `44f0e6b6a`,
-> `tools/surface-target-check.py` still reports `81 MCP tools / 150 SDK methods`
+> `tools/surface-target-check.py` still reports `81 MCP tools / 124 SDK methods`
 > against the approved `27 / 40`, and 27 of the 40 approved method names still
 > have no implementation. A document written against today's 81 would teach names
 > about to be retired. It also would not earn its keep: **of the 13 P0 / 31 P1

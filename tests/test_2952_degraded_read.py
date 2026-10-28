@@ -25,7 +25,6 @@ import pytest
 
 from tortoise.embeddings import EmbeddingModel
 from tortoise.exceptions import HybridReadUnavailableError
-from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import (
     VECTOR_LEG_UNAVAILABLE,
     declared_degraded_read,
@@ -516,46 +515,4 @@ class TestRetrievalLegs:
         monkeypatch.setattr(EmbeddingModel, "_last_failed_at", None, raising=False)
         monkeypatch.setattr(EmbeddingModel, "_last_error", None, raising=False)
 
-    def test_probe_declares_healthy_hybrid(self):
-        stub = _LegStub(HEALTHY)
-        out = TortoiseSDK.retrieval_legs(stub, "alpha beta", limit=3)
-        assert out["hybrid"] is True
-        assert out["declared_degraded_read"] is None
-        assert out["hybrid_refusal_reason"] is None
-        assert out["legs"] == HEALTHY
-        assert stub.calls == [{"query": "alpha beta", "kind": None, "limit": 3}]
-        assert "state" in out["embedder"]
 
-    def test_probe_structural_only_is_not_hybrid(self):
-        out = TortoiseSDK.retrieval_legs(
-            _LegStub([_leg("structural", True, False, "ok", 4)]), "")
-        # C1 declaration stays None (structural-only read by design); the
-        # gate-derived hybrid flag is False and names its refusal reason.
-        assert out["declared_degraded_read"] is None
-        assert out["hybrid"] is False
-        assert out["hybrid_refusal_reason"] == "leg_absent"
-
-    def test_probe_declares_single_leg_read(self):
-        out = TortoiseSDK.retrieval_legs(_LegStub(NO_EMBEDDER), "alpha")
-        assert out["hybrid"] is False
-        assert out["declared_degraded_read"]["reason"] == "no_embedder"
-        assert out["hybrid_refusal_reason"] == "no_embedder"
-
-    def test_require_hybrid_refuses_single_leg(self):
-        with pytest.raises(HybridReadUnavailableError) as ei:
-            TortoiseSDK.retrieval_legs(
-                _LegStub(NO_EMBEDDER), "alpha", lane="real_tortoise",
-                require_hybrid=True)
-        assert ei.value.reason == "no_embedder"
-        assert ei.value.lane == "real_tortoise"
-
-    def test_require_hybrid_refuses_when_no_legs_reported(self):
-        with pytest.raises(HybridReadUnavailableError) as ei:
-            TortoiseSDK.retrieval_legs(
-                _LegStub([]), "alpha", require_hybrid=True)
-        assert ei.value.reason == "leg_trace_unavailable"
-
-    def test_require_hybrid_passes_healthy(self):
-        out = TortoiseSDK.retrieval_legs(
-            _LegStub(HEALTHY), "alpha", require_hybrid=True)
-        assert out["hybrid"] is True
