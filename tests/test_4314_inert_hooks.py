@@ -1007,6 +1007,21 @@ def _logging_capture_bin(venv_bin: Path, log: Path) -> Path:
     return script
 
 
+def _venv_python(venv_bin: Path) -> Path:
+    """A QUALIFYING interpreter beside a console script.
+
+    Acceptance is the seam-agnostic interpreter ladder (#4848 review 3): the
+    shared predicate may not accept a tree on a console script, because a
+    console script is only runnable in the seams that RESOLVE one and cursor's
+    `session-start` never runs a script. A real checkout's venv always holds
+    its own `python`, so each fixture below gives one — the behaviour under
+    test is the leg that RUNS, not the leg that accepts."""
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    py = venv_bin / "python"
+    py.symlink_to(sys.executable)
+    return py
+
+
 def _coreutils(bindir: Path) -> None:
     """The shell plumbing a seam needs, plus nothing that could pass for an
     interpreter: ``python3`` is planted by the caller."""
@@ -1136,10 +1151,12 @@ def test_a_checkout_that_cannot_be_run_is_skipped_for_a_later_one(tmp_path):
 
     # Candidate 1 ($TORTOISE_SRC_DIR): the package, and NOTHING to run it with.
     stale = _module_dir(tmp_path / "stale")
-    # Candidate 2 (the installer's record): a checkout with its own venv.
+    # Candidate 2 (the installer's record): a checkout with its own venv — an
+    # interpreter AND the console script a seam runs in preference to `python -m`.
     good = _module_dir(tmp_path / "good")
     log = tmp_path / "argv.log"
     _logging_capture_bin(good / ".venv" / "bin", log)
+    _venv_python(good / ".venv" / "bin")
 
     (home / ".tortoise").mkdir(parents=True, exist_ok=True)
     (home / ".tortoise" / "hook-src-dir").write_text(str(good) + "\n")
@@ -1166,6 +1183,78 @@ def test_a_checkout_that_cannot_be_run_is_skipped_for_a_later_one(tmp_path):
     body = log.read_text(encoding="utf-8")
     assert "SELF=" in body and str(good / ".venv" / "bin" / "tortoise") in body, body
     assert "sessions" in body, body
+
+
+def test_a_console_script_only_candidate_is_skipped_for_a_later_runnable_one(tmp_path):
+    """#4848 review 3 — the reviewer's reproduction, reduced to a test.
+
+    The shared guard block is byte-identical across seven seams, but a console
+    script is only runnable in the seams that RESOLVE one into `TORTOISE_BIN`;
+    cursor's `session-start` executes an interpreter and never a script. While
+    `_tortoise_dir_runnable` still accepted on a console script, a candidate
+    holding a `pyvenv.cfg`-owned `bin/tortoise` with a `#!/bin/sh` shebang and NO
+    `bin/python` was ACCEPTED: the loop `break`ed on it, the later runnable
+    checkout was never tried, the accepted wrapper was never run, and the
+    breadcrumb blamed the ambient interpreter for a tree the guard had blessed.
+
+    Here candidate 1 is exactly that shape and candidate 2 is runnable, so the
+    only correct outcome is: candidate 1 skipped, candidate 2 RUN, no refusal.
+
+    Mutation: restore either console-script leg to `_tortoise_dir_runnable` —
+    candidate 2 never runs and this REDs."""
+    home = tmp_path / "home"
+    (home / ".codex" / "hooks").mkdir(parents=True)
+    hook = home / ".codex" / "hooks" / "session-end.sh"
+    shutil.copy(CODEX_HOOK, hook)
+    hook.chmod(0o755)
+
+    # Candidate 1: `tortoise/`, a NON-python console script in the pyvenv.cfg
+    # OWNING venv, and no interpreter anywhere in that tree.
+    stale = _module_dir(tmp_path / "stale")
+    (stale / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    accepted_mark = tmp_path / "accepted.log"
+    wrapper = stale / "bin" / "tortoise"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n" f'echo RAN >> {accepted_mark}\n' "exit 0\n",
+                       encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    # Candidate 2: a runnable checkout (interpreter for acceptance, console
+    # script to prove which leg executes).
+    good = _module_dir(tmp_path / "good")
+    log = tmp_path / "argv.log"
+    _logging_capture_bin(good / ".venv" / "bin", log)
+    _venv_python(good / ".venv" / "bin")
+
+    (home / ".tortoise").mkdir(parents=True, exist_ok=True)
+    (home / ".tortoise" / "hook-src-dir").write_text(str(good) + "\n")
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["/bin/bash", str(hook)], input=json.dumps({
+            "session_id": "sid-4848-console", "transcript_path": str(transcript),
+            "cwd": str(home)}), text=True, capture_output=True,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path), "TORTOISE_SRC_DIR": str(stale)},
+        timeout=30)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _wait_for(lambda: log.is_file()
+                     and "DONE" in log.read_text(encoding="utf-8")), (
+        "a candidate nothing can run was ACCEPTED and the runnable one was "
+        "never tried — the shared predicate judged a console script a seam may "
+        "not execute (#4848 review 3)")
+    assert not accepted_mark.exists(), (
+        "the unresolvable candidate's wrapper ran, so it won the loop")
+    crumbs = home / ".tortoise" / "capture-errors"
+    assert not crumbs.exists(), (
+        f"a refusal was recorded even though a runnable candidate existed: "
+        f"{[p.read_text(encoding='utf-8') for p in crumbs.iterdir()]}")
 
 
 def test_a_stale_checkout_refuses_with_a_wrong_interpreter_reason(tmp_path):
@@ -1625,29 +1714,29 @@ def test_the_per_turn_seam_refuses_a_binary_it_cannot_run(tmp_path):
         f"the binary WAS found; the refusal must say why it was not run: {body}")
 
 
-def test_a_checkout_accepted_on_its_console_script_is_the_one_that_runs(tmp_path):
-    """``_tortoise_dir_runnable`` accepts a candidate whose ``.venv/bin/tortoise``
-    has a NON-python `#!` (an unknown interpreter is never refused). The three
-    Claude seams then resolved `TORTOISE_BIN` only from `command -v tortoise` and
-    otherwise ran an interpreter — so the leg the loop had just ACCEPTED was
-    never executed, the loop did not skip to the later runnable candidate, and
-    the seam refused a candidate it had blessed. ``test_4041``'s own fixture
-    builds exactly this shape (`#!/bin/sh` console script), so it is supported.
+def test_a_checkout_that_offers_a_console_script_runs_the_script_not_a_bare_tortoise(tmp_path):
+    """A checkout whose `.venv/bin/tortoise` has a NON-python `#!` is accepted on
+    its INTERPRETER (acceptance is the shared ladder — #4848 review 3), and the
+    seam must then RUN the console script rather than a bare `tortoise` looked up
+    on PATH: the leg the guard accepted has to be the leg it executes, and a
+    checkout's own venv is normally NOT on PATH.
 
     Mutation: drop the `TORTOISE_BIN` resolution from ``$TORTOISE_MODULE/.venv``
-    in the Claude seam — the wrapper never runs, the refusal comes back, RED."""
+    in the Claude seam — the wrapper never runs, and this REDs."""
     home = tmp_path / "home"
     (home / ".claude" / "hooks").mkdir(parents=True)
     hook = home / ".claude" / "hooks" / "session-end.sh"
     shutil.copy(CLAUDE_HOOK, hook)
     hook.chmod(0o755)
 
-    # Candidate 1: the package plus a NON-python console script — accepted, and
-    # the only thing this seam could run.
+    # Candidate 1: the package, a NON-python console script, and the venv's own
+    # interpreter (acceptance) — the console script is the only thing this seam
+    # could run from that tree, and the only thing it may run.
     first = _module_dir(tmp_path / "first")
     log = tmp_path / "capture.log"
     wrapper = first / ".venv" / "bin" / "tortoise"
     wrapper.parent.mkdir(parents=True)
+    _venv_python(wrapper.parent)
     wrapper.write_text(
         "#!/bin/sh\n"
         f'printf "WRAPPER %s\\n" "$*" >> {log}\n'
@@ -1668,8 +1757,8 @@ def test_a_checkout_accepted_on_its_console_script_is_the_one_that_runs(tmp_path
     # The wrapper is invoked for the reindex sweep AND for the capture; either
     # proves the accepted leg is the executed one, so wait for the capture.
     assert _wait_for(lambda: log.is_file()), (
-        "the console script the guard ACCEPTED was never run — the seam refused "
-        "a candidate it had just blessed instead of running it")
+        "the console script this checkout offers was never run — the seam fell "
+        "back to a bare `tortoise` on PATH (absent here) and dropped the capture")
     assert _wait_for(lambda: "capture" in log.read_text(encoding="utf-8")), (
         f"the wrapper ran but never for the capture leg: {log.read_text(encoding='utf-8')}")
     crumbs = home / ".tortoise" / "capture-errors"
