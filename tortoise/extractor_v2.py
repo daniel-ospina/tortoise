@@ -748,6 +748,13 @@ def _build_master_from_brief(brief: dict,
         # declares neither, which is still every shipped pack today.
         "pack_hints": {ns: dict(h) for ns, h in
                        (brief.get("pack_hints") or {}).items()},
+        # #9733: the packs' declared cross-pack relation endpoints, carried on
+        # the master so compact-mode story selection co-selects the kinds a
+        # SELECTED pack's own relations name (``_select_pack_kinds``). Absent
+        # for every pack that declares no cross-pack endpoint.
+        "pack_refs": {ns: list(r) for ns, r in
+                      (brief.get("pack_refs") or {}).items()
+                      if isinstance(r, (list, tuple))},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
         # hint criterion. NOT kinds (master_kind_forms' section tuple excludes
         # it); rendered into S2/S4 prompt context only.
@@ -954,11 +961,47 @@ def _needs_gloss(kind: str, desc: str) -> bool:
     return False
 
 
-def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
+def _select_pack_kinds(story: str | None, pack_kinds: dict,
+                       pack_refs: dict | None = None) -> dict:
     """Selective pack injection: only sections whose domain words appear in
     the story. Conservative fallback — if nothing matches, return all so no
     needed kind is ever dropped (the flag-on path never calls this — the
-    pack vocabulary is owned by ``_render_master_core_only``)."""
+    pack vocabulary is owned by ``_render_master_core_only``).
+
+    **#9733 — a selected pack's declared REFERENCES come with it.** The result
+    is rendered under "EVERY kind you emit MUST come from this list", so a
+    namespace that selected on its own trigger words but whose relations name
+    ANOTHER namespace's kind offered a closed vocabulary its own declarations
+    could not be spelled in: `packs/investment-portfolio-manager` declares
+    `depends_on: [venture]` and its `marks`/`constrainedBy` endpoints are
+    `venture:investment`, while no `portfolio:` trigger word is also a
+    `venture:` trigger — a portfolio story therefore lost the position kind its
+    valuation mark exists to value.
+
+    ``pack_refs`` is the brief's reserved ``pack_refs`` section
+    (``{declaring ns: [foreign `ns:kind` an own relation endpoint names]}``,
+    built by ``value_extractor._relation_endpoint_refs``). A referenced kind is
+    added IFF the story already selected its declaring pack AND the kind is in
+    ``pack_kinds`` — a graph-gated brief that does not install the dependency
+    simply has nothing to add (fail-open, the same direction as every other
+    branch here). The all-packs fallback returns before this runs: it is
+    already the whole vocabulary.
+
+    ⚠️ Why the CLOSURE OVER REFERENCES and not over the manifest's
+    `depends_on` list, which is how #9733 was filed. Measured at this head, the
+    filing's premise ("only `portfolio` declares `depends_on` today") no longer
+    holds: `dev: [product-strategy, pm]`, `marketing: [product-strategy]`,
+    `product-strategy: [dev]` and `portfolio: [venture]` all declare one. Two
+    of them form a CYCLE (`dev` ↔ `product-strategy`), so transitively
+    co-selecting whole dependency NAMESPACES collapses the narrowing this
+    function exists for — a `marketing:` story would pull
+    marketing+product-strategy+dev+pm (35 of the 47 shipped kinds), and every
+    `dev:` story would pull dev+product-strategy+pm. The kinds a selected pack
+    actually references are the ones whose absence makes a declared relation
+    unemittable, and they are named by the declarations themselves — so the
+    closure is taken over THOSE, which costs one line for a dev or
+    product-strategy selection and one for portfolio (`venture:investment`).
+    """
     if not story:
         return dict(pack_kinds)
     low = story.lower()
@@ -978,7 +1021,15 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # a deliberate, fail-open one).
         if triggers is None or any(t in low for t in triggers):
             selected[k] = v
-    return selected or dict(pack_kinds)  # nothing matched → all (safe)
+    if not selected:
+        return dict(pack_kinds)  # nothing matched → all (safe)
+    # #9733: reference closure over the SELECTED packs' declared endpoints.
+    refs = pack_refs if isinstance(pack_refs, dict) else {}
+    for ns in sorted({k.split(":")[0] for k in selected}):
+        for ref in refs.get(ns) or ():
+            if ref in pack_kinds and ref not in selected:
+                selected[ref] = pack_kinds[ref]
+    return selected
 
 
 def _stable_hash(s: str) -> int:
@@ -1201,7 +1252,8 @@ def _render_master_compact(master: dict, story: str | None,
     lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
-    selected = _select_pack_kinds(story, master["pack_kinds"])
+    selected = _select_pack_kinds(story, master["pack_kinds"],
+                                  master.get("pack_refs"))
     lines.append(_group("PACK KINDS", selected, shuffle=True,
                         suffixes=_values))
     # granularity: matched-domain subsections only (compact). Hint blocks

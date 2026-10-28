@@ -638,6 +638,58 @@ class TestClashRules:
             assert [k for k in got if k.startswith(f"{NS}:")], (mention, got)
             assert set(got) != set(pack_kinds), (mention, "all-packs fallback")
 
+    def test_every_trigger_mention_keeps_the_endpoints_own_kind(self, pack):
+        """#9733 — the closed list a trigger mention produces CONTAINS the
+        position kind this pack's own relations point at.
+
+        The row alone proved NARROWING and never checked that the narrowed
+        vocabulary can still spell the pack's declarations: `marks` and
+        `constrainedBy` both take a `venture:investment` endpoint, `depends_on`
+        declares `venture`, and no `portfolio:` trigger word is also a
+        `venture:` trigger — so a portfolio story used to lose the very kind a
+        valuation mark exists to value, while the list is rendered under
+        "EVERY kind you emit MUST come from this list".
+
+        Every trigger word is exercised, not one: a row is data and the defect
+        is a missing CO-SELECTION, so probing a single mention would pass while
+        another entry still lost the overlay's dependency.
+        """
+        from tortoise.extractor_v2 import _PACK_TRIGGERS, _select_pack_kinds
+
+        master = v2._build_master_from_brief(compile_value_brief())
+        pack_kinds, refs = master["pack_kinds"], master["pack_refs"]
+        # The declaration the fix honours, read from the manifest rather than
+        # from memory: `venture` is the pack's declared dependency, and the
+        # referenced endpoint lives in that namespace.
+        assert list(pack.depends_on) == ["venture"]
+        assert refs[NS] == ["venture:investment"], refs.get(NS)
+
+        for mention in _PACK_TRIGGERS[f"{NS}:"]:
+            story = f"the board reviewed the {mention} last week"
+            hit = _select_pack_kinds(story, pack_kinds, refs)
+            assert "venture:investment" in hit, (mention, story, sorted(hit))
+            # NARROWING still holds — the co-selection is not the all-packs
+            # fallback restored under another name.
+            assert set(hit) != set(pack_kinds), (mention, "all-packs fallback")
+            assert "dev:issue" not in hit, (mention, sorted(hit))
+
+        # …and the assertion above is not vacuous: the TRIGGER WORDS alone drop
+        # the endpoint (the pre-#9733 head, i.e. the failing side) for every
+        # mention except the bare `portfolio` one — which `venture:` and `pm:`
+        # ALSO carry, so that mention never demonstrated the defect. Pin BOTH
+        # facts, so the discriminating set cannot shrink to nothing unnoticed
+        # (the whole row relying on a sibling's trigger would be the same strip
+        # one word over).
+        discriminating = [
+            mention for mention in _PACK_TRIGGERS[f"{NS}:"]
+            if "venture:investment" not in _select_pack_kinds(
+                f"the board reviewed the {mention} last week", pack_kinds)]
+        assert discriminating, (
+            "no mention discriminates — every portfolio trigger also matches "
+            "venture:, so this test would pass on the unfixed code")
+        assert set(discriminating) == set(_PACK_TRIGGERS[f"{NS}:"]) - {"portfolio"}, (
+            discriminating)
+
     def test_the_accepted_loss_is_a_recorded_decision(self, pack):
         """The COST of the row's invariant, pinned so it is a decision and not an
         accident.
@@ -688,13 +740,23 @@ def _strip_portfolio(table: dict) -> dict:
     Both compiles key their kind entries by `ns:kind`, but
     `memory_granularity` is keyed by bare namespace — filtering only on the
     former would leave one of this pack's entries in place and make the
-    comparison below fail for the wrong reason.
+    comparison below fail for the wrong reason. `pack_refs` (#9733) is the same
+    shape and needs the same treatment on BOTH sides: the pack's own row (its
+    cross-pack relation endpoints), and any `portfolio:*` endpoint another
+    pack's row names — a brief section is a contribution surface, so a new one
+    must not make "nothing else moved" read as false.
     """
     out = {k: v for k, v in table.items() if not k.startswith(f"{NS}:")}
     gran = out.get("memory_granularity")
     if isinstance(gran, dict) and NS in gran:
         out["memory_granularity"] = {
             n: g for n, g in gran.items() if n != NS}
+    refs = out.get("pack_refs")
+    if isinstance(refs, dict):
+        out["pack_refs"] = {
+            n: [r for r in row if not str(r).startswith(f"{NS}:")]
+            for n, row in refs.items() if n != NS}
+        out["pack_refs"] = {n: row for n, row in out["pack_refs"].items() if row}
     return out
 
 

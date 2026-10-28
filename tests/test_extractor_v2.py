@@ -7504,3 +7504,119 @@ class TestEvidence8503Claims:
             "the tokenizer docstring still argues for a contiguous-span design")
         assert "SEQUENCE EQUALITY" in tok_doc, (
             "the tokenizer docstring must name the comparison that replaced it")
+
+
+# ── #9733: compact selection closes over a selected pack's own references ──
+#
+# `_select_pack_kinds` narrows PACK KINDS by story trigger words, but the list is
+# rendered under "EVERY kind you emit MUST come from this list" — so a pack whose
+# RELATIONS name another namespace's kind offered a closed vocabulary its own
+# declarations could not be spelled in (`packs/investment-portfolio-manager`:
+# `marks`/`constrainedBy` endpoints are `venture:investment`, and no
+# `portfolio:` trigger word is also a `venture:` trigger). The closure is taken
+# over the DECLARED REFERENCES (the brief's reserved `pack_refs` section), not
+# over the manifests' `depends_on` list — see `_select_pack_kinds`' docstring
+# and `test_the_namespace_closure_is_deliberately_not_taken`.
+
+PORTFOLIO_STORY = "the board reviewed the investment mandate last week"
+
+
+class TestCompactReferenceClosure:
+    def test_a_referenced_kind_survives_selection(self):
+        """The defect, asserted at the level it lives: the trigger words select
+        `portfolio:*`, and the position kind its relations point at must come
+        with them. Without the refs map the kind is dropped — which is the
+        pre-#9733 head, so this assertion FAILS on the unfixed code."""
+        m = v2.build_master_list()
+        assert "venture:investment" in m["pack_kinds"]
+        assert "venture:investment" in v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"], m["pack_refs"])
+        # The discrimination pin: the trigger words alone do not select it.
+        assert "venture:investment" not in v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"])
+        assert "venture:investment" not in v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"], {})
+
+    def test_the_compact_render_carries_the_referenced_kind(self):
+        """End-to-end: the kind reaches the rendered closed list, and the
+        narrowing the mode exists for still holds (this is not the all-packs
+        fallback)."""
+        m = v2.build_master_list()
+        rendered = v2._render_master_compact(m, PORTFOLIO_STORY)
+        assert "- venture:investment" in rendered, rendered
+        hit = v2._select_pack_kinds(
+            PORTFOLIO_STORY, m["pack_kinds"], m["pack_refs"])
+        assert set(hit) != set(m["pack_kinds"]), "all-packs fallback"
+        assert "dev:issue" not in hit, list(hit)
+
+    def test_every_declared_endpoint_of_a_selected_pack_is_closed(self):
+        """The general guard over the REAL catalog: for every namespace that
+        declares a cross-pack endpoint, a story that selects it gets every one
+        of its `.` endpoints in the list. A new pack (or a new relation) needs
+        no engine edit — only the endpoint must be a kind the brief carries."""
+        m = v2.build_master_list()
+        assert m["pack_refs"], "fixture: the catalog must declare endpoints"
+        for ns, refs in m["pack_refs"].items():
+            trigger = v2._PACK_TRIGGERS[f"{ns}:"][0]
+            story = f"the {trigger} was reviewed last week"
+            hit = v2._select_pack_kinds(story, m["pack_kinds"], m["pack_refs"])
+            assert [k for k in hit if k.startswith(f"{ns}:")], (ns, story, hit)
+            for ref in refs:
+                if ref in m["pack_kinds"]:
+                    assert ref in hit, (ns, ref, story)
+
+    def test_a_reference_from_an_unselected_pack_is_not_added(self):
+        """Closure follows the SELECTION, not the catalog: a pack the story did
+        not select contributes no endpoint, or every prompt would drift toward
+        the all-packs set one reference at a time."""
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure",
+            m["pack_kinds"], m["pack_refs"])
+        assert "dev:issue" in hit
+        assert "venture:investment" not in hit, list(hit)
+
+    def test_a_reference_to_an_uninstalled_kind_is_inert(self):
+        """Fail-open: a graph-gated brief that does not install the dependency
+        has no such kind to add, and must not raise (the same direction as
+        every other branch in the selector)."""
+        pack_kinds = {"portfolio:mandate": "m", "dev:issue": "i"}
+        refs = {"portfolio": ["venture:investment"], "ghost": ["gone:kind"]}
+        hit = v2._select_pack_kinds(
+            "the investment mandate", pack_kinds, refs)
+        assert hit == {"portfolio:mandate": "m"}, hit
+
+    def test_nothing_matched_still_returns_everything(self):
+        """The all-packs fallback returns before the closure runs — it is
+        already the whole vocabulary, and a refs map must not narrow it."""
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "zzz no trigger word at all zzz", m["pack_kinds"], m["pack_refs"])
+        assert hit == m["pack_kinds"]
+
+    def test_the_namespace_closure_is_deliberately_not_taken(self):
+        """RECORDED DECISION (#9733): the closure is over REFERENCES, not over
+        `depends_on` NAMESPACES.
+
+        The filing asked for the dependency route and assumed "only `portfolio`
+        declares `depends_on` today". Measured at this head that premise is
+        stale — `dev: [product-strategy, pm]`, `marketing: [product-strategy]`,
+        `product-strategy: [dev]` and `portfolio: [venture]` all declare one,
+        and `dev` ↔ `product-strategy` is a CYCLE. Transitive namespace
+        closure would therefore collapse the narrowing compact mode exists for:
+        every `dev:` story would pull dev+product-strategy+pm, and a
+        `marketing:` story would pull 35 of the 47 shipped kinds.
+
+        Pinned so a later "generalise it" change is visible rather than silent:
+        these kinds are referenced by NO selected pack's endpoint, so their
+        absence is a stated cost of the narrowing, not a dangling reference. If
+        this starts failing, the decision moved — update it here and in
+        `_select_pack_kinds`' docstring rather than deleting the test.
+        """
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure",
+            m["pack_kinds"], m["pack_refs"])
+        assert "dev:issue" in hit
+        assert not [k for k in hit if k.startswith("pm:")], list(hit)
+        assert not [k for k in hit if k.startswith("marketing:")], list(hit)
