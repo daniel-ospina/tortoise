@@ -418,6 +418,14 @@ WHAT IS PINNED (one entry per test, in file order)
    count in every spelling, and the invisible site's ORDINAL (`total + 1`).
    "A sixth site is in the code today" outlived the 5 -> 6 move on a green
    suite, which is what a typed ordinal is worth.
+36. `test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce` —
+   every marker in the four vocabulary tuples must be a spelling `_flat` can
+   produce, and must be either PRESENT in the flattened documents or declared
+   absent-by-design with a reason. `_flat` turns `-` between word characters
+   into a space, so `"MAP-form writer"`, `"MAP-form"`, `"NAMED-form"` and
+   `"re-materializ"` were DEAD on arrival — 0 occurrences each, for ever — and
+   an exemption asserted to "write the attribute set by property MAP" stayed
+   green. A dead marker is worse than a missing one: it reads as coverage.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -3988,8 +3996,12 @@ def test_every_direct_edge_created_producer_is_safe_for_an_about_edge():
 #: ⛔ That is not a style note: `"MAP-form"`, `"NAMED-form"`, `"re-materializ"`
 #: and `"MAP-form writer"` were all DEAD on arrival (`#10200` reviews measured 0
 #: occurrences each in the flattened documents), and a marker that matches
-#: nothing pins nothing while reading as if it did. Each marker family below
-#: carries a probe in the legs, so a marker that dies reds instead of lying.
+#: nothing pins nothing while reading as if it did.
+#: ⛔ And a probe per family is NOT enough: `#10200` review measured that
+#: reverting three of the four flattened spellings left the suite green, because
+#: a live neighbour covered the same sentence. The invariant is therefore static
+#: and covers every member of every tuple —
+#: `test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce`.
 CLASS_VERDICT_MARKERS: dict[str, tuple[str, ...]] = {
     "MAP": (
         "property MAP",
@@ -4056,15 +4068,37 @@ _NEGATOR_RE = re.compile(
     re.I,
 )
 
-#: Where a CLAUSE ends. A negator or a history marker outside the denial's own
-#: clause says nothing about that denial — the sentence-wide reading is what let a
-#: trailing open-defect reference excuse the retracted sentence above it.
-#: ⚠️ The COMMA is a boundary (`#10200` review): without it a comma-joined run is
-#: ONE clause, so *"was a declared false positive before `#9417`, and it still
-#: drops the property"* — history kept, the denial NOT corrected — was green. In
-#: English a comma between coordinated predicates separates two units, so it is a
-#: clause boundary here even though it is not a sentence boundary.
+#: Where a CLAUSE ends. A history marker outside the denial's own clause says
+#: nothing about that denial — the sentence-wide reading is what let a trailing
+#: open-defect reference excuse the retracted sentence above it.
+#: ⚠️ The COMMA is a boundary for the HISTORY escape (`#10200` review): without it a
+#: comma-joined run is ONE clause, so *"was a declared false positive before
+#: `#9417`, and it still drops the property"* — history kept, the denial NOT
+#: corrected — was green. In English a comma between coordinated predicates
+#: separates two units, so it is a clause boundary here even though it is not a
+#: sentence boundary.
 _CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|", ",")
+
+#: ⛔ BUT THE NEGATOR SCAN GETS ITS OWN BREAK SET, WITHOUT THE COMMA. A comma is
+#: NOT a boundary for negation scope: a parenthetical sits between the auxiliaries
+#: and the class, so `,` in this set hid the negator and re-opened round 1's
+#: polarity finding — *"`sdk.supersede_point` is not, however, a re-materializing
+#: writer"* was green on BOTH legs (`#10200` review, measured). The history escape
+#: needs the comma; the negator does not.
+_NEGATOR_BREAKS: tuple[str, ...] = tuple(b for b in _CLAUSE_BREAKS if b != ",")
+
+#: A POST-positioned negator is still a negation of its predicate — English
+#: negates from behind as well as from in front, and these documents use that voice
+#: 14 times (`no longer`). Reading polarity only BACKWARD left *"`sdk.supersede_point`
+#: is a re-materializing writer no longer"* stating the class on both legs, and the
+#: exemption form *"… a declared false positive no longer: it re-materializes the
+#: set"* calling the exemption counted — the direction the recorded decision says
+#: may not happen (`#10200` review, measured).
+#: ⚠️ Deliberately NOT a whole-clause scan: a negator belonging to a NEIGHBOURING
+#: predicate reds true prose — measured on §13's *"A third NAMED form writer does
+#: not originate it but re-produces it on replay"*, whose `not` belongs to
+#: `originate`, not to the class.
+_POST_NEGATION_RE = re.compile(r"\bno\s+(?:longer|more|further)\b", re.I)
 
 #: Quantifier negations negate a COUNT, not the class: *"is not the ONLY writer
 #: that carries the set by property MAP"* AFFIRMS that this writer carries it, and
@@ -4081,6 +4115,13 @@ def _has_class_negator(prefix: str) -> bool:
     """Does this clause prefix carry a negator of the CLASS (not of a quantity)?"""
     return bool(_NEGATOR_RE.search(_QUANTIFIER_NEGATION_RE.sub(" ", prefix)))
 
+
+def _class_marker_negated(sentence: str, match) -> bool:
+    """Does a NEGATOR govern the class marker at `match` — in front or behind?"""
+    return _has_class_negator(
+        _clause_before(sentence, match.start())
+    ) or bool(_POST_NEGATION_RE.search(_clause_at(sentence, match.start())))
+
 #: A declared false positive described as COUNTED — the same contradiction from
 #: the other side: an exemption the census counts is a writer described as
 #: writing nothing. No history escape: this row has NEVER been counted, so a "it
@@ -4088,13 +4129,19 @@ def _has_class_negator(prefix: str) -> bool:
 EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
     "counted",
     "is one of them",
-    # FLATTENED — and a wider claim than the word "counted": an exemption
-    # ASSERTED to carry the set by property map states the same contradiction.
-    # Both were measured green at the `#10200` head: `"MAP-form writer"` was a
-    # dead marker (0 flattened occurrences), and *"writes the attribute set by
-    # property MAP"* named no member at all.
+    # FLATTENED — and wider claims than the word "counted": an exemption
+    # ASSERTED to carry the set by property map, or to re-materialize it, states
+    # the same contradiction. These were measured green at the `#10200` head:
+    # `"MAP-form writer"` was a dead marker (0 flattened occurrences), *"writes
+    # the attribute set by property MAP"* named no member at all, and *"… is a
+    # declared false positive no longer: it re-materializes the set"* put the
+    # whole MAP vocabulary behind the exemption marker and red nothing.
+    # ⚠️ `re materializ` is safe here where it is not evidence of a COUNTED row:
+    # the true §13.8 q2 sentence explains the exemption by quoting `SET r += $attrs`
+    # under two protections, and never says the replay re-materializes.
     "MAP form writer",
     "attribute set by property map",
+    "re materializ",
 )
 
 #: A DECLARED FALSE POSITIVE COUNT, in the spellings the documents use. The `^`
@@ -4160,9 +4207,14 @@ def _claim_sentences(text: str) -> list[str]:
 
 
 def _clause_before(sentence: str, index: int) -> str:
-    """The text of the clause that ENDS at `index` — a negator's neighbourhood."""
+    """The text of the clause that ENDS at `index` — a negator's neighbourhood.
+
+    Uses `_NEGATOR_BREAKS`, NOT `_CLAUSE_BREAKS`: a comma separates coordinated
+    predicates for the history escape, but a parenthetical after a comma does not
+    remove a negator's scope (`#10200` review).
+    """
     head = sentence[:index]
-    cut = max((head.rfind(brk) for brk in _CLAUSE_BREAKS), default=-1)
+    cut = max((head.rfind(brk) for brk in _NEGATOR_BREAKS), default=-1)
     return head[cut + 1:]
 
 
@@ -4189,7 +4241,7 @@ def _stated_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
     for marker in markers:
         pattern = re.compile(re.escape(marker.lower()))
         if any(
-            not _has_class_negator(_clause_before(low, match.start()))
+            not _class_marker_negated(low, match)
             for match in pattern.finditer(low)
         ):
             found.append(marker)
@@ -4197,13 +4249,13 @@ def _stated_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
 
 
 def _denied_markers(sentence: str, markers: tuple[str, ...]) -> list[str]:
-    """Markers under a NEGATOR in their own clause — the classes they DENY."""
+    """Markers under a NEGATOR — in their own clause or behind them — denied."""
     low = sentence.lower()
     found: list[str] = []
     for marker in markers:
         pattern = re.compile(re.escape(marker.lower()))
         if any(
-            _has_class_negator(_clause_before(low, match.start()))
+            _class_marker_negated(low, match)
             for match in pattern.finditer(low)
         ):
             found.append(marker)
@@ -4378,6 +4430,38 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
         "a `RE-MATERIALIZING` sentence is not read as stating the MAP class, so "
         "the marker is written in a spelling `_flat` cannot produce and pins "
         "nothing"
+    )
+    # … Probe 5: a NEGATOR separated from the class by a COMMA-SET PARENTHETICAL
+    # is still a negation of it, so the affirmative half must NOT count it.
+    # Round 2 put `,` into the shared break set to stop the history escape
+    # spanning a conjunction, and that silently re-opened round 1's polarity
+    # finding for ordinary English; the negator scan therefore has its own break
+    # set (`_NEGATOR_BREAKS`). `#10200` review.
+    appositive = (
+        (
+            "probe",
+            "`sdk.supersede_point` is not, however, a re-materializing writer.",
+        ),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _unstated_verdicts(list(appositive))
+    ), (
+        "a comma-separated parenthetical hides the negator from the affirmative "
+        "half, so the sentence counts as stating the class it negates"
+    )
+    # … Probe 6: a POST-positioned negator. English negates from behind as well
+    # as from in front (`no longer` appears 14 times in these documents), so a
+    # marker followed by one must not count as stating the class.
+    post_negated = (
+        ("probe", "`sdk.supersede_point` is a re-materializing writer no longer."),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _unstated_verdicts(list(post_negated))
+    ), (
+        "a negator AFTER the class marker is not read, so the class can be "
+        "denied by moving one adverb to the end of the clause"
     )
     unstated = _unstated_verdicts(sections)
     assert not unstated, (
@@ -4565,6 +4649,52 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "a quantifier negation makes the class count as UNSTATED, so the leg "
         "reds a sentence that does state the class"
     )
+    # Probe 9: a NEGATOR separated from the class by a COMMA-SET PARENTHETICAL is
+    # still a negation of it. Round 2 put `,` into the shared break set to stop the
+    # history escape spanning a conjunction, and that silently re-opened round 1's
+    # polarity finding for ordinary English (`#10200` review: green on BOTH legs).
+    # The negator scan therefore has its own break set (`_NEGATOR_BREAKS`).
+    appositive = (
+        (
+            "probe",
+            "`sdk.supersede_point` is not, however, a re-materializing writer.",
+        ),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(appositive))
+    ), (
+        "a comma-separated parenthetical hides the negator, so an ordinary "
+        "English class negation states the class instead of denying it"
+    )
+    # Probe 10: a POST-positioned negator. English negates from behind as well as
+    # from in front, and these documents write `no longer` 14 times; reading
+    # polarity only backward left the trailing form stating the class on both legs
+    # (`#10200` review), including the exemption direction.
+    post_negated = (
+        ("probe", "`sdk.supersede_point` is a re-materializing writer no longer."),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(post_negated))
+    ), (
+        "a negator AFTER the class marker is not read, so the verdict can be "
+        "denied by moving one adverb to the end of the clause"
+    )
+    post_exemption = (
+        (
+            "probe",
+            "`projection._rebuild_all_replay` is a declared false positive no "
+            "longer: it re-materializes the set.",
+        ),
+    )
+    assert any(
+        "_rebuild_all_replay" in item
+        for item in _denied_verdicts(list(post_exemption))
+    ), (
+        "the exemption may be called counted by putting `no longer` after the "
+        "exemption marker, which is the direction the recorded decision forbids"
+    )
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
         "a corrected passage contradicts a census table:\n  "
@@ -4685,4 +4815,107 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
         f"{where} states the ordinal for a population of {stated - 1}, but the "
         f"census holds {population} writers, so the site OUTSIDE it is the "
         f"{ORDINAL_WORDS[invisible]} — derive the ordinal from the tables"
+    )
+
+
+#: A hyphen BETWEEN word characters. `_flat` normalises exactly this to a space,
+#: so a marker containing one can NEVER match a flattened sentence — it is dead
+#: on arrival while reading as if it matched. Four such markers shipped in this
+#: PR's first three forms (`MAP-form`, `NAMED-form`, `re-materializ`,
+#: `MAP-form writer`) and each was found by a review, not by the suite.
+_HYPHENATED_MARKER = re.compile(r"\w-\w")
+
+#: Markers that are DELIBERATELY absent from today's documents: a retraction
+#: tripwire pins a sentence MEASURED false at some head, and a contradiction
+#: vocabulary member exists to catch a sentence nobody has written yet. Being
+#: absent is their job, so the liveness half below exempts them BY NAME — stated
+#: rather than inferred, because "absent from the docs" is otherwise exactly the
+#: dead-marker symptom.
+MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
+    "originates": "a future spelling of the NAMED class; live today as `originating`",
+    "neither carries": "retraction tripwire — the `#9417`-era denial, absent by design",
+    "transferred bare": "retraction tripwire — the pre-`#9417` denial, absent by design",
+}
+
+
+def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
+    """Every marker must be a spelling `_flat` can produce, and be pinned.
+
+    `#10200` review: `EXEMPT_COUNTED_MARKERS` held `"MAP-form writer"`, matched
+    with `marker.lower() in low` against a FLATTENED sentence, and `_flat` turns
+    `-` between word characters into a SPACE — measured **0** occurrences in
+    either flattened document, and 0 is what it could ever be. An exemption
+    asserted to *"write the attribute set by property MAP"* was green, and the
+    same was true of `"MAP-form"`, `"NAMED-form"` and `"re-materializ"`. A DEAD
+    marker is worse than a missing one: it reads as coverage, and the sentence
+    class it was supposed to catch stays green for ever.
+
+    Two halves, because either alone is useless:
+      1. NO marker may contain a hyphen between word characters (a spelling the
+         flattener cannot emit), and
+      2. every marker must otherwise be either PRESENT in the flattened documents
+         or listed in `MARKERS_ABSENT_BY_DESIGN` with a stated reason — so a
+         marker that dies by drift (a document reworded away from it) reds here
+         instead of pinning nothing.
+    """
+    families: dict[str, tuple[str, ...]] = {
+        "CLASS_VERDICT_MARKERS": tuple(
+            marker for markers in CLASS_VERDICT_MARKERS.values() for marker in markers
+        ),
+        "DENIAL_MARKERS": DENIAL_MARKERS,
+        "HISTORY_MARKERS": HISTORY_MARKERS,
+        "EXEMPT_COUNTED_MARKERS": EXEMPT_COUNTED_MARKERS,
+    }
+    # Probe: the pattern must see the four spellings this leg exists for …
+    unhittable = ("MAP-form", "NAMED-form", "re-materializ", "MAP-form writer")
+    for spelling in unhittable:
+        assert _HYPHENATED_MARKER.search(spelling), (
+            f"the dead-marker pattern does not see {spelling!r}, so it cannot "
+            "red on the defect it was written for"
+        )
+    # … and must NOT flag the live flattened spelling of the same words.
+    for spelling in ("MAP form", "NAMED form", "re materializ", "pre-#9417"):
+        assert not _HYPHENATED_MARKER.search(spelling), (
+            f"the dead-marker pattern flags {spelling!r}, which `_flat` produces "
+            "(or which has no hyphen between word characters), so it would red "
+            "on a live marker"
+        )
+    dead = [
+        f"{family}: {marker!r}"
+        for family, markers in families.items()
+        for marker in markers
+        if _HYPHENATED_MARKER.search(marker)
+    ]
+    assert not dead, (
+        "these markers contain a hyphen between word characters, and `_flat` "
+        "normalises that to a SPACE — so they can never match a sentence and "
+        f"pin nothing: {dead}. Write the FLATTENED spelling."
+    )
+
+    flat = (
+        _flat(_doc(STORAGE)).lower(),
+        _flat(_doc(EXTRACTOR)).lower(),
+    )
+    unpinned = [
+        f"{family}: {marker!r}"
+        for family, markers in families.items()
+        for marker in markers
+        if not any(marker.lower() in text for text in flat)
+        and marker not in MARKERS_ABSENT_BY_DESIGN
+    ]
+    assert not unpinned, (
+        "these markers appear in NEITHER flattened document and are not declared "
+        f"absent-by-design: {unpinned} — either a document was reworded away from "
+        "the marker (so it now pins nothing), or it needs a line in "
+        "`MARKERS_ABSENT_BY_DESIGN` saying why its absence is intended"
+    )
+    stale = [
+        marker
+        for marker in MARKERS_ABSENT_BY_DESIGN
+        if any(marker.lower() in text for text in flat)
+    ]
+    assert not stale, (
+        f"these markers are declared absent-by-design but DO appear in the "
+        f"documents: {stale} — the declaration has gone stale, and a stale "
+        "declaration is how a live marker gets quietly exempted"
     )
