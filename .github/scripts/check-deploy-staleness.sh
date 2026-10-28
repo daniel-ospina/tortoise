@@ -397,7 +397,9 @@ from silence — the silence is what this check exists to break.
 **Check, in this order:**
 1. \`gh run list --workflow deploy-hosted.yml --limit 20\` — are deploys landing?
    Red/cancelled runs here are the cause (a migration-drift gate failing closed,
-   or a \`cancel-in-progress\` cascade from rapid merges). If there is **no run
+   or a newer push superseding a still-PENDING run — \`cancel-in-progress\` is
+   now \`false\`, so a RUNNING deploy is no longer cancelled mid-deploy). If
+   there is **no run
    at all** for the undeployed deployable commits, the deploy was never
    triggered — check the trigger's path filter, not the deploy's logs.
 2. The drift gate's own report (the failing run's \`Check migration drift\`

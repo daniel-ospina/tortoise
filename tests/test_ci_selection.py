@@ -182,6 +182,16 @@ def test_docs_scanning_gates_stay_in_tier1():
         "red on main (#4309/#3616 class, same dual registration as the six "
         "sibling test_extractor_v4_* doc guards)"
     )
+    assert "test_7949_e5_section10_writeback.py" in tier1, (
+        "#10108 review (P1): the E5 write-back pin binds "
+        "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md §10's replicated-run "
+        "table to a fresh run of the registered scorer — `docs/` is in "
+        "NON_PYTHON_PREFIXES and that document matches no SOURCE_PATTERNS "
+        "entry, so a docs-only edit of §10 runs tier1 only; registered in "
+        "`core` alone, retyping one digit or deleting the subsection merged "
+        "green while #7949/#7947 went on citing it (#4309 class, same dual "
+        "registration as the sibling capstone rows above)"
+    )
 
 
 def test_v4_membership_gate_runs_on_both_architecture_docs():
@@ -207,6 +217,35 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+
+def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
+    """#10108 review (P1): pin the SELECTION, not just the manifest string.
+
+    `tests/test_7949_e5_section10_writeback.py` compares §10's published
+    replicated-run figures against a fresh run of the registered scorer. The one
+    change that can red it is a docs-only edit of
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — the diff class on which
+    `docs/` is filtered out by NON_PYTHON_PREFIXES, the document matches no
+    SOURCE_PATTERNS entry, `changed` empties and `select()` takes the docs-only
+    early return, so tier1 is the ONLY surface that runs.
+
+    Measured before the fix: the document's plan was `surfaces=[]`, the tier-1
+    set (64 files) did not contain this file, and the pin was registered in
+    `core` alone — asleep on the exact change it exists to catch. The manifest
+    assertion in :func:`test_docs_scanning_gates_stay_in_tier1` catches a deleted
+    row; this catches a row that is present but no longer reaches the file
+    (#9778 review P2 made the same point for the declared-mechanism gate).
+    """
+    r = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_7949_e5_section10_writeback.py" in r["test_files"], (
+        "a docs-only edit of §10's replicated-run passage must select the pin "
+        "that binds it to the scorer — otherwise the table can be retyped, "
+        "edited one digit, or deleted and merge green (#10108 review P1, "
+        "#4309 class)"
+    )
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -2422,6 +2461,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_worktree_report_tool_change_selects_core_not_tier1():
+    """A change to the lane report must run the rules it pins (#10220).
+
+    `tests/test_worktree_report.py` is registered on the `core` surface and owns the
+    report's anti-fabrication guarantees — the counts are derived from a log that is
+    re-hashed and re-parsed, a red suite exits 3 and never 0, an unfinished suite is
+    refused. That registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/worktree_report.py`, so `select()` returns NO surface, takes the
+    docs-only early return and falls back to the tier-1 smoke set, which does not
+    contain the file. Weakening a rule would then be the one PR that never ran the
+    cases pinning it — and that tool is what the merge path reads as a lane's test
+    evidence (`agent-infra#2977`), so the drop would be invisible where it matters most.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/worktree_report.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_worktree_report.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ax_write_eval_tool_change_selects_core_not_tier1():
     """A change to the eval instrument must run the rules it pins (#9695 review).
 
@@ -3046,6 +3109,33 @@ def test_backfill_graph_turns_tool_change_selects_core_not_tier1():
     r = _sel(["tools/backfill_graph_turns.py"])
     assert "core" in r["surfaces"], r
     assert "test_10017_backfill_census.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_backfill_copy_turns_tool_change_selects_core_not_tier1():
+    # #10017 review P1 (the third time this class was measured on this chain):
+    # tools/backfill_copy_turns.py is the COPY phase — the write whose turns the
+    # parity gate then certifies before an IRREVERSIBLE delete — and it owns
+    # tests/test_10017_backfill_copy.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a copy-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, so the
+    # file's own suite — and its #5128 interpreter guard, the repo gate that DID
+    # red this tool at 4cdad4be7 — never ran on the PR editing the copy.
+    # Registering the test under `core` does not help: a name in a
+    # surface's test_files only runs when that surface is ALREADY selected.
+    #
+    # Measured before the CORE_ALSO entry: `--changed-files
+    # tools/backfill_copy_turns.py` -> surfaces=[], full=False,
+    # test_10017_backfill_copy.py ABSENT. Same #1349/#3332/#3616 silent-drop
+    # class as tools/backfill_graph_turns.py above. CORE_ALSO (not
+    # TOOL_CARVEOUTS) because the suite is hermetic (a fake graph + a fake
+    # journal, no DB). Mutation check: removing the CORE_ALSO entry fails the
+    # second assert below.
+    r = _sel(["tools/backfill_copy_turns.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_10017_backfill_copy.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -5369,8 +5459,27 @@ def test_no_required_check_names_a_fast_leg():
     # leg — so adding a leg cannot orphan anything it requires
     assert "test" in gate["needs"]
     assert not [n for n in gate["needs"] if str(n).startswith("test (")], gate["needs"]
-    # the rollup is job-id keyed, not leg-name keyed
-    assert "join(needs.*.result, ' ')" in gate["steps"][0]["run"]
+    # the rollup is job-id keyed, not leg-name keyed. ONE step does the rollup and it
+    # is the sole author of the verdict: `python-ci-gate` still has EXACTLY ONE step
+    # (#9984 kept it that way on purpose — the two checkouts, this repo and the pinned
+    # agent-infra holding the shared predicate, live in the SEPARATE
+    # `ci-introduced-failure` job, because a `uses:`/`with:`/`env:` step added to this
+    # aggregate would widen the shim defence the capstone pin enforces). So the pin
+    # names the property that matters — exactly one step, and exactly one reader of
+    # the join — instead of a positional index. (A previous revision of this comment
+    # claimed the two checkouts sat ahead of the rollup in THIS job; they never did,
+    # and that false premise is what made loosening the positional check look
+    # justified.)
+    assert len(gate.get("steps") or []) == 1, (
+        "python-ci-gate must stay a ONE-step aggregate — an extra step can export "
+        f"BASH_ENV or mask the rollup's exit code (#9984 review); got {[s.get('name') for s in gate.get('steps') or []]}")
+    rollup_steps = [s for s in gate.get("steps", [])
+                    if "join(needs.*.result, ' ')" in (s.get("run") or "")]
+    assert len(rollup_steps) == 1, (
+        "exactly one step must own the `needs.*.result` rollup — two readers means "
+        f"two verdicts; got {len(rollup_steps)}")
+    assert rollup_steps[0]["run"] == gate["steps"][0]["run"], (
+        "the rollup step must BE the aggregate's only step, not a sibling of one")
     # the merge queue's only merge condition is the aggregate. Comments MAY
     # name a leg as history (several do, deliberately) — the ENFORCED lines
     # must not.
@@ -8186,7 +8295,18 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         # a given leg is a check that does not observe it (#5219). And every red
         # must NAME its leg — that is #9240's deliverable, and the reason these
         # assertions inspect `out` rather than only the exit code.
-        for red in ("failure", "cancelled"):
+        #
+        # ⛔ SPLIT BY CLASS SINCE #9984, and the split is the contract, not a
+        # concession. `cancelled` (below) still reds on the aggregate's own authority:
+        # a leg that never ran produced NO failure set, so there is nothing to compare
+        # against main and nothing that could make it pre-existing. `failure` does reach
+        # the introduced-failure predicate, which asks the RAIL's question about the
+        # same tree — so its exit code now comes from the predicate, and the assertion
+        # that matters is the FAIL-CLOSED one: with no measurable baseline (the
+        # harness's env renders neither `PR_HEAD` nor `EVENT_NAME`) the predicate
+        # refuses and the check still exits 1. Deleting the delegation would make this
+        # vector exit 0 — which is exactly what the assertion catches.
+        for red in ("cancelled",):
             for leg in job_names:
                 bad = dict(green)
                 bad[leg] = red
@@ -8207,6 +8327,121 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 assert "❌ 1 leg(s) did not pass" in out, (
                     f"the summary must count exactly one red leg, unpadded; got "
                     f"{out!r}")
+
+        # ── THE INTRODUCED-FAILURE PREDICATE (#9984) ──────────────────────
+        # A failed SHARD is now delegated to `ci-introduced-failure` (a separate job,
+        # see the workflow): the aggregate asks whether that verdict job SUCCEEDED.
+        # Everything else about a red leg is unchanged — it is still named, and the
+        # check still cannot go green on a red tree without that verdict.
+        PREDICATE = "ci-introduced-failure"
+        assert PREDICATE in job_names, (
+            "the aggregate must consume the introduced-failure verdict as a need — "
+            "otherwise a failed shard has no adjudicator and #9984's predicate is "
+            "either missing or asked by nothing")
+
+        #: The arms a failed TEST can be excused on. Declared in the aggregate's own
+        #: script (`DEFERRABLE_LEGS`) and pinned against the verdict job's `needs:` by
+        #: tests/test_ci_new_failure_gate.py, so this harness reads it from the script
+        #: instead of restating it.
+        deferrable = re.search(r'^\s*DEFERRABLE_LEGS="([^"]+)"', script, re.M)
+        assert deferrable, (
+            "the aggregate must declare `DEFERRABLE_LEGS` — the arms a failed test can "
+            "be excused on (#9984); without it every failed leg is excusable or none is")
+        DEFERRABLE = set(deferrable.group(1).split())
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 0, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` certified must PASS the "
+                "required check — an exit 1 here means the delegation was deleted and "
+                f"the old \"does anything fail?\" predicate is back (#9984); got {out!r}")
+            assert "certified every failing id" in out and leg in out, (
+                f"the excused leg must be NAMED, or the operator cannot tell why a red "
+                f"shard merged (#9240/#9984); got {out!r}")
+
+        # (b) the SAME red shard with the verdict job RED: the aggregate fails, and the
+        #     verdict job is the leg it names. This is the case the old predicate got
+        #     right, and it must stay right — a real PR-caused failure still blocks.
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            bad[PREDICATE] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` did NOT certify must FAIL "
+                f"the required check; got {out!r}")
+            assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, (
+                f"the verdict job must be NAMED as the refusing leg; got {out!r}")
+
+        # (b2) `timed_out` is DELEGATED exactly like `failure` (#9984 review). The
+        #      delegating case is `failure|timed_out`, and the two halves must agree:
+        #      the aggregate delegates a timed-out shard, AND the verdict job's own
+        #      step runs for it (pinned structurally by
+        #      tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_
+        #      every_class_the_aggregate_delegates — a `success` from a verdict job
+        #      whose step never ran is not a certification).
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 0, (
+                f"a `timed_out` for `{leg}` must be delegated exactly like `failure` — "
+                "an exit 1 here means the delegating case lost its `timed_out` half; "
+                f"got {out!r}")
+            assert "certified every failing id" in out and leg in out, out
+        #      ... and, like `failure`, it is NEVER delegable on a non-test arm.
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 1, (
+                f"a `timed_out` for `{leg}` must never be excused by the test-failure "
+                f"verdict — it is not a test arm (#9984); got {out!r}")
+            assert "not a test arm" in out, out
+
+        # (c) the verdict job is the ONE failure that can never be deferred: deferring
+        #     it would make the verdict ask itself (a red verdict, excused by itself).
+        bad = dict(green)
+        bad[PREDICATE] = "failure"
+        rc, out = _verdict(bad)
+        assert rc == 1, (
+            "a red `ci-introduced-failure` must red the required check even when no "
+            f"other leg failed — it is the refusal itself; got {out!r}")
+        assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, out
+        assert "certified every failing id" not in out, (
+            f"a red verdict must never be reported as a certification; got {out!r}")
+
+        # (c2) a NON-test arm is never delegable: `surface-guard` red is a surface
+        #      expansion, not a trunk red, and a verdict about test ids says nothing
+        #      about it. (This is also what keeps a drift-gate failure a hard block.)
+        assert set(job_names) - DEFERRABLE, "there must be a non-deferrable arm to assert on"
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{leg}` failure must NEVER be excused by the test-failure verdict — "
+                f"it is not a test arm (#9984); got {out!r}")
+            assert f"::error::leg '{leg}'" in out and "not a test arm" in out, out
+
+        # (d) and it must be fail-closed about its own absence: a verdict job that was
+        #     CANCELLED or SKIPPED certifies nothing, so a red shard cannot be excused.
+        for verdict_result in ("cancelled", "skipped"):
+            bad = dict(green)
+            bad["test"] = "failure"
+            bad[PREDICATE] = verdict_result
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{verdict_result}` `{PREDICATE}` must not excuse a red shard — an "
+                f"absent verdict is not a clean one (#9984 constraint 1); got {out!r}")
+            assert f"::error::leg '{PREDICATE}'" in out, out
 
         # An always-run leg has NO selector that can decline it, so a `skipped`
         # one is a lost shard. This is the half of "`skipped` is not a pass"
@@ -8270,11 +8505,20 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         two["test-slow"] = "cancelled"
         rc, out = _verdict(two)
         assert rc == 1
-        assert "::error::leg 'test' reported 'failure'" in out, out
+        assert "test: reported 'failure'" in out, out
         assert "::error::leg 'test-slow' was CANCELLED" in out, out
-        assert out.count("::error::leg ") == 2, (
-            f"each red leg gets its own line; got {out!r}")
-        assert "❌ 2 leg(s) did not pass" in out, out
+        assert out.count("::error::leg ") == 1, (
+            "each HARD-red leg gets its own error line, and a delegated one gets a "
+            f"plain line; got {out!r}")
+        # `test` is DELEGATED (#9984) and `test-slow` is a lost shard: the aggregate
+        # names both and refuses on its own authority, because a cancelled leg
+        # certifies nothing and no verdict could excuse it. The delegation is a
+        # plain line, not an `::error::` — an error annotation would claim a refusal
+        # the gate is not making.
+        assert "❌ 1 leg(s) did not pass" in out, out
+        assert "::error::leg 'test-slow'" in out, out
+        assert "test: reported 'failure'" in out and "delegated" in out, (
+            f"a delegated failure must say so plainly; got {out!r}")
 
         # A duplicate row inspected twice is ONE red leg and must be counted
         # once — a copy-paste must not inflate the operator's summary.
@@ -8286,13 +8530,16 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             "could not find the `test` row to duplicate — the fixture is stale")
         dup_src = script.replace(row_line, f"{row_line}\n{row_line}", 1)
         one_red = dict(green)
-        one_red["test"] = "failure"
+        # `cancelled`, not `failure`: a delegated failure is excused by a green
+        # verdict (#9984), so a HARD-red class is what proves the count de-duplicates.
+        one_red["test"] = "cancelled"
         rc, out = _verdict(one_red, src=dup_src)
         assert rc == 1, (
             "a duplicated row must not hide its own red; got "
             f"rc={rc} {out!r}")
         assert "❌ 1 leg(s) did not pass" in out, (
-            f"the summary must count LEGS, not rows; got {out!r}")
+            "the summary must count LEGS, not rows — a duplicated row inspected "
+            f"twice is ONE red leg; got {out!r}")
 
         # The `failure|cancelled` sweep must stay REACHABLE (#9240 review: it
         # was dead code behind the deleted distinct-count guard). A red result
@@ -8305,6 +8552,33 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         assert "no leg row named it" in out, (
             "the unrowed-need red must come from the identity-blind sweep, i.e. "
             f"the sweep must be reachable; got {out!r}")
+
+        # That sweep's `cancelled` half must be reachable even while ANOTHER leg is
+        # delegated (#9984 review). Gating the whole sweep on `RED_LEGS` being empty
+        # disabled the `cancelled` half too — and `cancelled` can never be delegated
+        # (the leg loop reds on it by name), so all the gate did was let a leg that
+        # never ran pass the required check once a deferrable leg was adjudicated.
+        delegated_plus_lost = dict(green)
+        delegated_plus_lost["test"] = "failure"
+        rc, out = _verdict(delegated_plus_lost, extra=("cancelled",))
+        assert rc == 1, (
+            "a `cancelled` need with no leg row must red the required check even while "
+            f"a delegable `failure` is being adjudicated; got {out!r}")
+        assert "no leg row named it" in out, out
+
+        # ... and so must its `failure` half (#9984 review). The gate on that half is a
+        # COUNT (`RESULT_FAILS > ROW_FAILS`), not `RED_LEGS` being empty: emptiness asked
+        # the wrong question, because it holds whenever ANY leg was delegated — so an
+        # un-rowed `failure` need hid behind an unrelated delegated leg and the check
+        # printed "did not introduce it" over a leg the row table never looked at
+        # (measured pre-fix: rc=0). `extra=("failure",)` is a need that reached `needs:`
+        # with no row; `test=failure` is the delegable leg that used to mask it.
+        rc, out = _verdict(delegated_plus_lost, extra=("failure",))
+        assert rc == 1, (
+            "an un-rowed `failure` need must red the required check even while ANOTHER "
+            f"leg is delegated — otherwise the last-resort sweep is blinded in its own "
+            f"case; got {out!r}")
+        assert "no leg row named it" in out, out
 
 
 def test_required_gate_covers_the_long_legs():
