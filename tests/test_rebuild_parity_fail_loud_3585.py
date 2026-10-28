@@ -2636,8 +2636,12 @@ def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env, caplog)
     # written for the OLD miss population, which still held records the journal
     # had established NOTHING for. The amendment splits both of those out
     # (`no-address`, `unregistered`), so a record now reaches this arm ONLY with
-    # an ESTABLISHED address, i.e. with a creation the journal demonstrably
-    # holds (this fixture journals `ObjectRegistered id=obj-p1-a`). The retired
+    # an ESTABLISHED address — ⛔ NOT necessarily with a creation the journal
+    # holds (#10211 review round 6): the state-op fixture 18 lines below reaches
+    # this SAME arm with NO `ObjectRegistered` in the journal at all, because a
+    # state op's target id and a mention stub's deterministic id are addresses
+    # the journal holds without creating a node. THIS fixture happens to hold
+    # one (`ObjectRegistered id=obj-p1-a`). The retired
     # text sent an operator hunting an unjournaled producer that the journal in
     # their hands disproves. MEASURED: without this pin the arm can regress to
     # any wording and the file stays green.
@@ -2648,8 +2652,8 @@ def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env, caplog)
     assert "not re-created by any journaled event" not in report, (
         f"the miss arm still describes the retired population: {report}")
     assert "DID establish this record's address" in report, (
-        f"the miss arm does not name the real cause (established address, "
-        f"carrier collapsed or renamed away): {report}")
+        f"the miss arm does not name the real cause (an established address "
+        f"with no Object carrying it): {report}")
     r = check_consistency(str(events / "events.jsonl"), proj)
     assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
 
@@ -2682,6 +2686,44 @@ def test_state_op_target_id_with_an_unestablished_name_still_refuses(env):
     assert "object-superseded-unregistered" not in str(ei.value), (
         "a state op's target id was treated as established by nothing: "
         f"{ei.value}")
+
+
+def test_rename_carried_name_with_no_creation_still_refuses(env, caplog):
+    """#10211 review round 6: the miss arm's NON-CREATION limb has TWO
+    spellings, and the NAME one is reachable.
+
+    A rename state op carries a `SET` of the merge key, so the journal
+    establishes that NAME — but if the rename's own target never existed, the
+    journal holds an address from a write that created nothing, and there is NO
+    carrier to collapse or rename. The miss arm therefore cannot illustrate limb
+    (2) with a target id alone.
+
+    FAILS IF: the arm enumerates only "a state op's or a mention stub's target
+    id" (the round-5 wording), which leaves this record in NEITHER limb and
+    sends the operator after a carrier that does not exist — and if nothing
+    pins the message, the id-only illustration can come back unnoticed.
+
+    REACHABLE: a raw/legacy producer that renames into a name and then
+    supersedes by that name, with no `ObjectRegistered` anywhere in the journal.
+    """
+    sdk, events = env
+    _raw(events, type="EntityMutated", op="rename", label="Object",
+         id="obj-mut-9", state={"name": "RENAMED-GHOST"}, event_id="e-mut-9")
+    _raw(events, type="ObjectSuperseded", name="RENAMED-GHOST",
+         supersedes_by="y", event_id="e-mut9-sup")
+    proj = sdk._get_proj()
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+            pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), (
+        "a name the journal established via a rename was exempted as "
+        f"unestablished: {ei.value}")
+    report = " ".join(r.getMessage() for r in caplog.records)
+    assert "DID establish this record's address" in report, report
+    assert "the NAME a rename's `SET` carries" in report, (
+        f"the miss arm's non-creation limb does not name the NAME spelling, so "
+        f"this record falls outside both limbs: {report}")
 
 
 def test_mention_stub_id_with_an_unestablished_name_still_refuses(env):

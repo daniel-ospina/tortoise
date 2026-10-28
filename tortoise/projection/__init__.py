@@ -15362,13 +15362,24 @@ class FalkorProjection(
                     # only the collapse/rename sent an operator after a merge
                     # that does not exist while the abort's own remedy named the
                     # right repair for the same record.
+                    # ⛔ BOTH SPELLINGS, not just the id (#10211 review round
+                    # 6): a record whose established address is a NAME a rename
+                    # state op carries, where that rename's target never
+                    # existed, is limb (2) — there is no carrier to collapse or
+                    # rename — so an id-only illustration left it in neither
+                    # limb. MEASURED: journal = [EntityMutated op=rename
+                    # {name: RENAMED-GHOST}, ObjectSuperseded {name:
+                    # RENAMED-GHOST}] establishes that name and no id, holds no
+                    # `ObjectRegistered`, and lands here.
                     _sup_why = ("the journal DID establish this record's "
                                 "address, but no Object carries it on this "
                                 "replay — a genuine divergence: either the "
                                 "carrier was collapsed or renamed, or the "
                                 "journal holds the address from a write that "
-                                "created nothing (a state op's or a mention "
-                                "stub's target id)")
+                                "created nothing — a state op's target id, or "
+                                "the NAME a rename's `SET` carries when its "
+                                "target never existed; or a mention stub's "
+                                "deterministic id")
                 else:
                     # Unreachable fail-safe: every shape this sweep can record
                     # has an arm above. Named so an added shape is LOUD here
