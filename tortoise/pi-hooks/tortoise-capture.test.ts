@@ -1929,9 +1929,14 @@ test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisib
   // classes (unreachable to every surface — a corrupt meta moved it out of every
   // scan), so an operator must not have to infer that from the order.
   assert.ok(
-    reaped[0].detail.includes("UNREACHABLE, never filed"),
+    reaped[0].detail.includes("UNREACHABLE"),
     `the ledger must say which class of loss a quarantined log is: ${reaped[0].detail}`,
   );
+  // …and no more than survives the quarantine: the corrupt meta (the only copy of
+  // `filed_key`) is REMOVED, so "never filed" is not a fact the record can hold —
+  // over-reporting irreversible loss is what teaches an operator to stop reading it.
+  assert.equal(reaped[0].detail.includes("never filed"), false, reaped[0].detail);
+  assert.ok(reaped[0].detail.includes("unknown"), reaped[0].detail);
 });
 
 // ── (4) Endpoint unreachable → retry with backoff, never a loss ────────────

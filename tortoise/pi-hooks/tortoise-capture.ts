@@ -1818,8 +1818,11 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  * because it is the SAFEST loss of the three: a corrupt meta moved it out of
  * every scan, so no drain can file it and no reader can list it, while a live
  * entry — filed or not — still has a surface that can deliver it. The eviction
- * is still a real loss, and its record names it in the same `loss` vocabulary
- * the live entries use (#6388).
+ * is still a real loss, and its record names that class in the same `loss`
+ * vocabulary the live entries use (#6388) — but it must not claim MORE than
+ * survives the quarantine: `quarantineLog` removes the corrupt meta, which was
+ * the only copy of `filed_key`, so whether the bytes ever reached the wire is
+ * unknowable and the record says `unknown` rather than inventing the answer.
  */
 export function pruneSpool(
   dir: string,
@@ -1861,7 +1864,8 @@ export function pruneSpool(
         reason: DISCARD_BYTES_EXCEEDED,
         detail:
           `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}` +
-          "; evicted a quarantined log (UNREACHABLE, never filed: its meta was corrupt)",
+          "; evicted a quarantined log (UNREACHABLE: its meta is gone, so" +
+          " whether it was ever filed is unknown)",
       }),
     );
     try {

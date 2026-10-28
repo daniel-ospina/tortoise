@@ -3549,7 +3549,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    15, "72db952ec1d0df00b680d06015ea8c07c36c950cac53de0d6609de355ad2254a")
+    15, "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3640,14 +3640,17 @@ _GENERATION_DIGESTS = {
     # very backlog it exists to deliver.  The discard line also names the class of
     # loss now (`UNDELIVERED (never filed)` vs `filed`); it is the only surface a
     # cap eviction has.  Behaviour moved, so the generation moves with it.
-    # Generation 15's digest was re-cut ONCE before it shipped: the review of
-    # #10216 found the quarantined-log path still unlabelled, so the same
-    # unmerged generation gained the `UNREACHABLE, never filed` record (and the
-    # prose that names its precedence).  No installed copy can carry generation
+    # Generation 15's digest was re-cut before it shipped: the review of #10216
+    # found the quarantined-log path still unlabelled, so the same unmerged
+    # generation gained the `UNREACHABLE` record (and the prose that names its
+    # precedence), then lost the `never filed` clause that record first carried
+    # — the corrupt meta, the only copy of the filing stamp, is removed at
+    # quarantine, so that clause asserted something the code cannot know.  No
+    # installed copy can carry generation
     # 15 — it has never been on `main` — so this is the one rewrite the rule
     # below permits, and it is recorded here rather than left to look like a
     # refresh-to-green.
-    15: "72db952ec1d0df00b680d06015ea8c07c36c950cac53de0d6609de355ad2254a",
+    15: "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f",
 }
 
 

@@ -3035,10 +3035,15 @@ def test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling(tmp_p
     # #6388: the orphan record names its class too. It goes FIRST among the
     # three classes (unreachable to every surface — a corrupt meta moved it out
     # of every scan), so an operator must not have to infer that from the order.
-    assert "UNREACHABLE, never filed" in reaped[0]["detail"], (
-        "the ledger must say which class of loss a quarantined log is: "
-        "unreachable, not merely undelivered"
+    assert "UNREACHABLE" in reaped[0]["detail"], (
+        "the ledger must say which class of loss a quarantined log is"
     )
+    # …and no more than survives the quarantine: the corrupt meta (the only copy
+    # of `filed_key`) is REMOVED, so "never filed" is not a fact the record can
+    # hold — over-reporting irreversible loss is what teaches an operator to stop
+    # reading the field.
+    assert "never filed" not in reaped[0]["detail"], reaped[0]["detail"]
+    assert "unknown" in reaped[0]["detail"], reaped[0]["detail"]
 
 
 def test_a_non_dict_terminal_marker_does_not_strand_the_entry(tmp_path):

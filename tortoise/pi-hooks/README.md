@@ -291,8 +291,9 @@ entry, which is the only copy of an undelivered conversation (#6388). Within a
 class the order is oldest-first, and the entry just written is never evicted. A
 quarantined turn log (`*.turns.jsonl.orphan[N]`) goes first even among those: a
 corrupt meta moved it out of every scan, so no drain can file it and no reader
-can list it — the safest loss of the three — and its record says
-`UNREACHABLE, never filed`.
+can list it — the safest loss of the three — and its record says `UNREACHABLE`,
+with the class it cannot know left as `unknown` (the corrupt meta, the only copy of
+the filing stamp, is removed when the log is quarantined).
 
 Idempotency is `session_id` (the server's upsert key) plus a content-addressed
 client key `sha256(session_id \0 sha256(turns))`, so replaying the same spool
