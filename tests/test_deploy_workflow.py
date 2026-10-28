@@ -2570,17 +2570,17 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "can find (wrong password / paused project)"
     )
     # `no_tenant` is also the DESIGNED outcome for a credential that names no
-    # graph the record can key on (`record_tenant_for` returns None for a
-    # SESSION/PAT or OAuth `oat_` key — neither carries a `default_graph_id`, a
-    # RESOLUTION gap at the credential, #10046 — and for the self-host registry
-    # lane, #9188/#9192), and these counters are process-global — so an absolute
+    # graph the record can key on — the self-host registry lane
+    # (`record_tenant_for` returns None there because `control_plane_ids` is
+    # False, #9188/#9192) — and these counters are process-global, so an absolute
     # "none at all for `no_tenant`" reds a healthy armed deployment on ordinary
     # traffic and offers no legitimate remedy. The bar must bound that arm to the
     # CAPTURE and **rule the per-request attribution out** (`record_writer` logs no
     # request identity), keeping it a fail-and-fix for the capture's own writes.
-    # (The SESSION/OAuth resolution gap is #10046, not #10047 — `hosted_api.py`
-    # `_bind_record_tenant`'s SCOPE BOUND names #10046 for that class and #10047
-    # for the runners below, and `mcp_auth.py` says the same. #10083 review P2.)
+    # ⛔ #10046 CLOSED the session/OAuth half: `hosted_api._session_user_org` and
+    # `oauth.resolve_oauth_access_token` now stamp `default_graph_id`, so neither
+    # credential class is a designed `no_tenant` source any more and the prose
+    # must not list them as one (review P2, rebase onto main's #10090).
     assert re.search(r"BOUND to the proving capture, not to the process", flat), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
@@ -2627,6 +2627,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "this pin cannot see): the pre-#10025 list is back, reading an org-wide key "
         "as designed residue beside the session / OAuth shapes. The CLAIM is "
         "measured by the `NOT one of those sources` pin above; keep this exact, "
+        "cheap, and honestly labelled"
+    )
+    assert re.search(
+        r"A session/JWT credential and an OAuth `oat_` token are \*\*NOT\*\* one of "
+        r"those\s+sources",
+        flat,
+    ), (
+        "the ⚠️ list files a session/JWT or OAuth `oat_` credential under the "
+        "DESIGNED `no_tenant` sources, which #10046 made false — "
+        "`hosted_api._session_user_org` and `oauth.resolve_oauth_access_token` "
+        "both stamp `default_graph_id`, so a `no_tenant` from either is the "
+        "default row failing to be NAMED, i.e. a fail-and-fix"
+    )
+    assert not re.search(r"carries no\s+`default_graph_id` at all", flat), (
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10046 "
+        "'RESOLUTION gap at the credential' claim is back. The CLAIM is measured by "
+        "the `session/JWT credential and an OAuth` pin above; keep this exact, "
         "cheap, and honestly labelled"
     )
     assert re.search(

@@ -3500,11 +3500,17 @@ why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
    `no_tenant` is ALSO the designed outcome for a credential that names no graph
-   **the record can key on**: a SESSION / PAT or OAuth `oat_` key (it carries no
-   `default_graph_id` at all — a RESOLUTION gap at the credential, #10046), and
-   the self-host registry lane (`record_writer.record_tenant_for` returns `None`
-   by design) — both documented as the fail-closed direction (#9188/#9192), not
+   **the record can key on**: the self-host registry lane
+   (`record_writer.record_tenant_for` returns `None` by design, #9188/#9192), not
    a regression.
+   ⛔ A session/JWT credential and an OAuth `oat_` token are **NOT** one of those
+   sources, and since #10046 that class is gone — so do NOT read either as one.
+   `hosted_api._session_user_org` and `oauth.resolve_oauth_access_token` put the
+   org's active `kind='default'` row id on the credential as `default_graph_id`,
+   exactly as `resolve_api_key` does, and `record_tenant_for` names it. So on the
+   hosted REST, MCP and OAuth lanes a `no_tenant` from either means the default
+   row could not be NAMED (absent, tombstoned, another org's, unreadable) or the
+   tenant read was lost — a **fail-and-fix**, not a designed state (#10046).
    ⚠️ An **org-wide API KEY is NOT one of those sources** since #10025:
    `resolve_api_key` puts the org's active `kind='default'` row id on the
    credential as `default_graph_id` and `record_tenant_for` names it, so an
