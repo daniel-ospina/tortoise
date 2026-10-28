@@ -2587,7 +2587,7 @@ def test_nested_record_spelling_agrees_on_every_engine(env):
     assert r["divergence"] != "non-folded", r["divergence"]
 
 
-def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
+def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env, caplog):
     """#10107 review P1: an id the journal ESTABLISHED is addressable even
     when the name the record also carries is one nothing established.
 
@@ -2610,12 +2610,33 @@ def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
     _raw(events, type="ObjectSuperseded", id="obj-p1-a", name="GHOST-OF-COLL2",
          supersedes_by="y", event_id="e-p1-sup")
     proj = sdk._get_proj()
-    with pytest.raises(NonFoldedEventsError) as ei:
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+            pytest.raises(NonFoldedEventsError) as ei:
         proj.rebuild_all(str(events), confirm_destructive=True)
     assert "object-superseded-miss" in str(ei.value), str(ei.value)
     assert "object-superseded-unregistered" not in str(ei.value), (
         "an established id was exempted because its NAME was unestablished — "
         f"the exemption widened past its bound: {ei.value}")
+    # ⛔ THE MISS ARM'S DIAGNOSED CAUSE (#10211 review round 4). This arm used to
+    # say "object not re-created by any journaled event (pre-#2194 journal,
+    # unjournaled capture SDK, legacy unjournaled Object, or delete race)" —
+    # written for the OLD miss population, which still held records the journal
+    # had established NOTHING for. The amendment splits both of those out
+    # (`no-address`, `unregistered`), so a record now reaches this arm ONLY with
+    # an ESTABLISHED address, i.e. with a creation the journal demonstrably
+    # holds (this fixture journals `ObjectRegistered id=obj-p1-a`). The retired
+    # text sent an operator hunting an unjournaled producer that the journal in
+    # their hands disproves. MEASURED: without this pin the arm can regress to
+    # any wording and the file stays green.
+    # ⚠️ Asserted on the SWEEP'S WARNING, which is where `_sup_why` renders —
+    # the raised error carries `refusal_remedy`, not this arm, so an assertion
+    # on `str(ei.value)` can never fail for the right reason.
+    report = " ".join(r.getMessage() for r in caplog.records)
+    assert "not re-created by any journaled event" not in report, (
+        f"the miss arm still describes the retired population: {report}")
+    assert "DID establish this record's address" in report, (
+        f"the miss arm does not name the real cause (established address, "
+        f"carrier collapsed or renamed away): {report}")
     r = check_consistency(str(events / "events.jsonl"), proj)
     assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
 

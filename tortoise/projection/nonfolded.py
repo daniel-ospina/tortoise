@@ -492,8 +492,14 @@ NO_ADDRESS_INSTRUCTION = (
 _NO_ADDRESS_REMEDY = (
     "A record of shape "
     f"`{SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}` carries no name and no "
-    "id that is a non-empty string, so there is no missing creation to add "
-    "and nothing out of order "
+    # ⛔ SCOPED TO THE RECORD, not to the journal (#10211 review round 4): a
+    # record with no address establishes NOTHING about the journal — its target
+    # is unknown, so a missing creation for that unknown target is exactly what
+    # cannot be ruled out. "the only repair is to fix the producing write" even
+    # concedes that lines can be missing. Claiming "nothing out of order" for
+    # the journal was an inference this record cannot support.
+    "id that is a non-empty string, so there is no creation THIS RECORD names "
+    "to add and no ordering it reports "
     # ⛔ "ITS repair", not "the only repair": `refusal_remedy` emits BOTH
     # sentences for a MIXED set, and an unscoped exclusivity claim then tells
     # the caller to reconcile the journal AND that reconciling it is not the

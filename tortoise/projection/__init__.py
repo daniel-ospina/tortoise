@@ -70,6 +70,7 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_DELETE_MISS,
     SHAPE_EDGE_MESSAGE_MISS,
     NO_ADDRESS_INSTRUCTION,
+    SHAPE_OBJECT_SUPERSEDED_MISS,
     SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS,
     SHAPE_OBJECT_SUPERSEDED_UNREGISTERED,
     SHAPE_POINT_BELIEF_MISS,
@@ -15336,11 +15337,31 @@ class FalkorProjection(
                     _sup_why = ("the journal hard-deleted the target before "
                                 "the deferred sweep ran, so live and replay "
                                 "both end with it absent — nothing was lost")
+                elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_MISS:
+                    # ⛔ THIS ARM'S TEXT WAS RETIRED BY THE AMENDMENT (#10211
+                    # review round 4): it used to say "object not re-created by
+                    # any journaled event (pre-#2194 journal, unjournaled capture
+                    # SDK, legacy unjournaled Object, or delete race)", which was
+                    # true of the OLD miss population — records the journal had
+                    # established NOTHING for. Both of those now classify
+                    # separately (`no-address`, `unregistered`), so a record can
+                    # only reach THIS arm with `OBJECT_ADDRESS_ESTABLISHED`,
+                    # which `journal_object_established` derives from a journaled
+                    # event alone. The creation IS in the journal; the fold
+                    # missed because the carrier collapsed onto one merge key or
+                    # was renamed away. Telling the operator to look for an
+                    # unjournaled producer sent them after a defect that the
+                    # journal in their hands disproves.
+                    _sup_why = ("the journal DID establish this record's "
+                                "address, but the fold could not land the "
+                                "supersede on it — the carrier was collapsed "
+                                "or renamed away")
                 else:
-                    _sup_why = ("object not re-created by any journaled "
-                                "event (pre-#2194 journal, unjournaled "
-                                "capture SDK, legacy unjournaled Object, or "
-                                "delete race)")
+                    # Unreachable fail-safe: every shape this sweep can record
+                    # has an arm above. Named so an added shape is LOUD here
+                    # rather than silently described as a miss.
+                    _sup_why = (f"object-superseded fold matched no Object "
+                                f"(unclassified shape {_sup_shape!r})")
                 logger.warning(
                     "rebuild: ObjectSuperseded fold matched no Object "
                     "(event_id=%s supersedes_by=%r) — %s",
