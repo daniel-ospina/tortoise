@@ -157,12 +157,6 @@ _tortoise_candidate_python() {
   fi
 }
 
-# 0 when this seam can actually RUN the checkout at "$1". Holding `tortoise/`
-# is not that (#4848): the tree must offer an entry point this guard accepts. A
-# WHEEL install resolves a module dir INSIDE a venv's site-packages, where there
-# is no `.venv` beneath it — the venv that OWNS the tree is the one marked by
-# `pyvenv.cfg`, found by walking up (bounded), the same way the seams' own wheel
-# probe does (#2385).
 # The interpreter this seam would RUN the module dir "$1" with, or nothing when
 # there is none. THIS is the precedence: `_tortoise_dir_runnable` accepts a
 # candidate exactly when something can run it, and the seam's own resolution

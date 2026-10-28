@@ -139,12 +139,6 @@ _tortoise_candidate_python() {
   fi
 }
 
-# 0 when this seam can actually RUN the checkout at "$1". Holding `tortoise/`
-# is not that (#4848): the tree must offer an entry point this guard accepts. A
-# WHEEL install resolves a module dir INSIDE a venv's site-packages, where there
-# is no `.venv` beneath it — the venv that OWNS the tree is the one marked by
-# `pyvenv.cfg`, found by walking up (bounded), the same way the seams' own wheel
-# probe does (#2385).
 # The interpreter this seam would RUN the module dir "$1" with, or nothing when
 # there is none. THIS is the precedence: `_tortoise_dir_runnable` accepts a
 # candidate exactly when something can run it, and the seam's own resolution
@@ -464,19 +458,22 @@ if [ -n "$TORTOISE_BIN" ] && ! _tortoise_bin_qualifies "$TORTOISE_BIN"; then
   TORTOISE_UNUSABLE_BIN="$TORTOISE_BIN"
   TORTOISE_BIN=""
 fi
-if [ -n "$TORTOISE_UNUSABLE_BIN" ]; then
-  _record_breadcrumb "claude" \
-    "the installed per-turn hook found a tortoise binary at $TORTOISE_UNUSABLE_BIN but the interpreter on its #! line cannot run it (tortoise needs Python $_TORTOISE_MIN_PY+), and captured nothing. Remedy: reinstall it (uv tool install --force .) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
-    || true
-  exit 0
-fi
-if [ -n "$TORTOISE_BIN" ]; then
-  # stdout MUST stay empty (UserPromptSubmit injects it into the user's prompt),
-  # but stderr is NOT swallowed: this is the mechanism of record, and a silent
-  # no-op (a wrong interpreter, an unreadable transcript) is precisely the
-  # "losing sessions silently" failure #3963 exists to remove.
-  "$TORTOISE_BIN" session spool "${SPOOL_ARGS[@]}" >/dev/null || exit 0
-else
+# #4848 review round 3: a stale binary on PATH is one MORE candidate this seam
+# must SKIP, never a dead end. Refusing here — BEFORE the module loop — left the
+# loop's own skip rule unapplied in the one seam that fires on every prompt, so
+# a host with a leftover `uv tool install` earlier on PATH and a perfectly
+# runnable checkout recorded in `hook-src-dir` kept the stale install and
+# recovered nothing: exactly the outcome #4848's acceptance decision exists to
+# prevent ("the loop still preferring an unusable candidate over a usable later
+# one"). It also made the refusal's own remedy a lie: it offered "set
+# TORTOISE_SRC_DIR to a checkout with a working .venv", but that variable is
+# read only INSIDE the loop below, after the `exit 0` — a user who followed the
+# message saw no change and had no way to tell why, which is the defect class
+# this change is about. A runnable checkout now WINS over the stale binary, and
+# the refusal fires only when nothing else resolved.
+TORTOISE_MODULE=""
+TORTOISE_UNUSABLE_DIR=""
+if [ -z "$TORTOISE_BIN" ]; then
 
   # Resolve a candidate module dir — accepted ONLY when it actually holds a
   # `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
@@ -485,8 +482,6 @@ else
   # candidate that HOLDS the package but cannot be RUN is skipped too, so the
   # loop can still reach a later, usable one (#4848) — and the first such
   # candidate is remembered so the refusal can NAME it.
-  TORTOISE_MODULE=""
-  TORTOISE_UNUSABLE_DIR=""
   for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
                    "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
                    "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
@@ -510,53 +505,70 @@ else
      && _tortoise_bin_qualifies "$TORTOISE_MODULE/.venv/bin/tortoise"; then
     TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
   fi
-  if [ -z "$TORTOISE_MODULE" ]; then
-    # A hook that captures nothing must leave EVIDENCE, never silence (#4314):
-    # from a HOME-scoped install `../..` is `$HOME`, so the old expression
-    # silently exited 0 having captured nothing at every single prompt.
-    # #4848: a dir that WAS found but cannot be run is a different cause with a
-    # different remedy, and the refusal names the interpreter.
-    if [ -n "$TORTOISE_UNUSABLE_DIR" ]; then
-      _record_breadcrumb "claude" \
-        "the installed per-turn hook resolved a tortoise source dir at $TORTOISE_UNUSABLE_DIR but $(_tortoise_unusable_reason "$TORTOISE_UNUSABLE_DIR") and captured nothing. Remedy: create that checkout's venv (uv sync --extra embeddings --extra parity in it) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
-        || true
-      exit 0
-    fi
+fi
+if [ -n "$TORTOISE_BIN" ]; then
+  # stdout MUST stay empty (UserPromptSubmit injects it into the user's prompt),
+  # but stderr is NOT swallowed: this is the mechanism of record, and a silent
+  # no-op (a wrong interpreter, an unreadable transcript) is precisely the
+  # "losing sessions silently" failure #3963 exists to remove.
+  "$TORTOISE_BIN" session spool "${SPOOL_ARGS[@]}" >/dev/null || exit 0
+  exit 0
+fi
+if [ -z "$TORTOISE_MODULE" ]; then
+  # A hook that captures nothing must leave EVIDENCE, never silence (#4314):
+  # from a HOME-scoped install `../..` is `$HOME`, so the old expression
+  # silently exited 0 having captured nothing at every single prompt.
+  # #4848: a binary that WAS found but cannot be RUN is a different cause with a
+  # different remedy, and it is named FIRST — it is the more specific of the two
+  # states, and it is reachable only once no checkout resolved above.
+  if [ -n "$TORTOISE_UNUSABLE_BIN" ]; then
     _record_breadcrumb "claude" \
-      "the installed per-turn hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), and captured nothing" \
+      "the installed per-turn hook found a tortoise binary at $TORTOISE_UNUSABLE_BIN but the interpreter on its #! line cannot run it (tortoise needs Python $_TORTOISE_MIN_PY+), and no runnable checkout was found instead, so it captured nothing. Remedy: reinstall it (uv tool install --force .) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
       || true
     exit 0
   fi
-  # `PYTHON_BIN` from the ENVIRONMENT is an explicit operator override and is
-  # honoured as-is; the resolved fallback is PROBED, so an interpreter too old
-  # for the package is refused here instead of failing inside the CLI (#4848).
-  # The checkout's OWN venv is preferred: it owns the package's dependencies
-  # (#2385), and the guard has already probed it.
-  # #4848 review: the interpreter comes from `_tortoise_dir_python` — the SAME
-  # precedence `_tortoise_dir_runnable` accepted the candidate on — so a dir the
-  # guard just blessed can never be refused here for want of an interpreter.
-  if [ -z "${PYTHON_BIN:-}" ]; then
-    PYTHON_BIN="$(_tortoise_dir_python "${TORTOISE_MODULE:-}" || true)"
-  fi
-  if [ -z "${PYTHON_BIN:-}" ]; then
+  # #4848: a dir that WAS found but cannot be run is a different cause with a
+  # different remedy, and the refusal names the interpreter.
+  if [ -n "$TORTOISE_UNUSABLE_DIR" ]; then
     _record_breadcrumb "claude" \
-      "the installed per-turn hook resolved a tortoise module dir at $TORTOISE_MODULE but $(_tortoise_unusable_reason "$TORTOISE_MODULE") and captured nothing. Remedy: create that checkout's venv (uv sync --extra embeddings --extra parity in it) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
+      "the installed per-turn hook resolved a tortoise source dir at $TORTOISE_UNUSABLE_DIR but $(_tortoise_unusable_reason "$TORTOISE_UNUSABLE_DIR") and captured nothing. Remedy: create that checkout's venv (uv sync --extra embeddings --extra parity in it) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
       || true
     exit 0
   fi
-  # CWE-427: the `-c` source is SINGLE-QUOTED and the module dir travels as an
-  # argv ELEMENT — never string-interpolated (a quote in the path must not
-  # inject code). `-c` puts the process CWD at sys.path[0], so the cwd is
-  # dropped before any non-builtin import: a planted ./json.py in the agent's
-  # workspace would otherwise execute as the user at EVERY prompt. `sys` is a
-  # builtin and cannot be shadowed, so importing it first is safe.
-  "$PYTHON_BIN" -c '
+  _record_breadcrumb "claude" \
+    "the installed per-turn hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), and captured nothing" \
+    || true
+  exit 0
+fi
+# `PYTHON_BIN` from the ENVIRONMENT is an explicit operator override and is
+# honoured as-is; the resolved fallback is PROBED, so an interpreter too old
+# for the package is refused here instead of failing inside the CLI (#4848).
+# The checkout's OWN venv is preferred: it owns the package's dependencies
+# (#2385), and the guard has already probed it.
+# #4848 review: the interpreter comes from `_tortoise_dir_python` — the SAME
+# precedence `_tortoise_dir_runnable` accepted the candidate on — so a dir the
+# guard just blessed can never be refused here for want of an interpreter.
+if [ -z "${PYTHON_BIN:-}" ]; then
+  PYTHON_BIN="$(_tortoise_dir_python "${TORTOISE_MODULE:-}" || true)"
+fi
+if [ -z "${PYTHON_BIN:-}" ]; then
+  _record_breadcrumb "claude" \
+    "the installed per-turn hook resolved a tortoise module dir at $TORTOISE_MODULE but $(_tortoise_unusable_reason "$TORTOISE_MODULE") and captured nothing. Remedy: create that checkout's venv (uv sync --extra embeddings --extra parity in it) or set TORTOISE_SRC_DIR to a checkout with a working .venv" \
+    || true
+  exit 0
+fi
+# CWE-427: the `-c` source is SINGLE-QUOTED and the module dir travels as an
+# argv ELEMENT — never string-interpolated (a quote in the path must not
+# inject code). `-c` puts the process CWD at sys.path[0], so the cwd is
+# dropped before any non-builtin import: a planted ./json.py in the agent's
+# workspace would otherwise execute as the user at EVERY prompt. `sys` is a
+# builtin and cannot be shadowed, so importing it first is safe.
+"$PYTHON_BIN" -c '
 import sys
 sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 sys.path.insert(0, sys.argv[1])
 from tortoise.__main__ import main
 raise SystemExit(main(["session", "spool", *sys.argv[2:]]))
 ' "$TORTOISE_MODULE" "${SPOOL_ARGS[@]}" >/dev/null || exit 0
-fi
 
 exit 0

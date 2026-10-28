@@ -1625,6 +1625,66 @@ def test_the_per_turn_seam_refuses_a_binary_it_cannot_run(tmp_path):
         f"the binary WAS found; the refusal must say why it was not run: {body}")
 
 
+def test_the_per_turn_seam_skips_a_binary_it_cannot_run_for_a_checkout(tmp_path):
+    """#4848's acceptance decision — *"the loop still preferring an unusable
+    candidate over a usable later one"* (the scoping comment on #4848) — applies
+    to the PATH binary TOO, and this seam was the only one that did not apply
+    it: it ``exit 0``-ed at a stale `tortoise` on PATH *before* the module loop,
+    so a host with a leftover `uv tool install` and a perfectly runnable
+    checkout in `TORTOISE_SRC_DIR`/`hook-src-dir` kept the stale install and
+    captured nothing. The refusal's own remedy was unactionable for the same
+    reason: it offers "set TORTOISE_SRC_DIR to a checkout with a working
+    .venv", and that variable was read only AFTER the exit, so a user who
+    followed it saw no change.
+
+    Mutation: put the ``if [ -n "$TORTOISE_UNUSABLE_BIN" ]`` refusal back above
+    the module loop — the seam refuses, the checkout's console script never
+    runs, and this REDs."""
+    home = tmp_path / "home"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    hook = home / ".claude" / "hooks" / "session-turn.sh"
+    shutil.copy(REPO_ROOT / "tortoise" / "claude-hooks" / "session-turn.sh", hook)
+    hook.chmod(0o755)
+
+    # The later, USABLE candidate: a checkout whose console script the guard
+    # accepts (a non-python `#!` is unknown, and unknown is never refused) and
+    # which records that it was the thing this seam actually RAN.
+    good = _module_dir(tmp_path / "good")
+    log = tmp_path / "argv.log"
+    _logging_capture_bin(good / ".venv" / "bin", log)
+
+    bindir = tmp_path / "bin"
+    _coreutils(bindir)
+    _old_python_shim(bindir, version="3.9.6")
+    # ...and the earlier, UNUSABLE one: a stale console script on PATH.
+    stale = bindir / "tortoise"
+    stale.write_text("#!/nonexistent/python3\n", encoding="utf-8")
+    stale.chmod(0o755)
+
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = subprocess.run(
+        ["/bin/bash", str(hook)], input=json.dumps({
+            "session_id": "sid-4848-turn-skip",
+            "transcript_path": str(transcript), "cwd": str(home)}),
+        text=True, capture_output=True, timeout=30,
+        env={"HOME": str(home), "PATH": f"{bindir}:/usr/bin:/bin",
+             "TMPDIR": str(tmp_path), "TORTOISE_SRC_DIR": str(good)})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _wait_for(lambda: log.is_file()
+                     and "DONE" in log.read_text(encoding="utf-8")), (
+        "the seam stopped at the stale binary on PATH instead of running the "
+        "runnable checkout it was handed — the skip rule #4848 installs was "
+        "not applied to the PATH leg")
+    body = log.read_text(encoding="utf-8")
+    assert f"SELF={good / '.venv' / 'bin' / 'tortoise'}" in body, body
+    assert "session" in body and "spool" in body, body
+    crumbs = home / ".tortoise" / "capture-errors"
+    assert not crumbs.exists(), (
+        "a refusal was recorded on a host that HAD a runnable checkout: "
+        f"{[p.read_text(encoding='utf-8') for p in crumbs.iterdir()]}")
+
+
 def test_a_checkout_accepted_on_its_console_script_is_the_one_that_runs(tmp_path):
     """``_tortoise_dir_runnable`` accepts a candidate whose ``.venv/bin/tortoise``
     has a NON-python `#!` (an unknown interpreter is never refused). The three
