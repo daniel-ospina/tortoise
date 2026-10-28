@@ -4195,11 +4195,33 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
         "`sdk.supersede_point` does not drop the property.",
     ),
     (
-        re.compile(rf"\b(?:carry|carries)\s+(?:no\s+{_PROPERTY_NOUN}|nothing)\b"),
+        # ⛔ THE OBJECT-NEGATION FRAME, in EVERY verb this record treats as
+        # synonymous — not just `carry`. The frame was measured bound to
+        # `carry|carries` alone while the file's OWN vocabulary used the sibling
+        # verbs: `writes no property` is a member of
+        # `CLASS_VERDICT_MARKERS["EXEMPT"]` (it is how §13 states the EXEMPTION's
+        # verdict), and `does not write the` / `never writes the` / `write|writes
+        # nothing` were already denials — so the same construction with the
+        # subject swapped to a COUNTED writer was GREEN. Measured at
+        # `6d40e5732` (`#10200` review): *"`sdk.supersede_point` writes no property
+        # on an about edge"*, *"… writes no `confidence` …"* and *"… sets no
+        # property …"* each left the whole module green, while the `carry` control
+        # on the same code path red. One alternation, three reachable green paths.
+        # ⚠️ `set|sets` is included because the MAP class's own spelling is `SET`
+        # (`SET r += $p`); the property noun is still what the frame reads, so the
+        # object — not the verb — remains the thing that separates a denial from
+        # the record.
+        re.compile(
+            rf"\b(?:carry|carries|write|writes|set|sets)\s+"
+            rf"(?:no\s+{_PROPERTY_NOUN}|nothing)\b"
+        ),
         (
             "`sdk.supersede_point` is said to carry no property.",
             "`sdk.supersede_point` carries no `confidence` on an about edge.",
             "`sdk.supersede_point` is said to carry nothing.",
+            "`sdk.supersede_point` writes no property on an about edge.",
+            "`sdk.supersede_point` writes no `confidence` on an about edge.",
+            "`sdk.supersede_point` sets no property on an about edge.",
         ),
         # ⛔ NOT the bare prefix `carry no` / `carries no`: measured, that reds at
         # least four TRUE §13 sentences that name a counted KEY (`DirectEdgeRepoint`
@@ -4473,6 +4495,41 @@ EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
     "counts as one",
 )
 
+#: The POPULATION spelled out instead of pronominal: `is one of the six writers`.
+#: ⛔ A LITERAL CANNOT PIN THIS ONE — the count varies with the table (`six` today,
+#: and a stale count is still a claim that the exemption is counted), so the frame
+#: is built from `NUMBER_WORDS` plus digits, the way `_COUNT_NUMBER_TOKEN` is,
+#: rather than typed. Measured at `6d40e5732` (`#10200` review): the tuple above
+#: held the PRONOUN form `is one of them` and the participle `counted`, so
+#: *"`projection._rebuild_all_replay` is one of the six writers"* — the exemption
+#: asserted to be a member of the six-writer population its own
+#: `NOT_AN_ABOUT_WRITER` row exempts it from — was GREEN in words AND in digits,
+#: while the pronominal control on the same code path red. The corpus writes the
+#: COUNTED direction exactly this way (§13: *"`sdk.supersede_point` IS one of
+#: them since `#9417`"*), so the mirror sentence about the exemption is the
+#: documents' own idiom, not a paraphrase class this instrument never claimed.
+#: ⚠️ Same shape as `DENIAL_PATTERNS`: every entry declares its own probes, and
+#: `must_not_see` is the TRUE prose the frame must stay out of. No history escape
+#: (this row has NEVER been counted), and `_marker_itself_negated` still applies —
+#: *"is not one of the six writers"* denies the counting, it does not assert it.
+_POPULATION_COUNT = "|".join(NUMBER_WORDS[index] for index in sorted(NUMBER_WORDS))
+EXEMPT_COUNTED_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
+    (
+        re.compile(
+            rf"\bis\s+one\s+of\s+the\s+(?:{_POPULATION_COUNT}|\d{{1,2}})\s+"
+            rf"(?:writers|counted\s+rows?)\b"
+        ),
+        (
+            "`projection._rebuild_all_replay` is one of the six writers.",
+            "`projection._rebuild_all_replay` is one of the 6 writers.",
+            "`projection._rebuild_all_replay` is one of the 7 counted rows.",
+        ),
+        # The documents' own COUNTED claim — pronominal, so this frame must not
+        # read it. A widening to `is one of …` in general reds it.
+        "`sdk.supersede_point` IS one of them since `#9417`.",
+    ),
+)
+
 #: A DECLARED FALSE POSITIVE COUNT, in the spellings the documents use. ⛔ The
 #: number is read from the token NEAREST the phrase, not from the leftmost one in a
 #: window (`#10200` review, cycle 2): a window regex took *"The census counts 6
@@ -4684,6 +4741,23 @@ def _denies_the_class_by_pattern(sentence: str) -> list[str]:
                 hits.append(match.group(0))
     return hits
 
+def _exempt_counted_by_pattern(sentence: str) -> list[str]:
+    """The counted-claims a LITERAL cannot pin — see `EXEMPT_COUNTED_PATTERNS`.
+
+    The exemption row gets NO history escape (it has never been counted), but the
+    marker's own polarity still decides: *"is NOT one of the six writers"* denies
+    the counting, so it must not red as if the sentence asserted it. Same reason
+    `_marker_itself_negated` guards the literals in `_denied_verdicts`.
+    """
+    low = sentence.lower()
+    hits: list[str] = []
+    for pattern, _must_see, _must_not_see in EXEMPT_COUNTED_PATTERNS:
+        for match in pattern.finditer(low):
+            if not _marker_itself_negated(low, match):
+                hits.append(match.group(0))
+    return hits
+
+
 #: A negator that governs THE MARKER ITSELF: the copula/auxiliary immediately
 #: before it (optionally with one comma-set parenthetical in between, which is the
 #: appositive shape probes 5/9 pin), or a post-positioned `no longer` immediately
@@ -4796,7 +4870,9 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     3. **The denial vocabulary is a set of FRAMES AND MARKERS, not a parser.** It
        now reads the inflections and voices that were MEASURED green
        (`DENIAL_PATTERNS`: base/infinitive, object, passive, adjective, and the
-       property named as `confidence`), and the literal list holds the
+       property named as `confidence` — each OBJECT construction in every verb of
+       the frame, `carry`/`write`/`set`, because one verb of one construction was
+       a measured green path four times over), and the literal list holds the
        third-person spellings the documents write — but a denial phrased with a
        verb, a noun or a construction in NEITHER place stays green. That is the
        same open vocabulary this leg has always had, and it is listed here because
@@ -4830,6 +4906,12 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                                 for match in re.finditer(re.escape(marker.lower()), low)
                             )
                         ]
+                        # ⛔ THE POPULATION SPELLED OUT (`is one of the six
+                        # writers`) — the same claim in the corpus's own counted
+                        # direction spelling, which no literal above can hold
+                        # because the count varies. Measured green at `6d40e5732`
+                        # while the pronominal control red (`#10200` review).
+                        hits += _exempt_counted_by_pattern(sentence)
                     else:
                         # ⛔ PER OCCURRENCE — see `_denies_the_class`. Both
                         # escapes (history, and the marker being itself negated)
@@ -5852,6 +5934,98 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "it — the failure mode this leg exists to prevent"
     )
 
+    # ⛔ Probe 23 (`#10200` review, cycle 9): the OBJECT-NEGATION frame was bound
+    # to ONE verb pair (`carry|carries`) while the file's own vocabulary used the
+    # siblings — `writes no property` is how §13 states the EXEMPTION's verdict,
+    # and `does not write the` / `never writes the` / `write nothing` were already
+    # denials. Swap the subject of the documents' own sentence to a counted writer
+    # and the whole module stayed GREEN, measured at `6d40e5732`: three reachable
+    # green paths, one alternation away from the frame that already existed.
+    other_object_negations = (
+        (
+            "probe",
+            "`sdk.supersede_point` writes no property on an about edge.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` writes no `confidence` on an about edge.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` sets no property on an about edge.",
+        ),
+    )
+    missed_object_negations = [
+        sentence
+        for sentence in other_object_negations
+        if not any("supersede_point" in item for item in _denied_verdicts([sentence]))
+    ]
+    assert not missed_object_negations, (
+        "the object-negation frame reads ONE verb of the construction, so the "
+        "denial is green whenever it is written `writes` or `sets` instead of "
+        "`carries` — and the EXEMPT row's own spelling (`writes no property`) is "
+        "in that set: " + repr([s[:70] for _l, s in missed_object_negations])
+    )
+    # … and the widening must not read the bare prefix: the OBJECT is what
+    # separates a denial from the record, so a verb plus `no` naming something
+    # that is not a property/attribute is not this frame's business.
+    assert not any(
+        "supersede_point" in item
+        for item in _denied_verdicts(
+            [
+                (
+                    "probe",
+                    "`sdk.supersede_point` writes no line numbers into §13.",
+                )
+            ]
+        )
+    ), (
+        "the widened frame reads the bare `writes no` prefix, so TRUE prose that "
+        "names a counted writer and negates something OTHER than a property reds "
+        "and an editor's only way out is to weaken it"
+    )
+    # ⛔ Probe 24 (`#10200` review, cycle 9): "the exemption may not be called
+    # counted" was pinned on the PRONOUN (`is one of them`) and the participle
+    # (`counted`), so the same claim with the POPULATION SPELLED OUT was green —
+    # in words AND in digits (`EXEMPT_COUNTED_PATTERNS` carries that frame).
+    population_spelled_out = (
+        ("probe", "`projection._rebuild_all_replay` is one of the six writers."),
+        ("probe", "`projection._rebuild_all_replay` is one of the 6 writers."),
+    )
+    missed_population = [
+        sentence
+        for sentence in population_spelled_out
+        if not any(
+            "_rebuild_all_replay" in item for item in _denied_verdicts([sentence])
+        )
+    ]
+    assert not missed_population, (
+        "the exemption asserted to be one of the six writers is green whenever the "
+        "population is spelled out instead of pronominal, so the recorded "
+        "decision's second direction is pinned only in one determiner: "
+        + repr([s[:70] for _l, s in missed_population])
+    )
+    # … and the TRUE counted claim (pronominal, about a COUNTER writer) and the
+    # NEGATED population claim stay green: polarity still decides, and a red on
+    # the documents' own §13 sentence would force its deletion.
+    population_true_prose = (
+        ("probe", "`sdk.supersede_point` IS one of them since `#9417`."),
+        (
+            "probe",
+            "`projection._rebuild_all_replay` is not one of the six writers.",
+        ),
+    )
+    population_reds = [
+        offender
+        for sentence in population_true_prose
+        for offender in _denied_verdicts([sentence])
+    ]
+    assert not population_reds, (
+        "the population frame reds TRUE prose — the documents' own pronominal "
+        "counted claim, or its negated form — so the correction record cannot be "
+        "written: " + repr(population_reds)
+    )
+
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
         "a corrected passage contradicts a census table:\n  "
@@ -6221,10 +6395,6 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the pronoun form of the same claim, absent "
         "until someone writes it (`#10200` review, cycle 6)"
     ),
-    "does not write": (
-        "contradiction vocabulary — the bare form of the same denial; absent by "
-        "design, its determiner form is the live marker (`does not write the`)"
-    ),
     "does not carry the": (
         "contradiction vocabulary — the determiner form of 'carry no property', "
         "absent from both documents until someone writes it (the `#10149` denial "
@@ -6260,12 +6430,6 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "recorded was the CARRY verb — so the gate survived swapping `carries` "
         "for `writes`, measured green. Live in `DENIAL_MARKERS` now, so the "
         "paraphrase reds the moment it is written"
-    ),
-    "no longer writes": (
-        "contradiction vocabulary — the BARE post-negated auxiliary form; absent "
-        "by design. Its determiner form (`no longer writes the`) sits directly "
-        "above and IS live — the claim this entry made at `#10200`'s head was "
-        "false, because the determiner form recorded there was the CARRY verb's"
     ),
 }
 
@@ -6344,6 +6508,27 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
             "the record, which is the failure mode every round of this review "
             "has filed"
         )
+    # ⛔ THE EXEMPT DIRECTION'S OWN FRAMES, probed the same way (`#10200` review,
+    # cycle 9). A frame in `EXEMPT_COUNTED_PATTERNS` that cannot see the claim it
+    # was written for is the same DEAD instrument as a hyphenated literal, and its
+    # `must_not_see` is the documents' own COUNTED sentence — the one a widening to
+    # `is one of …` in general would red.
+    for pattern, must_see, must_not_see in EXEMPT_COUNTED_PATTERNS:
+        for claim in must_see:
+            assert pattern.search(_flat(claim).lower()), (
+                f"EXEMPT_COUNTED_PATTERNS entry {pattern.pattern!r} cannot see the "
+                f"claim it was written for: {claim!r}"
+            )
+            assert _exempt_counted_by_pattern(_flat(claim)), (
+                f"EXEMPT_COUNTED_PATTERNS entry {pattern.pattern!r} matches "
+                f"{claim!r} at the frame, but the RULE does not reach it — an "
+                "escape is suppressing the claim it was written for"
+            )
+        assert not _exempt_counted_by_pattern(_flat(must_not_see)), (
+            f"EXEMPT_COUNTED_PATTERNS entry {pattern.pattern!r} reads TRUE prose "
+            f"it must stay out of: {must_not_see!r} — clearing that red means "
+            "weakening the record"
+        )
     # … and must NOT flag the live flattened spelling of the same words.
     for spelling in ("MAP form", "NAMED form", "re materializ", "pre-#9417"):
         assert not _HYPHENATED_MARKER.search(spelling), (
@@ -6389,4 +6574,25 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
         f"these markers are declared absent-by-design but DO appear in the "
         f"documents: {stale} — the declaration has gone stale, and a stale "
         "declaration is how a live marker gets quietly exempted"
+    )
+    # ⛔ THE THIRD DIRECTION — DECLARATION → MARKER, which neither half above
+    # checks (`#10200` review, cycle 9). `MARKERS_ABSENT_BY_DESIGN` is the file's
+    # own coverage map: a reader takes every key as "this marker exists and its
+    # absence is deliberate". A key that is a member of NO vocabulary tuple pins
+    # nothing and is consulted by nothing, so it reads as coverage without being
+    # any — the same doctrine the census enforces twice elsewhere (*"a marker that
+    # matches nothing pins nothing"*). Measured at `6d40e5732`: `does not write`
+    # and `no longer writes` were both orphans (their determiner forms, `does not
+    # write the` / `no longer writes the`, are the live markers and carry the
+    # reasons), so the entries were deleted rather than left as dead coverage —
+    # and this assertion stops the next orphan from being written.
+    declared_not_markers = sorted(
+        set(MARKERS_ABSENT_BY_DESIGN)
+        - {marker for markers in families.values() for marker in markers}
+    )
+    assert not declared_not_markers, (
+        "these `MARKERS_ABSENT_BY_DESIGN` keys are not a member of any marker "
+        f"tuple, so they exempt nothing and pin nothing: {declared_not_markers}. "
+        "Delete the entry (if its reason belongs to a live neighbour) or add the "
+        "marker to the family it belongs to"
     )
