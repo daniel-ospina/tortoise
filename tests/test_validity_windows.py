@@ -2381,6 +2381,13 @@ def test_no_end_receipt_when_the_shaped_end_was_never_STORED(sdk):
         f"{reply.get('valid_to_shaped')!r}")
 
 
+def _ep_version(sdk: TortoiseSDK) -> int:
+    """The graph-wide EP epoch, read straight from ``:EpMeta``."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+    return int(rows[0][0]) if rows and rows[0][0] is not None else 0
+
+
 def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     """#10079 review round 2 P2 — the absent-id contract must survive shaping.
 
@@ -2389,8 +2396,26 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     ``valid_to_shaped`` turned the empty result into a truthy dict:
     a caller's existence check (``if not sdk.update_point(id, ...)``) silently
     passed, and the receipt reported a shaping that never reached the record.
+
+    #10119 — THE SAME TEST, EXTENDED TO THE SIDE EFFECTS. The reply was only
+    half the contract. Below the honest ``{}`` the door journalled a
+    ``PointRevised`` for a node that is not there, advanced the graph-wide EP
+    epoch, and left the absent id in ``_dirty_roots`` — where no converged sweep
+    can reach it, which pins ``_auto_dream_mode()`` to ``'local'`` for the life
+    of the instance (the #2422 / #7505 / #9269 failure class, reached by a typo).
+    Measured pre-fix at ``ef02b7acd``: 1 revision, ``ep_version`` 2→3, the id in
+    the dirty set after a sweep of every real id, mode ``'local'``.
+
+    Each effect is asserted DIRECTLY, never through the reply: a reply-shaped
+    assertion passes on both trees, which is why this defect outlived the round
+    that added the receipt. The journal row needs a journal, so its own half
+    lives in ``test_a_missing_id_journals_no_revision`` below (the ``sdk``
+    fixture here is built without an event-log path).
     """
     missing = "no-such-point-9202"
+    epoch_before = _ep_version(sdk)
+    dirty_before = set(sdk._dirty_roots)
+    mode_before = sdk._auto_dream_mode()
     # the non-shaping case pins the pre-existing contract, so a failure below
     # cannot be blamed on the verb having changed shape generally
     assert sdk.update_point(missing, validTo="2026-06-10") == {}
@@ -2399,3 +2424,65 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
 
     assert reply == {}, f"an absent id returned a truthy reply: {reply!r}"
     assert "valid_to_shaped" not in reply
+    # #10119 row 2: the epoch is what a journal row CONSUMES downstream — no
+    # write landed, so there is nothing for it to advance.
+    assert _ep_version(sdk) == epoch_before, (
+        "an absent id advanced the graph-wide EP epoch: "
+        f"{epoch_before} -> {_ep_version(sdk)}")
+    # #10119 row 3: the id must never become a dirty root. Asserted as an
+    # EQUALITY so a second, unnamed root cannot hide behind the check.
+    assert sdk._dirty_roots == dirty_before, (
+        f"an absent id entered the dirty set: {sorted(sdk._dirty_roots)}")
+    # #10119 rows 4-5: a converged sweep has nothing to converge here, and the
+    # dream-mode selection is untouched by the typo.
+    sdk._sweep_dirty_roots(set())
+    assert missing not in sdk._dirty_roots, (
+        "the absent id survived a converged sweep — it can never be swept")
+    assert sdk._auto_dream_mode() == mode_before, (
+        "a typo'd id changed the dream mode: "
+        f"{mode_before!r} -> {sdk._auto_dream_mode()!r}")
+
+
+def test_a_missing_id_journals_no_revision(tmp_path):
+    """#10119 row 1 — 0 ``PointRevised`` rows for an id with no node.
+
+    Split from the test above for ONE reason: that one rides the module's ``sdk``
+    fixture, which is built without ``event_log_path``, so ``_emit_event`` has
+    nowhere to append and a journal count there would be vacuously zero. This
+    builds the journal-wired SDK the assertion needs, and carries a POSITIVE
+    CONTROL on the same door — the identical call on a REAL point must append
+    exactly one revision — so ``[]`` cannot pass because the journal was never
+    wired.
+    """
+    from tortoise.log import EventLog
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "absent_journal.db"),
+                      event_log_path=str(events / "events.jsonl"))
+
+    def _revisions() -> list[dict]:
+        path = events / "events.jsonl"
+        rows = EventLog(str(path)).read_all() if path.exists() else []
+        return [e for e in rows if e.get("type") == "PointRevised"]
+
+    try:
+        missing = "no-such-point-9202"
+        assert sdk.update_point(missing, confidence=0.5) == {}
+        # the shaping arm takes the same early return — pin both, because the
+        # receipt path is the one that used to be special-cased at the tail
+        assert sdk.update_point(missing, validTo="TBD") == {}
+        # the tag arm is a DIFFERENT write path (a MERGE per tag) reached after
+        # the append; it must be refused by the same gate, not by luck
+        assert sdk.update_point(missing, tags=["absent-10119"]) == {}
+        assert _revisions() == [], (
+            f"an absent id journalled a revision: {_revisions()!r}")
+
+        # POSITIVE CONTROL — the same door on a real point still records.
+        pid = sdk.create_point("statement", "a real point for #10119")["id"]
+        sdk.update_point(pid, confidence=0.42)
+        revisions = _revisions()
+        assert [e.get("id") for e in revisions] == [pid], (
+            f"the journal must hold exactly the real revision: {revisions!r}")
+    finally:
+        sdk.close()

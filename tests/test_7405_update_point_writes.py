@@ -986,8 +986,14 @@ def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
     ``update_point`` on a missing id historically returns ``{}`` without
     raising. A first attempt never consults the witness, so this stays true.
     (The GATE itself — "only a graph-replaced abort arms it" — is pinned by
-    ``test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract``;
+    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``;
     this test alone cannot observe it, since ``origin/main`` passes it too.)
+
+    #10119 narrowed the PATH, not the contract: the door now refuses an id that
+    was absent at entry BEFORE it issues any write, so this call no longer
+    reaches the per-key ``SET`` at all. The assertion is unchanged — the reply
+    for an absent id is ``{}`` — and the side effects that used to ride it are
+    pinned by ``tests/test_validity_windows.py``.
     """
     sdk = _sdk(tmp_path, "missing")
     try:
@@ -1001,28 +1007,74 @@ def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
 _WRITE_SLOT = "another write is in progress, retry the query"
 
 
-def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
+class _VanishThenAbortOnce:
+    """Delete the Point, then abort the next matching statement one time.
+
+    #10119 makes "the SET targets an id that does not exist" unreachable from
+    the door's ENTRY: an absent id returns before the write. The remaining way
+    to reach a zero-row ``SET`` is the race — the node is present at the
+    presence read and gone by the time the write is issued — which is what this
+    models (the deletion happens INSIDE the first matching statement, i.e. after
+    the door's read and before its write lands).
+    """
+
+    def __init__(self, real, needle: str, victim: str, message: str) -> None:
+        self._real = real
+        self._needle = needle
+        self._victim = victim
+        self._message = message
+        self.matching = 0
+        self.deleted = False
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                self._real.query(
+                    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                    params={"id": self._victim})
+                self.deleted = True
+                raise redis_exc.ResponseError(self._message)
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
         tmp_path, monkeypatch):
     """A non-rebuild abort must NOT arm the witness (#8854 review P1).
 
     ``retryable_aborted_write`` also admits the write-slot arm — ordinary
     multi-writer contention — which says nothing about whether the TARGET
-    exists. Arming the witness on it turned ``update_point(<missing id>)`` into
-    a stale ``ResponseError`` after four attempts, where the documented answer
-    is ``{}``. Only the graph-deleted-or-replaced family can mean "not
-    replayed yet", so only that family arms the witness.
+    exists. Arming the witness on it turned a zero-row re-issue into a stale
+    ``ResponseError`` after four attempts, where the documented answer is
+    ``{}``. Only the graph-deleted-or-replaced family can mean "not replayed
+    yet", so only that family arms the witness.
+
+    #10119 re-based this pin on the only reachable shape: the target EXISTS at
+    the door's presence read and vanishes before the write lands (see
+    ``_VanishThenAbortOnce``). A target absent at ENTRY never reaches the ``SET``
+    anymore, so the old fixture could not have exercised the witness gate at all
+    — it would have asserted a re-issue that no longer happens.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "lockslot")
     try:
-        missing = str(uuid.uuid4())
+        victim = _pid(sdk)
         proj = sdk._get_proj()
-        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE,
-                               message=_WRITE_SLOT)
+        proxy = _VanishThenAbortOnce(
+            proj.g, _POINT_PROP_SET_NEEDLE, victim, _WRITE_SLOT)
         proj.g = proxy
 
-        assert sdk.update_point(missing, confidence=0.5) == {}
+        assert sdk.update_point(victim, confidence=0.5) == {}
+        assert proxy.deleted, "fixture precondition: the Point must be gone"
         assert proxy.matching >= 2, "the aborted statement was never re-issued"
     finally:
         with contextlib.suppress(Exception):

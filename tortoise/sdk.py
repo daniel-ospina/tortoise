@@ -14266,6 +14266,12 @@ class TortoiseSDK:
         like an absent key, so it neither re-derives the hash/vector nor
         touches ``n.content``. An EMPTY STRING is a real edit (it hashes and
         stores ``""``); only ``None`` means "nothing to set".
+
+        An ABSENT id returns ``{}`` and DOES NOTHING (#10119): no
+        ``PointRevised`` record, no EP-epoch advance, no dirty root. The reply
+        was always honest; before this it sat on top of a journalled revision
+        for a node that is not there, which stranded a root no sweep can
+        converge and pinned the instance into local dream mode.
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
@@ -14535,11 +14541,41 @@ class TortoiseSDK:
             self._assert_lifecycle_guard(id, method="update", missing_ok=True,
                                          allow_operator=True)
 
-        # Check if node carries :Object label (entity node with version tracking)
-        has_object = proj.g.query(
-            "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
+        # ── #10119: PRESENCE and the `:Object` label, from ONE read ──────────
+        # This door already paid one existence read here (the `:Object` probe
+        # that selects the write arm). It answered only "does a `:Point:Object`
+        # with this id exist?", so a PLAIN `:Point` and an ABSENT id were the
+        # same answer — and the absent case then fell through the whole write
+        # path, journalling a revision, advancing the graph-wide EP epoch and
+        # stranding a dirty root for a node that is not there (#10119: measured
+        # at `ef02b7acd` — 1 `PointRevised`, `ep_version` 2→3, the id in
+        # `_dirty_roots` surviving a converged sweep, `_auto_dream_mode()`
+        # pinned to 'local' for the life of the instance).
+        #
+        # The two questions are asked of the SAME statement so the hot path
+        # still costs one round trip: `count(n) > 0` is PRESENCE (what the
+        # non-promote arm gates on below), `count(o) > 0` is the `:Object`
+        # label that picks the arm. Both are `count()` over an `OPTIONAL MATCH`,
+        # so the row exists either way and a duplicate-id fan-out only inflates
+        # the counts (the same tolerance the previous single-label probe had).
+        # PROBED on the embedded engine: plain `:Point` → (True, False);
+        # `:Point` + `:Object` → (True, True); absent id → (False, False).
+        #
+        # ⛔ AN EMPTY ROW FAILS **OPEN** (`_present = True`). `OPTIONAL MATCH`
+        # always answers exactly one row, so an empty set means the statement
+        # did not run — and reading that as "absent" would let a probe that
+        # never executed SUPPRESS the record of a write that is about to land.
+        # That is strictly worse than the defect: a real revision with no
+        # journal row. So the fallback keeps the pre-change behaviour (the
+        # write arms below run, match nothing, and the reply is `{}`).
+        _presence = proj.g.query(
+            "OPTIONAL MATCH (n:Point {id:$id}) "
+            "OPTIONAL MATCH (o:Point:Object {id:$id}) "
+            "RETURN count(n) > 0, count(o) > 0",
             params={"id": id},
-        ).result_set[0][0]
+        ).result_set
+        _present = bool(_presence[0][0]) if _presence else True
+        has_object = bool(_presence[0][1]) if _presence else False
 
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -14706,6 +14742,48 @@ class TortoiseSDK:
                              new_content=props.get("content"), **emit_props)
 
         if not _promote_arm:
+            # ── #10119: an ABSENT id does NO WORK — and journals nothing ───────
+            # The reply for a missing id was already honest (`{}`, the documented
+            # contract, and since #10079 it carries no shaping receipt). The SIDE
+            # EFFECTS were not: this door appended a `PointRevised` for a node
+            # that is not there, advanced the graph-wide EP epoch through the
+            # tail's `_mark_dirty`, and left the absent id in `_dirty_roots`,
+            # where no sweep can ever converge it — which pins
+            # `_auto_dream_mode()` to 'local' for the life of the instance
+            # (#2422 / #7505 / #9269's failure class, reached by a typo).
+            #
+            # WHERE this return goes is the whole fix. It is at the TOP of the
+            # non-promote arm:
+            #   * AFTER the presence read above, so the door pays nothing extra
+            #     to know the answer;
+            #   * BEFORE the append, so no record describes a revision the door
+            #     then cannot make (the §17.1 outbox rule is untouched — nothing
+            #     is written, so there is no order to state, and the door's own
+            #     `_declares_apply_first_write_lane` declaration still holds
+            #     for every call that reaches a write);
+            #   * BEFORE the property writes, the tag sync and `_mark_dirty`, so
+            #     the epoch does not move and the dirty set never gains the id;
+            #   * AFTER every refusing guard above (invalid status, inverted or
+            #     imprecise window, terminal claim, bad `content`), so a caller
+            #     who passed something invalid AND a missing id still gets the
+            #     diagnosis, not a silent `{}`.
+            #
+            # ⛔ SCOPED TO THIS ARM. The PROMOTE arm (`status='live'`) already
+            # keeps this property by a different route — its guarded `SET`
+            # matches nothing, the diagnostic raises `ValueError('No point …')`
+            # BEFORE `_record_promote` and `_mark_dirty`, and the #8854 pins
+            # require exactly that error type. Returning `{}` there would trade
+            # a diagnosis for silence and red four of those pins, so the gate
+            # does not reach it.
+            #
+            # Reachability, stated honestly: a node that EXISTS here and vanishes
+            # before the write lands still appends its record and still marks
+            # dirty (the write's empty outcome is not a second gate). That is the
+            # pre-existing #8854 residual — it needs the journal-first ordering
+            # decision reopened, not this arm — and it is NOT the shape this
+            # issue measured (an id that never existed).
+            if not _present:
+                return {}
             # The append's OWN per-call outcome is the commit signal — a
             # per-call value, not a delta of the shared
             # `_journal_write_failures` counter, which a CONCURRENT writer on
