@@ -909,7 +909,15 @@ def test_the_seam_witnesses_eight_of_eight_with_no_probe_edit_to_the_rule():
         "story_arc": "A narrative.",
         "s2_embed": {"entities": [1], "events": [1], "points": [1],
                      "operators": []},
-        "vet": {"enabled": True, "s2": {"kept": 3}, "union": {}},
+        # `_run_vet_pass`'s REAL shape: counts under `stats`, plus the surface
+        # the witness must not forward (`decisions` carries candidate text). The
+        # seam forwards the COUNTS, so a fixture shaped `{"kept": 3}` would model
+        # a producer that does not exist (#10214 review 3).
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3, "discarded": 1},
+                       "batch": {},
+                       "decisions": {"i_1": {"text": "candidate text"}}},
+                "union": {}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3},
                            "union": {}},
         "search": {"mode": "docker", "degraded": False, "queries_run": 15,
@@ -1290,7 +1298,7 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12522", "sdk.py:12803", "sdk.py:2368", "edges.py:467",
+        "sdk.py:12401", "sdk.py:12682", "sdk.py:2367", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
     r"SUPERSEDED and its file is gone": ("sdk.py:12317",),

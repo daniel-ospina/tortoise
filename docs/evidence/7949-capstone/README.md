@@ -130,8 +130,8 @@ itself.
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
 a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
 stamp**, and **every rendered cite this bundle re-derives is listed here** — including the ones the E3
-rule and the S2.2/S2.3 cause strings render: `sdk.py:12522` (the meta fold), `sdk.py:12803` (the
-references-edge writer), `sdk.py:2368` (`_TURN_WRITE_CYPHER`), `edges.py:467`
+rule and the S2.2/S2.3 cause strings render: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
+references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
 re-derived by this bundle to `502`/`510`), `edges.py:2168-2192` (`link_source_to_event`),
 `tortoise/extractor_v2.py:8278-8285` (the **classify-later** surface, as the S2.3 cause string cites
@@ -196,8 +196,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8883-8887`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:13402` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8873-8879` and dropped at the same fold, `tortoise/sdk.py:13402` |
+| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8883-8887`. Whether it then DID work was not observable through the receipt **on this run** — the missing surface WAS exactly the instrument — so this row does not claim it ran. ⚠️ **#9116's seam has since closed that gap**: the meta fold `tortoise/sdk.py:13433` now reads `"stats": _capture_stats_with_step_witness(out, len(extracted))`, which copies the pass's own counts onto the receipt as `stats["step_witness"]["vet"]` — so this ❌ is the FROZEN `e0fc940b` run's answer (the log predates the seam), not this head's. Measured on that run: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8873-8879`, and on the `e0fc940b` run the meta fold copied neither — the same ❌ is the frozen run's, since the seam at `tortoise/sdk.py:13433` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) now copies it as `stats["step_witness"]["classify_later"]`; ⚠️ on this corpus the pass is also IDLE (`enabled: true`, empty `s2`/`union`), so a re-run witnesses the pass's own "did no work" rather than the step |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -264,7 +264,7 @@ list, no classify items, or a fail-open `except`) while doing nothing, and that 
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
 unconditionally at `:8873`/`:8883` and now reaches the receipt through the seam at the meta fold
-`sdk.py:13402` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
+`sdk.py:13433` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -289,7 +289,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:475`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2432-2457`,
-reached from the capture path at `sdk.py:13683` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:13714` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -610,7 +610,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt that hides four steps)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:12574`; called at `:11611`) →
+`sdk._extract_session_v2` (`sdk.py:12605`; called at `:11611`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:8396`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
@@ -626,11 +626,11 @@ number's resolution is checked against the tree when it is re-derived.)
 | S0 READ | `_edus_from_conversation` `:8507` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:8540` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:8564` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:8593` | `result["vet"]` — built at `extractor_v2.py:8883-8887`, copied onto the receipt at the meta fold `sdk.py:13402` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — the shipped log predates it |
+| S2.2 VET | `_run_vet_pass` `:8593` | `result["vet"]` — built at `extractor_v2.py:8883-8887`, copied onto the receipt at the meta fold `sdk.py:13433` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — the shipped log predates it |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:8609` | `result["classify_later"]` — built at `extractor_v2.py:8873-8879`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — ⚠️ and on the measured corpus the pass is IDLE (`enabled: true`, empty `s2`/`union`), so it is honestly NOT witnessed |
 | S3 RESOLVE | `search_graph` `:8625` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:8845` (+ `run_s4` `:8646` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
-| S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop committed) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
+| S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count of points the write loop **resolved** — created, or folded onto an existing canonical, which is a commit and not a skip) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself — the
 object the shipped caller can hold. Before #9116 that object carried none of `result["vet"]`,
@@ -639,7 +639,7 @@ steps unobserved and refused at G5 for EVERY input. That was a property of the c
 not of §4.4 or of the pipeline: the steps' surfaces are BUILT unconditionally, and the surface the
 probe was handed did not say so. The drop was one layer ABOVE the extractor — it builds
 `result["vet"]` and `result["classify_later"]`, and the SDK's meta fold
-(`tortoise/sdk.py:13402`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
+(`tortoise/sdk.py:13433`, `"stats": _capture_stats_with_step_witness(out, len(extracted))` inside
 `_extract_session_v2`) forwarded `stats` and `error_census` only.
 
 **#9116 LANDED that seam** — `_capture_step_witness` (``tortoise/sdk.py``) copies each stage's own
