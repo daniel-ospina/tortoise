@@ -21,9 +21,11 @@ def sdk(tmp_path, monkeypatch):
     from tortoise.sdk import TortoiseSDK
 
     # The record can only hold the turns when a JOURNAL is configured too: the
-    # per-turn `PointAdded` records are what reach Postgres, and they are gated on
-    # the event log (`sdk._get_event_log()`). Both halves of the capability test
-    # are therefore supplied here.
+    # turn RECORDS are what reach Postgres, and they are gated on the event log
+    # (`sdk._get_event_log()`). Since #10017's step 7 the armed lane journals ONE
+    # `TurnsRecorded` carrier holding those snapshots rather than one `PointAdded`
+    # per turn; the store they reach is the same one either way. Both halves of
+    # the capability test are therefore supplied here.
     return TortoiseSDK(db_path=str(tmp_path / "cap.db"),
                        event_log_path=str(tmp_path / "events.jsonl"))
 
@@ -52,7 +54,8 @@ def test_unarmed_record_keeps_turns_in_the_graph(sdk, monkeypatch):
 def test_armed_record_writes_no_turn_nodes_but_keeps_the_session(sdk, monkeypatch):
     """Record armed -> the graph holds the Session only.
 
-    The transcript lives in the record (the per-turn `PointAdded` records), so the
+    The transcript lives in the record (the `TurnsRecorded` carrier, or a
+    per-turn `PointAdded` before #10017's step 7), so the
     thing that must be true of the GRAPH is the absence of turn nodes — and the
     Session's counters must still be written, or the quota/metering reads that
     depend on `turn_count`/`capture_redactions` would silently see nothing.
@@ -111,8 +114,21 @@ class _RecordingSeam:
         return None
 
     def point_contents(self) -> list[str]:
-        return [r["point"]["content"] for r in self.records
-                if r.get("type") == "PointAdded"]
+        """The turn text the capture handed the record, in EITHER carrier shape.
+
+        #10017 step 7 moved the record-armed lane from one `PointAdded` per turn
+        to ONE `TurnsRecorded` carrier holding them (`turns`), so a seam that
+        only read `point` would report "no turn reached the record" on the very
+        lane this file is about — and the non-vacuity assertion below would then
+        fail for a capture that stored the transcript correctly.
+        """
+        out: list[str] = []
+        for record in self.records:
+            if record.get("type") == "PointAdded":
+                out.append(record["point"]["content"])
+            elif record.get("type") == "TurnsRecorded":
+                out.extend(turn["content"] for turn in record.get("turns") or ())
+        return out
 
 
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:

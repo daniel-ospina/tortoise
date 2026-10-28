@@ -30,12 +30,13 @@ WHAT IS PINNED HERE, AND WHY EACH PIN CAN FAIL
    rebuild never had it as a node, and the record's hard-delete record removes
    its row — so neither route resurrects it.
 
-⛔ WHAT THIS FILE DOES NOT CLAIM. Nothing emits `TurnsRecorded` yet: step 7 turns
-the producer over in its own change (this one is deliberately INERT, so the
-capture writer's per-turn `PointAdded` path is untouched). The journal replayed
-in §3/§5 is therefore built from a REAL capture whose turn records are moved onto
-the carrier by this file — the snapshots are the producer's, the carriage is the
-thing under test.
+⛔ WHAT THIS FILE DOES NOT CLAIM. `_write_capture_turns` IS the producer since
+#10017's step 7 — but on the RECORD-ARMED lane only, where an unarmed capture's
+per-turn `PointAdded` path is untouched (#10000's capability rule). The journal
+replayed here is therefore built from a REAL unarmed capture whose turn records
+are moved onto the carrier by this file, so the snapshots are the producer's and
+the CARRIAGE is the thing under test; `tests/test_10017_turn_carrier_replay.py`
+is the file that reads the carrier off an armed capture directly.
 """
 from __future__ import annotations
 

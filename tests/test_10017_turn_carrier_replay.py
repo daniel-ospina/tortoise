@@ -59,10 +59,34 @@ EXPECTED_TURN_IDS = [f"{SESSION_ID}_t{i}" for i in range(len(CONV))]
 #: The `point` snapshot keys the capture writer puts on a turn record, as
 #: DECLARED. Kept as an explicit expectation rather than derived from the
 #: emitted record: a test that reads its expectation off the thing under test
-#: agrees with any key set, including a wrong one.
+#: agrees with any key set, including a wrong one. The two declarations the
+#: writer is held to are cross-checked against `record_projection` in
+#: `test_the_payload_expectation_here_IS_the_declared_contract` below, so this
+#: local copy cannot drift from the contract in either direction.
 TURN_SNAPSHOT_KEYS = frozenset({
     "id", "content", "pointKind", "speaker", "is_episodic", "status",
     "createdAt", "embedding",
+})
+
+#: The keys that ride on ONE branch only (#5004): `embedding_preserved` when the
+#: write PRESERVED a prior vector and so withholds the origin, or the three
+#: identity stamps when it ENCODED one. ⛔ Deliberately NOT part of an exact-set
+#: expectation: WHICH branch is taken depends on whether the embedder is
+#: available, so an exact set makes this leg environment-dependent (a dev box
+#: with `--extra embeddings` loads it, CI does not — the #2573/#2772 class
+#: `tests/conftest.py::force_sparse_tfidf` exists for) AND it would forbid the
+#: identity stamps the carrier is REQUIRED to carry (`record_projection.
+#: TURNS_SNAPSHOT_OPTIONAL_KEYS`: *"⛔ Step 7 must carry them VERBATIM"*).
+#: The property this leg defends is "no `Point`-shaped key the writer never
+#: emits, and no required key dropped" — inclusion, on both lanes.
+TURN_SNAPSHOT_BRANCH_KEYS = frozenset({
+    "embedding_preserved",
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+})
+
+#: The three stamps that cannot coexist with `embedding_preserved`.
+TURN_SNAPSHOT_IDENTITY_KEYS = frozenset({
+    "embedding_model", "embedding_revision", "embedding_text_hash",
 })
 
 
@@ -144,6 +168,20 @@ def _journal_of(sdk) -> str:
     return sdk._get_event_log().path
 
 
+def test_the_payload_expectation_here_IS_the_declared_contract():
+    """The local expectation is a COPY of the contract, never a second one.
+
+    `TURN_SNAPSHOT_KEYS` is written out longhand above so the assertion cannot
+    agree with any key set the writer happens to emit; this leg is what keeps
+    that honest by pinning the copy to `record_projection`'s declaration. A key
+    added to (or dropped from) the contract then reds HERE, deliberately, in
+    the same commit that changes it — instead of the payload leg going green on
+    a set it silently inherited.
+    """
+    assert TURN_SNAPSHOT_KEYS == rp.TURNS_SNAPSHOT_KEYS
+    assert TURN_SNAPSHOT_BRANCH_KEYS == rp.TURNS_SNAPSHOT_OPTIONAL_KEYS
+
+
 def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
     """The payload is the WRITER'S, verbatim — the contract step 7 inherits.
 
@@ -151,22 +189,81 @@ def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
     emits becomes a phantom node property on replay, and a key it emits but the
     record drops loses data. `cache_tier` is deliberately NOT here — it cannot
     ride a payload (`_RECORD_ONLY_KEYS` strips it) and the ROW states it as its
-    own column (see `test_the_record_rows_...` in the tier suite).
+    own column (see `test_the_record_writes_one_ROW_per_turn_...` below).
+
+    Enforced as a two-sided INCLUSION, not an exact set: the base keys are
+    REQUIRED (a dropped one is data loss), the branch keys are PERMITTED (which
+    branch the write takes depends on the embedder, and both are legitimate —
+    see `TURN_SNAPSHOT_BRANCH_KEYS`), and anything else is a phantom.
     """
     _capture_with_record_armed(armed_sdk, monkeypatch)
     carrier = next(r for r in _records(_journal_of(armed_sdk))
                    if r["type"] == rp.TURNS_RECORD_TYPE)
     assert len(carrier["turns"]) == len(CONV)
+    allowed = TURN_SNAPSHOT_KEYS | TURN_SNAPSHOT_BRANCH_KEYS
     for snapshot in carrier["turns"]:
-        assert frozenset(snapshot) == TURN_SNAPSHOT_KEYS, (
-            f"the carrier's snapshot drifted from the writer's payload: "
-            f"missing={sorted(TURN_SNAPSHOT_KEYS - set(snapshot))} "
-            f"extra={sorted(set(snapshot) - TURN_SNAPSHOT_KEYS)}")
+        keys = frozenset(snapshot)
+        assert TURN_SNAPSHOT_KEYS <= keys, (
+            "the carrier's snapshot drifted from the writer's payload — "
+            f"missing={sorted(TURN_SNAPSHOT_KEYS - keys)}")
+        assert keys <= allowed, (
+            "the carrier carries a key the writer's payload contract does not "
+            f"declare — extra={sorted(keys - allowed)}")
         assert "cache_tier" not in snapshot
+        assert not ({"embedding_preserved"} & keys
+                    and TURN_SNAPSHOT_IDENTITY_KEYS & keys), (
+            "the preserved-vector branch must WITHHOLD the origin stamps "
+            f"(#5004 round 3): saw {sorted(keys)}")
         assert snapshot["is_episodic"] is True
     # The session link rides the ENVELOPE, exactly as it does for `PointAdded`
     # (#3947) — never a per-turn key the live write does not set.
     assert carrier["contains_session"] == SESSION_ID
+
+
+def test_the_carrier_carries_the_ENCODED_identity_stamps(armed_sdk, monkeypatch):
+    """#5004's attestation on the CARRIER lane — the highest-volume producer.
+
+    `_emit_event` gates the attestation on the record TYPE (`creating=type_ in
+    ("PointAdded", "OperatorAdded")`), and the carrier is neither — so
+    `_write_capture_turns` stamps it explicitly on each snapshot it puts in the
+    carrier. Without that, an armed capture would journal a vector with NO
+    origin while the graph lane attests one: the same capture would yield
+    different record content depending on whether `TORTOISE_RECORD_DSN` is set,
+    and a model change would go SILENT for turns — the failure #5004/R1 ("the
+    payload carries the vector VERBATIM plus the identity it was computed
+    under") exists to expose.
+
+    Driven through `embed_fn` with an INJECTED vector batch, so the encoded
+    branch is taken deterministically: no ambient embedder, no model download,
+    no network — the branch that made the sibling leg environment-dependent is
+    produced here on purpose instead.
+    """
+    from tortoise.embeddings import embedding_identity
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setattr("tortoise.record_writer.write_live_record",
+                        lambda *a, **k: None, raising=False)
+    proj = armed_sdk._get_proj()
+    sdk_mod._write_session_and_turns(
+        proj, armed_sdk, SESSION_ID, CONV, now="2026-10-25T00:00:00+00:00",
+        embed_fn=lambda texts: [[0.1, 0.2, 0.3, 0.4] for _ in texts])
+    carrier = next(r for r in _records(_journal_of(armed_sdk))
+                   if r["type"] == rp.TURNS_RECORD_TYPE)
+    model, revision = embedding_identity()
+    for snapshot in carrier["turns"]:
+        keys = frozenset(snapshot)
+        assert snapshot["embedding"], (
+            "the injected vector did not ride the carrier — the identity "
+            "assertion below would then be vacuous (no vector, no origin)")
+        assert TURN_SNAPSHOT_IDENTITY_KEYS <= keys, (
+            "the CARRIER journalled a vector with no origin — `stamp_journal_"
+            "embedding(creating=True)` did not run on this lane, so a model "
+            f"change is silent for turns (saw {sorted(keys)})")
+        assert snapshot["embedding_model"] == model
+        assert snapshot["embedding_revision"] == revision
+        assert snapshot["embedding_text_hash"], (
+            "the stamp must name the text the vector describes (#4194)")
+        assert "embedding_preserved" not in keys
 
 
 def test_the_record_writes_one_ROW_per_turn_and_the_tier_goes_to_the_COLUMN():
