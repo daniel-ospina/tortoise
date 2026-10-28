@@ -4106,6 +4106,40 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "never writes the",
     "never writes a",
     "no longer carries the",
+    # ⛔ THE SAME POST-NEGATED FORM WITH THE OTHER VERB. `no longer carries the`
+    # was a member and `no longer writes the` was not, so the denial survived by
+    # swapping `carries` for `writes` — and `MARKERS_ABSENT_BY_DESIGN` recorded
+    # the absence as covered ('its determiner form is recorded above'), which made
+    # the gap read as a closed direction. Measured at the `#10200` review cycle 7:
+    # *"`sdk.supersede_point` no longer writes the attribute set on an about
+    # edge"* was GREEN while every other determiner form of the same sentence
+    # reds.
+    "no longer writes the",
+)
+
+#: Denials whose spelling VARIES too much for a literal: the TRANSFER-BARE form.
+#: ⛔ A literal cannot pin this one, and `#10200` review cycle 7 measured the gap:
+#: *"`sdk.supersede_point` transfers the about edge bare"* was GREEN while
+#: `transferred bare` — the PAST-tense tripwire for the retracted sentence — was a
+#: member, so the live denial and the retracted one were pinned in different
+#: tenses and only ONE of the two was pinned at all. The words between the verb
+#: and `bare` are the writer's OBJECT and they vary (`it` / `the edge` / `the
+#: about edge`), so the rule reads the FRAME — a transfer predicate, then `bare`
+#: inside the same clause — instead of enumerating determiner spellings, for the
+#: same reason `_HYPHENATED_MARKER` is a pattern rather than four literals.
+#: ⚠️ Bounded to the clause: `[^.;,]{0,40}?` cannot cross punctuation, so
+#: *"its about/structural transfer is a separate BARE `MERGE`"* in a NEIGHBOURING
+#: clause is not read as a denial of this writer (and that sentence belongs to the
+#: EXEMPT row anyway, which `DENIAL_MARKERS` never governs).
+#: ⚠️ STATED LIMIT: the VERB forms only (`transfers` / `transferred`). The NOUN
+#: form (*"the transfer is still bare"*) is deliberately NOT read: the REBUILD
+#: note `#10139` requires — *"the REBUILD half of the supersede transfer is still
+#: bare"* — is TRUE prose about a counted writer, so a noun-matching pattern reds
+#: a sentence the documents are required to carry, and the only way an editor
+#: could clear it is to delete that note. A verb-form rule costs one paraphrase
+#: and does not touch the record.
+DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\btransfer(?:s|red)\b[^.;,]{0,40}?\bbare\b"),
 )
 
 #: What makes a denial a statement about HISTORY rather than about HEAD — read in
@@ -4460,6 +4494,26 @@ def _denies_the_class(sentence: str, marker: str) -> bool:
         for match in re.finditer(re.escape(marker.lower()), low)
     )
 
+
+def _denies_the_class_by_pattern(sentence: str) -> list[str]:
+    """The denials a LITERAL cannot pin — see `DENIAL_PATTERNS`.
+
+    Same two escapes as `_denies_the_class`, applied to each PATTERN occurrence
+    for the same reason: a history-marked transfer-bare claim is a true record of
+    what changed, and a NEGATED one (*"it does not transfer the edge bare"*) is
+    true of a counted writer — the double negation states the class. Both were
+    measured on the guard's own vocabulary at `#10200` review cycle 7.
+    """
+    low = sentence.lower()
+    hits: list[str] = []
+    for pattern in DENIAL_PATTERNS:
+        for match in pattern.finditer(low):
+            if not _history_in_clause(low, match) and not _class_marker_negated(
+                low, match
+            ):
+                hits.append(match.group(0))
+    return hits
+
 #: A negator that governs THE MARKER ITSELF: the copula/auxiliary immediately
 #: before it (optionally with one comma-set parenthetical in between, which is the
 #: appositive shape probes 5/9 pin), or a post-positioned `no longer` immediately
@@ -4544,6 +4598,31 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     declared false positive described as counted (`EXEMPT_COUNTED_MARKERS`).
     A denial is excused only when the CLAUSE carrying it is about HISTORY — see
     `HISTORY_MARKERS`; the exemption row gets no such escape.
+
+    ⚠️ STATED LIMITS — two, both measured, and neither is an implied promise:
+    1. **The denial is attributed to EVERY census key named in the SENTENCE.** The
+       class-marker half is predicate-scoped (`_marker_itself_negated`), the
+       denial half is not, so a sentence that names TWO keys and denies the class
+       of one of them reds for BOTH. Measured at `#10200` review cycle 7: *"`sdk.
+       supersede_point` is counted, while `projection._rebuild_all_replay` carries
+       no property on an about edge"* reds `supersede_point` as `carries no
+       property`. That is the fail-CLOSED direction and it is deliberate: the
+       measured retracted sentence is itself multi-key (*"`_rebuild_all_replay`
+       and `sdk.supersede_point` are not one of them, so **neither** carries a
+       property"*), and a clause-scoped rule would have to resolve the PLURAL
+       antecedent (`neither` / `both` / `that row`) to keep it red — no mechanical
+       reading of that was found that does not either fail open on the retracted
+       shape or depend on an English antecedent heuristic. The cost of being wrong
+       in this direction is only a FALSE RED, and its resolution does not weaken
+       the prose: state each writer's verdict in its OWN sentence (pinned by
+       probe 12). Being wrong the other way would ship the defect.
+    2. **A denial that names NO symbol is invisible.** Cycle 4's *"the guard
+       declares that row a FALSE POSITIVE rather than counting it"* is the same
+       sentence class and no key-anchored rule can reach it (`if symbol not in
+       sentence: continue`). It is caught only when it also states a count, which
+       the derived-numerals leg reads. Recorded here rather than in the issue that
+       scoped the work (`#10149` out-of-scope (b)), because a bound that lives
+       only in a tracker comment is invisible to the lane that must rely on it.
     """
     offenders: list[str] = []
     for label, text in sections:
@@ -4585,6 +4664,11 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                             for marker in DENIAL_MARKERS
                             if _denies_the_class(sentence, marker)
                         ]
+                        # ⛔ THE SPELLINGS A LITERAL CANNOT HOLD (the
+                        # transfer-bare frame) — `DENIAL_PATTERNS`. Measured
+                        # green for the present tense at `#10200` review cycle 7
+                        # while the PAST-tense literal was a member.
+                        hits += _denies_the_class_by_pattern(sentence)
                         # ⛔ POLARITY: a NEGATED class marker denies the very
                         # class it names, and no `DENIAL_MARKERS` entry spells
                         # that form — `#10149`'s claim stated with the class's
@@ -5445,6 +5529,96 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "longer` is read as a class denial — the failure mode that pushes an "
         "editor to weaken correct sentences: " + repr(neighbour_reds)
     )
+    # ⛔ Probe 21 (`#10200` review, cycle 7): the DENIAL VOCABULARY pinned one
+    # TENSE and one VERB of the transfer denial, so the other tense and the other
+    # verb of the SAME claim were green. Measured: `no longer carries the` was a
+    # member and `no longer writes the` was not (the absent-by-design entry even
+    # claimed the determiner form was "recorded above" when the only determiner
+    # form recorded was the CARRY verb), and `transferred bare` was a past-tense
+    # literal while the PRESENT tense — the one a live denial is written in —
+    # matched nothing.
+    other_verb_and_tense = (
+        (
+            "probe",
+            "`sdk.supersede_point` no longer writes the attribute set on an about "
+            "edge.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` transfers the about edge bare.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` transfers it bare.",
+        ),
+    )
+    assert all(
+        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        for sentence in other_verb_and_tense
+    ), (
+        "the transfer denial is pinned in ONE verb or ONE tense, so the same "
+        "claim reds when written `carries` and is green when written `writes` "
+        "(or reds in the past tense and is green in the present) — measured at "
+        "the `#10200` cycle-7 head"
+    )
+    # … and the DOUBLE NEGATION of the frame is TRUE of a counted writer: it says
+    # the edge is transferred WITH properties, which is what `#9417` made true.
+    # `DENIAL_PATTERNS` is guarded by the same two escapes as the literals.
+    negated_transfer_bare = (
+        (
+            "probe",
+            "`sdk.supersede_point` does not transfer the about edge bare.",
+        ),
+    )
+    assert not any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(negated_transfer_bare))
+    ), (
+        "a NEGATED transfer-bare statement is read as the denial it denies, so "
+        "TRUE prose about the `#9417` carry reds"
+    )
+    # ⛔ Probe 22 (`#10200` review, cycle 7): the denial is attributed to EVERY
+    # census key named in the SENTENCE (the class-marker half is predicate-scoped,
+    # the denial half is not). That is fail-CLOSED on purpose — see the STATED
+    # LIMITS in `_denied_verdicts` — and the measured retracted sentence is itself
+    # multi-key, so a clause-scoped rule would first have to resolve its PLURAL
+    # antecedent (`neither` / `both`) to keep it red. This probe pins BOTH ends:
+    # the retracted multi-key shape stays red, and the documented resolution (one
+    # writer's verdict per sentence) stays green, so the bound costs a split and
+    # never a deleted contrast.
+    retracted_multi_key = (
+        (
+            "probe",
+            "`projection._rebuild_all_replay` and `sdk.supersede_point` are not "
+            "one of them, so neither carries a property on an about edge, and the "
+            "guard declares both census FALSE POSITIVES (`supersede_point` even "
+            "DROPS the property, `#9417`).",
+        ),
+    )
+    assert any(
+        "supersede_point" in item for item in _denied_verdicts(list(retracted_multi_key))
+    ), (
+        "the retracted §13.8 q2 sentence is no longer read as a denial, so the "
+        "sentence this whole leg exists for is green again"
+    )
+    contrast_split_into_sentences = (
+        (
+            "probe",
+            "`sdk.supersede_point` is a counted MAP form writer. "
+            "`projection._rebuild_all_replay` carries no property on an about "
+            "edge.",
+        ),
+    )
+    assert not any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(contrast_split_into_sentences))
+    ), (
+        "stating the two verdicts in separate SENTENCES still reds the counted "
+        "writer, so the documented resolution of the sentence-wide bound (split "
+        "the contrast) does not work and an editor's only way out is to delete "
+        "it — the failure mode this leg exists to prevent"
+    )
+
     offenders = _denied_verdicts(_census_sections())
     assert not offenders, (
         "a corrected passage contradicts a census table:\n  "
@@ -5740,7 +5914,14 @@ _HYPHENATED_MARKER = re.compile(r"\w-\w")
 MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     "originates": "a future spelling of the NAMED class; live today as `originating`",
     "neither carries": "retraction tripwire — the `#9417`-era denial, absent by design",
-    "transferred bare": "retraction tripwire — the pre-`#9417` denial, absent by design",
+    "transferred bare": (
+        "retraction tripwire — the PAST-tense form of the pre-`#9417` denial, "
+        "absent by design. ⚠️ It is a literal, so it pins ONE tense; the present "
+        "tense (`transfers it bare`, `transfers the about edge bare`) is read by "
+        "`DENIAL_PATTERNS`, which is a frame rather than a spelling list because "
+        "the object between the verb and `bare` varies (`#10200` review, cycle 7: "
+        "the present tense was GREEN while this literal was a member)"
+    ),
     "carries nothing": (
         "contradiction vocabulary — the verb form of `carries no property`, "
         "which is the spelling the documents use today"
@@ -5824,9 +6005,20 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the post-negated auxiliary determiner form, "
         "absent until someone writes it (`#10200` review, cycle 6)"
     ),
+    "no longer writes the": (
+        "contradiction vocabulary — the WRITE-verb form of `no longer carries "
+        "the`. ⚠️ Its absence was a recorded FALSE CLAIM until `#10200` review "
+        "cycle 7: this entry's neighbour below says the bare form is covered \"by "
+        "its determiner form recorded above\", and the only determiner form "
+        "recorded was the CARRY verb — so the gate survived swapping `carries` "
+        "for `writes`, measured green. Live in `DENIAL_MARKERS` now, so the "
+        "paraphrase reds the moment it is written"
+    ),
     "no longer writes": (
-        "contradiction vocabulary — the bare post-negated auxiliary form; absent "
-        "by design, its determiner form is recorded above"
+        "contradiction vocabulary — the BARE post-negated auxiliary form; absent "
+        "by design. Its determiner form (`no longer writes the`) sits directly "
+        "above and IS live — the claim this entry made at `#10200`'s head was "
+        "false, because the determiner form recorded there was the CARRY verb's"
     ),
 }
 
@@ -5865,6 +6057,28 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
         assert _HYPHENATED_MARKER.search(spelling), (
             f"the dead-marker pattern does not see {spelling!r}, so it cannot "
             "red on the defect it was written for"
+        )
+    # … and EVERY `DENIAL_PATTERNS` entry must SEE the denial it was written for,
+    # or it is the same DEAD instrument as a hyphenated literal — plus one
+    # sentence it must NOT read, because the REBUILD note (`#10139`) is TRUE prose
+    # that a counted writer's sentence may legitimately carry.
+    for pattern in DENIAL_PATTERNS:
+        assert pattern.search("transfers the about edge bare"), (
+            f"DENIAL_PATTERNS entry {pattern.pattern!r} cannot see the denial it "
+            "was written for (measured green at `#10200` review cycle 7)"
+        )
+        assert pattern.search("it transfers it bare"), (
+            f"DENIAL_PATTERNS entry {pattern.pattern!r} needs a fixed object "
+            "('the about edge'), so the rule is a spelling list in disguise"
+        )
+        assert not pattern.search(
+            "The REBUILD half of the supersede transfer is still bare (`#10139`)"
+        ), (
+            f"DENIAL_PATTERNS entry {pattern.pattern!r} reads the NOUN 'transfer' "
+            "(\"the transfer is still bare\"), so the true REBUILD note reds "
+            "whenever a counted writer is named in its sentence — that note is "
+            "required by `#10139`, so the only way to clear the red is to "
+            "delete it"
         )
     # … and must NOT flag the live flattened spelling of the same words.
     for spelling in ("MAP form", "NAMED form", "re materializ", "pre-#9417"):
