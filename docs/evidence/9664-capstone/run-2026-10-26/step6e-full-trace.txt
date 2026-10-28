@@ -1,0 +1,100 @@
+1. Live connection verification
+Connected and verified
+
+Called the ChatGPT-specific verification tool:
+
+JSON
+tortoise_overview({"section":"health"})
+
+Health check
+
+Result
+Server
+
+ok
+Database
+
+Connected
+FalkorDB
+
+Connected
+Graph size
+
+10
+DB latency
+
+88.3 ms
+Active errors
+
+0
+Server code stale
+
+No
+Journal write failures
+
+0
+One diagnostic counter reports record_write_failures.no_tenant = 1. This is worth investigating separately, but it did not prevent the health check from succeeding.
+
+Tortoise is connected and verified. No installation or configuration changes were needed.
+
+2. Onboarding state
+
+Called:
+
+JSON
+tortoise_onboarding_state({})
+Incomplete
+
+Fork: self · Status: active
+
+The server reports 3 completed steps out of the 7 canonical steps applicable to the onboarding flow, with one additional configuration-only step.
+
+Step
+
+State
+team-named
+
+ Complete
+connection-written
+
+Not applicable to ChatGPT
+harness-connected
+
+ Complete
+first-points-filed
+
+ Complete
+decide-completed
+
+ Pending
+capture-disclosed
+
+ Pending
+catalog-presented
+
+ Pending
+3. What remains
+
+Decision protocol: File a real decision with options, criteria, supporting evidence, and confidence evaluation. This completes decide-completed.
+
+Capture disclosure: Not yet recorded. This checkpoint is triggered by the first successful session capture, not by reading the disclosure.
+
+Catalog presentation: Not yet completed, although the supplied document doesn't specify the action that marks it complete.
+
+Recording setup: session_recording=true, but capture_revised=false and capture_ask_shown=false. No capture receipts exist.
+
+GitHub integration: Not connected or indexed. Issues and documents are enabled as settings but cannot ingest GitHub content until connected.
+
+4. Recommended next action
+
+Your onboarding document says that once harness-connected is already recorded, the connection flow should be treated as complete rather than repeated. The remaining work is the self-onboarding experience, not connector installation.
+
+Because you've explicitly prohibited installation, I haven't changed recording settings, connected GitHub, seeded anything, or created additional points.
+
+Bottom line: Connection works. First points exist. The most important unfinished functional milestone is decide-completed. The other outstanding steps concern recording and onboarding presentation.
+
+ChatGPT can make mistakes. Check important info.
+Latest response
+Thinking effort
+Medium
+Response complete

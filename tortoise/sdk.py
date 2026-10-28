@@ -158,6 +158,11 @@ from .projection.entities import (  # #3998: the declared :Source surface
 from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
 )
+# #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
+# The Point `name` advisory below reads the Point's fields OFF it rather than
+# re-typing `content`/`search_keys` — so the advisory cannot drift from the
+# index, and an index change that adds a field retires it with no second edit.
+from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
@@ -2716,18 +2721,24 @@ def _write_capture_turns(
     # the same replay re-creates them, undoing the migration within a day
     # (#10067).
     #
-    # `TurnRecorded` is that record for this lane: the same `public.point` row
-    # (the same snapshot, the same `record_read` turn read, the same
-    # `{session}_t{i}` key) and NO graph fold
-    # (`projection._NO_PROJECTION_FOLD`), with `cache_tier = 'record_only'` on
-    # the snapshot so the row's own DATA tells `rebuild_from_record` the same
-    # thing. Both rebuild routes then agree, which is the whole point: one
+    # `TurnsRecorded` is that record for this lane (its declaration and payload
+    # pin live in `record_projection`, main's #10129): ONE carrier per capture
+    # holding the very per-turn snapshots this loop builds, and NO graph fold
+    # (`projection._NO_PROJECTION_FOLD`). Its RECORD half — the `public.point`
+    # rows at `cache_tier = 'record_only'` — is the projection's
+    # `_turn_row_statements`, so the live write and a journal replay run the same
+    # statement. Both rebuild routes then agree, which is the whole point: one
     # journal, one record, one graph.
+    #
+    # ⛔ THE ROW WRITE MUST NOT BE DROPPED FROM THIS CHANGE. Those per-turn
+    # `PointAdded` records ARE the record's turn-row write (this function issues
+    # no row statement of its own — measured: drop them and the record projects
+    # zero turn rows), so a producer turnover that only swapped the journal TYPE
+    # would leave a capture's turns in no store at all.
     if sdk._get_event_log() is None:
         return redacted_total
-    from tortoise.record_projection import RECORD_ONLY_TIER, TURN_RECORD_TYPE
-    _turn_record_type = (TURN_RECORD_TYPE if _record_holds_turns
-                         else "PointAdded")
+    from tortoise.record_projection import TURNS_RECORD_TYPE
+    _turn_records: list[dict] = []
     # #1920 (durability half): the stale-turn delete above is a hard delete,
     # so it needs the SAME honest JSONL record ``delete_point`` emits —
     # ``EntityMutated`` op=delete, whose fold (``_delete_entity_by_id``) is
@@ -2742,7 +2753,17 @@ def _write_capture_turns(
         # subscriber surface. The JSONL half is the ``EntityMutated``
         # op=delete record the replay folds — NOT ``PointRetracted``, whose
         # fold tombstones (the wrong meaning for a removal).
-        sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
+        # ⛔ BUT NOT ON THE RECORD-HELD LANE. `PointRetracted` is in
+        # `_GRAPH_EVENT_TYPES`, so it writes a `:GraphEvent` subscriber row —
+        # and on this lane the turn's CREATION record is the carrier, which is
+        # deliberately NOT in that set (turns leave `poll_events` with step 7;
+        # see `record_projection.TURNS_RECORD_TYPE`). Announcing the deletion of
+        # an entity the feed never saw created is the asymmetry this gate
+        # removes; the JSONL half below still removes the record ROW, so a
+        # shorter re-capture is still durable. Pinned by
+        # `tests/test_10017_turn_carrier_replay.py`.
+        if not _record_holds_turns:
+            sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")
     for i, _turn in enumerate(windowed):
         turn_id = _capture_turn_id(session_id, i, turn_offset)
@@ -2770,14 +2791,11 @@ def _write_capture_turns(
             "status": status if status is not None else "draft",
             "createdAt": created_at if created_at is not None else now,
         }
-        if _record_holds_turns:
-            # #10017 R2: the ROW declares which store it is for, so every
-            # reader — `rebuild_from_record` today, an export or a sibling
-            # projection tomorrow — gets the placement without being taught
-            # an "except turns" predicate. It lands the `public.point`
-            # COLUMN (the schema refuses it as a props key, so it can never
-            # become a node property).
-            _turn_snapshot["cache_tier"] = RECORD_ONLY_TIER
+        # ⛔ The tier does NOT ride this snapshot: `_RECORD_ONLY_KEYS` strips
+        # `cache_tier` before any insert, and the row states it as its own
+        # COLUMN (`record_projection._turn_row_statements`). Carrying it here
+        # would also break `TURNS_SNAPSHOT_KEYS`, the payload pin the carrier
+        # inherits from the writer verbatim.
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
         # #5004 round-3: when THIS capture encoded nothing, what rides the
@@ -2788,27 +2806,55 @@ def _write_capture_turns(
         # `stamp_journal_embedding` stamps no identity.
         if turn_embs[i] is None and stored_emb is not None:
             _turn_snapshot["embedding_preserved"] = True
-        sdk._emit_event(
+        _turn_records.append({
+            "id": turn_id,
             # Parity with `create_point`'s emission (#3947 review F5): the
-            # PAYLOAD carries `content_hash`. It belongs here and NOT in the
+            # PAYLOAD carries `content_hash`. It belongs there and NOT in the
             # `point` snapshot, which `_emit_event` strips it from
             # (`content_hash` is derived, and the replay recomputes it in
             # `_upsert_point_props`).
-            #
-            # ⚠️ `contains_session` rides the ENVELOPE for both types — it is
-            # a capture-write structural fact (ONTOLOGY §4.5), never a node
-            # property. The graph fold reads it for `PointAdded` only and the
-            # record's `_ENVELOPE_RELATIONS` is keyed the same way, so on the
-            # carrier it is carried for the reader and materialises nothing in
-            # either store: a record-sourced `relation` row for a row the graph
-            # deliberately does not hold would be the record richer than the
-            # graph — the one direction Interface A forbids.
-            _turn_record_type,
-            {"id": turn_id, "kind": "event",
-             "content_hash": turn_hashes[i]},
-            point=_turn_snapshot,
+            "kind": "event",
+            "content_hash": turn_hashes[i],
+            "point": _turn_snapshot,
+        })
+
+    if _record_holds_turns:
+        # ONE carrier, holding the writer's snapshots VERBATIM — the payload
+        # contract `record_projection.TURNS_SNAPSHOT_KEYS` pins key-for-key.
+        #
+        # ⚠️ #5004's attestation is stamped HERE rather than by `_emit_event`:
+        # that seam gates on the TYPE (`creating=type_ in ("PointAdded",
+        # "OperatorAdded")`), and this carrier is neither — so without this the
+        # armed lane's turns would journal a vector with NO origin while the
+        # graph lane's attest one, i.e. the same capture would yield different
+        # record content depending on whether `TORTOISE_RECORD_DSN` is set.
+        # `creating=True` is accurate (this capture computed these vectors); the
+        # `embedding_preserved` branch still withholds the identity, because
+        # THAT vector may predate a model change.
+        from .embeddings import stamp_journal_embedding
+
+        for _record in _turn_records:
+            stamp_journal_embedding(_record["point"], creating=True)
+        # `contains_session` rides the ENVELOPE (a capture-write structural fact,
+        # ONTOLOGY §4.5 — never a node property). The graph fold reads it for
+        # `PointAdded` only; the record applies it once per turn
+        # (`_ENVELOPE_RELATIONS`), so the `relation` rows the record holds are
+        # the same ones the per-turn `PointAdded` lane wrote.
+        sdk._emit_event(
+            TURNS_RECORD_TYPE,
+            {"sessionId": session_id},
+            turns=[_record["point"] for _record in _turn_records],
             contains_session=session_id,
         )
+    else:
+        for _record in _turn_records:
+            sdk._emit_event(
+                "PointAdded",
+                {"id": _record["id"], "kind": _record["kind"],
+                 "content_hash": _record["content_hash"]},
+                point=_record["point"],
+                contains_session=session_id,
+            )
 
     # #4911: the live `SET s.capture_redactions` above has no journal carrier
     # without this record — a journal-only ``rebuild()`` / ``recover_from_log``
@@ -4595,8 +4641,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # dropped (a strip would let a caller believe the placement took).
     #
     # Hard-reject, not strip-and-ignore: there is no legitimate caller intent —
-    # the tier is written by the record's own producers (`TurnRecorded` via
-    # `_declared_mutations`, the R1 delete demote via
+    # the tier is written by the record's own producers (`TurnsRecorded` via
+    # `record_projection._turn_row_statements`, the R1 delete demote via
     # `record_projection._tier_demote_statement`), never by a props bag.
     if "cache_tier" in props:
         raise ValueError(
@@ -4893,6 +4939,182 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # because the SHARED projection writer (`_upsert_point_props`) is the door every
 # write reaches and it needs the same rule (#8006). `create_point`,
 # `update_point` and `update_entity` still call it here, under this name.
+
+
+def _point_fts_indexed_fields() -> list[str]:
+    """#10122: the fields the Point FULLTEXT index actually HOLDS.
+
+    Read off ``projection._FULLTEXT_INDEX_LABEL_FIELDS`` — the table that
+    CREATES the indexes — never a second hand-written copy of the field list.
+    So the advisory below cannot drift from the index, and an index change that
+    adds a field (``name`` being the one #10122 is about) silences it by
+    construction rather than needing a second edit.
+    """
+    for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:
+        if label == "Point":
+            return list(fields)
+    return []
+
+
+def _lexical_text(value) -> str:
+    """#10122: the coverage-comparison key — whitespace-collapsed, casefolded.
+
+    Accepts a list/tuple as well as a str: the doors flatten ``search_keys``
+    before this runs, but the generic ``update_entity`` payload is the caller's
+    own dict and a raw array is the #5482 shape, not a crash here.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = " ".join(str(v) for v in value)
+    return " ".join(str(value).split()).casefold()
+
+
+def _warn_point_name_not_lexically_indexed(
+    props: dict, *, door: str, content: str | None = None,
+    stored: dict | None = None,
+) -> None:
+    """#10122: advise, at the write door, that a Point's ``name`` is NOT
+    lexically indexed. Warn, never block (#1934's precedent for a declaration
+    gap) — and never mutates ``props``, because the node still stores it.
+
+    THE DEFECT. The Point FULLTEXT index holds ``content`` + ``search_keys``
+    only, while the write doors ACCEPT ``name`` on a Point and the node stores
+    it. The stored name is therefore invisible to the lexical leg: a query for
+    the point's OWN exact name returns nothing — MEASURED on the embedded and
+    the docker lane (#10122: the name-only point is absent from
+    ``run_fts_query`` while the content-carrying one is found). ``Event`` /
+    ``Subject`` / ``Object`` DO index ``name`` (``_FULLTEXT_INDEX_LABEL_FIELDS``
+    above), so a Point is the one label where an ACCEPTED write mints a
+    silently un-findable record — the #5482 class, which this repo fixed rather
+    than tolerated.
+
+    ⛔ NOT the fix: adding ``name`` to the index. That is a RANKING change (it
+    moves collection statistics and every Point's field length) and it is gated
+    on the #8486 measurement, which is postponed (the ruling recorded on
+    #10122). This advisory has ZERO ranking effect — it reads no score, and it
+    writes nothing. The HELPER does no graph read of its own: the only
+    non-payload input is the stored text the ``update_point`` door has already
+    read and hands over, which is why that door's verdict covers the text the
+    index WILL hold rather than only the fields the caller supplied.
+
+    SILENCE ON THE COMMON SHAPE. A name whose tokens already appear in the
+    text the index will hold does not warn — the identifier IS reachable, so
+    there is nothing to advise. WHICH text that is depends on the door:
+    ``create_point`` compares against the payload it is about to write (the
+    whole write), while ``update_point`` compares against the STORED
+    ``content``/``search_keys`` it reads in its own probe, because a name-only
+    update carries no indexed text of its own. ``update_entity``'s Point branch
+    still compares payload-only — an asymmetry that is deliberate for now
+    (threading the same read there is its own change) and named in
+    ``test_10122_point_name_not_indexed.py``.
+
+    ``content`` is the DOOR's own content argument, supplied only where the
+    payload does not carry it: ``create_point`` takes ``content`` as a required
+    positional (it is not part of the ``**props`` passthrough), so without this
+    a point whose title is plainly in its ``content`` would warn — the exact
+    false positive the coverage check exists to avoid. ``update_point`` /
+    ``update_entity`` pass ``content`` inside the props dict and need not set
+    it.
+    """
+    name = props.get("name")
+    if not isinstance(name, str):
+        return
+    needle = _lexical_text(name)
+    if not needle:
+        return
+    fields = _point_fts_indexed_fields()
+    if "name" in fields:
+        return  # the index holds `name` after all — nothing to advise
+    if not fields:
+        return  # no Point index on this engine — a different (visible) state
+
+
+    # ⛔ TOKEN-LEVEL, NOT SUBSTRING (#10122 review P2). The lexical leg answers
+    # with an OR-UNION of the query's tokens (``build_or_query``), so a name
+    # whose tokens are SCATTERED through ``content`` is findable — a substring
+    # test called that uncovered and the message then asserted an absence that
+    # does not hold (measured: content "the probe was a write for capstone and
+    # 9664 rows" answers a query for name "capstone-9664 write probe"). The
+    # honest condition is DISJOINT token sets: not one token of the name appears
+    # in the text this write indexes. Anything short of that only costs RANK,
+    # which is not what an advisory may promise.
+    from tortoise.sparse import tokenize_sparse_query
+
+    name_tokens = set(tokenize_sparse_query(str(name), keep_numeric=True))
+    indexed_tokens: set[str] = set()
+    # ⛔ PER FIELD, and the STORED component is used only where the payload
+    # does NOT set that field (#10122 rounds 2-4). Two earlier versions got
+    # this wrong in opposite directions: a payload-only comparison fired on
+    # every name-only update, and a single UNIONED stored blob then silenced an
+    # update that REPLACES content (measured: stored content carrying the name,
+    # then `update_point(name=…, content="unrelated curtains here")` → silent,
+    # although the tokens were only in the text being overwritten). The text
+    # the index will hold after this write is therefore: the payload value
+    # where the payload sets the field, else the stored component.
+    effective: dict[str, object] = {}
+    for field in fields:
+        if field == "content" and content is not None:
+            effective[field] = content
+        elif field in props:
+            effective[field] = props.get(field)
+        elif stored:
+            effective[field] = stored.get(field)
+        else:
+            effective[field] = None
+    for field in fields:
+        indexed_tokens.update(tokenize_sparse_query(
+            _lexical_text(effective[field]), keep_numeric=True))
+    if not any(ch.isalnum() for ch in str(name)):
+        # Silent only when the name carries NO alphanumeric character at all
+        # (pure punctuation/whitespace): then there is nothing to index and the
+        # advice would be meaningless. ⛔ NOT "when our token list is empty":
+        # ``build_or_query`` does not drop a degenerate query, it falls back to
+        # the ESCAPED RAW literal (#1791), so ``build_or_query("R&D") == "R&D"``
+        # and the engine still tokenizes it — measured: a point whose content
+        # says "the brand R&D handles the audit" IS returned by
+        # ``run_fts_query("R&D")`` at 1.0. So an `R&D`-shaped name (or a
+        # stopwords-only one, since our stopword list is not the engine's) is
+        # genuinely findable once its literal sits in an indexed field, and the
+        # advisory must speak rather than stay silent. That was a false negative
+        # in the previous round (#10122 review P2).
+        return
+    if name_tokens:
+        if name_tokens & indexed_tokens:
+            return
+    else:
+        # No token on our side (e.g. a one-character literal) but the name DOES
+        # carry alphanumerics: fall back to a casefolded literal containment
+        # test, which is what the engine's raw-literal path matches.
+        folded = _lexical_text(name)
+        if any(folded in _lexical_text(effective[f]) for f in fields):
+            return
+    # The roster is DERIVED from the same table, so a label that gains (or
+    # loses) a ``name`` index changes this sentence with the index.
+    other_labels = sorted(
+        label for label, label_fields in _FULLTEXT_INDEX_LABEL_FIELDS
+        if label != "Point" and "name" in label_fields)
+    if not other_labels:
+        label_clause = "no other label indexes it"
+    elif len(other_labels) == 1:
+        label_clause = f"{other_labels[0]} indexes it"
+    else:
+        label_clause = f"{'/'.join(other_labels)} index it"
+    where = ("the text the Point fulltext index will hold after this write"
+             if stored else
+             "the text THIS write supplies for those fields (this door has no "
+             "stored text to compare against)")
+    basis = ("none of the name's tokens" if name_tokens
+             else "the name's literal")
+    _logger.warning(
+        "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
+        "lexical query for the name can only reach this point through other "
+        "evidence, and will not rank on the name itself (#10122). Put the "
+        "identifier in `content` or in `search_keys`: `name` is not lexically "
+        "indexed on a Point (%s). The write is accepted as-is — "
+        "warn-not-block, #1934.",
+        door, name, basis, where, "/".join(fields), label_clause,
+    )
 
 
 def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
@@ -6875,8 +7097,87 @@ _TEMPORAL_RESTAMP_PROPS = frozenset({
 })
 
 
+def _shape_or_refuse_caller_end(props: dict) -> dict | None:
+    """#9202: read the CALLER's end for intent on the way in — shape or refuse.
+
+    Replaces the long write-boundary END warning (#6140/#9910, "stored verbatim,
+    merely warned about") with the two messages the 2026-10-26 ruling asks for:
+    a SHAPED value (blank or an uncertainty marker) is stored as the canonical
+    un-datable form and ECHOED back in the write reply, and an ILLEGIBLE
+    attempted instant (or text with no recoverable intent) is REFUSED naming the
+    fault and the repair. The decision itself, and its vocabulary, live in
+    ``validity.read_caller_end`` — this function only applies it to ``props``.
+
+    ⛔ NOT wired to ``validFrom``. The start keeps the #6140 warning: that ruling
+    named the START, and shaping it would re-open a reading it deliberately
+    pinned. Only the END moved, and only because the owner re-decided it here.
+
+    ⚠️ **This binds the GUARDED caller doors only** (``create_point``,
+    ``update_point``), so the refusal is not airtight and §4.7 does not claim it
+    is: ``update_entity``'s Point arms remain an unguarded route to a junk end
+    (#9649), and ``supersede_point``'s numeric-``valid_from`` kwarg is
+    deliberately exempt (it is not a caller ``validTo`` write). The shape/refuse
+    rule, its vocabulary, its receipt and its count are stated HERE and in
+    ``validity.read_caller_end`` rather than in the canonical ontology: they are
+    write-door behaviour, not the model.
+
+    Mutates ``props`` in place — ``validTo`` absent (``None``, which ``SET n +=
+    $props`` removes) plus ``validToPrecision='unknown'`` — and returns the
+    in-band RECEIPT (``{"sent": <token>, "validTo": None,
+    "validToPrecision": "unknown"}``) for the door to merge into its reply, or
+    ``None`` when the value was accepted (nothing to report: an accepted instant
+    and a normalised format variant are both SILENT — §0's "complete it, don't
+    lecture", and §1's "normalised silently").
+
+    The receipt is not cosmetic: without it a real typo (``validTo="-"`` meant as
+    a dash between two dates) would merge into "the author did not know" with no
+    trace — §7 trap 1, the trap that makes shaping indefensible.
+
+    One home, no second gate: this runs INSIDE ``_refuse_inverted_point_window``,
+    the caller-bound boundary ``create_point`` / ``update_point`` already route
+    through, on the predicate every read path orders with
+    (``validity._names_an_instant``). A second "is this an instant" test is
+    exactly the #9201/#9244 defect class.
+    """
+    from tortoise.validity import (
+        PRECISION_UNKNOWN,
+        TO_PRECISION_PROP,
+        read_caller_end,
+    )
+    if "validTo" not in props:
+        return None
+    sent = props["validTo"]
+    stored, shaped = read_caller_end(sent, props.get(TO_PRECISION_PROP))
+    if shaped is None:
+        if stored != sent:
+            # Representational variance the read measure could not order
+            # (`2024-3-1`, `2024/03/01`) — the SAME instant, so it is written in
+            # the canonical form with no comment: finishing the caller's
+            # sentence, not changing it.
+            props["validTo"] = stored
+        return None
+    props["validTo"] = None
+    props[TO_PRECISION_PROP] = PRECISION_UNKNOWN
+    return {
+        "sent": shaped,
+        "validTo": None,
+        "validToPrecision": PRECISION_UNKNOWN,
+    }
+
+
+def _with_end_receipt(reply: dict, receipt: dict | None) -> dict:
+    """Merge the #9202 shaping RECEIPT into a write-door reply (in-band).
+
+    Returns ``reply`` unchanged when nothing was shaped, so a write that sent a
+    real instant comes back byte-identical to before this door learned to shape.
+    """
+    if not receipt:
+        return reply
+    return {**reply, "valid_to_shaped": receipt}
+
+
 def _refuse_inverted_point_window(g, props: dict, *,
-                                  point_id: str | None = None) -> None:
+                                  point_id: str | None = None) -> dict | None:
     """#5359: refuse an INVERTED validity window at a Point write boundary.
 
     ``create_point`` / ``update_point`` accept ``validFrom``/``validTo`` as
@@ -6912,33 +7213,32 @@ def _refuse_inverted_point_window(g, props: dict, *,
     ``SET n += $props`` removes the property, so the effective bound is
     ``None`` and the window is open-ended — hence the key-presence test rather
     than a truthiness test.
+
+    Since #9202 (owner ruling 2026-10-26) the CALLER's END is decided here too,
+    BEFORE the pair is validated: ``_shape_or_refuse_caller_end`` shapes a value
+    that declares no date and refuses one that attempts an instant and fails, so
+    every value this function then validates is either an orderable instant or
+    absent. The returned RECEIPT is the door's in-band echo of a shaped value.
     """
     if "validFrom" not in props and "validTo" not in props:
-        return
-    # #6140 option C, as the owner ruled it — a WARNING, not a refusal. A
-    # caller handing us a bound that names no instant (`""`, `"TBD"`) is told
-    # what that value MEANS, and the write proceeds: refusing would make a
-    # legacy point impossible to update or supersede until its window was
+        return None
+    # #9202: the end's decision PRECEDES the pair validation below, so the two
+    # never disagree about the value being written.
+    receipt = _shape_or_refuse_caller_end(props)
+    # #6140 option C, as the owner ruled it — a WARNING, not a refusal, for the
+    # START. A caller handing us a bound that names no instant (`""`, `"TBD"`)
+    # is told what that value MEANS, and the write proceeds: refusing would make
+    # a legacy point impossible to update or supersede until its window was
     # repaired. Only the CALLER's value warns — a bound merged in from the
     # stored opposite side is not being written, so
     # `commit_schema.validate_validity_window` (which sees only the merged pair)
     # deliberately stays silent.
     #
-    # ⚠️ BOTH ENDS (#9202). The ruling named the START, and the START was the
-    # only side wired — so `create_point(validFrom="TBD")` spoke while
-    # `create_point(validTo="TBD")` said nothing, and the silent one is the
-    # more consequential mistake: the reply then reported `end_state: "known"`
-    # and `get_historical_knowledge` answered `found` about the year 2050 with
-    # no field distinguishing it from a dated end. The COVERAGE rule for that
-    # value is settled and shared (ONTOLOGY §4.7: a bound that names no instant
-    # is not a bound — the #6140 start reading, extended to the end by #9408),
-    # the write door now says so on either side, and since the 2026-10-25 owner
-    # ruling (#9202, option B) the END's REPORTED STATE is `unknown` too —
-    # `validity.end_state` raises `END_UNKNOWN` for an end that names no
-    # instant, so the reply stops asserting the end is dated and the
-    # `end_state_unknown` / `indeterminate_end_ids` flags fire for it. The write
-    # door itself still changes nothing: the value is accepted and stored
-    # verbatim.
+    # ⚠️ The END arm that used to sit beside this one is GONE (#9202, owner
+    # ruling 2026-10-26): a caller end is now SHAPED or REFUSED above, so there
+    # is no third outcome left for a warning to describe. The START keeps its
+    # warning because #6140's ruling named the start and nothing has reversed
+    # that half.
     #
     # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
     # for a single write: a dedup-hit `create_point` (create leg, then
@@ -6946,73 +7246,48 @@ def _refuse_inverted_point_window(g, props: dict, *,
     # create leg sets ``_WARN_SUPPRESS`` for the re-entry it causes, and the
     # update leg stays silent for a value the stored node already carries — an
     # unrelated update of a legacy point re-reads a value nobody is writing.
+    # (A SHAPED end needs none of that: the create leg rewrites ``props`` to
+    # absent + `unknown` before the dedup re-entry, so the update leg sees a
+    # value that declares nothing and shapes nothing — one receipt, one log
+    # line, by construction.)
     def _warn_unorderable_caller_bound(prop: str, bound: object) -> None:
-        """Say what a caller bound that names no instant MEANS, once per write.
+        """Say what a caller START that names no instant MEANS, once per write.
 
-        The gate is ``_created_sort_key`` — the very measure ``_covers``,
-        ``validity.effective_precision`` and the inversion guard order with, so
-        a warning cannot disagree with the read path about which values are
-        instants (``key[0] == 0``). No second notion of "parseable" is
-        introduced (#9201's rule), and the value is neither refused nor
-        rewritten (#6140's ruling: a warning, never a refusal).
+        The gate is ``validity._names_an_instant`` — the ONE home for "does this
+        value point at an instant?", the same measure ``_covers``,
+        ``effective_precision``, ``end_state``, the inversion guard and
+        ``_shape_or_refuse_caller_end`` all use — so this warning cannot disagree
+        with the read path about which values are instants, and no second notion
+        of "parseable" is introduced (#9201's rule). The value is neither
+        refused nor rewritten (#6140's ruling for the START: a warning, never a
+        refusal).
         """
-        if bound is None:
-            return
-        from tortoise.search_engine import _created_sort_key  # lazy — no cycle
-        if _created_sort_key(bound)[0] == 0:
+        from tortoise.validity import _names_an_instant
+        if bound is None or _names_an_instant(bound):
             return
         suppressed = _WARN_SUPPRESS.get()
         if suppressed is not None and repr(bound) in suppressed:
             return
-        if prop == "validTo":
-            # The END text must state the END's meaning. Reusing the start's
-            # "OPEN below" wording would tell the operator the opposite of what
-            # this value does (it bounds nothing ABOVE), which is worse than
-            # the silence it replaces.
-            #
-            # ⚠️ The remedy must name `validTo=None` for the UPDATE leg, which is
-            # where this warning also fires: `_refuse_inconsistent_validity_precision`
-            # resolves the pair an update will persist, so OMITTING `validTo` keeps
-            # the stored un-datable value and then refuses the declaration beside it
-            # (a `ValueError` where the caller was following this advice).
-            #
-            # The end's REPORTED STATE is the owner's, and it was ruled on
-            # 2026-10-25 (option B): such an end reads `unknown`. The warning
-            # says so, so the operator is not left guessing what the reply will
-            # call the value it just wrote.
-            _logger.warning(
-                "validTo %r names no instant — it bounds NOTHING, so the "
-                "window is UNBOUNDED above (ONTOLOGY §4.7, #9202). If the "
-                "end is known but un-datable, pass validToPrecision='unknown' "
-                "with NO validTo (on an update pass validTo=None explicitly — "
-                "omitting it keeps the stored value); otherwise pass an "
-                "ISO-8601 instant. The reply reports end_state='unknown' for "
-                "such an end either way (owner ruling 2026-10-25, #9202).",
-                bound,
-            )
-            return
         _logger.warning(
-            "validFrom %r names no instant — it means NO START WAS "
+            "%s %r names no instant — it means NO START WAS "
             "RECORDED, so the window is OPEN below (ONTOLOGY §4.7, "
             "#6140). Pass an ISO-8601 instant, or omit the property, to "
             "make the intent explicit.",
-            bound,
+            prop, bound,
         )
 
     from tortoise.commit_schema import validate_validity_window
     if point_id is None:
         _warn_unorderable_caller_bound("validFrom", props.get("validFrom"))
-        _warn_unorderable_caller_bound("validTo", props.get("validTo"))
         validate_validity_window(props.get("validFrom"), props.get("validTo"))
-        return
+        return receipt
     rows = g.query(
         "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
         params={"id": point_id},
     ).result_set
     if not rows:
-        return
+        return receipt
     warned_start = False
-    warned_end = False
     for stored_vf, stored_vt in rows:
         # ``get(key, default)`` uses the default only when the key is ABSENT,
         # so a key present with value None still clears the bound (matching
@@ -7022,14 +7297,8 @@ def _refuse_inverted_point_window(g, props: dict, *,
         if not warned_start and "validFrom" in props and props["validFrom"] != stored_vf:
             _warn_unorderable_caller_bound("validFrom", props["validFrom"])
             warned_start = True
-        # #9202: the END arm is gated exactly like the start's — the CALLER's own
-        # value, and only when it differs from what the node already carries (a
-        # duplicate-id fan-out must not re-warn per sibling; an unrelated update
-        # of a legacy point re-reads a value nobody is writing).
-        if not warned_end and "validTo" in props and props["validTo"] != stored_vt:
-            _warn_unorderable_caller_bound("validTo", props["validTo"])
-            warned_end = True
         validate_validity_window(effective_vf, effective_vt)
+    return receipt
 
 
 def _resolve_end_state(valid_to: object, valid_to_precision: object) -> str:
@@ -9488,6 +9757,10 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #10122: a `name` the index does not hold is a stored-but-unfindable
+        # identifier — advise here, at the door that accepted it (after the
+        # flatten, so the coverage check sees the stored `search_keys` form).
+        # ⛔ Advisory only: it never refuses and never touches `props`.
         # E4 (#5007): the span is an ADDRESS — enforce the all-or-nothing /
         # ordered / in-range rule HERE as well as on the `Point` model. These
         # two props ride the generic passthrough, so without this a caller
@@ -9506,10 +9779,18 @@ class TortoiseSDK:
         # validate_validity_window`, shared with `invalidate_point`'s #5358
         # guard and the read path's `_covers`) instead of re-implementing it.
         # No `point_id`: a fresh CREATE has no stored opposite bound to merge.
-        _refuse_inverted_point_window(self._get_proj().g, props)
+        # #9202: this call also DECIDES the caller's `validTo` (shape or refuse)
+        # and hands back the in-band receipt the reply echoes.
+        _end_receipt = _refuse_inverted_point_window(self._get_proj().g, props)
         # #2350 (E-prec): the per-end precision declaration is validated by the
         # same fresh-create rule (no stored opposite to merge).
         _refuse_inconsistent_validity_precision(self._get_proj().g, props)
+        # #10122 review P3: the advisory runs AFTER the refusal gates above —
+        # a create that these refuse writes nothing, and advising about a write
+        # that never happened is crying wolf (the same discipline
+        # ``update_entity`` documents for its own door).
+        _warn_point_name_not_lexically_indexed(props, door="create_point",
+                                               content=content)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -9770,12 +10051,26 @@ class TortoiseSDK:
                         # defect measured at the #9964 review: the re-run of this
                         # very call returned `temporal_not_applied` ONLY, while
                         # its first run reported `kind_other_layer` too).
-                        return {
+                        # ⛔ AND NO END RECEIPT (#10079 review P2). Shaping was
+                        # COMPUTED from the caller's props at the top of this
+                        # door, but this branch applies NOTHING — the fold that
+                        # would have stored the shaped end was refused by
+                        # #7819 just above. `valid_to_shaped` is defined as the
+                        # receipt of an end that WAS shaped INTO THE STORED
+                        # record (config/surface-manifest.yml), so emitting it
+                        # here told the caller their end was now the canonical
+                        # un-datable one while the stored window still ended on
+                        # its original date and read `known` — a receipt that
+                        # reports an action that did not happen is the exact
+                        # betrayal the ruling's §0 orders refused (#9202).
+                        # `temporal_not_applied` is the honest signal here, and
+                        # it rides this same reply.
+                        return _with_end_receipt({
                             **self.get_point(pid),
                             **_merge_advisories(
                                 self._temporal_not_applied_advisory(pid),
                                 _kind_layer_advisory(_layer_note, pid)),
-                        }
+                        }, None)
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -10020,8 +10315,10 @@ class TortoiseSDK:
                         self.update_point(pid, **props)
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
-                return {**self.get_point(pid),
-                        **_kind_layer_advisory(_layer_note, pid)}
+                return _with_end_receipt(
+                    {**self.get_point(pid),
+                     **_kind_layer_advisory(_layer_note, pid)},
+                    _end_receipt)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
         if explicit_id is not None:
@@ -10519,8 +10816,8 @@ class TortoiseSDK:
             _extra = dict(_merge_advisories(_provenance_notes, _layer_advice))
             if _source_change_notices:
                 _extra["source_change_notices"] = _source_change_notices
-            return {**_snapshot, **_extra}
-        return _snapshot
+            return _with_end_receipt({**_snapshot, **_extra}, _end_receipt)
+        return _with_end_receipt(_snapshot, _end_receipt)
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
         """Idempotent create/update — matches by content hash."""
@@ -14297,7 +14594,9 @@ class TortoiseSDK:
         # `update_point(id, validTo=EARLY)` on a future-`validFrom` point would
         # be checked as (None, EARLY) and pass, persisting the inversion. The
         # predicate itself is the ONE HOME, never a second copy.
-        _refuse_inverted_point_window(proj.g, props, point_id=id)
+        # #9202: this call also DECIDES the caller's `validTo` (shape or refuse)
+        # and hands back the in-band receipt the reply echoes.
+        _end_receipt = _refuse_inverted_point_window(proj.g, props, point_id=id)
         # #2350 (E-prec): precision is validated against the STORED pair after
         # the same merge, so a one-sided update cannot leave a marker beside a
         # bound it contradicts.
@@ -14468,6 +14767,39 @@ class TortoiseSDK:
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
 
+        # #10122: the advisory sits here, after the refusals that run BEFORE
+        # the write (kinds, sanitisation, span, validity window, precision, the
+        # draft→live status ValueError above). Named residuals it does NOT
+        # cover, all measured: `_assert_lifecycle_guard` (further down) and the
+        # promote arm's guarded-SET miss (`_raise_update_point_status_error`)
+        # can still raise after this line, so a refused transition can advise.
+        # Moving it past those is its own change — they are inside the write
+        # arm, not before it (#10122 review rounds 3-4).
+        # #10122: the advisory, AFTER the refusal gates above (a refused update
+        # writes nothing, so advising about it is crying wolf — the discipline
+        # `create_point` and `update_entity` already follow) and reading the
+        # STORED text, because the verdict must be about the index, not about
+        # the payload a name-only update does not carry (round-1 + round-2 P2).
+        # Fires only when the update carries a string `name`, so a plain update
+        # pays nothing.
+        if isinstance(props.get("name"), str):
+            # Aggregations ONLY, so this is one row on a hit AND on a miss —
+            # a mixed ``count(n), n.content`` projection groups implicitly and
+            # returned an EMPTY result set on the miss (the round-2 pin caught
+            # it as an IndexError).
+            _name_row = proj.g.query(
+                "OPTIONAL MATCH (n:Point {id:$id}) "
+                "RETURN count(n), "
+                "coalesce(head(collect(n.content)), ''), "
+                "coalesce(head(collect(n.search_keys)), '')",
+                params={"id": id},
+            ).result_set[0]
+            if _name_row[0]:
+                _warn_point_name_not_lexically_indexed(
+                    props, door="update_point",
+                    stored={"content": _name_row[1],
+                            "search_keys": _name_row[2]})
+
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an
         # idempotent success, not the illegal transition the draft-born guard
@@ -14483,7 +14815,7 @@ class TortoiseSDK:
             if _cur_status and _cur_status[0][0] == 'live':
                 if len(props) == 1:
                     # status-only: a true no-op — no write, no event.
-                    return self.get_point(id)
+                    return _with_end_receipt(self.get_point(id), _end_receipt)
                 # Other props still belong to the caller; drop only the
                 # already-satisfied status and let the non-status write path
                 # below apply them (never silently discard caller data).
@@ -14827,7 +15159,7 @@ class TortoiseSDK:
                     # through to the tail would run `_mark_dirty`, advancing
                     # the graph-wide EP epoch and persisting `ep_dirty` for a
                     # promote that matched nothing (#8854 review r9 P2).
-                    return self.get_point(id)
+                    return _with_end_receipt(self.get_point(id), _end_receipt)
                 # LANDED: record it HERE, before the tag sync and `_mark_dirty`
                 # below can strand it (#7951 2b — see `_record_promote`).
                 _record_promote()
@@ -14875,7 +15207,7 @@ class TortoiseSDK:
                     # #1088: see the :Object arm above — the same idempotent
                     # no-op, answered with no writes rather than through the
                     # tail's `_mark_dirty` EP advance.
-                    return self.get_point(id)
+                    return _with_end_receipt(self.get_point(id), _end_receipt)
                 # LANDED: see the `:Object` arm above — same commit point, same
                 # reason (#7951 2b).
                 _record_promote()
@@ -15061,7 +15393,20 @@ class TortoiseSDK:
         # `_mark_dirty` below it cannot strand a landed promotion. The unguarded
         # arms still record BEFORE their writes (the outbox ordering above); the
         # payload is the same dict either way — one record shape per call.
-        return result
+        #
+        # ⛔ AN ABSENT ID TAKES NO RECEIPT (#10079 review round 2, P2). This
+        # door returns `{}` for an id that does not exist — a documented
+        # contract (`this verb returns {} for a missing id`, asserted at
+        # tests/test_lifecycle_guards.py) — and that path writes NOTHING. Shaping
+        # still ran from the caller's props, so `_end_receipt` is non-None, and
+        # attaching it turned `{}` into truthy `{'valid_to_shaped': …}`: a caller
+        # checking `if not sdk.update_point(id, …)` to detect a missing id now
+        # silently passes, and the receipt reports a shaping that was never
+        # stored. Same class as the refused-fold branch above: a receipt may
+        # only report an end that reached the STORED record.
+        if not result:
+            return result
+        return _with_end_receipt(result, _end_receipt)
 
     # §17.1 LANE (#9206): the APPLY-FIRST lane — DECLARED, with the order it
     # actually uses. #9207 reversed this door to the apply-first shape, so the
@@ -16574,11 +16919,19 @@ class TortoiseSDK:
             derivable = rel in DERIVABLE_STRUCTURAL_RELS
             struct_rows = proj.g.query(
                 f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "
-                f"RETURN id(target), target.id, labels(target), properties(target)",
+                # ⛔ #9417: the EDGE's properties are selected too. The transfer
+                # below recreates the relationship on the successor, and a bare
+                # MERGE mints it with NO properties — so an `about*` edge carrying
+                # the subject binder's `confidence` (session_link.py:381,
+                # subject_binding.py:481) lost it on supersede. Selecting
+                # `properties(r)` here is what lets the transfer carry it across.
+                f"RETURN id(target), target.id, labels(target), properties(target), "
+                f"properties(r)",
                 params={"old_id": old_id},
             ).result_set
             for row in struct_rows:
-                # Row shape: [internal id, logical id, labels, properties] —
+                # Row shape: [internal id, logical id, labels, properties,
+                # edge properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
                 # replay key at emission: `name` for aboutSubject/Object/Event/
@@ -16590,6 +16943,27 @@ class TortoiseSDK:
                 # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
+                # #9417: the old relationship's own properties (row[4]) — carried
+                # onto the successor edge below, never silently dropped. WHITELISTED
+                # to the `RelationUpsert.attrs` vocabulary (the set the replay
+                # contract understands) — copying `properties(r)` raw would carry
+                # EP-managed / internal fields onto the successor.
+                # ⛔ NOT `source_version`: it is the RECORD column name, and this
+                # file's graph rels carry the anchor as `sourceVersion`
+                # (`projection/edges.py:504`, `_anchor_on_create`) — nothing writes
+                # `r.source_version`, so the entry could never match and only
+                # implied a carry that never happened. It is also the one key the
+                # record contract forbids re-applying on a re-link ("a re-link must
+                # not ADVANCE a recorded version", `record_projection.py:2061-2068`).
+                # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
+                # STILL dropped on transfer. That is the pre-existing loss #10139
+                # owns (the rebuild half is bare there too); stating it here rather
+                # than letting the word "never" above imply otherwise.
+                edge_props = {
+                    k: v for k, v in (row[4] or {}).items()
+                    if k in ("direction", "confidence", "weight", "label",
+                             "batch_id")
+                }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
@@ -16643,11 +17017,42 @@ class TortoiseSDK:
                             target_label=target_label,
                             edge_type=rel,
                         )
-                # Create new edge: new point → same target (MERGE = idempotent, no dupes)
+                # Create new edge: new point → same target (MERGE = idempotent,
+                # no dupes).
+                # ⛔ #9417: the old edge's properties are carried across, because a
+                # bare MERGE recreates the `about*` edge with NO properties and the
+                # binder's `confidence` is then DROPPED, not copied.
+                # ⛔ `ON CREATE SET`, NOT a bare `SET`. `SET nr += $attrs` overwrites
+                # PER KEY, so an unconditional carry made the RETIRED point's value
+                # win over a confidence the SUCCESSOR already held on the same
+                # target — measured: old 0.42 + successor's own live 0.91 → 0.42,
+                # successor destroyed (target: #9417 review P1). The collision is
+                # the COMMON case: `supersede_point` is the RESTATEMENT path, so a
+                # restated claim about the same subject is bound to the same
+                # Subject by `bind_point_subjects` and both edges exist. In a chain
+                # (X→Y→Z) each transfer would re-stamp the newest successor with the
+                # oldest ancestor's value, and the descriptor below carries no
+                # `attrs`, so the overwritten value is journaled NOWHERE and cannot
+                # be rebuilt.
+                # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
+                # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
+                # untouched), so this preserves it while still refusing to leave a
+                # NEWLY created edge bare. A successor edge that exists but is
+                # partially populated is deliberately NOT topped up — its own state
+                # is authoritative.
+                # ⛔ params carry `attrs` ONLY when there is something to carry — an
+                # empty map is not writable by FalkorDB and the projection degrades
+                # it to null with a #7369 warning, so the empty case must stay a
+                # plain MERGE with no `attrs` key at all.
+                _params = {"new_id": new_id, "tid": target_graph_id}
+                _carry = ""
+                if edge_props:
+                    _carry = "ON CREATE SET nr += $attrs"
+                    _params["attrs"] = edge_props
                 proj.g.query(
                     f"MATCH (new:Point {{id:$new_id}}), (t) WHERE id(t) = $tid "
-                    f"MERGE (new)-[:{rel}]->(t)",
-                    params={"new_id": new_id, "tid": target_graph_id},
+                    f"MERGE (new)-[nr:{rel}]->(t) {_carry}",
+                    params=_params,
                 )
                 # Delete old edge (match by exact internal node id)
                 proj.g.query(
@@ -19758,15 +20163,18 @@ class TortoiseSDK:
         (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
         + route-scoped attribute rejection (cycle-13: relation carries
         direction/confidence/weight — plus ``mitigation`` since #5244, because
-        a structural edge has no operator bridge to damp; operator route
-        carries confidence/weight).
+        a structural edge has no operator bridge to damp; the operator route
+        REFUSES confidence/weight, because ``create_operator`` has no edge
+        attribute to carry them).
 
         ``effective_route`` (#9173) is the route the write loop will ACTUALLY
         take — the request PROMOTED by the endpoint-kind gate
         (:meth:`_effective_route` / :meth:`_effective_connection_routes`,
         owner ruling 2026-10-13, #8499). It scopes the multi-item-``to`` arm,
         which is a DIRECT-edge rule (``create_direct_edge`` takes ONE target;
-        the operator route fans out). It is passed in rather than probed here
+        the operator route fans out), and — since #9749 — BOTH attribute arms,
+        because a route that cannot store an attribute must not be told the
+        attribute is clean (see the arm below). It is passed in rather than probed here
         so the caller keeps its one graph read per bundle/connection — and
         because Phase 2 has the resolved ids and no bundle to read refs from.
         The parameter is REQUIRED (no default) on purpose: a default of
@@ -19887,30 +20295,27 @@ class TortoiseSDK:
                                f"be one of {', '.join(sorted(self._INGEST_DIRECTION_VALUES))}, "
                                f"got {direction!r}",
                 })
-            if route == "operator":
+            if write_route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
                 # confidence/weight (they are plain direct-edge attributes).
-                # ⛔ #9173 review — DELIBERATELY left on the REQUEST route, not
-                # `write_route`: a promoted Point-bearing plain IMPL already
-                # passes these attributes through and `create_operator` DROPS
-                # them (measured at this head: a SINGULAR plain IMPL between
-                # Points with `confidence: 0.5` validates clean and writes an
-                # edge without it). Scoping this arm by the effective route
-                # would turn that silently-accepted bundle into a refusal — a
-                # new refusal for every existing caller, outside #9173's scope.
-                # The silent drop is a PRE-EXISTING defect on both route
-                # spellings, tracked as its own issue; when it is fixed this arm
-                # must move WITH the multi-item arm above, or the two rules stay
-                # inconsistent inside one function.
-                for key in ("confidence", "weight"):
-                    if key in conn:
-                        violations.append({
-                            "section": "connections", "index": index,
-                            "message": f"ingest: connections[{index}] {key} is "
-                                       f"not allowed on the operator route "
-                                       f"(reify:true/mitigation) — it belongs "
-                                       f"on plain IMPL/NAND direct edges",
-                        })
+                #
+                # #9749 — judged by the EFFECTIVE route, not the REQUEST.
+                # The #9173 review left it on the request route ON PURPOSE and
+                # said why: a promoted Point-bearing plain IMPL was validated
+                # as a direct edge and then written by `create_operator`, which
+                # has no such edge attribute, so the value was DROPPED while the
+                # caller was told "clean" (measured there: a singular plain IMPL
+                # between Points with `confidence: 0.5` validated clean and
+                # wrote an edge without it). That review's own instruction was
+                # that THIS arm must move WITH the multi-item arm above once the
+                # drop was decided. #9749 is that decision, and it goes the way
+                # `docs/INGEST_CONTRACT.md` §13 row 4 already states: an
+                # attribute the route cannot store is a Phase-1 violation, not a
+                # silent discard. The direct route — where §13 row 4 says these
+                # attributes belong — now actually carries them (the write loop
+                # forwards both into `create_direct_edge`).
+                self._reject_operator_route_attributes(index, conn, route,
+                                                       violations)
             else:
                 for key in ("confidence", "weight"):
                     val = conn.get(key)
@@ -19988,6 +20393,64 @@ class TortoiseSDK:
                                f"id=<operator id>, reason=..., "
                                f"strength=0.10..0.50)",
                 })
+
+    def _reject_operator_route_attributes(self, index: int, conn: dict,
+                                          request_route: str,
+                                          violations: list[dict]) -> None:
+        """#9749 — refuse ``confidence``/``weight`` on the OPERATOR route.
+
+        `create_operator` writes ``(op)-[:IMPL|NAND {idx}]->(endpoint)`` edges
+        and takes neither attribute, so a connection that reaches the operator
+        route has nowhere to PUT them. §8 assigns them to the operator-less
+        direct edge (``docs/INGEST_CONTRACT.md`` §13 row 4), and §11 is explicit
+        that an author-stated confidence is RECORDED for audit while EP computes
+        belief from factor structure — so dropping the value is not a harmless
+        no-op, it is the caller's declared value going missing behind a "clean"
+        verdict.
+
+        Two spellings reach this refusal, and they need different sentences
+        because the caller's remedy differs:
+
+        - ``request_route == "operator"`` — the caller ASKED for the operator
+          route (``reify: true`` / ``mitigation``). The remedy is to drop the
+          attribute, or to use the direct route (a non-Point pair).
+        - ``request_route == "direct"`` — the plain spelling, PROMOTED by the
+          endpoint-kind gate (#8499, owner ruling 2026-10-13) because the pair
+          is Point-bearing. The caller never chose the operator route, and
+          ``create_direct_edge`` is deliberately not gated, so the message names
+          that escape hatch rather than telling them to do something the
+          promotion overrode: measured on this tree, the promoted write created
+          the operator and wrote edges with ``confidence`` ABSENT.
+
+        Splitting the sentence must not split the ARM: both live in one helper,
+        called from the one place the write route is known, so they cannot drift
+        the way the pre-#9749 request-route/effective-route pair did.
+        """
+        _direct_escape = (
+            "write the operator-less edge explicitly with "
+            "sdk.create_direct_edge(...) if you need an edge-carried value")
+        for key in ("confidence", "weight"):
+            if key not in conn:
+                continue
+            if request_route == "operator":
+                message = (
+                    f"ingest: connections[{index}] {key} is not allowed on the "
+                    f"operator route (reify:true/mitigation) — it belongs on "
+                    f"plain IMPL/NAND direct edges (a pair with no plain :Point "
+                    f"endpoint); {_direct_escape}"
+                )
+            else:
+                message = (
+                    f"ingest: connections[{index}] {key} cannot be stored on "
+                    f"this connection: a Point-bearing pair is operator-mediated "
+                    f"(endpoint-kind gate, #8499), an operator has no edge "
+                    f"attribute to carry it, and its weighting is EP-computed "
+                    f"(INGEST_CONTRACT §11) — drop the key, or {_direct_escape}"
+                )
+            violations.append({
+                "section": "connections", "index": index,
+                "message": message,
+            })
 
     def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
         """ONE batched query resolving external endpoint existence, label
@@ -22293,6 +22756,16 @@ class TortoiseSDK:
                         op_type, src, dsts[0],
                         label=label,
                         direction=direction,
+                        # #9749: the §8 attributes this route is the ONLY home
+                        # for (INGEST_CONTRACT §13 row 4) were validated here
+                        # and then dropped — `create_direct_edge` has always
+                        # accepted both and wrote them on the edge (and the
+                        # `DirectEdgeCreated` journal descriptor replays them),
+                        # so the omission in THIS call was the whole defect. A
+                        # connection reaching this branch is non-Point-bearing,
+                        # so nothing upstream refuses them.
+                        confidence=conn.get("confidence"),
+                        weight=conn.get("weight"),
                         batch_id=batch_id,
                         promote_source=(promotion_policy == "auto"),
                     )
@@ -36692,6 +37165,19 @@ class TortoiseSDK:
                     )
                     if res.result_set and res.result_set[0][0]:
                         break
+                # #10122: POINT-gated, and only once the write LANDED. This
+                # surface reaches every label, and `name` IS indexed on
+                # Subject/Object/Event — warning before the match would both
+                # inflate the count for sibling labels and cry wolf on a miss
+                # (`update_entity("no-such-id", name=...)`), the two things the
+                # #3377 arm below is careful about. The advisory is the same one
+                # `create_point`/`update_point` call: this live `SET n += $p` is
+                # a THIRD Point write seam and it does not pass through
+                # `_upsert_point_props` (which is why it is not covered from
+                # there).
+                if res.result_set and res.result_set[0][0]:
+                    _warn_point_name_not_lexically_indexed(
+                        point_props, door="update_entity")
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
                 # leaves a phantom record).

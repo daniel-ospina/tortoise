@@ -560,8 +560,10 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import quote, urlencode
 
 # The fleet board is the ONLY source for the claim gate's holder read (#8175).
@@ -2543,11 +2545,48 @@ def _ahead_behind(
     return ahead, behind
 
 
+class TerminalState(NamedTuple):
+    """Why a ref CANNOT be in flight — and WHICH KIND of leftover it is.
+
+    `tip_is_a_merged_head` is the distinction #10174 needs, and it is the same
+    distinction the two predicates already make internally:
+
+      * predicate 1 says the ref's OWN TIP is a MERGED PR's head — a **MERGED
+        LEFTOVER**, which is exactly the squash-merge shape (the PR's commits never
+        entered main, so no ancestry test can see the landing);
+      * predicate 2 says the tip is a commit main ABSORBED as a merge parent, which
+        is a landing of a different shape and says nothing about `origin`.
+
+    Only the first carries the #10174 evidence: a merged leftover's REMOTE branch is
+    normally deleted at merge, and that pair — a merged PR naming this tip AND no
+    remote branch at all — is the strongest available evidence that no lane is live.
+    Carrying the flag rather than re-deriving it at the call site is deliberate: a
+    caller that re-tested `sha in merged_heads` would be a SECOND copy of predicate
+    1's guards, and the guards are what keep a freshly-created branch (sitting on a
+    merged PR's head) blocking.
+    """
+
+    reason: str
+    tip_is_a_merged_head: bool = False
+
+
+def _merged_pr_label(number: int | None) -> str:
+    """`#4242`, or an explicit gap — never a silent `#None`.
+
+    The number is carried by the sampled payload (#10174), but a demotion must never
+    DEPEND on it: the load-bearing datum is the head SHA, and a payload missing the
+    number still proves the ref is a merged leftover.
+    """
+    if isinstance(number, int):
+        return f"#{number}"
+    return "(number not on the sampled payload)"
+
+
 def _branch_terminal_state(
-    ref: str, sha: str | None, merged_head_shas: set[str],
+    ref: str, sha: str | None, merged_heads: Mapping[str, int | None],
     ancestor_merged: set[str] | None, main_tip: str | None,
     first_parent: set[str] | None,
-) -> str | None:
+) -> TerminalState | None:
     """Why this branch ref CANNOT be in flight, or None when it might be.
 
     #5186: a SQUASH-merged branch is the ordinary case in this repo, and its
@@ -2669,7 +2708,7 @@ def _branch_terminal_state(
         return None
     if (
         sha
-        and sha in merged_head_shas
+        and sha in merged_heads
         # ⛔ `sha != main_tip` IS NOT "the only guard left" when `first_parent`
         # is unavailable — an earlier version of this comment said so, and the
         # `--merged` fallback added below guards that same state. In every state a
@@ -2724,8 +2763,19 @@ def _branch_terminal_state(
             and (ancestor_merged is None or ref in ancestor_merged)
         )
     ):
-        return ("squash-merged — its tip SHA is a merged PR's head, so its content "
-                "already landed even though its commits are not ancestors of main")
+        # ⛔ THE NOTE NAMES THE PULL REQUEST (#10174). "its tip SHA is a merged PR's
+        # head" is enough to DEMOTE and not enough to ACT: a reader of the gate's
+        # output needs the number to verify the landing and to clean the ref up, and
+        # the harvest already carries it (`number` is on the same sampled payload as
+        # the `headSha`). The vocabulary is deliberate too — "MERGED LEFTOVER" says
+        # what the ref IS, where the old wording only said what it is not.
+        return TerminalState(
+            f"squash-merged — its tip {sha[:9]} is the head of the MERGED PR "
+            f"{_merged_pr_label(merged_heads.get(sha))}, so its content already "
+            "landed even though its commits are not ancestors of main — a MERGED "
+            "LEFTOVER, not a live holder",
+            tip_is_a_merged_head=True,
+        )
     if (
         # Every condition guards a DOWNGRADE, so an unreadable witness leaves the
         # ref BLOCKING.
@@ -2751,7 +2801,9 @@ def _branch_terminal_state(
         # `first_parent` is unreadable.
         and sha not in first_parent
     ):
-        return "merged into origin/main (its tip is a branch head main absorbed)"
+        return TerminalState(
+            "merged into origin/main (its tip is a branch head main absorbed)"
+        )
     return None
 
 
@@ -2899,7 +2951,8 @@ def _branch_terminal_state_from_prs(
         if head_sha == sha:
             return (
                 f"its tip {sha[:9]} is the head of the MERGED PR #{pr.get('number')} "
-                f"(targeted head-ref lookup, outside the {CLOSED_PR_LIMIT}-PR sample)"
+                f"(targeted head-ref lookup, outside the {CLOSED_PR_LIMIT}-PR sample) "
+                "— a MERGED LEFTOVER, not a live holder"
             )
         # ⛔ THE TIP-DIVERGENCE ARM — #5485's unsolved half, and the reason the
         # exact test above does NOT close this issue on its own. A MERGED PR's
@@ -2926,9 +2979,177 @@ def _branch_terminal_state_from_prs(
         return (
             f"its tip {sha[:9]} is contained in the MERGED PR #{pr.get('number')} "
             f"(head {head_sha[:9]}; targeted lookup + compare, outside the "
-            f"{CLOSED_PR_LIMIT}-PR sample)"
+            f"{CLOSED_PR_LIMIT}-PR sample) — a MERGED LEFTOVER, not a live holder"
         )
     return None
+
+
+class RemoteBranch(NamedTuple):
+    """What the branch API said about a demoted ref's REMOTE counterpart (#10174).
+
+    `sha` is the remote tip the same response carried, or "" when it carried none. It
+    exists so the note can compare it with the demoted LOCAL tip: `present` at the same
+    tip is the leftover and can be deleted; `present` at another tip means the NAME was
+    reused and a lane may be live under it — advice to delete there would destroy the
+    only holder of unlanded work (review finding on #10205).
+    """
+
+    kind: str
+    why: str
+    sha: str = ""
+
+
+def _remote_branch_state(gh_bin: str, slug: str | None, cwd: str, timeout: float,
+                        ref: str) -> RemoteBranch:
+    """("gone" | "present" | "unreadable", a one-line reason) for a LOCAL branch.
+
+    #10174: the question is *does the remote still hold this branch?* — and only
+    GitHub can answer it authoritatively. The local `refs/remotes/<remote>/<branch>`
+    would be free (the run already enumerates that namespace) and is a FETCH CACHE:
+    its absence means "this checkout has not fetched it", not "it is deleted", and
+    its presence may be a stale duplicate of a ref deleted weeks ago. The note this
+    feeds exists to say whether the strongest evidence is available, so it may not
+    be built from the weakest one.
+
+    ⛔ IT IS A NOTE-ONLY READ, AND THE POLARITY IS DIFFERENT FROM EVERY OTHER READ
+    IN THIS MODULE. Failure does NOT keep the ref blocking, because the demotion does
+    not rest on this datum: the load-bearing fact is that the ref's TIP IS A MERGED
+    PR'S HEAD, which is GitHub's own record of the landing. So the three outcomes
+    are all safe — a failed read can neither demote nor un-demote anything, and it
+    must never be narrated as `gone` ("the branch is deleted" and "we could not look"
+    are different sentences with different remedies, the module's oldest defect).
+
+    Bounded like every other optional surface: ONE request, paid only for a ref that
+    the merge-history test has ALREADY demoted (zero-or-one per DEMOTED REF — several
+    demoted refs in one run cost several reads; never one per local branch). The branch
+    name is percent-encoded into the path for the same reason
+    `_branch_terminal_state_from_prs` encodes it into the query — a ref name is
+    writer-influenced and `/` is the only character left intact.
+
+    ⛔ IT ALSO RETURNS THE REMOTE TIP, and that is NOT a convenience (review finding on
+    #10205). A branch NAME is reused: a lane can take a name whose old incarnation was
+    squash-merged and push NEW work to it from another machine or a cell, and this clone
+    never fetches, so `origin/<branch>` can be AHEAD of the demoted local ref holding
+    commits that landed nowhere. `name` alone cannot tell that apart from the leftover,
+    and the first cut of this clause used it to advise "delete the remote one too" —
+    advice that would have deleted the only holder of a live lane's unlanded work. The
+    tip is on the SAME response, so the comparison is free and the advice can be made
+    SAFE BY CONSTRUCTION instead of by the reader's caution. `sha` is "" when the payload
+    carried no tip; a caller must then treat the comparison as UNVERIFIED, never as a
+    match.
+    """
+    if not slug:
+        return RemoteBranch("unreadable", "no owner/name for the target repo")
+    branch = _short_branch(ref) if ref and ref != "(detached)" else ""
+    if not branch:
+        return RemoteBranch("unreadable", f"{ref!r} names no branch")
+    path = f"repos/{slug}/branches/{quote(branch, safe='/')}"
+    try:
+        payload = _gh_json(
+            gh_bin,
+            ["api", path, "--jq", "{name: .name, sha: (.commit.sha // \"\")}"],
+            cwd, timeout,
+        )
+    except SurfaceError as exc:
+        blob = str(exc).lower()
+        # `gh` renders a non-2xx as `HTTP <code>: <status> (<url>)`, so the 404 is
+        # matched on the CODE as well as on the prose — a bare "not found" test
+        # would miss the documented form on a response with no body prose.
+        if "http 404" in blob or "not found" in blob:
+            return RemoteBranch("gone", f"the branch API returned 404 for `{branch}`")
+        return RemoteBranch("unreadable", _one_line(str(exc)))
+    if not isinstance(payload, dict):
+        return RemoteBranch("unreadable", (
+            f"the branch API answered {type(payload).__name__}, not an object"
+        ))
+    name = payload.get("name")
+    if not (isinstance(name, str) and name):
+        return RemoteBranch("unreadable", (
+            f"the branch API answered without a name ({_one_line(repr(payload))})"
+        ))
+    remote_sha = payload.get("sha")
+    return RemoteBranch(
+        "present",
+        f"the branch API still returns `{name}`",
+        remote_sha if isinstance(remote_sha, str) else "",
+    )
+
+
+def _remote_counterpart_clause(state: RemoteBranch | None, ref: str,
+                              tip: str | None) -> str:
+    """The note fragment for `_remote_branch_state`'s answer, or "" when unasked.
+
+    ⛔ EVERY ANSWER SAYS A DIFFERENT THING, and the differences are the point:
+
+      * `gone` — corroboration a lane is dead: nothing on the remote can still be held
+        under a deleted name, so the local ref is safe to delete;
+      * `present` at the MERGED tip — the remote still holds exactly the artifact this
+        demotion proved landed, so it is a second cleanup target (a local delete alone
+        leaves `origin` holding it);
+      * `present` at ANOTHER tip — the name was REUSED and the remote holds work this
+        local ref never had. Then a lane may be live under that name: say so, and NEVER
+        advise a delete (review finding on #10205 — see `_remote_branch_state`);
+      * `present` with no comparable tip, or `unreadable` — UNKNOWN, stated as such, and
+        stated not to be load-bearing, so neither can be mistaken for the other.
+    """
+    if state is None:
+        return ""
+    kind, why = state.kind, state.why
+    branch = _short_branch(ref)
+    if kind == "gone":
+        return (
+            f"; its remote counterpart `origin/{branch}` is GONE ({why}) — a merged "
+            "leftover with no remote ref is the strongest evidence no lane is live: "
+            "nothing on the remote can still be held under a deleted name"
+        )
+    if kind == "present":
+        if state.sha and tip and state.sha == tip:
+            return (
+                f"; its remote counterpart `origin/{branch}` STILL EXISTS {why} at the "
+                f"SAME tip {tip[:9]} this demotion proves landed — that remote ref is "
+                "the leftover too, so delete both (a local delete alone re-dresses the "
+                "name on the next fetch)"
+            )
+        if state.sha and tip:
+            return (
+                f"; its remote counterpart `origin/{branch}` STILL EXISTS {why} but at "
+                f"ANOTHER tip ({state.sha[:9]}, not this ref's {tip[:9]}) — the NAME WAS "
+                "REUSED and the remote holds work this local ref never had, so a lane "
+                "may be LIVE under it: do NOT delete the remote ref, and do not read "
+                "this row as free. Only the local leftover is proven"
+            )
+        return (
+            f"; its remote counterpart `origin/{branch}` STILL EXISTS {why}, but its "
+            "tip could not be compared with this ref — treat it as UNVERIFIED: a "
+            "reused name can hold live work, so do NOT delete the remote ref"
+        )
+    return (
+        f"; whether the remote still holds `origin/{branch}` could not be read ({why}) "
+        "— UNKNOWN, and the demotion does not rest on it: tip equality is the "
+        "load-bearing test"
+    )
+
+
+def _ask_remote_state(remote_state: object, ref: str) -> RemoteBranch | None:
+    """Call the injected remote-state reader, folding a failed READ into `unreadable`.
+
+    The reader is injected (like `counts` / `tip_age` / `stale`) so the gh binary,
+    slug and timeout stay in `run_preflight`, and so the cost is paid ONLY for a ref
+    that reached a MERGED-LEFTOVER demotion.
+
+    ⛔ A RAISED `SurfaceError` MUST NOT ESCAPE THIS CALL. `scan_branch_surface` is
+    called inside the branch surface's `try`, whose handler marks the whole surface
+    INCOMPLETE (`git-unavailable`) — so an unhandled note-read failure would turn a
+    CLEAN run into exit 2 over a datum that cannot change the verdict.
+    """
+    if remote_state is None:
+        return None
+    try:
+        return remote_state(ref)  # type: ignore[operator]
+    except SurfaceError as exc:
+        return RemoteBranch("unreadable", _one_line(str(exc)))
+    except Exception as exc:  # a NOTE read can never break the scan
+        return RemoteBranch("unreadable", _one_line(f"{type(exc).__name__}: {exc}"))
 
 
 def _tip_is_ancestor_of(
@@ -3767,7 +3988,7 @@ class StaleHolder:
 
 def scan_branch_surface(
     surface: Surface, refs: list[tuple[str, str]], issue: int,
-    identity: Identity, merged_head_shas: set[str],
+    identity: Identity, merged_heads: Mapping[str, int | None],
     ancestor_merged: set[str] | None, main_tip: str | None,
     first_parent: set[str] | None,
     remote_namespaces: set[str] | None = None,
@@ -3775,6 +3996,7 @@ def scan_branch_surface(
     counts: object = None,
     stale: StaleHolder | None = None,
     tip_age: object = None,
+    remote_state: object = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -3820,13 +4042,22 @@ def scan_branch_surface(
             )
             continue
         terminal = _branch_terminal_state(
-            ref, sha, merged_head_shas, ancestor_merged, main_tip, first_parent,
+            ref, sha, merged_heads, ancestor_merged, main_tip, first_parent,
         )
         if terminal is not None:
+            # #10174: a MERGED LEFTOVER says WHICH PR landed it, and whether the
+            # remote still holds the branch. The remote read is asked ONLY here —
+            # for a ref the merge history has already demoted — so the cost is one
+            # bounded request for zero-or-one ref per run, never per branch.
+            extra = ""
+            if terminal.tip_is_a_merged_head:
+                extra = _remote_counterpart_clause(
+                    _ask_remote_state(remote_state, ref), ref, sha)
             surface.add(
                 ref,
-                f"branch is {terminal} — immutable history, not in-flight work "
-                "(non-blocking)",
+                f"branch is {terminal.reason}{extra} — immutable history, not "
+                "in-flight work (non-blocking), and NOT a licence to reuse the "
+                "name",
                 "weak",
             )
             continue
@@ -3839,10 +4070,17 @@ def scan_branch_surface(
         # consumes the demotion it returned.
         targeted = (targeted_terminal or {}).get(ref)
         if targeted is not None:
+            # Every value in `targeted_terminal` is a MERGED PR naming this tip
+            # (exactly or by containment), i.e. the same MERGED-LEFTOVER class as
+            # predicate 1 — so the same corroboration applies, and it is asked the
+            # same bounded way (this ref was about to BLOCK).
+            extra = _remote_counterpart_clause(
+                _ask_remote_state(remote_state, ref), ref, sha)
             surface.add(
                 ref,
-                f"branch is terminal — {targeted}; immutable history, not "
-                "in-flight work (non-blocking)",
+                f"branch is terminal — {targeted}{extra}; immutable history, not "
+                "in-flight work (non-blocking), and NOT a licence to reuse the "
+                "name",
                 "weak",
             )
             continue
@@ -4068,7 +4306,7 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
 
 def scan_worktree_surface(
     surface: Surface, blocks: list[dict], issue: int, identity: Identity,
-    merged_head_shas: set[str], ancestor_merged: set[str] | None,
+    merged_heads: Mapping[str, int | None], ancestor_merged: set[str] | None,
     main_tip: str | None, first_parent: set[str] | None,
     counts: object = None,
     stale: StaleHolder | None = None,
@@ -4154,13 +4392,17 @@ def scan_worktree_surface(
                 )
                 continue
         terminal = _branch_terminal_state(
-            branch, block.get("head"), merged_head_shas, ancestor_merged,
+            branch, block.get("head"), merged_heads, ancestor_merged,
             main_tip, first_parent,
         )
         if terminal is not None:
+            # ⛔ NO REMOTE COUNTERPART HERE, deliberately: this record is a WORKTREE
+            # on disk, and whether `origin` still has a branch of that name cannot
+            # make a checkout less dead (or more live). The branch surface asks that
+            # question about the BRANCH REF, which is the thing the remote can hold.
             surface.add(
                 label,
-                f"worktree is on a {terminal} — immutable history, not "
+                f"worktree is on a {terminal.reason} — immutable history, not "
                 "in-flight work (non-blocking)",
                 "weak",
             )
@@ -7038,20 +7280,37 @@ def run_preflight(
     #    enumeration (#5251). The `--search` filter is deliberately NOT used
     #    (the search API silently caps at 1000 results — a partial query wearing
     #    a complete face — and `search/issues` cannot return `head.ref`).
-    # Head SHAs of MERGED PRs, harvested from the closed-PR sample this run
-    # already fetches (`head.sha` + `merged_at` are both on the REST payload).
-    # The branch surface uses them for the squash-merge test (#5186) at ZERO
-    # added API cost — decision D4, which is why that test reuses this list
-    # instead of issuing a `gh pr list --head <ref>` per branch. ⛔ D4's
-    # ZERO-COST CONSTRAINT IS AMENDED BY #5485, and this comment is the place it
-    # would otherwise be lost: the TARGETED lookup in `run_preflight` DOES issue
-    # REST calls for local refs that match the issue number AND survive every
-    # predicate — ONE bounded list request, plus one `compare` per MERGED PR that
-    # request returns (up to the page cap), so normally 0-2 and never a call per
-    # branch. A `compare` failure aborts that ref's whole lookup and is COUNTED,
-    # so the ref keeps blocking (fail-closed). The reuse path is unchanged for
-    # predicate 1.
-    merged_head_shas: set[str] = set()
+    # Head SHAs of MERGED PRs → the PR NUMBER that landed them, harvested from the
+    # closed-PR sample this run already fetches (`number`, `head.sha` and
+    # `merged_at` are all on the REST payload).
+    #
+    # ⛔ IT IS A `sha -> number` MAP, NOT A SET (#10174), because the demotion has to
+    # NAME the pull request it rests on. A set can say "some merged PR's head is this
+    # tip"; only the number lets the reader verify the landing and clean the ref up,
+    # and the number is on the SAME payload the set was built from — so naming it
+    # costs nothing. The read is unchanged in every other respect: an empty or failed
+    # sample still leaves the map empty and every branch BLOCKING.
+    #
+    # The branch surface uses this for the squash-merge test (#5186) at ZERO added
+    # API cost — decision D4, which is why that test reuses this map instead of
+    # issuing a `gh pr list --head <ref>` per branch. ⛔ D4's ZERO-COST CONSTRAINT IS
+    # AMENDED TWICE, and this comment is the place it would otherwise be lost:
+    #   * #5485 — the TARGETED lookup below DOES issue REST calls for local refs that
+    #     match the issue number AND survive every predicate: ONE bounded list
+    #     request, plus one `compare` per MERGED PR it returns (up to the page cap),
+    #     so normally 0-2 and never a call per branch. A failure aborts that ref's
+    #     whole lookup and is COUNTED, so the ref keeps blocking (fail-closed).
+    #   * #10174 — ONE `repos/<slug>/branches/<name>` request, paid only for a ref the
+    #     merge history has ALREADY demoted, to say whether the remote counterpart is
+    #     gone, still there, and AT WHICH TIP. One per DEMOTED REF (several demoted
+    #     refs cost several reads; never one per local branch), and note-only: a
+    #     failure neither demotes nor un-demotes (see `_remote_branch_state`).
+    merged_heads: dict[str, int | None] = {}
+    #: Did the harvest actually RUN? `false` means the closed-PR sample could not be
+    #: read, so predicate 1 had no witness at all — which the branch surface's note
+    #: must SAY, because "no merged PR matches this tip" and "the merged-PR record
+    #: could not be read" are different facts about a ref that keeps blocking.
+    merged_heads_readable = False
     for surface_name, state, limit in (
         (SURFACE_OPEN_PRS, "open", open_pr_limit),
         (SURFACE_CLOSED_PRS, "closed", closed_pr_limit),
@@ -7083,15 +7342,23 @@ def run_preflight(
                         # `headSha` is the PROJECTED key this sample actually
                         # carries (see `_closed_pr_sample`'s jq filter). Reading
                         # a nested `head.sha` here was a silent no-op: the
-                        # projection never emits it, so the set stayed empty and
+                        # projection never emits it, so the map stayed empty and
                         # the squash-merge test never ran in production.
                         _sha = _pr.get("headSha")
                         if _sha:
-                            merged_head_shas.add(str(_sha))
+                            # `number` rides along in the SAME projection and is
+                            # what makes the demotion NAME its PR (#10174). A
+                            # payload whose number is absent still demotes — the
+                            # head SHA is the load-bearing datum, not the label.
+                            _number = _pr.get("number")
+                            merged_heads[str(_sha)] = (
+                                _number if isinstance(_number, int) else None
+                            )
+                merged_heads_readable = True
                 # ⛔ THIS ADVISORY SURFACE'S DATA FEEDS A BLOCKING ONE, and the
                 # authority split does not forbid it — the split is about which
                 # surface can BLOCK, not about where evidence comes from. The
-                # `merged_head_shas` harvested just above (from the closed-PR
+                # `merged_heads` harvested just above (from the closed-PR
                 # sample, authority ADVISORY) are passed to the BLOCKING branch
                 # and worktree scans, where predicate 1 uses them to DEMOTE a hit
                 # to `weak` — so advisory data can turn COLLISION into CLEAN.
@@ -7364,6 +7631,13 @@ def run_preflight(
     def _ref_tip_age(_ref: str) -> float | None:
         return _ref_tip_age_days(git_bin, cwd, _ref, timeout)
 
+    # #10174: does the REMOTE still hold this branch, and at which tip? Paid only for
+    # a ref the merge history already demoted — one read per DEMOTED REF, never one per
+    # local branch (see `_remote_branch_state`) — and note-only: a failure may not
+    # demote, un-demote, or turn the surface INCOMPLETE.
+    def _remote_state(_ref: str) -> RemoteBranch:
+        return _remote_branch_state(gh_bin, slug, cwd, timeout, _ref)
+
     # ⛔ THE WORKTREE LISTING IS READ HERE, BEFORE THE BRANCH SURFACES, because the
     # stale-holder test asks a question about the WORKTREES (`is a live process standing
     # in one of them?`) while scanning a BRANCH. It is the same ONE `git worktree list
@@ -7442,7 +7716,7 @@ def run_preflight(
                     if identity.owns_branch(_ref):
                         continue
                     _state = _branch_terminal_state(
-                        _ref, _sha, merged_head_shas, ancestor_merged, main_tip,
+                        _ref, _sha, merged_heads, ancestor_merged, main_tip,
                         first_parent,
                     )
                     if _state is not None:
@@ -7512,6 +7786,12 @@ def run_preflight(
             # #9806: `tip_age` and `stale` ride along for the SAME reason — one git
             # call and one claim read, only for a ref that matched AND is far enough
             # behind AND silent long enough to be a stale-holder candidate.
+            # #10174: `remote_state` is injected for the SAME cost discipline —
+            # `scan_branch_surface` asks it ONLY for a ref the merge history has
+            # already demoted, i.e. normally zero or one request per run, never one
+            # per ref. It is a NOTE read: it can neither demote nor keep a ref
+            # blocking, so its failure is folded into `unreadable` inside the scan
+            # (`_ask_remote_state`) rather than declared as an INCOMPLETE surface.
             judged0, demoted0, kept0, unmeasured0 = (
                 (stale.judged, stale.demoted, len(stale.kept), len(stale.unmeasured))
                 if stale else (0, 0, 0, 0)
@@ -7523,13 +7803,14 @@ def run_preflight(
             empty_kept0 = len(stale.empty_kept) if stale else 0
             empty_unmeasured0 = len(stale.empty_unmeasured) if stale else 0
             scan_branch_surface(
-                surface, refs, issue, identity, merged_head_shas,
+                surface, refs, issue, identity, merged_heads,
                 ancestor_merged, main_tip, first_parent,
                 remote_namespaces=remote_namespaces,
                 targeted_terminal=targeted_terminal,
                 counts=_branch_counts,
                 stale=stale,
                 tip_age=_ref_tip_age,
+                remote_state=_remote_state,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
@@ -7562,6 +7843,19 @@ def run_preflight(
             else:
                 surface.note += (
                     f"; {len(ancestor_merged)} already merged into main"
+                )
+            # #10174: predicate 1's witness (the merged-PR head map) is fed by the
+            # ADVISORY closed-PR sample, and when that sample cannot be read the map
+            # is EMPTY — so a ref that KEEPS BLOCKING may be blocking only because
+            # nobody could ask. Saying so is the difference between "a live holder is
+            # there" and "the merged-PR record could not be read", which have
+            # different remedies; the ref stays BLOCKING either way (fail-closed).
+            if namespace == "refs/heads" and not merged_heads_readable:
+                surface.note += (
+                    "; ⚠ the merged-PR head witness could not be read (the closed-PR "
+                    "sample failed), so the squash-merge test could not run — every "
+                    "ref here that the targeted lookup did not clear keeps BLOCKING "
+                    "(fail-closed)"
                 )
             if namespace == "refs/heads" and targeted_failures:
                 surface.note += (
@@ -7618,7 +7912,7 @@ def run_preflight(
             empty_kept0 = len(stale.empty_kept) if stale else 0
             empty_unmeasured0 = len(stale.empty_unmeasured) if stale else 0
             scan_worktree_surface(
-                surface, blocks or [], issue, identity, merged_head_shas,
+                surface, blocks or [], issue, identity, merged_heads,
                 _wt_ancestor, main_tip, first_parent,
                 counts=_branch_counts, stale=stale, tip_age=_ref_tip_age,
             )

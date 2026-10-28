@@ -60,6 +60,25 @@ the SHIPPED A4=0 evidence is pinned separately and literally
 change to A4's IMPLEMENTATION — as opposed to its default — still invalidates
 these goldens under R17, unchanged.
 
+#10121 RE-CAPTURE (R17, ORDER only — no content change). #10121 replaced
+every ranking leg's score tie-break (``ORDER BY score DESC, node.<id> ASC``,
+#3019's determinism clause) with the shared recency-then-id rule
+(``search_engine.recency_tie_clause``), so the ask lane's evidence rows come
+back in a different ORDER on the same corpus. This is the #3095 class exactly:
+the ROW SET is unchanged — verified row-by-row by ``_assert_golden``'s content
+layer (``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS``) and by ``_A4_OFF_ROWS``,
+which all run BEFORE their order layer — and only the sequence of those same
+rows moved. Two golden families were re-captured from the docker lane on
+``tests/_assembly_graph.build_base_graph`` / ``build_out_of_subgraph_gold``
+with ``question_date="2026-09-10"`` and a FakeReader, per the policy above:
+the five flag-OFF legacy byte-goldens (``GOLD_LEGACY_*``) and the shipped
+A4=0 order record (``_A4_OFF_ORDERED``). The ``_A4_OFF_ORDERED`` node on
+#3019 is the precedent for exactly this move; the FIRED/HOSTED goldens are
+byte-unchanged (their chronological spine is rendered from dated events, not
+from the fused pool). No ``_FROZEN_CHUNKS`` / ``_A4_OFF_ROWS`` /
+``_PRE_3804_CHUNKS`` edit accompanied this re-capture: those are the
+independent CONTENT record, and a re-capture must not touch them.
+
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
@@ -207,9 +226,9 @@ GOLD_LEGACY_CURRENT = """Current Date: 2026-09-10
 
 [session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session sess-2026-09-01] the new sofa was delivered on the first of september
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session sess-distract-8] talked about phone battery replacement shop with a friend"""
+[session sess-2026-09-01] the new sofa was delivered on the first of september"""
 GOLD_LEGACY_MISFIRE = """Current Date: 2026-09-10
 
 [session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
@@ -218,9 +237,9 @@ GOLD_LEGACY_MISFIRE = """Current Date: 2026-09-10
 
 [session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session sess-2026-09-01] the new sofa was delivered on the first of september
-
 [session sess-distract-8] talked about phone battery replacement shop with a friend
+
+[session sess-2026-09-01] the new sofa was delivered on the first of september
 
 [session sess-2026-08-10] took the dog to the vet for the chewed cushion"""
 GOLD_LEGACY_AGO = """Current Date: 2026-09-10
@@ -229,9 +248,9 @@ GOLD_LEGACY_AGO = """Current Date: 2026-09-10
 
 [session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
-[session sess-2026-09-01] the new sofa was delivered on the first of september
+[session sess-distract-8] talked about phone battery replacement shop with a friend
 
-[session sess-distract-8] talked about phone battery replacement shop with a friend"""
+[session sess-2026-09-01] the new sofa was delivered on the first of september"""
 GOLD_LEGACY_COMPARE = """Current Date: 2026-09-10
 
 [session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
@@ -398,35 +417,35 @@ _A4_OFF_CHUNKS = {
 _A4_OFF_ORDERED = {
     "what is the current status of the couch?": (
         _HEADER_CHUNK,
-        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
     ),
     "compare the couch and the dog bed, which should i keep?": (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
     ),
     "what was the couch status two weeks ago?": (
         _HEADER_CHUNK,
-        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
     ),
     "which came first - the couch or the dog bed?": (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
-        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
     ),
     CANARY_QUESTION: (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
-        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-09-01] the new sofa was delivered on the first of september",
+        "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
+        "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
         "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
     ),

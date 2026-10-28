@@ -1340,16 +1340,19 @@ def test_both_probes_are_dispatched_through_their_coordinators():
 # file's 15s ``[[services.http_checks]] timeout`` — removed by #2850 (2026-09-10)
 # because the /health HTTP check flapped and de-registered the sole machine. Its
 # successor is a TCP check whose 5s timeout times a KERNEL accept and is
-# documented as "generous headroom, not a latency budget", and deploy-hosted.yml
-# curls /health/ready with no ``--max-time`` at all. So there is no longer ANY
-# external quantity this can be compared against.
+# documented as "generous headroom, not a latency budget". The gate DOES now
+# bound that request — ``deploy-health-gate.sh`` curls ``/health/ready`` with
+# ``--max-time "$CURL_MAX_TIME_READY"`` (13 s by default) — but that bound is
+# DERIVED from the very constants guarded here (~1.12x their 11.6 s sum), so it
+# sits downstream of them and cannot act as an independent external deadline.
 #
 # Deleting the assertion instead would have silently unbounded the sum: the
 # per-plane asserts below compare each bound to its own inner total, so doubling
 # CONTROL_PLANE_HARD_TIMEOUT would pass every remaining assertion. Keeping an
 # explicit policy constant preserves that tripwire without pretending the number
-# is deploy-derived. 15.0s is the budget the old routing check implied; revisit
-# when a real deadline exists (add ``--max-time`` to that curl — #2850 follow-up).
+# is deploy-derived. 15.0s is the budget the old routing check implied; whether
+# it should now be re-derived from the client bound is a SEPARATE decision
+# (#2850 follow-up) — do not take it silently here.
 READY_WORST_CASE_BUDGET_S = 15.0
 
 
@@ -1358,8 +1361,10 @@ def _fly_check_budget_proxy_s() -> float | None:
 
     NOTE this check targeted ``/health`` — pure in-memory — NOT ``/health/ready``.
     It was borrowed only as a coarse, repo-owned BUDGET PROXY for the readiness
-    surface: ``deploy-hosted.yml`` curls ``/health/ready`` with no
-    ``--max-time``, so there is no real deadline for it anywhere.
+    surface. That surface is now curled WITH a client bound
+    (``deploy-health-gate.sh``: ``--max-time "$CURL_MAX_TIME_READY"``, 13 s), but
+    the bound is itself derived from these constants, so it is not an
+    independent deadline for them — there is still no external quantity.
 
     Returns ``None`` ONLY when fly.toml genuinely configures no ``http_checks``
     at all (the deliberate #2850 migration). EVERY other state that leaves the
@@ -1674,9 +1679,10 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     assert ready_worst_case < READY_WORST_CASE_BUDGET_S, (
         f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
         f"under the repo-owned policy ceiling ({READY_WORST_CASE_BUDGET_S}s). "
-        "This is a POLICY constant, not deploy-derived: /health/ready is curled "
-        "by deploy-hosted.yml with no --max-time, and fly.toml's 15s http_check "
-        "was removed by #2850. Raise the constant deliberately if the bound "
+        "This is a POLICY constant, not deploy-derived: the gate's client "
+        "bound on /health/ready (--max-time 13 s) is itself derived from these "
+        "constants, and fly.toml's 15s http_check was removed by #2850. Raise "
+        "the constant deliberately if the bound "
         "genuinely needs to grow; do not delete the assertion."
     )
     ceiling = _fly_check_budget_proxy_s()
@@ -1686,7 +1692,8 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
             f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
             f"under fly.toml's http_check timeout ({ceiling}s), borrowed ONLY as a "
             "coarse budget proxy for /health/ready (that check actually targets "
-            "/health, and deploy-hosted.yml curls /health/ready with no --max-time)"
+            "/health, and the gate's own --max-time on /health/ready is derived "
+            "from these constants, so it is not an independent deadline)"
         )
     else:
         # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a

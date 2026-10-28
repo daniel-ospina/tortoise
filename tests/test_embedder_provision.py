@@ -61,6 +61,11 @@ _PROVISIONING_WORKFLOWS = (
     "post-merge-validation.yml",
     "perf-lane.yml",
     "evals-on-demand.yml",
+    # #10194: the non-gating eval subtrees moved to their own docker-shaped
+    # runner, which provisions the embedder for the dense leg exactly as the
+    # gating shards did. A provisioning site that is not in this tuple is a site
+    # none of the pins below can see — the silent-degrade class they exist for.
+    "eval-suite-manual.yml",
 )
 # The four python-ci jobs that provision the embedder for the dense leg.
 _EMBEDDER_JOBS = ("test", "test-slow", "test-concurrency-falkor", "test-carve-out")
@@ -1009,4 +1014,4 @@ def test_every_watchdog_margin_sits_between_the_backoff_budget_and_the_step_cap(
                 f"{where}: watchdog {armed}s is outside ({budget}s, {cap}s)"
             )
             checked += 1
-    assert checked == 7, f"expected 7 embedder gate steps, found {checked}"
+    assert checked == 8, f"expected 8 embedder gate steps, found {checked}"

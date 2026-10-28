@@ -65,6 +65,14 @@ SHAPE_DELETE_MISS = "delete-miss"
 SHAPE_UNIMPLEMENTED_OP = "unimplemented-op"
 #: An ``EntityMutated`` op outside the recorded vocabulary.
 SHAPE_UNKNOWN_OP = "unknown-op"
+#: ``ObjectSuperseded`` matched no Object, and the JOURNAL cannot ADDRESS the
+#: record — NEITHER limb of its identity was ever established: its name by no
+#: `ObjectRegistered`, no `EntityMutated` state op, no `EventRecorded` mention
+#: stub; and its id (when carried) by nothing at all (#3590 D2). A record must
+#: carry a name to be this shape; an id-only record stays
+#: ``SHAPE_OBJECT_SUPERSEDED_MISS``. Distinct from that shape, which keeps the
+#: fail-closed refusal for a target the journal DID establish.
+SHAPE_OBJECT_SUPERSEDED_UNREGISTERED = "object-superseded-unregistered"
 #: ``ObjectSuperseded`` matched no Object.
 SHAPE_OBJECT_SUPERSEDED_MISS = "object-superseded-miss"
 #: ``PointSuperseded`` matched no Point.
@@ -197,6 +205,36 @@ EXEMPT_SHAPES: dict[str, str] = {
         "and the rebuilt graph may keep seeds the live graph dropped — "
         "reconcile the producer before relying on the rebuilt edge state"
     ),
+    SHAPE_OBJECT_SUPERSEDED_UNREGISTERED: (
+        "#3590 D2 (adopted on #3590, bounded): an `ObjectSuperseded` the "
+        "journal cannot ADDRESS — neither limb of its identity was ever "
+        "established. The NAME: no `ObjectRegistered` created it, no "
+        "`EntityMutated` state op carried it into the MERGE key, and no "
+        "`EventRecorded` mention stub minted it. The ID: absent, or not an id "
+        "the journal established by a REGISTRATION, a mention stub's "
+        "deterministic id, or a state op's TARGET id (an ESTABLISHED id "
+        "is a real target — the "
+        "fold missed because the carrier was collapsed away or renamed, not "
+        "because it never existed, so it must keep refusing; #10107 review). "
+        "BOTH limbs are required, and the record must carry a NAME: an "
+        "id-only record stays `object-superseded-miss` (the exemption is "
+        "granted on a name the journal never established, so a name is the "
+        "least identity it must carry — #10107 review P2). "
+        "Because nothing could have produced the address, live folded nothing "
+        "either and live/replay end in the SAME state. This is a weaker claim "
+        "than the neighbouring `edge-message-unreplayed` exemption, which "
+        "tolerates a real divergence; here there is none. DEGRADED GUARANTEE: "
+        "what is lost is the supersede a journal could not address — no entity "
+        "is invented on either side, the miss is still RECORDED and reported "
+        "by the run boundary (an exemption still requires the record, #5380), "
+        "and the exemption covers ONLY the unaddressable case: a name the "
+        "journal DID establish (by registration, by a rename, or by a mention "
+        "stub) still refuses as `object-superseded-miss`, as does a record "
+        "carrying an established id — a supersede that could have landed never "
+        "becomes skippable — a hard-deleted target keeps its own anchored "
+        "`supersede-target-deleted` bound, and an established-then-deleted name "
+        "is NOT absorbed here"
+    ),
 }
 
 
@@ -205,6 +243,7 @@ def classify_terminalizer_miss(
     *,
     has_successor: bool = False,
     target_deleted: bool = False,
+    name_unregistered: bool = False,
 ) -> str:
     """The failure SHAPE for a Point/Object terminalizer that matched 0 rows.
 
@@ -227,6 +266,19 @@ def classify_terminalizer_miss(
     in the reference fold, its ordered ``anchors`` boundary as an additional
     exemption). This module has no journal, so it cannot decide it.
 
+    ``name_unregistered`` is the sibling caller-decision for
+    ``ObjectSuperseded`` only (#3590 D2): the caller has scanned the journal
+    and found the record's NAME not established — no ``ObjectRegistered``
+    created it, no ``EntityMutated`` state op carried it into the merge key,
+    and no ``EventRecorded`` mention stub minted it — **and** its ``id`` (when
+    it carries one) not an id the journal established. Both limbs are
+    required; a name alone is NOT the contract, and a caller that sets this
+    flag on a name-only reading exempts a supersede that could have landed.
+    Also a journal question this module cannot answer — passed in for the same
+    reason as ``target_deleted``, and it must NOT be inferred from the graph,
+    because a live-holder probe is exactly the ambiguity the exemption
+    excludes. It is ignored for every other ``event_type``.
+
     The default arm is fail-CLOSED: a terminalizer type outside the four
     named below returns :data:`SHAPE_UNCLASSIFIED_TERMINALIZER`, which is NOT
     in :data:`EXEMPT_SHAPES`.
@@ -246,8 +298,12 @@ def classify_terminalizer_miss(
         # a genuine miss whatever the target's hard-delete state.
         return SHAPE_POINT_RETRACTED_MISS
     if event_type == "ObjectSuperseded":
+        # `target_deleted` FIRST: it has its own anchor-gated bound and must
+        # not be absorbed by the newer exemption (#3590 D2).
         if target_deleted:
             return SHAPE_SUPERSEDE_TARGET_DELETED
+        if name_unregistered:
+            return SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
         return SHAPE_OBJECT_SUPERSEDED_MISS
     return SHAPE_UNCLASSIFIED_TERMINALIZER
 
