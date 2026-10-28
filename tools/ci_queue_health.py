@@ -711,7 +711,12 @@ def classify_queue(
         # work" would point the operator away from the one workflow the governor
         # could trim, and would contradict the reason line above it. So the leader
         # and its trim-safety are reported as FACTS (the shape `no_flood()` uses),
-        # and the no-action clause states what actually bounds the governor.
+        # and the no-action clause states what ACTUALLY bounds the governor: the
+        # clause ORDER (`pr_running != 0` returns above the governor's block), not
+        # the trim scope — because in this very shape the scope DOES license trims
+        # (the same queue with no PR run executing is a FLOOD whose `trimmable` is
+        # non-empty), and naming the scope as the bound would be a second false
+        # claim beside the one this clause exists to remove.
         reasons.append(
             f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
             f"queued PR-event run has waited {backlogged_wait:.0f}s "
@@ -719,8 +724,10 @@ def classify_queue(
             f"checks cannot answer inside that wait. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
-            f"no run was trimmed: the governor only cancels a trim-safe OFFENDER's "
-            f"queued runs, and a queued PR run is never a candidate"
+            f"no run was trimmed: this state is reached only while a PR-event run "
+            f"is executing, and the governor's block sits BELOW that clause, so no "
+            f"trim was ever considered. In any case its candidates are a trim-safe "
+            f"OFFENDER's queued runs, and a queued PR run is never a candidate"
         )
         return health(PR_BACKLOGGED)
 
