@@ -119,10 +119,12 @@ class FakeD1 {
       const existing = rows.find((r) => r.state === state);
       if (existing) {
         // ⛔ THIS DOUBLE DELEGATES THE OWNER RULE TO THE SQL IT IS GIVEN, it does not restate it.
-        // The real statement writes `user_id=COALESCE(excluded.user_id, consent_attempts.user_id)`;
-        // a double that hardcoded "only overwrite with non-null" would keep the suite green if that
-        // COALESCE were deleted, and the nulling is exactly what lets a SECOND identity pass the
-        // mint's `attempt.user_id !== row.user_id` check for a flow someone else began.
+        // The real statement writes `user_id=COALESCE(consent_attempts.user_id, excluded.user_id)`
+        // — the EXISTING value first, which is what makes the first known owner win. A double that
+        // hardcoded "only overwrite with non-null" would keep the suite green if that COALESCE were
+        // deleted, and the order is the whole property: `excluded` first is last-writer-wins, which
+        // lets a SECOND identity take over a flow someone else began (the very bypass
+        // `test_a_second_identity_cannot_take_over_a_flow_by_re_entering_it` exists to catch).
         if (/COALESCE\(\s*consent_attempts\.user_id\s*,\s*excluded\.user_id\s*\)/i.test(sql)) {
           // FIRST known owner wins: fills an ownerless row, never re-assigns a known one.
           if (existing.user_id == null) existing.user_id = user_id;
@@ -199,6 +201,13 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   });
   // An unprovisioned key is ABSENCE, not a falsy value: delete it rather than set "".
   if (scenario === "mint_no_secret") delete e.CONSENT_TOKEN_SECRET;
+  // The `iss` knob's own defaults, so a cross-half test can vary ONE side at a time. `dropIssuer`
+  // deletes the key (absence, not ""), and `APP_ORIGIN` is movable independently of it — the whole
+  // point of the default-agreement test is that the two must NOT be derivable from each other.
+  if (opts.dropIssuer) delete e.CONSENT_TOKEN_ISSUER;
+  if (opts.issuer !== undefined) e.CONSENT_TOKEN_ISSUER = opts.issuer;
+  if (opts.appOrigin !== undefined) e.APP_ORIGIN = opts.appOrigin;
+  if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
   const res = await tokenRoute.onRequestPost({ request: post("/api/consent/token", { state: "state-xyz" }, headers), env: e });
@@ -375,7 +384,9 @@ def test_the_mint_route_fails_closed_when_the_signing_key_is_absent() -> None:
 def test_a_token_minted_by_the_bff_is_accepted_by_the_AS(monkeypatch) -> None:
     """THE test of this file, and the one that proves a BRIDGE rather than two agreeing mocks.
 
-    The mint happens in TypeScript (the shipped `consent-flow.ts`), the verification in Python
+    The mint happens in TypeScript (the shipped `consent-bridge.ts::mintConsentToken` — NOT
+    `consent-flow.ts`, which the purity guard forbids from holding an `async` function), the
+    verification in Python
     (the shipped `tortoise/consent_token.py`). Any drift between them — the key order, the
     base64url encoding, the `aud`, the bind set, the HMAC input — reds this, where two
     same-language unit tests would both stay green and production would answer `invalid_token`
@@ -409,6 +420,97 @@ def test_a_token_minted_by_the_bff_is_accepted_by_the_AS(monkeypatch) -> None:
         "state": _PARAMS["state"],
     }
     assert assertion["email"] is None, "email is display-only and must not be invented"
+
+
+def _issuer_claim(token: str) -> str:
+    """The minted token's `iss`, decoded but unverified — the exact bytes the AS compares."""
+    import base64
+
+    seg = token.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))["iss"]
+
+
+def _presented() -> dict:
+    return {
+        "client_id": _PARAMS["client_id"],
+        "redirect_uri": _PARAMS["redirect_uri"],
+        "code_challenge": _PARAMS["code_challenge"],
+        "state": _PARAMS["state"],
+    }
+
+
+def test_the_issuer_default_is_the_SAME_on_both_halves_and_ignores_APP_ORIGIN(monkeypatch) -> None:
+    """`iss` has ONE knob and ONE default on both halves — and it is NOT `APP_ORIGIN`.
+
+    `APP_ORIGIN` is a declared, `recommended` binding of this project, so an operator may set it
+    explicitly. While the minter read it as an `iss` fallback and `consent_token_issuer()` did not,
+    pointing it at any other host minted a token the AS then refused: the mint answered `200` and
+    every redemption a silent `401 invalid_token`, with no other symptom. This runs the mint with
+    `CONSENT_TOKEN_ISSUER` ABSENT and `APP_ORIGIN` set elsewhere, then hands the token to the
+    shipped verifier (whose own `CONSENT_TOKEN_ISSUER` is unset too) — acceptance IS the agreement.
+    """
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_ISSUER", raising=False)
+
+    out = _run("mint_ok", dropIssuer=True, appOrigin="https://preview.example")
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+    assert _issuer_claim(token) == _ISSUER, (
+        f"the minter stamped iss={_issuer_claim(token)!r}; it must default to the SAME literal the "
+        "AS does, never to APP_ORIGIN — the AS does not read that binding, so deriving `iss` from it "
+        "makes the mint succeed and every redemption fail")
+
+    from tortoise.consent_token import verify_consent_token
+
+    # Raises `401 invalid_token` if the two halves' defaults disagree. This is the assertion the
+    # finding was about: the cross-half pin above it hardcodes both sides to the same value, so its
+    # `??` short-circuited on `CONSENT_TOKEN_ISSUER` and never exercised a default at all.
+    verify_consent_token(token, presented=_presented())
+
+
+def test_a_padded_issuer_is_normalised_on_BOTH_halves(monkeypatch) -> None:
+    """`consent_token_issuer()` does `.strip()`; the minter must trim too.
+
+    The AS compares `iss` byte-exactly, so a padded `CONSENT_TOKEN_ISSUER` on the Pages side is
+    another silent `401` — the same rule `CONSENT_TOKEN_SECRET`'s provenance documents at length,
+    one field over.
+    """
+    padded = "  https://app.premiselabs.co  "
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", padded)
+
+    out = _run("mint_ok", issuer=padded)
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+    assert _issuer_claim(token) == _ISSUER, (
+        f"a padded issuer was stamped verbatim ({_issuer_claim(token)!r}) — the minter does not "
+        "trim, so it disagrees with the AS the moment the value carries whitespace")
+
+    from tortoise.consent_token import verify_consent_token
+
+    verify_consent_token(token, presented=_presented())
+
+
+def test_an_EMPTY_issuer_falls_through_to_the_default_on_BOTH_halves(monkeypatch) -> None:
+    """An empty `CONSENT_TOKEN_ISSUER` is `or`-fallback, not `??`-fallback, on both sides.
+
+    `"" ?? literal` yields `""` (a falsy value already set), while the AS's `configured or DEFAULT`
+    yields the literal — so a `??` here would stamp `iss: ""` and fail every redemption. Absence and
+    emptiness must resolve identically.
+    """
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", "")
+
+    out = _run("mint_ok", issuer="")
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+    assert _issuer_claim(token) == _ISSUER, (
+        f"an empty issuer stamped {_issuer_claim(token)!r} instead of falling through to the "
+        "default the AS uses")
+
+    from tortoise.consent_token import verify_consent_token
+
+    verify_consent_token(token, presented=_presented())
 
 
 def test_the_minted_token_carries_a_fresh_single_use_nonce() -> None:
@@ -682,9 +784,9 @@ def test_the_return_leg_never_nulls_a_recorded_owner() -> None:
     """A re-entry WITHOUT a session must not erase the owner an earlier leg recorded.
 
     The start route records the attempt on BOTH legs, and on the return leg it re-records the SAME
-    row keyed by `state`. The write is `user_id=COALESCE(excluded.user_id, consent_attempts.user_id)`
-    precisely so a cold-browser re-entry (or a stale tab) cannot null a known owner: with a plain
-    assignment, the next person to arrive signed in as someone else passes the mint's
+    row keyed by `state`. The write is `user_id=COALESCE(consent_attempts.user_id, excluded.user_id)`
+    — EXISTING first — precisely so a cold-browser re-entry (or a stale tab) cannot null a known
+    owner: with a plain assignment, the next person to arrive signed in as someone else passes the mint's
     `attempt.user_id !== row.user_id` check — which is the check
     `test_the_mint_route_refuses_a_flow_a_DIFFERENT_identity_started` exists to prove — and mints an
     assertion into a flow another identity began. Nothing pinned that COALESCE before: the D1

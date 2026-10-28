@@ -53,9 +53,19 @@ export function consentAsOrigin(env: Env): string {
   return env.CONSENT_AS_ORIGIN ?? "https://api.premiselabs.co";
 }
 
-/** The `iss` this minter stamps. Mirrors `consent_token_secret`'s default on the AS side. */
+/** The `iss` this minter stamps. Mirrors `consent_token_issuer()` on the AS side EXACTLY.
+ *
+ * Same knob, same default, same normalisation — because the AS compares `iss` byte-exactly and
+ * answers a silent `401 invalid_token` for a mismatch while the mint itself still answers `200`.
+ * ⛔ Do NOT fall back to `APP_ORIGIN`: the AS does not read it, so an operator who sets it
+ * explicitly (it is a declared, `recommended` binding of this project) would point the two halves
+ * at different issuers with no symptom but every redemption failing.
+ */
 export function consentTokenIssuer(env: Env): string {
-  return env.CONSENT_TOKEN_ISSUER ?? env.APP_ORIGIN ?? "https://app.premiselabs.co";
+  // `trim()` + `||` mirror `consent_token_issuer()`'s `.strip()` / `or`: a padded or empty value
+  // must resolve the same way on both sides, which is the `CONSENT_TOKEN_SECRET` rule one field over.
+  const configured = (env.CONSENT_TOKEN_ISSUER ?? "").trim();
+  return configured || "https://app.premiselabs.co";
 }
 
 function corsHeaders(env: Env, origin: string): Headers {
