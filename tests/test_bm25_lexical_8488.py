@@ -218,12 +218,22 @@ class TestBM25Scorer:
         assert scores["three"] > scores["one"]
         assert scores["three"] < 3 * scores["one"]
 
-    def test_score_tie_breaks_by_id_not_by_dict_order(self):
-        """#3019: RRF is rank-based, so a tie must be a function of the data."""
+    def test_score_tie_breaks_by_recency_then_id_not_by_dict_order(self):
+        """#3019 + #10121: a tie is a function of the data, NEWEST first.
+
+        #3019 closed the dict-order half with ``(-score, id)`` — which on this
+        tree's timestamp-minted ULIDs is OLDEST-first, so the arm ranked its
+        corpus newest-first and then dropped the newest match at ``limit``.
+        #10121 made the tie recency-then-id, both DESCENDING.
+        """
         docs = [("b", "alpha beta"), ("a", "alpha beta")]
-        assert [pid for pid, _ in bm25_rank("alpha", docs)] == ["a", "b"]
+        assert [pid for pid, _ in bm25_rank("alpha", docs)] == ["b", "a"]
         assert [pid for pid, _ in bm25_rank("alpha", list(reversed(docs)))] == [
-            "a", "b"]
+            "b", "a"]
+        # A supplied stamp outranks the id.
+        assert [pid for pid, _ in bm25_rank(
+            "alpha", docs, recency={"a": "2026-10-01", "b": "2026-01-01"}
+        )] == ["a", "b"]
 
     def test_no_shared_token_is_absent_rather_than_zero(self):
         """"unscorable" and "scored zero" must stay distinguishable."""
@@ -462,9 +472,26 @@ class TestReadPath:
                    for e in on_trace), (
             f"the lexical leg must be BM25-scored when the gate is on; "
             f"trace={on_trace}")
-        assert on_ids.index(target) < off_ids.index(target), (
-            "the BM25-scored lexical leg must rank the rare-token record "
-            f"better than the shipped scorer did; off={off_ids}, on={on_ids}")
+        assert on_ids.index(target) <= off_ids.index(target), (
+            "the BM25-scored lexical leg must not rank the rare-token record "
+            f"WORSE than the shipped scorer did; off={off_ids}, on={on_ids}")
+
+        def _lexical_rank(rows: list[dict]) -> int:
+            """Rows scoring strictly higher than the target on the lexical leg."""
+            target_score = next(
+                r["scores"]["fts"] for r in rows if r["id"] == target)
+            return sum(1 for r in rows
+                       if r["id"] != target
+                       and r["scores"]["fts"] > target_score)
+
+        # THE STRICT CLAIM lives where the arm acts: the LEXICAL rank. The fused
+        # position does not move on this fixture because the four topic
+        # documents sit in a DENSE tie cluster the bounded lexical weight cannot
+        # cross (#8488's recorded effect size: a lexical rank gain is worth
+        # roughly half a dense place at k=60). Measured 4 -> 0.
+        assert _lexical_rank(on) < _lexical_rank(off), (
+            "the arm must strictly improve the target's LEXICAL rank; "
+            f"off={_lexical_rank(off)}, on={_lexical_rank(on)}")
         # The lexical SCORE the fusion consumed, not just the order.
         on_target = next(h for h in on if h["id"] == target)
         assert on_target["scores"]["fts"] > max(

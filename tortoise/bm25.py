@@ -86,7 +86,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from .env_truthy import env_flag
 
@@ -266,6 +266,7 @@ def bm25_rank(
     k1: float = BM25_K1,
     b: float = BM25_B,
     keep_numeric: bool = False,
+    recency: Mapping[str, str] | None = None,
 ) -> list[tuple[str, float]]:
     """``[(doc_id, score), ...]`` ranked descending — the shape a leg returns.
 
@@ -275,7 +276,18 @@ def bm25_rank(
     unstable tie makes the fused order a function of dict order).
     """
     scores = bm25_scores(query, docs, k1=k1, b=b, keep_numeric=keep_numeric)
-    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    # ⛔ The arm ranks its OWN corpus, so it must resolve a tie like every other
+    # ranking leg (#10121): recency first, then the id — both DESCENDING. The
+    # previous key was ``(-score, id)`` ASCENDING, i.e. OLDEST-first on this
+    # tree's timestamp-minted ULIDs, so on a tie the arm dropped the NEWEST
+    # match at ``limit`` (measured: absent from ``run_bm25_query(limit=5)`` on a
+    # 21-row tie, rank 20/21).
+    stamp = recency or {}
+    ranked = sorted(
+        scores.items(),
+        key=lambda kv: (kv[1], stamp.get(kv[0]) or "", kv[0]),
+        reverse=True,
+    )
     if limit is not None:
         ranked = ranked[:max(0, limit)]
     return ranked
