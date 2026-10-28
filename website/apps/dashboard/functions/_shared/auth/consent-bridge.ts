@@ -270,8 +270,13 @@ export interface ConsentAttempt {
   expires_at: number;
   /**
    * SHA-256 of the per-attempt key the CREATING browser holds (null on a row written before this
-   * column existed). The raw key is never stored: a database read must not yield a credential for
-   * somebody else's in-flight consent.
+   * column existed). THIS COLUMN never holds the raw key — but that is a narrower claim than "the
+   * raw key is never stored anywhere": the key must reach the browser, so it travels the sign-in
+   * hop's return target, and `auth/start.ts` PERSISTS that return target in `auth_flows.next` in
+   * this same D1 database (`FLOW_MAX_AGE_S`). Read access to `auth_flows` during the ≤15-minute
+   * attempt window is therefore equivalent to holding the key. §2.3/§4 record that carrier as a
+   * known cost of the design; do not restate it here as if it did not exist — a claim stronger than
+   * the code is how the next lane stops looking for the residual.
    */
   attempt_key_hash: string | null;
 }
@@ -402,7 +407,15 @@ export async function recordConsentAttempt(
   return { row, owns_flow: keyHash !== null && stored === keyHash };
 }
 
-/** SHA-256 hex of an opaque attempt key. The raw key never lands in the database. */
+/**
+ * SHA-256 hex of an opaque attempt key.
+ *
+ * The COLUMN holds this hash and never the raw key. That is all it buys: the raw key still travels
+ * the browser's channels (the authorize URL, the sign-in return target that `auth_flows.next`
+ * persists, and the AS page's `redirectTo`), which §2.3/§4 record. Do not upgrade this into "the raw
+ * key is never stored" — it is measurably false, and a claim stronger than the code is how a real
+ * residual stops being looked for.
+ */
 export async function attemptKeyHash(key: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", utf8(key));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");

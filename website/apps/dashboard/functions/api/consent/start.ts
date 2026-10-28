@@ -228,8 +228,13 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
         attemptKey,
       );
       ownsFlow = recorded.owns_flow;
-    } catch {
-      // A store fault must not become a sign-out, and must not silently drop the flow.
+    } catch (e) {
+      // A store fault must not become a sign-out, and must not silently drop the flow. It must also
+      // not be SILENT: `ensureColumn` deliberately propagates a genuine DDL failure (only
+      // duplicate-column is swallowed), and a failed `ALTER TABLE` is not a transient blip — no
+      // retry or restart fixes it — so without this log line a half-evolved schema leaves the
+      // consent arm dark with every route answering the same 503 and nothing anywhere to act on.
+      console.error("consent attempt write failed", e);
       return json({ error: "unavailable", reason: "consent_store_unavailable" }, { status: 503 });
     }
   } else {

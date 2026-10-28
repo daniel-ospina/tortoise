@@ -140,6 +140,15 @@ disagreeing about one row — so such an attempt is refused and the visitor rest
 pre-column key answers the SAME `403 no_authorize_attempt` as an unrecorded flow, so the route is not an
 oracle for guessing a `state`.
 
+⚠️ **Where the raw key goes** (stated, because the row's SHA-256 is the narrow claim and is easy to
+misread as the whole one): the key rides the `selfPath` return target **and** `authorizeUrl` (the page is
+the mint's only caller), so it passes through the AS page URL, the visitor's history, the sign-in hop's
+return target — which `auth/start.ts` PERSISTS as `auth_flows.next` in this same D1 database — and the
+page's GoTrue `redirectTo` flow state. Read access to `auth_flows` (or those flow records) inside the
+≤15-minute window is therefore equivalent to holding the key. That is the accepted cost of a carrier that
+is not a cookie; §4 records why no cheaper carrier proves the CHANNEL, and stripping the param on the
+`redirectTo` hop is the one available reduction (step 4).
+
 **Recorded exemptions from that no-oracle rule** (they are deliberate, and stated here so a later reader
 neither "fixes" them nor reads the sentence above as flow-wide):
 
@@ -233,7 +242,7 @@ The mint requires the browser to reach the session origin even though the consen
 | **Latency** | one extra round trip per consent screen; the consent interaction is out-of-band of the token hot path, so this is not on any p95 that matters. |
 | **Failure domains** | +1 (the mint route). The `no_session`/`unavailable` split (property 3) is what keeps that addition from becoming a sign-out. |
 | **Loop risk** | the navigation must be marked as already-attempted so a session that cannot be established reaches a **terminal, actionable** state instead of bouncing forever — the #3485/#3503 class. The carrier is a NAMED query parameter, `consent_retry=1`, placed on the sign-in hop's return target (`auth_url`'s `next`) by the `sign_in` redirect; the route reads it on return and passes `attempted = true` to `decideConsentAdvance` (`consent-flow.ts::CONSENT_RETRY_PARAM`). It is deliberately NOT `stale=1` (`welcome.ts`, `admin/[[path]].ts`), which marks an out-of-date snapshot and means something different. The existing page already carries the copy and the retry affordance for this (`#5734`), and it must be carried over, not re-derived. |
-| **The attempt key transits the AS page URL** | §2.3 gives the flow to the BROWSER that created it, and the consent page on `api.*` is the mint's only documented caller — so the key must arrive with the page. It rides the `authorizeUrl` query (`ATTEMPT_KEY_PARAM`), which puts it in the AS's request log and the visitor's history for the ≤15-minute attempt window. **This is a recorded DECISION, not an oversight:** §2.3 forbids a second *cookie* (identity reconciles by the token), and a URL parameter is not one. The mitigation is structural rather than secrecy — the key is per-attempt, 32 random bytes, stored only as a SHA-256, useless without the row, and inert once the row expires. |
+| **The attempt key transits browser-visible URLs, and one of them is PERSISTED** | §2.3 gives the flow to the BROWSER that created it, and the consent page on `api.*` is the mint's only documented caller — so the key must arrive with the page. It rides the `authorizeUrl` query (`ATTEMPT_KEY_PARAM`) **and** the sign-in hop's return target, and that return target is a value the BFF already stores: `auth/start.ts` writes it verbatim into `auth_flows.next` in the same D1 `SESSIONS` database for `FLOW_MAX_AGE_S`. A third channel follows from the page: `authorizeReturnTo()` preserves the param, so it also reaches the GoTrue `redirectTo` flow state. **Read access to `auth_flows` (or the GoTrue flow records) during the ≤15-minute attempt window is therefore equivalent to holding the key** — an operator, a support tool or a backup is enough. **This is a recorded DECISION, not an oversight:** §2.3 forbids a second *cookie* (identity reconciles by the token) and a URL parameter is not one, and every alternative carrier is either a cookie or a server-side lookup that cannot prove the CHANNEL (a non-secret flow id in the return target would let any browser fill the ownerless row — the exact hole the key closes). The mitigation is scope, not secrecy: per-attempt, 32 random bytes, only the SHA-256 on the row, inert at expiry — and the residual is stated rather than implied. Narrowing it is a follow-up, not a silence: stripping `attempt_key` on the page's `redirectTo` hop (`_CONSENT_HTML`'s `STRIP_PARAMS`, step 4) removes the GoTrue channel, and nothing else in this design can remove the `auth_flows.next` one. |
 
 ## 5. Task 2 — RFC 8414 `authorization_endpoint` stability: VERIFIED
 

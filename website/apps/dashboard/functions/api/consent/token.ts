@@ -191,7 +191,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   let attempt;
   try {
     attempt = await readConsentAttempt(env.SESSIONS, state);
-  } catch {
+  } catch (e) {
+    // Same rule as `start`: never silent — a propagated DDL failure is not a transient blip.
+    console.error("consent attempt read failed", e);
     return corsJson(env, origin, { error: "unavailable", reason: "consent_store_unavailable" }, 503);
   }
   if (!attempt) {

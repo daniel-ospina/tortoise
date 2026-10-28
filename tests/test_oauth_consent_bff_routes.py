@@ -377,7 +377,11 @@ def _run(scenario: str, **opts) -> dict:
         )
     found = re.findall(r"^RESULT (\{.*\})$", proc.stdout, re.MULTILINE)
     assert found, f"no RESULT line for {scenario!r}:\n{proc.stdout}\n{proc.stderr}"
-    return json.loads(found[-1])
+    out = json.loads(found[-1])
+    # The worker's `console.error` is a production SIGNAL, not noise: a propagated DDL failure is
+    # NOT a transient blip, so a log line is the only thing an operator can ever act on.
+    out["stderr"] = proc.stderr
+    return out
 
 
 # ── the mint route's refusals ───────────────────────────────────────────────
@@ -1001,6 +1005,10 @@ def test_a_store_fault_is_a_typed_503_and_never_a_redirect() -> None:
     """
     out = _run("start_signed_in", storeThrows=True)
     assert out["status"] == 503, out
+    assert "consent attempt write failed" in out["stderr"], (
+        "a store fault answered 503 with NO log line anywhere — a genuinely failed ALTER TABLE is "
+        "indistinguishable from a transient blip and nothing in the logs can ever flag it: "
+        f"{out['stderr'][-600:]!r}")
     assert out["body"] == {"error": "unavailable", "reason": "consent_store_unavailable"}, out["body"]
     assert out["location"] is None, f"a store fault produced a REDIRECT: {out['location']!r}"
 
