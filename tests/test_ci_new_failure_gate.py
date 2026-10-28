@@ -371,6 +371,68 @@ def test_an_unreadable_job_log_blocks_at_job_granularity(tmp_path):
     assert "job granularity" in proc.stdout
 
 
+#: A `gh` stand-in that reproduces the REAL step-log endpoint's refusal (#10202): exit
+#: 1 with that exact message rather than print a log carrying terminal escape
+#: sequences, unless `--allow-escape-sequences` is passed. Every other call is the job
+#: listing. A recorded fixture cannot stand in for this — `--logs-dir` bypasses `gh`
+#: entirely, which is exactly why the defect shipped green.
+_STUB_GH = """#!/usr/bin/env bash
+set -u
+case "$*" in
+  *--allow-escape-sequences*) cat "${STUB_GH_LOG:?}" ;;
+  *"/logs") echo "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway" >&2; exit 1 ;;
+  *) printf '{"id": 1, "name": "test (d)", "conclusion": "failure"}\\n' ;;
+esac
+"""
+
+#: `MAIN_RED_LOG` as `gh` actually returns it: the step log carries the escape
+#: sequences this case is about (pytest colours). Verified against the shared parser —
+#: `ci_exemption.py ids/signatures` still yield `test_a` + `KeyError: 'id'` on it — so
+#: what is under test is the FETCH, not a degraded parse.
+ESCAPED_RED_LOG = MAIN_RED_LOG.replace(
+    "FAILED tests/test_cache_projection_live.py::test_a - KeyError: 'id'",
+    "\x1b[31mFAILED\x1b[0m tests/test_cache_projection_live.py::test_a - "
+    "KeyError: 'id'\x1b[0m",
+)
+
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_an_escaped_log_is_read_not_degraded_to_job_granularity(tmp_path):
+    """#10202: `gh` refuses an escaped log unless asked, and that refusal is quiet.
+
+    Measured on run 40578637580: all four failing jobs were unreadable "the response
+    contains terminal escape sequences", so every one of them fell back to
+    `job-unreadable::<slug>`. Those keys carry no signature and can never be exempted,
+    so main's own reds blocked EVERY PR — #9984's defect wearing the fail-closed
+    costume, and invisible to the fixture seam because that seam never runs `gh`.
+
+    The gate must therefore ask for the escaped text (`--allow-escape-sequences`) and
+    reach the same EXEMPT-bearing verdict a plain log does.
+    """
+    assert "\x1b" in ESCAPED_RED_LOG, "the fixture must carry real escape sequences"
+    box = Sandbox(tmp_path)
+    log = tmp_path / "gh-stdout.log"
+    log.write_text(ESCAPED_RED_LOG, encoding="utf-8")
+    stub = tmp_path / "gh"
+    stub.write_text(_STUB_GH, encoding="utf-8")
+    stub.chmod(0o755)
+    argv = [
+        sys.executable, str(GATE), "evaluate",
+        "--repo", "daniel-ospina/tortoise",
+        "--run-id", "4242",
+        "--head", "deadbeef" * 5,
+        "--event", "pull_request",
+        "--agent-infra", str(box.agent_infra),
+        "--gh", str(stub),
+    ]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120,
+                          env=box.env(STUB_GH_LOG=str(log)))
+    assert "log unreadable" not in proc.stdout, proc.stdout
+    assert "job granularity" not in proc.stdout, proc.stdout
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "EXEMPT: tests/test_cache_projection_live.py::test_a" in proc.stdout
+
+
 @pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
 def test_the_rail_and_the_gate_agree_on_the_same_fixture(tmp_path):
     """#9984 acceptance 5: ONE predicate, proven by running both over one fixture.

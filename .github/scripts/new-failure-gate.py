@@ -25,7 +25,9 @@ WHERE THE TWO SIDES COME FROM
   PR side    — the failing JOBS of THIS workflow run, and their own step logs via the
                Actions jobs API. That text is byte-identical in shape to
                `gh run view --log-failed` (it is where that command gets it from), so
-               the shared parser reads it unchanged. `runner.temp` artifacts were the
+               the shared parser reads it unchanged — INCLUDING its terminal escape
+               sequences, which `gh` refuses to print without `--allow-escape-sequences`
+               (see `job_log`; #10202). `runner.temp` artifacts were the
                alternative and are rejected: only the pytest legs upload one, and a
                failure in a guard step (an orphan-count assert, a packaging guard) has
                no artifact at all.
@@ -218,8 +220,24 @@ class Runner:
             if not path.is_file():
                 raise Unmeasured(f"no recorded log at {path}")
             return path.read_text(encoding="utf-8", errors="replace")
+        # `--allow-escape-sequences` is LOAD-BEARING, not cosmetic (#10202). `gh`
+        # exits 1 rather than print a response carrying terminal escape sequences
+        # unless it is given this flag, and a pytest/guard step log essentially always
+        # carries them (pytest colours, and `##[group]` echoes of the workflow's own
+        # source). Without it EVERY failing job fell back to `job-unreadable::<slug>` —
+        # which carries no signature and can never be exempted — so the gate blocked
+        # every PR on main's own reds: the exact failure #9984 exists to remove,
+        # reintroduced as "fail closed". Measured on run 40578637580, where all four
+        # failing jobs were unreadable for this reason alone.
+        #
+        # Reading them is safe: the escaped text is what `gh run view --log-failed`
+        # emits, and the shared parser strips ANSI SGR itself (verified against
+        # `ci_exemption.py ids/signatures` on an SGR-wrapped capture). A gate that
+        # could not read an escaped log would still refuse rather than pass — but a
+        # gate that refuses everything is not a gate.
         return self._run(
-            [self.gh, "api", f"repos/{self.repo}/actions/jobs/{job_id}/logs"],
+            [self.gh, "api", f"repos/{self.repo}/actions/jobs/{job_id}/logs",
+             "--allow-escape-sequences"],
             what=f"log for job {job_id}",
         )
 
@@ -386,11 +404,11 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
         "--workflow", "python-ci.yml", "--exclude", head,
     ]
     rates = runner.shell(
-        common + ["--main-union-rates", str(runs), "--runs-report", str(report_path)],
+        [*common, "--main-union-rates", str(runs), "--runs-report", str(report_path)],
         what="main's rate baseline (ci-failure-set.sh --main-union-rates)",
     )
     sigs = runner.shell(
-        common + ["--main-union-signatures", str(runs)],
+        [*common, "--main-union-signatures", str(runs)],
         what="main's signature baseline (ci-failure-set.sh --main-union-signatures)",
     )
     rates_path.write_text(rates, encoding="utf-8")

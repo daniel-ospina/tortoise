@@ -78,6 +78,12 @@
         "check-drift"
       ]
     ],
+    "ci-introduced-failure": [
+      [
+        "python-ci.yml",
+        "ci-introduced-failure"
+      ]
+    ],
     "classify": [
       [
         "finding-provenance.yml",
@@ -517,7 +523,7 @@
       ]
     ]
   },
-  "gate_digest": "2aa5a383888a34aa390dcd6a7ca652f6d23aa1e7d629e4820486b743dc79fc97",
+  "gate_digest": "7178da29d020f179ef84b284b73169c9ccdcf495108cf27bea907dcda2701a6c",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -541,5 +547,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-27T23:28:33Z"
+  "verified_at": "2026-10-28T02:23:06Z"
 }
