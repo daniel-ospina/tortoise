@@ -10,7 +10,8 @@ What this file pins, and why each test exists:
 * the BOUND on the lexical leg's fusion weight (#7704 / #1657) and the
   mutation that reds it — dropping the clamp lets the lexical leg's also-ran
   overtake the dense leg's best hit, i.e. the read's actual answer;
-* the READ PATH: the arm is OFF by default, ON behind ``TORTOISE_BM25_LEXICAL``,
+* the READ PATH: the arm is ON by default (owner ruling 2026-10-28), and
+  ``TORTOISE_BM25_LEXICAL=0`` opts out,
   and an arm that finds nothing falls back to the shipped scorer instead of
   costing the read its lexical leg;
 * the dense-only miss — the acceptance test: on this fixture the DENSE leg
@@ -324,8 +325,27 @@ class TestLexicalWeightBound:
 
 # ── the read path ─────────────────────────────────────────────────────────
 class TestReadPath:
-    def test_arm_is_off_by_default(self, monkeypatch, lexicon_embedder):
-        """No gate ⇒ the lexical rows are the SHIPPED scorer's, not BM25's.
+    def test_arm_is_on_by_default(self, monkeypatch, lexicon_embedder):
+        """OWNER RULING 2026-10-28: with NO env set, the arm RUNS.
+
+        Pins the default in the direction that matters — a regression back to
+        fail-safe-OFF would silently retire the arm and nothing else would
+        notice. Mutation: ``env_flag(BM25_ENV, False)`` → no
+        ``mechanism="bm25"`` entry, this reds.
+        """
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        sdk, _target = _e2e_sdk()
+        trace: list[dict] = []
+        hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
+        assert hits, "guard: the read must return rows"
+        assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
+                   for e in trace), (
+            "with no TORTOISE_BM25_LEXICAL in the environment the arm must run "
+            f"(owner ruling 2026-10-28); trace={trace}")
+
+    def test_the_opt_out_restores_the_shipped_scorer(self, monkeypatch,
+                                                     lexicon_embedder):
+        """``TORTOISE_BM25_LEXICAL=0`` ⇒ the lexical rows are the SHIPPED scorer's.
 
         Not a tautology: the read runs, and each hit's ``scores["fts"]`` must
         match the shipped leg's score for that id — a value BM25 does NOT
@@ -334,7 +354,7 @@ class TestReadPath:
         """
         # Explicit, not ambient: this assertion is about the UNSET gate, so it
         # must not depend on the process env a sibling test happened to leave.
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         sdk, target = _e2e_sdk()
         graph = sdk._get_proj().g
         from tortoise.search_engine import run_fts_query
@@ -352,7 +372,8 @@ class TestReadPath:
         hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
         assert all(e.get("mechanism") != LEXICAL_MECHANISM_BM25
                    for e in trace), (
-            "the BM25 arm must not run unless TORTOISE_BM25_LEXICAL is set")
+            "the BM25 arm must not run when TORTOISE_BM25_LEXICAL=0 opts "
+            "out")
         assert hits, "guard: the read must return rows to compare"
         assert all(h["id"] in shipped for h in hits), (
             "guard: every hit must be a row of the graph the shipped scores "
@@ -421,7 +442,7 @@ class TestReadPath:
         reds.
         """
         sdk, target = _e2e_sdk()
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         from tortoise import retrieval_metering
         tally = retrieval_metering.arm(org_id=None)
         _before = tally.legs.get("fts", 0)
@@ -478,7 +499,7 @@ class TestReadPath:
             sdk.create_point("statement", content)
 
         query = "the"
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = sdk.tortoise_fts_query(query, limit=5)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         on_trace: list[dict] = []
@@ -516,7 +537,7 @@ class TestReadPath:
             sdk.create_point("statement", content)
 
         query = "zebra xylophone"
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = sdk.tortoise_fts_query(query, limit=5)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         on_trace: list[dict] = []
@@ -625,7 +646,7 @@ class TestReadPath:
         again and this reds.
         """
         sdk, _target = _e2e_sdk()
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
 
         control_trace: list[dict] = []
         # ruff F841: the call's EFFECT is `control_trace`, asserted below — the
@@ -645,7 +666,7 @@ class TestReadPath:
 
         for lever in ({"search_keys_prf": True},
                       {"entity_key_expansion": True}):
-            monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+            monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
             off = [(h["id"], h["similarity"])
                    for h in sdk.tortoise_fts_query(QUERY, limit=10, **lever)]
             monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
@@ -712,7 +733,7 @@ class TestReadPath:
 
         # The same floor with the gate OFF is the reference read: a stood-down
         # arm changes nothing about it (not the ids, not the fused scores).
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off_floored = [(h["id"], h["similarity"])
                        for h in sdk.tortoise_fts_query(QUERY, limit=10)]
         assert floored and floored == off_floored, (
@@ -793,7 +814,7 @@ class TestReadPath:
             sdk.create_point("statement", content)
         target = sdk.create_point("statement", TARGET_DOC)["id"]
 
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = [(h["id"], h["similarity"])
                for h in sdk.tortoise_fts_query(QUERY, limit=10)]
         assert off and off[0][0] != target, (

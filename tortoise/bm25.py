@@ -86,10 +86,9 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from collections.abc import Sequence
 
-from .env_truthy import is_truthy
+from .env_truthy import env_flag
 
 logger = logging.getLogger(__name__)
 
@@ -131,14 +130,28 @@ DEFAULT_LEXICAL_WEIGHT = 1.0
 LEXICAL_WEIGHT_MAX = 1.0
 
 
+#: #8488 (owner ruling 2026-10-28): the arm is now ON by default and the
+#: variable is an OPT-OUT. Fail-safe-OFF was right while the arm was unmeasured;
+#: the owner moved it to default-ON on mechanism-level evidence (this module's
+#: own tests) with the benchmark (#8486) still pending. ``=0`` / ``false`` /
+#: ``no`` / ``off`` disables it, and an unset, blank or GARBAGE value keeps the
+#: DEFAULT — a typo must never silently change which scorer a read uses.
+#:
+#: ⛔ ORDERING: enable is only correct ON TOP OF the arm's own tie fix (#10121,
+#: PR #10150 — ``bm25_rank`` ties oldest-first, so it truncates the NEWEST match
+#: at ``limit``). This PR must not merge before #10150.
+BM25_DEFAULT_ENABLED = True
+
+
 def bm25_enabled() -> bool:
     """Is the in-process BM25 lexical arm enabled for this process?
 
-    Fail-safe OFF (unset/blank/garbage → False) via the recorded truthy
-    contract in :mod:`tortoise.env_truthy` — the same spellings every other
-    lever in this tree accepts.
+    Default ON, opt-out via ``TORTOISE_BM25_LEXICAL=0``, resolved through
+    :func:`tortoise.env_truthy.env_flag` — whose contract is exactly this case:
+    unset/blank/garbage -> the DEFAULT (a typo never flips a knob), explicit
+    truthy -> True, explicit falsy -> False.
     """
-    return is_truthy(os.environ.get(BM25_ENV))
+    return env_flag(BM25_ENV, BM25_DEFAULT_ENABLED)
 
 
 def bm25_tokens(text: str, *, keep_numeric: bool = False) -> list[str]:
