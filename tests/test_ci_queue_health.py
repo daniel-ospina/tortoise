@@ -740,8 +740,14 @@ def test_an_unnamed_verdict_is_never_exit_0(monkeypatch):
 # ── anything the queue was ever measured to do (#10237) ───────────────────
 
 def serving_pr_runs(count=2, age_seconds=60):
-    """`count` PR-event runs that are EXECUTING — the state the old clause saw."""
-    return starving_pr_runs(count, age_seconds=age_seconds)
+    """`count` PR-event runs that are EXECUTING — the state the old clause saw.
+
+    Built from `run()` directly, NOT from the `starving_pr_runs` factory: this
+    fixture is the opposite of starvation, and a reader should not have to hold two
+    definitions of it to believe the setup (PR #10253 review, P3).
+    """
+    return [run(7000 + i, "Python CI", event="pull_request", age_seconds=age_seconds)
+            for i in range(count)]
 
 
 def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
