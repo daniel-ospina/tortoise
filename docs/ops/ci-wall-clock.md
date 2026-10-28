@@ -141,11 +141,23 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 
 ⚠ `test-record-postgres` is the one pre-existing cap that sits closest to its work (15.43 m
 against a 20 m cap). Left unchanged — a measured max under its cap is not a defect — but if it
-ever false-kills, the number to move is 20 → 30 from a fresh measurement, not on suspicion. It is
-NOT exposed to the post-step class below, and that is a fact about what it INSTALLS rather than
-about its timing: the `actions/cache` key is shared, but a hit saves nothing, and a miss writes
-only its own `.[test,postgres]` downloads (`python-ci.yml:3635` — `[embeddings]`/torch are
-deliberately absent), so its cold save is not the 3.6 GB archive.
+ever false-kills, the number to move is 20 → 40 from a fresh measurement, not on suspicion, for
+the reason below.
+
+⚠ **It IS exposed to the post-step class below — conditionally, on the cache key changing.** What
+keeps its save small is not what the job installs; it is whether the `actions/cache` lookup hits
+the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.ts:45` extracts the
+matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
+exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
+everything the restore just put there. On a `uv.lock` bump every pip site gets a new primary key
+at once, and this job — p50 1.62 m, the fastest of them — is the likely payer: it restores the
+shared 3.6 GB archive and re-saves it, its own `.[test,postgres]` downloads
+(`python-ci.yml:3635`; `[embeddings]`/torch deliberately absent) being a rounding error beside it.
+Its exposure is therefore 12 m in-step + ~1 m setup + ~9 m save ≈ 22 m against 20 → `cancelled` →
+red (#5219), on an event rather than on every run. Moved only from a measurement — nothing has
+measured it cancelled — but the number to move it TO follows the arm-2 rule, not arm 1: 22 × 1.5 →
+**40**, not 2 × 15.43 = 30, because the save this row pays on a key bump is the SHARED archive and
+not its own downloads.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
 itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
@@ -163,12 +175,13 @@ SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitt
 watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
 `python3 tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
-is how a constant goes stale. `test-record-postgres` is outside the class altogether (above). THREE
-rows do NOT clear it, and all three are recorded here rather than moved: nothing has measured any
-of them being cancelled, and this document's own rule is to move a cap from a measurement instead
-of on suspicion. `test-slow` sits exactly AT its cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m
-against 60 — no headroom at all) and `test-carve-out` is 9 m past it (10 m embedder + 19 m shard
-watchdog + ~1 m + ~9 m = 39 m against 30). The third has the least headroom of all:
+is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
+moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
+cap from a measurement instead of on suspicion. `test-record-postgres` is the first — 22 m against
+20, on a key bump only, and `20 → 40` if it false-kills (above). `test-slow` sits exactly AT its
+cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
+`test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
+30). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
 because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
@@ -199,11 +212,12 @@ document exists to remove.
 
 - **The job's cold save is NOT the 3.6 GB torch/embeddings archive** — cap = **2 × measured max**,
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
-  context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; `test-record-postgres` 15.43 × 2 → 30; the
-  rest floor at 15). ⚠ That predicate is deliberately narrower than "no cache step": postgres DOES
-  mount `~/.cache/pip` on a writable key (`python-ci.yml:3624-3631`); it simply writes its own
-  `.[test,postgres]` downloads (`:3635`) and never the archive, so its save cannot be the binding
-  term.
+  context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
+  deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
+  writable shared key (`python-ci.yml:3624-3631`) and is therefore NOT an arm-1 row — on a key bump
+  its save IS the archive (see the note under the table). Arm 1 applies to a job whose save is
+  small because nothing restores an archive into its cache path, not because its `pip install`
+  line omits torch.
 - **The job's cold save IS that archive** — `2 × max` cannot see the POST-step at all, so the
   binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
   the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
