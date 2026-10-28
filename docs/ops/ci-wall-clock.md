@@ -129,7 +129,7 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 | `test-slow (a…e)` (5 legs) | 18–19 | 8.0–9.9 | 9.9–12.7 | 12.92 | 60 |
 | `test-carve-out` (+`(b)`,`(c)`) | 20–23 | 8.3–8.6 | 8.7–9.2 | 19.85 | 30 |
 | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | 20 ⚠ thin |
-| `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | 20 |
+| `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | **40 (was 20)** |
 | `test-concurrency-falkor` | 18 | 2.02 | 2.71 | 2.95 | 15 |
 | `test-track-b` | 17 | 0.93 | 1.09 | 1.18 | 10 |
 | `surface-guard` | 24 | 1.07 | 1.26 | 1.35 | 10 |
@@ -142,6 +142,15 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 ⚠ `test-record-postgres` is the one pre-existing cap that sits closest to its work (15.43 m
 against a 20 m cap). Left unchanged — a measured max under its cap is not a defect — but if it
 ever false-kills, the number to move is 20 → 30 from a fresh measurement, not on suspicion.
+
+⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
+itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
+killed at its own cap — conclusion `cancelled` — is **invisible here by construction**. A run at
+`a898363ea~1` passed its marker selection, then spent the remaining budget uploading a 3.6 GB
+`~/.cache/pip` archive in the `actions/cache` save POST-step and was cancelled at 20 m, which
+`python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The binding term is
+the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm — read the cap
+against the SUM of the job's caps, not against its median.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 

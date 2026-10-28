@@ -3028,28 +3028,39 @@ jobs:
     # ci-surfaces carve_out files. A future revert of _KEEPALIVE_LOCK
     # (#2172) or the anchor semantics would produce NO CI failure anywhere —
     # the race would resurface only probabilistically (#2065/#2172 flake).
-    # This job runs the D14 set URI-less on every run (PR + push), ~1 min.
+    # This job runs the D14 set URI-less on every run (PR + push); measured
+    # whole-job p50 4.71m / p95 7.23m / max 8.03m (docs/ops/ci-wall-clock.md).
     needs: changes
     if: always() && needs.changes.result == 'success'
     runs-on: ubuntu-latest
-    # #10182: the budget must cover EVERY step this job runs, post-steps
-    # included — a cold pip cache makes `actions/cache` save on the way OUT,
-    # and that save is charged against this timeout like any other step.
+    # #10182: the cap must cover EVERY step this job runs — `actions/cache`
+    # saves `~/.cache/pip` as a POST-step on a cache miss, and that save is
+    # charged against this timeout like any other step.
     #
     # Measured (run 40587081433, job 122533023160): the marker selection PASSED
-    # (12m32s, 0 failed), the artifact uploaded, and then the cache post-step
-    # tarred ~/.cache/pip into a 3.6 GB archive and began uploading it at
-    # ~5.6 MB/s effective — `Sent 2348810240 of 3608530109 (65.1%)` — until
-    # `timeout-minutes: 20` elapsed at 01:20:19 and the job was reported
-    # `cancelled`. `python-ci-gate` reads that as red (correctly: a cancelled
-    # leg certifies nothing, #5219), so a fully green job reddened the required
-    # gate on a diff that touches three Markdown files.
+    # and the D14 artifact uploaded; then the cache save tarred 3.6 GB (3m24s)
+    # and was still uploading it — `Sent 2348810240 of 3608530109 (65.1%)` —
+    # when the old 20m ceiling elapsed at 01:20:19. The job reported
+    # `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
+    # cancelled leg certifies nothing), so a job whose work was green reddened
+    # a REQUIRED check on a diff that touches three Markdown files.
     #
-    # This is deterministic, not flake: the in-step test cap is `15m` (below),
-    # the install/setup is ~1.5m, and a cold save needs ~11m — ~27m worst case
-    # against a 20m ceiling, so any run whose cache misses would overrun even on
-    # an idle runner. Raised rather than leaving the save unbounded, because the
-    # save is not this job's work and there is no per-post-step timeout.
+    # The arithmetic that forces the raise is the job's OWN in-step cap, not
+    # this run's duration: `timeout … 15m` (below) + ~1m setup/install + ~9m
+    # for a cold save ≈ 25m against a 20m ceiling. On measured norms the margin
+    # is thinner than it looks — whole-job p50 4.71m / p95 7.23m / max 8.03m
+    # (docs/ops/ci-wall-clock.md) is measured over `success`/`failure` jobs
+    # only, so it CANNOT see a save that ran to cancellation; against a ~9m
+    # save that leaves ~3m, and this run's test step had already spent 12m32s
+    # of its own 15m cap.
+    #
+    # What this does NOT fix, and no job cap can: the in-step `15m` cap
+    # SIGINT-kills the step (pytest-attribution then emits INCOMPLETE) instead
+    # of letting it finish, and this run was within 2m28s of that — 9m11s of
+    # its 12m32s was COLLECTION (01:00:53 → 01:10:04) against a 221s norm for
+    # the whole step (docs/ci-timing.md). Tracked in #10212. Raising this number
+    # stops the cache SAVE from being the term that reds the gate; it does not
+    # make the shared-HOME pip cache small, which is why the save is 3.6 GB.
     timeout-minutes: 40
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
