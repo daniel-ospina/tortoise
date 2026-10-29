@@ -167,32 +167,6 @@ def test_distribution_distinct_sessions_dedupes_a_retry():
     assert d["distinct_sessions"] == 2
 
 
-def _metered_scope(handle) -> tuple | None:
-    """The (STORE, graph) a ``_GuardedGraph`` handle belongs to.
-
-    A graph NAME is not an identity: two embedded stores both call their graph
-    ``tortoise``, so scoping on the name alone would bill one store's traffic to
-    the other. ``_GuardedGraph`` wraps ONE projection (``__slots__ = ("_g",
-    "_proj")``), so the projection is the authoritative witness — ``_path`` for
-    the embedded lane, ``_host`` for the server lane; ``FalkorProjection`` sets
-    one of them or raises, so those two ARE the identity.
-
-    ``None`` when neither is readable: an unresolvable handle is then counted
-    as foreign (a loud under-count against ``total``) instead of collapsing
-    into a shared sentinel key, which is exactly the name-only conflation this
-    function exists to prevent. There is deliberately no ``id(proj.db)``
-    fallback — ``id(None)`` is the SAME key for every projection without a
-    ``db``, and ``id()`` is recyclable, so such a key can alias a dead object.
-    """
-    proj = getattr(handle, "_proj", None)
-    if proj is None:
-        return None
-    store = getattr(proj, "_path", None)
-    if store is None:
-        store = getattr(proj, "_host", None)
-    if store is None:
-        return None
-    return (store, getattr(proj, "_graph_name", None))
 
 
 # ── integration: a real capture reports a non-zero, phase-attributed count ──

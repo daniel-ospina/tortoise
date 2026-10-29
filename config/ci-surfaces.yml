@@ -2750,8 +2750,9 @@ surfaces:
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
   - test_source_kind_runtime_registration.py
+  - test_subject_binding_1370.py
   # #1370's binder arm (test_subject_binding_1370.py) keeps its file; #4282 excised
-  # only its `TestCaptureSeam` class (6 of 55 functions, 61 tests kept). The
+  # only its `TestCaptureSeam` class (6 functions removed; 67 tests still collect). The
   # write-time subject-binding pass it pinned still runs on the hosted lane, and
   # `test_capture_entity_attachment_3664.py` above still covers it there.
   - test_ci_expected_manifests.py
@@ -4814,6 +4815,7 @@ surfaces:
   # then never run (the #1349/#3332 silent-drop class). Dual-registered with
   # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
   - test_2884_ep_state_journaled.py
+  - test_vocab_gating_callers_5163.py
   # #5163's core arm (test_vocab_gating_callers_5163.py) survives; #4282 excised only its
   # `sdk.capture_session` arms — see the
   # note under `api` above.
@@ -5949,6 +5951,7 @@ surfaces:
   # itself is not in SOURCE_PATTERNS["sdk"]; this arm is additionally selected
   # directly by the SOURCE_PATTERNS["sdk"] sources (tortoise/models.py,
   # ids.py, crypto.py, retrieval.py, ...). Dual with `api`/`core`.
+  - test_vocab_gating_callers_5163.py
   # #5163's sdk arm (test_vocab_gating_callers_5163.py) survives except the four arms
   # that drove `sdk.capture_session`, which #4282 excised.
   # #5213: `tortoise/projection/edges.py` IS a SOURCE_PATTERNS["sdk"] source, so
@@ -6029,6 +6032,7 @@ surfaces:
   # `tortoise/kind_classifier.py` or `tortoise/extractor_v2.py` change selects
   # `core`, NOT `classify` — this arm covers a selection that names `classify`
   # directly. Dual with `api`/`core`/`sdk`.
+  - test_vocab_gating_callers_5163.py
   # #5163's classify arm (test_vocab_gating_callers_5163.py) survives except the four
   # arms that drove `sdk.capture_session`, which #4282 excised.
   - test_kind_eval_set.py

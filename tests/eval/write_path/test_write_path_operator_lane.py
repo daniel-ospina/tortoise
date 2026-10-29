@@ -39,7 +39,6 @@ all seven are captured here.
 """
 from __future__ import annotations
 
-import shutil
 import sys
 from pathlib import Path
 
@@ -173,40 +172,12 @@ def _gold_operator_payload(session_id: str, gold: dict,
     }
 
 
-def _extractor(golds: dict[str, dict]):
-    """The deterministic extractor seam: a per-session payload derived from
-    the sealed gold, shaped exactly like ``extractor_v2.extract_session_v2``'s
-    output so ``sdk._extract_session_v2`` consumes it unchanged."""
-
-    def _run(_model, _conversation=None, *, session_id=None, **_kw):
-        payload = _gold_operator_payload(
-            session_id, golds.get(session_id, {}), golds)
-        return {
-            "session_id": session_id, "story_arc": "", "embed_list": {},
-            "search": {"mode": "embedded", "degraded": True},
-            "payload": payload, "chain_notes": [], "link_before_create": [],
-            "supersessions": [], "warnings": [], "minted_kinds": [],
-            "stats": {}, "errors": [],
-        }
-
-    return _run
-
-
-def _tmp_corpus(tmp_path: Path) -> Path:
-    dst = tmp_path / "corpus"
-    shutil.copytree(corpus.WRITE_PATH_DIR, dst, ignore=shutil.ignore_patterns(
-        "runs", "__pycache__", "test_*.py"))
-    return dst
 
 
 
 
-def _failure_detail(audit: dict) -> str:
-    """Readable failure detail — the per-edge verdicts."""
-    detail = {eid: (d.get("verdict"), d.get("forms_found"))
-              for eid, d in (audit.get("results") or {}).items()}
-    return (f"edge_correct={audit.get('edge_correct')}/"
-            f"{audit.get('planted')}: {detail}")
+
+
 
 
 
@@ -327,45 +298,9 @@ def test_fold_lane_mints_every_planted_operator_endpoint():
 # missing?)`) — every planted edge silently lost at exactly the layer this
 # lane could not see before.
 
-def _fold_commit_extractor(payloads: dict[str, dict]):
-    """The commit leg's seam: hand the REAL ``execute_embed`` payload for this
-    session to the REAL capture commit — no gold-derived payload."""
-    def _run(_model, _conversation=None, *, session_id=None, **_kw):
-        return {
-            "session_id": session_id, "story_arc": "", "embed_list": {},
-            "search": {"mode": "embedded", "degraded": True},
-            "payload": payloads[session_id], "chain_notes": [],
-            "link_before_create": [], "supersessions": [],
-            "warnings": [], "minted_kinds": [], "stats": {}, "errors": [],
-        }
-
-    return _run
 
 
-def _expected_operator_counts(payload: dict) -> tuple[int, int]:
-    """(operator nodes, mitigations) a payload should commit.
 
-    A MITIGATES payload entry does NOT create its own operator node —
-    ``apply_payload_operators`` attaches a mitigation Point to the declared
-    target IMPL instead, so the graph operator-node count is the IMPL/NAND
-    count and the dampeners are counted separately (their deep-miss drop is
-    the failure mode the count alone would hide)."""
-    ops = payload.get("operators") or []
-    impl_nand = sum(1 for o in ops if o.get("op_type") in ("IMPL", "NAND"))
-    mitigates = sum(1 for o in ops if o.get("op_type") == "MITIGATES")
-    return impl_nand, mitigates
-
-def _fold_payloads(ev2) -> dict[str, dict]:
-    """The REAL fold output per operator session (endpoints minted, no emitted
-    points) — the input to both commit-leg tests."""
-    golds = {sid: corpus.load_gold(sid) for sid in OPERATOR_SESSIONS}
-    payloads: dict[str, dict] = {}
-    for sid in OPERATOR_SESSIONS:
-        embed, _expected, _ops = _fold_emission(golds[sid])
-        payloads[sid] = ev2.execute_embed(
-            embed, {"points": []}, session_id=sid, story_arc="",
-            summary="")["payload"]
-    return payloads
 
 
 

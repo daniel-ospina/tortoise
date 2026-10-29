@@ -128,15 +128,6 @@ def _turn_rows(sdk: TortoiseSDK, session_id: str):
         params={"p": f"{session_id}_t"}).result_set
 
 
-# ── 1. The write path stores the encoder's own vector ─────────────────────
-
-
-
-# ── 2. The dense leg now actually returns the captured turn ───────────────
-
-
-
-# ── 3. Negative control: no embedder ⇒ turn stored, leg DECLARED impaired ──
 
 
 
@@ -148,6 +139,102 @@ def _turn_rows(sdk: TortoiseSDK, session_id: str):
 
 
 
+
+
+
+
+
+
+
+
+# ── #4194 (restored, #4282): the vector guard, behaviourally ──────────────
+
+def _write(sdk, session_id: str, conv, *, embed=True):
+    """One write through the real writer, no capture door, no extraction.
+
+    The seam is the SAME one the hosted lane installs
+    (`hosted_api.py:15017`): `_capture_turn_embeddings` over the store's own
+    width. Passing a raw `embedder.encode` instead bypasses
+    `encode_batch_for_store`, which is what applies that width — the vector then
+    silently lands NULL and the test would "pass" for the wrong reason.
+    """
+    import tortoise.sdk as sdk_mod
+
+    proj = sdk._get_proj()
+    embed_fn = (None if not embed else
+                (lambda texts: sdk_mod._capture_turn_embeddings(
+                    texts, proj.required_embedding_dim)))
+    return sdk_mod._write_session_and_turns(
+        proj, sdk, session_id, conv,
+        now="2026-06-01T00:00:00+00:00", embed_fn=embed_fn)
+
+
+def _vectors(sdk, session_id: str):
+    return {r[0]: r[2] for r in _turn_rows(sdk, session_id)}
+
+
+def test_rewrite_without_an_embedder_preserves_a_stored_vector(sdk, embedder):
+    """The MERGE re-writes the same ``{session}_t{i}`` id, so an unguarded
+    ``vecf32($emb)`` with ``$emb=NULL`` would REMOVE the property on a write
+    that runs while the embedder is down. The CASE guard must preserve it.
+    """
+    before = _write(sdk, "s-4194-recap", CONV)
+    v_before = _vectors(sdk, "s-4194-recap")
+    assert len(v_before) == len(CONV) and all(v is not None for v in v_before.values())
+
+    _write(sdk, "s-4194-recap", CONV, embed=False)
+    v_after = _vectors(sdk, "s-4194-recap")
+    assert set(v_after) == set(v_before)
+    for tid, vec in v_after.items():
+        assert vec is not None, (
+            f"{tid}: a re-write without an embedder REMOVED the stored vector")
+        assert np.allclose(np.asarray(v_before[tid]), np.asarray(vec), atol=1e-6), tid
+    assert before["turn_texts"]
+
+
+def test_rewrite_with_CHANGED_content_and_no_embedder_clears_the_vector(sdk, embedder):
+    """The other half of the same CASE: content that changed makes the stored
+    vector STALE, so it must be cleared rather than preserved. Pinning only the
+    preserve half would pass on a guard that never clears.
+    """
+    _write(sdk, "s-4194-changed", CONV)
+    assert all(v is not None for v in _vectors(sdk, "s-4194-changed").values())
+
+    changed = [dict(t) for t in CONV]
+    changed[0] = {**changed[0], "content": "A completely different first turn."}
+    _write(sdk, "s-4194-changed", changed, embed=False)
+    vec = _vectors(sdk, "s-4194-changed")
+    kept = [tid for tid, v in vec.items() if v is not None]
+    assert kept == ["s-4194-changed_t1"], (
+        "the CHANGED turn (t0) must carry NO vector while the untouched t1 keeps "
+        f"its own; vectors surviving: {kept}")
+
+
+def test_no_embedder_still_stores_the_turn(sdk, embedder):
+    """A write with no embedder stores the turn and simply writes no vector —
+    it must not drop the node (the leg is impaired, the content is not lost)."""
+    _write(sdk, "s-4194-noemb", CONV, embed=False)
+    rows = _turn_rows(sdk, "s-4194-noemb")
+    assert len(rows) == len(CONV), rows
+    assert all(r[1] for r in rows), "the turn text must still be stored"
+    assert all(r[2] is None for r in rows), "no embedder must write no vector"
+
+
+def test_wrong_width_embedder_output_degrades_to_no_vector(sdk, embedder, monkeypatch):
+    """A model whose output width is not the index's must not be stored: a
+    wrong-width vector is unqueryable, and storing it would look healthy."""
+    class _WrongWidth(_FakeEmbedder):
+        DIM = _FakeEmbedder.DIM + 7
+
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: _WrongWidth()))
+    EmbeddingModel._reset()
+    _write(sdk, "s-4194-width", CONV)
+    vec = _vectors(sdk, "s-4194-width")
+    assert vec, "the turns must still be stored"
+    assert all(v is None for v in vec.values()), (
+        f"a wrong-width vector was stored: {[v for v in vec.values() if v is not None]}")
 
 
 def test_required_embedding_dim_follows_the_index_not_the_mode(sdk, monkeypatch):

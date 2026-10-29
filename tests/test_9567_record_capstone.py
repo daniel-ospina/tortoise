@@ -4,9 +4,12 @@ WHAT THIS FILE IS. The capstone's DoD has twelve items and each already has a
 unit somewhere else (`test_9078_…` capture, `test_9556_…` restore,
 `test_record_backup.py` drill, the PGlite tenancy suite, `test_quota.py` gate).
 This file does not repeat any of those bodies: it drives the **production**
-path once through a real Postgres record and asserts the end-to-end property
-the capstone's objective sentence names — *armed, written, complete,
-restorable, tenanted and quota-correct*. Where an item cannot be executed as an
+path through a real Postgres record and asserts the end-to-end property the
+capstone's objective sentence names. ⚠️ #4282 deleted `capture_session`, so the
+**armed** and **restorable** legs (D1's armed half, D2's one-capture, D4/D5's
+rebuild-from-record-only) no longer run here — what survives is the
+NOT-ARMED report, the no-bypass scan, the tenancy legs and the quota gate, each
+still executed rather than restated. Where an item cannot be executed as an
 end-to-end case from a lane, the artifact under `docs/verify/` says so with the
 reason; no leg here fakes a green for one.
 
@@ -162,12 +165,6 @@ def test_D3_no_write_path_bypasses_the_record():
 # ── D4/D5/D6 — the rebuild from the record only ────────────────────────────
 
 
-@dataclass
-class Restored:
-    outcome: Any
-    view: Any
-    project: Any
-    conn: Any
 
 
 
@@ -184,11 +181,6 @@ class Restored:
 # ── D9/D10 — tenancy ───────────────────────────────────────────────────────
 
 
-def _app_conn(dsn: str):
-    _, psycopg2 = _driver()
-    from tests.test_9078_record_written_by_production_path import _app_role_dsn
-
-    return psycopg2.connect(_app_role_dsn(dsn))
 
 
 
