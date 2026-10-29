@@ -129,6 +129,17 @@ required, and neither substitutes for `bind`.
    anyone who names the `state`;
 6. mints the token (§2.1) and returns `{token, exp}`. The session's access token never leaves the server.
 
+⚠️ **Step 2 bounds the credential by the PROVIDER token's lifetime; it does NOT revalidate the grant on every mint.**
+`getAccessTokenForSession` answers from D1 while the provider-issued access token has more than the 60 s
+`REFRESH_SKEW_MS` left, and calls the provider only past that point — the same cache §3 property 2 records as
+deliberate ("the 60 s `REFRESH_SKEW_MS` cache keeps the hot path off the provider"). So what this route
+actually guarantees is *the session's provider-issued credential was live at its last refresh*, not *the grant
+is live right now*: a provider-side revocation (grant revoked, user deleted) is detected at the **next refresh**,
+at most one access-token lifetime later, and not at the mint. Re-minting on load — step 4's documented recovery
+— is exactly the cached path. Revalidating per mint would be a change of behaviour (an extra provider round trip
+on the consent path, with its own failure semantics) and is deliberately **not** made: the residual is recorded
+here rather than implied to be closed by a comment claiming more than the code does.
+
 ⚠️ It is a `POST`, not the `GET` this section first sketched, and the guard is the route's OWN: the
 `allowedOrigin` allowlist above plus the JSON media type. ⛔ It must NOT use `csrf.ts`'s
 `guardStateChangingRequest`: that helper's origin layer is `guardOrigin`, which refuses anything that is not

@@ -234,6 +234,22 @@ function env(over) {
   }, over || {});
 }
 
+// The PROVIDER stand-in. The mint's ONLY network call is the accessor's refresh POST, so counting
+// calls here is the whole difference between "asked the provider" and "answered from D1" — the two
+// are otherwise indistinguishable (both answer 200 to the caller). `raw` carries a non-JSON body
+// verbatim, so the classifier's "a WAF page is not a sign-out" branch stays reachable.
+function installFetch(responses) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+    const r = responses[Math.min(calls.length - 1, responses.length - 1)]
+      || { status: 500, raw: "" };
+    return { ok: r.status < 400, status: r.status,
+             text: async () => (r.raw !== undefined ? r.raw : JSON.stringify(r.body)) };
+  };
+  return calls;
+}
+
 function post(path, body, headers) {
   return new Request("https://app.premiselabs.co" + path, {
     method: "POST",
@@ -414,6 +430,48 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.subtrees = subtrees;
   out.pageAllowed = pageAllowed;
   out.moduleAllowed = bounce.isAppReturnPath(path);
+} else if (scenario === "mint_credential_resolution") {
+  // The mint's credential resolution, in the two directions that a single sentence can drift in.
+  // The corrected comment (review round at `94906c6d0`) claims a BOUND, not a per-mint check: inside
+  // the 60 s `REFRESH_SKEW_MS` window the accessor answers from D1 with ZERO provider calls (so a
+  // revocation is NOT seen per mint), and once the cache lapses the mint reaches the provider exactly
+  // once, so a revoked grant is a 401 `no_session` one refresh later. Asserting the status alone
+  // proves neither half, because the cached and refreshed paths answer the SAME 200.
+  out.cases = [];
+  for (const [label, spec] of Object.entries(opts.cases || {})) {
+    const calls = installFetch(spec.responses || []);
+    const e = env({
+      SESSIONS: new FakeD1({
+        sessions: [sessionRow({
+          access_token_expires_at: NOW + (spec.expiresInMs === undefined ? 3_600_000 : spec.expiresInMs),
+        })],
+        consent_attempts: [{ state: "state-xyz", client_id: "client-abc",
+          redirect_uri: "https://client.example/cb",
+          code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", scope: "mcp",
+          resource: null, user_id: "user-1", created_at: NOW, expires_at: NOW + 900_000,
+          attempt_key_hash: await attemptKeyHash("test-attempt-key") }],
+      }),
+      // Without these the accessor answers `unavailable` before it ever reaches `fetch`, which would
+      // make the "zero calls" arm pass for the WRONG reason.
+      SUPABASE_URL: "https://proj.supabase.co",
+      SUPABASE_ANON_KEY: "anon-key",
+    });
+    const one = { label };
+    try {
+      const res = await tokenRoute.onRequestPost({
+        request: post("/api/consent/token", { state: "state-xyz", attempt_key: "test-attempt-key" },
+                      { Cookie: "__Host-session=handle-1" }),
+        env: e });
+      one.status = res.status;
+      one.body = await res.json();
+    } catch (err) {
+      one.threw = String((err && err.name) || err) + ": " + String((err && err.message) || "");
+    }
+    one.fetchCount = calls.length;
+    out.cases.push(one);
+  }
+  out.status = out.cases.length ? out.cases[0].status : null;
+  out.body = out.cases.length ? out.cases[0].body : null;
 } else {
   throw new Error("unknown scenario " + scenario);
 }
@@ -509,6 +567,86 @@ def test_the_mint_route_allows_an_attempt_row_with_NO_owner_yet() -> None:
     out = _run("mint_null_owner")
     assert out["status"] == 200, out
     assert out["body"]["token"].count(".") == 2
+
+
+def test_the_mint_does_NOT_revalidate_the_grant_per_call_and_the_accessor_bounds_it() -> None:
+    """The mint's comment claimed a provider-liveness check that the cached path never performs.
+
+    Raised at `94906c6d0` as a P2 claim mismatch: the comment said the accessor "proves the session is
+    LIVE against the provider, not merely un-expired in D1", while `getAccessTokenForSession` answers
+    from D1 whenever the provider-issued token has more than `REFRESH_SKEW_MS` (60 s) left. The
+    direction mattered — the claim was wrong in the PERMISSIVE direction, and it is the sentence a
+    reader would lean on when deciding where a revoked grant is caught.
+
+    Both halves are pinned, because a comment-only fix would leave either free to drift:
+      * `cached_fresh` — inside the window the mint answers 200 with ZERO provider calls, i.e. a
+        revocation is NOT detected per mint (the residual now recorded in the spec's §2.3);
+      * `cached_then_refreshed` / `cached_then_revoked` — once the cache lapses the mint DOES reach the
+        provider exactly once, and a revoked grant (`invalid_grant`) is a 401 `no_session`. That is the
+        "detected at the next refresh" half of the corrected comment.
+
+    The status alone would prove nothing: the cached and the refreshed path both answer 200, so the
+    fetch COUNT is the only observable that separates them.
+    """
+    out = _run("mint_credential_resolution", cases={
+        "cached_fresh": {"expiresInMs": 3_600_000, "responses": []},
+        "cached_then_refreshed": {"expiresInMs": 1_000, "responses": [{"status": 200, "body": {
+            "access_token": "a1", "refresh_token": "r1", "expires_in": 3600,
+            "user": {"id": "user-1"}}}]},
+        "cached_then_revoked": {"expiresInMs": 1_000,
+                               "responses": [{"status": 400, "body": {"error": "invalid_grant"}}]},
+    })
+    by = {case["label"]: case for case in out["cases"]}
+    assert set(by) == {"cached_fresh", "cached_then_refreshed", "cached_then_revoked"}, out
+
+    assert "threw" not in by["cached_fresh"], by["cached_fresh"]
+    assert by["cached_fresh"]["status"] == 200, by["cached_fresh"]
+    assert by["cached_fresh"]["fetchCount"] == 0, (
+        "the mint called the provider with a still-fresh cached access token — either "
+        "`REFRESH_SKEW_MS` shrank to nothing or the accessor stopped answering from D1; the "
+        "comment and the spec both state that this is the cached path, so a provider call here "
+        f"means one of them is now wrong: {by['cached_fresh']}")
+
+    assert by["cached_then_refreshed"]["fetchCount"] == 1, (
+        "a stale cached token must reach the provider EXACTLY once — zero means the mint never "
+        "checks the grant at all (revocation would never be detected), two means a refresh "
+        f"stampede: {by['cached_then_refreshed']}")
+    assert by["cached_then_refreshed"]["status"] == 200, by["cached_then_refreshed"]
+
+    assert by["cached_then_revoked"]["fetchCount"] == 1, by["cached_then_revoked"]
+    assert by["cached_then_revoked"]["status"] == 401, by["cached_then_revoked"]
+    assert by["cached_then_revoked"]["body"]["error"] == "no_session", by["cached_then_revoked"]
+
+
+def test_the_mints_comment_states_the_credential_bound_it_actually_has() -> None:
+    """The claim lives in a COMMENT, so the file is where a revert would show up.
+
+    The behavioural test above pins what the code does; this one pins that the sentence a reviewer
+    reads says the same thing. The pre-fix text ("LIVE against the provider … a revoked provider
+    grant would otherwise still mint") is asserted ABSENT by name, because that is the exact
+    wording a future edit would restore from git history — and an over-strong claim here is how a
+    real residual stops being looked for.
+    """
+    lines = (CONSENT_DIR / "token.ts").read_text().splitlines()
+    call = next((i for i, line in enumerate(lines)
+                 if "await getAccessTokenForSession(" in line), None)
+    assert call is not None, "the mint no longer resolves the credential with the accessor"
+    block: list[str] = []
+    for line in reversed(lines[:call]):
+        if not line.strip().startswith("//"):
+            break
+        block.insert(0, line)
+    comment = "\n".join(block)
+    assert comment, "no comment explains what the accessor buys at the mint site"
+    assert "REFRESH_SKEW_MS" in comment, (
+        "the comment must name the cache window it depends on, so the bound is checkable: "
+        f"{comment}")
+    assert "refresh" in comment.lower(), comment
+    for stale_claim in ("LIVE against the provider",
+                        "revoked provider grant would otherwise still mint"):
+        assert stale_claim not in comment, (
+            f"the comment restored the claim the cached path does not honour ({stale_claim!r}); "
+            f"the accessor answers from D1 for up to one access-token lifetime: {comment}")
 
 
 def test_the_mint_route_refuses_an_origin_that_is_not_the_as() -> None:

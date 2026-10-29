@@ -173,11 +173,15 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return corsJson(env, origin, { error: "unavailable", reason: "session_store_unavailable" }, 503);
   }
 
-  // Resolve the credential with the BFF's own accessor: it is what proves the session is
-  // LIVE against the provider, not merely un-expired in D1 (the row's TTL is 400 days, so a
-  // revoked provider grant would otherwise still mint a consent assertion). `no_session` and
-  // `unavailable` stay DISTINCT — property 3, and the reason this route can never sign a
-  // user out on a blip.
+  // Resolve the credential with the BFF's own accessor. ⛔ What that BUYS is a BOUND, not a
+  // per-mint revalidation: the accessor answers from D1 while the PROVIDER-ISSUED access token
+  // has more than `REFRESH_SKEW_MS` (60 s) left, so the session row's 400-day TTL never mints on
+  // its own — but a provider-side revocation (grant revoked, user deleted) is detected at the
+  // NEXT REFRESH, at most one access-token lifetime later, and NOT at every mint. Do not upgrade
+  // this into "a revoked provider grant cannot mint": that is measurably false, and a claim
+  // stronger than the code is how a real residual stops being looked for (§2.3 records it).
+  // `no_session` and `unavailable` stay DISTINCT — property 3, and the reason this route can
+  // never sign a user out on a blip.
   const token = await getAccessTokenForSession(env, handle);
   if (!token.ok) {
     if (token.reason === "no_session") return corsJson(env, origin, { error: "no_session" }, 401);
