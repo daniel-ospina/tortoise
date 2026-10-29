@@ -14246,12 +14246,13 @@ class FalkorProjection(
                 # the two engines still read one record two ways (the #4042
                 # wipe and ``last_ann_drop_seq`` are recreate-shaped too).
                 _is_evidence_fold = record_is_evidence_fold(ev)
-                if t in ("PointAdded", "OperatorAdded"):
-                    if _is_evidence_fold:
-                        pass
-                    else:
-                        last_recreate_seq[("Point", p["id"])] = seq
-                        last_recreate_seq_any[p["id"]] = seq
+                # (No second type test here: the enclosing block is already
+                # ``t in ("PointAdded", "OperatorAdded")``, so a re-test would
+                # be always-true and would read as if a third type could reach
+                # it — #10010 review round 8.)
+                if not _is_evidence_fold:
+                    last_recreate_seq[("Point", p["id"])] = seq
+                    last_recreate_seq_any[p["id"]] = seq
                 # #3689 review P2: the annotator folds' drop boundary is a
                 # REAL delete→recreate, not a bare upsert (see above).
                 # #3689 review P2 + #3860: the annotator folds' drop boundary
