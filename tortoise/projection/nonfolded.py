@@ -66,15 +66,50 @@ SHAPE_UNIMPLEMENTED_OP = "unimplemented-op"
 #: An ``EntityMutated`` op outside the recorded vocabulary.
 SHAPE_UNKNOWN_OP = "unknown-op"
 #: ``ObjectSuperseded`` matched no Object, and the JOURNAL cannot ADDRESS the
-#: record — NEITHER limb of its identity was ever established: its name by no
+#: record — it carries at least one address (a name, an id, or both) and the
+#: journal established NONE of the addresses it carries: a name by no
 #: `ObjectRegistered`, no `EntityMutated` state op, no `EventRecorded` mention
-#: stub; and its id (when carried) by nothing at all (#3590 D2). A record must
-#: carry a name to be this shape; an id-only record stays
-#: ``SHAPE_OBJECT_SUPERSEDED_MISS``. Distinct from that shape, which keeps the
-#: fail-closed refusal for a target the journal DID establish.
+#: stub; an id by no registration, no mention stub's deterministic id, no state
+#: op's target id (#3590 D2, as amended on #10204). ⛔ The record must carry an
+#: address but NOT specifically a name: an id-only record IS this shape when
+#: nothing established that id. Distinct from
+#: ``SHAPE_OBJECT_SUPERSEDED_MISS``, which keeps the fail-closed refusal for a
+#: target the journal DID establish.
 SHAPE_OBJECT_SUPERSEDED_UNREGISTERED = "object-superseded-unregistered"
+#: ``ObjectSuperseded`` carrying NO address it could be looked up by — no
+#: ``name`` and no ``id`` that is a non-empty ``str`` (``{}``,
+#: ``{supersedes_by: …}``, ``{"name": ""}``,
+#: ``{"id": 123}``). REFUSED, never exempt, and
+#: it exists so the report can tell this apart from
+#: ``SHAPE_OBJECT_SUPERSEDED_MISS``: nothing in such a record is checkable, so
+#: "the journal never established it" is unfalsifiable (#3590 D2, #10204) and
+#: the fail-closed default must stand — while a genuine established-then-missed
+#: target keeps that shape's own remedy (reconcile the journal). The two are
+#: epistemically different records and used to share one label, which is the
+#: defect shape the END-side ruling on #9202 fixed.
+SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS = "object-superseded-no-address"
 #: ``ObjectSuperseded`` matched no Object.
 SHAPE_OBJECT_SUPERSEDED_MISS = "object-superseded-miss"
+#: The three answers the JOURNAL can give about an ``ObjectSuperseded`` miss's
+#: address — the ``object_address=`` decision ``classify_terminalizer_miss``
+#: takes for that type (#10204). ⛔ The value is the JOURNAL's answer, never a
+#: graph probe: "no live holder" cannot tell "never established" from
+#: "established then hard-deleted", and a graph probe would exonerate a graph
+#: whose journal is simply incomplete.
+#:
+#: * :data:`OBJECT_ADDRESS_NONE` — NEITHER ``name`` nor ``id`` is a non-empty
+#:   ``str``. ⚠️ Symmetric on purpose: a record carrying ``{"name": 123}`` or
+#:   ``{"name": ""}`` DOES carry a name, so "no ``name``" was false for it.
+#:   PRESENCE, not writability: a NUL-bearing id IS an address here, so this is
+#:   not "an address the graph could not store".
+#: * :data:`OBJECT_ADDRESS_UNESTABLISHED` — carries ≥1 address, the journal
+#:   established none of them → the exempt shape.
+#: * :data:`OBJECT_ADDRESS_ESTABLISHED` — carries an address the journal DID
+#:   establish → the refusing shape. ⚠️ A caller with NO journal to consult (the
+#:   one-record LIVE path) must send this too: it is the fail-CLOSED answer.
+OBJECT_ADDRESS_NONE = "none"
+OBJECT_ADDRESS_UNESTABLISHED = "unestablished"
+OBJECT_ADDRESS_ESTABLISHED = "established"
 #: ``PointSuperseded`` matched no Point.
 SHAPE_POINT_SUPERSEDED_MISS = "point-superseded-miss"
 #: ``PointRetracted`` matched no Point.
@@ -173,7 +208,13 @@ EXEMPT_SHAPES: dict[str, str] = {
         "the id-wide fallback is checked too) that the fold actually applied — "
         "a re-creation anchor that suppressed the delete does not tag it — so a "
         "foreign-kind delete sharing the id still refuses, and the "
-        "entity-parity leg still compares a re-created node's status"
+        "entity-parity leg still compares a re-created node's status. ⚠️ And on "
+        "the one-record `apply()` engines (`rebuild`/`recover_from_log`/"
+        "`restore`) AND in `check_consistency`'s reference fold this exemption "
+        "is currently SILENT: the `_deleted` arm skips before recording, and the "
+        "reference fold's `_object_hard_deleted` arm `pass`es by design, so the "
+        "record #5380 requires is ABSENT on those four surfaces while "
+        "`rebuild_all` records it (pre-existing, #10209 names all four)"
     ),
     SHAPE_EDGE_MESSAGE_MISS: (
         "the write-back's edge is legitimately absent because it was HARD-"
@@ -206,34 +247,83 @@ EXEMPT_SHAPES: dict[str, str] = {
         "reconcile the producer before relying on the rebuilt edge state"
     ),
     SHAPE_OBJECT_SUPERSEDED_UNREGISTERED: (
-        "#3590 D2 (adopted on #3590, bounded): an `ObjectSuperseded` the "
-        "journal cannot ADDRESS — neither limb of its identity was ever "
-        "established. The NAME: no `ObjectRegistered` created it, no "
-        "`EntityMutated` state op carried it into the MERGE key, and no "
-        "`EventRecorded` mention stub minted it. The ID: absent, or not an id "
-        "the journal established by a REGISTRATION, a mention stub's "
-        "deterministic id, or a state op's TARGET id (an ESTABLISHED id "
-        "is a real target — the "
-        "fold missed because the carrier was collapsed away or renamed, not "
-        "because it never existed, so it must keep refusing; #10107 review). "
-        "BOTH limbs are required, and the record must carry a NAME: an "
-        "id-only record stays `object-superseded-miss` (the exemption is "
-        "granted on a name the journal never established, so a name is the "
-        "least identity it must carry — #10107 review P2). "
+        "#3590 D2 as AMENDED on #10204 (owner decision, #3590 comment "
+        "6453059051): an `ObjectSuperseded` the journal cannot ADDRESS. The "
+        "bound is now about ADDRESSES, not about a name: the record must carry "
+        "at least one address — a `name`, an `id`, or both — and the journal "
+        "must have established NONE of the addresses it carries. NAME sources: "
+        "`ObjectRegistered`, an `EntityMutated` state op's `SET`ting the merge "
+        "key — ⛔ ANY of `rename`/`restatus`/`revise`/`supersede`, NOT a rename "
+        "alone (`journal_object_established` reads `state.name` for every op in "
+        "`_ENTITY_MUTATION_STATE_OPS`; a rename-only illustration under-states "
+        "the source and reads as a `restatus`-carried name being exempt — the "
+        "FAIL-OPEN direction) — and an `EventRecorded` mention stub. "
+        "ID sources: a "
+        "registration's id, a mention stub's DETERMINISTIC id, a state op's "
+        "TARGET id. An address the journal DID establish is a real target, so "
+        "that record keeps REFUSING — but ⛔ the cause is a DISJUNCTION, and "
+        "`object-superseded-miss` is NOT a synonym for \"a genuine "
+        "divergence\" (#10211 review rounds 5-7). An ESTABLISHED address does "
+        "not imply a creation (a state op's `SET` — its target id, or a name it "
+        "writes, whatever the op — with a target that never existed, are "
+        "addresses the journal holds without creating a node; ⚠️ a mention "
+        "stub's deterministic id is NOT "
+        "one of these — the stub is MERGEd `ON CREATE SET s.id=$id`, so it DOES "
+        "create the node, and a later registration re-ids it, which is the "
+        "collapse/rename limb), and one "
+        "class diverges on NEITHER side: a target the journal registered and "
+        "then HARD-DELETED, superseded by NAME (no `id`), refuses here because "
+        "the anchored `supersede-target-deleted` bound reads the record's own "
+        "id — live folded nothing either, so the refusal is conservative rather "
+        "than a divergence. Name-keyed delete recognition is `#10224` (it must "
+        "not exempt on duplicate names). "
         "Because nothing could have produced the address, live folded nothing "
-        "either and live/replay end in the SAME state. This is a weaker claim "
-        "than the neighbouring `edge-message-unreplayed` exemption, which "
-        "tolerates a real divergence; here there is none. DEGRADED GUARANTEE: "
-        "what is lost is the supersede a journal could not address — no entity "
-        "is invented on either side, the miss is still RECORDED and reported "
-        "by the run boundary (an exemption still requires the record, #5380), "
-        "and the exemption covers ONLY the unaddressable case: a name the "
-        "journal DID establish (by registration, by a rename, or by a mention "
-        "stub) still refuses as `object-superseded-miss`, as does a record "
-        "carrying an established id — a supersede that could have landed never "
-        "becomes skippable — a hard-deleted target keeps its own anchored "
-        "`supersede-target-deleted` bound, and an established-then-deleted name "
-        "is NOT absorbed here"
+        "either and live/replay end in the SAME state — so this is NOT the tier "
+        "of the neighbouring `edge-message-miss` exemption, which still "
+        "absorbs a missing-creation-path absence on the one-record `apply()` "
+        "leg; for any journal "
+        "whose establishing lines are intact this exemption tolerates NO "
+        "divergence at all (see the RESIDUAL for the case where the lines are "
+        "not intact). "
+        "⛔ DELIBERATE DATA-INTEGRITY DECISION, not merely a rule — the standard "
+        "a permanent skip must meet (Causet's bar, recorded on #3590 comment "
+        "6453059051): a record nothing can address is skipped "
+        "PERMANENTLY, so the skip is recorded (this entry), the decision is "
+        "recorded where the gate is read (`identity-decision.md`), and the "
+        "loss is bounded to a supersede that could not have landed. The "
+        "deciding reason is AX, not convenience (#10183): a refusal must name "
+        "what the caller can DO, and for a target the journal never "
+        "established there is no creation to add, nothing out of order, no "
+        "producer to journal — retrying reproduces it. No remedy ⇒ no refusal. "
+        "DEGRADED GUARANTEE: what is lost is the supersede a journal could not "
+        "address — no entity is invented on either side, the miss is still "
+        "RECORDED and reported by the run boundary (an exemption still "
+        "requires the record, #5380), and the exemption covers ONLY the "
+        "unaddressable case: ANY established address (a registered/renamed/"
+        "mentioned name, or a registered/stub/state-op id) keeps refusing as "
+        "`object-superseded-miss`, so a supersede that could have landed never "
+        "becomes skippable; a hard-deleted target keeps its own anchored "
+        "`supersede-target-deleted` bound; an established-then-deleted address "
+        "is NOT absorbed; and a record carrying NO address at all is refused "
+        "as `object-superseded-no-address`, never exempted here. ⚠️ RESIDUAL: the "
+        "predicate reads the JOURNAL, so it cannot tell \"never established\" "
+        "from \"the establishing line is not in the journal\" — and the "
+        "mechanisms include: a DAMAGED line (the #5612 salvage SKIPS it "
+        "and COUNTS it); a TORN trailing line (counted as "
+        "`torn_trailing_count` on the restore/backup report); a line that is "
+        "PRESENT and parses but whose discriminator is unusable (a non-string "
+        "`type`), which the fold's malformed-envelope guard skips and — on the "
+        "replay engines, which open no malformed-envelope collector — counts "
+        "NOWHERE (only `recover_from_log` tallies it, as `malformed_skipped`); "
+        "and an establishing line that was NEVER WRITTEN — an unjournaled "
+        "capture SDK or a legacy raw producer, the class `commit_ops` journals "
+        "a supersede for with a synthesised id and no registration — which "
+        "also leaves NO count anywhere, only this exempt record. On every "
+        "one of them, live folded "
+        "the supersede and replay does not, so the \"live folded nothing "
+        "either\" claim holds for a journal-faithful, untorn writer only. That "
+        "residual is pre-existing for the name limb and the amendment applies "
+        "it to the id spelling"
     ),
 }
 
@@ -243,7 +333,7 @@ def classify_terminalizer_miss(
     *,
     has_successor: bool = False,
     target_deleted: bool = False,
-    name_unregistered: bool = False,
+    object_address: str | None = None,
 ) -> str:
     """The failure SHAPE for a Point/Object terminalizer that matched 0 rows.
 
@@ -266,18 +356,22 @@ def classify_terminalizer_miss(
     in the reference fold, its ordered ``anchors`` boundary as an additional
     exemption). This module has no journal, so it cannot decide it.
 
-    ``name_unregistered`` is the sibling caller-decision for
-    ``ObjectSuperseded`` only (#3590 D2): the caller has scanned the journal
-    and found the record's NAME not established — no ``ObjectRegistered``
-    created it, no ``EntityMutated`` state op carried it into the merge key,
-    and no ``EventRecorded`` mention stub minted it — **and** its ``id`` (when
-    it carries one) not an id the journal established. Both limbs are
-    required; a name alone is NOT the contract, and a caller that sets this
-    flag on a name-only reading exempts a supersede that could have landed.
+    ``object_address`` is the sibling caller-decision for ``ObjectSuperseded``
+    only (#3590 D2 as amended on #10204): one of :data:`OBJECT_ADDRESS_NONE`,
+    :data:`OBJECT_ADDRESS_UNESTABLISHED`, :data:`OBJECT_ADDRESS_ESTABLISHED`,
+    as answered by the JOURNAL. The bound is about ADDRESSES, not about a name:
+    a record carrying at least one address whose addresses the journal
+    established NONE of is exempt; a record carrying NO address is refused
+    under its own shape (nothing in it is checkable, so "never established" is
+    unfalsifiable); a record carrying an address the journal DID establish is
+    refused as a genuine miss. ⛔ The legacy ``name_unregistered`` boolean is
+    GONE — it encoded the retired "a name is the least identity it must carry"
+    clause, and a name-only reading exempts a supersede that could have landed.
     Also a journal question this module cannot answer — passed in for the same
     reason as ``target_deleted``, and it must NOT be inferred from the graph,
     because a live-holder probe is exactly the ambiguity the exemption
-    excludes. It is ignored for every other ``event_type``.
+    excludes. It is ignored for every other ``event_type``; ``None`` (the
+    default) is the fail-CLOSED answer, so a caller that forgets it refuses.
 
     The default arm is fail-CLOSED: a terminalizer type outside the four
     named below returns :data:`SHAPE_UNCLASSIFIED_TERMINALIZER`, which is NOT
@@ -302,7 +396,13 @@ def classify_terminalizer_miss(
         # not be absorbed by the newer exemption (#3590 D2).
         if target_deleted:
             return SHAPE_SUPERSEDE_TARGET_DELETED
-        if name_unregistered:
+        # #10204: the unrepairable case gets its OWN label, because today it
+        # shares `object-superseded-miss` with a genuine divergence and a
+        # caller cannot tell which one it is looking at (the #9202 defect
+        # shape). It keeps REFUSING — it is deliberately NOT in EXEMPT_SHAPES.
+        if object_address == OBJECT_ADDRESS_NONE:
+            return SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS
+        if object_address == OBJECT_ADDRESS_UNESTABLISHED:
             return SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
         return SHAPE_OBJECT_SUPERSEDED_MISS
     return SHAPE_UNCLASSIFIED_TERMINALIZER
@@ -383,10 +483,133 @@ class NonFoldedEventsError(RuntimeError):
             f"{engine}: {len(self.refused)} journal event(s) could not be "
             f"resolved to exactly one node and were NOT folded — the "
             f"projection would be silently incomplete (R8/#3585): "
-            f"{named}{more}. Reconcile the journal (a missing creation "
-            f"event, an out-of-order append, or an unjournaled producer) "
-            f"before relying on this graph."
+            f"{named}{more}. {refusal_remedy(self.refused)}"
         )
+
+
+#: The two remedies a refusal can carry (#10183's third part). Each is ONE
+#: sentence, and `refusal_remedy` is their ONE home — the raised
+#: :class:`NonFoldedEventsError` and `check_consistency`'s `non-folded` action
+#: both read it, so the two surfaces cannot give one record contradictory
+#: instructions (which they did before #10204: the abort was split by shape
+#: while the health gate's action still prescribed the retired repair).
+_RECONCILE_REMEDY = (
+    "Reconcile the journal (a missing creation event, an out-of-order append, "
+    "or an unjournaled producer) before relying on this graph."
+)
+#: The no-address shape's ACTUAL repair (#10183's third part), and the ONE
+#: home for it. The per-record receipt in `projection/_object_supersede_miss_detail`
+#: renders this same instruction, so the run-boundary remedy and the per-record
+#: detail cannot drift into two different instructions for one record — the
+#: defect class this module's remedies exist to remove, one level down.
+#: ⚠️ What the pins actually hold (#10211 review round 2): one asserts the
+#: RENDERED per-record `detail` contains this constant, and one asserts the
+#: boundary sentence interpolates it. A relationship between the two constants
+#: alone is NOT the tie — measured, drifting the receipt left every test green.
+NO_ADDRESS_INSTRUCTION = (
+    "supply the target's name or id (fix the producing write, or amend the "
+    "journal line)"
+)
+_NO_ADDRESS_REMEDY = (
+    "A record of shape "
+    f"`{SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}` has neither a `name` nor an `id` "
+    "that is a non-empty string, so there is no creation THIS RECORD names "
+    "to add and no ordering it reports "
+    # ⛔ SCOPED TO THE RECORD, not to the journal (#10211 review round 4): a
+    # record with no address establishes NOTHING about the journal — its target
+    # is unknown, so a missing creation for that unknown target is exactly what
+    # cannot be ruled out. "the only repair is to fix the producing write" even
+    # concedes that lines can be missing. Claiming "nothing out of order" for
+    # the journal was an inference this record cannot support.
+    # ⛔ "ITS repair", not "the only repair": `refusal_remedy` emits BOTH
+    # sentences for a MIXED set, and an unscoped exclusivity claim then tells
+    # the caller to reconcile the journal AND that reconciling it is not the
+    # repair — the contradiction this split exists to end.
+    f"— its repair is to {NO_ADDRESS_INSTRUCTION} and re-run."
+)
+#: The MISS shape's SECOND sentence (#10211 review round 8). "Reconcile the
+#: journal" is the right instruction for the *divergence* half of the miss
+#: shape, but it is WRONG for case (3) of the per-record receipt in
+#: ``projection.rebuild_all`` — a record whose carrier the journal HARD-DELETED
+#: under an ``id`` the record does not carry (it carries the NAME only). Nothing
+#: is out of order there and no creation is missing: the record simply cannot be
+#: recognised by the anchored delete bound, which reads only the record's own
+#: ``id``. The receipt already says so ("not to reconcile the journal", #10224),
+#: so leaving the run boundary prescribing reconcile would print two
+#: contradictory instructions for ONE record — the exact defect
+#: :func:`refusal_remedy` exists as the single home to remove, one level up.
+#: ⛔ SCOPED to the sub-case, not swapped in for the reconcile sentence: the
+#: miss shape also covers genuine divergences, which reconcile DOES repair. Both
+#: sentences therefore appear together rather than one displacing the other.
+MISS_NAME_ONLY_DELETED_INSTRUCTION = (
+    "If the record carries the target's NAME only and the journal hard-deleted "
+    "that target, carry the deleted target's id instead (#10224)."
+)
+_MISS_NAME_ONLY_DELETED_REMEDY = (
+    "For the conservative sub-case — a name-only record over a target the "
+    f"journal hard-deleted — {MISS_NAME_ONLY_DELETED_INSTRUCTION}"
+)
+
+
+def refusal_remedy(refused) -> str:
+    """The third part of a refusal: what the caller can actually DO.
+
+    ⛔ THREE limbs share the fail-the-run set and they do NOT share a remedy
+    (#10183's admission test, #10204, #10211 review round 8):
+
+    * a genuine divergence — the journal established the target and the fold
+      missed it — is REPAIRABLE, and "reconcile the journal" names the three
+      ways that happens;
+    * a record carrying NO address at all is not: there is no creation to add,
+      nothing out of order, and no producer to journal, so prescribing
+      "reconcile the journal" is a remedy the caller cannot perform. Its real
+      remedy is to SUPPLY the address, which is why it is still allowed to
+      refuse rather than being exempted;
+    * the `object-superseded-miss` shape carries BOTH halves above — a genuine
+      divergence AND a CONSERVATIVE sub-case (a name-only record over a target
+      the journal HARD-DELETED under an id the record does not carry) that
+      reconciling does not repair. So the miss shape receives the reconcile
+      sentence **joined by** the deleted-target-id sentence, never one swapped
+      for the other: the divergence half is still repaired by reconciling, and
+      the conservative half still needs the id.
+
+    So the reconcile prescription is emitted for every shape EXCEPT a refused
+    set that is solely the no-address shape; such a set never prescribes a
+    repair that does not exist — and a MIXED set carries every applicable
+    sentence. ⚠️ The miss limb is necessarily SET-scoped: `refused` is a set of
+    records whose causes are not distinguishable from the shape alone, so this
+    home cannot emit the deleted-target-id sentence for only the conservative
+    ones. That is why the per-record receipt in `projection.rebuild_all`
+    enumerates the same three causes and names case (3) itself — the two homes
+    must agree about the sub-case, not merely coexist (`#10224`).
+    ⚠️ NOT "only when a record could be reconciled" (#10211 review round 7):
+    `unknown-event-type`, `unimplemented-op` and `unknown-op` also receive the
+    reconcile sentence, and nothing in them is reconcilable — the repair is to
+    upgrade the replayer or the writer. That is a PRE-EXISTING AX gap on a
+    different axis, filed as `#10225` rather than absorbed by this split.
+
+    ``refused`` is any iterable of :class:`NonFoldedEvent` (the caller passes
+    the REFUSED subset, never the exempt one: an exempt record prescribes no
+    repair at all). An EMPTY set returns no remedy rather than the reconcile
+    sentence — there is no record to reconcile, and prescribing one would be
+    the same "a remedy the caller cannot perform" defect this splits on.
+    """
+    shapes = {e.shape for e in refused}
+    if not shapes:
+        return ""
+    parts = []
+    if shapes != {SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}:
+        parts.append(_RECONCILE_REMEDY)
+    if SHAPE_OBJECT_SUPERSEDED_MISS in shapes:
+        # #10211 review round 8: the miss shape has TWO causes and only one of
+        # them is reconciled. Emitting the reconcile sentence alone contradicts
+        # the per-record receipt's case (3) for the same record. JOINED, not
+        # swapped — see this function's docstring for the limb and why the
+        # sentence is set-scoped rather than per-record.
+        parts.append(_MISS_NAME_ONLY_DELETED_REMEDY)
+    if SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS in shapes:
+        parts.append(_NO_ADDRESS_REMEDY)
+    return " ".join(parts)
 
 
 # ── The run-scoped collector ──────────────────────────────────────────────
