@@ -4865,6 +4865,64 @@ _MARKER_NEGATION_BEFORE_RE = re.compile(
 _MARKER_NEGATION_AFTER_RE = re.compile(
     r"\A(?:\s*[\w'\u2019\-]+){0,3}\s+no\s+(?:longer|more|further)\b", re.I
 )
+#: The OBJECT-negation voice of the SAME denial, AFTER the marker: English writes
+#: *"it re-materializes **nothing** on an about edge"* and *"it writes **no
+#: property**"*, and those are the spellings this file's own `DENIAL_PATTERNS`
+#: already recognises for a counted writer (`nothing` / `no <property noun>`).
+#: ⛔ The POST half knew only the adverbial `no longer`, so the identical claim put
+#: its negation in the OBJECT — and every one of these was measured as a FALSE RED
+#: on the EXEMPT row, because `EXEMPT_COUNTED_MARKERS` holds `re materializ` / `MAP
+#: form writer` and an un-suppressed occurrence says the exemption is COUNTED:
+#:   * *"`projection._rebuild_all_replay` re-materializes nothing on an about
+#:     edge."*
+#:   * *"`projection._rebuild_all_replay` re-materializes nothing on the rebuild
+#:     pass, so it carries no property on an about edge."*
+#: The exemption row's OWN vocabulary states the verdict as *"This writer carries
+#: NO property on an about edge"*, so denying the counted class in the class's own
+#: words was the one spelling that red — the direction that forces an editor to
+#: weaken true prose (`#10200` review, cycle 10, executed).
+#: ⚠️ Same ≤ THREE word-tokens, same no-punctuation crossing, and it additionally
+#: requires that no PREDICATE TERMINATOR sits between the marker and the negator
+#: (`_PREDICATE_TERMINATORS`): without that, *"drops the property **and** carries
+#: nothing"* would read the second predicate's object as a denial of the first
+#: marker and clear a real denial — the neighbour-negator defect this whole scan
+#: exists to avoid, on the object side. Bounding negation scope with termination
+#: terms is the field's own rule (`#10200` review's external rung: the ConText /
+#: NegEx family scopes a cue and terminates it on a conjunction).
+_PROPERTY_OBJECT_NEGATION_AFTER_RE = re.compile(
+    rf"\A(?:\s*[\w'\u2019\-]+){{0,3}}\s+(?:nothing\b|no\s+{_PROPERTY_NOUN}\b)",
+    re.I,
+)
+#: Words that END the marker's predicate, so a negator PAST one belongs to the next
+#: predicate. Coordinators, the subordinators `_HISTORY_BREAKS` already treats as
+#: predication boundaries, and the causal `because`/`so` pair these documents use
+#: to attach the REBUILD note (`#10139`) to the clause before it.
+_PREDICATE_TERMINATORS: tuple[str, ...] = (
+    "and",
+    "but",
+    "or",
+    "nor",
+    "so",
+    "yet",
+    "while",
+    "whereas",
+    "because",
+    "then",
+)
+
+
+def _object_negation_after(low: str, match) -> bool:
+    """Does an OBJECT negation (`nothing` / `no <property>`) govern this marker?
+
+    Split out of `_marker_itself_negated` so the terminator bound is testable on
+    its own: a matched window that carries a `_PREDICATE_TERMINATORS` word is the
+    NEXT predicate's negation, not this marker's, so it must not suppress it.
+    """
+    tail = _PROPERTY_OBJECT_NEGATION_AFTER_RE.match(low[match.end() :])
+    if tail is None:
+        return False
+    window = re.findall(r"[\w'\u2019\-]+", tail.group(0).lower())
+    return not any(word in _PREDICATE_TERMINATORS for word in window)
 
 
 def _marker_itself_negated(low: str, match) -> bool:
@@ -4879,9 +4937,13 @@ def _marker_itself_negated(low: str, match) -> bool:
     rule.
     """
     prefix = _QUANTIFIER_NEGATION_RE.sub(" ", low[: match.start()])
-    return bool(
-        _MARKER_NEGATION_BEFORE_RE.search(prefix)
-    ) or bool(_MARKER_NEGATION_AFTER_RE.match(low[match.end():]))
+    return (
+        bool(_MARKER_NEGATION_BEFORE_RE.search(prefix))
+        or bool(_MARKER_NEGATION_AFTER_RE.match(low[match.end() :]))
+        # … and the OBJECT voice of the same trailing denial, which the
+        # adverbial half above cannot hold (`#10200` review, cycle 10).
+        or _object_negation_after(low, match)
+    )
 
 
 def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
@@ -4919,7 +4981,7 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     A denial is excused only when the CLAUSE carrying it is about HISTORY — see
     `HISTORY_MARKERS`; the exemption row gets no such escape.
 
-    ⚠️ STATED LIMITS — three, all measured, and none is an implied promise:
+    ⚠️ STATED LIMITS — four, all measured, and none is an implied promise:
     1. **The denial is attributed to EVERY census key named in the SENTENCE.** The
        class-marker half is predicate-scoped (`_marker_itself_negated`), the
        denial half is not, so a sentence that names TWO keys and denies the class
@@ -4956,6 +5018,21 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
        coverage claim, and the round that closed the five measured spellings found
        it still said two (`#10200` review, cycle 7). A bound left out of this list
        is a bound a lane will rely on.
+    4. **A POST-positioned denial is read on the PREDICATE, so its OBJECT voice is
+       bounded too.** `nothing` / `no <property noun>` counts only within ≤ THREE
+       word-tokens of the marker AND with no `_PREDICATE_TERMINATORS` word between
+       (`and`/`but`/`or`/`nor`/`so`/`yet`/`while`/`whereas`/`because`/`then`), so
+       *"drops the property and carries nothing"* keeps its denial — the second
+       predicate's negation is not the first marker's. Past that window, or with a
+       property noun outside `_PROPERTY_NOUN`, the marker reads as ASSERTED: on a
+       counted row that is fail-OPEN (a denial written as *"it re-materializes no
+       attributes at all on the rebuild pass"* is longer than three tokens and
+       stays green), which is why the window is as wide as the one the adverbial
+       `no longer` half has always used and no wider, and why the OBJECT vocabulary
+       is the same `_PROPERTY_NOUN` `DENIAL_PATTERNS` already reads. The other
+       direction is the one that hurt: an exemption denied with the EXEMPT row's
+       own wording (*"it carries no property on an about edge"*) was a FALSE RED
+       until this bound was read at all (`#10200` review, cycle 13, executed).
     """
     offenders: list[str] = []
     for label, text in sections:
@@ -6100,6 +6177,96 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "the population frame reds TRUE prose — the documents' own pronominal "
         "counted claim, or its negated form — so the correction record cannot be "
         "written: " + repr(population_reds)
+    )
+
+    # ⛔ Probe 25 (`#10200` review, cycle 13): the POST half of the polarity read
+    # knew only the ADVERBIAL `no longer`, so the OBJECT voice of the same denial —
+    # `re-materializes nothing`, `writes no property` — was read as an ASSERTED
+    # class marker. That is the spelling this file's own `DENIAL_PATTERNS`
+    # recognises for a counted writer, and the spelling the exemption row's verdict
+    # is written in (*"This writer carries NO property on an about edge"*), so the
+    # TRUE statement of the exemption red through `EXEMPT_COUNTED_MARKERS` (which
+    # holds `re materializ` / `MAP form writer`). Measured at `3a20e63e9` by running
+    # this leg's own functions: both sentences below RED, and the last one shows the
+    # false red survives without any census-counted vocabulary at all.
+    object_negated_true_prose = (
+        (
+            "probe",
+            "`projection._rebuild_all_replay` re-materializes nothing on an about "
+            "edge.",
+        ),
+        (
+            "probe",
+            "`projection._rebuild_all_replay` re-materializes nothing on the "
+            "rebuild pass, so it carries no property on an about edge.",
+        ),
+        # … and the same conclusion reached by a bare object negation naming no
+        # property noun: `no recorded version read at all` is what §13 writes, and
+        # the widened window must not reach it.
+        (
+            "probe",
+            "`projection._rebuild_all_replay` carries no recorded version read at "
+            "all.",
+        ),
+    )
+    object_negated_reds = [
+        offender
+        for sentence in object_negated_true_prose
+        for offender in _denied_verdicts([sentence])
+    ]
+    assert not object_negated_reds, (
+        "an OBJECT negation (`re-materializes nothing`, `writes no property`) is "
+        "read as an ASSERTED class, so TRUE prose reds — and it is the exemption's "
+        "OWN stated wording, so an editor's only way out is to delete the record "
+        "of why the row is exempt: " + repr(object_negated_reds)
+    )
+    # … and the mirror, which is what the same widening must not cost: an object
+    # negation about a COUNTED writer DENIES its class, so it must red. At
+    # `3a20e63e9` this was GREEN — the post half could not see the negator, so
+    # `re materializ` counted as STATED and `#10149`'s own claim restated as
+    # *"it re-materializes nothing"* shipped unread.
+    counted_object_negation = (
+        (
+            "probe",
+            "`sdk.supersede_point` re-materializes nothing on an about edge.",
+        ),
+    )
+    assert any(
+        "supersede_point" in item
+        for item in _denied_verdicts(list(counted_object_negation))
+    ), (
+        "an object negation AFTER a class marker is invisible, so the class counts "
+        "as stated and `#10149`'s claim restated as 'it re-materializes nothing' "
+        "is green on both legs"
+    )
+    # … and the negation must stay scoped to the marker's OWN predicate: a
+    # coordinator ENDS it (`_PREDICATE_TERMINATORS`), so the next predicate's
+    # object negation cannot suppress a real denial. ⛔ The sentences below were
+    # chosen by MUTATION, not by eye: the obvious control (*"drops the property and
+    # carries nothing"*) stays green either way, because `carries nothing` is a
+    # `DENIAL_MARKERS` entry that reds on its own — it measures nothing about this
+    # bound. These two go GREEN the moment the terminator check is removed, i.e.
+    # they pin the bound; their trailing negation is no denial of its own.
+    coordinated_object_negation = (
+        (
+            "probe",
+            "`sdk.supersede_point` transfers the about edge bare and nothing "
+            "else.",
+        ),
+        (
+            "probe",
+            "`sdk.supersede_point` transfers it bare but retains no property map.",
+        ),
+    )
+    suppressed_denials = [
+        sentence
+        for sentence in coordinated_object_negation
+        if not any("supersede_point" in item for item in _denied_verdicts([sentence]))
+    ]
+    assert not suppressed_denials, (
+        "an object negation belonging to the NEXT predicate suppresses the denial "
+        "before it, so a real denial of a counted writer is green one coordinator "
+        "away: " + repr([s[:80] for _l, s in suppressed_denials])
     )
 
     offenders = _denied_verdicts(_census_sections())
