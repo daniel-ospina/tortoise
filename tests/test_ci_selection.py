@@ -6308,20 +6308,31 @@ def test_live_required_job_runs_only_declared_live_tests():
 def test_test_slow_job_carries_junitxml_manifest_guard():
     """cycle-7 P2-1 (int-1) + Task 9 Step 5: the test-slow legs flip to
     docker with the fast job's exact wiring — (a) the pytest invocation
-    carries --junitxml=/tmp/junit.xml -o junit_family=xunit1 AND -r fEs
-    (never the historical -rfE — pytest 9.1.1 replaces the report set on
-    repeated -r flags, so a trailing -rfE would suppress the skip summary
+    carries a PER-RUNNER --junitxml (${RUNNER_TEMP}/junit.xml — never the
+    host-global /tmp literal, #7815's clobber) -o junit_family=xunit1 AND
+    -r fEs (never the historical -rfE — pytest 9.1.1 replaces the report set
+    on repeated -r flags, so a trailing -rfE would suppress the skip summary
     the guard depends on), (b) a manifest-generation step exists BEFORE the
     pytest step (echoing each leg's ${{ matrix.files }} to
     ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    /tmp/expected-nodeids.txt), and (c) a skip-guard step gated on rc==0 AND
-    non-empty $FILES runs tools/skip-guard.py with --manifest."""
+    ${RUNNER_TEMP}/expected-nodeids.txt), and (c) a skip-guard step gated on
+    rc==0 AND non-empty $FILES runs tools/skip-guard.py with --manifest."""
     wf = _load_python_ci()
     steps = wf["jobs"]["test-slow"]["steps"]
     run = next(s for s in steps
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
-    assert "--junitxml=/tmp/junit.xml" in invocation
+    # ⛔ THE GUARD'S TWO RECONCILED ARTIFACTS ARE PER-RUNNER, not host-global
+    # `/tmp` literals (#7815/#10028). `test-slow`, `test-carve-out` and
+    # `test-track-b` run CONCURRENTLY on one self-hosted host and share ONE
+    # `/tmp`: measured on run 40798901821, three of them wrote
+    # `/tmp/expected-nodeids.txt` within the same 10 minutes, and `test-track-b`
+    # then reconciled its own 4-nodeid run against a PEER's manifest and
+    # `junit.xml` and redded with 1428 "expected nodeids absent" belonging to no
+    # test it ran. `${RUNNER_TEMP}` is `<runner_install>/_work/_temp`, and a
+    # self-hosted runner executes ONE job at a time — per-JOB unique on a shared
+    # host. Asserting the pinned literal instead would re-open the clobber.
+    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in invocation
     assert "-o junit_family=xunit1" in invocation
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
@@ -6348,7 +6359,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                  if s.get("name", "").startswith("Skip-fail guard"))
     grun = guard["run"]
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
-    assert "--manifest /tmp/expected-nodeids.txt" in grun
+    assert '--manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"' in grun
+    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
     # #9539: read the DERIVED legs — the workflow holds no literal rows.
     leg_files = slow_leg_files(load_manifest())
@@ -6551,7 +6563,10 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert "--junitxml=/tmp/junit.xml" in run["run"]
+    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in run["run"], \
+        ("#7815: the carve-out legs share a host with `test-slow`/`test-track-b`, "
+         "so the junitxml they reconcile against must be per-runner, never the "
+         "host-global /tmp literal")
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
