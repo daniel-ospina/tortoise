@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
-from _node_ids import node_id
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -1045,77 +1044,81 @@ class TestNegativePaths:
 # consistency digest. Before #7936 it was a RANDOM ulid. Its exact SHAPE was
 # never the contract #151 protects: the load-bearing half is `id != name`
 # below (the stub must not take the entity NAME as its id).
+#
+# ⛔ #3590 D1 retired the mint these three arms measured. `_event_plain_merge`
+# no longer creates a stub for `subject` / `object` / `uses[]`, so the
+# id-shape question is moot for them, and the arms that asserted a node (via a
+# self-comparison, `sid == node_id(proj, …)` — the same name→id read stated
+# twice) were red for it. What survives is pinned in
+# `TestAnUnregisteredMentionMintsNothing` below.
+
+
+class TestAnUnregisteredMentionMintsNothing:
+    """#3590 D1 (owner-RULED 2026-10-26): a mention is the LINK, never a
+    creation — an unresolvable mention drops its link, records the miss, and
+    mints nothing.
+
+    These three arms replace the retired `…_has_entity_name_id` pins, which
+    required the fold to CREATE a node per mention. D1 forbids that, so their
+    premise is now empty (`MATCH (n {name:…})` returns 0 rows) and their
+    replacement assertion had degenerated into a self-comparison: `node_id`
+    (`tests/_node_ids.py`) IS the `MATCH (n:Label {name:$name}) RETURN n.id`
+    read, so `sid == node_id(proj, …)` held for ANY fold — including one whose
+    stub id was a random `ulid()` (`#9876` review P1, `test-quality-gap`).
+
+    #151's real property survives as an ABSENCE here: a name mentioned in
+    prose can never become an id, because no node is written at all. The
+    presence half (an id is never the name) is `_mint_subject_stub`'s
+    residual — the `aboutSubject` mint whose `ON CREATE SET s.id=$name` is the
+    open #8914, deliberately NOT pinned as correct here.
+    """
+
+    @pytest.mark.parametrize("ref_key,label,name", [
+        ("subject", "Subject", "stub-agent-1"),     # performs
+        ("object", "Object", "artifact-stub-1"),    # produces
+        ("uses", "Object", "input-stub-1"),         # uses[]
+    ])
+    def test_a_fold_mention_of_an_unregistered_name_writes_no_node(
+            self, sdk, ref_key, label, name):
+        from tortoise.projection.nonfolded import (
+            SHAPE_UNFOLDED_MENTION,
+            collect_non_folded,
+            refused_events,
+        )
+
+        proj = sdk._get_proj()
+        record = {
+            "type": "EventRecorded",
+            "id": "ev-3590-1",
+            "eventId": "ev-3590-1",
+            "eventKind": "test",
+            "subject": "stub-agent-1",
+            "object": "artifact-stub-1",
+            "uses": ["input-stub-1"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        }
+        with collect_non_folded() as entries:
+            proj.apply(record)
+
+        rows = proj.g.query(
+            f"MATCH (n:{label} {{name:$n}}) RETURN n.id",
+            params={"n": name}).result_set
+        assert rows == [], (
+            f"the fold MINTED a :{label} out of a bare `{ref_key}` mention "
+            f"(D1): {rows}")
+
+        miss = [e for e in entries if e.shape == SHAPE_UNFOLDED_MENTION]
+        assert miss, (
+            "the dropped mention left NO record — D1 requires the miss to be "
+            f"recorded (entries: {[str(e) for e in entries]})")
+        assert not refused_events(entries), (
+            "an unregistered mention was classified as a producer omission "
+            f"that fails the run: {[str(e) for e in refused_events(entries)]}")
 
 
 class TestStubEntityIdIsNotTheName:
-    """#151: `_upsert_event` auto-created Subject/Object stubs carry a real id
-    for the name — never the entity name itself (#7936: the canonical
-    `entity_name_id`, formerly a random ulid)."""
-
-    def test_performs_stub_subject_has_entity_name_id(self, sdk):
-        """Stub Subject created via performs edge gets the canonical id, not
-        the entity name."""
-        proj = sdk._get_proj()
-        proj.apply({
-            "type": "EventRecorded",
-            "id": "ev-ulid-1",
-            "eventId": "ev-ulid-1",
-            "eventKind": "test",
-            "subject": "stub-agent-1",
-            "startedAt": "2024-01-01T00:00:00Z",
-        })
-        r = proj.g.query(
-            "MATCH (s:Subject {name:'stub-agent-1'}) RETURN s.id, s.name"
-        ).result_set
-        assert len(r) == 1
-        sid, name = r[0][0], r[0][1]
-        assert name == "stub-agent-1"
-        assert sid == node_id(proj, "Subject", "stub-agent-1"), sid
-        assert sid != name, f"id must not be the entity name ({sid!r} == {name!r})"
-
-    def test_produces_stub_object_has_entity_name_id(self, sdk):
-        """Stub Object created via produces edge gets the canonical id, not
-        the entity name."""
-        proj = sdk._get_proj()
-        proj.apply({
-            "type": "EventRecorded",
-            "id": "ev-ulid-2",
-            "eventId": "ev-ulid-2",
-            "eventKind": "build",
-            "subject": "ci-bot",
-            "object": "artifact-stub-1",
-            "startedAt": "2024-01-01T00:00:00Z",
-        })
-        r = proj.g.query(
-            "MATCH (o:Object {name:'artifact-stub-1'}) RETURN o.id, o.name"
-        ).result_set
-        assert len(r) == 1
-        oid, name = r[0][0], r[0][1]
-        assert name == "artifact-stub-1"
-        assert oid == node_id(proj, "Object", "artifact-stub-1"), oid
-        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
-
-    def test_uses_stub_object_has_entity_name_id(self, sdk):
-        """Stub Object created via uses edge gets the canonical id, not the
-        entity name."""
-        proj = sdk._get_proj()
-        proj.apply({
-            "type": "EventRecorded",
-            "id": "ev-ulid-3",
-            "eventId": "ev-ulid-3",
-            "eventKind": "analysis",
-            "subject": "analyst",
-            "uses": ["input-stub-1"],
-            "startedAt": "2024-01-01T00:00:00Z",
-        })
-        r = proj.g.query(
-            "MATCH (o:Object {name:'input-stub-1'}) RETURN o.id, o.name"
-        ).result_set
-        assert len(r) == 1
-        oid, name = r[0][0], r[0][1]
-        assert name == "input-stub-1"
-        assert oid == node_id(proj, "Object", "input-stub-1"), oid
-        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
+    """#151's surviving half: a stub that IS minted must not take the name as
+    its id (see the module comment above and `_mint_subject_stub`, #8914)."""
 
     def test_stub_preserves_existing_id_on_merge(self, sdk):
         """When the Subject already exists via `_upsert_subject` (with its own
