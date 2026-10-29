@@ -546,6 +546,22 @@ TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
 #: (``_UNATTESTABLE``) rather than assert its own ``now``/``draft`` — which would
 #: re-stamp ``created_at`` and DEMOTE a promoted turn on the store of record.
 #:
+#: ⛔ WHAT THE OMISSION BUYS IS THE **UPDATE** ARM, NOT BOTH (#10021 review P3).
+#: ``_upsert_statement`` builds the ``INSERT ... (columns)`` list and the
+#: ``DO UPDATE SET`` list from the SAME ``col_values`` keys (its ``columns =``
+#: and ``updates =`` lines), so
+#: an omitted key is absent from both: a row that ALREADY exists keeps its values
+#: (the half the writer needs), and a row that does NOT exist takes the column's
+#: declared DEFAULT — or NULL, since ``public.point.status`` / ``created_at`` are
+#: nullable ``text`` with no default (PostgreSQL: "each column not present in the
+#: explicit or implicit column list will be filled with a default value, either
+#: its declared default value or null if there is none"). The fresh-row NULL is a
+#: RECORDED RESIDUAL, stated at its producer (`sdk._write_capture_turns`) and
+#: pinned by `tests/test_10000_turns_record_only.py::
+#: test_the_omitted_pair_is_safe_on_the_update_arm_only`. ⚠️ A `coalesce(EXCLUDED.
+#: c, point.c)` on the conflict arm would NOT close it — on a fresh insert
+#: ``EXCLUDED.c`` IS that NULL; only a column DEFAULT would.
+#:
 #: ⛔ THIS SET IS WHY THE ALWAYS-SET ABOVE CAN KEEP ITS PROMISE. Declaring
 #: ``status``/``createdAt`` unconditional while an arm omits them left the pin
 #: that reads a REAL capture (``tests/test_10017_record_carrier.py``) passing only

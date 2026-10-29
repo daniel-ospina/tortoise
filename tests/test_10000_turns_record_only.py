@@ -501,6 +501,76 @@ def test_an_unreadable_prior_row_omits_the_field_rather_than_restamping(
         "it) would then describe a shape no capture produces")
 
 
+def test_the_omitted_pair_is_safe_on_the_update_arm_only():
+    """The omission protects the row the record HOLDS — and only that one.
+
+    ⛔ THIS PINS A MECHANISM AND ITS RESIDUAL, NOT A BEHAVIOUR THIS LANE FIXED
+    (#10021 review, P3). `sdk._write_capture_turns` omits `status`/`createdAt`
+    when the prior-row read failed, and the justification written beside it used
+    to claim the general rule "a key that is absent is a column the upsert does
+    not touch". Driven through the record's OWN statement emitter, that is true on
+    the UPDATE arm only:
+
+      * `DO UPDATE SET` is built from `col_values`' keys, so an omitted column is
+        never named and the stored turn's value survives — the half the writer
+        needs, and the reason the pair is omitted rather than asserted;
+      * the `INSERT ... (columns)` list is built from the SAME keys, so the column
+        is absent there too, and a row that does not exist yet takes its declared
+        DEFAULT or NULL (PostgreSQL's INSERT contract). `public.point.status` and
+        `public.point.created_at` are nullable `text` with NO default, so a FRESH
+        turn lands with both NULL — the recorded residual, served by
+        `record_read` as `"created_at": null`.
+
+    It is NOT closable with `coalesce(EXCLUDED.status, point.status)`: on a fresh
+    row EXCLUDED.status IS the omitted NULL, so the coalesce yields NULL as well.
+    What WOULD close it is a declared DEFAULT on the two columns — so this pin
+    fails if one lands, and says so: at that point the omission is safe on both
+    arms by the schema's own contract and the residual note must be deleted
+    rather than left describing a hole that no longer exists.
+    """
+    columns = rp.table_columns()
+    node = rp.Node("point", "Point", "id")
+
+    def statement(snapshot: dict) -> str:
+        col_values, tail = rp._split_properties(
+            "point", snapshot, columns=columns, refused={})
+        return rp._upsert_statement("o", "g", node, "s_t0", col_values,
+                                    tail).sql
+
+    omitted = statement({"id": "s_t0", "content": "[user] hi",
+                         "pointKind": "event"})
+    supplied = statement({"id": "s_t0", "status": "draft",
+                          "createdAt": "2026-01-01T00:00:00+00:00"})
+
+    insert_list, rest = omitted.split(")", 1)
+    # The SAFE arm: the conflict branch never names the column it cannot attest.
+    assert "status = EXCLUDED.status" not in rest, omitted
+    assert "created_at = EXCLUDED.created_at" not in rest, omitted
+    # …and the residual: absent from the INSERT list too, so the row that does not
+    # exist yet has no value for it at all — and the column declares no default.
+    assert "status" not in insert_list and "created_at" not in insert_list, (
+        f"the omitted pair reached the INSERT column list — re-derive the "
+        f"residual note at sdk._write_capture_turns: {omitted}")
+    # The CONTROL: a value the capture CAN attest is written on both arms, so the
+    # two assertions above discriminate an omission from the statement's shape.
+    assert "status = EXCLUDED.status" in supplied
+    assert "created_at = EXCLUDED.created_at" in supplied
+
+    point_sql = (rp.REPO_ROOT / "supabase" / "migrations"
+                 / "20261012000003_record_epistemic.sql").read_text(encoding="utf-8")
+    body = point_sql.split("CREATE TABLE IF NOT EXISTS public.point (", 1)[1]
+    body = body.split("\n);", 1)[0]
+    for column in ("status", "created_at"):
+        line = next(ln for ln in body.splitlines()
+                    if ln.strip().startswith(f"{column} "))
+        assert "DEFAULT" not in line.upper(), (
+            f"public.point.{column} now declares a default ({line.strip()!r}) — "
+            "the omission is safe on the INSERT arm too, so delete the fresh-row "
+            "NULL residual at sdk._write_capture_turns and "
+            "record_projection.TURNS_SNAPSHOT_UNATTESTABLE_KEYS, and turn this "
+            "pin into its positive (the row lands 'draft'/now, not NULL)")
+
+
 def test_a_recapture_on_a_graph_that_lost_its_session_journals_the_records_values(
         sdk, monkeypatch):
     """⛔ #10021 review P2: the prior row is read from the RECORD, not the graph.
@@ -1345,6 +1415,128 @@ def test_the_fold_leaves_the_live_id_space_end_after_a_shrink(sdk, monkeypatch):
         "the fold replayed the peak (got "
         f"{rows[0][0] if rows else None!r}), so a rebuilt session reports a "
         "healthy shrunk transcript as truncated")
+
+
+def test_the_record_high_water_is_the_sweep_bound_when_the_graph_is_gone(
+        sdk, monkeypatch):
+    """⛔ #10021 review P2: the sweep's bound cannot live only in the GRAPH.
+
+    `stale` used to be computed under `if session_existed:` — a probe of the
+    graph `:Session` — and its range came only from that node's
+    `turn_max_index`. Both are facts about the GRAPH used to license a removal
+    from the RECORD, and §2.0/§9.1 make the record the authority with the graph
+    as a rebuildable cache (D7 is measured with it destroyed). In exactly that
+    state a 4-turn session re-captured as 1 turn swept NOTHING: the record kept
+    `_t1.._t3`, `turn_count` became 1, and both doors served the four rows as a
+    COMPLETE transcript.
+
+    So the test destroys the graph `:Session` (what D7 measures) and asserts the
+    removal REACHES THE RECORD — the `EntityMutated` op=delete records the fold
+    applies as a hard delete. `test_the_record_high_water_read_orders_by_index`
+    pins the SQL half; this pins that the writer consults it.
+
+    Mutation: restore `if session_existed:` around the sweep — the seam receives
+    no delete record and `_t1.._t3` survive both stores.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    # The record holds no row for the NEW window's id — a fresh turn, which is
+    # the shape a re-capture after a shrink has (`_t0` already existed; the
+    # pinned datum here is the session's HIGH-WATER mark, not the prior row).
+    monkeypatch.setattr(sdk_mod, "_record_prior_vectors", lambda *a, **k: {})
+    # The record's own highest index. `_RlsConn` below pins the read that
+    # produces it; here it is the value such a read returns for `_t0.._t3`.
+    monkeypatch.setattr(sdk_mod, "_record_turn_high_water", lambda *a, **k: 3)
+    _bind_tenant(sdk)
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "lost-session", turns)
+    proj = sdk._get_proj()
+    # D7's state: the graph holds no `:Session` for this session at all.
+    proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s",
+                 params={"sid": "lost-session"})
+    seam.records.clear()
+    _capture(sdk, "lost-session", turns[0:1], session_existed=False)
+    deleted = sorted(r["id"] for r in seam.records
+                     if r.get("type") == "EntityMutated"
+                     and r.get("op") == "delete")
+    assert deleted == ["lost-session_t1", "lost-session_t2",
+                       "lost-session_t3"], (
+        "a shorter re-capture on a session the GRAPH has lost swept nothing "
+        f"from the record (deleted={deleted!r}) — the record keeps every "
+        "surplus turn and both doors serve them as a complete transcript")
+
+
+def test_the_record_high_water_read_orders_by_index():
+    """`record_read.turn_high_water` answers the RESIDUE bound, not a count.
+
+    ⛔ A LEXICAL MAX IS THE TRAP: `max(node_key)` orders `sess_t9` after
+    `sess_t10`, so the bound would name 9 for a session holding ten turns and
+    leave `_t10` unswept forever. The index is parsed (`record_read._turn_index`)
+    and compared numerically.
+
+    Scoped like every other read in this module: an unscoped connection sees
+    NOTHING under the production role, and "the record holds no turn" would then
+    read as a clean, sweepless answer rather than a failure. A FAILED read
+    raises, so the writer's caller can tell "holds nothing" from "cannot ask".
+    """
+    rows = [_turn_row(i, f"[user] t{i}") for i in (0, 1, 2, 9, 10)]
+    conn = _RlsConn(org_id="org-1", turn_rows=rows)
+    assert record_read.turn_high_water(
+        conn, org_id="org-1", graph_id="g-1", session_id="sess") == 10, (
+        "the high-water mark was not the numerically greatest turn index")
+    assert any("set_config" in sql for sql in conn.statements), (
+        "the high-water read did not install the tenant scope, so RLS would "
+        "answer 'no turn rows' for every session")
+
+    empty = _RlsConn(org_id="org-1")
+    assert record_read.turn_high_water(
+        empty, org_id="org-1", graph_id="g-1", session_id="sess") is None, (
+        "a record holding no turn row must answer None (a fresh capture), not "
+        "an index")
+
+
+def test_a_record_row_above_the_live_id_space_is_not_a_complete_transcript():
+    """⛔ #10021 review P2: the mark is a witness in BOTH directions.
+
+    `_shortfall` read only `max(held) < turn_max_index` (the missing TAIL), so
+    rows ABOVE the session's live end — the residue a shorter re-capture leaves
+    when its surplus sweep did not land — answered COMPLETE. An APPEND cannot
+    produce that shape (it writes `turn_max_index = turn_offset + count - 1`), so
+    a row above the mark is residue by construction, and `served_turn_count`
+    deliberately tolerates a LONGER served set when the record answered — which
+    is why nothing downstream would have questioned it.
+
+    Mutation: drop the `max(held) > turn_max_index` arm — this leg serves four
+    turns for a one-turn session and answers COMPLETE.
+    """
+    residue = _RlsConn(narrative=[(None, None, 0, 4)],
+                       turn_rows=[_turn_row(0, "[user] a"),
+                                  _turn_row(1, "[assistant] b"),
+                                  _turn_row(2, "[user] c"),
+                                  _turn_row(3, "[assistant] d")])
+    answer = record_read.session_turns(residue, org_id="org-1", graph_id="g-1",
+                                       session_id="sess", turn_max_index=0)
+    assert not answer.answered, (
+        "a record holding rows ABOVE the session's live id space was served as "
+        "a complete transcript — the session holds 1 turn and 4 were returned")
+    assert "no longer owns" in answer.reason, answer.reason
+    assert [t.turn_id for t in answer.turns] == [
+        "sess_t0", "sess_t1", "sess_t2", "sess_t3"], (
+        "the rows were dropped instead of carried for the merge")
+
+    # The healthy APPEND shape stays served: `offset + count - 1` is the mark, so
+    # the last row sits AT the live end and this arm must not fire.
+    append = _RlsConn(narrative=[(None, None, 0, 2)],
+                      turn_rows=[_turn_row(0, "[user] a"),
+                                 _turn_row(1, "[assistant] b"),
+                                 _turn_row(2, "[user] c"),
+                                 _turn_row(3, "[assistant] d")])
+    answer = record_read.session_turns(append, org_id="org-1", graph_id="g-1",
+                                       session_id="sess", turn_max_index=3)
+    assert answer.answered and len(answer.turns) == 4, (
+        "an APPEND's four rows against a window length of 2 and a live end of "
+        "3 were refused — the fix must see residue, not length")
 
 
 class _RecordingSeam:

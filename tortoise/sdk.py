@@ -2440,7 +2440,20 @@ _SESSION_REDACTIONS_CYPHER = (
 #: "This capture cannot attest the value" — distinct from ``None``, which is a
 #: real absence (a fresh turn) the journalled snapshot must state. A snapshot key
 #: carrying this sentinel is OMITTED, and an omitted column is one the record's
-#: upsert (and the graph fold) leaves untouched (#10000 review P1).
+#: upsert's ``DO UPDATE SET`` never names — so a row that ALREADY exists keeps
+#: its value — and the graph fold's ``coalesce`` leaves alone on match (#10000
+#: review P1).
+#:
+#: ⛔ THE INSERT ARM IS NOT COVERED BY THAT, and this paragraph used to say it was
+#: (#10021 review, P3). ``record_projection._upsert_statement`` builds the
+#: ``INSERT ... (columns)`` list from the same ``col_values`` keys, so an omitted
+#: column is absent from BOTH lists; a row that does not exist yet has nothing to
+#: "not touch" and takes its declared DEFAULT or NULL (PostgreSQL INSERT
+#: contract). ``public.point.status``/``created_at`` declare no default, so a
+#: fresh row lands NULL — the recorded residual, stated at its producer
+#: (``sdk._write_capture_turns``' omitted-field note) and pinned by
+#: ``tests/test_10000_turns_record_only.py::
+#: test_the_omitted_pair_is_safe_on_the_update_arm_only``.
 _UNATTESTABLE = object()
 
 
@@ -2478,6 +2491,9 @@ def _record_prior_vectors(sdk, session_id: str,
     * the ``created_at``/``status`` half is OMITTED, not cleared: the caller marks
       them ``_UNATTESTABLE`` and the journalled snapshot leaves both fields out,
       so the replay cannot assert this capture's own values over the record's.
+      ⛔ That protects the row the record ALREADY holds; a row it does not hold
+      takes the omitted column's declared default or NULL, and these two columns
+      declare none (the residual, stated at ``sdk._write_capture_turns``).
 
     That asymmetry is why ``{}`` is the wrong value here: ``{}`` means "the record
     holds no row for these ids" (a fresh turn), which licenses the caller to
@@ -2517,6 +2533,57 @@ def _record_prior_vectors(sdk, session_id: str,
         # ids" (a fresh turn), while ``None`` means "this capture cannot know" —
         # and the journalled snapshot must then OMIT the fields it cannot attest
         # rather than write a value over the record's.
+        return None
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+
+def _record_turn_high_water(sdk, session_id: str) -> int | None:
+    """The highest turn index the RECORD holds — the #1920 sweep's OTHER bound.
+
+    ⛔ A FACT ABOUT THE GRAPH IS NOT A LICENCE ABOUT THE RECORD (#10021 review
+    P2), and the sweep was the second place that rule was not yet applied. Its
+    whole range used to come from the graph `:Session`'s ``turn_max_index``, read
+    by the caller only when a probe of the graph node said the session already
+    existed — so a session whose ``:Session`` node is gone (the state §2.0 makes
+    normal: the graph is a rebuildable cache, and §9.1's D7 is measured with it
+    destroyed) swept NOTHING, while the record kept every surplus row of the
+    previous, longer capture. Both doors then served those rows as a COMPLETE
+    transcript.
+
+    ``turn_prior_vectors`` answers the same question for the CURRENT window's
+    ids; this answers it for the whole session, which is what a REMOVAL needs.
+    Two bounded reads per armed capture is the cost, and it does not scale with
+    turn count in the way #3086 measures (that pin is about per-turn work and
+    on-loop GRAPH work; this is one fixed record read).
+
+    ``None`` — not ``-1`` — when the record cannot be asked: the caller folds it
+    to the graph's bound, and a failed read must never be read as "the record
+    holds nothing", which would sweep nothing at all. Same tenant resolution and
+    same failure posture as ``_record_prior_vectors``: a tenant this capture
+    cannot resolve is a tenant this may not read from.
+    """
+    from tortoise.record_read import turn_high_water
+    from tortoise.record_serve import open_record
+    from tortoise.record_writer import record_tenant
+
+    tenant = getattr(sdk, "_record_tenant", None) or record_tenant()
+    if tenant is None:
+        return None
+    org_id, graph_id = tenant
+    conn = None
+    try:
+        conn = open_record()
+        return turn_high_water(conn, org_id=org_id, graph_id=graph_id,
+                               session_id=session_id)
+    except Exception:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "could not read the record's turn high-water mark for session %s — "
+            "a shorter re-capture sweeps only the graph's range, so record "
+            "turn rows above the session's live id space may survive as "
+            "residue (#1920/#10021)", session_id, exc_info=True)
         return None
     finally:
         if conn is not None:
@@ -2644,12 +2711,16 @@ def _write_capture_turns(
     a hard ``DETACH DELETE``, journaled as an ``EntityMutated`` op=delete
     (the ``delete_point`` record) so a rebuild cannot resurrect the orphan.
 
-    ``session_existed`` is the caller's own pre-MERGE probe: when False the
-    Session had no prior capture, so there can be no stale turn to scan for
-    and the prune read is skipped (the fresh-capture hot path keeps its exact
-    query count — #3086 measures this path). It DEFAULTS TO TRUE — the
-    conservative direction: a caller that omits it prunes, so forgetting the
-    parameter cannot silently reinstate #1920.
+    ``session_existed`` is the caller's own pre-MERGE probe of the graph
+    ``:Session``. ⛔ IT NO LONGER GATES THE SWEEP OR THE PRIOR-ROW READ (#10021
+    review P2): both asked it for a licence about the RECORD, and a graph probe
+    is not evidence about the record (§2.0 — the graph is the cache, and §9.1's
+    D7 is measured with it destroyed). It is still forwarded by
+    ``_write_session_and_turns``, which uses it for the graph mark read and for
+    its own replay/retry gate; the record half now takes its own bound from the
+    record (`_record_turn_high_water`). It DEFAULTS TO TRUE — the conservative
+    direction: a caller that omits it prunes, so forgetting the parameter cannot
+    silently reinstate #1920.
 
     #4911: RETURNS the number of credential-shaped spans redacted from this
     window, and writes the same number to the Session as ``capture_redactions``
@@ -2864,12 +2935,27 @@ def _write_capture_turns(
     # (``_capture_turn_ids`` would return nothing and the surplus rows would keep
     # being served). A non-zero ``turn_offset`` is an APPEND, so only ids at or
     # beyond ``turn_offset + len(window)`` are stale.
+    #
+    # ⛔ THE BOUND IS THE MAX OF BOTH STORES, AND IT IS NOT GATED ON THE GRAPH
+    # (#10021 review P2). Every id that could hold residue has to be named, and
+    # the two stores carry DIFFERENT residue in the two directions that matter:
+    # the graph mark names the surplus a graph-lane capture left, and the
+    # record's own highest index names the surplus a record-lane capture left —
+    # including the case the graph cannot answer at all (`:Session` gone, mark
+    # absent, or a failed mark read). The old `if session_existed:` gate asked a
+    # fact about the GRAPH and used it to decide a removal from the RECORD; with
+    # the node gone the record kept `_t0.._t3` while `turn_count` became 1, and
+    # the read side served four turns as COMPLETE.
+    _first_live = turn_offset + len(turn_rows)
+    _stale_bound = prior_turn_max_index
+    if _record_first:
+        _record_bound = _record_turn_high_water(sdk, session_id)
+        if _record_bound is not None and _record_bound > _stale_bound:
+            _stale_bound = _record_bound
     stale: list[str] = []
-    if session_existed:
-        _first_live = turn_offset + len(turn_rows)
-        if prior_turn_max_index >= _first_live:
-            stale = [_capture_turn_id(session_id, _i)
-                     for _i in range(_first_live, prior_turn_max_index + 1)]
+    if _stale_bound >= _first_live:
+        stale = [_capture_turn_id(session_id, _i)
+                 for _i in range(_first_live, _stale_bound + 1)]
         # The RECORD half of the removal is the `PointRetracted` +
         # `EntityMutated` pair emitted below (its fold is a hard delete), and it
         # is emitted whatever store holds the turns. The GRAPH half runs when the
@@ -2953,9 +3039,42 @@ def _write_capture_turns(
         # apply the snapshot absolutely (the graph path's `coalesce` is the write
         # rule; the record's upsert is `EXCLUDED`). So the key is present when
         # this capture knows the value — the prior row's, or the fresh-turn
-        # defaults — and ABSENT when the prior read could not tell it, because a
-        # key that is absent is a column the upsert does not touch, while a key
+        # defaults — and ABSENT when the prior read could not tell it, while a key
         # carrying `now`/`draft` DEMOTES and RE-STAMPS a stored turn.
+        #
+        # ⛔ AND ABSENT IS SAFE ON **ONE** ARM, NOT TWO (#10021 review, P3). On the
+        # UPDATE arm `_upsert_statement` builds `DO UPDATE SET` from the supplied
+        # columns' own keys (`updates = ", ".join(... col_values)`), so an omitted
+        # column is not named and the stored value survives — that half is exactly
+        # right. On the **INSERT** arm the same omission takes the column out of
+        # the `INSERT ... (columns)` list too, and a row that does not exist yet
+        # has nothing to "not touch": per PostgreSQL's INSERT contract (\"each column
+        # not present in the explicit or implicit column list will be filled with
+        # a default value, either its declared default value or null if there is
+        # none\") the column takes its DEFAULT or NULL — and `public.point.status`
+        # / `public.point.created_at` are nullable `text` with NO default
+        # (`supabase/migrations/20261012000003_record_epistemic.sql`).
+        #
+        # So this arm's RECORDED RESIDUAL is: when the record does not already
+        # hold the turn (the whole window of a FRESH capture, and any newly
+        # appended turn) the row lands with `created_at = NULL`, `status = NULL`,
+        # where every other writer guarantees a value — the graph path
+        # (`_TURN_WRITE_CYPHER`'s coalesce, above), the fresh-turn branch below,
+        # and `projection/entities.py`'s replay fold
+        # (`n.createdAt=coalesce($ca, n.createdAt, $now)`,
+        # `n.status=coalesce($st, n.status, 'live')`, :2104-2105). `record_read`
+        # then serves `"created_at": null` for those turns. The trigger is narrow
+        # — `_prior_unknown` needs the prior READ to raise while the subsequent
+        # turn WRITES succeed — and the capture warns; it is recorded here rather
+        # than silently traded because the alternative (journalling
+        # `now`/`draft`) is the demote/re-stamp bug this arm exists to fix.
+        #
+        # ⛔ WHY NOT `coalesce(EXCLUDED.c, point.c)` (the rule the graph applies)?
+        # It does not reach this arm: on a fresh row EXCLUDED.c IS the omitted
+        # NULL, so the coalesce yields NULL too. Making the omission safe both ways
+        # needs a DECLARED DEFAULT on the two columns (then the omission is safe by
+        # contract, and `test_the_omitted_pair_is_safe_on_the_update_arm_only`
+        # reds to say so) — a schema change this lane did not take.
         if status is not _UNATTESTABLE:
             _turn_snapshot["status"] = status if status is not None else "draft"
         if created_at is not _UNATTESTABLE:
