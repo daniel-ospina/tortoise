@@ -48,8 +48,9 @@ _ENV_LEAKS = (
     "AUTOSCALE_PROC_DIR",
     "AUTOSCALE_ALLOW_WORKTREE",
     "AUTOSCALE_SKIP_PROBE",
-    # The OS-label mode the timer pins for its FILL leg (#10275). Inherited from an operator's shell
-    # it would change every rendered unit, so it leaks exactly like the other seams.
+    # The OS-label mode the timer pins for BOTH its legs — FILL (through the provisioner) and the
+    # ORPHANED re-registration on REPAIR (#10275). Inherited from an operator's shell it would change
+    # every rendered unit, so it leaks exactly like the other seams.
     "CI_RUNNER_OS_LABEL",
     "RUNNER_AUTOSCALE_INTERVAL",
     "RUNNER_AUTOSCALE_REPO",
@@ -572,8 +573,9 @@ def test_the_provisioner_is_pinned_for_the_timer_only_when_it_exists(tmp_path):
     )
 
 
-def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anything(tmp_path):
-    """The timer's FILL leg must carry `CI_RUNNER_OS_LABEL`, or it registers runners without it.
+def test_the_os_label_mode_is_pinned_on_every_renderer_whether_or_not_a_provisioner_resolved(tmp_path):
+    """The timer must carry `CI_RUNNER_OS_LABEL` for BOTH legs that read it — the pin is not
+    conditional on a provisioner resolving.
 
     `runner_autoscale.py`'s FILL calls `install-ci-runner-x64.sh --count N --fallback auto` through
     `_run`, which passes no `env=` — the provisioner therefore sees only what the unit inherits, and
@@ -582,19 +584,37 @@ def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anythin
     to zero answers one fill at a time, `--status` stays green until the last carrier is replaced,
     and then every PR is BLOCKED again — the incident the label exists to end, rebuilt silently.
 
-    Bound to the provisioner because it is a provisioner input and to nothing else: an absent
-    provisioner means the FILL leg does not exist, and a pin that outlives it would be a claim about
-    a leg this box cannot run.
+    ⛔ AND THE FILL LEG IS NOT THE ONLY READER, which is why the pin is UNCONDITIONAL. The same
+    timer runs this tool's REPAIR leg, which re-registers an ORPHANED runner through
+    `resolve_labels` → `_os_labels`, reading the variable from the tool's OWN environment; that
+    leg needs no provisioner (`register()` runs the install's own `config.sh`). Gated on
+    `$PROVISIONER`, the variable was validated and then DROPPED with no message on exactly the
+    boxes where the ORPHANED repair is the only capacity path there is — the operator's `on`
+    silently becoming `off` and the runner re-registered without the label. Both halves are wrong:
+    the variable is not provisioner-only, and the REPAIR leg does exist without it.
 
+    Mutation: gate any of the four pins on `$PROVISIONER` again -> the absent-provisioner `on`
+    cases find no pin -> RED. (Measured: this is the shape the pre-fix code had, and the
+    absent-provisioner `on` case is the one that fails on it.)
     Mutation: drop the `Environment=CI_RUNNER_OS_LABEL` line -> the `on` case finds no pin -> RED.
     Mutation: render `auto` unconditionally -> the default case asserts `off` -> RED.
     """
     sb = _sandbox(tmp_path)
+    # ⛔ NO PROVISIONER, AND THE PIN IS STILL THERE — `off`, because that is the default. The box
+    # that renders this unit is the one whose only capacity path is the ORPHANED repair, and a
+    # unit that says nothing there leaves the tool reading the variable as unset.
     res = _run(sb, "--dry-run")
     assert res.returncode == 0, (res.stdout, res.stderr)
-    assert "CI_RUNNER_OS_LABEL" not in res.stdout, (
-        "an absent provisioner was given an OS-label pin it can never use"
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>off</string>" in res.stdout, (
+        "a provisioner-less box got no OS-label pin, so its ORPHANED repair derives `off`"
     )
+
+    # …and the operator's opt-in reaches a provisioner-less box too: this is the pair that occurs
+    # (unit rendered without a provisioner + ORPHANED runner) and the one the split test files
+    # never exercised together.
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>on</string>" in res.stdout, res.stdout
 
     prov = sb["repo"] / "tools" / "install-ci-runner-x64.sh"
     prov.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
@@ -657,6 +677,39 @@ def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anythin
     )
     assert res.returncode == 0, (res.stdout, res.stderr)
     assert "CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
+    # ⛔ AND THE CRON ENTRY CARRIES IT WITH NO PROVISIONER TOO. The cron entry is prose: nothing
+    # else in the tree re-reads the pin out of it, so a gate here is invisible until a box's
+    # ORPHANED runner is re-registered without the label.
+    sb_cron_noprov = _sandbox(tmp_path / "cron-noprov", uname="Linux")
+    res = _run(
+        sb_cron_noprov,
+        "--dry-run",
+        env=dict(
+            sb_cron_noprov["env"],
+            AUTOSCALE_HAS_SYSTEMD="0",
+            AUTOSCALE_HAS_CRON="1",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
+    # …and the SYSTEMD unit too, with no provisioner. The fleet's Linux cells run this one, and a
+    # re-gate on this renderer alone would leave the plist/cron cases green.
+    sb_systemd_noprov = _sandbox(tmp_path / "systemd-noprov", uname="Linux")
+    _systemd_stubs(sb_systemd_noprov)
+    res = _run(
+        sb_systemd_noprov,
+        "--dry-run",
+        env=dict(
+            sb_systemd_noprov["env"],
+            AUTOSCALE_PLATFORM="systemd",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "Environment=CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
 
 
 # `<<DELIM`, `<<-DELIM`, `<<'DELIM'`, `<<"DELIM"` — but never `<<<`, which is a here-string.

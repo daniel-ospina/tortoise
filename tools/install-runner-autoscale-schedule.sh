@@ -179,7 +179,7 @@ if [ -z "$GH_BIN" ]; then
 fi
 
 STATE_DIR="${RUNNER_AUTOSCALE_STATE_DIR:-$HOME/.pi/agent/state}"
-# ── the OS-label mode the TIMER passes to the provisioner ────────────────────────────────────
+# ── the OS-label mode the TIMER passes to the tool (and through it, to the provisioner) ─────
 # ⛔ THE FILL LEG REGISTERS NEW RUNNERS THROUGH `install-ci-runner-x64.sh --count N --fallback
 # auto`, and `_run` there passes no `env=` — so the child sees only what THIS unit inherits.
 # systemd does NOT inherit the installing shell's environment, so a unit that pins no
@@ -187,6 +187,15 @@ STATE_DIR="${RUNNER_AUTOSCALE_STATE_DIR:-$HOME/.pi/agent/state}"
 # autoscaler ADDS joins without `ubuntu-24.04`. Measured shape: the pool drifts back to zero answers
 # one fill at a time, `--status` stays green until the last runner that still carries the label is
 # replaced, and then every PR is BLOCKED again (#6897's incident, silently rebuilt).
+#
+# ⛔ THE FILL LEG IS NOT THE ONLY READER, which is why the pins below are UNCONDITIONAL. The timer
+# runs `runner_autoscale.py`, whose REPAIR leg re-registers an ORPHANED runner through its own
+# `resolve_labels` → `_os_labels`, reading `CI_RUNNER_OS_LABEL` from ITS OWN environment
+# (`tools/runner_autoscale.py`, `resolve_labels`). That leg needs no provisioner — `register()` runs
+# the install's own `config.sh` — so on a provisioner-less box the REPAIR leg is the ONLY capacity
+# path the box has, and gating the variable on `$PROVISIONER` left it deriving `off` while the
+# operator's `on` was accepted and silently dropped. An ORPHANED runner is exactly the one with no
+# labels to preserve (PR #10275 review, finding 1).
 #
 # The value is CAPTURED AT INSTALL TIME from the operator's own environment and defaults to `off`:
 # rendering `auto` here would make this script flip the #6897 pin by itself on any 24.04 box, which
@@ -217,9 +226,10 @@ done
 # but no HOME fired, found no credential, and exited 2 every interval (round 10, F2's cron half).
 CRON_ENV="HOME=$HOME PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
 [ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER"
-# ⛔ THE OS-LABEL PIN RIDES WITH THE PROVISIONER, because it only means anything to it: the timer's
-# FILL leg is the path that REGISTERS a new runner, and the installer defaults the variable to `off`.
-[ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV CI_RUNNER_OS_LABEL=$OS_LABEL_MODE"
+# ⛔ THE OS-LABEL PIN IS UNCONDITIONAL — it is NOT a provisioner input. `runner_autoscale.py`
+# reads it itself on the ORPHANED re-registration path (REPAIR), which needs no provisioner, so
+# gating it here left the one leg a provisioner-less box still runs deriving `off` (see the header).
+CRON_ENV="$CRON_ENV CI_RUNNER_OS_LABEL=$OS_LABEL_MODE"
 
 # ── platform detection, fail-closed ───────────────────────────────────────────────────────────
 has_systemd() {
@@ -356,10 +366,12 @@ Environment=HOME=$HOME
 Environment=RUNNER_AUTOSCALE_STATE_DIR=$STATE_DIR
 Environment=PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 $( [ -n "$PROVISIONER" ] && printf 'Environment=RUNNER_AUTOSCALE_PROVISIONER=%s\n' "$PROVISIONER" )
-# ⛔ AND THE OS-LABEL MODE WITH IT, or the FILL leg this unit exists to reach registers runners
-# WITHOUT ubuntu-24.04 while the pool's older runners still carry it — coverage decaying one fill
-# at a time, with --status green at every step until the last carrier is replaced.
-$( [ -n "$PROVISIONER" ] && printf 'Environment=CI_RUNNER_OS_LABEL=%s\n' "$OS_LABEL_MODE" )
+# ⛔ AND THE OS-LABEL MODE WITH IT, UNCONDITIONALLY. Both legs read it: the FILL leg (through the
+# provisioner) and the ORPHANED re-registration on the REPAIR leg, which reads it from the tool's
+# own environment and needs no provisioner at all. Pinned only when a provisioner resolved, the
+# FILL leg registers runners WITHOUT ubuntu-24.04 and an ORPHANED repair re-registers one without
+# it — the same erasure through two doors, with --status green at every step meanwhile.
+Environment=CI_RUNNER_OS_LABEL=$OS_LABEL_MODE
 ExecStart=$PYTHON $INSTALLED${ARGV_TAIL}
 # A pass is idempotent, so a non-zero exit is a RECORD, not a reason to retry in a tight loop:
 # Restart= is deliberately UNSET, and the next timer fire re-evaluates from a fresh measurement.
@@ -410,7 +422,7 @@ $( [ -n "${RUNNER_AUTOSCALE_REPO:-}" ] && printf '    <string>--repo</string>\n 
     <key>PATH</key><string>$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>RUNNER_AUTOSCALE_GH</key><string>${GH_BIN:-gh}</string>
 $( [ -n "$PROVISIONER" ] && printf '    <key>RUNNER_AUTOSCALE_PROVISIONER</key><string>%s</string>\n' "$PROVISIONER" )
-$( [ -n "$PROVISIONER" ] && printf '    <key>CI_RUNNER_OS_LABEL</key><string>%s</string>\n' "$OS_LABEL_MODE" )
+    <key>CI_RUNNER_OS_LABEL</key><string>$OS_LABEL_MODE</string>
   </dict>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><true/>
@@ -489,9 +501,10 @@ probe() {
   )
   [ -n "${GH_BIN:-}" ] && penv+=("RUNNER_AUTOSCALE_GH=$GH_BIN")
   [ -n "$PROVISIONER" ] && penv+=("RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER")
-  # The probe reproduces the schedule's environment, and the schedule now carries the OS-label mode
-  # for the FILL leg — so a probe without it would attest a timer that fills differently.
-  [ -n "$PROVISIONER" ] && penv+=("CI_RUNNER_OS_LABEL=$OS_LABEL_MODE")
+  # The probe reproduces the schedule's environment, and the schedule carries the OS-label mode for
+  # BOTH legs (FILL through the provisioner, ORPHANED re-registration through this same tool) — so
+  # it is rendered unconditionally here too, or the probe attests a timer that repairs differently.
+  penv+=("CI_RUNNER_OS_LABEL=$OS_LABEL_MODE")
   # shellcheck disable=SC2086  # $ARGV_TAIL is a deliberate word-split argv tail (" --repo o/n")
   env "${penv[@]}" "$py" "$target" $ARGV_TAIL --json --status 2>&1
 }

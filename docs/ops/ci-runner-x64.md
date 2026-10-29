@@ -107,7 +107,8 @@ drifts back to zero answers one fill at a time, and `--status` used to print "co
 until the last carrier was replaced. **Three pins** close it: `tools/install-runner-autoscale-schedule.sh`
 renders `CI_RUNNER_OS_LABEL` into the timer (systemd unit, launchd plist, cron entry) **and** its
 probe, captured from the operator's environment at install time and defaulting to `off`, so the
-install command is the opt-in:
+install command is the opt-in. The render is **unconditional**: gating it on a provisioner that
+resolved left the third pin below inert on the boxes where it is the only repair there is.
 
 ```bash
 CI_RUNNER_OS_LABEL=on tools/install-runner-autoscale-schedule.sh   # the FILL leg then attaches it
@@ -314,8 +315,9 @@ runs with, not your shell's: `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/run
 (the systemd path; `SYSTEMD_UNIT_DIR` if you installed elsewhere) or the `CI_RUNNER_OS_LABEL` key in
 `$HOME/Library/LaunchAgents/*runner-autoscale*.plist` on macOS. That line is rendered by
 `tools/install-runner-autoscale-schedule.sh` from the mode the fill leg will actually use, and it is
-absent when no provisioner was configured — absence is "not recorded", which is a third answer, not
-"off".
+rendered **unconditionally** — a provisioner plays no part in whether it is recorded, because the
+same variable also decides the ORPHANED re-registration on the REPAIR leg, which needs none. A unit
+with no such line is a unit installed before that pin existed; re-run the schedule installer.
 
 (The class is decided ONCE, in the same awk that computes the denominator, so the two cannot
 disagree — they used to, and a zero-carrier custom label exited `5` claiming every PR was blocked.)
