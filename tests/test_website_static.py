@@ -2423,11 +2423,15 @@ class TestARenderedCodeElementGetsAMonoFace:
     indirection resolves, a `font:` shorthand naming a mono face is accepted, and the
     last compound may carry a class/id/attribute/pseudo.
 
-    Known residuals, deliberately not modelled: a page rendering `<code>` **only**
+    Known residual, deliberately not modelled: a page rendering `<code>` **only**
     inside `<pre>` is refused, because the `pre code` pairing is skipped
-    unconditionally; and a `var()` nested inside a fallback (`var(--a, var(--b))`) is
-    refused rather than resolved, because the reference regex stops at the first `)`.
-    Both fail RED, never green, and no page in this tree is shaped either way.
+    unconditionally. It fails RED, never green, and no page in this tree is shaped
+    that way. A `var()` nested inside a fallback (`var(--a, var(--b, Menlo))`) is *not*
+    a residual — the reference is matched paren by paren and substituted recursively,
+    which is what css-variables-1 §"replace a var()" step 3 does (the fallback is
+    itself substituted), so the family that is credited is the one the browser would
+    compute. Truncating at the first `)` instead credited `--brand: Georgia, serif` +
+    `font-family: var(--mono, var(--brand, Menlo))` as mono (#10254 review, round 6).
     """
 
     #: the trees this guard scans. `apps/` yields no self-contained page today, but it
@@ -2456,7 +2460,10 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: a font-family-only scan, the lesson the sibling class already learned
     FAMILY = re.compile(r"(?:font-family|font)\s*:\s*([^;}]*)", re.IGNORECASE)
     VAR_DEF = re.compile(r"(--[\w-]+)\s*:\s*([^;}]*)")
-    VAR_REF = re.compile(r"var\(\s*(--[\w-]+)\s*(?:,([^)]*))?\)", re.IGNORECASE)
+    #: NOT a `var(...)` regex: a fallback may itself carry `var()`, so the reference is
+    #: scanned to its balanced `)`. Truncating at the first `)` (a regex cannot count
+    #: parens) is how the guard credited a serif named only inside an unresolved
+    #: fallback — see `_substitute`
     #: the selector's LAST compound must be the element itself — `.code{}` is the big
     #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets.
     #: The element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
@@ -2483,6 +2490,40 @@ class TestARenderedCodeElementGetsAMonoFace:
             return False
         return any(m in v for m in self.MONO)
 
+    @staticmethod
+    def _var_reference(text, start):
+        """`(name, fallback, end)` for the `var(` at `text[start]`, matched paren by paren.
+
+        `end` is the index of its closing `)`. The fallback is split at the first
+        *top-level* comma, so `var(--mono, var(--brand, Menlo))` yields the fallback
+        `var(--brand, Menlo)` — whole, not truncated at the inner `)`. `None` for an
+        unbalanced reference, which is then left in the text and refused by the caller.
+        """
+        depth, i = 0, start + 3
+        while i < len(text):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        else:
+            return None
+        inner = text[start + 4:i]
+        depth, comma = 0, None
+        for j, ch in enumerate(inner):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                comma = j
+                break
+        if comma is None:
+            return inner.strip().lower(), None, i
+        return inner[:comma].strip().lower(), inner[comma + 1:], i
+
     def _substitute(self, value, defined, depth=0):
         """`value` with its `var()` references replaced the way CSS replaces them.
 
@@ -2496,20 +2537,44 @@ class TestARenderedCodeElementGetsAMonoFace:
         also defined `--mono` as a serif would pass this guard while macOS Chrome
         rendered the serif.
 
-        A missing token falls back. A token defined as something that itself resolves
-        to nothing substitutes to nothing, so the declaration is invalid at
-        computed-value time, the element inherits, and the guard goes RED — the safe
-        direction (over-detection, never a false green).
-        """
-        def replace(match):
-            name, fallback = match.group(1).lower(), match.group(2)
-            resolved = defined.get(name)
-            chosen = resolved if resolved is not None else (fallback or "")
-            if not chosen.strip() or depth >= 2:
-                return ""
-            return self._substitute(chosen, defined, depth + 1)
+        Reference resolution is recursive and paren-balanced, because the fallback is
+        itself substituted (css-variables-1 "replace a var()" step 3): `var(--a,
+        var(--b, Menlo))` computes to whatever `--b` is, so the family this guard may
+        credit is the one the browser would actually use — reading the fallback as
+        flat text credited a serif sitting inside it (#10254 review, round 6).
 
-        return self.VAR_REF.sub(replace, value)
+        A missing token falls back. A reference that resolves to nothing — missing with
+        no fallback, defined as empty, or a chain past the depth cap — makes the whole
+        declaration invalid at computed-value time (CSS does not fall through to the
+        next family in the list), so the element inherits and the guard goes RED. That
+        is the safe direction: over-detection, never a false green.
+        """
+        out, i, invalid = [], 0, False
+        while i < len(value):
+            if value[i:i + 4].lower() != "var(":
+                out.append(value[i])
+                i += 1
+                continue
+            ref = self._var_reference(value, i)
+            if ref is None:
+                # unbalanced: not a reference the browser would accept, so its text is
+                # not a family either — refused below by the `var(` check
+                out.append(value[i])
+                i += 1
+                continue
+            name, fallback, end = ref
+            resolved = defined.get(name)
+            chosen = resolved if resolved is not None else fallback
+            if chosen is None or not chosen.strip() or depth >= 2:
+                invalid = True
+                i = end + 1
+                continue
+            substituted = self._substitute(chosen, defined, depth + 1)
+            if "var(" in substituted.lower():
+                invalid = True
+            out.append(substituted)
+            i = end + 1
+        return "" if invalid else "".join(out)
 
     def _elements_styled_mono(self, css):
         """The element names (`code`, `pre`) that some rule gives a mono family."""
@@ -2623,6 +2688,44 @@ class TestARenderedCodeElementGetsAMonoFace:
              "code{font-family:inherit}", False),
             ("bare `monospace` IS Courier on macOS Chrome — not a mono face here",
              "code{font-family:var(--mono, monospace)}", False),
+        ]
+        for why, css, expect in cases:
+            got = "code" in self._elements_styled_mono(css)
+            assert got == expect, (
+                f"{'false green' if got else 'false red'}: {why}\n  css: {css}\n"
+                f"  guard says mono={got}, CSS computes mono={expect}")
+
+    def test_a_nested_var_is_resolved_the_way_the_browser_resolves_it(self):
+        """A `var()` inside a fallback, and an unresolvable reference in a list (#10254 r6).
+
+        The fallback of a `var()` is *itself substituted* by css-variables-1 §"replace a
+        var()" step 3, so `var(--mono, var(--brand, Menlo))` computes to whatever
+        `--brand` is. Reading the fallback as flat text — the reference regex stopped at
+        the first `)`, so it never saw `Menlo` as living inside another `var()` — credited
+        a **serif** as a mono face: the round-6 review's false green, reproduced against
+        this class's own logic before it was fixed.
+
+        The last two rows are the other direction of the same mistake: a reference that
+        resolves to nothing invalidates the **whole** declaration at computed-value time,
+        and CSS does not then fall through to the next family in the list — so a trailing
+        `Menlo` written after an unresolvable `var()` is not a face the element gets.
+        """
+        cases = [
+            # (why, css, is `code` given a mono face?)
+            ("a serif inside the fallback's own var() — the round-6 false green",
+             ":root{--brand:Georgia,serif} "
+             "code{font-family:var(--mono, var(--brand, Menlo))}", False),
+            ("the same shape, inner token missing → the browser uses its fallback",
+             "code{font-family:var(--mono, var(--brand, Menlo))}", True),
+            ("the same shape, `--mono` defined → the outer fallback is dead text",
+             ":root{--mono:Menlo} code{font-family:var(--mono, var(--brand, Menlo))}", True),
+            ("the same shape, `--mono` defined as a serif",
+             ":root{--mono:Georgia,serif} "
+             "code{font-family:var(--mono, var(--brand, Menlo))}", False),
+            ("an unresolvable `var()` invalidates the whole list, not just its slot",
+             "code{font-family:var(--mono), Menlo}", False),
+            ("a token whose own value carries an unresolvable var() is guaranteed-invalid",
+             ":root{--mono:Menlo,var(--nope)} code{font-family:var(--mono)}", False),
         ]
         for why, css, expect in cases:
             got = "code" in self._elements_styled_mono(css)
