@@ -325,15 +325,26 @@ def observe_steps(result: dict) -> dict[str, str]:
                                                  or classify.get("union")):
         seen["S2.3"] = ("a classify pass reported assignments "
                         "(step_witness['classify_later'])")
-    # S3: the search stage EXECUTED. `queries_run` is the budget it spent; 0 is
-    # the extractor's own skip answer (no/embedded backend), which the capstone
-    # refuses at G2 anyway — so on any run that reaches G5 a spent budget is the
-    # witness and a degraded attempt still ran.
-    if search.get("queries_run"):
+    # S3: the search stage RESOLVED on the real backend — ATTEMPTED is not the
+    # same answer (#10214 review, P1 fail-open). `queries_run > 0` alone is a
+    # fail-open witness: `extractor_v2.search_graph` increments ``q_run`` BEFORE
+    # the attempt (`:2665`) and returns ``degraded=True`` with the spent budget
+    # on its exception path (`:2682-2690`) — i.e. the first FTS query RAISED
+    # (dead handle, dropped connection, timeout) still spends budget. G2 cannot
+    # catch that: ``backend_is_searchable`` is env-derived and never runs a
+    # query, so a backend that passes G2 and then degrades mid-pass would score
+    # S3, pass G5 and let G6 write a COMPLETED table claiming "eight steps
+    # observed in one pass" over a search that resolved nothing.
+    # The bundle's own rule is the opposite and is already code in the sibling
+    # probe: a degraded search is NOT S3 (the step table above, and
+    # ``capstone_measure.py``'s ``if queries and not degraded``). Two probes in
+    # one bundle must not grade the same fact oppositely, so S3 is witnessed
+    # only on the stage's own success signal — the same discipline the VET and
+    # classify arms apply by requiring positive activity rather than the flag.
+    if search.get("queries_run") and not search.get("degraded"):
         seen["S3"] = ("S3 searched the graph "
                       f"(step_witness['search']: queries_run="
-                      f"{search.get('queries_run')}, degraded="
-                      f"{bool(search.get('degraded'))}, "
+                      f"{search.get('queries_run')}, degraded=false, "
                       f"hits={search.get('hits')})")
     if merge.get("merged_items") is not None:
         seen["S5"] = (f"S5 merged {merge.get('merged_items')} item(s) "

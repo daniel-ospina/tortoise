@@ -1293,6 +1293,88 @@ def test_a_pass_without_a_payload_does_not_observe_s6():
     assert "S6" not in seen
 
 
+def test_a_degraded_search_does_not_observe_s3():
+    """A search that RAISED spent budget and resolved nothing (#10214 P1).
+
+    ``search_graph`` increments ``q_run`` BEFORE the attempt and returns
+    ``degraded=True`` with that spent budget on its exception path, so
+    ``queries_run > 0`` alone scores a search that never resolved. Both arms are
+    pinned here, so the gate cannot regress into "degraded is never witnessed":
+      * ``degraded=True, queries_run=1`` — the first FTS query failed (dead
+        handle / dropped connection). The bundle's own rule says a degraded
+        search is not S3, and ``capstone_measure.py`` already codes it as
+        ``if queries and not degraded``.
+      * ``degraded=False, queries_run=1`` — a single successful query IS S3, so
+        the fix must not start requiring a bigger budget.
+
+    Non-vacuity: at the pre-fix head the rule was ``if search.get("queries_run"):``
+    alone, so the degraded receipt scored S3 and the first assertion reds.
+    """
+    degraded = probe.observe_steps(_seam_receipt(
+        search={"mode": "docker", "degraded": True,
+                "reason": "S3 degraded: graph search failed (ConnectionError: reset)",
+                "queries_run": 1, "entities": [], "points": [], "events": []}))
+    assert "S3" not in degraded, degraded.get("S3")
+    assert set(degraded) == set(cvc.STEPS) - {"S3"}, sorted(degraded)
+
+    resolved = probe.observe_steps(_seam_receipt(
+        search={"mode": "docker", "degraded": False, "reason": None,
+                "queries_run": 1, "entities": [{"id": "o_1"}],
+                "points": [], "events": []}))
+    assert "S3" in resolved, sorted(resolved)
+    assert "degraded=false" in resolved["S3"], resolved["S3"]
+
+
+def test_a_degraded_search_refuses_the_closing_gate_instead_of_publishing(
+        tmp_path, monkeypatch):
+    """The consequence, end to end: G5 refuses and no table is emitted.
+
+    A middle-pass degradation is invisible to G2 (``backend_is_searchable`` is
+    env-derived and runs no query), so G5 is the last gate before G6 writes
+    ``status="COMPLETED"``, ``reason="eight steps observed in one pass"``. With
+    S3 graded as the stage's success signal, the run must refuse HERE and say
+    which stage degraded — otherwise V5, the epic's only closing gate on the
+    step count, passes on a step that never resolved and E3/E4 rows are
+    published as measurements taken on it.
+
+    Non-vacuity: at the pre-fix head this run exits 0 with S3 in
+    ``steps_observed`` and a COMPLETED table, so both the exit-code and the
+    ``steps_observed`` assertion red.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _seam_receipt(
+                search={"mode": "docker", "degraded": True,
+                        "reason": "S3 degraded: graph search failed "
+                                  "(ConnectionError: reset)",
+                        "queries_run": 1, "entities": [], "points": [],
+                        "events": []})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g5-degraded.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, (code, out.read_text()[-800:])
+    record = cvc.extract_block(out.read_text())
+    assert record["run"]["status"] != "COMPLETED", record["run"]
+    assert "S3" in record["run"]["reason"], record["run"]["reason"]
+    assert "S3" not in (record["run"].get("steps_observed") or []), record["run"]
+    # the cause is the witness's OWN values, so the reader can act on it
+    assert "degraded" in record["run"]["reason"], record["run"]["reason"]
+    # and NOTHING here is published as a measurement: the refusal rows say so
+    assert {row["evidence_kind"] for row in record.get("rows") or []} == {
+        "refusal"}, record.get("rows")
+
+
 def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypatch):
     """#9116: the refusal must be attributed to the surface, not to the pipeline.
 

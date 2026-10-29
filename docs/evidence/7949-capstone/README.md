@@ -209,8 +209,12 @@ though the receipt cannot witness them.
 exactly the instrumentation E4's row forbids, so the honest output is `UNOBSERVED` with its cause
 and file:line — and any table the probe emits records `steps_observed` **and**
 `steps_unobserved` so the count cannot be read as 8. ⚠️ **This is the `e0fc940b5` run's count.**
-`#9116`'s seam has since landed, so a re-run at a post-seam head witnesses both rows; the two
-scored rows above keep the count the run measured.
+`#9116`'s seam has since landed, so a re-run at a post-seam head moves **S2.2**; it does **not** move
+S2.3 — that row moves only once its classify pass carries a non-empty `s2`/`union`, and on the
+measured corpus the pass is IDLE (`enabled: true`, empty counters — the S2.3 row above, and the
+note in the seam section below), so a
+re-run still reports S2.3 unobserved and the count stays **7 of 8**. A re-run is necessary and NOT
+sufficient: the two scored rows above keep the count the run measured.
 
 ⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
 `classify_later` surface in what the run actually holds (the receipt's top-level keys and its
@@ -219,8 +223,11 @@ a non-empty `s2` or `union`, with `enabled` not `false`. The FLAG alone is never
 below). When it is not a witness, the cause reports the number of keys it really inspected instead
 of quoting a remembered one. A step is never *assigned* unwitnessed, and every step ends up in
 exactly one of the two sets (a hole or an overlap refuses the run). So the epic's own GREEN gate —
-V5, all eight steps observed — stays reachable: landing `#9116` flips these two rows **without
-touching the probe or these tests**.
+V5, all eight steps observed — stays reachable, and `#9116` is what made it so: the seam put each
+stage's own facts on the receipt, and **this bundle changed with it** — `observe_steps` (below) reads
+the seam's `stats['step_witness']` block, and `capstone_measure._witness_block` gained the same
+`stats['step_witness'][key]` candidate so the measurement lane sees the block at all. Landing the
+seam alone flipped neither row; the probe changes are what let a re-run read them.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
@@ -247,6 +254,19 @@ would then have passed on a step nobody observed. The rule now requires the flag
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
 distinct from both the OFF cause and `#9116`'s absent-surface cause: three negatives, three places
 to look.
+
+⛔ **And ATTEMPTED is not RESOLVED — S3's witness is a search that RETURNED, not one that spent
+budget.** `search_graph` increments its budget counter `q_run` BEFORE the attempt and returns
+`degraded=True` with that spent budget on its exception path — i.e. the first FTS query RAISED
+(dead handle, dropped connection, timeout) still reports `queries_run > 0`. So `queries_run > 0`
+alone is a fail-open witness, and it is the same class of error as accepting the FLAG for the pass:
+counter activity is not success. G2 cannot cover it (`backend_is_searchable` is env-derived and runs
+no query), so a backend that passes G2 and then degrades mid-pass would reach G5 with S3 scored and
+G6 would write a COMPLETED table — "eight steps observed in one pass" — over a search that resolved
+nothing, publishing E3/E4 rows measured on it. S3 is therefore witnessed only on the stage's own
+success signal, `queries_run > 0 AND degraded is false` — which is the row above ("a degraded search
+is not S3") and the sibling probe's `if queries and not degraded`, now implemented identically in
+both probes.
 
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
