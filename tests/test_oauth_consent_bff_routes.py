@@ -472,6 +472,78 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   }
   out.status = out.cases.length ? out.cases[0].status : null;
   out.body = out.cases.length ? out.cases[0].body : null;
+} else if (scenario === "mint_transport") {
+  // #10291 — the three shipped arms of `token.ts` that the mint scenarios above never execute:
+  // the CORS PREFLIGHT (the mechanism that makes the credentialed cross-origin call possible at
+  // all), the media-type gate (what stops a cross-site form post from reaching the mint), and the
+  // 405 for every other method. None of them is dead code — deleting one leaves the route either
+  // unreachable from the consent page or open to a simple form post — and until this scenario
+  // existed, deleting all three left the whole suite green.
+  const e = env({ SESSIONS: new FakeD1({ sessions: [sessionRow()] }) });
+  const AS = "https://api.premiselabs.co";
+  const URL_ = "https://app.premiselabs.co/api/consent/token";
+  out.cases = {};
+
+  // 1. The preflight the consent page's credentialed fetch depends on.
+  {
+    const res = await tokenRoute.onRequestOptions({
+      request: new Request(URL_, { method: "OPTIONS",
+        headers: { Origin: AS, "Access-Control-Request-Method": "POST",
+                   "Access-Control-Request-Headers": "content-type" } }),
+      env: e });
+    out.cases.preflight_allowed = {
+      status: res.status,
+      allowOrigin: res.headers.get("Access-Control-Allow-Origin"),
+      allowCredentials: res.headers.get("Access-Control-Allow-Credentials"),
+      allowMethods: res.headers.get("Access-Control-Allow-Methods"),
+      allowHeaders: res.headers.get("Access-Control-Allow-Headers"),
+      vary: res.headers.get("Vary"),
+      body: await res.text(),
+    };
+  }
+
+  // 2. …and the same preflight from the two SUFFIX look-alikes must be refused with NO CORS
+  //    header, or the browser completes the credentialed call to an attacker origin.
+  out.cases.preflight_refused = [];
+  for (const bad of [AS + ".evil.example", "https://api.premiselabs.co.attacker.tld"]) {
+    const res = await tokenRoute.onRequestOptions({
+      request: new Request(URL_, { method: "OPTIONS",
+        headers: { Origin: bad, "Access-Control-Request-Method": "POST" } }),
+      env: e });
+    out.cases.preflight_refused.push({
+      origin: bad, status: res.status,
+      allowOrigin: res.headers.get("Access-Control-Allow-Origin"),
+    });
+  }
+
+  // 3. A simple cross-site POST can set `text/plain` WITHOUT a preflight, so the media-type gate
+  //    is the half that actually stops it. No cookie is sent here on purpose: the refusal must be
+  //    the MEDIA TYPE, not `no_session` — otherwise this test would pass on a route that had lost
+  //    the gate entirely (the status would just be 401 for a different reason).
+  out.cases.wrong_media_type = [];
+  for (const ct of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"]) {
+    const res = await tokenRoute.onRequestPost({
+      request: post("/api/consent/token", { state: "state-xyz", attempt_key: "k" },
+                  { "Content-Type": ct }),
+      env: e });
+    out.cases.wrong_media_type.push({ mediaType: ct, status: res.status, body: await res.json() });
+  }
+
+  // 4. Anything that is not POST/OPTIONS. `onRequest` must answer it ITSELF (405) rather than
+  //    hand it to `next()` — a Pages `onRequest` that forwards everything makes the route's method
+  //    surface whatever the framework defaults to.
+  out.cases.wrong_method = [];
+  for (const method of ["GET", "PUT", "DELETE"]) {
+    const res = await tokenRoute.onRequest({
+      request: new Request(URL_, { method, headers: { Origin: AS } }),
+      env: e,
+      next: async () => new Response("NEXT WAS CALLED", { status: 418 }),
+    });
+    out.cases.wrong_method.push({ method, status: res.status, body: await res.json(),
+                                  allowOrigin: res.headers.get("Access-Control-Allow-Origin") });
+  }
+
+  out.status = out.cases.preflight_allowed.status;
 } else {
   throw new Error("unknown scenario " + scenario);
 }
@@ -555,6 +627,75 @@ def test_the_mint_scenario_actually_runs_as_the_identity_it_is_given() -> None:
         "the owner of the flow was refused its own mint — the scenario is not running as the "
         f"identity it was given: {as_owner}")
     assert _run("mint_foreign_attempt", sessionUserId="user-1")["status"] == 403
+
+
+def test_the_CORS_preflight_is_the_one_that_makes_the_credentialed_mint_reachable() -> None:
+    """#10291 — the preflight was executed by no test, and it is the reachability half.
+
+    The consent page mints from the AS origin with `credentials: "include"`. That call only happens
+    if THIS route answers the preflight with the exact AS origin (never `*`), credentials allowed, and
+    `POST` in the method list — so deleting or narrowing `onRequestOptions` makes the mint
+    unreachable from the page while every other test in this file stays green. The two suffix
+    look-alikes are pinned in the same arm because the refusal must carry NO
+    `Access-Control-Allow-Origin`: a 403 with the header set still completes the browser call.
+    """
+    out = _run("mint_transport")
+    allowed = out["cases"]["preflight_allowed"]
+    assert allowed["status"] == 204, allowed
+    assert allowed["allowOrigin"] == _AS_ORIGIN, (
+        f"the preflight answered {allowed['allowOrigin']!r} — a wildcard or a misconfigured origin "
+        "either breaks the credentialed mint (browsers refuse `*` with credentials) or opens it"
+    )
+    assert allowed["allowCredentials"] == "true", allowed
+    assert "POST" in (allowed["allowMethods"] or ""), allowed
+    assert "Content-Type" in (allowed["allowHeaders"] or ""), allowed
+    assert allowed["vary"] == "Origin", (
+        "a preflight answer that varies with the Origin header must say so, or a cache can serve "
+        "one origin's answer to another"
+    )
+    for refused in out["cases"]["preflight_refused"]:
+        assert refused["status"] == 403, refused
+        assert refused["allowOrigin"] is None, (
+            f"{refused['origin']} was refused 403 but handed an Allow-Origin header — with the "
+            "header present the browser completes the credentialed call anyway"
+        )
+
+
+def test_the_mint_refuses_a_simple_cross_site_POST_by_MEDIA_TYPE_not_by_cookie() -> None:
+    """#10291 — the 415 gate: the arm that stops a form post, which no preflight protects.
+
+    `text/plain`, `application/x-www-form-urlencoded` and `multipart/form-data` are the three media
+    types a cross-site HTML form can send WITHOUT a preflight, so the media-type check is the control
+    that keeps a hostile page from reaching the mint with the visitor's cookie. Every case here is
+    driven with **no** session cookie on purpose: the answer must be `415 unsupported_media_type`,
+    never `401 no_session`, or the test would pass on a route that had lost the gate and refused for
+    an unrelated reason.
+    """
+    out = _run("mint_transport")
+    assert [c["mediaType"] for c in out["cases"]["wrong_media_type"]] == [
+        "text/plain", "application/x-www-form-urlencoded", "multipart/form-data"
+    ]
+    for case in out["cases"]["wrong_media_type"]:
+        assert case["status"] == 415, case
+        assert case["body"]["error"] == "unsupported_media_type", case
+
+
+def test_a_method_that_is_neither_POST_nor_OPTIONS_is_answered_405_by_this_route() -> None:
+    """#10291 — `onRequest` must own the refusal, not forward it.
+
+    A Pages `onRequest` that returned `next()` for everything would make this route's method surface
+    whatever the framework defaults to, and the 405 arm is where its CORS headers are attached — a
+    refusal the browser cannot read is a refusal the page reports as a network error. The harness's
+    `next()` answers 418 on purpose: reaching it at all is the failure.
+    """
+    out = _run("mint_transport")
+    for case in out["cases"]["wrong_method"]:
+        assert case["status"] == 405, case
+        assert case["body"]["error"] == "method_not_allowed", case
+        assert case["allowOrigin"] == _AS_ORIGIN, (
+            "the 405 carries no Allow-Origin, so the page sees a CORS failure instead of the "
+            "refusal"
+        )
 
 
 def test_the_mint_route_allows_an_attempt_row_with_NO_owner_yet() -> None:
