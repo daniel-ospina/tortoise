@@ -1272,10 +1272,12 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     `MODE = …` block ref must land on that block's own `if [ "$MODE" = … ]` line, and "the refusal
     dies at `:NNN`" must land on a `die`, not on the comment that explains it.
 
-    Non-vacuity (measured): the pre-fix pair `:529`/`:534` reds three ways — neither number is in
-    `anchors`, `:529` is the `--print-labels` prelude comment rather than the `MODE = install` block,
-    and `:534` is `# every install.` rather than the `die`. Swapping `:562` for the already-pinned
-    `:535` (the `--print-labels` block) reds the `MODE = install` sentence check.
+    Non-vacuity (measured, each mechanism in isolation): the pre-fix pair `:529`/`:534` reds on the
+    unknown-number check — "cites installer line(s) this pin does not know: [529, 534]". Supply table
+    entries that ACCEPT those lines and the two sentence checks still catch it on their own: the
+    `MODE = install` claim reds on `:529` (the `--print-labels` prelude comment) and the refusal
+    claim reds on `:534` (`# every install.`). The same holds for a number this pin already knows:
+    `:562` swapped for `:535` (the `--print-labels` block) reds only the sentence check.
     """
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
     start = next(
