@@ -56,6 +56,7 @@ Static: one file read. No network, no DB, no graph, no model.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -78,6 +79,23 @@ _SECTION_8_HEADING = "## 8."
 #: `tests/test_extractor_v4_citation_rot.py` documents. A clock time (`12:30`) is excluded
 #: by the same lookbehind, because the character before its colon is a digit.
 _BARE_LINE_CITATION = re.compile(r"(?<![A-Za-z0-9_.]):\d{2,4}\b")
+
+#: The two primitives LUMPED into one subject (``noul`` / ``score``) under a live-exercise
+#: verb. `noul` HAS a live caller of ours (`agent-infra/scripts/ask-owner.py`); `score`
+#: has none — no caller anywhere in the fleet builds a `score` question. So a sentence
+#: pairing them under "exercised"/"corroborated"/"verified live" is false about `score`,
+#: and false in the UNSAFE direction: it licenses the `score` shape (its 2–10 level
+#: `criteria` array is the dominant term in `vet-v1`'s request and the input to the
+#: `atomic_min` veto that stops a FUSED candidate being dropped) as if it had ever been
+#: sent to the vendor. The sentence is the unit, so the match may not cross `.`, `!`, `?`
+#: or `;` — otherwise a nearby mention of "verified live" would be attributed to the pair.
+_LUMPED_LIVE_CLAIM = re.compile(
+    r"`*noul`*\s*/\s*`*score`*[^.!?;]{0,200}(?:exercis|corroborat|verified live)",
+    re.IGNORECASE,
+)
+
+#: The module whose docstring makes the same claim — the two artifacts must not disagree.
+SEAM_MODULE = ROOT / "tortoise" / "s2_decision_seam.py"
 
 
 def _lines() -> list[str]:
@@ -242,3 +260,81 @@ def test_the_three_checkers_redden_on_the_pre_fix_record():
         "a file-anchored `FILE:line` carries a symbol to resolve against and is deliberately "
         "tolerated; a clock time is not a citation at all"
     )
+
+
+def test_neither_artifact_claims_the_score_primitive_was_exercised_live():
+    """`noul` and `score` are NOT corroborated alike, and the record must say so.
+
+    THE DEFECT THIS PINS (review of PR #10072): `tortoise/s2_decision_seam.py`'s module
+    docstring said *"the ``noul`` / ``score`` shapes are the ones that caller exercised
+    live"*, while §2 of THIS record said *"The `noul` / `score` primitives are documented by
+    the vendor and exercised by no caller of ours"* — the same PR, opposite claims, and
+    **both wrong**: `noul` IS live-exercised (`agent-infra/scripts/ask-owner.py` posts five
+    `noul` questions to `api.typesafe.ai/v1/systemone` on `jev-latest`), and `score` is sent
+    by nobody (the deleted `collision_preflight` JEV path sent only `noul`; `turn-classify.py`
+    sends only `choice`; the vendor merely documents `score` at
+    `docs.typesafe.ai/primitives/score`).
+
+    Why it is not cosmetic: the docstring's form is the unsafe direction. It tells an
+    operator that `score` — whose 2–10 level `criteria` array is the dominant term in
+    `vet-v1`'s request and the input to the `atomic_min` veto that stops a FUSED candidate
+    being dropped — has been exercised live, when nothing has ever sent one. A wrong
+    `score` shape is benign (400 → `Unavailable` → no verdict), but the ledger this PR
+    exists to make honest would be wrong at exactly the primitive with no live evidence.
+
+    So: no artifact may pair the two primitives under a live-exercise verb, and both must
+    name the caller that actually exercises `noul` (the evidence anchor, so a later
+    "tidy-up" that restores the lumped claim has to delete a citation to do it).
+
+    Non-vacuity: both pre-fix sentences are re-checked below, and they red on the checker
+    rather than on a remembered line number. Static: two file reads, no network.
+    """
+    record = DOC.read_text(encoding="utf-8")
+    docstring = ast.get_docstring(
+        ast.parse(SEAM_MODULE.read_text(encoding="utf-8"))
+    ) or ""
+    assert docstring, f"{SEAM_MODULE.name} no longer carries a module docstring"
+
+    for name, text in (
+        (f"§2 of {DOC.relative_to(ROOT)}", record),
+        (f"{SEAM_MODULE.relative_to(ROOT)}'s module docstring", docstring),
+    ):
+        # Collapse whitespace first: the claim wraps across lines in both artifacts, and a
+        # checker that only saw single lines would pass on a re-wrapped re-introduction.
+        collapsed = " ".join(text.split())
+        hit = _LUMPED_LIVE_CLAIM.search(collapsed)
+        assert hit is None, (
+            f"{name} lumps `noul` and `score` into one subject under a live-exercise verb, "
+            "which is false about `score` — no caller of ours has ever sent a score "
+            f"question. Offending span: {hit.group(0)!r}"
+        )
+        assert "ask-owner.py" in collapsed, (
+            f"{name} must name the caller that actually exercises `noul` live "
+            "(`agent-infra/scripts/ask-owner.py`) — without it, the split is unanchored "
+            "and the next reader has no evidence to check it against"
+        )
+
+    # ── non-vacuity: the two pre-fix sentences, re-measured ──────────────────
+    for pre_fix, artifact in (
+        ("repo has left — the vendor's own docs already show the map form and the "
+         "``instructions`` / ``criteria`` fields), and the ``noul`` / ``score`` shapes are "
+         "the ones that caller exercised live.", "the pre-fix docstring"),
+        ("so the two are re-measured and re-cut in ONE pass. The `noul` / `score` "
+         "primitives are documented by the vendor and exercised by no caller of ours;",
+         "the pre-fix record"),
+    ):
+        assert _LUMPED_LIVE_CLAIM.search(" ".join(pre_fix.split())) is not None, (
+            f"{artifact} must red on this checker — otherwise the guard is inert and the "
+            "claim can be restored green"
+        )
+
+    # The legitimate, factual shapes must NOT be flagged: `noul` alone (its own live
+    # caller), and a mention of both primitives that makes no exercise claim.
+    for legitimate in (
+        "`noul` is live-exercised by `agent-infra/scripts/ask-owner.py`.",
+        "A wrong ``noul``/``score`` shape is the benign case: 400 → Unavailable → no "
+        "verdict, and the counters name it.",
+    ):
+        assert _LUMPED_LIVE_CLAIM.search(legitimate) is None, (
+            f"this is a TRUE statement and must pass: {legitimate!r}"
+        )

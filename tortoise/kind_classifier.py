@@ -707,9 +707,21 @@ class KindClassifier:
             if isinstance(served, (str, list)) and served:
                 # The concrete version the response ECHOED — the receipt that makes
                 # a threshold shift visible instead of inferred (the alias resolves
-                # to whatever the vendor ships, by owner ruling 2026-10-27). A str
-                # for one version, a sorted list when a roll happened mid-pass.
-                seam["model_served"] = served
+                # to whatever the vendor ships, by owner ruling 2026-10-27).
+                # ACCUMULATED, never replaced: `_decide_tail_seam` runs once per
+                # classifier batch with THAT batch's own stats, so assigning here
+                # published only the LAST batch's version and claimed it decided
+                # the whole tail — the exact reading a roll BETWEEN batches must be
+                # able to refuse (`.env.example`: "record it"). The fold is the
+                # seam's own `_record_served`, so the two halves of the record
+                # cannot drift apart: one version stays a string, versions that
+                # differ become a sorted list. A list arrives here when the roll
+                # happened INSIDE one decider call (it re-chunks at BATCH_MAX), so
+                # each name is folded in turn.
+                from .s2_decision_seam import _record_served
+                for version in ([served] if isinstance(served, str) else served):
+                    if isinstance(version, str) and version:
+                        _record_served(seam, version)
             unavailable = seam_stats.get("unavailable")
             if isinstance(unavailable, int) and not isinstance(unavailable, bool):
                 seam["unavailable"] = seam.get("unavailable", 0) + unavailable

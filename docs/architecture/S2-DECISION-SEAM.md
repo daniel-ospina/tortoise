@@ -103,10 +103,18 @@ costs a refused chunk, not 40 silently dropped items. **Re-addressing it to the
 documented path form is a precondition of the first scored run**, and it is filed
 rather than done here (`tortoise#10176`) because it changes the request this record's
 cost table was measured on — `#10117`'s untrusted-data framing moves the same request,
-so the two are re-measured and re-cut in ONE pass. The
-`noul` / `score` primitives are documented by the vendor and exercised by no
-caller of ours; a wrong shape there returns 400 → `Unavailable` → the declared
-fallback (nothing is dropped, nothing is minted), and the counters name it. Never
+so the two are re-measured and re-cut in ONE pass. The typed primitives this seam
+sends are documented by the vendor, but they are **not** corroborated alike, and
+this record states it per primitive rather than for "the caller": `choice`
+(`agent-infra/scripts/turn-classify.py`) and `noul`
+(`agent-infra/scripts/ask-owner.py` posts five `noul` questions to the vendor
+endpoint on the alias `jev-latest`) each have a live caller of ours, while
+`score` is **documented only** — the vendor publishes it
+(`docs.typesafe.ai/primitives/score`) and **no caller of ours has ever sent one**,
+so its 2–10 level `criteria` array, the dominant term in `vet-v1`'s request, is
+unmeasured here rather than corroborated. A wrong shape returns 400 →
+`Unavailable` → the declared fallback (nothing is dropped, nothing is minted), and
+the counters name it. Never
 read this record as "verified live": the first armed call is what does that.
 
 ## 3. What it does
@@ -420,7 +428,7 @@ different failures, and only the latter reddens a pure-logic test.
 | `test_the_batch_bound_the_read_cap_and_the_offer_bind_are_pinned` | `_step` floors at 1, clamps to `BATCH_MAX` and maps an unbounded knob (`inf`, an object) to the ceiling instead of raising `OverflowError`; an over-cap body degrades **for the cap reason**, asserted on a VALID-JSON body so a deleted guard cannot pass via the JSON parse instead; and a **generator** `offered` set still populates `criteria` (binding it twice consumed it, shipping the empty map the guard exists to prevent). |
 | `test_identical_answers_across_a_chunk_are_not_attributable` | the runtime half of the attribution check: three elements answered identically (every `keep` equal **and** every `atomic` equal) produce **no verdict** at all, `attribution_rejects == 1`, `by_outcome == {}`, and every item is named `seam.attribution_unverified` with the prompt version. The **control in the same test** answers three *differing* pairs and gets `DISCARD`/`KEEP`/`NOOP` — so the guard is not a blanket refusal dressed as a check. |
 | `test_an_unattributable_chunk_cannot_discard_through_the_real_gate` | the composition: an armed seam answering identically for three candidates through the **real `vet_gate`** leaves every one of them `KEEP` (`by_outcome == {"KEEP": 3}`), which is the product fact — an unattributable answer cannot drop anything. |
-| `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` | an armed classify run reports `assigned_seam == 1` and `stats["seam"]["calls"] == 1` while `adjudication_calls` stays `0` and no `stats["llm"]` block appears — the seam's lane is countable **without** blending its spend into the LLM's (a census showing only `adjudication_calls: 0` beside a non-zero tail rate reads the arm as inert). Round 14 added the **receipt**: the vendor's `usage` is `{input_tokens, output_tokens}` with no `cost_usd`, and this half's fold copied only `cost_usd` — so an armed classify run published the seeded `0.0` (a number the service never reported) and dropped the only receipt there was, while the VET half (which folds the seam's whole stats dict) kept it. |
+| `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` | an armed classify run reports `assigned_seam == 1` and `stats["seam"]["calls"] == 1` while `adjudication_calls` stays `0` and no `stats["llm"]` block appears — the seam's lane is countable **without** blending its spend into the LLM's (a census showing only `adjudication_calls: 0` beside a non-zero tail rate reads the arm as inert). Round 14 added the **receipt**: the vendor's `usage` is `{input_tokens, output_tokens}` with no `cost_usd`, and this half's fold copied only `cost_usd` — so an armed classify run published the seeded `0.0` (a number the service never reported) and dropped the only receipt there was, while the VET half (which folds the seam's whole stats dict) kept it. The same test now covers the receipt's **accumulation**: `_decide_tail_seam` runs once per classifier batch and folded THAT batch's stats, so it published only the last batch's `model_served` and claimed one version decided the whole tail — the reading a roll BETWEEN batches must be able to refuse, and the one the alias decision depends on. Two batches echoing `jev-1.14.0` then `jev-1.15.0` now read `["jev-1.14.0", "jev-1.15.0"]` through the seam's own `_record_served`; the single-batch assertions above cannot see this. |
 
 Mutation-checked (each restores byte-identically — verified with `diff`). Rows cite methods and
 assertions by NAME — never by line number, and never by row **ordinal**. Both go stale the same way
@@ -464,6 +472,7 @@ behind it, not a hope.
 | rebase: `_api_key` skips the 0600 store (env → `.env` only) | ✅ the guards test reddens on `_api_key() == "apikey_from_the_store"` — the documented arming HOME stops being read, which is the inert-arming-path class |
 | rebase: `_api_key` drops `.strip()` on the env value | ✅ the guards test reddens on the whitespace-only case (`"   "` wins, so the outgoing header value is `Bearer` plus a trailing space) |
 | round 14: `_decide_tail_seam` stops folding `input_tokens` (the receipt) | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `seam["input_tokens"] == 6112` — measured on a `/tmp` copy, 1 failed / 12 passed, restored `diff`-identically |
+| `_decide_tail_seam` REPLACES `model_served` with the batch's own value instead of accumulating it (the pre-fix code) | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `["jev-1.14.0", "jev-1.15.0"]` — measured in the worktree with the fold reverted to `seam["model_served"] = served`: `1 failed, 12 deselected`, reading `'jev-1.15.0'` (the last batch's version, claimed for the whole tail), restored `diff`-identically. ⚠️ The row exists because the single-batch assertions were GREEN under it: only a second batch can see a last-write. |
 | round 14: `_api_key`'s `.env` term reverts to a single file-order scan that returns on the first name it matches | ✅ the guards test reddens on the shadowing case (an empty `TYPESAFE_API_KEY=` line above a populated `JEV_API_KEY=` line reported no key) — measured the same way |
 
 ## 9. What this does NOT close

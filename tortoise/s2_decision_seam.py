@@ -22,8 +22,14 @@ question), not an array, and every question carries ``instructions``; a
 are the three shapes that 400 if you copy the PRE-migration page instead of a
 caller (``#7866``; those 400s were measured on ``jevtypesafeai.com``, which this
 repo has left — the vendor's own docs already show the map form and the
-``instructions`` / ``criteria`` fields), and the ``noul`` / ``score`` shapes are
-the ones that caller exercised live. The response is
+``instructions`` / ``criteria`` fields). WHICH of the three shapes has been
+exercised live is **not** uniform, so it is stated per primitive: ``choice`` and
+``noul`` each have a live caller of ours (``agent-infra/scripts/turn-classify.py``
+sends one ``choice``; ``agent-infra/scripts/ask-owner.py`` posts five ``noul``
+questions, on the vendor ALIAS), while ``score`` is DOCUMENTED ONLY — the vendor
+publishes it (``docs.typesafe.ai/primitives/score``) and **no caller of ours has
+ever sent one**, so its ``criteria`` array is unmeasured here rather than
+corroborated. The response is
 ``{model, answers, usage}`` with one entry per question name, each echoing its
 own ``type`` — which is what :func:`_noul` / :func:`_score` / :func:`_choice`
 validate against, so an answer of the wrong primitive fails closed rather than

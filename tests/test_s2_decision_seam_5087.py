@@ -484,6 +484,12 @@ def test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter():
 
     Mutant that reddens it: drop the ``assigned_seam`` bump at the seam's write
     site (or the key from the stat dict) and that lane is invisible again.
+
+    The second half reddens on a different mutant: **replace**
+    ``seam["model_served"]`` with the batch's own value instead of folding it
+    through ``_record_served`` (the pre-fix code). One batch cannot see that —
+    the two-batch phase pins it, because the alias resolving to a new version
+    between batches then reads as *that* version having decided the whole tail.
     """
     clf = _classifier(lambda _rows: ({"i0": "core:workflow"}, {
         "calls": 1, "cost_usd": 0.001, "input_tokens": 6112,
@@ -508,6 +514,33 @@ def test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter():
         f"the fold into stats['seam'] — got {stats['seam'].get('input_tokens')!r}")
     assert "llm" not in stats, (
         "no LLM spend was made, so no LLM spend block is reported")
+
+    # ── the served-version receipt ACCUMULATES across batches ────────────────
+    # `_decide_tail_seam` runs once per classifier batch and folds THAT batch's
+    # own seam stats, so an assignment published only the last batch's version
+    # and claimed it decided the whole tail — the reading a roll BETWEEN
+    # batches must be able to refuse (`.env.example`: "record it"). The seam's
+    # own `_record_served` keeps a single version as a string and merges
+    # differing ones into a sorted list; this half now folds through the same
+    # helper instead of replacing. Two batches, the vendor's alias resolving to
+    # a new version between them:
+    versions = iter(["jev-1.14.0", "jev-1.15.0"])
+    rolled = _classifier(
+        lambda rows: ({rows[0][0]: "core:workflow"}, {
+            "calls": 1, "prompt": seam.CLASSIFY_PROMPT, "model": seam.MODEL,
+            "model_served": next(versions)}),
+        batch_size=1)
+    two = rolled.classify_items([
+        {"id": "i0", "type": "entity", "text": "the plan workflow"},
+        {"id": "i1", "type": "entity", "text": "the plan workflow"},
+    ])
+    assert two["stats"]["seam"]["calls"] == 2, (
+        "one item per batch is two batches, so two seam calls")
+    assert [a["mode"] for a in two["assignments"].values()] == ["seam", "seam"]
+    assert two["stats"]["seam"]["model_served"] == ["jev-1.14.0", "jev-1.15.0"], (
+        "a roll between classifier batches must be a RECEIPT, not a last-write: "
+        "a replaced field claims one version decided the entire tail — got "
+        f"{two['stats']['seam'].get('model_served')!r}")
 
 
 def test_identical_answers_across_a_chunk_are_not_attributable():
