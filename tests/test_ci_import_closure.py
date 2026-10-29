@@ -1123,7 +1123,7 @@ def test_validate_exits_two_when_it_could_not_read_the_window(
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
     monkeypatch.setattr(ci, "changed_files",
-                        lambda repo, pr, cache: ["tortoise/lazy.py"])
+                        lambda repo, pr, cache, head_sha=None: ["tortoise/lazy.py"])
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
         "failed_files": [], "failed_tests": [], "jobs": ["test (a)"],
         "job_failed_without_test_failure": [], "artifacts": 0,
@@ -1207,7 +1207,7 @@ def test_a_red_pr_that_uploaded_no_artifact_is_not_a_clean_window(
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
     monkeypatch.setattr(ci, "changed_files",
-                        lambda repo, pr, cache: ["tortoise/lazy.py"])
+                        lambda repo, pr, cache, head_sha=None: ["tortoise/lazy.py"])
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
         "failed_files": [], "failed_tests": [], "jobs": ["test (a)"],
         "job_failed_without_test_failure": [], "artifacts": 0,
@@ -1352,7 +1352,7 @@ def test_a_green_pr_with_no_artifacts_still_exits_zero(monkeypatch, capsys,
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
     monkeypatch.setattr(ci, "changed_files",
-                        lambda repo, pr, cache: ["tortoise/lazy.py"])
+                        lambda repo, pr, cache, head_sha=None: ["tortoise/lazy.py"])
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
         "failed_files": [], "failed_tests": [], "jobs": [],   # ← green PR
         "job_failed_without_test_failure": [], "artifacts": 0,
@@ -1484,7 +1484,7 @@ def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",)
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
     monkeypatch.setattr(ci, "changed_files",
-                        lambda repo, pr, cache: list(changed))
+                        lambda repo, pr, cache, head_sha=None: list(changed))
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: dict(truth_stub))
     args = argparse.Namespace(
         json="", exclude_type_checking=False, repo="o/r",
@@ -1508,8 +1508,8 @@ def test_validate_exits_two_when_ONE_artifact_was_unreadable(monkeypatch, capsys
     """P2 (#10143): the `errors` arm of the certification gate was UNPINNED.
 
     `errors` is the only arm that fires when a red leg WAS partly read
-    (`artifacts > 0`) and one artifact was unusable — the state §3.4 measures 16
-    times across 9 PRs, and the state the doc's headline "the window is PARTIAL
+    (`artifacts > 0`) and one artifact was unusable — the state §3.4 measures 8
+    times across 5 PRs, and the state the doc's headline "the window is PARTIAL
     and `validate` exits 2" depends on. Everything else is healthy here
     (`runs_seen`/`test_legs_seen` set, a `test*` leg present, the failure in
     model), so exit 0 is the only other possible answer: delete `errors or` at
@@ -1606,7 +1606,7 @@ def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys,
                         lambda: _stub_selection_module())
     monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
     monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
-    monkeypatch.setattr(ci, "changed_files", lambda repo, pr, cache: changed)
+    monkeypatch.setattr(ci, "changed_files", lambda repo, pr, cache, head_sha=None: changed)
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: _truth(
         failed_files=[always_on],
         jobs=["test-record-postgres"], artifacts=1,
@@ -1852,6 +1852,116 @@ def test_the_artifacts_listing_is_paginated(monkeypatch):
     arts = module._artifacts("o/r", 99)
     assert [a["name"] for a in arts] == ["pytest-log-test-a", "pytest-log-test-b"]
     assert "--paginate" in seen[0], "the listing must ask for every page"
+
+
+def test_the_diff_cache_is_keyed_by_the_head_sha(monkeypatch, tmp_path):
+    """P2: keyed by the PR alone, so a MOVED head was scored on the OLD diff.
+
+    `pr_ground_truth` is keyed by sha precisely because a cache that can only
+    HIDE a miss is the failure this harness exists to prevent (§3.3). The diff
+    cache had the mirror-image defect: `GET /pulls/{pr}/files` has no ref
+    selector (its only params are `pull_number`, `per_page`, `page`), so the list
+    it returns belongs to the PR's CURRENT head — cached under `files-…-<pr>`,
+    head A's list was read back at head B and paired with B's ground truth. The
+    derived set is then computed over a diff the truth never saw: it can only
+    UNDER-count misses, records no `artifact_errors` entry, and the row exits
+    clean. On the pre-fix code the second call below returns head A's list.
+    """
+    from tools import ci_import_closure as module
+
+    fetched: list[str] = []
+
+    def _run_gh(argv):
+        fetched.append(argv[1])
+        return f"tortoise/head{len(fetched)}.py\n".encode()
+
+    monkeypatch.setattr(module, "_run_gh", _run_gh)
+
+    first = module.changed_files("o/r", 7, tmp_path, head_sha="aaaa")
+    assert first == ["tortoise/head1.py"]
+    # The SAME head is served from the cache — the cache still works.
+    assert module.changed_files("o/r", 7, tmp_path, head_sha="aaaa") == first
+    assert len(fetched) == 1, "a re-run at the same head must not re-fetch"
+
+    second = module.changed_files("o/r", 7, tmp_path, head_sha="bbbb")
+    assert second == ["tortoise/head2.py"], (
+        "the PR moved to head `bbbb`; head `aaaa`'s file list describes a diff "
+        "this head's ground truth was never produced from")
+    assert len(fetched) == 2, "a moved head must re-fetch"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "files-o__r-aaaa.json", "files-o__r-bbbb.json"], (
+            "the key is the head the list describes — never the PR number, which "
+            "names a stream of different trees")
+
+
+def test_a_diff_is_never_cached_under_a_key_that_names_no_head(monkeypatch,
+                                                             tmp_path):
+    """P2: no sha means no identity — so nothing is written, not even a PR key.
+
+    A fallback to `files-<repo>-<pr>.json` on the un-keyed path would reinstate
+    exactly the stale read the sha key removes, one branch further in. The
+    fail-closed answer is to leave the list uncached.
+    """
+    from tools import ci_import_closure as module
+
+    fetched: list[str] = []
+
+    def _run_gh(argv):
+        fetched.append(argv[1])
+        return b"tortoise/lazy.py\n"
+
+    monkeypatch.setattr(module, "_run_gh", _run_gh)
+
+    assert module.changed_files("o/r", 7, tmp_path) == ["tortoise/lazy.py"]
+    assert module.changed_files("o/r", 7, tmp_path) == ["tortoise/lazy.py"]
+    assert len(fetched) == 2, "with no head sha the list cannot be cached"
+    assert list(tmp_path.iterdir()) == [], (
+        f"an un-keyed list was cached anyway: {list(tmp_path.iterdir())}")
+
+
+def test_validate_hands_the_diff_the_head_it_keyed_the_TRUTH_on(monkeypatch,
+                                                                tmp_path):
+    """P2: the helper's key is only as good as the CALL SITE's argument.
+
+    Direction-aware on purpose: `cmd_validate` fetches `meta["head"]["sha"]` to
+    key the ground truth, then reads the diff. If it reads the diff without
+    handing that sha over, the two describe different trees and nothing records
+    it. The invariant asserted is not "the argument exists" but "the diff's head
+    IS the truth's head".
+    """
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": ["tests/test_t.py"]}
+    seen: dict[str, str | None] = {}
+
+    def _changed(repo, pr, cache, head_sha=None):
+        seen["diff_sha"] = head_sha
+        return ["tortoise/lazy.py"]
+
+    def _ground_truth(repo, sha, cache):
+        seen["truth_sha"] = sha
+        return _truth()
+
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ci, "_selection_module", _stub_selection_module)
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "_gh_json",
+                        lambda argv: {"head": {"sha": "headB"}})
+    monkeypatch.setattr(ci, "changed_files", _changed)
+    monkeypatch.setattr(ci, "pr_ground_truth", _ground_truth)
+
+    ci.cmd_validate(argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    ))
+    assert seen.get("truth_sha") == "headB"
+    assert seen.get("diff_sha") == seen["truth_sha"], (
+        f"the diff was read for {seen.get('diff_sha')!r} while the ground truth "
+        f"is {seen['truth_sha']!r} — a mismatch that can only HIDE a miss")
 
 
 def test_the_ground_truth_cache_is_keyed_by_repo(monkeypatch, tmp_path):

@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (81 test functions / 83 collected, incl. the harness
+- Pins: `tests/test_ci_import_closure.py` (84 test functions / 86 collected, incl. the harness
   mutation check — re-derive with `grep -c '^def test_' tests/test_ci_import_closure.py` and
   `pytest --collect-only -q`; a count written here without that command is a snapshot, not a fact)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
@@ -264,6 +264,7 @@ closed the same way: the state is recorded, the truth is **not cached**, and the
 | **a red `test*` leg whose run uploads no `pytest-log-*` at all** (e.g. `ci.yml`'s `test-isolation`) | that leg is outside the junit-carrying set, so its failures cannot be attributed to files | recorded in `artifact_errors` and the window is PARTIAL. This is deliberate and it is the honest state: the harness cannot read that leg, and an unread leg can only UNDER-count misses. Each red leg is checked against **its own run's** listing, so a leg in one workflow is never re-checked against another's artifacts |
 | **the manifest's `core` surface resolves to ZERO test files** | a renamed/removed `core` key, or a failed `_surface_members` fallback | `core_empty` is flagged and every verb that publishes a number REFUSES (exit **2**). An empty surface makes `derived = current`, so nothing can ever miss and the window reports "TOTAL MISSES 0" from an analysis that examined nothing |
 | **a failure lands outside the modelled selection** | `select()` models the surface legs only, while ground truth covers every leg — so `test-record-postgres`'s four files (run on EVERY PR, `python-ci.yml:3733`, literals `:3819-3822`) and `test-track-b`'s one (`:2568`, `FILES=` `:2627`) were outside `current_rel` | those legs are unioned into today's selection AND into the derived one (`ALWAYS_ON_LEG_FILES` — a `core` member is otherwise subtracted out of `derived`), and any residual entry is reported as a HOLE IN THE MODEL and makes the window PARTIAL — never as an absolution |
+| **the PR's diff list was cached against the PR, while the ground truth is keyed by the head SHA** | `GET /pulls/{pr}/files` has **no ref selector** (params: `pull_number`, `per_page`, `page`), so the list belongs to the PR's CURRENT head. `--prs` accepts any PR id, and a lane checking its OWN open PR re-runs at a new head — head A's list was read back and paired with head B's truth, so `derived` was computed over a diff the truth never saw: it can only UNDER-count misses and records nothing | the diff cache is keyed by the head sha it describes (`files-<repo>-<sha>.json`, the truth cache's own identity), and a call with no sha caches nothing rather than falling back to a PR key |
 
 `test-d14-hosted-api` (`pytest tests/ -m embedded_only`) is deliberately **not** modelled: its set is
 a marker over the whole tree, and a wider guess is the DANGEROUS direction, because everything in
@@ -308,8 +309,10 @@ uv run python tools/ci_import_closure.py validate --window 40 --json /tmp/valida
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_ci_import_closure.py -q
 ```
 
-`validate` needs `gh` (auth) the first time; it caches every junit artifact and its per-PR ground
-truth under `.ci-selection/closure-cache/` (gitignored), so re-runs are offline and instant. It
+`validate` needs `gh` (auth) the first time; it caches every junit artifact, its per-PR ground
+truth, and the PR's diff list under `.ci-selection/closure-cache/` (gitignored), so re-runs are
+offline and instant. The ground truth is keyed by the head **sha** and the diff list by the same
+sha — never by the PR number, which names a stream of different trees (§3.4). It
 exits **2** when the window is partial — an artifact it could not read, an unparseable or missing
 `junit.xml`, a red leg whose artifact listing was **empty** (artifacts expire after 90 days by
 default, and deleting a run deletes its artifacts, so "nothing uploaded" is an ordinary state, not

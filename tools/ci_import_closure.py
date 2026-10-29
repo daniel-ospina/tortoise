@@ -62,7 +62,9 @@ VERBS
     validate   replay a window of merged PRs: for each, the tests that ACTUALLY
                failed (from the run's `junit.xml` artifacts) vs the derived
                selection; report per-PR misses.
-    report     emit the markdown report (`docs/ci/core-import-closure.md`).
+    report     emit the report data as JSON (stdout; `--json PATH` to also
+               write it). It does NOT render `docs/ci/core-import-closure.md` —
+               that document is hand-written and checked in.
 
 WHY junit AND NOT "the job was red"
     A red job is not a failing test. Measured on #10070 (`test (f)`): the job
@@ -1672,22 +1674,43 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
     return result
 
 
-def changed_files(repo: str, pr: int, cache: Path | None = None) -> list[str]:
-    if cache is not None:
-        cached = cache / f"files-{_slug(repo)}-{pr}.json"
-        if cached.exists():
-            try:
-                return json.loads(cached.read_text())
-            except (OSError, ValueError):
-                pass
+def changed_files(repo: str, pr: int, cache: Path | None = None,
+                  head_sha: str | None = None) -> list[str]:
+    """The PR's changed files, cached under THE HEAD SHA THEY DESCRIBE.
+
+    ⛔ THE KEY MUST NAME THE HEAD (#10143 review P2). `GET
+    /repos/{owner}/{repo}/pulls/{pull_number}/files` has NO ref selector — its
+    only parameters are `pull_number`, `per_page` and `page`
+    (docs.github.com/en/rest/pulls/pulls#list-pull-requests-files) — so the
+    response is the diff of the PR's CURRENT head. Keyed by the PR alone, a
+    `validate` run at head A left its list in `files-<repo>-<pr>.json`, and a
+    later run at head B read it back and paired it with B's ground truth
+    (`truth-v<N>-<slug>-<sha>.json`, which IS keyed by sha): the derived set was
+    then computed over a diff the truth never saw. That direction can only
+    UNDER-count misses, it records no `artifact_errors` entry, so the row reads
+    clean and `validate` can exit 0 on it — the same cache-hides-a-miss shape the
+    truth cache's sha key exists to prevent (§3.3). Merged windows are latent
+    (a merged PR's list is final), but `--prs` accepts any PR id and a lane
+    checking its OWN open PR hits it on every push.
+
+    With no `head_sha` there is no identity to key on, so nothing is cached — a
+    list is never stored under a key it does not describe. The legacy
+    `files-<repo>-<pr>.json` entries are simply never read again.
+    """
+    cached = cache / f"files-{_slug(repo)}-{head_sha}.json" if (
+        cache is not None and head_sha) else None
+    if cached is not None and cached.exists():
+        try:
+            return json.loads(cached.read_text())
+        except (OSError, ValueError):
+            pass
     out = _run_gh([
         "api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate",
         "--jq", ".[].filename",
     ])
     files = sorted({line for line in out.decode().splitlines() if line.strip()})
-    if cache is not None:
-        (cache / f"files-{_slug(repo)}-{pr}.json").write_text(
-            json.dumps(files, indent=1))
+    if cached is not None:
+        cached.write_text(json.dumps(files, indent=1))
     return files
 
 
@@ -1990,7 +2013,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
     for pr in prs:
         meta = _gh_json(["api", f"repos/{args.repo}/pulls/{pr}"])
         sha = meta["head"]["sha"]
-        changed = changed_files(args.repo, pr, CACHE_DIR)
+        # ⛔ THE DIFF IS FETCHED FOR THE HEAD ITS TRUTH IS KEYED ON. Cached by PR
+        # alone, an earlier run's list (head A) was scored against this head's
+        # ground truth — a mismatch that can only hide a miss (#10143 review P2).
+        changed = changed_files(args.repo, pr, CACHE_DIR, head_sha=sha)
         truth = pr_ground_truth(args.repo, sha, CACHE_DIR)
         explain: dict = {}
         selection = ci.select(changed, "pull_request", manifest, explain)
