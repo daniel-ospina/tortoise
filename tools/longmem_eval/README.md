@@ -200,6 +200,63 @@ every question (`questions_with_ep == questions`) — an EP pass that
 returned without writing posteriors (no EP factors in the window, a
 stale-run stand-down) reads `partial`, never `activated`.
 
+**Contribution, not just coverage (#10137).** Arming the beliefs is
+necessary and **not sufficient**: a question whose extraction mints no
+IMPL/NAND (and no direct IMPL/NAND edge between claims) is EP-inert for ever,
+and a graph of IMPL-only operators over the
+no-source `Beta(1,1)` prior is a **fixed point** — every posterior is exactly
+`0.50`, so coverage reads complete while the belief layer moved nothing.
+Each per-question manifest therefore carries these cells, and the run
+summary publishes the **populations** built from them:
+
+| cell (per question) | reads | why it exists |
+|---|---|---|
+| `operators` | graph census of operator nodes, over the ENGINE's predicate (`is_operator` OR `op_type`) | a MEASURED `0` means no operator-shaped node exists — and, with `factor_edges` also `0`, nothing EP does can ever reach a claim (STRUCTURAL). ⚠️ the engine's predicate also admits a hybrid `create_point(op_type=…)` CLAIM, so one node can appear here AND in the claim censuses; `no_operators` therefore means "no operator-SHAPED node", and an edge-less hybrid lands on `no_ep_factors` (the non-structural, safe side) |
+| `factor_edges` | census of DIRECT `IMPL`/`NAND` edges — claim → claim, operator-mediated edges (premise→op→conclusion) excluded | an edge between two claims with no operator node between them is still a factor (#888 W5), so a STRUCTURAL verdict needs BOTH to be a measured `0` |
+| `points_off_neutral` | claims whose persisted posterior mean is not `0.50` (ε `1e-6`; computed from `read_confidence`, never re-implemented in Cypher) | the STATE census — an IMPL-only graph over uniform priors reads `0` while `points_with_ep` covers every claim |
+| `points_moved_off_neutral` | claims that were NOT off-neutral before this pass and are after it | the CONTRIBUTION proper: a claim given a non-uniform baseline sits off the neutral mean with EP never having run, so a bare off-neutral count would credit the pass with a prior it did not create |
+| `factors` | the operators THIS pass selected, from dream's `budget_used` (full mode) | the health surface's `operator_counts` is the Dreamer's `_last_operator_count`, written PER BATCH by a full pass — it holds the last batch, not the pass |
+| `no_op_reason` | the SDK's own diagnosis (#3139): `no_ep_factors`, `stale_run_guard`, … | distinguishes a pass that wrote nothing from one that was never possible; `None` when the SDK cannot say (UNKNOWN, never invented) |
+
+⚠️ **A census that could not be read is `null` (UNKNOWN), never `0`.** `0` is a
+published finding here — it drives the STRUCTURAL verdict and the
+`neutral_questions` population — so a failed query, an unreadable cell or an
+older SDK that never reported the cell must not collapse into it. That applies
+end to end: a manifested `null` is carried as `null` into the summary and never
+summed as a zero, and every summed census cell publishes a `*_unread` count
+beside it, so a partial sum can never read as a complete measurement. It also
+covers the RESUMED case — a checkpoint written before #10137 re-runs with
+`points_with_ep > 0` and no contribution cells, and that question is counted in
+`questions_contribution_unknown`, **not** in `neutral_questions` ("the belief
+layer ran and moved nothing" is a finding, and it requires a measurement).
+
+The contribution cells are also `null` for a pass that did not run: they
+describe what THAT pass did.
+
+`methodology.measurement_posture.activation` then carries
+`questions_off_neutral` / `points_off_neutral` / `points_moved_off_neutral`
+and the graph census (`operators`, `factor_edges` — `null` when unread, with the
+`*_unread` counts and `questions_contribution_unknown` beside them; the coverage
+cells `points_with_ep` / `points_unmeasured` follow the same rule, each with its
+own `*_unread` companion), the
+enumerated `inert_questions` (`question_id`, `question_type`, `reason` ∈
+`no_operators` / `no_ep_factors` / `stale_run_guard` / `activation_failed` /
+`no_manifest` / `unmeasured`), the enumerated `neutral_questions` (measured,
+and every posterior is the neutral mean), and `by_question_type` — the same
+populations split by the benchmark's own question type, so *"single-session
+questions are the common case"* is a measurement rather than an assertion.
+The split RECONCILES with the run-level cells by construction, and its per-type
+counter is `questions_measured` (the run-level `measured` counts manifests, a
+different population). A `reason` outside the closed vocabulary still carries
+the SDK's own `no_op_reason` on the enumerated entry, so a diagnosis is never
+dropped just because the vocabulary cannot name it.
+
+⚠️ **Residual, deliberately not fixed here:** `belief_layer_state`'s bar is
+unchanged — `activated` means COVERED, so a fully covered run that
+contributed nothing still reads `activated`. Re-cutting that bar is #8486's
+recorded disclosure rule and an open owner decision, not a lane's call; the
+contribution cells beside it are what make the shape visible.
+
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
 `--rerank-pool N`, `--rerank-cap N`, `--rerank-lambda F`, `--rerank-model
