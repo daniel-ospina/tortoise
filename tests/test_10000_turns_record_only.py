@@ -263,6 +263,152 @@ def test_shorter_recapture_sweeps_by_id_space_not_by_count(sdk, monkeypatch):
         "the surplus turn beyond the new window was not swept")
 
 
+def test_graph_residue_beyond_a_lowered_mark_is_still_swept(sdk, monkeypatch):
+    """⛔ #10021 review P2: the bound cannot be only the mark the MERGE lowers.
+
+    `_write_session_and_turns` reads the prior mark and then MERGEs
+    `s.turn_max_index` to THIS window's end (decision (c) — the reader's tail
+    witness must describe the live end). So on every lane where the record cannot
+    hold the turns (`_record_first` False: unarmed, journal-less, no tenant,
+    breaker open) that mark is the sweep's only witness, and a sweep that FAILS
+    after the MERGE has already lowered it leaves residue nothing will ever name
+    again: every later capture reads the lowered mark, the arithmetic finds
+    nothing beyond the window, and the surplus stays `CONTAINS`-wired forever.
+
+    The fixture is exactly that state — four turn nodes, a mark lowered to 1 — and
+    the same shape `test_hosted_api`'s stale-superset leg builds for the read
+    side. The bound that survives the statement is the graph's own turn ids: no
+    `SET` can un-`CONTAINS` them.
+
+    Mutation: drop `prior_graph_turns` from `_stale_bound` — nothing is swept and
+    all four ids remain.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    proj = sdk._get_proj()
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "lowered-mark", turns)
+    assert len(sdk_mod._capture_turn_ids(proj, "lowered-mark")) == 4
+    # The residue a failed sweep leaves: the MERGE already lowered the mark to
+    # this window's end, and every surplus node is still wired to the session.
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) SET s.turn_count=2, s.turn_max_index=1",
+        params={"sid": "lowered-mark"})
+    _capture(sdk, "lowered-mark", turns[0:2], session_existed=True)
+    assert sorted(sdk_mod._capture_turn_ids(proj, "lowered-mark")) == [
+        "lowered-mark_t0", "lowered-mark_t1"], (
+        "the surplus turns beyond a LOWERED mark were not swept — the mark was "
+        "the sweep's only bound, so residue above it is now permanent and both "
+        "read doors publish a body that contradicts itself (#8447)")
+
+
+def test_a_failed_prior_read_costs_one_cycle_not_the_residue(
+        sdk, monkeypatch):
+    """⛔ #10021 review P2: a tolerated read failure must cost ONE cycle.
+
+    The prior read is deliberately best-effort — it fails toward -1, which sweeps
+    no id ("never delete where we cannot place it"). With the MARK as the only
+    witness that posture was no longer bounded: the same capture lowered the mark,
+    so the failure cost the residue PERMANENTLY, where main's monotone-up mark
+    cost it one cycle. The witness is derived from the NODES, so a later capture
+    that can read re-derives the bound — which is the property this pins, in both
+    halves: the fault cycle sweeps nothing (the conservative posture is intact)
+    AND the next cycle cleans up.
+
+    Mutation: drop `prior_graph_turns` from the bound — the second capture sweeps
+    nothing and `_t1.._t3` stay attached to a one-turn session.
+    """
+    from tortoise.projection import _GuardedGraph
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    proj = sdk._get_proj()
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "failed-read", turns)
+
+    # The needle names the ONE read this leg injects into. Re-point it when that
+    # read's cypher changes; never delete the leg.
+    needle = "RETURN s.turn_max_index, s.turn_count, collect(t.id)"
+    real_query = _GuardedGraph.query
+    fired: list[str] = []
+
+    def flaky(self, cypher, *a, **kw):
+        if needle in cypher:
+            fired.append(cypher)
+            raise RuntimeError("transient graph error (test)")
+        return real_query(self, cypher, *a, **kw)
+
+    monkeypatch.setattr(_GuardedGraph, "query", flaky)
+    _capture(sdk, "failed-read", turns[0:1], session_existed=True)
+    assert fired, (
+        "the injected failure never fired — the prior read's cypher moved and "
+        f"`{needle}` no longer names it; re-point this needle, do not delete the "
+        "leg (without it this leg pins nothing)")
+    assert len(sdk_mod._capture_turn_ids(proj, "failed-read")) == 4, (
+        "a capture that could not read its bound deleted turns anyway — the "
+        "failure must sweep NOTHING")
+
+    # The fault clears (a transient error, which is the documented posture).
+    monkeypatch.setattr(_GuardedGraph, "query", real_query)
+    _capture(sdk, "failed-read", turns[0:1], session_existed=True)
+    assert sorted(sdk_mod._capture_turn_ids(proj, "failed-read")) == [
+        "failed-read_t0"], (
+        "one failed prior read left the residue PERMANENTLY — the mark was "
+        "lowered by the same capture and nothing re-derives the peak, so no "
+        "later sweep can ever see _t1.._t3 again")
+
+
+def test_the_prior_mark_read_converts_the_index_and_the_count_separately(
+        sdk, monkeypatch):
+    """⛔ #10021 review P3: `turn_max_index` is an INDEX, `turn_count` a COUNT.
+
+    One `coalesce(s.turn_max_index, s.turn_count, 0)` made one value of two
+    different quantities, so a session captured BEFORE the mark existed (a count,
+    no index, its turn nodes long gone) named ONE ID PAST ITS OWN END in the
+    sweep — `turn_count = 2` read as a max index of 2 for ids `_t0`/`_t1`. It is
+    the same defect `hosted_api._prior_stored_turn_count` was split for on the
+    metering side.
+
+    Pinned on the conversion AND on what reaches the journal, because that is
+    where an off-by-one is a deleted id rather than a number: the surplus named
+    for a legacy two-turn session shrunk to one turn is `_t1` — never `_t2`.
+
+    Mutation: restore the `coalesce(...)` — `_prior_mark_index(None, 2)` answers
+    2, and the journal carries an `EntityMutated` op=delete for `legacy-mark_t2`.
+    """
+    assert sdk_mod._prior_mark_index(3, 2) == 3, (
+        "the mark is an index and must be used as one")
+    assert sdk_mod._prior_mark_index(None, 2) == 1, (
+        "a COUNT was substituted for a max INDEX — a two-turn legacy session "
+        "names `_t2`, one past its end")
+    assert sdk_mod._prior_mark_index(None, 0) == -1, (
+        "a session declaring zero turns must sweep no id")
+    assert sdk_mod._prior_mark_index(None, None) == -1
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    proj = sdk._get_proj()
+    # The pre-#10000 shape, ASSERTED: a Session with a COUNT and no id-space mark,
+    # whose turn nodes the graph no longer holds (so the sweep's only bound IS
+    # the count arm).
+    proj.g.query(
+        "MERGE (s:Session {id:'legacy-mark'}) "
+        "SET s.created_at='2026-01-01T00:00:00+00:00', s.is_episodic=true, "
+        "    s.turn_count=2")
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'legacy-mark'}) "
+        "RETURN s.turn_max_index, s.turn_count").result_set
+    assert rows and rows[0][0] is None and rows[0][1] == 2, (
+        f"the fixture is not the legacy shape: {rows!r}")
+    _capture(sdk, "legacy-mark", [{"role": "user", "content": "t0"}],
+             session_existed=True)
+    deleted = sorted(
+        str(ev.get("id")) for ev in sdk._get_event_log().read_all()
+        if ev.get("type") == "EntityMutated" and ev.get("op") == "delete"
+        and str(ev.get("id", "")).startswith("legacy-mark_t"))
+    assert deleted == ["legacy-mark_t1"], (
+        "the sweep named the wrong surplus for a legacy session "
+        f"(deleted={deleted!r}) — `_t2` does not exist, so the bound came from "
+        "a COUNT read as an INDEX")
+
+
 def test_turn_max_index_survives_a_journal_only_rebuild(sdk, monkeypatch):
     """The high-water mark is restored by the FOLD, not only by the live MERGE.
 

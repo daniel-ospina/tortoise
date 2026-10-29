@@ -2649,6 +2649,65 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
             if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
+def _split_graph_turn_ids(session_id: str, raw: Any) -> list[tuple[str, int | None]]:
+    """The prior read's collected ids → ``(id, index)``, each index parsed once.
+
+    The SAME guard ``_capture_turn_ids`` applies, for the same reasons: str-only
+    (a non-string id would make the suffix slice raise), and a suffix that is
+    ``isdecimal()`` — NOT ``isdigit()``, because ``'²'.isdigit()`` is True while
+    ``int('²')`` raises — with the ``int()`` itself wrapped, because ``int()``
+    also refuses a decimal string longer than its conversion limit, so
+    ``isdecimal()`` being True does not imply parseable.
+
+    An id that cannot be PLACED is returned as ``(id, None)`` rather than
+    dropped, and the sweep LEAVES IT ALONE: "never delete where we cannot place
+    it" is the direction the recorded contract pins
+    (``tests/test_write_session_and_turns_3551.py::
+    test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture``), and no
+    writer mints such an id anyway (``_capture_turn_id`` formats an ``int``), so
+    it cannot be the live window's turn either way.
+    """
+    prefix = f"{session_id}_t"
+    out: list[tuple[str, int | None]] = []
+    for tid in (raw or []):
+        if not isinstance(tid, str) or not tid.startswith(prefix):
+            continue
+        suffix = tid[len(prefix):]
+        if not suffix.isdecimal():
+            continue
+        try:
+            out.append((tid, int(suffix)))
+        except (TypeError, ValueError):
+            out.append((tid, None))
+    return out
+
+
+def _prior_mark_index(turn_max_index: Any, turn_count: Any) -> int:
+    """The prior ``:Session`` read's two arms → the id-space end (or ``-1``).
+
+    ⛔ ``turn_max_index`` is an INDEX and ``turn_count`` is a COUNT (#10021
+    review P3). They used to be read through ONE
+    ``coalesce(s.turn_max_index, s.turn_count, 0)``, which substitutes a COUNT
+    ``N`` for a max index of ``N - 1`` — so a session captured before the mark
+    existed named ONE ID PAST ITS OWN END in the stale-turn sweep. Harmless on a
+    healthy lane (that id does not exist) but a wrong bound is exactly the kind
+    of thing that stops being harmless later, and it is the SAME defect
+    ``hosted_api._prior_stored_turn_count`` was split for on the metering side
+    ("the two arms are converted separately"). So: the mark IS an index and is
+    used as one, the count is converted by ``- 1``, and "neither present" is
+    ``-1`` — which sweeps no id.
+    """
+    for value, delta in ((turn_max_index, 0), (turn_count, -1)):
+        if value is None:
+            continue
+        try:
+            return int(value) + delta
+        except (TypeError, ValueError):
+            # Fail toward deleting NOTHING rather than toward a bad range.
+            return -1
+    return -1
+
+
 @_declares_apply_first_write_lane("_write_capture_turns")
 def _write_capture_turns(
     proj,
@@ -2662,6 +2721,7 @@ def _write_capture_turns(
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
     turn_offset: int = 0,
     prior_turn_max_index: int = -1,
+    prior_graph_turns: list[tuple[str, int | None]] | None = None,
 ) -> int:
     """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
@@ -2710,6 +2770,12 @@ def _write_capture_turns(
     matching the ``turn_count`` the same capture just stored. The removal is
     a hard ``DETACH DELETE``, journaled as an ``EntityMutated`` op=delete
     (the ``delete_point`` record) so a rebuild cannot resurrect the orphan.
+
+    The sweep's BOUND is the union of every place residue can be named:
+    ``prior_turn_max_index`` (the graph mark, read before the MERGE lowers it),
+    ``_record_turn_high_water`` on a record-first lane, and ``prior_graph_turns``
+    — the graph's own ``CONTAINS``-wired turn ids, which is the only one of the
+    three a ``SET`` cannot destroy (#10021 review P2).
 
     ``session_existed`` is the caller's own pre-MERGE probe of the graph
     ``:Session``. ⛔ IT NO LONGER GATES THE SWEEP OR THE PRIOR-ROW READ (#10021
@@ -2956,6 +3022,30 @@ def _write_capture_turns(
     if _stale_bound >= _first_live:
         stale = [_capture_turn_id(session_id, _i)
                  for _i in range(_first_live, _stale_bound + 1)]
+    # ⛔ THE STATEMENT-PROOF BOUND (#10021 review P2). The arithmetic above is
+    # bounded by `s.turn_max_index`, and the MERGE this capture already ran
+    # LOWERS that mark to its own window's end — so on the lanes where
+    # `_record_first` is False the mark is the sweep's ONLY witness, and one
+    # tolerated failure (a prior read that raised, or a sweep statement that
+    # failed after the MERGE had lowered the mark) left ids NOBODY would name
+    # again: every later capture read the lowered mark, the arithmetic found
+    # nothing, and the surplus turn nodes stayed `CONTAINS`-wired forever, with
+    # the read side then publishing a body that contradicts itself (#8447).
+    # Main's monotone-up mark bounded that exposure to one cycle; the live mark
+    # (decision (c), `sdk.py:3280-3303`) is right and stays — so the bound has to
+    # come from something the statement cannot overwrite. `CONTAINS`-wired turn
+    # nodes ARE that thing (`_capture_turn_ids` is the same witness
+    # `record_read.turn_high_water` keeps for the record), read by the caller in
+    # the SAME statement that reads the mark, so the re-capture path pays no
+    # extra round-trip. Every id at or beyond this window's end is residue
+    # whatever the mark says, in both directions: a mark lowered by a previous
+    # shrink, a mark read that failed, and a mark that never existed. An id whose
+    # index cannot be PARSED is not swept — "never delete where we cannot place
+    # it", the direction `tests/test_write_session_and_turns_3551.py` pins.
+    _graph_residue = [tid for (tid, _index) in (prior_graph_turns or [])
+                      if _index is not None and _index >= _first_live]
+    if _graph_residue:
+        stale = sorted(set(stale) | set(_graph_residue))
         # The RECORD half of the removal is the `PointRetracted` +
         # `EntityMutated` pair emitted below (its fold is a hard delete), and it
         # is emitted whatever store holds the turns. The GRAPH half runs when the
@@ -3469,20 +3559,49 @@ def _write_session_and_turns(
     # to walk. Read only on a re-capture: a fresh capture has no prior Session and
     # therefore no stale turn, so the fresh-capture hot path keeps its exact query
     # count (#3086).
+    # #10021 review P2/P3: ONE read answers both questions the sweep needs, so
+    # the re-capture path keeps its exact query count (#3086).
+    #
+    #   * the MARK's two arms, converted SEPARATELY (`_prior_mark_index`):
+    #     `turn_max_index` is an INDEX, `turn_count` a COUNT, and the
+    #     `coalesce(...)` that made one value of them named an id one past the
+    #     end for a session captured before the mark existed;
+    #   * the graph's OWN turn ids (`collect(t.id)`), the statement-proof bound.
+    #     The MERGE below lowers `s.turn_max_index`, so a failure between the
+    #     read and the sweep used to leave residue nothing would ever name
+    #     again; the CONTAINS-wired nodes are not something a SET can overwrite.
+    #     The `WHERE` is part of the OPTIONAL MATCH (MEASURED FalkorDB semantics:
+    #     a predicate after an OPTIONAL MATCH is absorbed into the optional
+    #     pattern — the same shape `activation_scorecard.FUNNEL_QUERY` uses), so
+    #     the collection carries TURN points only and a session with none
+    #     collects `[]`.
     prior_turn_max_index = -1
+    prior_graph_turns: list[tuple[str, int | None]] = []
     if session_existed:
         try:
             _prior = proj.g.query(
-                "MATCH (s:Session {id:$sid}) RETURN "
-                "coalesce(s.turn_max_index, s.turn_count, 0)",
-                params={"sid": session_id}).result_set
-            prior_turn_max_index = int(_prior[0][0]) if _prior else -1
+                "MATCH (s:Session {id:$sid}) "
+                "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+                "AND t.id STARTS WITH $prefix "
+                "RETURN s.turn_max_index, s.turn_count, collect(t.id)",
+                params={"sid": session_id,
+                        "prefix": f"{session_id}_t"}).result_set
+            if _prior:
+                prior_turn_max_index = _prior_mark_index(_prior[0][0],
+                                                         _prior[0][1])
+                prior_graph_turns = _split_graph_turn_ids(session_id,
+                                                          _prior[0][2])
         except Exception:
             # Fail toward deleting NOTHING rather than toward a bad range: a
-            # failed read leaves the mark at -1, which sweeps no id — the same
-            # conservative direction the turn-id parse guard takes ("never
-            # delete where we cannot place it").
+            # failed read leaves the mark at -1 and no witness, which sweeps no
+            # id — the same conservative direction the turn-id parse guard takes
+            # ("never delete where we cannot place it"). ⚠️ It costs ONE cycle,
+            # not the residue: the witness is derived from the NODES, so the next
+            # capture that can read re-derives the bound and sweeps. That is the
+            # property main's monotone-up mark had and this restores.
             prior_turn_max_index = -1
+            prior_graph_turns = []
     sdk._graph_write_with_retry(
         lambda: proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
@@ -3514,6 +3633,7 @@ def _write_session_and_turns(
         proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
         session_existed=session_existed, turn_offset=turn_offset,
         prior_turn_max_index=prior_turn_max_index,
+        prior_graph_turns=prior_graph_turns,
         texts_and_counts=(turn_texts, redaction_counts))
     return {
         "turn_count": turn_count,
