@@ -4645,6 +4645,15 @@ _COUNT_WINDOW = 61
 #: have (`#10200` review, executed both directions). The period is NOT added to
 #: `_CLAUSE_BREAKS`: `_clause_at` and the history escape read that tuple, and a
 #: sentence is a WIDER bound than a clause, so the two are kept apart on purpose.
+#: ⚠️ STATED, not implied: `[.!?]` followed by whitespace is the same candidate set
+#: comparable sentence segmenters start from (NLTK Punkt's `sent_end_chars`), and
+#: requiring the WHITESPACE is what keeps a dotted symbol in the same sentence
+#: (`projection._rebuild_all_replay` never splits) — Punkt's own motivating example
+#: is that a period alone is not a boundary (*"Mr. Smith"*). What this rule does NOT
+#: do is Punkt's next step, suppressing abbreviations: `e.g. ` IS read as a boundary
+#: here. That looseness is pre-existing in `_claim_sentences` and is retained rather
+#: than half-fixed, because ONE definition of a sentence end is the property this
+#: module needs — a second, hand-rolled splitter is how the two drift apart.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
 
