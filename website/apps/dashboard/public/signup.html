@@ -138,8 +138,9 @@
         // same-origin (so the origin check passes) but serialises to a
         // network-path reference, which the BROWSER then re-interprets as
         // `https://evil.example/`. NOTE: THIS LINE CANNOT FIRE while the
-        // allowlist above admits only `/welcome`, `/team` and `/admin[/…]` — no
-        // routed path begins with `//`, so `ret` cannot either (`/..//evil.example`
+        // allowlist above admits only `/welcome`, `/team`, `/admin[/…]` and the
+        // EXACT path `/api/consent/start` (#3524) — no routed path begins with
+        // `//`, so `ret` cannot either (`/..//evil.example`
         // normalises to `//evil.example` first and is rejected there). It is kept
         // as belt-and-braces so the invariant survives a future loosening of the
         // allowlist; the allowlist is the

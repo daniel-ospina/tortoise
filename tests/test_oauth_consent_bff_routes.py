@@ -99,8 +99,23 @@ class FakeD1 {
     // A REAL store fault: without this the 503 arm is unreachable in tests, so nothing would red if
     // the route were ever changed to continue — i.e. if the security gate started failing OPEN.
     this._throws = Boolean(opts && opts.throws);
+    // ⛔ A DDL-ONLY fault, and it is a DIFFERENT fault from `throws`. `throws` fires on ANY
+    // statement naming the table — including the `CREATE TABLE IF NOT EXISTS` — so under it
+    // `ensureColumn`'s `ALTER TABLE` is never reached and the PROPAGATION half is untested: the
+    // suite stayed green with `ensureColumn`'s catch widened to `catch { return; }` AND with the
+    // call site replaced by a local swallow-all. SQLite reports "duplicate column name" as the
+    // same primary result code (SQLITE_ERROR) as a genuine fault, so the message is the ONLY
+    // discriminator — which is exactly the property `ensureColumn` claims and nothing pinned.
+    //   "fault"     → a genuine DDL failure (the SQLITE_FULL/READONLY shape): must PROPAGATE.
+    //   "duplicate" → the already-evolved column: must be SWALLOWED and the route continue.
+    this._ddlFault = (opts && opts.ddlFault) || null;
   }
   _maybeThrow(sql) {
+    if (this._ddlFault && /^\s*ALTER TABLE/i.test(sql)) {
+      throw new Error(this._ddlFault === "duplicate"
+        ? "D1_ERROR: duplicate column name: attempt_key_hash"
+        : "D1_ERROR: database or disk is full");
+    }
     if (this._throws && /consent_attempts/.test(sql)) {
       throw new Error("D1_ERROR: control plane unreachable");
     }
@@ -268,7 +283,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
              created_at: NOW, expires_at: NOW + 900_000,
              attempt_key_hash: seededHash }]
         : []),
-    }, { throws: Boolean(opts.storeThrows) }),
+    }, { throws: Boolean(opts.storeThrows), ddlFault: opts.ddlFault ?? null }),
   });
   // An unprovisioned key is ABSENCE, not a falsy value: delete it rather than set "".
   if (scenario === "mint_no_secret") delete e.CONSENT_TOKEN_SECRET;
@@ -327,7 +342,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
   const seeded = opts.seededAttempts || [];
   const store = new FakeD1({ sessions, consent_attempts: seeded },
-                          { throws: Boolean(opts.storeThrows) });
+                          { throws: Boolean(opts.storeThrows), ddlFault: opts.ddlFault ?? null });
   if (opts.wantLegacySchema) store._legacySchema();
   const e = env({ SESSIONS: store });
   const source = opts.params || {
@@ -1037,6 +1052,39 @@ def test_the_mints_store_fault_is_also_a_typed_503_with_a_log_line() -> None:
         f"the mint's store fault was SILENT: {out['stderr'][-600:]!r}")
 
 
+def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> None:
+    """`ensureColumn` swallows ONLY `duplicate column name` — the mint half of that property.
+
+    The tests above (and `test_a_store_fault_is_a_typed_503_and_never_a_redirect`) pin the
+    OBSERVABILITY half of a store fault: the log line, the typed body, the missing `Location`. They
+    cannot pin the PROPAGATION half, because `FakeD1`'s `storeThrows` fires on ANY statement naming
+    the table — including the `CREATE TABLE IF NOT EXISTS` — so `ensureColumn`'s `ALTER TABLE` is
+    never even reached. Measured: with the old double both of these left the file fully green: (a)
+    `ensureColumn`'s catch widened to `catch { return; }`, (b) the call site replaced by a local
+    swallow-all. Both are the same shipped regression — a genuinely failed `ALTER TABLE` swallowed,
+    leaving a half-evolved schema that 503s with nothing anywhere to act on, which is precisely the
+    outcome `start.ts:232-238` exists to remove.
+
+    SQLite makes this a MESSAGE question and not a code one: a duplicate column and a genuine DDL
+    failure both surface as SQLITE_ERROR (https://sqlite.org/rescode.html §4 — the primary result
+    code is the same; only the text differs), so `ddlFault` injects both texts on `ALTER TABLE`
+    only, and the two arms below are the two directions of the `only`.
+    """
+    # A genuine fault must PROPAGATE to the route's own catch — typed 503, logged, never a mint.
+    faulted = _run("mint_ok", ddlFault="fault")
+    assert faulted["status"] == 503, (
+        f"a genuine DDL failure was SWALLOWED and the mint carried on: {faulted}")
+    assert faulted["body"] == {
+        "error": "unavailable", "reason": "consent_store_unavailable"}, faulted["body"]
+    assert "consent attempt read failed" in faulted["stderr"], (
+        f"a propagated DDL failure answered 503 with NO log line: {faulted['stderr'][-600:]!r}")
+    # ... and the duplicate-column error (what every already-evolved database produces) must NOT be
+    # propagated: it is the normal path, so swallowing it is load-bearing in its own direction.
+    evolved = _run("mint_ok", ddlFault="duplicate")
+    assert evolved["status"] == 200, (
+        f"`duplicate column name` was PROPAGATED, so an already-evolved database could never mint: {evolved}")
+
+
 def test_the_keys_HOLDER_renews_the_attempt() -> None:
     """The mirror of the test below, and the half nothing pinned.
 
@@ -1197,6 +1245,30 @@ def test_a_store_fault_is_a_typed_503_and_never_a_redirect() -> None:
         f"{out['stderr'][-600:]!r}")
     assert out["body"] == {"error": "unavailable", "reason": "consent_store_unavailable"}, out["body"]
     assert out["location"] is None, f"a store fault produced a REDIRECT: {out['location']!r}"
+
+
+def test_a_GENUINE_DDL_fault_PROPAGATES_on_start_too() -> None:
+    """The `start` half of the same property — `ensureColumn` must not swallow a real DDL failure.
+
+    Same gap and same double, stated once at the mint arm above: `storeThrows` throws on the
+    `CREATE TABLE` so the `ALTER TABLE` never runs, which is why widening `ensureColumn`'s catch (or
+    a local swallow-all at the call site) left this file green. `start` is the route that RECORDS,
+    so it is the leg where a swallowed DDL failure would leave the flow half-written and every
+    later mint 403 on a missing column.
+    """
+    faulted = _run("start_signed_in", ddlFault="fault")
+    assert faulted["status"] == 503, (
+        f"a genuine DDL failure was SWALLOWED and `start` carried on to a redirect: {faulted}")
+    assert faulted["body"] == {
+        "error": "unavailable", "reason": "consent_store_unavailable"}, faulted["body"]
+    assert faulted["location"] is None, (
+        f"a genuine DDL failure produced a REDIRECT: {faulted['location']!r}")
+    assert "consent attempt write failed" in faulted["stderr"], (
+        f"a propagated DDL failure answered 503 with NO log line: {faulted['stderr'][-600:]!r}")
+    # The duplicate-column error is the NORMAL path on every already-evolved database: swallowed.
+    evolved = _run("start_signed_in", ddlFault="duplicate")
+    assert evolved["status"] == 302, (
+        f"`duplicate column name` was PROPAGATED, so an already-evolved database could never start: {evolved}")
 
 
 def _key_from(location: str | None) -> str:
