@@ -30,8 +30,6 @@ from tests.test_hosted_api import (
 from tortoise.sdk import TortoiseSDK
 from tortoise.write_verb import (
     DEDUP_CONTENT_HASH_HIT,
-    DEDUP_NEW,
-    DEDUP_REPHRASE_LINKED,
 )
 
 

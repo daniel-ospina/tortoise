@@ -46,8 +46,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import uuid
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,9 +53,7 @@ from typing import Any
 import pytest
 
 from tortoise import cache_projection as cp
-from tortoise import monitoring, record_writer
-from tortoise import record_projection as rp
-from tortoise.record_writer import use_record_tenant
+from tortoise import record_writer
 from tortoise.sdk import TortoiseSDK
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

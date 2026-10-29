@@ -25,7 +25,6 @@ import pytest
 
 from tortoise.embeddings import EmbeddingModel
 from tortoise.exceptions import HybridReadUnavailableError
-from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import (
     VECTOR_LEG_UNAVAILABLE,
     declared_degraded_read,

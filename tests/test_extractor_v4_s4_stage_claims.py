@@ -82,7 +82,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACTOR = ROOT / "tortoise" / "extractor_v2.py"
-SDK = ROOT / "tortoise" / "sdk.py"
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 
 #: The anchor the S4 call site names ("see the ``G5 record — the live S4 stage
@@ -204,92 +203,16 @@ def _env_flag_default_true(call: ast.expr) -> bool:
     )
 
 
-def _comparison_kind(node: ast.expr) -> str:
-    """Label one operand of the sdk v1 dispatch, or `""` for anything else.
-
-    The OPERATOR is part of the label. An operator-blind match accepted the
-    semantics-inverting rewrites `extractor != "v1"` and `summary is None`,
-    which would leave the marker's bypass paths (i)/(ii) false while the guard
-    reported clean (the #8601 review proved it).
-    """
-    if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Name):
-        return ""
-    if len(node.comparators) != 1 or len(node.ops) != 1:
-        return ""
-    op = node.ops[0]
-    comparator = node.comparators[0]
-    if (
-        node.left.id == "extractor"
-        and isinstance(op, ast.Eq)
-        and isinstance(comparator, ast.Constant)
-        and comparator.value == "v1"
-    ):
-        return "extractor_v1"
-    if (
-        node.left.id == "summary"
-        and isinstance(op, ast.IsNot)
-        and isinstance(comparator, ast.Constant)
-        and comparator.value is None
-    ):
-        return "summary_not_none"
-    return ""
 
 
 
 
 
 
-def _iter_stmt_lists(node: ast.AST) -> list[list[ast.stmt]]:
-    """Every statement list inside `node`, NOT descending into nested defs.
-
-    Needed because `ast.walk` gives no parent: to read the statement that
-    FOLLOWS the dispatch `If` (the v2 fall-through) it must be located inside
-    its own sibling list.
-    """
-    lists: list[list[ast.stmt]] = []
-    for field in ("body", "orelse", "finalbody"):
-        block = getattr(node, field, None)
-        if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
-            lists.append(block)
-    for handler in getattr(node, "handlers", []) or []:
-        lists.extend(_iter_stmt_lists(handler))
-    for case in getattr(node, "cases", []) or []:
-        lists.extend(_iter_stmt_lists(case))
-    for block in list(lists):
-        for stmt in block:
-            if isinstance(
-                stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                continue
-            lists.extend(_iter_stmt_lists(stmt))
-    return lists
 
 
-def _enclosing_stmt_list(
-    tree: ast.Module, node: ast.If
-) -> tuple[list[ast.stmt], int] | None:
-    """The statement list holding `node`, and `node`'s index in it."""
-    for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-        if not (fn.lineno <= node.lineno <= (fn.end_lineno or fn.lineno)):
-            continue
-        for body in _iter_stmt_lists(fn):
-            if node in body:
-                return body, body.index(node)
-    return None
 
 
-def _return_callee(stmts: list[ast.stmt]) -> str:
-    """The callee of the first `return <call>(...)` in this statement list.
-
-    `""` when there is no such return, so the caller reports a missing route
-    rather than silently accepting it.
-    """
-    for stmt in stmts:
-        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
-            return _call_name(stmt.value.func)
-    return ""
 
 
 

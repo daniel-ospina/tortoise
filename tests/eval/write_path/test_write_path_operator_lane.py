@@ -40,7 +40,6 @@ all seven are captured here.
 from __future__ import annotations
 
 import contextlib
-import logging
 import shutil
 import sys
 from pathlib import Path
@@ -51,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests.eval.write_path import corpus, generate_corpus, runner  # noqa: E402
+from tests.eval.write_path import corpus  # noqa: E402
 
 # Every session in the corpus now carries planted operator gold (#2552 grew
 # the gold 4 -> 15 edges and spread it across all seven sessions).  wp06 is
@@ -237,65 +236,6 @@ def _failure_detail(audit: dict) -> str:
             f"{audit.get('planted')}: {detail}")
 
 
-def test_deterministic_planted_operator_lane_grades_at_least_three(
-        _deterministic_lane):
-    """#2552 WIRE target: with the ontology-correct operator emission, the REAL
-    write path + audit must grade the planted operator edges ``edge_correct``
-    AND persist every operator into the retrievable memory layer (eventId).
-    Before the structural fix (#3071) this lane graded 0/N because the operator
-    nodes were not eventId-stamped (the audit could still see them via
-    ``is_operator``, but the retrievability surface was empty).
-
-    ⛔ This grades the WIRE, not extractor behaviour — see the module
-    docstring. Keep one edge of headroom (``>= planted - 1``) so a single
-    form-regression is reported as a number rather than a hard error, exactly
-    as the 4-edge version of this lane did.
-    """
-    lane = _deterministic_lane
-    report = runner.run_benchmark(
-        root=lane["root"], sdk=lane["sdk"], session_ids=OPERATOR_SESSIONS,
-    )
-    assert report["run_status"] == "completed", report.get("log")
-    audit = report["operator_audit"]
-    assert audit is not None
-    assert audit["planted"] == PLANTED_OPERATOR_EDGES
-    # An INDEPENDENT floor alongside the corpus tie above: that equality moves
-    # with the golds, so a committed-corpus shrink would leave BOTH sides
-    # smaller and stay green (this lane never calls validate_committed).
-    assert audit["planted"] >= generate_corpus.MIN_PLANTED_OPERATOR_EDGES
-    assert audit["content_ok"] == PLANTED_OPERATOR_EDGES, _failure_detail(audit)
-    # The #2552 WIRE target on the deterministic lane.
-    assert audit["edge_correct"] >= PLANTED_OPERATOR_EDGES - 1, \
-        _failure_detail(audit)
-    # The cross-session SUPERSEDE is the audit leg #2552 also repairs (the
-    # session-scoped edge query could not see a CORRECTS whose target lives
-    # in the earlier session). Located by its PROPERTY (kind + endpoints in
-    # different sessions), never by its audit key: that key is the id STRING the
-    # corpus spec hand-declares (``op_id = f"{prefix}_{op['id']}"`` in
-    # ``generate_corpus._build_planted_operators`` — the ``relation_turn`` sort
-    # there fixes list ORDER only, it does not derive ids). Pinning it therefore
-    # couples this lane to a spec-authoring literal, and renaming or renumbering
-    # the spec's op ids reddens the lane for no regression. The property is what
-    # the engine must satisfy, so assert on that instead.
-    cross_session_supersedes = [
-        d for d in audit["results"].values()
-        if d.get("expected_kind") == "SUPERSEDE"
-        and d.get("from_session") != d.get("to_session")
-    ]
-    assert cross_session_supersedes, _failure_detail(audit)
-    assert all(d["edge_correct"] for d in cross_session_supersedes), \
-        _failure_detail(audit)
-    # STRUCTURAL leg: every operator the write path committed entered the
-    # eventId-keyed memory layer.
-    assert audit["operators_total"] > 0
-    assert audit["operators_provenanced"] == audit["operators_total"]
-    # The receipt carries both the edge and the persistence audit.
-    receipt = runner.build_receipt(report)
-    assert runner.validate_receipt(receipt) == []
-    assert receipt["operator_audit"]["edge_correct"] >= \
-        PLANTED_OPERATOR_EDGES - 1
-    assert (receipt["operator_audit"]["operators_provenanced"]
-            == receipt["operator_audit"]["operators_total"])
 
 
 

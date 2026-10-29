@@ -21,8 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.eval.write_path import runner, schema
-from tortoise.sdk import TortoiseSDK
+from tests.eval.write_path import runner
 
 CONV = [
     {"role": "user", "content": "I think the auth dead-end is the top issue. "

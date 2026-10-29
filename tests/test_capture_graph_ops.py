@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 
 from tortoise.graph_ops import (
-    PHASES,
     GraphOpsCounter,
     capture_phase,
     classify_op,
@@ -24,7 +23,6 @@ from tortoise.graph_ops import (
     distribution_from_rows,
     record_graph_op,
 )
-from tortoise.sdk import TortoiseSDK
 
 CONV = [
     {"role": "user", "content": "I think the auth dead-end is the top issue. "

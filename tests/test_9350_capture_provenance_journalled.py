@@ -43,7 +43,6 @@ import pytest
 # hosted parity suites do — the offline MockModel seam keeps it network-free.
 from tests.test_hosted_api import client as client
 from tortoise.log import EventLog
-from tortoise.projection import _CACHE_WRITE_AUTHORIZED, _live_write_scope
 from tortoise.sdk import _CAPTURE_PROVENANCE_LANE, TortoiseSDK
 
 PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
@@ -397,7 +396,6 @@ def test_the_hosted_capture_journals_and_replays_the_same_provenance(
     """
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import TEST_ORG_ID
-    from tortoise.log import EventLog
 
     log_path = str(tmp_path / "hosted.jsonl")
     monkeypatch.setattr(
@@ -560,7 +558,11 @@ def test_the_id_pre_read_rides_the_write_retry_funnel(tmp_path):
         sdk.close()
 
 
-@pytest.mark.parametrize("module", ["tortoise/sdk.py", "tortoise/hosted_api.py"])
+# #4282: the `tortoise/sdk.py` arm is gone with the door it pinned. All three of
+# that lane's guarded sites (operator label sweep, operator ids, retry heal)
+# lived inside the deleted `capture_session`, so the parameter survives only
+# for the hosted lane, whose three sites are still all pinned below.
+@pytest.mark.parametrize("module", ["tortoise/hosted_api.py"])
 def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module):
     """EVERY guarded call site, both lanes — the narrowing is checked in source.
 

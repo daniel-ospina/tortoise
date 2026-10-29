@@ -24920,7 +24920,8 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
 async def accept_invite_by_id(invitation_id: str,
                               user: dict = Depends(get_current_user)):  # noqa: B008
     """#1875: token-less accept from the pending list (email-match authz).
-    NOT the registry sdk.invitation_accept (it lacks the email guard)."""
+    NOT the registry sdk.invitation_accept (deleted by #4282; it lacked the
+    email guard)."""
     from tortoise.supabase_control import (
         InvitationError,
         get_control_plane,
@@ -27012,7 +27013,8 @@ def _drop_org_acl_users(org_id: str) -> None:
 
 
 def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None:
-    """Cascade-delete a registry org + drop its graph (mirrors sdk.org_delete)."""
+    """Cascade-delete a registry org + drop its graph (as `sdk.org_delete` did
+    before #4282 deleted it)."""
     # C4 (#2113): drop the custom graphs' ACL users BEFORE the nodes go
     # (the enumeration reads the nodes).
     _drop_org_acl_users(org_id)

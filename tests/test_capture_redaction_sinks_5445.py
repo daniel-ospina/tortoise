@@ -28,7 +28,6 @@ import pytest
 from tortoise.sdk import (
     _CAPTURE_TURN_CAP,
     TortoiseSDK,
-    _capture_turn_role_text,
     _capture_turn_window,
     _redact_summary_strings,
     _redact_turn_contents,

@@ -34,71 +34,21 @@ from tortoise.commit_ops import (
 from tortoise.sdk import TortoiseSDK
 
 
-@pytest.fixture(autouse=True)
-def _mock_provider(monkeypatch):
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-
-
 @pytest.fixture()
 def sdk(tmp_path):
     return TortoiseSDK(db_path=str(tmp_path / "t.db"))
 
 
-CONV = [
-    {"role": "user", "content": "a session whose extraction seam is fixed"},
-    {"role": "assistant", "content": "noted"},
-]
 
 
-def _pt(pid: str, content: str, kind: str = "statement") -> dict:
-    return {"id": pid, "content": content, "pointKind": kind,
-            "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
-            "about_entities": [], "source_ref": "session.md", "quote": "",
-            "status": "draft", "search_keys": []}
 
 
-def _payload(points, operators, supersessions=None) -> dict:
-    return {"session_id": "s4716", "client_commit_id": "",
-            "captured_at": "2026-09-23T00:00:00Z",
-            "extractor": {"version": "t", "mode": "byok",
-                          "calibration_version": "v2"},
-            "summary": "", "story_arc": "", "provenance_refs": [],
-            "sources": [], "entities": [], "points": points, "events": [],
-            "operators": operators, "supersessions": supersessions or [],
-            "telemetry": {"counts": {"kept": len(points)}}}
 
 
-def _extract_returning(payload, noops=None):
-    def _run(_model, _conversation=None, *, session_id=None, **_kw):
-        return {"payload": payload, "errors": [], "warnings": [],
-                "stats": {}, "noops": list(noops or []), "chain_notes": [],
-                "link_before_create": [], "supersessions": [],
-                "minted_kinds": [], "story_arc": "", "search": {},
-                "error_census": {}}
-
-    return _run
 
 
-def _pre_existing_id(sdk, content: str, kind: str = "statement") -> str:
-    """The graph id of a Point holding ``content`` — created OUTSIDE the
-    capture (a non-payload id, e.g. the m2/ULID shape). ``kind`` must match the
-    payload point's kind or the commit's kind-scoped resolver treats it as new
-    (#784) and no re-key happens."""
-    sdk.create_point(kind, content)
-    rows = sdk._get_proj().g.query(
-        "MATCH (p:Point {content:$c}) RETURN p.id",
-        params={"c": content}).result_set
-    assert rows, "pre-created Point not found"
-    return rows[0][0]
 
 
-def _impl_edges(proj) -> list[tuple[str, str]]:
-    rows = proj.g.query(
-        "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-        "MATCH (o)-[:IMPL {idx:0}]->(s) MATCH (o)-[:IMPL {idx:1}]->(d) "
-        "RETURN s.id, d.id").result_set
-    return [(r[0], r[1]) for r in rows]
 
 
 # ── Part 1: the capture commit remap ────────────────────────────────────────

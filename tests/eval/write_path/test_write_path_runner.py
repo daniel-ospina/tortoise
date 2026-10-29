@@ -19,7 +19,7 @@ import shutil
 
 import pytest
 
-from tests.eval.write_path import corpus, generate_corpus, runner, schema
+from tests.eval.write_path import corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
 
 
