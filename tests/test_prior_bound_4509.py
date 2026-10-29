@@ -21,6 +21,11 @@ starved-prior bound MOVES to that set (each leg's ``DEFAULT_POOL_SIZE``, times t
 live legs) instead of disappearing at 500 turns. See ``_DOCUMENTED_PROD_POOL``
 and ``test_production_pool_bound_still_starves_the_prior`` below.
 
+#10121 note: the fused pool is ordered by the shared recency-then-id tie
+(``search_engine.recency_tie_clause``), so WHICH prior the bound starves is the
+OLDEST row, not the latest-sorting id (#3019's ``id ASC`` premise, which the
+production fixture used to rely on). The bound itself is unchanged.
+
 These tests are HERMETIC (per-test embedded store, no provider keys, no
 network): the query embedder is pinned to None so the sparse leg is the only one
 submitted and ranking is a pure FTS ordering, and ``TORTOISE_POOL_FLOOR`` is
@@ -121,11 +126,14 @@ def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     real prior. The echoes contain the query tokens; the prior does too, so it
     is a genuine candidate of the fused pool.
 
-    ``prior_id`` must sort AFTER the echo ids (``<session_id>_t<i>``): every row
-    in this fixture scores alike, so the fused order is the ``id`` tie-break
-    (#3019), and only a late-sorting prior sits outside a window the echoes
-    fill. An earlier revision relied on the prior being seeded after the hot
-    echoes, i.e. on the opaque DB row order this tie-break replaces."""
+    Every row here scores alike, so the fused order is the shared recency-then-id
+    tie (#10121) — recency now decides, so seed ORDER is what places the prior.
+    The prior is seeded BETWEEN the two bands: the ``_COLD`` echoes written after
+    it hold newer stamps and fill the over-fetch window ahead of it (that is the
+    starvation the test reproduces), while the ``_HOT`` band written before it is
+    older. Before #10121 this fixture got the same property from the ``id``
+    tie-break (``prior_id`` sorts after ``<session_id>_t<i>``); that spelling is
+    no longer what orders these rows — the recency key is."""
     for i in range(_HOT):
         _seed_echo(s, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
     s.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
@@ -230,16 +238,25 @@ def test_limit_applies_to_the_already_filtered_candidate_set(sdk):
 
     FALSIFIER — (1) *what value makes this test fail?* The identity of the two
     returned rows: pre-truncation they are the two REAL priors; a filter applied
-    after the cut returns two echoes (or nothing after a drop). (2) *reachable?*
-    Yes: the three echoes sort ahead of the two priors and the window is 2, so
-    the ordering is forced. The priors are named ``zz_pt_*`` precisely so they
-    sort after the ``s1_t*`` echoes — with earlier-sorting priors the window
-    would hold the priors either way and the test would not discriminate.
+    after the cut finds the window full of echoes, drops them, and returns
+    nothing. (2) *reachable?* Yes — the two priors are seeded FIRST and the three
+    echoes LAST, so under the shared recency tie (#10121) the echoes hold the
+    three newest stamps, the three rows of the pool are all echoes, and
+    ``result_ids[:2]`` is entirely echoes: only a pre-truncation filter can put
+    the priors inside the page.
+
+    ⚠️ That seeding order is load-bearing and was REVERSED by #10121's tie
+    direction. An earlier revision seeded the echoes first and named the priors
+    ``zz_pt_*`` so they sorted after the ``s1_t*`` echoes under #3019's
+    ``id ASC``; with recency-first ordering that made the priors the NEWEST rows,
+    i.e. ``result_ids[:2]`` — so the pre-#4509 after-the-cut drop returned both
+    priors and this test passed on the very code it exists to fail. Seeding the
+    priors first restores the discrimination under the shipped direction.
     """
-    for i in range(3):
-        _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
     sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_a")
     sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_b")
+    for i in range(3):
+        _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
 
     rows = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=2, exclude_turn_echo_session="s1"))
@@ -274,12 +291,20 @@ def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
                                n_echoes: int) -> None:
     """The PRODUCTION call shape's fixture: ``n_echoes`` echoes plus ONE real
     prior, and — unlike ``_seed_echo_wall`` — no ``pool_size`` is passed by the
-    caller under test, so the fused pool is the product default. Every row
-    scores alike, so the ``id`` tie-break decides: ``prior_id`` must sort after
-    the echo ids for the echoes to fill the pool ahead of it."""
+    caller under test, so the fused pool is the product default.
+
+    Every row here scores alike, so the tie-break decides who fills the pool —
+    and #10121 changed WHICH tie-break that is. It used to be #3019's ``id
+    ASC``, so the prior was seeded LAST and relied on ``zz_pt_real`` sorting
+    after the ``s1_t<i>`` ids. It is now recency-then-id DESC, so the prior
+    that starves is the OLDEST row: seeding it FIRST is what puts it below a
+    wall of newer echoes — the production shape the residual is about (a prior
+    captured earlier in the session, then the session keeps talking). MEASURED
+    at the pre-change head: with the prior seeded last it came back FIRST out
+    of a 130-row pool, because recency now leads the pool."""
+    sdk.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
     for i in range(n_echoes):
         _seed_echo(sdk, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
-    sdk.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
 
 
 def test_production_pool_bound_still_starves_the_prior(sdk):
@@ -295,6 +320,14 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
     legs, about twice as wide. The bound this fix moves is 15 -> that fused set
     (~120 keyword-only, ~240 hybrid), NOT to 500 — so a session whose echoes fill
     it still starves a real prior ranked below them.
+
+    #10121 moved the ORDER that decides which prior sits outside that window,
+    not the bound. The tie was ``id ASC`` (#3019); it is now recency-then-id
+    DESC, so the prior that starves is the OLDEST-ranked one rather than the
+    latest-sorting id — the fixture seeds the prior first for that reason
+    (measured at the pre-change head: seeded last, it came back FIRST out of a
+    130-row pool). The number this pin measures is unchanged: one leg's
+    ``DEFAULT_POOL_SIZE``.
 
     This is the falsifier for any claim that #4509 removes starvation outright.
     The claim used to be written into the comments in ``extractor_v2.py`` and

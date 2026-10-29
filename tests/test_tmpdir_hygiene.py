@@ -395,6 +395,171 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         shutil.rmtree(live, ignore_errors=True)
 
 
+# ── #1005 (epic #1647 E2E-7): the RUN-scoped root registry ─────────────────
+# The CI orphan gate may only call a residue a leak if it can attribute the
+# server to THIS run, and the attribution key is the run's session temp roots.
+# Under `pytest -n` a run owns one root per worker process, and the hygiene
+# report is written by whichever worker exits last — so every process appends
+# its root to a run-keyed registry at install time, before it can spawn a
+# server. These tests pin that contract; without it the last writer would see
+# only its own root and a sibling worker's leak would read as foreign.
+
+
+def test_run_roots_records_the_installed_root_under_the_run_uid():
+    from tests._tmpdir_hygiene import (
+        run_registry_path,
+        run_roots,
+        run_uid,
+    )
+
+    assert run_uid(), "a run id is always defined (never an empty key)"
+    path = run_registry_path()
+    assert path.endswith(run_uid())
+    root = session_tmpdir()
+    assert root is not None
+    # #10255 review (P3): read the REGISTRY, not `run_roots()`. `run_roots()`
+    # appends the in-memory `_SESSION_TMPDIR` unconditionally (`if current and
+    # current not in roots`), so `root in run_roots()` passes even if
+    # `record_run_root` were a no-op — the assertion did not test the write path
+    # it names. The write path is what makes a SIBLING worker's root visible to
+    # whichever process exits last and writes the report.
+    recorded = [
+        line.strip()
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert os.path.realpath(root) in recorded, (
+        "install time must RECORD the session root in the run registry — it is "
+        "the attribution key the orphan gate binds to, and a sibling worker's "
+        "root reaches the last process to exit only through this file (#1005)"
+    )
+    assert root in run_roots(), (
+        "the installed session root must also be readable as one of this run's "
+        "roots, which is how the sweep consumes the registry (#1005)"
+    )
+
+
+def test_record_run_root_actually_writes_the_registry(tmp_path, monkeypatch):
+    """#10255 review (P3): the WRITE path, proven discriminating.
+
+    `run_roots()` appends the in-memory `_SESSION_TMPDIR` unconditionally, so
+    any assertion of the shape `root in run_roots()` holds even when nothing was
+    ever written. This drives `record_run_root` against a registry path of its
+    own and reads the FILE, so making the write a no-op reds here — which is the
+    failure mode that would silently de-attributed every sibling worker's root
+    (a sibling's root reaches the process that writes the report ONLY through
+    this file).
+    """
+    from tests import _tmpdir_hygiene as h
+
+    registry = tmp_path / "run-registry.txt"
+    monkeypatch.setattr(h, "run_registry_path", lambda: str(registry))
+    fresh = tmp_path / "session-root"
+    fresh.mkdir()
+    h.record_run_root(str(fresh))
+    lines = [ln.strip() for ln in registry.read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    assert os.path.realpath(str(fresh)) in lines, (
+        "record_run_root must APPEND the realpath of the root to the run "
+        "registry — this is the sibling-worker attribution key (#1005)"
+    )
+
+
+def test_run_roots_is_run_scoped_not_a_shared_pile(tmp_path, monkeypatch):
+    """A root recorded by ANOTHER run must never be attributed to this one.
+
+    Two concurrent pytest runs on one host each own their roots; if the
+    registry were global, the gate would attribute a neighbour's server to us
+    and red a green run — the exact defect the registry exists to prevent.
+    """
+    import tests._tmpdir_hygiene as hygiene
+
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
+    mine = str(tmp_path / "tt_mine")
+    theirs = str(tmp_path / "tt_theirs")
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-aaa")
+    hygiene.record_run_root(mine)
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-bbb")
+    hygiene.record_run_root(theirs)
+
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-aaa")
+    as_aaa = hygiene.run_roots()
+    assert mine in as_aaa, "run-aaa's own root must be visible to it"
+    assert theirs not in as_aaa, (
+        "another run's root is NOT ours to attribute — it is the population "
+        "the gate must read as foreign (#1005)"
+    )
+    assert session_tmpdir() in as_aaa, (
+        "the live session root is always included, by design: a failed "
+        "registry write must not make this run unable to attribute its OWN "
+        "servers (that would silently loosen the gate)"
+    )
+
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-bbb")
+    as_bbb = hygiene.run_roots()
+    assert theirs in as_bbb and mine not in as_bbb, (
+        "the registry is keyed per run in BOTH directions — neither run may "
+        "see the other's roots"
+    )
+
+
+def test_record_run_root_is_additive_and_never_raises(tmp_path, monkeypatch,
+                                                      caplog):
+    """Every worker's root lands in one file; concurrent appends must not lose
+    a sibling's root (the O_APPEND contract), and a write failure must not fail
+    the suite.
+
+    #10255 review B: a write failure does NOT "degrade to the gate's
+    unattributable path" — that was this test's claim and it was false.
+    `run_roots()` re-appends the in-memory root unconditionally, so `own_roots`
+    in the report is never empty from this cause and the gate takes the
+    ATTRIBUTED path with a PARTIAL root set. The assertions below pin the TRUE
+    contract: the failure is swallowed, it is recorded where it happened, and
+    the process's own root is still reported.
+    """
+    import logging
+
+    import tests._tmpdir_hygiene as hygiene
+
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-ccc")
+    hygiene.record_run_root(str(tmp_path / "tt_gw0"))
+    hygiene.record_run_root(str(tmp_path / "tt_gw1"))
+    roots = hygiene.run_roots()
+    assert str(tmp_path / "tt_gw0") in roots
+    assert str(tmp_path / "tt_gw1") in roots, (
+        "the second worker's append must not clobber the first's — both roots "
+        "are needed to attribute the whole run"
+    )
+
+    # A directory that cannot be created is an OSError, not a suite failure.
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR",
+                        str(tmp_path / "tt_blocker" / "sub"))
+    (tmp_path / "tt_blocker").write_text("not a directory")
+    with caplog.at_level(logging.WARNING, logger=hygiene.logger.name):
+        hygiene.record_run_root(str(tmp_path / "tt_gw2"))  # must not raise
+    assert any("could not record" in rec.getMessage()
+               for rec in caplog.records), (
+        "a swallowed registry write must be RECORDED where it happened — it "
+        "is the only trace, because nothing in the report or the gate can see "
+        "it (#10255 review B)"
+    )
+
+    # The corrected claim, pinned: a failed append does not empty `own_roots`.
+    monkeypatch.setattr(hygiene, "_SESSION_TMPDIR", str(tmp_path / "tt_gw3"))
+    roots = hygiene.run_roots()
+    assert str(tmp_path / "tt_gw3") in roots, (
+        "a failed append does NOT make `own_roots` empty: the in-memory root "
+        "is re-appended, so the gate takes the ATTRIBUTED path with a PARTIAL "
+        "root set and never reports `unattributable` from this cause — making "
+        "this test's earlier claim true would require changing the GATE too"
+    )
+    assert str(tmp_path / "tt_gw2") not in roots, (
+        "the failed append really did not land — otherwise the assertion above "
+        "would be vacuous"
+    )
+
+
 def test_host_coordination_is_host_scoped_and_lock_is_sweep_scoped():
     """The two surfaces #3752 must keep distinct.
 

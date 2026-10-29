@@ -181,7 +181,8 @@ env:
   # published as `changes.outputs.slow_matrix`, so there is no committed leg
   # list to rot. `slow_file_issues`/`leg_coverage_issues` pin the pool and
   # `slow_shard_issues` pins the declaration; the drift guard in the job pins
-  # the expanded legs to `slow_files - carve_out` at run time. The push matrix
+  # the expanded legs to `slow_gating_files()` (slow_files minus carve-out minus
+  # the non-gating lane) at run time. The push matrix
   # and env-broken exclusions are derived by the selector (#1472).
   # Env-broken in this job (tests/e2e needs browsers; test_agent_signup needs
   # a live redis on 6379) — single source is tools/ci_selection.py.
@@ -333,7 +334,8 @@ jobs:
           # changes job (red, not silent-green) if slow_run=true with an
           # empty or non-leg slow_selected.
           #
-          # #9539: the leg set is the DERIVED pool (`slow_files - carve_out`),
+          # #9539: the leg set is the DERIVED pool (`slow_gating_files()`:
+          # slow_files - carve_out - non-gating lane, #10194),
           # not the workflow's old committed rows — it is the same set the
           # run step's per-leg intersection can match against, and it is read
           # from the selector rather than parsed out of the workflow, so the
@@ -384,10 +386,24 @@ jobs:
           # same way as `fast_matrix` (one JSON GITHUB_OUTPUT line, so the
           # template-context toString hazard above applies identically).
           echo "carve_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["carve_matrix"]))')" >> "$GITHUB_OUTPUT"
-          # #9539: the slow pool's matrix — `slow_files - carve_out` packed into
+          # #9539: the slow pool's matrix — `slow_gating_files()` packed into
           # `config/ci-surfaces.yml::slow_shards` LPT bins by the same `durations`
           # map the fast band uses. Emitted like the two above (one JSON line).
           echo "slow_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_matrix"]))')" >> "$GITHUB_OUTPUT"
+      - name: Non-gating lanes — what this gate does NOT run (#10194)
+        # #10194: a MEMBERSHIP change is invisible in a CI log unless the log
+        # says what left it. "the evals aren't running" and "the evals are
+        # excluded on purpose" read identically from a green run, so this prints
+        # the non-gating lane (each entry → its resolved file count) and the
+        # shard → file-count map the run is about to expand. A reader can then
+        # SEE that `tests/eval/**` + `tests/longmem_eval/**` are absent from all
+        # nine shards instead of inferring it from a total.
+        #
+        # Report-only on purpose: it reads the same `push_legs()` derivation the
+        # matrix step above emits, and it exits 0 on every path. The gate on this
+        # exclusion is the guard test (tests/test_10194_eval_suite_non_gating.py)
+        # plus `--integrity`, not a log line.
+        run: python3 tools/ci_selection.py --non-gating-report
       - name: Tier-2 duration split (#1473)
         # #1473/#6135: LPT-pack the tier-2 selected files across the configured
         # shard count by measured duration (config/ci-surfaces.yml durations)
@@ -1576,21 +1592,30 @@ jobs:
         # not always ~0 by construction — the embedded-file-contract atexit race
         # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
-        # sweep's own `left` now accounts for. What this gate reds: a leak
-        # that appears AFTER the sweep (COUNT > left), an accounting-identity
-        # violation (reaped + exited + left < before), a probe_failed report above a
-        # measured COUNT of zero (no `left` to bind to), an error or skipped
-        # report, a no_embedded_servers report above a measured COUNT of zero,
-        # and an unaccounted/unreadable report. A `cleared: false` report does
+        # sweep's own `left` now accounts for. #1005: every count-based red is
+        # applied to servers ATTRIBUTED to this run — those whose argv carries a
+        # socket path under one of the run's own session temp roots — because
+        # `COUNT` is a host-wide pgrep and `left` a snapshot from one pytest
+        # process. What this gate reds: this run's OWN servers growing after the
+        # sweep measured them (own_now > own_left), an accounting-identity
+        # violation (reaped + exited + left < before), a probe_failed report
+        # with an attributed residue above zero (no `left` to bind to), an error
+        # or skipped report, a no_embedded_servers report with an attributed
+        # own_now above zero, and a report that is unaccounted, unreadable or
+        # UNATTRIBUTABLE (no usable `own_roots`). The HOST-WIDE count above
+        # `left` is NOT a verdict: it is a `::warning::` that names the
+        # attribution, because on the self-hosted pool it includes every other
+        # job's servers. A `cleared: false` report does
         # NOT red at any measured COUNT: `cleared` reports whether the sweep's
         # TIME BUDGET sufficed — a function of runner load — not its residue
-        # (#4989). A `probe_failed` report at a measured COUNT of zero is a
+        # (#4989). A `probe_failed` report with no attributed server is a
         # warning, not a red: there is no live residue to bound, and the
-        # measured COUNT — not `cleared` — decides the verdict. It does NOT
+        # measured attribution — not `cleared` — decides the verdict. It does NOT
         # independently red a residue the sweep itself
         # measures and declines to act on (a server with a live client, an
-        # unconfirmed path-based server): that lands in `left` and passes at
-        # COUNT == left, bounded by the sweep's own measurement (#4884).
+        # unconfirmed path-based server): that lands in `left`/`own_left` and
+        # passes at own_now == own_left, bounded by the sweep's own measurement
+        # (#4884).
         # #1371 kill-aware: after a WATCHDOG kill (rc 124/137/2) the
         # orphan count is a GUARANTEED kill-path artifact — SIGKILL skips atexit
         # and the conftest end-sweep — not a leak signal, so the gate downgrades
@@ -1613,10 +1638,54 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+              # matched — measured on procps-ng 4.0.4 (`ps -p 1` → 0,
+              # `ps -p 999999` → 1, `ps -p 1,999999` → 0), and the procps man
+              # page publishes no exit-status contract at all, so `-eq 0` was
+              # an assumption the tool never made. That rc is a COMPLETED
+              # measurement of an empty population, not a failed probe: this
+              # read sits inside the residue's shutdown window, which the
+              # gate's own header documents as normal (a server the sweep
+              # still saw exits in the ~0.05s before this later probe), and
+              # every counted server exiting in between is most likely exactly
+              # at COUNT 1-2. Failing the job there reds a passing run that
+              # leaked nothing, with a message that blames attribution and
+              # sends the reader after a residue that does not exist. Only a
+              # real probe failure (rc>1, a missing `ps`, a timeout) reds. On
+              # the benign path the (truncated) file stays empty, so the gate
+              # reads own_now=0 — below every `own_left`, i.e. never a red.
+              [ "$arc" -le 1 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
 
       - name: Stop FalkorDB services (#6673)
         # Last step + always(): a failed or cancelled job must not leave a
@@ -1716,7 +1785,8 @@ jobs:
       # `slow_matrix` (tools/ci_selection.slow_matrix_include) and this job
       # expands it, exactly like `test`'s `fast_matrix` and `test-carve-out`'s
       # `carve_matrix` — so the leg count is `config/ci-surfaces.yml::slow_shards`
-      # and the partition is an LPT pack of `slow_files - carve_out` off the
+      # and the partition is an LPT pack of `slow_gating_files()` (slow_files -
+      # carve-out - non-gating lane, #10194) off the
       # committed `durations` map. Nothing here counts legs or lists files.
       #
       # WHY THE COUNT, MEASURED (5 newest completed main runs, 2026-10-21: ids
@@ -1858,7 +1928,7 @@ jobs:
         timeout-minutes: 10
         run: |
           exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
-      - name: Drift guard — the expanded legs cover slow_files minus carve-out (#1471/#9539)
+      - name: Drift guard — the expanded legs cover the gating slow pool (#1471/#9539/#10194)
         # #1471: the legs MUST cover the full slow-file set — a new slow file
         # added to config/ci-surfaces.yml `slow_files:` that lands in no leg
         # silently drops coverage (the #1260/#1270 drift class). Epic #1647 Task
@@ -1900,7 +1970,8 @@ jobs:
               print(f"❌ test-slow leg drift: missing={sorted(expected - union)} extra={sorted(union - expected)}")
               raise SystemExit(1)
           print(f"{len(legs)} legs cover exactly {len(expected)} slow files "
-                f"(union == slow_files - carve_out, no duplicates)")
+                f"(union == slow_gating_files(): slow_files - carve_out - "
+                f"non-gating lane, no duplicates)")
           EOF
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block — same mechanics as the
@@ -2035,11 +2106,17 @@ jobs:
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
           # shards derive their budget from. Since #9539 the legs are DERIVED
-          # (`slow_files - carve_out` LPT-packed into `slow_shards` = 5), so the
-          # heavier leg carries 7.58m — the DERIVED weight, not a committed row;
-          # the header on this job carries the derivation and the per-leg numbers.
-          # This literal 40m is 5.3x that weight, i.e. 2.6x the 2.0x minimum the
-          # headroom floor requires (15.2m); it was 10m
+          # (`slow_gating_files()` LPT-packed into `slow_shards` = 5, #10194), so the
+          # heavier leg carries the DERIVED weight, not a committed row. That
+          # weight MOVES: 7.58m when this budget was argued, 5.72m after #10194
+          # took the non-gating lane out of the pool. Read the live number from
+          # `python3 tools/ci_selection.py --non-gating-report` (it prints every
+          # leg's file count and estimated seconds) — do NOT quote one here, that
+          # is how this paragraph went stale the first time.
+          # This literal 40m is 6.99x that weight today, i.e. 3.5x the 2.0x
+          # minimum the headroom floor requires (11.44m today; the floor itself
+          # is `WATCHDOG_HEADROOM x heavier leg`, so it moves with the pool); it
+          # was 10m
           # when the committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). The 40m/60m
           # pair is deliberately NOT derived from the leg weight — tightening it
@@ -2145,7 +2222,10 @@ jobs:
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. On a
         # docker leg the sweep reports no embedded server was ever running, so
         # the bound is structurally 0; on a tier-2 embedded leg it is the
-        # sweep's own `left`. A `cleared: false` report does not red at any
+        # sweep's own post-sweep count of THIS RUN's servers (`own_left`), and
+        # every count-based red is applied to the servers attributed to this run
+        # (#1005) — a host-wide `COUNT` above `left` is a `::warning::`, never a
+        # verdict. A `cleared: false` report does not red at any
         # measured COUNT: `cleared` reports whether the sweep's TIME BUDGET
         # sufficed — a function of runner load — not its residue (#4989).
         if: always()
@@ -2162,10 +2242,54 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+              # matched — measured on procps-ng 4.0.4 (`ps -p 1` → 0,
+              # `ps -p 999999` → 1, `ps -p 1,999999` → 0), and the procps man
+              # page publishes no exit-status contract at all, so `-eq 0` was
+              # an assumption the tool never made. That rc is a COMPLETED
+              # measurement of an empty population, not a failed probe: this
+              # read sits inside the residue's shutdown window, which the
+              # gate's own header documents as normal (a server the sweep
+              # still saw exits in the ~0.05s before this later probe), and
+              # every counted server exiting in between is most likely exactly
+              # at COUNT 1-2. Failing the job there reds a passing run that
+              # leaked nothing, with a message that blames attribution and
+              # sends the reader after a residue that does not exist. Only a
+              # real probe failure (rc>1, a missing `ps`, a timeout) reds. On
+              # the benign path the (truncated) file stays empty, so the gate
+              # reads own_now=0 — below every `own_left`, i.e. never a red.
+              [ "$arc" -le 1 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
@@ -2947,12 +3071,17 @@ jobs:
         # Same gate contract as the fast/slow asserts (#4740): the bound is read
         # from the conftest session-end sweep's own report
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. The
-        # carve-out runs embedded, so the sweep reports its own `left`. The
-        # gate reds a leak that appears AFTER the sweep (COUNT > left), an
-        # accounting-identity violation, a probe_failed report above a measured
-        # COUNT of zero, an error or skipped report, a no_embedded_servers
-        # report above a measured COUNT of zero, and an unaccounted/unreadable
-        # report; a residue the sweep itself measures and declines to act on is
+        # carve-out runs embedded, so the sweep reports its own `left` — and
+        # #1005 applies every count-based red to the servers ATTRIBUTED to this
+        # run (own_now vs own_left), never to the host-wide `COUNT`. The
+        # gate reds this run's own servers growing after the sweep
+        # (own_now > own_left), an accounting-identity violation, a probe_failed
+        # report with an attributed residue above zero, an error or skipped
+        # report, a no_embedded_servers report with an attributed own_now above
+        # zero, and a report that is unaccounted, unreadable or unattributable
+        # (no usable `own_roots`); a host-wide `COUNT` above `left` is a
+        # `::warning::` diagnostic; a residue the sweep itself measures and
+        # declines to act on is
         # bounded by that measurement, not independently red (#4884). A
         # `cleared: false` report does not red at any measured COUNT: `cleared`
         # reports whether the sweep's TIME BUDGET sufficed — a function of
@@ -2971,10 +3100,54 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+              # matched — measured on procps-ng 4.0.4 (`ps -p 1` → 0,
+              # `ps -p 999999` → 1, `ps -p 1,999999` → 0), and the procps man
+              # page publishes no exit-status contract at all, so `-eq 0` was
+              # an assumption the tool never made. That rc is a COMPLETED
+              # measurement of an empty population, not a failed probe: this
+              # read sits inside the residue's shutdown window, which the
+              # gate's own header documents as normal (a server the sweep
+              # still saw exits in the ~0.05s before this later probe), and
+              # every counted server exiting in between is most likely exactly
+              # at COUNT 1-2. Failing the job there reds a passing run that
+              # leaked nothing, with a message that blames attribution and
+              # sends the reader after a residue that does not exist. Only a
+              # real probe failure (rc>1, a missing `ps`, a timeout) reds. On
+              # the benign path the (truncated) file stays empty, so the gate
+              # reads own_now=0 — below every `own_left`, i.e. never a red.
+              [ "$arc" -le 1 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
       - name: Upload carve-out log (measurement artifact, #1477)
         if: always()
         continue-on-error: true
@@ -3004,11 +3177,40 @@ jobs:
     # ci-surfaces carve_out files. A future revert of _KEEPALIVE_LOCK
     # (#2172) or the anchor semantics would produce NO CI failure anywhere —
     # the race would resurface only probabilistically (#2065/#2172 flake).
-    # This job runs the D14 set URI-less on every run (PR + push), ~1 min.
+    # This job runs the D14 set URI-less on every run (PR + push); measured
+    # whole-job p50 4.71m / p95 7.23m / max 8.03m (docs/ops/ci-wall-clock.md).
     needs: changes
     if: always() && needs.changes.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # #10182: the cap must cover EVERY step this job runs — `actions/cache`
+    # saves `~/.cache/pip` as a POST-step on a cache miss, and that save is
+    # charged against this timeout like any other step.
+    #
+    # Measured (run 40587081433, job 122533023160): the marker selection PASSED
+    # and the D14 artifact uploaded; then the cache save tarred 3.6 GB (3m24s)
+    # and was still uploading it — `Sent 2348810240 of 3608530109 (65.1%)` —
+    # when the old 20m ceiling elapsed at 01:20:19. The job reported
+    # `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
+    # cancelled leg certifies nothing), so a job whose work was green reddened
+    # a REQUIRED check on a diff that touches three Markdown files.
+    #
+    # The arithmetic that forces the raise is the job's OWN in-step cap, not
+    # this run's duration: `timeout … 15m` (below) + ~1m setup/install + ~9m
+    # for a cold save ≈ 25m against a 20m ceiling. On measured norms the margin
+    # is thinner than it looks — whole-job p50 4.71m / p95 7.23m / max 8.03m
+    # (docs/ops/ci-wall-clock.md) is measured over `success`/`failure` jobs
+    # only, so it CANNOT see a save that ran to cancellation; against a ~9m
+    # save that leaves ~3m, and this run's test step had already spent 12m32s
+    # of its own 15m cap.
+    #
+    # What this does NOT fix, and no job cap can: the in-step `15m` cap
+    # SIGINT-kills the step (pytest-attribution then emits INCOMPLETE) instead
+    # of letting it finish, and this run was within 2m28s of that — 9m11s of
+    # its 12m32s was COLLECTION (01:00:53 → 01:10:04) against a 221s norm for
+    # the whole step (docs/ci-timing.md). Tracked in #10212. Raising this number
+    # stops the cache SAVE from being the term that reds the gate; it does not
+    # make the shared-HOME pip cache small, which is why the save is 3.6 GB.
+    timeout-minutes: 40
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
@@ -3660,9 +3862,151 @@ jobs:
         if: always()
         uses: ./.github/actions/postgres-teardown
 
+  # ── "DID THIS PR INTRODUCE A FAILURE?" (#9984) ──────────────────────────────
+  # The required check used to ask "does anything fail anywhere?". Because it is ONE
+  # check aggregating every shard, a single pre-existing trunk red red'd it for EVERY
+  # PR — measured 2026-10-25: main green in 26 of its 27 Python CI jobs, the one red
+  # (#9979) red'd all 11 open PRs including ones touching nothing near it, and the
+  # repo-wide merge rate went to zero for ~8 hours on idle machines. The rail already
+  # asks the right question and exempts a failure main itself is red for; this job asks
+  # the same question of the same tree, with the same code.
+  #
+  # IT IS A SEPARATE JOB, NOT A STEP ON THE AGGREGATE, for two structural reasons:
+  #   * the aggregate's whole design is that its `needs:`+LEGS table IS its claim, and
+  #     it carries NO checkout and NO tooling — a step that runs repo code there would
+  #     be the first, which is why its step list is digest-pinned by
+  #     tests/test_capstone_preregistration_9075.py (a step in that job can export
+  #     `BASH_ENV` and make the required check exit 0 over a red leg);
+  #   * the verdict needs a checkout of THIS repo and of a PINNED agent-infra, and
+  #     giving the aggregate those steps is exactly the surface that pin refuses.
+  # So the aggregate consumes this job as one more need, and treats ITS result as the
+  # one failure that can never be deferred (a verdict cannot ask itself).
+  #
+  # `needs:` MUST STAY EQUAL to the aggregate's DEFERRABLE_LEGS — the predicate can only
+  # adjudicate a leg it waited for. The equality is pinned in both directions by
+  # `tests/test_ci_new_failure_gate.py`, because a drift either excuses a leg the verdict
+  # never looked at (a false PASS on the required check) or waits for a leg it can never
+  # excuse (a no-op verdict).
+  ci-introduced-failure:
+    # `always()`: this must run when the legs FAILED — that is the only case it exists
+    # for. Without it the default `success()` would skip it on exactly the red runs.
+    if: always()
+    # EXACTLY the arms that produce a TEST failure set — the only class #9984 lets the
+    # predicate excuse. The gate's own deferrable set is this same list (pinned by
+    # tests/test_ci_new_failure_gate.py), so a leg cannot be excused by a verdict that
+    # never waited for it (which would pass a red leg), and a leg cannot be waited for
+    # and never excused (which would make the verdict a no-op).
+    #
+    # ⛔ NOT `manifest-integrity`: a job on the path to the test matrix must not depend
+    # on the drift gate, or a drift would SKIP the matrix instead of failing it
+    # (#2656, pinned by test_drift_gate_cannot_skip_the_test_matrix).
+    needs: [test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres]
+    runs-on: ubuntu-latest
+    # Bounded: this job feeds the REQUIRED aggregate, and it makes a handful of API
+    # reads. A stalled GitHub must not hold `python-ci-gate` pending for hours.
+    timeout-minutes: 15
+    # Reading the run's jobs and their step logs is the whole requirement. Explicit, so
+    # a repository-setting drift cannot silently widen the token this check uses.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The rail's predicate, at a PIN. Unpinned, this job would track agent-infra
+      # `main` and could go red on a change nobody in this repo reviewed — on the
+      # surface every PR's merge depends on.
+      - name: Check out the shared CI predicate (pinned, #9984)
+        uses: actions/checkout@v4
+        with:
+          repository: daniel-ospina/agent-infra
+          path: .ci-predicate
+          ref: 0b8cfa37ea73c6b6b47db10c6bc32921d3b2d904
+
+      # #9018: this job shells out to `gh`, which is simply ABSENT on the fallback
+      # pool's minimal non-login PATH — where it reads as a test failure and is not
+      # one. Provide the tool or fail NAMING it.
+      - name: Runner tool contract — provide gh (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure gh
+
+      # Only when a leg actually FAILED: on an all-green run there is nothing to
+      # adjudicate, and on a `push` run the module refuses by design (see below). A
+      # `cancelled` leg is not in this set — the aggregate reds on that class itself,
+      # and a leg that never ran has no failure set to compare.
+      #
+      # ⛔ THE CONDITION MUST NAME EVERY CLASS THE AGGREGATE DELEGATES (#9984 review).
+      # The aggregate delegates BOTH `failure` and `timed_out` for a deferrable leg, and
+      # `contains()` is EXACT-ELEMENT membership over the joined array — so
+      # `always() && contains(needs.*.result, 'failure')` left a `timed_out` delegation
+      # with NO adjudicator: this job still RUNS (it is `always()`), its predicate step
+      # is SKIPPED, every remaining step succeeds, and the aggregate reads that
+      # job-level `success` as a certification — the required check goes GREEN on a PR
+      # whose shard timed out, with no comparison against main at all. Joined to the
+      # aggregate's own delegable set by
+      # `tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_every_class_the_aggregate_delegates`.
+      - name: Was a leg's failure introduced by this PR? (#9984)
+        if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'timed_out')) }}
+        env:
+          # `GH_TOKEN` is what the jobs/logs API reads. `github.token` carries exactly
+          # the `actions: read` this job declares — no wider.
+          GH_TOKEN: ${{ github.token }}
+          # The event payload, passed as ENV rather than inline: the values are only
+          # meaningful on `pull_request`, and a `push` invocation is refused by the
+          # module on purpose (below).
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          # ⛔ THE RED LEGS, FROM THE `needs` THIS JOB ALREADY WAITED FOR (#9984 review).
+          # `--red-legs` is the ONLY switch that turns on the module's "a red leg with
+          # NO failing job in the listing is unobservable" net, and nothing passed it:
+          # with it empty, `failing_jobs()` scopes to EVERY job and a red leg whose
+          # failed job is absent from the listing (or ended on a conclusion this module
+          # does not map) left `failed == []`, so `evaluate` took its "nothing failed →
+          # CLEAN" branch and this job's `success` certified a delegated red leg. That
+          # is the precise false PASS the module's own docstring promises cannot happen
+          # ("a listing that names no failing job for a red leg — each is 2, never 0").
+          # Derived from `toJSON(needs)` rather than a hand-kept list, so there is no
+          # second copy of the leg table to drift — the objection the `--red-legs`
+          # docstring raises against a caller passing its own table.
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -u
+          # `scripts/` is a MACHINE-LOCAL pointer (#9475: gitignored, NOT tracked — a
+          # git symlink cannot hold `$AGENT_INFRA_PATH`), so the runner has no copy of
+          # the rail's `ci-failure-set.sh` / `ci_exemption.py`. They are checked out
+          # from the pin above because the gate must ask the RAIL's question with the
+          # RAIL's code: a second implementation of "NEW failure" here would drift from
+          # the one the merge path enforces, and the drift would be discovered at 3
+          # a.m. by a lane (#9984 constraint 7).
+          #
+          # ── THE DECLARED BOUNDARY: PR-only ────────────────────────────────
+          # On `push`, "no new failure relative to main" is VACUOUS (the tree IS main)
+          # and main's redness is the baseline every PR is compared against — so the
+          # module REFUSES a push invocation and exits 2. That fails this job, which
+          # reds the aggregate, which keeps the old push behaviour: any red leg still
+          # reds the required check on main. Deliberate — the post-merge alarm must not
+          # be the thing this predicate silences.
+          #
+          # FAIL CLOSED: every non-zero from the module fails this job, including its
+          # "unmeasurable" exit — an unreadable baseline, an unreadable job log, a
+          # missing checkout. A missing check is not a green check.
+          rc=0
+          RED_LEGS=$(python3 -c 'import json,os; needs=json.loads(os.environ["NEEDS_JSON"]); print(" ".join(k for k,v in sorted(needs.items()) if (v or {}).get("result") in ("failure","timed_out")))')
+          python3 .github/scripts/new-failure-gate.py evaluate \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --head "$PR_HEAD" \
+            --event "$EVENT_NAME" \
+            --red-legs "$RED_LEGS" \
+            --agent-infra .ci-predicate || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::#9984 the introduced-failure predicate did not certify this tree (exit $rc) — a NEW failure, or a failure set that could not be measured; merge blocked"
+            exit 1
+          fi
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard]
+    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard, ci-introduced-failure]
     runs-on: ubuntu-latest
     # #3239 shape, and the most expensive instance of it: this IS the required
     # check (`merge_conditions` in .mergify.yml), and it carried no cap at all.
@@ -3678,6 +4022,15 @@ jobs:
         run: |
           RESULTS="${{ join(needs.*.result, ' ') }}"
           echo "matrix results: $RESULTS"
+          # #9984: the arms a failed TEST can be excused on, and the job that decides
+          # it. Both are plain shell vars, deliberately: this script must stay
+          # renderable by its own harness in tests/test_ci_selection.py, which refuses
+          # a script carrying a GitHub expression it cannot substitute.
+          # ⛔ THE TWO MUST AGREE (pinned by tests/test_ci_new_failure_gate.py): the
+          # verdict job's `needs:` is exactly this list, so it waits for every arm it
+          # can excuse and excuses nothing it did not wait for.
+          PREDICATE_JOB="ci-introduced-failure"
+          DEFERRABLE_LEGS="test test-slow test-carve-out test-concurrency-falkor packs-compile test-track-b test-d14-hosted-api test-record-postgres"
 
           #    `skipped` is NOT a pass by default. A docs-only diff legitimately
           #    skips the matrix, so a leg the SELECTOR declined may skip — but a
@@ -3705,11 +4058,25 @@ jobs:
           #    un-named.
           #
           #    Fail-closed is preserved and made explicit per class:
-          #      failure          -> red, named
+          #      failure          -> named, then handed to the INTRODUCED-FAILURE
+          #                          PREDICATE (#9984); red unless every failing id is
+          #                          main's own, and red CLOSED on any unmeasurable
           #      cancelled        -> red, named (a cancelled leg certifies nothing)
           #      empty (#5219)    -> red, named (a missing leg is not a pass)
           #      skipped+selected -> red, named (a lost shard is not a pass)
           #      skipped+declined -> pass (the selector declined this leg)
+          #
+          #    WHY `failure` IS THE ONE CLASS THAT IS HANDED ON (#9984). The gate used
+          #    to ask "does anything fail anywhere?". Because it is ONE required check
+          #    aggregating every shard, a single pre-existing trunk red red'd it for
+          #    every PR in the repo — measured 2026-10-25: main green in 26 of its 27
+          #    jobs, the one red (#9979) red'd all 11 open PRs including ones touching
+          #    nothing near it, and the repo-wide merge rate went to zero for ~8 hours
+          #    on idle machines. The rail already asks the right question and exempts a
+          #    failure main itself has; this hands the same tree to the same code.
+          #    What is NOT exemptible is unchanged and checked FIRST: a leg that never
+          #    ran (cancelled / skipped-while-selected / no result) can never be
+          #    excused as "pre-existing", because it produced no failure set at all.
           LEGS_FILE="$(mktemp)"
           cat > "$LEGS_FILE" <<'LEGS'
           changes|${{ needs.changes.result }}|-
@@ -3724,6 +4091,7 @@ jobs:
           test-d14-hosted-api|${{ needs.test-d14-hosted-api.result }}|-
           test-record-postgres|${{ needs.test-record-postgres.result }}|-
           surface-guard|${{ needs.surface-guard.result }}|-
+          ci-introduced-failure|${{ needs.ci-introduced-failure.result }}|-
           LEGS
 
           # Fail closed by construction, and NAME the leg while doing it: every
@@ -3734,6 +4102,11 @@ jobs:
           # twice; the loop itself never skips a red row, so a duplicate cannot
           # mask one.
           FAILED_LEGS=""
+          # #9984: the legs whose only complaint is "something failed". They are named
+          # HERE (so an operator still sees which shard is red) and then adjudicated by
+          # the predicate below. They are NOT in FAILED_LEGS: a red shard whose every
+          # failing id is main's own is not this PR's problem.
+          RED_LEGS=""
           while IFS='|' read -r leg result selected; do
             if [ -z "$leg" ]; then
               continue
@@ -3758,6 +4131,24 @@ jobs:
                 echo "::error::leg '$leg' reported NO RESULT (empty) — the #5219 missing-leg shape is not a pass; merge blocked"
                 FAILED_LEGS="$FAILED_LEGS$leg "
                 ;;
+              failure|timed_out)
+                # #9984: a failed TEST arm is adjudicated by `ci-introduced-failure`,
+                # which asks the rail's question about this same tree. The deferrable set
+                # is `$DEFERRABLE_LEGS` and nothing else: a non-test gate (surface,
+                # manifest, workflow-lint, or the verdict job itself) can never be
+                # excused as "pre-existing", and the verdict job in particular must not
+                # be deferred — that would make the verdict ask itself.
+                case " $DEFERRABLE_LEGS " in
+                  *" $leg "*)
+                    echo "  $leg: reported '$result' (selector: selected='$selected') — delegated to the introduced-failure predicate (#9984)"
+                    RED_LEGS="$RED_LEGS$leg "
+                    ;;
+                  *)
+                    echo "::error::leg '$leg' reported '$result' (selector: selected='$selected') — not a test arm, so it is not delegable; merge blocked"
+                    FAILED_LEGS="$FAILED_LEGS$leg "
+                    ;;
+                esac
+                ;;
               *)
                 echo "::error::leg '$leg' reported '$result' (selector: selected='$selected') — merge blocked"
                 FAILED_LEGS="$FAILED_LEGS$leg "
@@ -3776,16 +4167,54 @@ jobs:
           fi
 
           # Defence in depth (#5219): the plain sweep over `needs.*.result` is
-          # identity-BLIND — it cannot say WHICH leg — so it is the last resort for
-          # a failing/cancelled result that reached `needs:` with no row at all.
+          # identity-BLIND — it cannot say WHICH leg — so it is the last resort for a
+          # failing/cancelled result that reached `needs:` with NO row at all.
           # The invariant itself is owned by `.github/scripts/check-required-set.py
           # ::check_gate_legs` (run inside `manifest-integrity`, whose failure the
           # loop above already reports by name) and by
           # `tests/test_required_set_sync.py` at test time; this is the narrowest
           # third layer, and the only one still reachable if that guard is itself
           # what drifted (pinned by tests/test_ci_selection.py).
-          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+          # ⛔ `cancelled` IS SWEPT UNCONDITIONALLY (#9984 review). It can never be
+          # delegated — the leg loop above reds on that class by name — so a
+          # `cancelled` result still in `$RESULTS` without a row is drift, and gating
+          # the WHOLE sweep on `RED_LEGS` being empty made a delegated `failure`
+          # elsewhere blind this layer to a leg that never ran. Measured pre-fix: a
+          # `cancelled` need whose row was deleted passed rc=0 as soon as one
+          # deferrable leg was delegated.
+          # ⛔ THE `failure` HALF IS GATED ON A COUNT, NOT ON `RED_LEGS` BEING EMPTY
+          # (#9984 review). `RED_LEGS` is non-empty whenever ANY deferrable leg is
+          # delegated — which is a different question from "did every `failure` in
+          # `$RESULTS` reach this loop as a row?". Gating on emptiness therefore
+          # blinded this layer in its OWN case: an un-rowed `failure` need, plus any
+          # OTHER delegated leg, took the sweep to rc=0 and the check printed
+          # "did not introduce it" over a leg the row table never looked at
+          # (measured: `extra=('failure',)` + `test=failure` → rc=0 pre-fix).
+          # Comparing counts closes that without re-redding the delegated class: the
+          # sweep fires exactly when more failure/timed_out results arrived than rows
+          # claim them, which is precisely "a result with no row".
+          # Both halves stay LITERAL — `failure|cancelled` is pinned as a line of code
+          # (#9240), so the literal survives here even though the gate moved.
+          RESULT_FAILS=$(printf '%s\n' $RESULTS | grep -cxE 'failure|timed_out' || true)
+          ROW_FAILS=$(awk -F'|' '$2 == "failure" || $2 == "timed_out" { n++ } END { print n+0 }' "$LEGS_FILE")
+          if echo "$RESULTS" | grep -qE 'cancelled' \
+             || { [ "$RESULT_FAILS" -gt "$ROW_FAILS" ] && echo "$RESULTS" | grep -qE 'failure|cancelled'; }; then
             echo "::error::a need reported failure-or-cancelled but no leg row named it — the leg table above has drifted from needs:; merge blocked"
+            rm -f "$LEGS_FILE"
             exit 1
           fi
-          echo "✅ every declared leg ran to success, or was declined by the selector"
+
+          # ── THE VERDICT (#9984) ─────────────────────────────────────────────
+          # A failed shard is no longer this check's problem on its own: it delegated
+          # to `ci-introduced-failure`, which asked the RAIL's question about the same
+          # tree (the same `ci_exemption.py decide` the merge path enforces). If that
+          # job did not SUCCEED, its own row above already put it in FAILED_LEGS and we
+          # never reach here — so arriving with RED_LEGS means every failed shard was
+          # certified as main's own pre-existing red.
+          rm -f "$LEGS_FILE"
+          if [ -n "$RED_LEGS" ]; then
+            RED_COUNT=$(printf '%s\n' $RED_LEGS | sort -u | wc -l | tr -d ' ')
+            echo "✅ $RED_COUNT leg(s) failed ($RED_LEGS), and $PREDICATE_JOB certified every failing id as main's own pre-existing red — this PR did not introduce it (#9984)"
+          else
+            echo "✅ every declared leg ran to success, or was declined by the selector"
+          fi

@@ -4,6 +4,7 @@ type: engineering
 domain: operations
 doc_status: live
 created: 2026-10-27
+updated: 2026-10-27
 subjects.team: epistemic-team
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
@@ -89,20 +90,23 @@ git diff --name-only origin/main...HEAD | uv run python tools/ci_selection.py --
 
 ## Trap 2 — a big number is the selector working
 
-The selection is **surface**-based, not import-graph based. `core` alone is **738 test files** out of
-**1,219** in the tree (737 / 1,218 before this lane registered its own test file), and a docs-prose
-diff still pulls its surface's smoke set. Measured at this head:
+The selection is **surface**-based, not import-graph based. `core` alone is **743 test files** out of
+**1,224** in the tree (re-measured 2026-10-27 at `77dc2bbba` + #10194's own test file; it was
+737 / 1,218 when this doc was written), and a docs-prose diff still pulls its surface's smoke set.
+Measured at this head:
 
 | Changed path | Selection | Files |
 |---|---|---|
 | `docs/blog-authoring.md` (prose) | surfaces `onboarding`, not full | 137 |
 | `tools/run_affected.sh` (non-python tool) | tier-1 smoke, surfaces `[]` | 64 |
 | `tortoise/sdk.py` (SHARED_MODULE) | `full: true` — blast radius | all |
-| `config/ci-surfaces.yml` (falls to `core`) | surfaces `core`, not full | 684 |
+| `config/ci-surfaces.yml` (falls to `core`) | surfaces `core`, not full | 687 |
 | `HEAD...HEAD` (nothing) | nothing, and it says so | 0 |
 
 So a few hundred files for one small diff is expected — a `config/` edit pulls the whole `core`
-surface (that 684 is this lane's own diff). If a number really looks wrong, the summary line names the
+surface (that 687 is this lane's own diff: it moved from 688 when #10194 took the two
+`tests/eval/` files a `config/` diff used to select out of the gate, and its own test file is the
++1 back). If a number really looks wrong, the summary line names the
 surfaces responsible — that is the diagnostic, not a smaller number.
 
 ## What it does NOT run
@@ -123,6 +127,21 @@ export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 uv run pytest tests/test_onboarding_state.py -q
 ```
 
+A **fourth** set is subtracted, and it is the one that surprises people: the **non-gating lane**
+(`config/ci-surfaces.yml: on_demand` — **44 files** at this head). These are tests that exist and run
+but are deliberately not a merge gate:
+
+| lane entry | files | its runner |
+|---|---|---|
+| `eval/**` + `longmem_eval/**` (the subtree form, expanded against disk — the count GROWS with the subtree and is never a literal) | 43 | `.github/workflows/eval-suite-manual.yml` — `workflow_dispatch` only (#10194) |
+| `eval/retrieval/test_integration.py` (already inside `eval/**`, so it runs in BOTH shapes — and it is the most expensive of the subtree's files: 1 523.4 s of their 2 604.3 s, measured over the 42 they numbered at #10194) | 0 extra | `.github/workflows/evals-on-demand.yml` — its own literal lane entry, embedded shape (#4711) · and `.github/workflows/eval-suite-manual.yml`, docker shape, as one of the subtree's files |
+| `test_perf_lane_volunteer_context.py` | 1 | `.github/workflows/perf-lane.yml` (#3992) |
+
+So a diff under `tests/eval/` or `tests/longmem_eval/`, or one that selects the `eval` surface (an
+`eval`-registered test file, `tools/longmem_eval/…`, `tortoise/embeddings.py`), will select **none of
+those files** — a green PR there says nothing about them. That is the owner's decision (#10194, evals
+paused), not a tool defect: run the manual workflow, or `--run` with the paths yourself.
+
 `--run` otherwise runs the fast set only — the same files the PR's shard legs run. Without that
 export, a default checkout **refuses** the run outright (epic #1647 P4): the URI gate reds every test
 in the selection at fixture setup, which reads as "my diff broke things" when it is the environment.
@@ -140,8 +159,9 @@ in the selection at fixture setup, which reads as "my diff broke things" when it
 ## How the selection works, and what this tool cannot fix
 
 `select()` maps each changed path to a surface via `SOURCE_PATTERNS` / `SHARED_MODULES` in
-`tools/ci_selection.py`, unions those surfaces' test files, then subtracts the slow, carve-out and
-URI-requiring sets. Unknown paths and shared modules fail closed to FULL, on purpose.
+`tools/ci_selection.py`, unions those surfaces' test files, then subtracts the slow, carve-out,
+URI-requiring and non-gating-lane sets. Unknown paths and shared modules fail closed to FULL, on
+purpose.
 
 What that means for the number you see:
 
@@ -150,8 +170,11 @@ What that means for the number you see:
   direction every comparable system takes (below).
 - **Membership is not this tool's to choose.** Moving a test file between surfaces, or between the
   fast pool and `slow_files` / `on_demand`, is a curation decision in `config/ci-surfaces.yml` and
-  needs its own evidence (#10127). This tool only *reads* that manifest, and its own test file is the
-  only row it registers.
+  needs its own evidence (#10127). An `on_demand` entry takes two forms — one file, or a `dir/**`
+  subtree expanded against disk — and a subtree is the right spelling when the UNIT of the decision is
+  a directory (#10194's `eval/**`, `longmem_eval/**`): a new file under it is off the gate with no
+  config edit, where a literal list would put it back into a shard and tell nobody. This tool only
+  *reads* that manifest, and its own test file is the only row it registers.
 
 ## What comparable selective runners do (and what we took)
 

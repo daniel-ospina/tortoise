@@ -57,7 +57,21 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    constant the live fold would have written (#9634). Named honestly, including
    its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
    plan against the VIEW, so it cannot see a property the VIEW carries — the
-   bound on the exception is the drift pin, not that test.
+   bound on the exception is the drift pin, not that test. A **second** declared
+   exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half, #9974): a
+   property the record is FORBIDDEN to store and the cache must COMPUTE from the
+   columns it does carry — `status` from a supersession carrier
+   (`supersededBy`/`supersededAt`). Same bound, same pin shape; the divergences
+   from the record's own `public.*_current_status` views (their `ELSE 'live'`
+   branch, and their `IS NOT NULL` reading of an empty carrier) are measured and
+   named at that table, as is the residue it deliberately does NOT derive. A
+   **third** declared exception is :data:`EVENT_STREAM_FOLDS` (#10198): the same
+   `status`, derived not from a COLUMN but from the record's own EVENT STREAM
+   (`public.journal_event`), because the connector/pack lifecycle vocabulary is
+   declared at RUNTIME by packs and is not reconstructible from any row. Its
+   source is ordered by `seq`, its vocabulary is imported from
+   :mod:`tortoise.status_folds` (never restated here), and its bound — the
+   terminal statuses the record has no carrier for — is stated at the table.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -102,12 +116,15 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "DERIVED_FROM_RECORD",
+    "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
     "RELATION_TABLE",
     "AmbiguousRecordColumn",
     "CacheProjectionError",
+    "LifecycleEvent",
     "ProjectionPlan",
     "ProjectionReport",
     "RecordNode",
@@ -118,6 +135,7 @@ __all__ = [
     "UnknownRecordLabel",
     "UnprojectableRecord",
     "ambiguities",
+    "apply_event_stream_folds",
     "bookkeeping_columns",
     "canonical_property",
     "declaration_for",
@@ -130,6 +148,7 @@ __all__ = [
     "project_records",
     "projected_columns",
     "projected_properties",
+    "read_lifecycle_events",
     "read_record_view",
     "record_plan",
     "relation_from_row",
@@ -249,9 +268,13 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
 #: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
-#:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
-#:   so nothing a record row carries could contradict this table, and the cache
-#:   seeds it through the fold.
+#:   `record_projection.OpDispatch.never_store`); the schema has no column for it.
+#:   It is NOT a constant this table may fill, because it is not a DEFAULT here:
+#:   it is DERIVED from another column the record does hold, and that derivation
+#:   is :data:`DERIVED_FROM_RECORD`'s job (below). Filling `'live'` from this
+#:   table would *fabricate* a positive claim over a value the record carries —
+#:   the one thing a fold-derived default must never do (#9634's own rule:
+#:   a default stands in where the record is SILENT).
 #: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
 #:   REBUILD INSTANT, so there is nothing for a table to pin.
 #: * `Source.sourceKind` — ONTOLOGY §4.6 REQUIRED, `public.source.source_kind`
@@ -314,6 +337,264 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
     "Subject": {"subjectKind": "other"},
     "Object": {"objectKind": "other", "title": ""},
 }
+
+#: The CACHE-owned lifecycle properties, DERIVED from record COLUMNS — the
+#: *other half* of §2.6's split, and the half the CACHE had no owner for (#9974).
+#:
+#: WHY THIS TABLE EXISTS. §2.6 (`02-identity-and-placement.md`) classifies
+#: `Object.status` / `Subject.status` as **DERIVED (a cache)** — *"the journal
+#: value is not the record"* — and both schemas refuse the name in `props`
+#: (`chk_object_props_no_derived` #8179, `chk_subject_props_no_derived` #8263),
+#: so the record must not store it. The record layer DOES define the fold —
+#: `public.object_current_status` / `public.subject_current_status`
+#: (`20261012000004_record_procedural.sql`) compute it as
+#: `superseded_by IS NOT NULL OR superseded_at IS NOT NULL → 'superseded' ELSE
+#: 'live'` — but the CACHE projection invoked no fold, so a **record-sourced
+#: rebuild** materialized every `:Object` with no `status`. And
+#: `live._terminal_excluded` reads an ABSENT status as LIVE *by design* (the
+#: legacy-node rule), so a superseded Object came back LIVE and
+#: `entity_identity.resolve_entity_id` resolved a name to it. That is #9974,
+#: measured: superseded live → rebuild → `status` NULL → the name resolves to
+#: the superseded id.
+#:
+#: WHY DERIVATION AND NOT A FILL. `status` is not a constant: the fold derives
+#: it from the event stream (`_fold_object_superseded` → `'superseded'`;
+#: `status_folds` / `_fold_object_status` → the connector and pack-declared
+#: vocabularies; `EntityMutated op=restatus` → a caller's explicit lifecycle
+#: write). `FOLD_ON_CREATE_DEFAULTS` above may NOT fill it, because filling
+#: `'live'` where the record names a supersession would replace a carried value
+#: with a fabricated one.
+#:
+#: WHAT THIS TABLE CAN AND CANNOT DERIVE — stated, because "a cache owns it" is
+#: only true where the record carries the signal, and the residue is a decision
+#: rather than an omission (#9974):
+#:
+#: * **DERIVED — a supersession, from EITHER PRIMARY carrier.** §2.6 makes
+#:   `supersededBy` AND `supersededAt` PRIMARY, and the record's own views read
+#:   them with `OR`. Both carriers are needed because the record genuinely
+#:   produces rows with only one of them: an id-only (legacy §6b)
+#:   `ObjectSuperseded` writes `superseded_at` ALONE and replays through the
+#:   fold as `status='superseded'` with `supersededBy=''`
+#:   (`test_status_projection.py::test_rebuild_all_legacy_6b_id_only_shape_supersedes`,
+#:   #2164/#2193), while an `op=supersede` mutation may write `superseded_by`
+#:   with no instant. Deriving from `supersededBy` alone left the id-only shape
+#:   resurrected — #9974's own measured defect, still open on a shape the record
+#:   still emits.
+#:   ⚠️ TWO deliberate divergences from those views, both measured, so neither is
+#:   a guess:
+#:   (a) The views' `ELSE 'live'` branch is NOT mirrored. An absent status
+#:   already reads LIVE to `live._terminal_excluded` (its documented legacy-node
+#:   rule), so the branch changes no terminal decision — while WRITING `'live'`
+#:   would assert a positive lifecycle claim about a row whose real status the
+#:   record may carry elsewhere (a `restatus`, below) and this table cannot
+#:   read. Same no-fabrication rule `FOLD_ON_CREATE_DEFAULTS` obeys.
+#:   (b) A carrier must be PRESENT AND NON-EMPTY, which is narrower than the
+#:   views' `IS NOT NULL` — and it is the views, not this table, that are wrong
+#:   on that edge. Measured on a live engine:
+#:   `update_entity(obj, supersededBy="")` leaves the node
+#:   `status='live', supersededBy=''`, so `'' IS NOT NULL` makes
+#:   `public.object_current_status` answer `'superseded'` for a node the graph
+#:   holds LIVE. Truthiness agrees with the graph here, so it is what this table
+#:   uses; `tests/test_cache_projection.py`'s
+#:   `test_an_empty_carrier_is_not_a_supersession` pins the measured edge.
+#: * **NOT MONOTONE — the carriers CAN be cleared, and the record writes that.**
+#:   An explicit `sdk.update_entity(obj, status='live', supersededBy=None,
+#:   supersededAt=None)` journals `EntityMutated op=supersede` with null state and
+#:   the record mutation is `UPDATE public.object SET superseded_by = %s,
+#:   superseded_at = %s` bound to `(None, None)` — measured, carriers cleared, and
+#:   a rebuild then correctly derives nothing. Only the STATUS-ONLY
+#:   `update_entity(status='live')` shape is a record no-op (`never_store` yields
+#:   a literal `SET node_key = node_key`), so only that shape leaves an
+#:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
+#:   express un-superseded"; it can, via the carriers.
+#: * **⚠️ NOT SOUND FOR A CARRIER SET WITHOUT THE STATUS FOLD — a LIVE-WRITER
+#:   divergence, measured and OWNED BY #10192.** A carrier present does NOT imply
+#:   the node's `status` is `'superseded'`. Measured on a live engine at this
+#:   head, all three ACCEPTED by `update_entity`:
+#:
+#:       update_entity(obj, supersededBy='v2')                  -> status='live', supersededBy='v2'
+#:       update_entity(obj, supersededAt='2026-01-01T00:00:00Z') -> status='live', supersededAt='…'
+#:       update_entity(obj, supersededBy='')                    -> status='live', supersededBy=''
+#:       update_entity(obj, status='superseded', supersededBy='p-v2') -> status='superseded'  (the coherent pair)
+#:
+#:   The record writes the carrier (`op=supersede` is the classifier's reading of
+#:   that write), so a rebuild would materialize a TERMINAL node for an entity
+#:   the live graph holds LIVE — `live._terminal_excluded` drops it from recall
+#:   and `entity_identity.resolve_entity_id` refuses its name. BOTH carriers are
+#:   exposed; the empty-carrier case is the one this table escapes (see (b)
+#:   above), and the non-empty cases are #10192's, which owns the fix (a write-door
+#:   coherence guard vs a change to the record's fold — its decision, not this
+#:   table's). This table does not try to compensate: it cannot see the graph, and
+#:   inventing a second rule here would give the cache and the record two
+#:   different folds — the defect #9974 is about.
+#: * **NOT DERIVED — `superseded`, and every other `restatus` value
+#:   (`deprecated`/`archived`/`retracted`/`draft`).** The event-kind
+#:   vocabularies this bullet used to name are now derived from the record's
+#:   EVENT STREAM instead — see :data:`EVENT_STREAM_FOLDS` (#10198); they were
+#:   never derivable from a COLUMN, which is why they are not here.
+#:   `superseded` is named FIRST because it is the value this
+#:   table exists to derive and it too can be reached WITHOUT a carrier: measured,
+#:   `update_entity(subject, status='superseded')` leaves `status='superseded'`
+#:   with `supersededBy`/`supersededAt` both absent, and the record mutation is
+#:   the `never_store` no-op. An explicit `update_entity(status=…)` journals
+#:   `EntityMutated op=restatus`, whose ONLY carrier of the value is
+#:   `public.journal_event.payload` (`state.status`) — `public.object` has no
+#:   row-level trace, and the props tail refuses the name. So #9974 stays open on
+#:   every `restatus` shape, `superseded` included; it is NOT closed by the
+#:   carrier derivation. Those values are NOT recoverable from the record's
+#:   LAYER tables, which is what this projection reads. Recovering them means
+#:   changing what a record-sourced rebuild READS (the journal, or a schema
+#:   column) — an ownership decision on #9974, not a silent default here. Naming
+#:   it is the bound on this table: it narrows #9974's window, it does not close
+#:   it. ⚠️ It is ALSO the bound's other half for :data:`EVENT_STREAM_FOLDS`: a
+#:   `restatus` to a TERMINAL status (`archived`) suppresses the connector fold on
+#:   a live graph and has no record signal here, so the event-stream fold can
+#:   label such an Object where the graph kept it terminal. Both readings land it
+#:   VISIBLE in `recall_state`'s default view (an absent status already reads
+#:   LIVE), so the fold narrows the window rather than widening it.
+#:
+#: `(property, source properties, value)`, applied in :func:`node_from_row` only
+#: where the record is SILENT about the target property — which, for a name the
+#: schema refuses, is always. The value is derived when ANY declared source is
+#: present and non-empty; the sources are alternatives (the record emits each
+#: alone), never a preference order.
+DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
+    "Object": (("status", ("supersededBy", "supersededAt"), "superseded"),),
+    "Subject": (("status", ("supersededBy", "supersededAt"), "superseded"),),
+}
+
+#: The properties the cache COMPUTES from the record's EVENT STREAM — the third
+#: declared exception to "the cache is the record's rows", and the answer to
+#: #10198.
+#:
+#: WHY A THIRD TABLE. :data:`FOLD_ON_CREATE_DEFAULTS` derives from the FOLD's
+#: constants and :data:`DERIVED_FROM_RECORD` derives from the record's COLUMNS.
+#: Neither can reach the connector/pack lifecycle: `_fold_object_status`
+#: (``projection/entities.py``) writes `in_progress`/`completed` from
+#: `status_folds.BUILTIN_CONNECTOR_FOLDS` plus every pack-declared
+#: `kindDefs.<kind>.folds` — a vocabulary declared by packs at RUNTIME. No
+#: `public.object` row carries it, which is why a record-sourced rebuild
+#: materialised every connector-tracked Object with no `status`, why
+#: `live._terminal_excluded` read those as LIVE, and why the shipped
+#: ``record_reconcile`` trigger reported `status` under `graph_only` — "the cache
+#: holds it, the record cannot place it" — for every tenant with connector work
+#: items. A `graph_only` count that is permanently non-zero is worthless for the
+#: same reason #10017 R2 found `relations_not_written` worthless: it is a
+#: declared partial signal that is always on. MEASURED before this table (a real
+#: Postgres, the record replayed from a live `EventAPI` journal): the live
+#: `github.issue.closed` Object held `status='completed'`, the rebuilt node
+#: carried no `status` at all, and the reconcile trigger's `graph_only` carried
+#: one `status` per Object.
+#:
+#: WHY THE EVENT STREAM AND NOT THE VIEW. `public.object_current_status` folds
+#: ONLY the two states the Object ROW can reconstruct (`live`/`superseded`) and
+#: its own `COMMENT` delegates the rest: *"the connector work-item states
+#: (in_progress/completed) are not reconstructible from the Object row and are
+#: the projection's (#7969) to fold from public.journal_event"*
+#: (`20261012000004_record_procedural.sql`; the same division is recorded in
+#: `docs/epics/2026-10-10-7879-postgres-record/03-schema.md` §5.4). So this is
+#: not a second answer to the view's question — it is the half the view declines
+#: to answer, in the layer the record assigns it. Widening the VIEW instead would
+#: have required a record-side declaration table (a schema decision) or a SQL
+#: copy of the vocabulary, which §"Whichever it is" on #10198 forbids: the
+#: vocabulary has ONE home, :mod:`tortoise.status_folds`.
+#:
+#: WHAT IT READS. `public.journal_event`, the record's own history, restricted to
+#: `event_type = 'EventRecorded'` and ordered by `seq` — the per-graph journal
+#: position, which is exactly the order the live fold applies events in. The
+#: per-event payload keys (`eventKind`/`object`/`about_entities`) are the
+#: projection's contract (#7969); they are read HERE, in the projection, and
+#: nowhere else. The payload is unwrapped to the event ITSELF first, because the
+#: record persists two envelope shapes and only one is flat (see
+#: :data:`_PAYLOAD_EVENT`) — the live fold unwraps the nested one, so a reader
+#: that did not would fold nothing for every conversation-mined event, silently.
+#:
+#: HOW IT FOLDS. The LIVE fold's semantics, imported rather than restated:
+#:
+#: * **the events replayed in `seq` order**, over the ones that name the Object —
+#:   its `object` (the event's declared target) or one of its `about_entities`
+#:   (the loose list the extraction pipeline emits instead). `about_entities` is
+#:   PREFERRED over `aboutEntities`, not unioned with it, exactly as the live
+#:   fold reads them;
+#: * **pack-declared folds first**, guarded to an Object whose `objectKind` is
+#:   the DECLARING pack's namespaced kind; **then the built-in connector
+#:   compatibility fold**, guarded to an Object whose kind declares NO lifecycle
+#:   (a kind that declares `statuses` OWNS its state — the #2725 collision);
+#: * **a terminal Object is never resurrected.** The live guard is `o.status IS
+#:   NULL OR NOT (o.status IN $excluded)`, applied to EVERY `SET`, so it is a
+#:   state machine rather than a last-writer pick: once a write makes the Object
+#:   terminal, the later folds are refused. This replays the stream with that
+#:   same guard per event (:func:`_is_terminal_status`), so a pack fold that
+#:   targets a terminal word (`archived`) latches instead of being overwritten
+#:   by the next event — and a supersession (`superseded`, from
+#:   :data:`DERIVED_FROM_RECORD`) still wins in either temporal order. Replaying
+#:   the transition rules, rather than reading the last event's value, IS what a
+#:   rebuild of an event-sourced projection is (Microsoft Learn, *Event Sourcing
+#:   pattern*: rehydration = *"replaying all the events in its stream"*).
+#:
+#: ⚠️ **BOUND — a TERMINAL `restatus` (`deprecated`/`archived`/`retracted`) is
+#: not honoured**, because the record carries no signal for it (see
+#: :data:`DERIVED_FROM_RECORD`'s NOT-DERIVED bullet). Measured consequence: an
+#: Object the graph holds `archived` and that later receives a
+#: `github.issue.closed` is folded to `completed` here where the live fold
+#: refused. That does NOT make it newly visible — an ABSENT status already reads
+#: LIVE to `_terminal_excluded`, so the pre-#10198 rebuild showed it too. The
+#: converse cannot happen either: a terminal value this fold produces is one a
+#: PACK fold declared and the live fold wrote too (`archive → archived`), so a
+#: rebuild hides only Objects the live graph presents as terminal as well.
+#: Closing the `restatus` gap needs a record carrier for it, which is #9974's
+#: ownership decision, not this table's.
+#: ⚠️ **BOUND — the fold's AUDIT emission is not reproduced.**
+#: `_fold_object_status` emits `status_fold_unapplied` (#1934) when a declared
+#: fold's explicit target is absent. That is a warning about a WRITE, not graph
+#: state, so a rebuild has nothing to restore from it.
+#:
+#: `{label: (property, ...)}` — spelled as a table so the suite can pin its
+#: scope, exactly as the other two exceptions are pinned.
+EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
+    "Object": ("status",),
+}
+
+
+@dataclass(frozen=True)
+class LifecycleEvent:
+    """One record-sourced `EventRecorded`, reduced to what the status fold reads.
+
+    Deliberately NOT the event payload: a fold that carried the whole dict would
+    be a second `:Event` writer, and the projection already materializes the
+    `:Event` from its row. `seq` is the graph's journal position (the ordering
+    the live fold applies events in) and the ONLY field that is not a graph
+    property.
+
+    ``object_name`` is the event's declared target (the record's `object`
+    column); ``about_names`` is the loose list the extraction pipeline emits
+    instead. Both are graph NAME keys, not ids — the live fold matches
+    `MATCH (o:Object {name:$n})`, and a rebuild must fold onto exactly the rows
+    that MATCH would have hit.
+    """
+
+    seq: int
+    event_kind: str
+    object_name: str | None = None
+    about_names: tuple[str, ...] = ()
+
+    def targets(self) -> tuple[tuple[str, bool], ...]:
+        """``(name, is_explicit_object)``, deduplicated, declared target first.
+
+        The live fold builds the same list: the explicit `object` is folded AND
+        reported on a miss, an `about_entities` entry is folded silently, and a
+        name that is both is written once.
+        """
+        out: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        if self.object_name:
+            out.append((self.object_name, True))
+            seen.add(self.object_name)
+        for name in self.about_names:
+            if isinstance(name, str) and name and name not in seen:
+                out.append((name, False))
+                seen.add(name)
+        return tuple(out)
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
 _PLACEMENT_DOC = (
@@ -611,6 +892,14 @@ class RecordView:
 
     nodes: tuple[RecordNode, ...] = ()
     relations: tuple[RecordRelation, ...] = ()
+    #: The record's `EventRecorded` stream, as the lifecycle fold's inputs
+    #: (#10198). It rides the VIEW rather than only being consumed inside
+    #: `read_record_view` because a rebuild is a pure function of the view: a
+    #: caller that assembles a view without a connection would otherwise get a
+    #: cache with no connector lifecycle, i.e. the defect this field closes.
+    #: Empty is a legitimate value — a graph with no event stream folds nothing,
+    #: which is exactly the pre-#10198 behaviour.
+    lifecycle_events: tuple[LifecycleEvent, ...] = ()
 
     @property
     def record_keys(self) -> tuple[tuple[str, str], ...]:
@@ -723,6 +1012,23 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
         if props.get(prop) is None:
             props[prop] = default
+    # §2.6's DERIVED half (#9974): the cache COMPUTES a projection-owned
+    # property from the columns the record does carry. Applied AFTER the
+    # defaults and only where the record is silent about the target, so a record
+    # that ever states the value wins over the derivation. `_props_from_row`
+    # cannot state it for `status` (the schema refuses the name), which is why
+    # this is the only path that can put a lifecycle value on a rebuilt node.
+    #
+    # ANY declared source suffices, and it must be non-empty — the sources are
+    # alternatives (the record emits each alone: an id-only legacy supersession
+    # carries `supersededAt` and NOT `supersededBy`), never a preference order.
+    # A single-source reading left the id-only shape underived and therefore
+    # LIVE on rebuild, which is #9974 itself. Truthiness (not the record views'
+    # `IS NOT NULL`) is deliberate: an empty carrier is measured to coexist with
+    # a LIVE node; see DERIVED_FROM_RECORD's bound.
+    for prop, sources, value in DERIVED_FROM_RECORD.get(label, ()):
+        if props.get(prop) is None and any(props.get(src) for src in sources):
+            props[prop] = value
     return RecordNode(label=label, key=raw, props=props)
 
 
@@ -756,6 +1062,275 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
                           props=props)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# The EVENT-STREAM fold — the connector / pack lifecycle (#10198)
+# ════════════════════════════════════════════════════════════════════════════
+
+#: The event ITSELF, out of a `public.journal_event.payload`. TWO shapes are
+#: persisted, and the live fold unwraps one of them:
+#:
+#: * **flat** — `eventKind` / `object` / `about_entities` at the top level, what
+#:   `EventAPI._emit` journals; and
+#: * **nested** — `{"version": "1.0", "type": "EventRecorded", "event": {…},
+#:   "createdAt": …}`, what `ConversationMiner._emit_event` builds and writes to
+#:   the record (`mining.py`, #5475). `_journal_row` strips the envelope keys
+#:   (`record_projection.ENVELOPE_KEYS` = type/ts/event_id/initiated_by/
+#:   projection_version/seq), so `version`, `event` and `createdAt` SURVIVE and
+#:   `payload ->> 'eventKind'` is NULL for every mined event.
+#:
+#: The live fold reads both — `inner = event.get("event", event)`
+#: (`projection/entities.py::apply`) — so a record-side reader that read only the
+#: top level would fold NOTHING for a mined event, in silence (review P2).
+#: `jsonb_typeof` is what makes the unwrap exact: `payload -> 'event'` yields JSON
+#: `null` (not SQL NULL) for a missing key, which `COALESCE` would keep.
+_PAYLOAD_EVENT = ("COALESCE(CASE WHEN jsonb_typeof(payload -> 'event') = 'object' "
+                  "THEN payload -> 'event' ELSE NULL END, payload)")
+
+#: The record's own event stream, reduced to the fold's inputs. `seq` orders it.
+#: ⚠️ The payload keys are the projection's own contract (#7969) — this is the
+#: projection reading them, which is where `status_folds` says the fold lives.
+_LIFECYCLE_EVENTS_SQL = (
+    "SELECT seq, "
+    f"       {_PAYLOAD_EVENT} ->> 'eventKind' AS event_kind, "
+    f"       {_PAYLOAD_EVENT} ->> 'object'    AS object_name, "
+    f"       {_PAYLOAD_EVENT} -> 'about_entities' AS about_entities, "
+    f"       {_PAYLOAD_EVENT} -> 'aboutEntities'  AS about_entities_camel "
+    "FROM public.journal_event "
+    "WHERE org_id = %s AND graph_id = %s "
+    "  AND event_type = 'EventRecorded'"
+)
+
+#: The same statement narrowed to the events that could name ONE Object. The
+#: `@>` containment test reads an ARRAY and a bare STRING the same way
+#: (a scalar contains itself), which is why it is used instead of `?` — the
+#: pipeline emits `about_entities` as a list, but a hand-written event may spell
+#: it as one string, and the live fold normalises that case rather than
+#: dropping it.
+_LIFECYCLE_EVENTS_FOR_ONE_SQL = (
+    _LIFECYCLE_EVENTS_SQL
+    + f" AND (({_PAYLOAD_EVENT} ->> 'object') = %s"
+      f" OR ({_PAYLOAD_EVENT} -> 'about_entities') @> to_jsonb(%s::text)"
+      f" OR ({_PAYLOAD_EVENT} -> 'aboutEntities')  @> to_jsonb(%s::text))"
+)
+
+
+def _as_names(value: Any) -> tuple[str, ...]:
+    """`about_entities`/`aboutEntities` as a tuple of names, whatever shape.
+
+    The live fold normalises the same three shapes (`inner.get("about_entities")
+    or inner.get("aboutEntities") or []`, then a bare string becomes a one-item
+    list); a rebuild that only handled the list form would silently drop every
+    hand-written event.
+    """
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(v for v in value if isinstance(v, str) and v)
+    return ()
+
+
+def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
+                      target: str | None = None) -> tuple[LifecycleEvent, ...]:
+    """The record's `EventRecorded` rows as fold inputs, ordered by `seq`."""
+    if target is None:
+        rows = _rows(cur, _LIFECYCLE_EVENTS_SQL + " ORDER BY seq",
+                     (org_id, graph_id))
+    else:
+        rows = _rows(cur, _LIFECYCLE_EVENTS_FOR_ONE_SQL + " ORDER BY seq",
+                     (org_id, graph_id, target, target, target))
+    out: list[LifecycleEvent] = []
+    for row in rows:
+        kind = row.get("event_kind")
+        if not isinstance(kind, str) or not kind:
+            # An Event with no kind cannot fold (the live fold gates on
+            # `if _wk and ...`), and `record_projection` already journaled the
+            # row that produced this one.
+            continue
+        try:
+            seq = int(row.get("seq"))
+        except (TypeError, ValueError):
+            continue
+        out.append(LifecycleEvent(
+            seq=seq,
+            event_kind=kind,
+            object_name=row.get("object_name") or None,
+            # PREFER, do not UNION: the live fold is
+            # `inner.get("about_entities") or inner.get("aboutEntities") or []`
+            # (`entities.py::apply`), so a payload carrying both spellings with
+            # different contents folds only the snake_case list there. A rebuild
+            # that concatenated would fold Objects the live graph never touched
+            # (review P2, same reader).
+            about_names=(_as_names(row.get("about_entities"))
+                         or _as_names(row.get("about_entities_camel"))),
+        ))
+    out.sort(key=lambda e: e.seq)
+    return tuple(out)
+
+
+def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
+                          target: str | None = None) -> tuple[LifecycleEvent, ...]:
+    """The record's event stream as fold inputs, for one tenant scope.
+
+    The CONNECTION-scoped entry point to :func:`_lifecycle_events`, for a door
+    that holds a connection rather than a cursor (``record_serve.read_node``).
+    ``target`` narrows to the events that could name one Object, so a
+    single-row read folds only the events that could POSSIBLY name it.
+
+    ⚠️ What that buys is bounded, and it is not "avoids a scan": the predicate
+    is on `payload` expressions, while the table's only index is
+    `idx_journal_event_node (org_id, graph_id, node_label, node_key)`
+    (`20261012000001_record_event_stream.sql:141`) — keyed on the event's OWN
+    subject, not on the Objects it names. The narrowing therefore filters rows
+    AFTER the scope scan; it narrows the Python fold, not the read. Worth
+    saying plainly because the cheaper-sounding claim invites the next reader
+    to raise the single-row `LIMIT` or drop the predicate believing either is
+    an index win.
+    """
+    cur = _rp.scope_connection(conn, org_id)
+    return _lifecycle_events(cur, org_id=org_id, graph_id=graph_id,
+                             target=target)
+
+
+def _lifecycle_index():
+    """The pack-declared fold surface, or an EMPTY index — never raising.
+
+    ⛔ Deliberately the PROJECTION's own accessor (`entities._status_fold_index`)
+    rather than a second registry lookup here: it carries the last-good
+    declared-kind spellings through a registry outage (#2729 review P2), so the
+    built-in connector fold cannot re-label a lifecycle-owning kind on the path
+    a rebuild takes. A rebuild must fold by the SAME index a live write folds
+    by, which means asking the same function rather than re-deriving one.
+    """
+    from .projection.entities import _status_fold_index
+
+    return _status_fold_index()
+
+
+def _is_terminal_status(value: Any) -> bool:
+    """Is this an Object status the live fold's guard refuses to overwrite?
+
+    The ONE reading of `commit_ops.OBJECT_TERMINAL_STATUSES` on this path —
+    the live guard's `$excluded` (`_terminal_object_statuses()` in
+    `projection/entities.py`) is the same set, so the replay below cannot drift
+    from it. Case-folded, matching what this module already did for the record's
+    own `superseded` carrier (the live vocabulary is lowercase, and a
+    case-variant is treated as terminal here rather than resurrected).
+    """
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+
+    return isinstance(value, str) and value.lower() in OBJECT_TERMINAL_STATUSES
+
+
+def apply_event_stream_folds(
+    nodes: Iterable[RecordNode],
+    events: Iterable[LifecycleEvent],
+    *,
+    index: Any = None,
+) -> tuple[RecordNode, ...]:
+    """Derive :data:`EVENT_STREAM_FOLDS`' properties from the record's events.
+
+    A PURE function of (record rows, record event stream) — no graph read, no
+    constant of its own. The vocabulary comes from :mod:`tortoise.status_folds`
+    (the ONE home, #2729) and the ordering comes from the record's `seq`, so a
+    rebuilt cache folds exactly the words the live fold writes, in the order it
+    wrote them.
+
+    **A sequential REPLAY, not a last-writer pick.** The live fold is a state
+    machine: every one of its `SET o.status` statements carries the guard
+    `AND (o.status IS NULL OR NOT (o.status IN $excluded))`
+    (`projection/entities.py::_fold_object_status`, both halves), so once an
+    event folds an Object terminal, EVERY later fold is refused. The same guard
+    is applied here, per event, in `seq` order — a rebuild re-runs the
+    transition rules rather than reading the last event's value, which is what
+    rehydration means (Microsoft Learn, *Event Sourcing pattern*: *"Applications
+    derive the current state of an entity by replaying all the events in its
+    stream. This process is known as rehydration."*). Without it, a pack fold
+    that targets a terminal word (`archived`) followed by any later fold
+    resurrected a terminal Object — the #2164/#3309 defect, re-opened on the
+    record path (review P2).
+
+    Applied where a VIEW becomes properties: :func:`read_record_view` (so every
+    connection-based consumer — reconciliation, `record-restore`, the CLI — sees
+    it) and `FalkorProjection.rebuild_from_record` (so a view a CALLER built
+    without a connection folds too). Both applications are idempotent: the
+    replay is a pure function of (row props, event stream), so re-running it
+    over an already-folded node reproduces the same value.
+
+    ``nodes`` is returned unchanged when the view holds no event or no row the
+    fold could touch — the common case, and the reason a rebuild of a
+    connector-less tenant does no extra work.
+    """
+    nodes_t = tuple(nodes)
+    props_by_label = {label: props for label, props in EVENT_STREAM_FOLDS.items()
+                      if props}
+    if not props_by_label:
+        return nodes_t
+    by_target: dict[str, list[LifecycleEvent]] = {}
+    for event in sorted(events, key=lambda e: e.seq):
+        for name, _explicit in event.targets():
+            by_target.setdefault(name, []).append(event)
+    if not by_target:
+        return nodes_t
+
+    if index is None:
+        index = _lifecycle_index()
+    from tortoise.status_folds import builtin_fold_status
+
+    out: list[RecordNode] = []
+    for node in nodes_t:
+        derived = props_by_label.get(node.label)
+        if not derived:
+            out.append(node)
+            continue
+        current = node.props.get("status")
+        # The live fold's terminal guard, evaluated the way the live fold
+        # evaluates it: per event, against the status the previous event left.
+        # The record can carry ONE terminal value of its own (`superseded`, from
+        # DERIVED_FROM_RECORD's carriers), and a supersession beats any
+        # connector event in either temporal order, so refusing to fold here is
+        # exact for that value rather than an approximation of a timeline the
+        # record cannot express. A terminal status that a PACK fold writes is
+        # guarded below, per event — see the replay loop.
+        if _is_terminal_status(current):
+            out.append(node)
+            continue
+        name = node.props.get("name")
+        events_for = by_target.get(name) if isinstance(name, str) else None
+        if not events_for:
+            out.append(node)
+            continue
+        kind = node.props.get("objectKind")
+        kind_key = None if kind is None else str(kind).lower()
+        # `objectKind` absent => the built-in fold applies (`o.objectKind IS
+        # NULL` in the clone's guard); a declared lifecycle kind owns its state
+        # and suppresses it (#2725).
+        owns = bool(kind_key) and index.owns_state(kind_key)
+        # The replay: `events_for` is in `seq` order, and EVERY write is guarded
+        # the way the live `SET` is — `AND (o.status IS NULL OR NOT (o.status IN
+        # $excluded))`. So a terminal word written by one event latches: the
+        # later events are refused instead of resurrecting the Object.
+        status: str | None = current
+        for event in events_for:
+            if kind_key:
+                for target_kind, fold_status in index.folds_for_event(
+                        event.event_kind):
+                    if kind_key in index.kind_forms_for(target_kind) \
+                            and not _is_terminal_status(status):
+                        status = fold_status
+            if event.object_name == name:
+                builtin = builtin_fold_status(event.event_kind)
+                if builtin is not None and not owns \
+                        and not _is_terminal_status(status):
+                    status = builtin
+        if status is None or status == current:
+            out.append(node)
+            continue
+        props = dict(node.props)
+        props["status"] = status
+        out.append(RecordNode(label=node.label, key=node.key, props=props))
+    return tuple(out)
+
+
 def read_record_view(conn: Any, *, org_id: str, graph_id: str,
                      labels: Iterable[str] = tuple(NODE_TABLES)) -> RecordView:
     """Read the record's node and relation state for ONE scope.
@@ -780,11 +1355,20 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     ``org_id`` this reader is about to filter on — one value, so the predicate
     and the policies cannot disagree — and refuses a connection whose role
     bypasses RLS, which a read-only door needs at least as much as a writer.
+
+    ``labels`` is DECLARED `Iterable`, so it is materialised ONCE here, before
+    anything iterates it (#10258 review, P2). The event-stream fold is gated on
+    membership in this set, and a generator caller — the canonical
+    `(l for l in …)` form — would have been drained by the node loop, leaving
+    the gate `False`, `lifecycle_events` empty, and every connector-tracked
+    Object back to the #10198 defect (an absent `status` reads LIVE) with no
+    raise, no log and no signal.
     """
+    labels_t = tuple(labels)
     nodes: list[RecordNode] = []
     relations: list[RecordRelation] = []
     cur = _rp.scope_connection(conn, org_id)
-    for label in labels:
+    for label in labels_t:
         table = NODE_TABLES[label]
         # #10017 R2: the tier is a COLUMN, not a reader's opinion. A turn row is
         # `record_only` — §9.1 keeps raw turns outside the graph — and the cache
@@ -836,7 +1420,16 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
                      (org_id, graph_id,
                       org_id, graph_id, org_id, graph_id)):
         relations.append(relation_from_row(row))
-    return RecordView(nodes=tuple(nodes), relations=tuple(relations))
+    # #10198: the record's EVENT STREAM is the other half of the `status` cache
+    # — the connector/pack lifecycle, which no row carries (see
+    # EVENT_STREAM_FOLDS). It is read here, where the record's history is
+    # already being read, and CARRIED on the view so a caller that re-projects
+    # this view folds by the same events rather than by nothing.
+    events: tuple[LifecycleEvent, ...] = ()
+    if "Object" in labels_t:
+        events = _lifecycle_events(cur, org_id=org_id, graph_id=graph_id)
+    return RecordView(nodes=apply_event_stream_folds(nodes, events),
+                      relations=tuple(relations), lifecycle_events=events)
 
 
 def _rows(cur: Any, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:

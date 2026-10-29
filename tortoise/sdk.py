@@ -158,6 +158,11 @@ from .projection.entities import (  # #3998: the declared :Source surface
 from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
 )
+# #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
+# The Point `name` advisory below reads the Point's fields OFF it rather than
+# re-typing `content`/`search_keys` — so the advisory cannot drift from the
+# index, and an index change that adds a field retires it with no second edit.
+from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
@@ -4842,6 +4847,182 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # `update_point` and `update_entity` still call it here, under this name.
 
 
+def _point_fts_indexed_fields() -> list[str]:
+    """#10122: the fields the Point FULLTEXT index actually HOLDS.
+
+    Read off ``projection._FULLTEXT_INDEX_LABEL_FIELDS`` — the table that
+    CREATES the indexes — never a second hand-written copy of the field list.
+    So the advisory below cannot drift from the index, and an index change that
+    adds a field (``name`` being the one #10122 is about) silences it by
+    construction rather than needing a second edit.
+    """
+    for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:
+        if label == "Point":
+            return list(fields)
+    return []
+
+
+def _lexical_text(value) -> str:
+    """#10122: the coverage-comparison key — whitespace-collapsed, casefolded.
+
+    Accepts a list/tuple as well as a str: the doors flatten ``search_keys``
+    before this runs, but the generic ``update_entity`` payload is the caller's
+    own dict and a raw array is the #5482 shape, not a crash here.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = " ".join(str(v) for v in value)
+    return " ".join(str(value).split()).casefold()
+
+
+def _warn_point_name_not_lexically_indexed(
+    props: dict, *, door: str, content: str | None = None,
+    stored: dict | None = None,
+) -> None:
+    """#10122: advise, at the write door, that a Point's ``name`` is NOT
+    lexically indexed. Warn, never block (#1934's precedent for a declaration
+    gap) — and never mutates ``props``, because the node still stores it.
+
+    THE DEFECT. The Point FULLTEXT index holds ``content`` + ``search_keys``
+    only, while the write doors ACCEPT ``name`` on a Point and the node stores
+    it. The stored name is therefore invisible to the lexical leg: a query for
+    the point's OWN exact name returns nothing — MEASURED on the embedded and
+    the docker lane (#10122: the name-only point is absent from
+    ``run_fts_query`` while the content-carrying one is found). ``Event`` /
+    ``Subject`` / ``Object`` DO index ``name`` (``_FULLTEXT_INDEX_LABEL_FIELDS``
+    above), so a Point is the one label where an ACCEPTED write mints a
+    silently un-findable record — the #5482 class, which this repo fixed rather
+    than tolerated.
+
+    ⛔ NOT the fix: adding ``name`` to the index. That is a RANKING change (it
+    moves collection statistics and every Point's field length) and it is gated
+    on the #8486 measurement, which is postponed (the ruling recorded on
+    #10122). This advisory has ZERO ranking effect — it reads no score, and it
+    writes nothing. The HELPER does no graph read of its own: the only
+    non-payload input is the stored text the ``update_point`` door has already
+    read and hands over, which is why that door's verdict covers the text the
+    index WILL hold rather than only the fields the caller supplied.
+
+    SILENCE ON THE COMMON SHAPE. A name whose tokens already appear in the
+    text the index will hold does not warn — the identifier IS reachable, so
+    there is nothing to advise. WHICH text that is depends on the door:
+    ``create_point`` compares against the payload it is about to write (the
+    whole write), while ``update_point`` compares against the STORED
+    ``content``/``search_keys`` it reads in its own probe, because a name-only
+    update carries no indexed text of its own. ``update_entity``'s Point branch
+    still compares payload-only — an asymmetry that is deliberate for now
+    (threading the same read there is its own change) and named in
+    ``test_10122_point_name_not_indexed.py``.
+
+    ``content`` is the DOOR's own content argument, supplied only where the
+    payload does not carry it: ``create_point`` takes ``content`` as a required
+    positional (it is not part of the ``**props`` passthrough), so without this
+    a point whose title is plainly in its ``content`` would warn — the exact
+    false positive the coverage check exists to avoid. ``update_point`` /
+    ``update_entity`` pass ``content`` inside the props dict and need not set
+    it.
+    """
+    name = props.get("name")
+    if not isinstance(name, str):
+        return
+    needle = _lexical_text(name)
+    if not needle:
+        return
+    fields = _point_fts_indexed_fields()
+    if "name" in fields:
+        return  # the index holds `name` after all — nothing to advise
+    if not fields:
+        return  # no Point index on this engine — a different (visible) state
+
+
+    # ⛔ TOKEN-LEVEL, NOT SUBSTRING (#10122 review P2). The lexical leg answers
+    # with an OR-UNION of the query's tokens (``build_or_query``), so a name
+    # whose tokens are SCATTERED through ``content`` is findable — a substring
+    # test called that uncovered and the message then asserted an absence that
+    # does not hold (measured: content "the probe was a write for capstone and
+    # 9664 rows" answers a query for name "capstone-9664 write probe"). The
+    # honest condition is DISJOINT token sets: not one token of the name appears
+    # in the text this write indexes. Anything short of that only costs RANK,
+    # which is not what an advisory may promise.
+    from tortoise.sparse import tokenize_sparse_query
+
+    name_tokens = set(tokenize_sparse_query(str(name), keep_numeric=True))
+    indexed_tokens: set[str] = set()
+    # ⛔ PER FIELD, and the STORED component is used only where the payload
+    # does NOT set that field (#10122 rounds 2-4). Two earlier versions got
+    # this wrong in opposite directions: a payload-only comparison fired on
+    # every name-only update, and a single UNIONED stored blob then silenced an
+    # update that REPLACES content (measured: stored content carrying the name,
+    # then `update_point(name=…, content="unrelated curtains here")` → silent,
+    # although the tokens were only in the text being overwritten). The text
+    # the index will hold after this write is therefore: the payload value
+    # where the payload sets the field, else the stored component.
+    effective: dict[str, object] = {}
+    for field in fields:
+        if field == "content" and content is not None:
+            effective[field] = content
+        elif field in props:
+            effective[field] = props.get(field)
+        elif stored:
+            effective[field] = stored.get(field)
+        else:
+            effective[field] = None
+    for field in fields:
+        indexed_tokens.update(tokenize_sparse_query(
+            _lexical_text(effective[field]), keep_numeric=True))
+    if not any(ch.isalnum() for ch in str(name)):
+        # Silent only when the name carries NO alphanumeric character at all
+        # (pure punctuation/whitespace): then there is nothing to index and the
+        # advice would be meaningless. ⛔ NOT "when our token list is empty":
+        # ``build_or_query`` does not drop a degenerate query, it falls back to
+        # the ESCAPED RAW literal (#1791), so ``build_or_query("R&D") == "R&D"``
+        # and the engine still tokenizes it — measured: a point whose content
+        # says "the brand R&D handles the audit" IS returned by
+        # ``run_fts_query("R&D")`` at 1.0. So an `R&D`-shaped name (or a
+        # stopwords-only one, since our stopword list is not the engine's) is
+        # genuinely findable once its literal sits in an indexed field, and the
+        # advisory must speak rather than stay silent. That was a false negative
+        # in the previous round (#10122 review P2).
+        return
+    if name_tokens:
+        if name_tokens & indexed_tokens:
+            return
+    else:
+        # No token on our side (e.g. a one-character literal) but the name DOES
+        # carry alphanumerics: fall back to a casefolded literal containment
+        # test, which is what the engine's raw-literal path matches.
+        folded = _lexical_text(name)
+        if any(folded in _lexical_text(effective[f]) for f in fields):
+            return
+    # The roster is DERIVED from the same table, so a label that gains (or
+    # loses) a ``name`` index changes this sentence with the index.
+    other_labels = sorted(
+        label for label, label_fields in _FULLTEXT_INDEX_LABEL_FIELDS
+        if label != "Point" and "name" in label_fields)
+    if not other_labels:
+        label_clause = "no other label indexes it"
+    elif len(other_labels) == 1:
+        label_clause = f"{other_labels[0]} indexes it"
+    else:
+        label_clause = f"{'/'.join(other_labels)} index it"
+    where = ("the text the Point fulltext index will hold after this write"
+             if stored else
+             "the text THIS write supplies for those fields (this door has no "
+             "stored text to compare against)")
+    basis = ("none of the name's tokens" if name_tokens
+             else "the name's literal")
+    _logger.warning(
+        "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
+        "lexical query for the name can only reach this point through other "
+        "evidence, and will not rank on the name itself (#10122). Put the "
+        "identifier in `content` or in `search_keys`: `name` is not lexically "
+        "indexed on a Point (%s). The write is accepted as-is — "
+        "warn-not-block, #1934.",
+        door, name, basis, where, "/".join(fields), label_clause,
+    )
+
+
 def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
                                    none_demotes: bool = False) -> None:
     """#5140 P1: `documentKind` is the documenthood/METER key, not metadata.
@@ -9482,6 +9663,10 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #10122: a `name` the index does not hold is a stored-but-unfindable
+        # identifier — advise here, at the door that accepted it (after the
+        # flatten, so the coverage check sees the stored `search_keys` form).
+        # ⛔ Advisory only: it never refuses and never touches `props`.
         # E4 (#5007): the span is an ADDRESS — enforce the all-or-nothing /
         # ordered / in-range rule HERE as well as on the `Point` model. These
         # two props ride the generic passthrough, so without this a caller
@@ -9506,6 +9691,12 @@ class TortoiseSDK:
         # #2350 (E-prec): the per-end precision declaration is validated by the
         # same fresh-create rule (no stored opposite to merge).
         _refuse_inconsistent_validity_precision(self._get_proj().g, props)
+        # #10122 review P3: the advisory runs AFTER the refusal gates above —
+        # a create that these refuse writes nothing, and advising about a write
+        # that never happened is crying wolf (the same discipline
+        # ``update_entity`` documents for its own door).
+        _warn_point_name_not_lexically_indexed(props, door="create_point",
+                                               content=content)
         # #3263: provenance is INFERRED from the write context, never demanded.
         # A write that carries a session context has a derivable Source — the
         # same `session:<id>` ref the capture path wires explicitly (#1350).
@@ -14512,6 +14703,39 @@ class TortoiseSDK:
                     "update_point only promotes draft→live — use "
                     "retract_point()/supersede_point() for lifecycle transitions"
                 )
+
+        # #10122: the advisory sits here, after the refusals that run BEFORE
+        # the write (kinds, sanitisation, span, validity window, precision, the
+        # draft→live status ValueError above). Named residuals it does NOT
+        # cover, all measured: `_assert_lifecycle_guard` (further down) and the
+        # promote arm's guarded-SET miss (`_raise_update_point_status_error`)
+        # can still raise after this line, so a refused transition can advise.
+        # Moving it past those is its own change — they are inside the write
+        # arm, not before it (#10122 review rounds 3-4).
+        # #10122: the advisory, AFTER the refusal gates above (a refused update
+        # writes nothing, so advising about it is crying wolf — the discipline
+        # `create_point` and `update_entity` already follow) and reading the
+        # STORED text, because the verdict must be about the index, not about
+        # the payload a name-only update does not carry (round-1 + round-2 P2).
+        # Fires only when the update carries a string `name`, so a plain update
+        # pays nothing.
+        if isinstance(props.get("name"), str):
+            # Aggregations ONLY, so this is one row on a hit AND on a miss —
+            # a mixed ``count(n), n.content`` projection groups implicitly and
+            # returned an EMPTY result set on the miss (the round-2 pin caught
+            # it as an IndexError).
+            _name_row = proj.g.query(
+                "OPTIONAL MATCH (n:Point {id:$id}) "
+                "RETURN count(n), "
+                "coalesce(head(collect(n.content)), ''), "
+                "coalesce(head(collect(n.search_keys)), '')",
+                params={"id": id},
+            ).result_set[0]
+            if _name_row[0]:
+                _warn_point_name_not_lexically_indexed(
+                    props, door="update_point",
+                    stored={"content": _name_row[1],
+                            "search_keys": _name_row[2]})
 
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an
@@ -19877,15 +20101,18 @@ class TortoiseSDK:
         (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
         + route-scoped attribute rejection (cycle-13: relation carries
         direction/confidence/weight — plus ``mitigation`` since #5244, because
-        a structural edge has no operator bridge to damp; operator route
-        carries confidence/weight).
+        a structural edge has no operator bridge to damp; the operator route
+        REFUSES confidence/weight, because ``create_operator`` has no edge
+        attribute to carry them).
 
         ``effective_route`` (#9173) is the route the write loop will ACTUALLY
         take — the request PROMOTED by the endpoint-kind gate
         (:meth:`_effective_route` / :meth:`_effective_connection_routes`,
         owner ruling 2026-10-13, #8499). It scopes the multi-item-``to`` arm,
         which is a DIRECT-edge rule (``create_direct_edge`` takes ONE target;
-        the operator route fans out). It is passed in rather than probed here
+        the operator route fans out), and — since #9749 — BOTH attribute arms,
+        because a route that cannot store an attribute must not be told the
+        attribute is clean (see the arm below). It is passed in rather than probed here
         so the caller keeps its one graph read per bundle/connection — and
         because Phase 2 has the resolved ids and no bundle to read refs from.
         The parameter is REQUIRED (no default) on purpose: a default of
@@ -20006,30 +20233,27 @@ class TortoiseSDK:
                                f"be one of {', '.join(sorted(self._INGEST_DIRECTION_VALUES))}, "
                                f"got {direction!r}",
                 })
-            if route == "operator":
+            if write_route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
                 # confidence/weight (they are plain direct-edge attributes).
-                # ⛔ #9173 review — DELIBERATELY left on the REQUEST route, not
-                # `write_route`: a promoted Point-bearing plain IMPL already
-                # passes these attributes through and `create_operator` DROPS
-                # them (measured at this head: a SINGULAR plain IMPL between
-                # Points with `confidence: 0.5` validates clean and writes an
-                # edge without it). Scoping this arm by the effective route
-                # would turn that silently-accepted bundle into a refusal — a
-                # new refusal for every existing caller, outside #9173's scope.
-                # The silent drop is a PRE-EXISTING defect on both route
-                # spellings, tracked as its own issue; when it is fixed this arm
-                # must move WITH the multi-item arm above, or the two rules stay
-                # inconsistent inside one function.
-                for key in ("confidence", "weight"):
-                    if key in conn:
-                        violations.append({
-                            "section": "connections", "index": index,
-                            "message": f"ingest: connections[{index}] {key} is "
-                                       f"not allowed on the operator route "
-                                       f"(reify:true/mitigation) — it belongs "
-                                       f"on plain IMPL/NAND direct edges",
-                        })
+                #
+                # #9749 — judged by the EFFECTIVE route, not the REQUEST.
+                # The #9173 review left it on the request route ON PURPOSE and
+                # said why: a promoted Point-bearing plain IMPL was validated
+                # as a direct edge and then written by `create_operator`, which
+                # has no such edge attribute, so the value was DROPPED while the
+                # caller was told "clean" (measured there: a singular plain IMPL
+                # between Points with `confidence: 0.5` validated clean and
+                # wrote an edge without it). That review's own instruction was
+                # that THIS arm must move WITH the multi-item arm above once the
+                # drop was decided. #9749 is that decision, and it goes the way
+                # `docs/INGEST_CONTRACT.md` §13 row 4 already states: an
+                # attribute the route cannot store is a Phase-1 violation, not a
+                # silent discard. The direct route — where §13 row 4 says these
+                # attributes belong — now actually carries them (the write loop
+                # forwards both into `create_direct_edge`).
+                self._reject_operator_route_attributes(index, conn, route,
+                                                       violations)
             else:
                 for key in ("confidence", "weight"):
                     val = conn.get(key)
@@ -20107,6 +20331,64 @@ class TortoiseSDK:
                                f"id=<operator id>, reason=..., "
                                f"strength=0.10..0.50)",
                 })
+
+    def _reject_operator_route_attributes(self, index: int, conn: dict,
+                                          request_route: str,
+                                          violations: list[dict]) -> None:
+        """#9749 — refuse ``confidence``/``weight`` on the OPERATOR route.
+
+        `create_operator` writes ``(op)-[:IMPL|NAND {idx}]->(endpoint)`` edges
+        and takes neither attribute, so a connection that reaches the operator
+        route has nowhere to PUT them. §8 assigns them to the operator-less
+        direct edge (``docs/INGEST_CONTRACT.md`` §13 row 4), and §11 is explicit
+        that an author-stated confidence is RECORDED for audit while EP computes
+        belief from factor structure — so dropping the value is not a harmless
+        no-op, it is the caller's declared value going missing behind a "clean"
+        verdict.
+
+        Two spellings reach this refusal, and they need different sentences
+        because the caller's remedy differs:
+
+        - ``request_route == "operator"`` — the caller ASKED for the operator
+          route (``reify: true`` / ``mitigation``). The remedy is to drop the
+          attribute, or to use the direct route (a non-Point pair).
+        - ``request_route == "direct"`` — the plain spelling, PROMOTED by the
+          endpoint-kind gate (#8499, owner ruling 2026-10-13) because the pair
+          is Point-bearing. The caller never chose the operator route, and
+          ``create_direct_edge`` is deliberately not gated, so the message names
+          that escape hatch rather than telling them to do something the
+          promotion overrode: measured on this tree, the promoted write created
+          the operator and wrote edges with ``confidence`` ABSENT.
+
+        Splitting the sentence must not split the ARM: both live in one helper,
+        called from the one place the write route is known, so they cannot drift
+        the way the pre-#9749 request-route/effective-route pair did.
+        """
+        _direct_escape = (
+            "write the operator-less edge explicitly with "
+            "sdk.create_direct_edge(...) if you need an edge-carried value")
+        for key in ("confidence", "weight"):
+            if key not in conn:
+                continue
+            if request_route == "operator":
+                message = (
+                    f"ingest: connections[{index}] {key} is not allowed on the "
+                    f"operator route (reify:true/mitigation) — it belongs on "
+                    f"plain IMPL/NAND direct edges (a pair with no plain :Point "
+                    f"endpoint); {_direct_escape}"
+                )
+            else:
+                message = (
+                    f"ingest: connections[{index}] {key} cannot be stored on "
+                    f"this connection: a Point-bearing pair is operator-mediated "
+                    f"(endpoint-kind gate, #8499), an operator has no edge "
+                    f"attribute to carry it, and its weighting is EP-computed "
+                    f"(INGEST_CONTRACT §11) — drop the key, or {_direct_escape}"
+                )
+            violations.append({
+                "section": "connections", "index": index,
+                "message": message,
+            })
 
     def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
         """ONE batched query resolving external endpoint existence, label
@@ -22412,6 +22694,16 @@ class TortoiseSDK:
                         op_type, src, dsts[0],
                         label=label,
                         direction=direction,
+                        # #9749: the §8 attributes this route is the ONLY home
+                        # for (INGEST_CONTRACT §13 row 4) were validated here
+                        # and then dropped — `create_direct_edge` has always
+                        # accepted both and wrote them on the edge (and the
+                        # `DirectEdgeCreated` journal descriptor replays them),
+                        # so the omission in THIS call was the whole defect. A
+                        # connection reaching this branch is non-Point-bearing,
+                        # so nothing upstream refuses them.
+                        confidence=conn.get("confidence"),
+                        weight=conn.get("weight"),
                         batch_id=batch_id,
                         promote_source=(promotion_policy == "auto"),
                     )
@@ -37058,6 +37350,19 @@ class TortoiseSDK:
                     )
                     if res.result_set and res.result_set[0][0]:
                         break
+                # #10122: POINT-gated, and only once the write LANDED. This
+                # surface reaches every label, and `name` IS indexed on
+                # Subject/Object/Event — warning before the match would both
+                # inflate the count for sibling labels and cry wolf on a miss
+                # (`update_entity("no-such-id", name=...)`), the two things the
+                # #3377 arm below is careful about. The advisory is the same one
+                # `create_point`/`update_point` call: this live `SET n += $p` is
+                # a THIRD Point write seam and it does not pass through
+                # `_upsert_point_props` (which is why it is not covered from
+                # there).
+                if res.result_set and res.result_set[0][0]:
+                    _warn_point_name_not_lexically_indexed(
+                        point_props, door="update_entity")
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
                 # leaves a phantom record).

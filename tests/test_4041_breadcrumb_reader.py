@@ -316,10 +316,15 @@ def test_an_absent_breadcrumb_does_not_even_spawn_the_renderer(tmp_path):
     bindir = tmp_path / "bin"
     _mock_tortoise(bindir, tmp_path / "calls.log")
     marker = tmp_path / "renderer-spawned"
-    _custom_python3(bindir, marker=marker)
+    # #4848: the hook PROBES the interpreter it resolves (a version check), so
+    # the shim is pinned as the documented `PYTHON_BIN` operator override —
+    # an override is never probed, and the marker keeps meaning exactly what
+    # this test is about: "the RENDERER ran".
+    shim = _custom_python3(bindir, marker=marker)
     # Deliberately NO breadcrumb seeded.
 
-    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO,
+                     extra_env={"PYTHON_BIN": str(shim)})
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", proc.stdout
@@ -342,10 +347,13 @@ def test_a_directory_at_the_crumb_path_does_not_spawn_the_renderer(tmp_path):
     bindir = tmp_path / "bin"
     _mock_tortoise(bindir, tmp_path / "calls.log")
     marker = tmp_path / "renderer-spawned"
-    _custom_python3(bindir, marker=marker)
+    # #4848: see the sibling guard — the pinned override is what keeps the
+    # marker a renderer-only signal now that a resolved interpreter is probed.
+    shim = _custom_python3(bindir, marker=marker)
     _crumb_path(home).mkdir(parents=True)  # a DIRECTORY, not a record
 
-    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO,
+                     extra_env={"PYTHON_BIN": str(shim)})
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", proc.stdout
@@ -524,7 +532,10 @@ def test_a_renderer_that_writes_then_fails_injects_nothing(tmp_path):
     shim.chmod(0o755)
     _seed_breadcrumb(home, **_capture_failure())
 
-    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+    # #4848: the pinned operator override keeps the RENDERER on this shim (an
+    # override is never probed, a resolved interpreter is).
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO,
+                     extra_env={"PYTHON_BIN": str(shim)})
 
     assert proc.returncode == 0, proc.stderr
     assert "GARBAGE" not in proc.stdout, (
@@ -544,10 +555,12 @@ def test_a_renderer_that_succeeds_with_no_output_prints_nothing(tmp_path):
     home.mkdir()
     bindir = tmp_path / "bin"
     _mock_tortoise(bindir, tmp_path / "calls.log")
-    _custom_python3(bindir, stdout="", rc=0)
+    shim = _custom_python3(bindir, stdout="", rc=0)
     _seed_breadcrumb(home, **_capture_failure())
 
-    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+    # #4848: the pinned operator override keeps the RENDERER on this shim.
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO,
+                     extra_env={"PYTHON_BIN": str(shim)})
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", (
@@ -567,10 +580,12 @@ def test_a_renderer_failure_cannot_leak_onto_hook_stderr(tmp_path):
     home.mkdir()
     bindir = tmp_path / "bin"
     _mock_tortoise(bindir, tmp_path / "calls.log")
-    _custom_python3(bindir, stderr="TRACEBACK-MARKER", rc=1)
+    shim = _custom_python3(bindir, stderr="TRACEBACK-MARKER", rc=1)
     _seed_breadcrumb(home, **_capture_failure())
 
-    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO)
+    # #4848: the pinned operator override keeps the RENDERER on this shim.
+    proc = _run_hook(home, path=f"{bindir}:/usr/bin:/bin", src=REPO,
+                     extra_env={"PYTHON_BIN": str(shim)})
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", proc.stdout
@@ -682,6 +697,26 @@ def test_the_second_inert_branch_also_renders_the_breadcrumb(tmp_path):
     src = tmp_path / "src"
     (src / "tortoise").mkdir(parents=True)
     (src / "tortoise" / "__init__.py").write_text("", encoding="utf-8")
+    # #4848: the seam now REFUSES a source dir it cannot run, and a later
+    # `../..` candidate can win over it — so the dir is given the one entry
+    # point that survives with no interpreter: a console script whose `#!` is
+    # not python (unknown is not refused). The RESOLVED module dir is therefore
+    # this dir, and the branch under test is still "resolved, but no
+    # interpreter", which is the state its payload must describe.
+    #
+    # #4848 REVIEW ROUND 2: the entry point is now the `pyvenv.cfg` OWNING-venv
+    # one (`bin/tortoise`), not `.venv/bin/tortoise`. A `.venv` console script is
+    # resolved into `TORTOISE_BIN` and EXECUTED by this seam — acceptance and
+    # execution must agree — so that fixture would no longer describe "no
+    # interpreter". The owning-venv script is accepted by the walk-up but is not
+    # reachable from `$TORTOISE_MODULE/.venv`, and with no `bin/python` beside it
+    # there is still nothing to run the module with: the exact state this branch's
+    # payload describes.
+    console = src / "bin" / "tortoise"
+    console.parent.mkdir(parents=True)
+    console.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    console.chmod(0o755)
+    (src / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
 
     proc = _run_hook(home, path=str(bindir), src=src)
 

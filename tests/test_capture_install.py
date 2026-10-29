@@ -3431,8 +3431,13 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # only) must read as stale to receive the injection half.  The drift detector
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 14}
+# #4848 and main's #6388/#10216 bumps are INDEPENDENT and both apply: `pi`
+# moved 14→15 on main (the capture spool's rank-by-class cap) while claude,
+# codex and cursor moved here (the `tortoise-interp-guard` block).  Taking
+# either side alone would pin `pi` to a generation main has already passed and
+# leave the shell seams accepting an interpreter they cannot run.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
+                             "pi": 15}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3471,7 +3476,14 @@ def test_shipped_install_contract_generations(harness):
     The codex seam took the same slot split and its marker was already at 3 on
     main (#5919), so NO number moved for it: a stale codex install is caught by
     the installed-copy byte comparison (`modified-script`), not by a generation
-    bump.  Cursor also started at 3, then moved 3→4 under #2122 (the
+    bump.  #4848 changed the BEHAVIOUR of every shell seam that resolves an
+    interpreter (the byte-identical `tortoise-interp-guard` block: a candidate
+    that holds `tortoise/` but cannot be RUN is now refused instead of run under
+    an unversioned `python3`, which on a stock macOS host is 3.9 and cannot
+    import the package), so claude 11→12, codex 3→4 and cursor 4→5.  The bump is
+    again what carries the guard to an already-installed host, whose hook bytes
+    are frozen at install time — without it that host keeps accepting an
+    unusable checkout and keeps reporting the capture as merely quiet.  Cursor also started at 3, then moved 3→4 under #2122 (the
     sessionStart injection half — see the table comment above).  `pi` moved 1→2 on
     main under #4897, which this branch predates, so 2 is main's number and not
     a #5838 bump; #5109 then moved `pi` 2→3 (the read-side store-mode warning
@@ -3528,12 +3540,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 14`` from
+    Mutation: delete ``// tortoise-hook-version: 15`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 14
+    assert hook_install.read_hook_version(_PI_SRC) == 15
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -3549,7 +3561,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    14, "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6")
+    15, "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3631,6 +3643,26 @@ _GENERATION_DIGESTS = {
     # defect. The reason sanitiser also moved to the single write site, so
     # `spool.error` (a raw exception message) can no longer bypass it.
     14: "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6",
+    # Generation 15: the capture spool's count/byte ceiling ranks entries in TWO
+    # CLASSES before age — an already-filed entry (its bytes are on the wire, and
+    # the harness's own session log still holds them) is the safe loss and is
+    # reaped FIRST, while a never-filed entry is the only copy of a conversation
+    # that never reached the graph (#6388).  Generation 14 ranked by age alone,
+    # so on a box whose backlog is older than its successes the cap reaped the
+    # very backlog it exists to deliver.  The discard line also names the class of
+    # loss now (`UNDELIVERED (never filed)` vs `filed`); it is the only surface a
+    # cap eviction has.  Behaviour moved, so the generation moves with it.
+    # Generation 15's digest was re-cut before it shipped: the review of #10216
+    # found the quarantined-log path still unlabelled, so the same unmerged
+    # generation gained the `UNREACHABLE` record (and the prose that names its
+    # precedence), then lost the `never filed` clause that record first carried
+    # — the corrupt meta, the only copy of the filing stamp, is removed at
+    # quarantine, so that clause asserted something the code cannot know.  No
+    # installed copy can carry generation
+    # 15 — it has never been on `main` — so this is the one rewrite the rule
+    # below permits, and it is recorded here rather than left to look like a
+    # refresh-to-green.
+    15: "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f",
 }
 
 
