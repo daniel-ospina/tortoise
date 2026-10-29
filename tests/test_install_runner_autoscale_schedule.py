@@ -614,6 +614,43 @@ def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anythin
     assert res.returncode == 1, (res.stdout, res.stderr)
     assert "CI_RUNNER_OS_LABEL must be off|on|auto" in res.stderr, res.stderr
 
+    # ⛔ AND EVERY RENDERER, not just the one this box happens to use: the fleet's Linux cells run
+    # the SYSTEMD unit, and a plist-only assertion passed with the systemd line deleted (measured —
+    # the mutation survived until this case existed). The cron entry too: it is prose, so nothing
+    # else can re-read the pin out of it.
+    sb_linux = _sandbox(tmp_path / "linux", uname="Linux")
+    _systemd_stubs(sb_linux)
+    prov_linux = sb_linux["repo"] / "tools" / "install-ci-runner-x64.sh"
+    prov_linux.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    prov_linux.chmod(0o755)
+    res = _run(
+        sb_linux,
+        "--dry-run",
+        env=dict(
+            sb_linux["env"], AUTOSCALE_PLATFORM="systemd", CI_RUNNER_OS_LABEL="on"
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "Environment=CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+    assert "Environment=CI_RUNNER_OS_LABEL=off" not in res.stdout, res.stdout
+
+    sb_cron = _sandbox(tmp_path / "cron", uname="Linux")
+    prov_cron = sb_cron["repo"] / "tools" / "install-ci-runner-x64.sh"
+    prov_cron.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    prov_cron.chmod(0o755)
+    res = _run(
+        sb_cron,
+        "--dry-run",
+        env=dict(
+            sb_cron["env"],
+            AUTOSCALE_HAS_SYSTEMD="0",
+            AUTOSCALE_HAS_CRON="1",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
 
 def test_systemd_units_render_with_path_and_the_active_check(tmp_path):
     """On Linux the unit pins HOME/PATH (measured: no HOME ⇒ `gh auth login`, exit 2) and the

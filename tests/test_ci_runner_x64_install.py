@@ -491,6 +491,20 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
         f"a label only half the pool answers must not read as plain coverage: {r.stderr}"
     )
 
+    # ⛔ AND THE MIRROR: `ubuntu-latest` with NO carrier is the HEALTHY state, not a block. The gate
+    # detaches that label from the pool whenever GitHub-hosted is healthy, so a zero-answer
+    # `ubuntu-latest` verdict would make `--status` — and any `--status && …` guard — permanently red
+    # in normal operation: the false red this instrument must never produce. The denominator is the
+    # runners that COULD answer (x64 pool for a bare version label), so a two-arch pool is not read
+    # as erosion either.
+    healthy = _stub_gh(tmp_path / "gh2", "x1\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04")
+    repo2 = _repo_with_workflows(
+        tmp_path / "h", "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{healthy}:{os.environ['PATH']}"), cwd=repo2)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "report, not a block" in r.stderr, r.stderr
+
 
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
 def test_dry_run_decides_nothing_and_calls_nothing(tmp_path: Path):

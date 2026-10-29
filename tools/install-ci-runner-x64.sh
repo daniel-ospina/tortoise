@@ -242,7 +242,7 @@ case "${CI_RUNNER_OS_LABEL:-off}" in
 esac
 
 resolve_os_label() { # sets OS_LABELS ("" or ",ubuntu-24.04"); OFF by default, never guessed
-  local os_name
+  local os_name released
   OS_LABELS=""
   case "${CI_RUNNER_OS_LABEL:-off}" in
     on)  OS_LABELS=",$OS_LABEL"; return 0 ;;
@@ -260,10 +260,14 @@ resolve_os_label() { # sets OS_LABELS ("" or ",ubuntu-24.04"); OFF by default, n
       fi
       # The subshell keeps os-release's NAME/VERSION_ID out of this script's environment.
       # shellcheck disable=SC1091
-      if ( . "$OS_RELEASE_SEAM" 2>/dev/null && [ "${VERSION_ID:-}" = "${OS_LABEL#ubuntu-}" ] ); then
+      released="$( ( . "$OS_RELEASE_SEAM" 2>/dev/null; printf '%s' "${VERSION_ID:-}" ) )"
+      if [ "$released" = "${OS_LABEL#ubuntu-}" ]; then
         OS_LABELS=",$OS_LABEL"
       else
-        say "os-label: auto DECLINED — $OS_RELEASE_SEAM does not report VERSION_ID=${OS_LABEL#ubuntu-}; $OS_LABEL not claimed"
+        # ⛔ NAME THE MEASUREMENT, not the expectation: "does not report VERSION_ID=24.04" is a
+        # claim about what we wanted, so an operator on a 22.04 box could not tell whether the read
+        # failed or the box really is 22.04.
+        say "os-label: auto DECLINED — $OS_RELEASE_SEAM reports VERSION_ID=${released:-<none>}, not ${OS_LABEL#ubuntu-}; $OS_LABEL not claimed"
       fi
       return 0 ;;
   esac
@@ -340,6 +344,13 @@ if [ "$MODE" = status ]; then
   pool_tsv="$(gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[] | [.name, ([.labels[].name]|join(","))] | @tsv' 2>/dev/null)" || exit 3
   pool_total="$(printf '%s\n' "$pool_tsv" | grep -c . || true)"
   case "$pool_total" in ''|*[!0-9]*) pool_total=0 ;; esac
+  # Is the GATE routing `ubuntu-latest` here right now? Same predicate `fallback_engaged` reads,
+  # computed off the read already in hand. It decides whether a zero-answer `ubuntu-latest` is the
+  # fleet being blocked or just GitHub-hosted serving it (which is the normal, healthy state).
+  fallback_on="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v a="$ARM_POOL_LABEL" -v f="$FALLBACK_LABEL" '
+    {k=split($2,x,","); ha=0; hf=0
+     for(i=1;i<=k;i++){ if(x[i]==a) ha=1; if(x[i]==f) hf=1 }
+     if (ha && hf) c++} END{printf "%d", (c+0)>0 ? 1 : 0}')"
   uncovered=0
   labels_seen=0
   # ⛔ A WHOLE-LINE YAML COMMENT IS NOT A `runs-on:` LINE. Unanchored, `# legacy: runs-on: windows-2022`
@@ -356,24 +367,55 @@ if [ "$MODE" = status ]; then
       | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^"//; s/"$//' \
       | grep -vE '^(\$|[[:space:]]*$)' | sort -u); do
     labels_seen=$((labels_seen + 1))
-    n="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" \
-      '{k=split($2,a,","); for(i=1;i<=k;i++) if(a[i]==want) c++} END{printf "%d", c+0}')"
+    # ⛔ n OF WHO? The denominator has to be the runners that COULD answer this label, or the
+    # reading is a false red on a two-arch pool: the ARM64 runners must never claim the bare
+    # `ubuntu-<version>` (that is the arch invariant `_preserve_labels` now enforces), so
+    # `7 of 12` on the live pool would read as erosion when it is exactly correct. A bare version
+    # label is measured against the x64 pool, an `-arm` spelling against the arm64 pool, and
+    # anything else against the whole pool.
+    counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" '
+      {k=split($2,a,","); hit=0; x64=0; arm=0
+       for(i=1;i<=k;i++){ if(a[i]==want) hit=1; if(a[i]==x64label) x64=1; if(a[i]==armlabel) arm=1 }
+       total++; if (hit) n++; if (x64) nx64++; if (arm) narm++}
+      END { denom = total
+            if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) denom = narm
+            else if (want ~ /^ubuntu-[0-9][0-9.]*$/) denom = nx64
+            if (denom == 0) denom = total
+            printf "%d %d", n+0, denom+0 }')"
+    n="${counts% *}"
+    denom="${counts#* }"
+    # ⛔ WHOSE PROBLEM IS A ZERO? Only a label this pool is ASKED to serve. `ubuntu-latest` is asked
+    # of the pool only while the gate is routing it here (`fallback_on`), so `ubuntu-latest = 0`
+    # with hosted healthy is a REPORT, not a block — treating it as a block would make `--status`
+    # permanently red in normal operation, i.e. the false red this instrument must not produce.
+    # A bare `ubuntu-<version>` IS the incident class (pinned on purpose, hosted unavailable). An
+    # `-arm` spelling, `macos-*`, `windows-*` and any custom label are not this pool's to serve and
+    # were never measured against hosted — report them, do not verdict them.
+    case "$label" in
+      *-arm)        pool_serves=0 ;;
+      "$FALLBACK_LABEL") pool_serves="$fallback_on" ;;
+      ubuntu-[0-9]*)     pool_serves=1 ;;
+      *)            pool_serves=0 ;;
+    esac
     if [ "$n" -eq 0 ]; then
       # ⛔ REPORT THE MEASUREMENT, NOT A CAUSE. The line used to assert "only GitHub-hosted can
-      # answer it, and hosted is not available here" for EVERY zero-answer label — including
-      # `ubuntu-24.04-arm`, `macos-14` and `windows-2022`, which this pool can never serve and whose
-      # hosted availability was never measured. What was measured is the pool.
-      say "  ⛔ $label = 0 of $pool_total self-hosted runner(s) answer it."
-      say "     A required leg naming it can then only be served by GitHub-hosted. If it is required, python-ci-gate is never dispatched and every PR stays BLOCKED."
-      uncovered=1
-    elif [ "$n" -lt "$pool_total" ]; then
+      # answer it, and hosted is not available here" for EVERY zero-answer label — including the
+      # ones this pool can never serve and whose hosted availability was never measured.
+      say "  ⛔ $label = 0 of $denom self-hosted runner(s) answer it."
+      if [ "$pool_serves" = 1 ]; then
+        say "     A required leg naming it can then only be served by GitHub-hosted: python-ci-gate is never dispatched and every PR stays BLOCKED."
+        uncovered=1
+      else
+        say "     This pool is not asked to serve it (the gate is not routing $FALLBACK_LABEL here, or the label is another architecture's / hosted-only class) — a report, not a block."
+      fi
+    elif [ "$n" -lt "$denom" ]; then
       # ⛔ COVERED IS NOT THE SAME AS FULLY COVERED, and the difference is the whole erosion path:
       # the scheduled autoscaler ADDS runners, and a fill/repair pass that omits the label leaves
       # the pool drifting back to zero answers one runner at a time with this instrument green at
-      # every step. `0 < n < pool_total` is the only read that sees it before the last one goes.
-      say "  $label = $n of $pool_total runner(s) — ⚠️ PARTIAL: the other $((pool_total - n)) cannot answer it. A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=on --repair-labels."
+      # every step. `0 < n < denom` is the only read that sees it before the last one goes.
+      say "  $label = $n of $denom runner(s) — ⚠️ PARTIAL: the other $((denom - n)) cannot answer it. A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=on --repair-labels."
     else
-      say "  $label = $n of $pool_total runner(s)"
+      say "  $label = $n of $denom runner(s)"
     fi
   done
   if [ "$uncovered" = 0 ]; then
@@ -392,7 +434,10 @@ if [ "$MODE" = status ]; then
   # a repo whose workflows name no single-label runs-on) the loop above prints its header, zero rows,
   # and exits 0 — a clean bill of health from the one instrument meant to prove coverage. Refuse
   # instead, with its own exit code so a caller can tell it apart from a real zero-answer label.
-  if [ ! -d .github/workflows ] || ! ls .github/workflows/*.yml .github/workflows/*.yaml >/dev/null 2>&1; then
+  # ⛔ EACH GLOB IS TESTED SEPARATELY: `ls *.yml *.yaml` exits 2 when only ONE of them matches, so a
+  # repo with valid `.yaml` workflows and no `.yml` reads as "nothing there" and exits 4.
+  if [ ! -d .github/workflows ] \
+      || { ! ls .github/workflows/*.yml >/dev/null 2>&1 && ! ls .github/workflows/*.yaml >/dev/null 2>&1; }; then
     say "⛔ label-coverage read NOTHING: no .github/workflows/*.yml|*.yaml in $(pwd) — run --status from the repo root. An empty read is not a coverage verdict."
     exit 4
   fi
