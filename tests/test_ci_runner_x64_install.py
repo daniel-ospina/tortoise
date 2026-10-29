@@ -496,20 +496,44 @@ def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_pat
     # never re-derives `on` (which would silently widen an `auto` install).
     assert "This pool IS asked to serve them" in r.stderr, r.stderr
 
-    # ⛔ THE MIRROR — AND THE FALSE RED THIS FIX REMOVES. With `CI_RUNNER_OS_LABEL` at its shipped
-    # default (`off`, and `_env` pins that), a pool that correctly answers NO `ubuntu-24.04` is the
-    # #6897 pin — the exact state the runbook's own revert recipe (`off` plus `--repair-labels`)
-    # produces. Verdicting it made `--status` — the mode the runbook tells an operator to VERIFY
-    # with — permanently red in the one configuration the doc calls the recorded recommendation, and
-    # the remedy it printed re-applied a departure the owner has not settled. Report: exit 0.
+    # ⛔ THE MIRROR — AND THE FALSE CLEAR THIS FIX REMOVES. With `CI_RUNNER_OS_LABEL` at its shipped
+    # default (`off`, and `_env` pins that), a pool that answers NO `ubuntu-24.04` used to be
+    # reported as **"that is the #6897 pin applied correctly, NOT the incident state"**, exit 0 —
+    # and the runbook tells the operator to verify with the BARE `--status`, where the variable is
+    # unset. But `n == 0` cannot distinguish "never asked" (the pin, nothing to do) from "asked and
+    # gone" (erosion to zero — the incident, and the exact event the `⚠️ PARTIAL` arm exists to see
+    # coming one fill at a time). Naming the harmless reading was a fail-open in the BLOCKING
+    # direction: the default invocation cleared precisely the erosion this block exists to surface.
+    # The honest output is the measurement plus the ambiguity, and never an assertion of one side.
     r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uncovered)
     assert r.returncode == 0, (
         f"the pinned configuration (#6897, flag off) is not the incident state: {r.stderr}"
     )
+    assert "0 of 1 self-hosted runner(s)" in r.stderr, r.stderr
     assert "#6897 pin applied correctly" in r.stderr, r.stderr
     assert "⛔ UNCOVERED" not in r.stderr, r.stderr
+    # Mutation (the pre-fix code): print only the harmless reading -> RED, both below.
+    assert "never asked" in r.stderr and "asked and gone" in r.stderr, (
+        f"a zero answer under an unset flag must name BOTH readings, not assert the pin: {r.stderr}"
+    )
+    assert "NOT the incident state" not in r.stderr, (
+        f"a shell's flag cannot rule out erosion to zero — that assertion is the fail-open: {r.stderr}"
+    )
     # The verdict is still ONE read away, and the report says so without claiming it applied anything.
     assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "read-only" in r.stderr, r.stderr
+
+    # ⛔ AND THE INVOCATION THE RUNBOOK ACTUALLY DOCUMENTS IS THE ONE WITH THE VARIABLE ABSENT, not
+    # the one where it says `off`. `_env` pins `off` explicitly (the suite is hermetic), so without
+    # this case the suite proves only that `off` behaves — and `off`/absent is exactly the pair the
+    # shipped default lives in. Same assertion: the ambiguity, never the pin asserted as the state.
+    bare = _env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}")
+    bare.pop("CI_RUNNER_OS_LABEL", None)
+    r = _run("--status", env=bare, cwd=uncovered)
+    assert r.returncode == 0, r.stderr
+    assert "never asked" in r.stderr and "NOT the incident state" not in r.stderr, (
+        f"the bare `--status` the runbook tells an operator to verify with must not name the pin "
+        f"as the state: {r.stderr}"
+    )
 
     # ⛔ AN EMPTY POOL IS NOT ONE RUNNER. `awk` counts RECORDS, and an empty pool feeds it exactly
     # one empty record, so the denominator was `total=1` and an empty pool reported
@@ -586,15 +610,31 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
         f"a half-covered bare pin IS this script's to re-apply: {r.stderr}"
     )
 
-    # ⛔ AND THE SAME ARM WITH THE FLAG OFF IS THE MIRROR DEFECT: a partial carrier set is then a
-    # LEFTOVER from a previous state, and "re-apply with CI_RUNNER_OS_LABEL=on" would reverse #6897
-    # in passing. The remedy must be the revert, and the verdict must stay a report.
+    # ⛔ AND THE SAME ARM WITH THE FLAG OFF MUST NOT INVERT THE REMEDY — the fix for finding 1's (b),
+    # and the destructive half. This branch is reached only when `0 < n < denom`, i.e. it has just
+    # MEASURED runners carrying the label. A runner's labels are explicitly assigned (GitHub REST:
+    # `Add custom labels` / `Set custom labels` / `Remove all custom labels`; registration labels
+    # come from `config.sh --labels`), so a carrier is proof the pool WAS asked — "this pool is not
+    # asked to serve it" was asserted on a line reporting carriers, and the remedy it printed
+    # (`--repair-labels` with the variable UNSET) PUTs a WHOLE set: following it removes the label
+    # from the LAST carriers and lands the pool at `0 of 12`, which the zero arm then reports as
+    # intentional. Both readings must be stated and the destructive command refused.
     r = _run("--status", env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}"), cwd=pin)
     assert r.returncode == 0, (r.returncode, r.stderr)
     assert "CI_RUNNER_OS_LABEL=on --repair-labels" not in r.stderr, (
         f"the remedy must not re-apply a departure the operator has switched off: {r.stderr}"
     )
-    assert "leftover from a previous state" in r.stderr, r.stderr
+    # Mutation (the pre-fix code): assert the leftover reading and prescribe the revert -> both RED.
+    assert "leftover from a previous state" not in r.stderr, (
+        f"an unset flag cannot make a MEASURED carrier set a leftover — both readings must be "
+        f"stated: {r.stderr}"
+    )
+    assert "proof the pool WAS asked" in r.stderr, (
+        f"a carrier must outvote a shell variable, and the line must say so: {r.stderr}"
+    )
+    assert "Do NOT settle it by accident" in r.stderr, (
+        f"the destructive instruction must be refused out loud, not printed as the fix: {r.stderr}"
+    )
 
     # ⛔ AND THE MIRROR: `ubuntu-latest` with NO carrier is the HEALTHY state, not a block. The gate
     # detaches that label from the pool whenever GitHub-hosted is healthy, so a zero-answer
@@ -653,6 +693,60 @@ def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digit
         "--status",
         env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
         cwd=bare,
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "every PR BLOCKED" in r.stderr, r.stderr
+
+
+# ── 3a-bis. the intent is PER LABEL, not per block ─────────────────────────────────────────
+def test_label_coverage_verdicts_only_the_label_this_script_can_register(tmp_path: Path):
+    """A bare pin the installer CANNOT emit must never be verdicted, whatever the flag says.
+
+    `resolve_os_label` can only ever set `$OS_LABEL` (`ubuntu-24.04`), but the awk's `bare` class is
+    ANY `^ubuntu-[0-9][0-9.]*$`. One intent flag was therefore applied to the whole class: with
+    `CI_RUNNER_OS_LABEL=on`, a workflow pinning `ubuntu-22.04` at zero took the verdict arm, exited
+    `5`, and printed the remedy `CI_RUNNER_OS_LABEL=on --repair-labels` — a command that CANNOT
+    apply `ubuntu-22.04`, because the installer only ever emits `$OS_LABEL`. That is a permanent red
+    with an unactionable remedy: the false-red class this block refuses to create, and the mirror of
+    `tools/runner_autoscale.py:284-287` ("a custom label that merely starts `ubuntu-<digits>` … is
+    NOT in the class") in the other direction.
+
+    Mutation: `if [ "$shell_asks_os_label" = 1 ]` without the `$label = $OS_LABEL` conjunct -> this
+    case exits 5 -> RED.
+    Control: the SAME pool and flag with `ubuntu-24.04` still exits 5, so the fix is not "the flag
+    stopped working".
+    """
+    pool = _stub_gh(tmp_path / "gh", "x1\tself-hosted-x64,ubuntu-24.04")
+    empty = _stub_gh(tmp_path / "gh-empty", "x1\tself-hosted-x64,ubuntu-latest")
+    other = _repo_with_workflows(
+        tmp_path / "other", "jobs:\n  a:\n    runs-on: ubuntu-22.04\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=other,
+    )
+    assert r.returncode == 0, (
+        f"a bare pin this script cannot register is a report, never a permanent red with a remedy "
+        f"that cannot apply: {r.returncode} {r.stderr}"
+    )
+    assert "ubuntu-22.04 = 0 of 1 self-hosted runner(s)" in r.stderr, r.stderr
+    assert "nothing here re-applies ubuntu-22.04" in r.stderr, r.stderr
+    assert "every PR BLOCKED" not in r.stderr, (
+        f"a label this pool cannot be asked to serve must not be told it blocks every PR: {r.stderr}"
+    )
+    assert "--repair-labels" not in r.stderr, (
+        f"the unactionable remedy must not be printed either: {r.stderr}"
+    )
+
+    # CONTROL — the label the flag actually governs, same flag, a pool with no carrier for it.
+    ours = _repo_with_workflows(
+        tmp_path / "ours", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=ours,
     )
     assert r.returncode == 5, (r.returncode, r.stderr)
     assert "every PR BLOCKED" in r.stderr, r.stderr
@@ -1361,6 +1455,65 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
 
 
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
+def test_the_runbooks_cross_file_refs_land_on_what_they_name():
+    """Refs OUTSIDE the installer map were only range-checked, so they drifted silently.
+
+    The runbook cites `.github/workflows/*.yml`, `scripts/ci_runner_gate.sh` and `config.sh` by line
+    number, and the installer map pin above can only see refs INSIDE its own bullet. Measured at
+    this head: `mirror-images.yml:92` cited the arm64 comment while the file had moved it to `:104`
+    (this PR adds 12 net lines above it), and `python-ci.yml:1556` / `:1544-1546` were ALREADY stale
+    on `main` (the cited comment sits at `:1761`). Each still passed the only check they had — `1 <=
+    n <= EOF` — which an offset-shifted number always passes.
+
+    Mutation: revert any of the four refs to its pre-fix number -> RED with the line it actually
+    hit. A ref that lands two files away is worse than none: a fixer sent there edits workflow
+    routing or a shell script the sentence never named.
+    """
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+
+    def at(rel: str, n: int) -> str:
+        lines = (REPO_ROOT / rel).read_text().splitlines()
+        assert 1 <= n <= len(lines), f"{rel} has {len(lines)} lines, the runbook cites :{n}"
+        return lines[n - 1]
+
+    # Who the pool's arm64-ness is (and why nothing depends on it).
+    m = re.search(r"`mirror-images\.yml:(\d+)` records", runbook)
+    assert m is not None, (
+        "the runbook no longer cites `mirror-images.yml:<line>` for the arm64 measurement — "
+        "re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert "orbctl run -m pi-runner uname -m" in at(".github/workflows/mirror-images.yml", n), (
+        f"the runbook cites mirror-images.yml:{n} for the arm64 comment, but that line is "
+        f"{at('.github/workflows/mirror-images.yml', n)!r}"
+    )
+
+    # The prohibition, and the reason for it.
+    m = re.search(r"`\.github/workflows/python-ci\.yml:(\d+)`\s*\n?\s*is \"Do NOT change it back", runbook)
+    assert m is not None, (
+        "the runbook no longer cites `python-ci.yml:<line>` as the \"Do NOT change it back\" "
+        "prohibition — re-anchor this pin"
+    )
+    n = int(m.group(1))
+    assert "never to `self-hosted`" in at(".github/workflows/python-ci.yml", n), (
+        f"the runbook cites python-ci.yml:{n} as the prohibition, but that line is "
+        f"{at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
+    m = re.search(r"recorded at `:(\d+)-(\d+)` \u2014 a `self-hosted` pin removes", runbook)
+    assert m is not None, (
+        "the runbook no longer cites the python-ci.yml span that records WHY a `self-hosted` pin is "
+        "forbidden — re-anchor this pin"
+    )
+    lo, hi = int(m.group(1)), int(m.group(2))
+    span = "\n".join((REPO_ROOT / ".github/workflows/python-ci.yml").read_text().splitlines()[lo - 1 : hi])
+    assert "not answered" in span and "WAIT for a hosted runner" in span, (
+        f"the runbook's python-ci.yml span :{lo}-{hi} does not record the reason it names "
+        f"(pending-not-answered instead of a false red): {span!r}"
+    )
+
+
+# ── 8. a missing installer is a FAIL, not a silent skip ───────────────────────────────────────
 def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path):
     """Copied one directory down, the module's own `REPO_ROOT` has no installer → it must go RED.
 

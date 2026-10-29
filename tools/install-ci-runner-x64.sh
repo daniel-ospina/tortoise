@@ -368,10 +368,29 @@ if [ "$MODE" = status ]; then
   # validation arm is 300 lines above), so the verdict and the label set a re-registration would
   # actually get cannot disagree: `on` claims it, `auto` claims it only on a matching host, `off`
   # (and `auto` declining) does not.
+  #
+  # ⛔ BUT IT IS THE INTENT OF **THIS SHELL**, WHICH IS NOT A PROPERTY OF THE POOL. A shell variable
+  # cannot say what the last installer pass, the autoscaler timer, or a peer lane asked for — so it
+  # may only ever ADD a verdict (the pool is asked ⇒ a zero answer is the incident), never SUBTRACT
+  # one. The runbook tells the operator to verify with the BARE `--status` (`docs/ops/ci-runner-x64.md`
+  # §*Verify it*), and in that invocation this variable is unset — i.e. `off` — so reading it as a
+  # pool fact made the DEFAULT invocation clear exactly the erosion this block exists to see, and
+  # made the `⚠️ PARTIAL` arm assert "this pool is not asked to serve it" on a line that had just
+  # MEASURED carriers answering it. A runner's labels are explicitly assigned (GitHub REST:
+  # `Add custom labels` / `Set custom labels` / `Remove all custom labels`; registration labels come
+  # from `config.sh --labels`), so `n > 0` is direct evidence that SOME actor asked the pool to serve
+  # the label — and a carrier outvotes a shell.
+  #
+  # So the two inputs stay SEPARATE and both are printed:
+  #   * `shell_asks_os_label` — what this shell's `CI_RUNNER_OS_LABEL` resolves to;
+  #   * `n` — the measurement. `n > 0` short-circuits the intent read at every consumer below.
+  # When the shell does not ask and `n == 0`, the honest output is the MEASUREMENT plus the
+  # ambiguity (the pin applied correctly, or erosion to zero — one shell cannot tell them apart);
+  # never an assertion of the harmless reading, which is a fail-open in the blocking direction.
   resolve_os_label
   case "$OS_LABELS" in
-    *",$OS_LABEL") os_label_asked=1 ;;
-    *)              os_label_asked=0 ;;
+    *",$OS_LABEL") shell_asks_os_label=1 ;;
+    *)              shell_asks_os_label=0 ;;
   esac
   uncovered=0
   labels_seen=0
@@ -542,6 +561,17 @@ if [ "$MODE" = status ]; then
     rest="${counts#* }"
     denom="${rest%% *}"
     label_class="${rest#* }"
+    # ⛔ THE INTENT IS PER LABEL, NOT PER BLOCK. `resolve_os_label` can only ever set `$OS_LABEL`
+    # (`ubuntu-24.04`), but the `bare` class the awk defines is ANY `^ubuntu-[0-9][0-9.]*$` — so
+    # with the flag `on`, a workflow pinning `ubuntu-22.04` at zero took the verdict arm, exited `5`,
+    # and printed a remedy (`CI_RUNNER_OS_LABEL=on --repair-labels`) that CANNOT apply it: the
+    # installer only ever emits `$OS_LABEL`. A permanent red with an unactionable remedy is the
+    # false-red class this block refuses to create, and the drift `tools/runner_autoscale.py:284-287`
+    # names ("a custom label that merely starts `ubuntu-<digits>` … is NOT in the class") in the
+    # other direction. So `$OS_LABEL` is the ONLY label this script can be asked to serve; every
+    # other bare spelling is somebody else's registration and is reported, never verdicted.
+    lab_asked=0
+    if [ "$label" = "$OS_LABEL" ] && [ "$shell_asks_os_label" = 1 ]; then lab_asked=1; fi
     if [ "$n" -eq 0 ]; then
       # ⛔ WHOSE PROBLEM IS A ZERO? Only a label this pool is ASKED to serve — and the three classes
       # answer differently, so the verdict is per-class rather than "any zero is the incident":
@@ -574,14 +604,21 @@ if [ "$MODE" = status ]; then
           # holds only WHILE hosted is also unavailable (the 2026-10-28 outage). On a healthy day the
           # pinned legs dispatch on hosted by design — that is what the pin is for — so the verdict
           # states the measurement and makes the consequence conditional instead of asserting it.
-          # And the verdict itself exists only when the pool IS asked to serve the label: with the
-          # flag `off` a zero answer is #6897's pin applied correctly, which is a REPORT.
-          if [ "$os_label_asked" = 1 ]; then
+          if [ "$label" != "$OS_LABEL" ]; then
+            say "     A bare hosted-version pin, but not the one this script registers (it only ever emits $OS_LABEL): nothing here re-applies $label, so its zero answer is not this pool's verdict — a report, not a block."
+          elif [ "$lab_asked" = 1 ]; then
             say "     Only GitHub-hosted can answer it, and this pool IS asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}) — so a required leg naming it has NO self-hosted answer: the mitigation is not applied. On a hosted outage that is every PR BLOCKED; on a healthy day it is the #6897 pin in effect."
             uncovered=1
           else
-            say "     Only GitHub-hosted is asked to answer it: this pool is NOT asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}) — that is the #6897 pin applied correctly, NOT the incident state. A report, not a block."
-            say "     To have this instrument check the mitigation instead, run it with CI_RUNNER_OS_LABEL=on — \`--status\` is read-only, so that changes nothing on the pool."
+            # ⛔ THE SHELL'S FLAG IS NOT THE POOL'S STATE, SO A ZERO CANNOT BE NAMED. `n == 0` is
+            # consistent with BOTH "never asked" (the #6897 pin applied correctly, nothing to do)
+            # and "asked and gone" (erosion to zero — the incident, and the exact event this block
+            # was given a PARTIAL arm to see coming). This arm used to assert the harmless reading,
+            # which is a fail-open in the blocking direction: it cleared the erosion the doc says the
+            # block surfaces, in the DEFAULT invocation the runbook tells the operator to verify with
+            # (bare `--status`, variable unset ⇒ `off`). Report the measurement plus the ambiguity.
+            say "     Two readings fit that measurement, and CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} is THIS SHELL's intent — not the pool's: the #6897 pin applied correctly (nothing to do), or a pool that WAS serving it and has eroded to zero (the incident state, on a hosted outage). A zero answer cannot distinguish \"never asked\" from \"asked and gone\"."
+            say "     Runbook §*Verify it* has the read that settles it from the pool's own record; to see the verdict as if it IS asked, re-run with CI_RUNNER_OS_LABEL=on — \`--status\` is read-only, so that changes nothing on the pool. A report, not a block."
           fi
           ;;
         *)
@@ -604,13 +641,30 @@ if [ "$MODE" = status ]; then
       case "$label_class" in
         bare)
           # ⛔ THE REMEDY CARRIES THE PRECONDITION IT NEEDS, and never prescribes a side of the open
-          # decision: when the pool is not asked to serve this label, a partial carrier set is
-          # LEFTOVER from a previous state and the revert removes it — telling that operator to
-          # "re-apply with CI_RUNNER_OS_LABEL=on" would reverse #6897 in passing.
-          if [ "$os_label_asked" = 1 ]; then
+          # decision: telling an operator whose shell says `off` to "re-apply with
+          # CI_RUNNER_OS_LABEL=on" would reverse #6897 in passing.
+          if [ "$label" != "$OS_LABEL" ]; then
+            say "     A bare hosted-version pin this script does not register (it only ever emits $OS_LABEL), so nothing here re-applies $label — a report."
+          elif [ "$lab_asked" = 1 ]; then
             say "     A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} --repair-labels."
           else
-            say "     This pool is not asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}), so a partial carrier set is a leftover from a previous state: $0 --repair-labels with the variable UNSET removes it. A report, not a block."
+            # ⛔ CARRIERS ARE INTENT — THIS ARM USED TO INVERT THE REMEDY ON THE OPPOSITE READING.
+            # Reaching here MEANS `n > 0`: the pool has just been MEASURED carrying the label. A
+            # runner's labels are explicitly assigned (GitHub REST: `Add custom labels` / `Set
+            # custom labels` / `Remove all custom labels`; registration labels come from `config.sh
+            # --labels`) — a runner never acquires one on its own — so the carriers are proof the
+            # pool WAS asked, and "this pool is not asked to serve it" was asserted on a line
+            # reporting three runners answering it. Worse, the remedy it printed (`--repair-labels`
+            # with the variable UNSET) PUTs a WHOLE label set (`set`, not `add`), so following it
+            # removes the label from the LAST carriers and lands the pool at `0 of $denom` — which
+            # the zero arm above would then report as intentional. That is a destructive instruction
+            # printed as the fix for an identical measurement, keyed on a shell variable that carries
+            # no pool state. State both readings and refuse to prescribe: the measurement is
+            # `n of denom carry it, flag not set in THIS shell`, and both "leftover" and "eroding"
+            # fit it — only one of them is safe to act on, so the operator decides from the pool's
+            # own record, not from here.
+            say "     $n runner(s) DO carry it, and CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} is only THIS SHELL's intent: a runner's labels are assigned explicitly, so a carrier is proof the pool WAS asked at some point. Two readings fit — a leftover from an earlier \`on\` period (the revert removes it), or erosion while the pool is still asked (re-apply)."
+            say "     ⛔ Do NOT settle it by accident: \`--repair-labels\` PUTs a WHOLE label set, so running it with the variable UNSET removes $OS_LABEL from the last $n carrier(s) and lands the pool at 0 of $denom. A report, not a block."
           fi
           ;;
         arm)

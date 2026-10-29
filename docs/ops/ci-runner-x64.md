@@ -45,15 +45,15 @@ set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm6
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
 - `ARM64`/`X64` are **ornaments** — no job matches on them, and none can (a `runs-on` naming
-  either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1556`
+  either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1761`
   is "Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is
-  recorded at `:1544-1546` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
+  recorded at `:1748-1750` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
   during a hosted outage the required leg WAITS and "the aggregate stays pending — not answered
   yet" instead of being answered by the pool).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
-  Apple-Silicon Mac — `mirror-images.yml:92` records `orbctl run -m pi-runner uname -m` →
+  Apple-Silicon Mac — `mirror-images.yml:104` records `orbctl run -m pi-runner uname -m` →
   `aarch64`). No workflow depends on an arm64 binary, container image, or wheel: the only
   arch-sensitive job in the repo (`mirror-images`) copies a **manifest list** and is pinned to
   a hosted label for an unrelated reason (a fresh egress IP).
@@ -258,23 +258,48 @@ The EXIT is decided per CLASS, not "any zero-answer label":
   block-level remedy then prints `⛔ UNCOVERED label(s) above`, with exit `5` (a verdict, and it is
   bad). "Asked" is read from `CI_RUNNER_OS_LABEL` through the installer's own `resolve_os_label`, so
   `on` — and `auto` on a matching host — asks, while `off` (the shipped default, and `auto`
-  declining) does not. ⛔ With `off`, a pool that correctly answers no `ubuntu-24.04` **is the
-  #6897 pin applied correctly** and the block reports it as exactly that, exit `0`: verdicting it
-  made `--status` — the mode this section tells you to verify with — permanently red in the
-  configuration the doc elsewhere calls the recorded recommendation, and the remedy it printed
-  (`CI_RUNNER_OS_LABEL=on …`) re-applied a departure the owner has not settled. The report still
-  names the one read that produces the verdict (`CI_RUNNER_OS_LABEL=on --status`, read-only);
+  declining) does not.
+  ⛔ **THAT READ IS THIS SHELL'S INTENT, NOT THE POOL'S — so it can only ADD a verdict, never
+  subtract one.** The bare `--status` this section tells you to verify with has the variable unset
+  (⇒ `off`), and a shell variable cannot say what the last installer pass, the autoscaler timer, or
+  a peer lane asked for. Two consequences, both of which this block now states instead of papering
+  over:
+  * **`n == 0` with the flag off cannot be NAMED.** It is consistent with BOTH "the #6897 pin
+    applied correctly" (nothing to do) and "asked and gone" — the pool eroded to zero one fill at a
+    time, which is the incident state. The block reports the measurement plus both readings, exit
+    `0`. It used to assert the harmless one (`NOT the incident state`), which cleared exactly the
+    erosion this block exists to surface — a fail-open in the blocking direction, in the default
+    invocation. To get the verdict anyway, run `CI_RUNNER_OS_LABEL=on --status` (read-only).
+  * **`n > 0` OUTVOTES THE FLAG.** A self-hosted runner's labels are explicitly assigned — GitHub's
+    REST surface is *Add custom labels* / *Set custom labels* / *Remove all custom labels*, and
+    registration labels come from `config.sh --labels`, so a runner never acquires one on its own.
+    A measured carrier is therefore proof that SOME actor asked the pool to serve the label, and a
+    shell variable cannot un-ask it;
 - `ubuntu-latest` at zero is a **report** (exit `0`): while the gate is not routing here, a pool
   carrying no `ubuntu-latest` IS the healthy state;
 - an `-arm` spelling, `macos-*` / `windows-*`, and a **custom** label at zero are reports (`0`) too —
   their hosted availability was never measured, so a zero there is not this block's verdict. A
   custom label that merely starts `ubuntu-<digits>` (`ubuntu-2204-tools`) is NOT the bare-version
-  class: it is measured against the whole pool and reported, never verdicted.
+  class: it is measured against the whole pool and reported, never verdicted. **The intent is also
+  per LABEL, not per block:** `resolve_os_label` can only ever set `ubuntu-24.04`, so any OTHER bare
+  pin (`ubuntu-22.04`) is a report even with the flag `on` — this script cannot apply it, and a red
+  whose printed remedy cannot work is the false-red class this block refuses to create.
 
-The remedy is class- AND intent-correct for the `⚠️ PARTIAL` arm too: a half-covered bare pin is
-"re-apply with `--repair-labels`" **only while the pool is asked to serve it**; with the flag off a
-partial carrier set is a leftover from a previous state and the printed remedy is the revert, not
-the re-apply.
+The remedy is class- AND intent-correct for the `⚠️ PARTIAL` arm too. A half-covered `ubuntu-24.04`
+is "re-apply with `--repair-labels`" **only while the pool is asked to serve it**. With the flag off
+the block does **not** prescribe either side: reaching that arm means it just MEASURED carriers, so
+both readings fit — a leftover from an earlier `on` period (the revert removes it) or erosion while
+the pool is still asked (re-apply) — and `--repair-labels` PUTs a WHOLE label set, so running it
+with the variable unset would remove the label from the **last** carriers. The block says so out
+loud and leaves the choice to you.
+
+**Settling which one it is.** The pool's recorded intent is the environment the *scheduled* pass
+runs with, not your shell's: `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/runner-autoscale.service`
+(the systemd path; `SYSTEMD_UNIT_DIR` if you installed elsewhere) or the `CI_RUNNER_OS_LABEL` key in
+`$HOME/Library/LaunchAgents/*runner-autoscale*.plist` on macOS. That line is rendered by
+`tools/install-runner-autoscale-schedule.sh` from the mode the fill leg will actually use, and it is
+absent when no provisioner was configured — absence is "not recorded", which is a third answer, not
+"off".
 
 (The class is decided ONCE, in the same awk that computes the denominator, so the two cannot
 disagree — they used to, and a zero-carrier custom label exited `5` claiming every PR was blocked.)
@@ -400,23 +425,23 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:923` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:745` (arch refusal dies at `:750`) and `uninstall` `:798` ·
-  guards at `:745-795` (forks `:753`, disk `:773`, cpu/memory `:780` — `:793`, the memory guard,
-  is the last one) · sha256 pin + registration at `:934-944` (verify `:934`, token `:937`, one
-  argv `:942-943`, `config.sh` `:944`; the run at `:926` is the dry-run echo) · systemd
-  install/start at `:954-956` · label resolution at `:222-319` (`fallback_engaged` `:222`,
+- `--count N` → `tools/install-ci-runner-x64.sh:977` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:799` (arch refusal dies at `:804`) and `uninstall` `:852` ·
+  guards at `:799-849` (forks `:807`, disk `:827`, cpu/memory `:834` — `:847`, the memory guard,
+  is the last one) · sha256 pin + registration at `:988-998` (verify `:988`, token `:991`, one
+  argv `:996-997`, `config.sh` `:998`; the run at `:980` is the dry-run echo) · systemd
+  install/start at `:1008-1010` · label resolution at `:222-319` (`fallback_engaged` `:222`,
   `resolve_os_label` `:250`, `resolve_labels` `:282`, whose body ends at its `}` on `:319`) ·
-  `repair` `:685` · `--print-labels` `:718` · label-coverage at `:337-680` (section separator at
-  `:337`, its `say` header at `:344`, the three "read nothing" arms at `:653`, `:661` and `:670`,
-  the uncovered verdict at `:678`).
+  `repair` `:739` · `--print-labels` `:772` · label-coverage at `:337-734` (section separator at
+  `:337`, its `say` header at `:344`, the three "read nothing" arms at `:707`, `:715` and `:724`,
+  the uncovered verdict at `:732`).
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:186-190`, the `case`
   through its `esac`): a `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op
   that reports success having deregistered nothing. `CI_RUNNER_OS_LABEL` is validated the same
   way and in the same place (`:245-247`), so a typo is refused in `--status` and `--uninstall`
   too — not only in the three modes that resolve labels.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:797-906`; the proof is `is_runner_install` at `:214`, which accepts `.runner` or
+  gone** (`:851-960`; the proof is `is_runner_install` at `:268`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -443,15 +468,16 @@ falls back.
   one · `5` label-coverage WAS read and found a required label that **this pool is asked to serve**
   with no self-hosted answer — the erosion state: the operator opted in (`CI_RUNNER_OS_LABEL=on`,
   or `auto` resolving to this host), so the mitigation is silently absent. A zero-answer label the
-  pool is **not** asked to serve (`off`, the shipped default) is a report, not a verdict: that is
-  #6897's pin applied correctly. **`0` does not mean "covered":** `0` is what a report with no ⛔
+  pool is **not** asked to serve (`off`, the shipped default, or `auto` declining) is a report, not
+  a verdict: that is either #6897's pin applied correctly OR erosion to zero, which one shell cannot
+  tell apart, so it reports both. **`0` does not mean "covered":** `0` is what a report with no ⛔
   line exits with, and a `0`-runner label the pool IS asked to serve is the `5` case, not a clean
   bill of health. Nothing in the tree keys on `--status`'s status today, so this is a signal for an
   operator or a future `--status && …` guard, not a change any caller currently reads.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:745`, the `MODE = install`
-  block; the refusal itself dies at `:750`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:799`, the `MODE = install`
+  block; the refusal itself dies at `:804`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
