@@ -847,15 +847,34 @@ def test_the_account_menu_settles_instead_of_404ing_its_invites(page: Page):
     answer with its retryable-error row — a PARENT-MENU re-render racing the click.
     `_wire()` now answers `{"invites": []}` (the app's normal no-invites state).
 
-    This arm is the deterministic half: on the pre-fix fixture the alert renders and
-    this fails in under a second, so the fix is proven rather than trusted to a
-    1-in-3 flake reproducing.
+    This arm is the deterministic half: on the pre-fix fixture the fetch answers
+    404, so the response this arm BINDS TO is not ok and the arm reds on every
+    run — the fix is proven rather than trusted to a 1-in-3 flake reproducing.
+
+    ⛔ The fetch is AWAITED before any claim about what it rendered (#10179 P2-1).
+    `to_have_count(0)` succeeds on the first poll when the element is simply
+    absent, i.e. it asserts "absent NOW", not "never appears" — so an absence
+    assertion evaluated straight after the click races `loadPendingInvites`'s
+    response and passes on the PRE-FIX fixture whenever the response has not been
+    delivered yet. Binding the assertion to the response (and asserting the
+    response itself, which is the thing the fixture changed) makes the arm red on
+    every run with the stub removed, and green once the 200 is restored.
     """
     _seed(page)
     _wire(page, inv=_inventory(login_methods=1))
 
     page.goto(DASHBOARD_URL)
-    _open_account_menu(page)
+    with page.expect_response(
+        lambda r: r.url.endswith("/v1/invites/pending")
+    ) as invites_resp:
+        _open_account_menu(page)
+    # The fixture's answer IS half of what this arm pins: `_wire` must serve the
+    # app's normal no-invites state, and 404 is the retryable-error path.
+    assert invites_resp.value.ok, (
+        f"the invites fetch answered {invites_resp.value.status} — `_wire` must "
+        "serve the app's normal no-invites state, not fall through to the 404 "
+        "catch-all (which is the #9191 detached-node re-render)"
+    )
     menu = page.locator(".account-menu")
     # The retryable-error row `loadPendingInvites` writes on a failed fetch:
     # `{ _loadError: 'Could not load invites — reopen the menu to retry' }`.
