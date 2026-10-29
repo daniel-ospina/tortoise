@@ -429,7 +429,20 @@ if [ "$MODE" = status ]; then
   # `group:` named beside it) prints `!`, exactly like a block with no readable label and no group.
   coverage="$(grep -rhvE '^[[:space:]]*#' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
       | awk '
-      function trim(s) { gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+      # ⛔ CRLF: `\r` is not `[ \t]`, so a CRLF workflow left `ubuntu-24.04\r` in the emitted
+      # label — a token that matches no class arm, so it fell to the "a report, not a block" default
+      # and the whole read silently became "not a label this pool serves", exit 0 (measured: the
+      # real carriers of that label were never read). GitHub accepts CRLF YAML.
+      function trim(s) { sub(/\r+$/, "", s); gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+      # ⛔ A KEY IS A NODE, NOT A SPELLING — for `group:`/`labels:` exactly as for `runs-on:`.
+      # YAML gives a plain, a single-quoted and a double-quoted key the SAME mapping key (1.2.2
+      # §7.4.2 / §8.2.2), and GitHub routes all three the same way. Matched on the SPELLING only, a
+      # quoted `labels:` was not a `labels:` key at all: it emitted no label, `plabels` stayed 0, and
+      # a `group:` in the same mapping suppressed the one refusal marker (the `finish()` condition
+      # `!pgroup || plabels`) — so a required `ubuntu-24.04` was never measured and `--status`
+      # exited 0. Measured: `runs-on: {group: pool, "labels": [ubuntu-24.04]}` → rc 0 with no
+      # `ubuntu-24.04` row; the same mapping with a plain `labels:` → rc 5.
+      function keyis(k, name) { return k ~ ("^[\"\047]?" name "[\"\047]?[ \t]*:") }
       function unq(s) {
         s = trim(s)
         while (s ~ /^["\047]/) s = substr(s, 2)
@@ -473,14 +486,29 @@ if [ "$MODE" = status ]; then
         if (trim(cur) != "") parts[++n] = cur
         for (i = 1; i <= n; i++) {
           k = trim(parts[i])
-          if (k ~ /^group[ \t]*:/) pgroup = 1
-          else if (k ~ /^labels[ \t]*:/) { plabels = 1; value(substr(k, index(k, ":") + 1)) }
+          if (keyis(k, "group")) pgroup = 1
+          else if (keyis(k, "labels")) { plabels = 1; value(substr(k, index(k, ":") + 1)) }
         }
       }
+      # ⛔ AN UNCLOSED COLLECTION IS REFUSED, NOT TRUNCATED — the same content-not-prefix rule
+      # `emit()` applies to a VALUE, applied to the FORM. `flowlist()` strips a `]` that may not be
+      # there (`sub(/\]$/, "", s)` is a silent no-op), so a multi-line flow sequence — valid YAML,
+      # and what a formatted workflow produces — was read as its opening line and `finish()`ed on
+      # the spot: `runs-on: [self-hosted,` / `ubuntu-24.04]` emitted `self-hosted`, dropped the pin
+      # on the continuation line, and exited 0. Measured: that fixture → rc 0 with NO
+      # `ubuntu-24.04` row; the identical array on one line → rc 5. Joining continuation lines would
+      # also close it; refusing is the fail-closed half of the contract stated above (exit 4, "no
+      # verdict"), and a form this pass cannot read is refused rather than cleared.
       function value(s) {
         s = trim(s)
-        if (s ~ /^\[/) { flowlist(s); return }
-        if (s ~ /^\{/) { mapping(s); return }
+        if (s ~ /^\[/) {
+          if (s !~ /\]$/) { bad++; return }
+          flowlist(s); return
+        }
+        if (s ~ /^\{/) {
+          if (s !~ /\}$/) { bad++; return }
+          mapping(s); return
+        }
         emit(s)
       }
       # ⛔ THE KEY IS A NODE, NOT A SPELLING — AND A KEY THIS PASS OPENS NO BLOCK FOR IS REFUSED.
@@ -532,12 +560,12 @@ if [ "$MODE" = status ]; then
         if (pend && ind > pind) {
           if (line ~ /^-[ \t]/) {
             item = trim(substr(line, 2))
-            if (item ~ /^group[ \t]*:/) pgroup = 1
-            else if (item ~ /^labels[ \t]*:/) { plabels = 1; value(substr(item, index(item, ":") + 1)) }
+            if (keyis(item, "group")) pgroup = 1
+            else if (keyis(item, "labels")) { plabels = 1; value(substr(item, index(item, ":") + 1)) }
             else value(item)
           }
-          else if (line ~ /^group[ \t]*:/) pgroup = 1
-          else if (line ~ /^labels[ \t]*:/) {
+          else if (keyis(line, "group")) pgroup = 1
+          else if (keyis(line, "labels")) {
             plabels = 1
             v = substr(line, index(line, ":") + 1)
             if (trim(v) != "") value(v)

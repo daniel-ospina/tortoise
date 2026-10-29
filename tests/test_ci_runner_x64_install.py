@@ -625,10 +625,16 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
     assert "CI_RUNNER_OS_LABEL=on --repair-labels" not in r.stderr, (
         f"the remedy must not re-apply a departure the operator has switched off: {r.stderr}"
     )
-    # Mutation (the pre-fix code): assert the leftover reading and prescribe the revert -> both RED.
-    assert "leftover from a previous state" not in r.stderr, (
-        f"an unset flag cannot make a MEASURED carrier set a leftover — both readings must be "
-        f"stated: {r.stderr}"
+    # ⛔ BOTH READINGS MUST BE STATED, and this assertion used to name a string the script never
+    # emits (`"leftover from a previous state"` — `grep` finds it nowhere), so it could not fail and
+    # the "Mutation ... both RED" note above rested on the two assertions below it alone. Pin the
+    # text the code ACTUALLY prints, positively: the both-readings sentence is the fix, a
+    # single-reading revert drops one half of it, and the pin reds.
+    assert "leftover from an earlier" in r.stderr, (
+        f"the flag-off PARTIAL arm must name the leftover reading it fits: {r.stderr}"
+    )
+    assert "erosion while the pool is still asked" in r.stderr, (
+        f"and the OTHER reading it fits — a single-reading message is the destructive half: {r.stderr}"
     )
     assert "proof the pool WAS asked" in r.stderr, (
         f"a carrier must outvote a shell variable, and the line must say so: {r.stderr}"
@@ -1135,6 +1141,103 @@ def test_label_coverage_reads_the_runs_on_key_in_every_yaml_spelling(tmp_path: P
         )
 
 
+def test_label_coverage_reads_a_quoted_labels_key_and_refuses_an_unclosed_collection(tmp_path: Path):
+    r"""Three shapes were CLEARED at exit 0 while a required pin went unmeasured — all fail-open.
+
+    They are one class: the block's own contract says "a form this pass cannot read is refused",
+    and each of these read as a form it COULD read.
+
+    1. **A quoted `labels:` key.** `mapping()` and the two block arms matched `/^labels[ \t]*:/`,
+       the SPELLING, not the key node. YAML gives a plain, a single-quoted and a double-quoted key
+       the same mapping key — the argument this file already makes for `runs-on` — so
+       `runs-on: {group: pool, "labels": [ubuntu-24.04]}` emitted NO label, `plabels` stayed 0, and
+       the `group:` beside it suppressed the one refusal marker (`finish()` prints `!` only on
+       `bad > 0 || (got == 0 && (!pgroup || plabels))`). Measured: rc 0 with no `ubuntu-24.04` row
+       at all. The block form `'labels': ubuntu-24.04` under a `group:` behaves identically.
+    2. **An unterminated flow collection.** `flowlist()` does `sub(/\]$/, "", s)`, a silent no-op
+       when the `]` is not on the line, and the caller `finish()`es the block on the same line — so
+       a multi-line flow sequence (valid YAML; what a formatted workflow produces) was read as its
+       opening line: `runs-on: [self-hosted,` / `ubuntu-24.04]` emitted `self-hosted`, dropped the
+       pin, and exited 0. Same for a multi-line flow MAPPING.
+    3. **CRLF.** `trim()` stripped `[ \t]` only, so `ubuntu-24.04\r` survived into the emitted
+       label, matched no class arm, and fell to the `*)` "a report, not a block" default — the
+       whole read silently became "not a label this pool serves", exit 0.
+
+    Mutation: restore `/^labels[ \t]*:/` -> the two quoted-key cases exit 0 -> RED.
+    Mutation: drop the two `bad++` arms in `value()` -> the unclosed cases exit 0 -> RED.
+    Mutation: drop `sub(/\r+$/, "", s)` from `trim()` -> the CRLF case exits 0 -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+
+    def status(repo: Path) -> subprocess.CompletedProcess:
+        return _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+            cwd=repo,
+        )
+
+    # 1. a QUOTED `labels:` key is the same key — measured, exactly like the plain spelling.
+    measured = {
+        "flow mapping, double-quoted key": 'jobs:\n  a:\n    runs-on: {group: pool, "labels": [ubuntu-24.04]}\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n',
+        "block mapping, single-quoted key": "jobs:\n  a:\n    runs-on:\n      group: pool\n      'labels': ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    }
+    for i, (name, body) in enumerate(measured.items()):
+        r = status(_repo_with_workflows(tmp_path / f"ql{i}", body))
+        combined = r.stdout + r.stderr
+        assert r.returncode == 5, (
+            f"{name}: a quoted `labels:` key carries a required pin this pool is asked to serve, "
+            f"so a zero answer is 5 — not {r.returncode}: {combined}"
+        )
+        assert "ubuntu-24.04 = 0 of 1" in combined, (
+            f"{name}: the pin was never measured — the `group:` beside the quoted key suppressed "
+            f"the refusal as well, which is the incident state cleared at exit 0: {combined}"
+        )
+
+    # 2. an UNCLOSED collection has no static label set, so it is 4 (no verdict) — never 0.
+    unclosed = {
+        "multi-line flow sequence": "jobs:\n  a:\n    runs-on: [self-hosted,\n      ubuntu-24.04]\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        "multi-line flow mapping": "jobs:\n  a:\n    runs-on: {group: pool,\n      labels: [ubuntu-24.04]}\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    }
+    for i, (name, body) in enumerate(unclosed.items()):
+        r = status(_repo_with_workflows(tmp_path / f"un{i}", body))
+        combined = r.stdout + r.stderr
+        assert r.returncode == 4, (
+            f"{name}: the members past the line break cannot be read, so the read is PARTIAL and "
+            f"has no verdict — that is 4, not {r.returncode}: {combined}"
+        )
+        assert "STATIC label set" in combined, f"{name}: {combined}"
+        assert not re.search(r"= \d+ of \d+", combined), (
+            f"{name}: a partial read must not verdict any label: {combined}"
+        )
+        # CONTROL — the identical array on ONE line is a static label set, and it verdicts.
+        one_line = body.replace("[self-hosted,\n      ubuntu-24.04]", "[self-hosted, ubuntu-24.04]").replace(
+            "{group: pool,\n      labels: [ubuntu-24.04]}", "{group: pool, labels: [ubuntu-24.04]}"
+        )
+        assert one_line != body, f"{name}: the control fixture did not change — fix the substitution"
+        ctl = status(_repo_with_workflows(tmp_path / f"un{i}-ctl", one_line))
+        assert ctl.returncode == 5, (
+            f"{name} (control, one line): a readable static set verdicts at 5 — not {ctl.returncode}: "
+            f"{ctl.stdout}{ctl.stderr}"
+        )
+
+    # 3. CRLF must not fabricate a label: `ubuntu-24.04\r` is not a class arm and is not a name.
+    crlf = _repo_with_workflows(
+        tmp_path / "crlf",
+        "jobs:\r\n  a:\r\n    runs-on: ubuntu-24.04\r\n  b:\r\n    runs-on: ubuntu-latest\r\n    steps: []\r\n",
+    )
+    r = status(crlf)
+    combined = r.stdout + r.stderr
+    assert r.returncode == 5, (
+        f"a CRLF workflow names the same labels as an LF one, so the pin's zero answer is 5 — not "
+        f"{r.returncode}: {combined}"
+    )
+    assert "ubuntu-24.04 = 0 of 1" in combined, (
+        "the `\\r` was kept in the label, so every row fell to the "
+        f"\"not a label this pool serves\" default: {combined}"
+    )
+    assert "\r" not in combined, f"a carriage return survived into the report: {combined!r}"
+
+
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
 def test_dry_run_decides_nothing_and_calls_nothing(tmp_path: Path):
     """A plan is the operator's step: no token, no download, no registration, no label read."""
@@ -1632,6 +1735,27 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "repair": r'^if \[ "\$MODE" = repair \]',
         "print-labels": r'^if \[ "\$MODE" = labels \]',
     }
+    # ⛔ THE SYSTEMD REF IS NOT IN THE DICT ABOVE BECAUSE THE MAP DOES NOT WRITE IT AS
+    # `label` `:NNN` — it writes `systemd install/start at `:NNN``, so the label-to-ref regex the
+    # dict is matched with cannot be anchored on it. That is exactly why it drifted unchecked: the
+    # sentence cited `:1062-1064` (the download block) while the systemd install/start lives at
+    # `:1085-1088`, and `main` had it right at `:510-512` before this change — a regression that only
+    # the in-range arm could see. Pinned here by the phrase the sentence uses.
+    systemd = re.search(r"systemd\s+install/start at `:(\d+)(?:-(\d+))?`", map_text)
+    assert systemd is not None, (
+        f"the runbook map no longer cites the systemd install/start line — re-anchor this pin: {map_text!r}"
+    )
+    s_start = int(systemd.group(1))
+    s_stop = int(systemd.group(2) or s_start)
+    s_block = installer[s_start - 1 : s_stop]
+    assert any(re.search(r"svc\.sh install", line) for line in s_block), (
+        "the runbook cites the systemd install/start at "
+        f":{s_start}-{s_stop}, which carries no `svc.sh install` — the systemd block is at "
+        f"{[i + 1 for i, line in enumerate(installer) if 'svc.sh install' in line]}"
+    )
+    assert any(re.search(r"svc\.sh start", line) for line in s_block), (
+        f"the same sentence names a START, and :{s_start}-{s_stop} carries no `svc.sh start`"
+    )
     # ⛔ EVERY anchor must be found by name: a label the map stopped naming is how this pin would
     # silently degrade to checking nothing (the runbook writes some labels bare — `(forks :262` —
     # and some in backticks — `` `fallback_engaged` :160``, so both forms are matched).
