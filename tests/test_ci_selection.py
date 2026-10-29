@@ -10874,6 +10874,178 @@ def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
         )
 
 
+def test_orphan_assert_steps_hand_the_gate_the_counted_argv():
+    """#1005 (epic #1647 E2E-7): the count is HOST-WIDE; the argv is what makes
+    a server attributable to THIS run.
+
+    `--count` alone cannot tell another job's server (or a sibling `pytest -n`
+    worker's) from this run's, and redding that difference failed PASSING runs
+    (9 counted vs left=8, pytest rc 0). The gate can only make the distinction
+    if the workflow hands it the counted servers' argv, so each step must
+    produce that file from `$PIDS` and pass it — and a `ps` failure must be a
+    FAILED probe, never an empty file that silently reads as "all foreign".
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, (
+        f"expected the three 'Assert no redislite orphans' steps, found "
+        f"{len(steps)} — this pin must not pass vacuously"
+    )
+    for s in steps:
+        body = "\n".join(
+            line
+            for line in s["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert ': > "$ARGV"' in body, (
+            f"step {s.get('name')!r} must truncate the argv file before the "
+            f"probe, so a stale file from an earlier attempt cannot attribute "
+            f"this run's count (#1005)"
+        )
+        assert 'ps -ww -o pid=,args= -p "$PIDLIST"' in body, (
+            f"step {s.get('name')!r} must read the counted servers' argv with "
+            f"`ps -ww -o pid=,args= -p` (#1005)"
+        )
+        assert "tr -s '[:space:]' ','" in body, (
+            f"step {s.get('name')!r} must normalise pgrep's newline-separated "
+            f"pids to a comma list: GNU `ps -p` REJECTS a newline list with "
+            f"'process ID list syntax error' (measured on the self-hosted "
+            f"Linux cells) while BSD `ps` tolerates it, so without this the "
+            f"Linux legs write an EMPTY argv file and every server reads as "
+            f"unattributable (#1005)"
+        )
+        assert '[ "$arc" -le 1 ]' in body and "ps failed" in body, (
+            f"step {s.get('name')!r} must fail closed on a `ps` error: an "
+            f"empty argv would attribute every counted server to another "
+            f"process and hide this run's own residue (#1005)"
+        )
+        # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+        # matched (measured on procps-ng 4.0.4: `ps -p 1` → 0, `ps -p 999999`
+        # → 1, `ps -p 1,999999` → 0), and the procps man page publishes no
+        # exit-status contract. `-eq 0` therefore encoded an assumption the
+        # tool never made and failed the job on a benign shutdown race — the
+        # very defect class this PR removes, one layer up. Pin the polarity so
+        # a re-tightening to `-eq 0` (or to any wider `-le N`) reds here:
+        # rc>1 is a probe failure, rc 0/1 are completed measurements.
+        assert '[ "$arc" -eq 0 ]' not in body, (
+            f"step {s.get('name')!r} must NOT require `ps` to exit 0: rc 1 is a "
+            f"COMPLETED measurement of an empty population (every counted "
+            f"server exited in the shutdown window), so `-eq 0` fails a green "
+            f"run (#10255 review 1)"
+        )
+        assert re.search(r'\[\s*"\$arc"\s*-le\s+[2-9]', body) is None, (
+            f"step {s.get('name')!r} must treat only rc>1 as a probe failure — "
+            f"a wider bound would read a real `ps` failure as an empty "
+            f"attribution (#10255 review 1)"
+        )
+        assert '--argv "$ARGV"' in body, (
+            f"step {s.get('name')!r} must pass --argv to the gate — the gate "
+            f"warns rather than reds when the attribution is unavailable, so a "
+            f"dropped flag would silently retire the leak check (#1005)"
+        )
+
+
+def _fake_ps_probe_dir(tmp: Path) -> Path:
+    """A PATH dir whose `pgrep`/`ps` answer from the environment.
+
+    The orphan step's verdict on a `ps` exit status cannot be pinned by reading
+    its text: what matters is that the JOB does not fail. So the real step body
+    is executed against shims — `pgrep` prints ``$FAKE_PIDS``, `ps` prints
+    ``$FAKE_PS_OUT`` and exits ``$FAKE_PS_RC`` — which is how the benign
+    shutdown race is reproduced deterministically.
+    """
+    shims = tmp / "shims"
+    shims.mkdir(parents=True, exist_ok=True)
+    (shims / "pgrep").write_text('#!/bin/sh\nprintf "%s" "$FAKE_PIDS"\n')
+    (shims / "ps").write_text(
+        '#!/bin/sh\nprintf "%s" "$FAKE_PS_OUT"\nexit "$FAKE_PS_RC"\n')
+    for name in ("pgrep", "ps"):
+        (shims / name).chmod(0o755)
+    return shims
+
+
+def _run_orphan_step(body: str, tmp: Path, env_extra: dict) -> \
+        subprocess.CompletedProcess:
+    """Run a real 'Assert no redislite orphans' step body with the shims."""
+    env = dict(os.environ)
+    env["PATH"] = f"{tmp / 'shims'}:{env.get('PATH', '')}"
+    env["RUNNER_TEMP"] = str(tmp)
+    env.update(env_extra)
+    return subprocess.run(
+        ["bash", "-c", body], cwd=str(REPO), env=env,
+        capture_output=True, text=True, timeout=120)
+
+
+def _orphan_step_fixtures(tmp: Path) -> None:
+    """The two files the step reads: pytest's rc and the sweep's report."""
+    (tmp / "pytest-rc").write_text("0")
+    (tmp / "redislite-hygiene-end.json").write_text(json.dumps({
+        "own_roots": ["/tmp/tt_fixture"],
+        "sweep": {"reaped": 0, "exited": 0, "cleared": True, "left": 0,
+                  "before": 0, "own_left": 0},
+    }))
+
+
+def test_orphan_step_survives_ps_exit_1_on_an_empty_match():
+    """#10255 review 1 (P1): a benign `ps` race must not fail the job.
+
+    `ps -p <list>` exits **1** when no listed pid matched (measured on
+    procps-ng 4.0.4; the procps man page documents no exit-status contract).
+    The count and this read sit inside the residue's shutdown window, which the
+    gate's own header documents as normal, so at COUNT 1-2 every counted server
+    exiting in between is ordinary — the pre-fix `[ "$arc" -eq 0 ]` failed the
+    step there, on a run whose pytest passed and which leaked nothing.
+
+    Non-vacuity: with `-eq 0` restored this step exits 1 with
+    `::error::ps failed rc=1`.
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, f"expected 3 orphan steps, found {len(steps)}"
+    for s in steps:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            _fake_ps_probe_dir(tmp)
+            _orphan_step_fixtures(tmp)
+            done = _run_orphan_step(s["run"], tmp, {
+                "FAKE_PIDS": "4242\n", "FAKE_PS_RC": "1", "FAKE_PS_OUT": ""})
+        assert "::error::ps failed" not in done.stdout, (
+            f"step {s.get('name')!r} failed the job on `ps` rc 1 — a "
+            f"COMPLETED measurement of an empty population, not a failed probe "
+            f"(#10255 review 1): {done.stdout}{done.stderr}"
+        )
+        assert done.returncode == 0, (
+            f"step {s.get('name')!r} must pass when the counted servers exited "
+            f"before the later probe (rc={done.returncode}): "
+            f"{done.stdout}{done.stderr}"
+        )
+
+
+def test_orphan_step_still_fails_closed_on_a_real_ps_error():
+    """#10255 review 1, the other half: rc>1 is still a FAILED probe.
+
+    Relaxing rc 1 must not relax the fail-closed direction — an unreadable
+    attribution would read every counted server as another process's and hide
+    this run's own residue (#1005), so rc 2 (and a missing/timed-out `ps`, \
+    which is not 0/1 either) must still red.
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, f"expected 3 orphan steps, found {len(steps)}"
+    for s in steps:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            _fake_ps_probe_dir(tmp)
+            _orphan_step_fixtures(tmp)
+            done = _run_orphan_step(s["run"], tmp, {
+                "FAKE_PIDS": "4242\n", "FAKE_PS_RC": "2", "FAKE_PS_OUT": ""})
+        assert done.returncode == 1, (
+            f"step {s.get('name')!r} must exit 1 on `ps` rc 2 — a real probe "
+            f"failure is not an empty measurement (rc={done.returncode}): "
+            f"{done.stdout}{done.stderr}"
+        )
+        assert "::error::ps failed rc=2" in done.stdout, (
+            f"step {s.get('name')!r} must name the failed probe: {done.stdout}"
+        )
+
+
 def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
     """#4740 review 5: each empty-selection block must WRITE the no-pytest
     report to the very path the orphan gate is handed.
