@@ -4636,6 +4636,26 @@ _COUNT_NUMBER_TOKEN = re.compile(
 _DECLARED_FALSE_POSITIVE_PHRASE = re.compile(r"\b(?:false positives?|positives)\b", re.I)
 #: How far before the phrase a count may sit, and never across a sentence end.
 _COUNT_WINDOW = 61
+#: A SENTENCE BOUNDARY, and the ONE definition of it — `_claim_sentences` splits on
+#: this and the count window tests it, so the two cannot drift apart. ⛔ The window
+#: used to be bounded by `_CLAUSE_BREAKS` ALONE, which holds no full stop, so
+#: *"The census counts 6 writers. The declared false positive is X"* was read as
+#: stating SIX — a false red on two true sentences, and the exact over-claim this
+#: module exists to refuse: the docstring above promised a bound the code did not
+#: have (`#10200` review, executed both directions). The period is NOT added to
+#: `_CLAUSE_BREAKS`: `_clause_at` and the history escape read that tuple, and a
+#: sentence is a WIDER bound than a clause, so the two are kept apart on purpose.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+def _crosses_a_sentence_end(boundaries: list[int], lo: int, hi: int) -> bool:
+    """Does a SENTENCE boundary fall strictly between `lo` and `hi`?
+
+    `boundaries` are `_SENTENCE_BOUNDARY` match starts — the first whitespace
+    character after the full stop, so a numeral before it and a phrase after it
+    are in DIFFERENT sentences and the numeral says nothing about that phrase.
+    """
+    return any(lo < boundary < hi for boundary in boundaries)
 #: "both" IS a count of two — the exact spelling the stale header used.
 _COUNT_WORD_VALUES: dict[str, int] = {"both": 2}
 
@@ -4697,7 +4717,7 @@ def _claim_sentences(text: str) -> list[str]:
     asymmetry is recorded here rather than claimed away.
     """
     flat = _flat(text)
-    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", flat) if part.strip()]
+    return [part.strip() for part in _SENTENCE_BOUNDARY.split(flat) if part.strip()]
 
 
 def _clause_at(sentence: str, index: int) -> str:
@@ -6463,6 +6483,9 @@ def _declared_false_positive_counts(
             (match.start(), match.group(1).lower())
             for match in _COUNT_NUMBER_TOKEN.finditer(flat)
         ]
+        #: Every sentence end in this passage, in the SAME flattened coordinate
+        #: space as the tokens and the phrases.
+        sentence_ends = [match.start() for match in _SENTENCE_BOUNDARY.finditer(flat)]
         for phrase in _DECLARED_FALSE_POSITIVE_PHRASE.finditer(flat):
             before = [
                 (position, token)
@@ -6476,6 +6499,14 @@ def _declared_false_positive_counts(
                 # the declared false positive is X"* read THREE.
                 and not any(
                     brk in flat[position : phrase.start()] for brk in _CLAUSE_BREAKS
+                )
+                # ⛔ … AND one SENTENCE (`#10200` review, executed both ways): a
+                # `_CLAUSE_BREAKS` member is not the only boundary — it holds no
+                # full stop, so the numeral in *"The census counts 6 writers. The
+                # declared false positive is X"* was attached to a phrase in the
+                # NEXT sentence and a true sentence pair red as a wrong count.
+                and not _crosses_a_sentence_end(
+                    sentence_ends, position, phrase.start()
                 )
             ]
             if before:
@@ -6496,6 +6527,13 @@ def _declared_false_positive_counts(
                     and position - phrase.end() <= _COUNT_WINDOW
                     and not any(
                         brk in flat[phrase.end() : position] for brk in _CLAUSE_BREAKS
+                    )
+                    # … and not across a sentence end in THIS direction either —
+                    # the mirror of the `before` bound, which was missing for the
+                    # same reason (`#10200` review, executed): *"The declared false
+                    # positive is X. 6 writers are counted"* read SIX.
+                    and not _crosses_a_sentence_end(
+                        sentence_ends, phrase.end(), position
                     )
                 ]
                 # … and *"the ONLY declared false positive"* states a count of ONE
@@ -6551,7 +6589,8 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
     Both are cheap to derive, so they are derived: the count from
     `NOT_AN_ABOUT_WRITER`, the ordinal from the population's width plus one.
     Covered spellings are stated rather than implied — the count as a cardinal
-    word (or "both"), or a numeral, in the SAME CLAUSE as "false positive(s)",
+    word (or "both"), or a numeral, in the SAME CLAUSE and the SAME SENTENCE as
+    "false positive(s)",
     matched to the token NEAREST the phrase; the ordinal only in the *"A <ordinal>
     site is in the code today"* sentence. The count is read in digits as well as
     in words because the guarded paragraph writes every other count as a numeral,
@@ -6643,6 +6682,54 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
     assert _declared_false_positive_counts(list(other_clause)) == [], (
         "a numeral from an EARLIER clause is attached to `declared false "
         "positive`, so a sentence that states no count is read as stating one"
+    )
+    # ⛔ … and the boundary a `_CLAUSE_BREAKS` member does NOT provide: a SENTENCE
+    # end. That tuple holds no full stop, and nothing else here split sentences
+    # first, so the numeral in the sentence BEFORE the phrase was attached to it
+    # — a false red on two true sentences, both directions (`#10200` review,
+    # executed before the fix: `before` returned 6, `after` returned 6). The
+    # comment above already claimed `.` was among the separators; it was not.
+    next_sentence = (
+        (
+            "probe",
+            "The census counts 6 writers. The declared false positive is "
+            "`projection._rebuild_all_replay`.",
+        ),
+    )
+    assert _declared_false_positive_counts(list(next_sentence)) == [], (
+        "a numeral from the PREVIOUS sentence is attached to `declared false "
+        "positive`, so a passage that states no count for it reds as a wrong "
+        f"count ({_declared_false_positive_counts(list(next_sentence))}) — the "
+        "cheapest way to clear that red is to reword a TRUE sentence"
+    )
+    prior_sentence = (
+        (
+            "probe",
+            "The declared false positive is `projection._rebuild_all_replay`. "
+            "6 writers are counted.",
+        ),
+    )
+    assert _declared_false_positive_counts(list(prior_sentence)) == [], (
+        "a numeral from the FOLLOWING sentence is attached to `declared false "
+        "positive` — the forward branch needs the same sentence bound, or a "
+        "stale count in the next sentence reads as this sentence's own "
+        f"({_declared_false_positive_counts(list(prior_sentence))})"
+    )
+    # … and the bound is the SENTENCE, not the full stop's position: a count and
+    # its phrase separated by a dotted SYMBOL in the same sentence must still be
+    # read, or the fix reds the documents' own house spelling.
+    dotted_symbol = (
+        (
+            "probe",
+            "the census holds one declared false positive at "
+            "`projection._rebuild_all_replay`",
+        ),
+    )
+    assert [
+        count for _where, count in _declared_false_positive_counts(list(dotted_symbol))
+    ] == [1], (
+        "a dotted symbol inside the SAME sentence is read as a sentence end, so "
+        "the count it belongs to is lost and true prose reds as silence"
     )
     # … and a HISTORY-marked count is TRUE and must stay writable, the same escape
     # the denial leg carries (`#10200` review, cycle 3: the count leg had none).
