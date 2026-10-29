@@ -7,6 +7,9 @@
 # The step used to be one line:
 #
 #   xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3 \
+#
+# ⛔ (that historical line is quoted, not run: `-a` and `-r` are GNU-only xargs
+#    flags and macOS's xargs rejects `-a` outright — see the invocation below.)
 #     > "$RUNNER_TEMP/mdlint-pr.txt" 2>&1
 #
 # and it produced this, twice, on two different runner instances and two
@@ -197,7 +200,15 @@ count="$(tr -cd '\0' < "$FILES_FROM" | wc -c | tr -d ' ')"
 # lines to stdout but every FINDING line to stderr, so a stdout-only report would
 # satisfy the differ's cardinality checks while carrying zero findings — a fail
 # OPEN. This is the same merge the previous one-liner made.
-xargs -0 -a "$FILES_FROM" -r "$CLI" >"$TMP_REPORT" 2>&1
+# ⛔ PORTABLE INVOCATION, deliberately: `-a` and `-r` are GNU extensions that
+# BSD/Apple `xargs` does not have (measured on macOS: `xargs: invalid option --
+# a`, an empty report, and this script failing at "produced no report") — so the
+# input is a plain stdin REDIRECT, and `-r` is unnecessary because the population
+# was already proven non-empty above (`count -gt 0 || fail`). Six of this
+# producer's own tests shell this body out with the ambient `PATH`, so a GNU-only
+# flag here is a red local suite on every dev machine even though CI (GNU xargs)
+# stays green.
+xargs -0 "$CLI" <"$FILES_FROM" >"$TMP_REPORT" 2>&1
 rc=$?
 
 stderr_tail() {

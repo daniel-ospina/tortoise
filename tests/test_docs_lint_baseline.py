@@ -1560,8 +1560,16 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
         # FAIL-OPEN one: cli2 writes `Linting:`/`Summary:` to stdout and every
         # FINDING line to stderr (measured), so a stdout-only report satisfies
         # every cardinality check while carrying zero findings.
-        assert 'xargs -0 -a "$FILES_FROM"' in producer
-        assert '"$CLI" >"$TMP_REPORT" 2>&1' in producer, (
+        assert 'xargs -0 "$CLI" <"$FILES_FROM"' in producer, (
+            "the invocation must be portable: `-a`/`-r` are GNU-only and macOS's "
+            "xargs rejects `-a` outright (measured), which reds six of "
+            "tests/test_docs_markdownlint.py on every dev machine"
+        )
+        assert '-r "$CLI"' not in producer, (
+            "`-r` is a GNU-only flag here and is unnecessary — the population is "
+            "already proven non-empty before the call"
+        )
+        assert '<"$FILES_FROM" >"$TMP_REPORT" 2>&1' in producer, (
             "the producer must capture BOTH streams into the report"
         )
         # The capture must not be subject to `set -e`: cli2 exits 1 (under xargs,
