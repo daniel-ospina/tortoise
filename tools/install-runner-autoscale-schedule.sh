@@ -170,6 +170,24 @@ if [ -z "$GH_BIN" ]; then
 fi
 
 STATE_DIR="${RUNNER_AUTOSCALE_STATE_DIR:-$HOME/.pi/agent/state}"
+# ── the OS-label mode the TIMER passes to the provisioner ────────────────────────────────────
+# ⛔ THE FILL LEG REGISTERS NEW RUNNERS THROUGH `install-ci-runner-x64.sh --count N --fallback
+# auto`, and `_run` there passes no `env=` — so the child sees only what THIS unit inherits.
+# systemd does NOT inherit the installing shell's environment, so a unit that pins no
+# `CI_RUNNER_OS_LABEL` gives the provisioner `off` (the installer's default), and every runner the
+# autoscaler ADDS joins without `ubuntu-24.04`. Measured shape: the pool drifts back to zero answers
+# one fill at a time, `--status` stays green until the last runner that still carries the label is
+# replaced, and then every PR is BLOCKED again (#6897's incident, silently rebuilt).
+#
+# The value is CAPTURED AT INSTALL TIME from the operator's own environment and defaults to `off`:
+# rendering `auto` here would make this script flip the #6897 pin by itself on any 24.04 box, which
+# is an owner decision and not this installer's to take. Opt in explicitly:
+#   CI_RUNNER_OS_LABEL=on tools/install-runner-autoscale-schedule.sh ...
+OS_LABEL_MODE="${CI_RUNNER_OS_LABEL:-off}"
+case "$OS_LABEL_MODE" in
+  on|off|auto) : ;;
+  *) echo "REFUSED: CI_RUNNER_OS_LABEL must be off|on|auto (got '$OS_LABEL_MODE')" >&2; exit 1 ;;
+esac
 LOG="${AUTOSCALE_LOG:-$STATE_DIR/runner-autoscale.job.log}"
 ARGV_TAIL=""
 [ -n "${RUNNER_AUTOSCALE_REPO:-}" ] && ARGV_TAIL=" --repo $RUNNER_AUTOSCALE_REPO"
@@ -190,6 +208,9 @@ done
 # but no HOME fired, found no credential, and exited 2 every interval (round 10, F2's cron half).
 CRON_ENV="HOME=$HOME PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
 [ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER"
+# ⛔ THE OS-LABEL PIN RIDES WITH THE PROVISIONER, because it only means anything to it: the timer's
+# FILL leg is the path that REGISTERS a new runner, and the installer defaults the variable to `off`.
+[ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV CI_RUNNER_OS_LABEL=$OS_LABEL_MODE"
 
 # ── platform detection, fail-closed ───────────────────────────────────────────────────────────
 has_systemd() {
@@ -326,6 +347,10 @@ Environment=HOME=$HOME
 Environment=RUNNER_AUTOSCALE_STATE_DIR=$STATE_DIR
 Environment=PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 $( [ -n "$PROVISIONER" ] && printf 'Environment=RUNNER_AUTOSCALE_PROVISIONER=%s\n' "$PROVISIONER" )
+# ⛔ AND THE OS-LABEL MODE WITH IT, or the FILL leg this unit exists to reach registers runners
+# WITHOUT `ubuntu-24.04` while the pool's older runners still carry it — coverage decaying one fill
+# at a time, with `--status` green at every step until the last carrier is replaced.
+$( [ -n "$PROVISIONER" ] && printf 'Environment=CI_RUNNER_OS_LABEL=%s\n' "$OS_LABEL_MODE" )
 ExecStart=$PYTHON $INSTALLED${ARGV_TAIL}
 # A pass is idempotent, so a non-zero exit is a RECORD, not a reason to retry in a tight loop:
 # Restart= is deliberately UNSET, and the next timer fire re-evaluates from a fresh measurement.
@@ -376,6 +401,7 @@ $( [ -n "${RUNNER_AUTOSCALE_REPO:-}" ] && printf '    <string>--repo</string>\n 
     <key>PATH</key><string>$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>RUNNER_AUTOSCALE_GH</key><string>${GH_BIN:-gh}</string>
 $( [ -n "$PROVISIONER" ] && printf '    <key>RUNNER_AUTOSCALE_PROVISIONER</key><string>%s</string>\n' "$PROVISIONER" )
+$( [ -n "$PROVISIONER" ] && printf '    <key>CI_RUNNER_OS_LABEL</key><string>%s</string>\n' "$OS_LABEL_MODE" )
   </dict>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><true/>
@@ -454,6 +480,9 @@ probe() {
   )
   [ -n "${GH_BIN:-}" ] && penv+=("RUNNER_AUTOSCALE_GH=$GH_BIN")
   [ -n "$PROVISIONER" ] && penv+=("RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER")
+  # The probe reproduces the schedule's environment, and the schedule now carries the OS-label mode
+  # for the FILL leg — so a probe without it would attest a timer that fills differently.
+  [ -n "$PROVISIONER" ] && penv+=("CI_RUNNER_OS_LABEL=$OS_LABEL_MODE")
   # shellcheck disable=SC2086  # $ARGV_TAIL is a deliberate word-split argv tail (" --repo o/n")
   env "${penv[@]}" "$py" "$target" $ARGV_TAIL --json --status 2>&1
 }

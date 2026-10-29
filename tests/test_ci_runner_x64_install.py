@@ -88,6 +88,11 @@ _NEUTRAL_HEADROOM = {
     "CI_RUNNER_DISK_RESERVE_GB": "0",
     "CI_RUNNER_MEM_PER_RUNNER_GB": "0",
     "CI_RUNNER_MEM_RESERVE_GB": "0",
+    # ⛔ THIS FILE CALLS ITSELF HERMETIC AND WAS NOT. It starts from `dict(os.environ)`, and this PR
+    # adds a variable that CHANGES THE INSTALLER'S ANSWER — so a box (or CI job) with
+    # `CI_RUNNER_OS_LABEL=on|auto` exported reded the label tests for a reason unrelated to the code
+    # under test. The default arm is pinned here; each arm then sets what it means.
+    "CI_RUNNER_OS_LABEL": "off",
 }
 
 
@@ -100,9 +105,17 @@ def _env(base: Path, **extra: str) -> dict[str, str]:
     return env
 
 
-def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _run(
+    *args: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [BASH, str(INSTALLER), *args], capture_output=True, text=True, env=env or _env(Path("/nonexistent-base"))
+        [BASH, str(INSTALLER), *args],
+        capture_output=True,
+        text=True,
+        env=env or _env(Path("/nonexistent-base")),
+        # `--status`' label-coverage read is a read OF THE CWD (it parses `.github/workflows`), so a
+        # case that exercises it must say where it stands.
+        cwd=str(cwd) if cwd else None,
     )
 
 
@@ -254,6 +267,228 @@ def test_repair_dry_run_plans_the_body_the_real_run_puts(tmp_path: Path):
     )
     assert "self-hosted-x64,ubuntu-latest" in done.stderr, (
         f"the real run sends that same set: {done.stderr}"
+    )
+
+
+# ── 3b. the OS-release label: the deadlock escape, opt-in and honest about declining ────────
+def test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it(tmp_path: Path):
+    """`CI_RUNNER_OS_LABEL=on` adds `ubuntu-24.04` on EVERY `--fallback` arm; the default adds none.
+
+    The default arm is the #6897 decision (`test_labels_are_this_archs_own_and_follow_the_fallback`
+    pins it as the shipped behaviour). What is pinned HERE is the other half nobody executed: the
+    opt-in, and the invariant that makes it an OS FACT rather than a fallback state — `--fallback
+    off` must not be able to drop it, because a runner that drops it leaves `workflow-lint` and
+    `test-slow (a–e)` unschedulable and `python-ci-gate` is never dispatched (every PR BLOCKED).
+
+    Mutation: append `$OS_LABELS` inside the `off` arm only -> the third case lacks it -> RED.
+    Mutation: return early from `resolve_labels` after the `--fallback` case -> RED.
+    """
+    on = _run("--print-labels", "--fallback", "on", env=_env(tmp_path, CI_RUNNER_OS_LABEL="on"))
+    assert on.returncode == 0, on.stderr
+    assert on.stdout.strip() == "self-hosted-x64,ubuntu-latest,ubuntu-24.04", on.stdout
+
+    # ⛔ THE ONE INVARIANT THE FEATURE RESTS ON: the OS fact rides every arm.
+    off = _run("--print-labels", "--fallback", "off", env=_env(tmp_path, CI_RUNNER_OS_LABEL="on"))
+    assert off.returncode == 0, off.stderr
+    assert off.stdout.strip() == "self-hosted-x64,ubuntu-24.04", (
+        f"`--fallback off` must not drop the OS fact: {off.stdout}"
+    )
+
+    # The default is `off`: the shipped behaviour still keeps the #6897 pin.
+    default = _run("--print-labels", "--fallback", "off", env=_env(tmp_path))
+    assert "ubuntu-24.04" not in default.stdout, default.stdout
+
+
+def test_auto_claims_the_os_label_only_when_the_host_reports_that_release(tmp_path: Path):
+    """`auto` derives the label from the HOST, and SAYS SO when it declines.
+
+    `auto` used to decline in total silence: a 22.04 box, a container with no `/etc/os-release`, or
+    a macOS lane got a label set without `ubuntu-24.04` and no signal — indistinguishable from
+    "opted out", on the one property (the host's release) that decides whether the escape applies.
+    The recommended spelling must not be the quiet one. Both reads are seams (`CI_RUNNER_OS_NAME`,
+    `CI_RUNNER_OS_RELEASE`) for the same reason `CI_RUNNER_ARCH` is: the box that reads this code is
+    not the box being guarded.
+
+    Mutation: return 0 silently in the declined arms -> the DECLINED assertions red -> RED.
+    Mutation: drop the `VERSION_ID` comparison -> the 22.04 case claims the label -> RED.
+    """
+    rel24 = tmp_path / "os-release-24"
+    rel24.write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    rel22 = tmp_path / "os-release-22"
+    rel22.write_text('NAME="Ubuntu"\nVERSION_ID="22.04"\n')
+
+    derived = _run(
+        "--print-labels",
+        env=_env(
+            tmp_path,
+            CI_RUNNER_OS_LABEL="auto",
+            CI_RUNNER_OS_NAME="Linux",
+            CI_RUNNER_OS_RELEASE=str(rel24),
+        ),
+    )
+    assert derived.returncode == 0, derived.stderr
+    assert derived.stdout.strip() == "self-hosted-x64,ubuntu-24.04", (
+        f"auto on a 24.04 box must claim the OS fact: {derived.stdout}"
+    )
+    assert "DECLINED" not in derived.stderr, derived.stderr
+
+    wrong_release = _run(
+        "--print-labels",
+        env=_env(
+            tmp_path,
+            CI_RUNNER_OS_LABEL="auto",
+            CI_RUNNER_OS_NAME="Linux",
+            CI_RUNNER_OS_RELEASE=str(rel22),
+        ),
+    )
+    assert wrong_release.returncode == 0, wrong_release.stderr
+    assert wrong_release.stdout.strip() == "self-hosted-x64", wrong_release.stdout
+    assert "DECLINED" in wrong_release.stderr and "$OS_LABEL" not in wrong_release.stderr, (
+        "a declining `auto` must say why, not return 0 in silence: " f"{wrong_release.stderr}"
+    )
+    assert "22.04" in wrong_release.stderr, wrong_release.stderr
+
+    not_linux = _run(
+        "--print-labels",
+        env=_env(tmp_path, CI_RUNNER_OS_LABEL="auto", CI_RUNNER_OS_NAME="Darwin"),
+    )
+    assert not_linux.returncode == 0, not_linux.stderr
+    assert not_linux.stdout.strip() == "self-hosted-x64", not_linux.stdout
+    assert "DECLINED" in not_linux.stderr and "not Linux" in not_linux.stderr, not_linux.stderr
+
+
+def test_an_unrecognised_os_label_value_is_refused_in_every_mode(tmp_path: Path):
+    """A typo is a USAGE error (exit 1) in every mode — including `--status`, where it is looked for.
+
+    The refusal used to live inside `resolve_os_label`, which only install / repair / --print-labels
+    reach. `--status` never calls it, so `CI_RUNNER_OS_LABEL=true --status` exited 0 with no
+    complaint — and `--status` is exactly the mode an operator runs AFTER setting the flag to
+    VERIFY the escape is applied. A fail-open in the one place the answer is read. The check is now
+    hoisted beside `--count`, so all four modes refuse before doing anything.
+
+    Mutation: move the `case` back inside `resolve_os_label` -> `--status` exits 0/3, not 1 -> RED.
+    """
+    for args in (
+        ("--print-labels",),
+        ("--status",),
+        ("--uninstall",),
+        ("--repair-labels",),
+        ("--count", "1", "--dry-run"),
+    ):
+        r = _run(*args, env=_env(tmp_path, CI_RUNNER_OS_LABEL="true"))
+        assert r.returncode == 1, f"{args} must refuse a typo as a usage error: {r.returncode} {r.stderr}"
+        assert "CI_RUNNER_OS_LABEL must be off|on|auto" in r.stderr, (args, r.stderr)
+
+
+def test_the_log_names_the_label_set_that_is_actually_registered(tmp_path: Path):
+    """The `fallback:` line must print the FINAL set — the one `config.sh` gets, OS label included.
+
+    `$OS_LABELS` is appended at the END of `resolve_labels`, and the two `say` lines printed
+    `$LABELS` before that — so one run logged `labels=self-hosted-x64,ubuntu-latest` and registered
+    `…,ubuntu-24.04` four lines later, and the runbook quotes the log line as recorded output. An
+    operator reading the log for the mitigation saw it absent and concluded the flag had not applied.
+
+    Mutation: revert either `say` to `$LABELS` alone -> the assertion reds -> RED.
+    """
+    engaged = _stub_gh(tmp_path / "engaged", "1")
+    (tmp_path / ".runner").write_text('{"agentName": "pi-runner-x64-1"}\n')
+    env = _env(
+        tmp_path,
+        PATH=f"{engaged}:{os.environ['PATH']}",
+        CI_RUNNER_ARCH="x86_64",
+        CI_RUNNER_OS_LABEL="on",
+    )
+    r = _run("--repair-labels", "--count", "1", "--dry-run", env=env)
+    assert r.returncode == 0, r.stderr
+    logged = re.search(r"labels=(\S+)", r.stderr)
+    assert logged, r.stderr
+    assert "ubuntu-24.04" in logged.group(1), (
+        f"the logged label set is not the one that would be registered: {r.stderr}"
+    )
+
+
+# ── 3c. label-coverage: the instrument that must not lie in either direction ────────────────
+def _repo_with_workflows(tmp_path: Path, body: str, suffix: str = ".yml") -> Path:
+    repo = tmp_path / "repo"
+    wf = repo / ".github" / "workflows"
+    wf.mkdir(parents=True, exist_ok=True)
+    (wf / f"w{suffix}").write_text(body)
+    return repo
+
+
+def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_path: Path):
+    """Exit 4 for an EMPTY READ, 0 when the read happened, 5 when a label has NO answer.
+
+    Two separate predicates, neither implied by the other: the directory may be missing (no read at
+    all), or it may exist and yield zero labels (a `uses:`-only workflow). Exit 0 used to cover BOTH
+    "every label covered" and "a required label has no runner", so `--status && …` could not tell
+    the state that blocks every PR from the one that does not — a verdict, and it is bad, is exit 5.
+
+    Mutation: drop either exit-4 arm -> the corresponding case exits 0 -> RED.
+    Mutation: return 0 on `uncovered` -> the 5 case reds -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+
+    no_dir = tmp_path / "no-dir"
+    no_dir.mkdir()
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=no_dir)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "read NOTHING" in r.stderr, r.stderr
+
+    # `.yaml` is as real as `.yml` (GitHub accepts both): a `uses:`-only caller yields zero labels.
+    uses_only = _repo_with_workflows(
+        tmp_path, "jobs:\n  call:\n    uses: org/repo/.github/workflows/x.yml@main\n", suffix=".yaml"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uses_only)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "found NO runs-on label" in r.stderr, r.stderr
+
+    # A covered label: the read happened, the pool answers it. Exit 0.
+    covered = _repo_with_workflows(
+        tmp_path,
+        "jobs:\n"
+        "  a:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        # ⛔ A COMMENT IS NOT A `runs-on:` LINE. Counted, this printed a false ⛔ UNCOVERED for a
+        # label no workflow asks for (and this tree's own comments name real labels).
+        "  # legacy: runs-on: windows-2022\n"
+        "  b:\n    runs-on: ubuntu-latest  # note: runs-on: macos-14\n    steps: []\n",
+        suffix=".yaml",
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=covered)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-latest = 1 of 1" in r.stderr, r.stderr
+    assert "windows-2022" not in r.stderr and "macos-14" not in r.stderr, (
+        f"comment prose was counted as a required label: {r.stderr}"
+    )
+
+    # The incident state: a REQUIRED label nobody answers. A verdict, and it is bad -> 5.
+    uncovered = _repo_with_workflows(tmp_path / "u", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n")
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uncovered)
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "0 of 1 self-hosted runner(s)" in r.stderr, r.stderr
+    # ⛔ THE REMEDY MUST NAME ITS PRECONDITION: `--repair-labels` PUTs a WHOLE set, so the bare
+    # command (variable unset ⇒ `off`) removes the mitigation while the operator means to fix it.
+    assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "REMOVES the mitigation" in r.stderr, r.stderr
+
+
+def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Path):
+    """`0 < n < pool_total` is the erosion state: a label half the pool cannot answer is WARNED.
+
+    The scheduled autoscaler ADDS runners, and its FILL leg registers them through
+    `install-ci-runner-x64.sh` — which attaches `ubuntu-24.04` only under `CI_RUNNER_OS_LABEL`. A
+    pool that drifts to `ubuntu-24.04 = 3` still printed a clean "covered" line, so the label could
+    reach zero answers one fill at a time with this instrument green at every step and the return of
+    the ALL-PR-BLOCKED state landing with no red in between.
+
+    Mutation: `elif [ "$n" -lt "$pool_total" ]` -> `elif false` -> "PARTIAL" absent -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest\nr2\tself-hosted-x64")
+    repo = _repo_with_workflows(tmp_path, "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n")
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-latest = 1 of 2 runner(s)" in r.stderr, r.stderr
+    assert "PARTIAL" in r.stderr, (
+        f"a label only half the pool answers must not read as plain coverage: {r.stderr}"
     )
 
 
@@ -732,6 +967,11 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "disk": r"DISK NEXT",
         "cpu/memory": r"CPU LAST",
         "fallback_engaged": r"^fallback_engaged\(\)",
+        # ⛔ THE ANCHOR THIS CHANGE ADDS. Without an entry it was checked only by the in-range arm,
+        # so the next edit above it moved `resolve_os_label` and the map kept pointing at an
+        # unrelated line — exactly the drift this dict's own comment records for `repair` /
+        # `print-labels`, and why it demands EVERY anchor be found by name.
+        "resolve_os_label": r"^resolve_os_label\(\)",
         "resolve_labels": r"^resolve_labels\(\)",
         "verify": r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',
         "token": r"registration-token",

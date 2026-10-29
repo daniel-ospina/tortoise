@@ -270,15 +270,27 @@ ARCH_LABEL = {
 #: `ubuntu-22.04-arm`, `ubuntu-26.04-arm` (`github/docs`
 #: `data/reusables/actions/supported-github-runners.md`, checked 2026-10-27).
 #:
-#: ⛔ THIS IS WHAT RE-REGISTRATION DROPS, AND IT IS NOW THE ONLY THING IT DROPS. The BARE
-#: `ubuntu-24.04`-shaped label is PRESERVED (`_preserve_labels`): the pool carries it as the
-#: temporary mitigation for the suspended #6897 pin, so dropping it on a repair pass deleted the
-#: mitigation silently — the class of failure this whole contract exists to make visible. An `-arm`
-#: label is a different matter: it names an ARM64 hosted image, and on this x64 pool it is a false
-#: architecture claim (an arm64 job served by x86 hardware is a false PASS, not a queue delay), so
-#: it is dropped rather than carried forward. A custom label that merely starts `ubuntu-<digits>`
-#: (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be preserved.
+#: ⛔ THIS IS WHAT RE-REGISTRATION DROPS ON AN x64 BOX, AND IT IS NOW THE ONLY THING IT DROPS
+#: THERE. The BARE `ubuntu-24.04`-shaped label is PRESERVED (`_preserve_labels`): the pool carries
+#: it as the temporary mitigation for the suspended #6897 pin, so dropping it on a repair pass
+#: deleted the mitigation silently — the class of failure this whole contract exists to make
+#: visible. An `-arm` label is a different matter: it names an ARM64 hosted image, and on this x64
+#: pool it is a false architecture claim (an arm64 job served by x86 hardware is a false PASS, not a
+#: queue delay), so it is dropped rather than carried forward. A custom label that merely starts
+#: `ubuntu-<digits>` (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be preserved.
 ARM64_VERSION_PINNED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*-arm", re.IGNORECASE)
+
+#: The BARE (x64) spellings: `ubuntu-24.04`, `ubuntu-22.04`, `ubuntu-26.04` — the same published
+#: table, same column as the ARM64 ones above minus the suffix.
+#:
+#: ⛔ THE DROP RULE IS ARCH-RELATIVE, and it was not: `_preserve_labels` took `machine`, used it for
+#: the arch MARKER, and then dropped `-arm` and preserved the bare label on EVERY machine. Per the
+#: published mapping the two halves are mirror images — bare `ubuntu-24.04` IS the x64 image and
+#: `ubuntu-24.04-arm` IS the arm64 one — so on an arm64 box that rule inverted: it dropped the
+#: spelling the box legitimately answers and preserved the one it does not, i.e. exactly the
+#: false-architecture PASS the docstring says must never happen. Correct on the x64 box the
+#: autoscaler provisions for, wrong the moment it is deployed on an arm64 one.
+X64_VERSION_PINNED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*", re.IGNORECASE)
 
 DEFAULT_REPO = "daniel-ospina/tortoise"
 
@@ -299,7 +311,7 @@ class ProvisionerRefused(ActionFailed):
     `verdict=fill-refused-by-provisioner` and exits 5 instead of a green timer over a box that
     cannot grow — the false PASS that a "a refusal is an answer, exit 0" reading created.
     ⛔ TWO KINDS OF REFUSAL ARRIVE HERE, AND THEY ARE NOT THE SAME FACT: `die()` in
-    `tools/install-ci-runner-x64.sh:137` exits 2 for EVERY guard arm, so this is either the
+    `install-ci-runner-x64.sh`'s `die()` exits 2 for EVERY guard arm, so this is either the
     sizing disagreement (`cpu headroom` / `memory headroom` — the tool computed a count the
     callee's `COUNT*2 + 2 <= ncpu` / `COUNT*2 + 4 <= MemAvailable` guard rejects, open at #9672)
     or one of the callee's other arms (architecture, forks, disk, an unreadable measurement, gate
@@ -633,7 +645,8 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     the fallback is engaged right now.
 
     This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
-    (`tools/install-ci-runner-x64.sh:192`, in this tree since #9639) instead of inventing a
+    (the `resolve_labels` function of `tools/install-ci-runner-x64.sh`, in this tree since #9639)
+    instead of inventing a
     second rule, and it is `auto`: the gate's state is the source of truth, so a runner never
     acquires a permanent claim on the pool. The reader CAN open it, which is why this file
     re-derives NOTHING it cannot check: the arch marker is this box's own `uname -m`, and the
@@ -1275,7 +1288,7 @@ def converge(
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             # ⛔ THE INSTALLER'S `die` EXITS 2 FROM EVERY GUARD, NOT JUST THE SIZING ONE.
-            # `tools/install-ci-runner-x64.sh:137` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
+            # `tools/install-ci-runner-x64.sh`'s `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
             # so the wrong arch, an unreadable fork cap, a FULL DISK, an unreadable core count and
             # an unreadable gate state all arrive here as rc=2 exactly like the cpu/memory arms do.
             # Only `cpu headroom` / `memory headroom` are the two-models disagreement (#9672), and
@@ -1413,6 +1426,21 @@ def converge(
     return record
 
 
+def _foreign_arch_version_pin(label: str, machine: str) -> bool:
+    """Is `label` a version-pinned HOSTED label for the OTHER architecture?
+
+    Bare `ubuntu-<version>` is the x64 image and `ubuntu-<version>-arm` is the arm64 one
+    (`github/docs` `data/reusables/actions/supported-github-runners.md`), so the two rules are
+    mirror images and BOTH must be read against `machine` — see `X64_VERSION_PINNED_LABEL`.
+    """
+    here = ARCH_LABEL.get(machine.lower())
+    if ARM64_VERSION_PINNED_LABEL.fullmatch(label):
+        return here != ARCH_LABEL["aarch64"]
+    if X64_VERSION_PINNED_LABEL.fullmatch(label):
+        return here != ARCH_LABEL["x86_64"]
+    return False
+
+
 def _preserve_labels(current: list[str], machine: str) -> str:
     """The labels a RE-registered runner keeps: its custom labels, plus THIS box's arch marker.
 
@@ -1421,12 +1449,14 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     other label (a custom tier, a pool tag, `ubuntu-latest` while the fallback is engaged) is
     PRESERVED, because a workflow targeting it would otherwise queue forever.
 
-    ⛔ THE ARM64 SPELLING OF A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04-arm`-shaped — see
-    `ARM64_VERSION_PINNED_LABEL`) is the ONE class dropped rather than preserved. It names an
-    ARM64 hosted image, so on this x64 pool it is a false architecture claim: a job pinned to it
-    would be served by hardware it did not ask for — a false PASS, not a queue delay. Dropping it
-    restores the arch invariant; no workflow is starved by that, because a job naming the label
-    wants the GitHub-hosted image of that architecture.
+    ⛔ THE ARCHITECTURE-SPECIFIC VERSION PIN (`ubuntu-24.04-arm`-shaped — see
+    `ARM64_VERSION_PINNED_LABEL`) is the ONE class dropped rather than preserved ON THIS BOX. It
+    names an ARM64 hosted image, so on this x64 pool it is a false architecture claim: a job pinned
+    to it would be served by hardware it did not ask for — a false PASS, not a queue delay.
+    Dropping it restores the arch invariant; no workflow is starved by that, because a job naming
+    the label wants the GitHub-hosted image of that architecture. ⛔ AND THE RULE IS READ AGAINST
+    `machine` IN BOTH DIRECTIONS (`_foreign_arch_version_pin`): on an arm64 box the bare `ubuntu-24.04`
+    is the foreign spelling and is the one dropped, because the mapping bisects on the suffix.
 
     ⛔ THE BARE `ubuntu-<version>` IS PRESERVED, and that is a DELIBERATE reversal of what this
     function used to do (PR #10275 review, 2026-10-29). The pool carries `ubuntu-24.04` as the
@@ -1452,7 +1482,7 @@ def _preserve_labels(current: list[str], machine: str) -> str:
         x
         for x in current
         if x and x.lower() not in host_derived and not x.lower().startswith("self-hosted-")
-        and not ARM64_VERSION_PINNED_LABEL.fullmatch(x)
+        and not _foreign_arch_version_pin(x, machine)
     ]
     if not arch:
         return ""  # unknown arch: the caller falls back to resolve_labels, which REFUSES

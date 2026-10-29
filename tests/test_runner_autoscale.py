@@ -855,7 +855,7 @@ def test_repair_keeps_the_os_label_and_drops_the_arm64_spelling(env):
 
 
 def test_preserve_labels_keeps_the_os_label_and_still_drops_the_arm_spelling():
-    """The two branches of `_preserve_labels`, asked directly rather than through a repair pass.
+    """The three branches of `_preserve_labels`, asked directly rather than through a repair pass.
 
     The schedule is what makes this worth its own arm: `tools/install-runner-autoscale-schedule.sh`
     re-registers repaired runners with nobody reading the output, so a label dropped here disappears
@@ -872,6 +872,19 @@ def test_preserve_labels_keeps_the_os_label_and_still_drops_the_arm_spelling():
     assert RA._preserve_labels(["self-hosted-x64", "ubuntu-24.04-arm"], "x86_64") == (
         "self-hosted-x64"
     ), "an arm64 hosted spelling on an x64 pool is a false architecture claim, not capacity"
+
+    # ⛔ THE RULE IS ARCH-RELATIVE, and it used to be applied on every machine: `-arm` dropped
+    # everywhere, bare preserved everywhere. The published mapping bisects on the suffix (bare
+    # `ubuntu-24.04` IS the x64 image, `ubuntu-24.04-arm` IS the arm64 one), so on an arm64 box that
+    # rule INVERTED — it dropped the spelling the box legitimately answers and preserved the one it
+    # does not, i.e. the false-architecture PASS this function exists to prevent. Both directions,
+    # one case each, or the arm64 half is a latent inversion nothing can see.
+    assert RA._preserve_labels(["self-hosted-arm64", "ubuntu-24.04-arm"], "aarch64") == (
+        "self-hosted-arm64,ubuntu-24.04-arm"
+    ), "an arm64 box must keep the arm64 spelling it legitimately answers"
+    assert RA._preserve_labels(["self-hosted-arm64", "ubuntu-24.04"], "aarch64") == (
+        "self-hosted-arm64"
+    ), "the BARE label is the x64 image — carrying it on an arm64 box is a false arch claim"
 
 
 def test_another_repos_listener_still_counts_against_the_boxes_ceiling(env):
@@ -1579,7 +1592,7 @@ MUTATIONS = {
         # arm64 hosted label on an x64 pool serves a job on hardware it did not ask for. Both
         # spellings are on the fixture, so a match widened back to the whole family is caught here
         # by the bare label's PRESENCE below, and a match narrowed to nothing is caught by `-arm`.
-        old="and not ARM64_VERSION_PINNED_LABEL.fullmatch(x)",
+        old="and not _foreign_arch_version_pin(x, machine)",
         new="and True",
         kwargs=dict(
             pool=[("r1", "offline", False, POOL_LABELS_WITH_VERSION_PINS)],

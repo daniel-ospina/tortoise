@@ -47,6 +47,9 @@ _ENV_LEAKS = (
     "AUTOSCALE_PROC_DIR",
     "AUTOSCALE_ALLOW_WORKTREE",
     "AUTOSCALE_SKIP_PROBE",
+    # The OS-label mode the timer pins for its FILL leg (#10275). Inherited from an operator's shell
+    # it would change every rendered unit, so it leaks exactly like the other seams.
+    "CI_RUNNER_OS_LABEL",
     "RUNNER_AUTOSCALE_INTERVAL",
     "RUNNER_AUTOSCALE_REPO",
     "RUNNER_AUTOSCALE_STATE_DIR",
@@ -566,6 +569,50 @@ def test_the_provisioner_is_pinned_for_the_timer_only_when_it_exists(tmp_path):
     assert f"<key>RUNNER_AUTOSCALE_PROVISIONER</key><string>{prov}</string>" in res.stdout, (
         res.stdout
     )
+
+
+def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anything(tmp_path):
+    """The timer's FILL leg must carry `CI_RUNNER_OS_LABEL`, or it registers runners without it.
+
+    `runner_autoscale.py`'s FILL calls `install-ci-runner-x64.sh --count N --fallback auto` through
+    `_run`, which passes no `env=` — the provisioner therefore sees only what the unit inherits, and
+    systemd does not inherit the installing shell. With no pin the installer's default (`off`)
+    applies and every runner the autoscaler ADDS joins without `ubuntu-24.04`: the pool drifts back
+    to zero answers one fill at a time, `--status` stays green until the last carrier is replaced,
+    and then every PR is BLOCKED again — the incident the label exists to end, rebuilt silently.
+
+    Bound to the provisioner because it is a provisioner input and to nothing else: an absent
+    provisioner means the FILL leg does not exist, and a pin that outlives it would be a claim about
+    a leg this box cannot run.
+
+    Mutation: drop the `Environment=CI_RUNNER_OS_LABEL` line -> the `on` case finds no pin -> RED.
+    Mutation: render `auto` unconditionally -> the default case asserts `off` -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL" not in res.stdout, (
+        "an absent provisioner was given an OS-label pin it can never use"
+    )
+
+    prov = sb["repo"] / "tools" / "install-ci-runner-x64.sh"
+    prov.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    prov.chmod(0o755)
+
+    # The DEFAULT is `off`: this installer must not flip the #6897 pin by itself on a 24.04 box.
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert f"<key>CI_RUNNER_OS_LABEL</key><string>off</string>" in res.stdout, res.stdout
+
+    # …and the operator's choice at install time is what gets pinned.
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert f"<key>CI_RUNNER_OS_LABEL</key><string>on</string>" in res.stdout, res.stdout
+
+    # A typo is REFUSED here rather than pinned into a unit nothing re-reads.
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="true"))
+    assert res.returncode == 1, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL must be off|on|auto" in res.stderr, res.stderr
 
 
 def test_systemd_units_render_with_path_and_the_active_check(tmp_path):
