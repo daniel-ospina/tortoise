@@ -251,6 +251,40 @@ BEGIN
     'the prune lost its LIMIT — its cost now grows with the backlog');
 END $$;
 
+-- ── The ARGUMENT NAMES — the only thing the caller actually depends on ───
+-- The one production caller, `tortoise/consent_token.py::ControlPlaneJtiStore.consume`,
+-- reaches this function through PostgREST with NAMED arguments —
+-- `rpc_value("consume_oauth_consent_ticket", {"p_jti": jti, "p_expires_at": stamp})` — so the
+-- parameter NAMES are its whole contract. Rename either one and PostgREST cannot bind the
+-- call: every consent-token redemption answers 503 `temporarily_unavailable` with no other
+-- symptom, and nothing names the migration.
+--
+-- Nothing else catches it, which is why this block is not optional. The behavioural blocks
+-- in this file call the function POSITIONALLY, so a rename leaves every one of them green;
+-- `has_function_privilege(... 'public.consume_oauth_consent_ticket(text,timestamptz)')` pins
+-- only the TYPE signature; and `tests/fake_control_plane.py::_rpc_dispatch` keys on `p_jti`
+-- from the CALLER's dict, so it is unchanged by a migration-only diff. Same precedent, same
+-- reason as `supabase/tests/20260926000001_metering_capture_tokens.sql` (which pins
+-- `p_tokens_in`/`p_cost_usd` by name and order for its own by-name caller).
+-- Mutation caught: renaming `p_jti` -> `p_nonce`, renaming `p_expires_at`, or swapping them.
+DO $$
+DECLARE args text;
+BEGIN
+  SELECT pg_get_function_arguments(
+    'public.consume_oauth_consent_ticket(text,timestamptz)'::regprocedure) INTO args;
+  PERFORM tests.assert(
+    position('p_jti text' IN args) > 0,
+    format('the first parameter is no longer `p_jti text` (arguments=[%s]) — the ONLY caller '
+           'passes it BY NAME (consent_token.py::ControlPlaneJtiStore.consume, '
+           '{"p_jti": jti, "p_expires_at": stamp}), so PostgREST cannot bind the call and '
+           'every redemption 503s', args));
+  PERFORM tests.assert(
+    position('p_expires_at' IN args) > position('p_jti' IN args),
+    format('`p_expires_at` must FOLLOW `p_jti` (arguments=[%s]) — the by-name caller is '
+           'order-blind but every positional call in this file encodes the order, and a swap '
+           'is how the two stamps get crossed', args));
+END $$;
+
 -- ── The BOUND, driven: 700 expired rows, one call, exactly 500 collected ───
 INSERT INTO public.oauth_consent_tickets (jti, expires_at)
 SELECT '3524-bulk-' || g, now() - interval '1 hour'
