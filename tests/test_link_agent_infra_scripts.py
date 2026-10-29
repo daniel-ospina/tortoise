@@ -103,6 +103,22 @@ def git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def load_tool_module():
+    """Import the tool as a MODULE (not as a subprocess), exactly as the drift gate does.
+
+    ``tools/agent_infra_drift_check.py`` IMPORTS this module and calls ``link_main``, so a
+    behaviour that only exists in a subprocess is a behaviour the gate does not have. Loading by
+    FILE PATH keeps the tool's own filename (and therefore ``if __name__ == "__main__"``) intact.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_lais_under_test", TOOL)
+    assert spec is not None and spec.loader is not None, f"cannot load {TOOL} as a module"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture()
 def fake_infra(tmp_path: Path) -> Path:
     """An agent-infra checkout with the three tools this repo's docs name, plus its CLI."""
@@ -705,6 +721,39 @@ def git_infra(fake_infra: Path) -> Path:
     return fake_infra
 
 
+@pytest.fixture()
+def git_shim(tmp_path: Path) -> dict[str, str]:
+    """A ``git`` on PATH that delegates to the real one EXCEPT ``merge-base --is-ancestor``.
+
+    That one question exits **128** — git's ERROR status, which ``git-merge-base(1)`` documents as
+    distinct from 1 = "not an ancestor": *"Errors are signaled by a non-zero status that is not
+    1."* PR #10250 review ROUND 8 ISSUE 2 (P3): the classifier accepted only status 0, so an error
+    fell through to ``PIN_DIVERGED`` → exit **1** (DRIFT) with ``git fetch && git checkout <pin>``
+    printed as the remedy. A shim is the only way to reach that branch without a 20 s
+    ``GIT_TIMEOUT`` hang, and everything else must stay REAL git — the verdict is only reached
+    through genuine ``rev-parse``/``cat-file`` answers.
+    """
+    real = shutil.which("git")
+    assert real, "no git on PATH — this module cannot be tested without one"
+    shim_dir = tmp_path / "git-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        # Iterate the argv: the tool always calls `git -C <dir> <verb> …`, so the verb may be at
+        # any position (and `--is-ancestor` is unambiguous anywhere in a git argv).
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = "--is-ancestor" ]; then\n'
+        '    echo "fatal: unable to read tree (shim: git cannot answer)" >&2\n'
+        "    exit 128\n"
+        "  fi\n"
+        "done\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    return {"PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"}
+
+
 class TestPinAgreement:
     """#10114 — a correct link into a checkout that is NOT the pinned tree is the silent no-op.
 
@@ -826,6 +875,35 @@ class TestPinAgreement:
         assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
         assert "DIVERGED" in result.stdout, result.stdout
 
+    def test_a_git_ERROR_at_the_ancestry_step_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path, git_shim: dict[str, str]
+    ) -> None:
+        """ROUND 8 ISSUE 2 (P3): a git that cannot ANSWER is UNKNOWN, never "diverged".
+
+        The checkout here genuinely carries the pin, so no drift exists to report; only the
+        ancestry question fails (the shim exits 128 = git's error status). The pre-fix tool read
+        that as "not an ancestor" twice and printed ``DIVERGED`` + ``git fetch && git checkout`` —
+        sending an operator to rewrite a checkout over what may be a hung or broken git, which
+        this module itself calls "a worse failure than the one being reported".
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "work after the pin")
+        env = self._env(self._home(tmp_path, pin), **git_shim)
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (
+            "a git ERROR is 'cannot verify' (2), never drift (1) — rc="
+            f"{result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "pin: git-error" in result.stdout, result.stdout
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "DIVERGED" not in result.stdout, (
+            f"a git that could not answer was reported as a diverged checkout: {result.stdout!r}"
+        )
+        assert "remedy" not in result.stderr, (
+            f"a cannot-verify verdict printed a `git checkout` remedy: {result.stderr!r}"
+        )
+
     def test_a_checkout_that_predates_the_pin_entirely_is_drift_not_unknown(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:
@@ -943,17 +1021,43 @@ class TestPinAgreement:
         )
         assert "Traceback" not in result.stderr, result.stderr
         assert "Traceback" not in result.stdout, result.stdout
+        # ⛔ The rc alone does NOT pin this behaviour (PR #10250 review ROUND 8 ISSUE 1, P2):
+        # ``--pin-check`` does not exist on the pre-fix tool, so argparse rejects the unknown flag
+        # with status 2, empty stdout and NO traceback — every assertion above holds there, on a
+        # tool this test claims to be RED against. The verdict PRINTED to stdout is the only
+        # discriminator: it can only come from ``pin_state`` classifying the unexpandable path.
+        assert "pin: unreadable" in result.stdout, (
+            "the run exited 2 without ever printing a pin verdict, so this test cannot tell the "
+            f"`_expand` guard from argparse rejecting the flag: {result.stdout!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        # Not the DRIFT class, whose remedy would send an operator to rewrite the checkout.
+        assert "remedy" not in result.stderr, result.stderr
 
     def test_the_explicit_pin_flag_also_survives_an_unexpandable_path(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:
-        """``--pin`` takes the same ``_expand`` path — a caller-supplied ``~`` must not crash it."""
+        """``--pin`` takes the same ``_expand`` path — a caller-supplied ``~`` must not crash it.
+
+        Same vacuity trap as its sibling above (ROUND 8 ISSUE 1, P2), plus the question the flag
+        is authoritative about: the NAMED path must be the one reported, never the default record.
+        """
         env = self._env(self._home(tmp_path))
         result = self._pin_check(
             repo, git_infra, env, "--pin", "~definitely-no-such-user-xyz/pin"
         )
         assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
         assert "Traceback" not in result.stderr, result.stderr
+        assert "pin: unreadable" in result.stdout, (
+            "the run exited 2 without a pin verdict, so this test cannot tell the `_expand` "
+            f"guard from argparse rejecting the unknown flag: {result.stdout!r}"
+        )
+        assert "~definitely-no-such-user-xyz/pin" in result.stdout, (
+            "the verdict does not name the path --pin was given, so an unexpandable explicit pin "
+            f"was silently replaced by the default record: {result.stdout!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "remedy" not in result.stderr, result.stderr
 
     def test_the_env_pin_is_honoured(self, repo: Path, git_infra: Path, tmp_path: Path) -> None:
         """``HARNESS_PIN`` is the harness's own variable name — not an invented one."""
@@ -1347,6 +1451,47 @@ class TestPinAgreement:
             f"the enclosing repository's HEAD was used as this directory's HEAD: {result.stdout!r}"
         )
 
+    def test_git_that_cannot_be_RUN_at_the_pin_object_step_is_cannot_verify(
+        self, git_infra: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The other half of ROUND 8 ISSUE 2: ``_git`` returning ``None`` must not read as DRIFT.
+
+        ``_git`` returns ``None`` when git could not be RUN at all (``OSError``, or the 20 s
+        ``GIT_TIMEOUT`` — which exists because #10114 was measured at load average 94). The
+        pre-fix ``cat-file`` step folded that into ``PIN_ABSENT`` → exit **1** + a
+        ``git checkout`` remedy, i.e. a hung git reported as "the checkout predates the pin".
+
+        IN PROCESS, not via a subprocess: a shim cannot produce a *spawn failure*, a 20 s hang is
+        not a test, and ``pin_state`` is the unit under test — its whole contract is the mapping
+        from a git answer to a state. The monkeypatched module is loaded by file path, so this
+        cannot touch any other module's state.
+        """
+        module = load_tool_module()
+        pin = tmp_path / "pin"
+        pin.write_text("a" * 40 + "\n")
+        real_git = module._git
+
+        def git_cannot_be_asked(infra: Path, *args: str):
+            if args and args[0] == "cat-file":
+                return None  # what `_git` returns for OSError / TimeoutExpired
+            return real_git(infra, *args)
+
+        monkeypatch.setattr(module, "_git", git_cannot_be_asked)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state in module.PIN_CANNOT_VERIFY, (
+            f"a git that could not be asked about the pin object was classified {state!r}, which "
+            f"is exit 1 DRIFT with a `git checkout` remedy: {detail}"
+        )
+        assert state not in module.PIN_DRIFT, detail
+        assert "cannot verify" in detail, detail
+
+        # And the sibling outcome is NOT swallowed: a git that ANSWERS "no such object" is
+        # still drift (pinned by `test_a_checkout_that_predates_the_pin_entirely_is_drift_not_unknown`).
+        monkeypatch.setattr(module, "_git", real_git)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state == module.PIN_ABSENT, (state, detail)
+
+
 
 class TestDefaultPinPathIsCallTime:
     """The pin path must be resolved at CALL time — the only shape a subprocess suite cannot see.
@@ -1367,13 +1512,7 @@ class TestDefaultPinPathIsCallTime:
     @staticmethod
     def _load():
         """Import the tool as a MODULE (not as a subprocess), exactly as the drift gate does."""
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("_lais_under_test", TOOL)
-        assert spec is not None and spec.loader is not None, f"cannot load {TOOL} as a module"
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+        return load_tool_module()
 
     def test_home_is_read_at_call_time(self, tmp_path: Path, monkeypatch) -> None:
         module = self._load()

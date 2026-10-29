@@ -31,7 +31,8 @@ Exit codes
 box is PINNED to (``$HARNESS_PIN`` / ``${CELL_HOME:-$HOME}/.pi/agent/state/HARNESS-PIN``)? It never touches the
 link: 0 = the checkout is at the pin or carries it, **or** this machine records no pin (said out
 loud, never silence); 1 = drift (behind / diverged / the pin commit is absent from the checkout);
-2 = cannot verify (the pin file is empty or unreadable, or the checkout is not a git repo).
+2 = cannot verify (the pin file is empty or unreadable, the checkout is not a git repo, or git
+    could not answer — a git error or a timed-out git is UNKNOWN, never drift).
 
 The two assertion modes answer DIFFERENT questions and are refused together (exit 2, via an
 argparse ``mutually_exclusive_group``). Before that guard, ``--check --pin-check`` answered the
@@ -106,17 +107,23 @@ GIT_TIMEOUT = 20
 #: `git checkout <garbage>`, which is a worse failure than the one being reported.
 PIN_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 #: ``pin_state`` verdicts. The drift three are the ones that make ``--pin-check`` exit 1; the
-#: cannot-verify two are exit 2; ``ok`` and ``no-pin`` are the only passes, and ``no-pin`` is
+#: cannot-verify three are exit 2; ``ok`` and ``no-pin`` are the only passes, and ``no-pin`` is
 #: always STATED — an unanswered question is not a clean one.
 PIN_OK = "ok"
 PIN_NO_PIN = "no-pin"
 PIN_UNREADABLE = "unreadable"
 PIN_NOT_A_REPO = "not-a-repo"
+#: git was ASKED and could not answer (it could not be run, timed out, or exited with a status
+#: that is not one of its documented answers). Distinct from ``PIN_NOT_A_REPO``, which is a
+#: positive finding about the directory: git answered, and the answer was "this is not a repo
+#: root". Collapsing the two is what PR #10250 review ROUND 8 ISSUE 2 (P3) found: a hung or
+#: broken git was reported as DRIFT, with `git checkout <pin>` printed as the remedy.
+PIN_GIT_ERROR = "git-error"
 PIN_ABSENT = "pin-absent"
 PIN_BEHIND = "behind"
 PIN_DIVERGED = "diverged"
 PIN_DRIFT = frozenset({PIN_ABSENT, PIN_BEHIND, PIN_DIVERGED})
-PIN_CANNOT_VERIFY = frozenset({PIN_UNREADABLE, PIN_NOT_A_REPO})
+PIN_CANNOT_VERIFY = frozenset({PIN_UNREADABLE, PIN_NOT_A_REPO, PIN_GIT_ERROR})
 
 # Tools this repo names in its own docs and hooks. Only used to make a *stale checkout* legible
 # (`diagnose` asks agent-infra whether it has them); never to gate the link itself — the link
@@ -336,6 +343,31 @@ def _git(infra: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
         return None
 
 
+def _is_ancestor(infra: Path, ancestor: str, descendant: str) -> bool | None:
+    """``git merge-base --is-ancestor``: ``True``/``False``, or ``None`` when git could not answer.
+
+    ⛔ ``--is-ancestor`` has THREE outcomes, and its own manual spells them out (git-merge-base(1),
+    quoted from git-scm.com/docs/git-merge-base): *"Check if the first <commit> is an ancestor of
+    the second <commit>, and exit with status 0 if true, or with status 1 if not. **Errors are
+    signaled by a non-zero status that is not 1.**"* (PR #10250 review ROUND 8 ISSUE 2, P3.)
+    Accepting only status 0 — the shape this replaced — therefore read "git could not answer"
+    (``None``: spawn failure or the 20 s ``GIT_TIMEOUT``, which is why that timeout exists at all)
+    as "not an ancestor" and fell through to ``PIN_DIVERGED``: exit **1**, DRIFT, with
+    ``git fetch && git checkout <pin>`` printed as the remedy. That sends an operator to rewrite a
+    checkout over what may be a hung or broken git — "a worse failure than the one being
+    reported", which is the rule this whole module is built on (``cannot-verify is never drift``).
+    ``128`` (error 128, measured: ``fatal: Not a valid commit name <sha>``) is the same class.
+    """
+    proc = _git(infra, "merge-base", "--is-ancestor", ancestor, descendant)
+    if proc is None:
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    return None
+
+
 def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
     """Classify ``infra`` against the harness pin. Returns ``(state, detail)``.
 
@@ -412,7 +444,18 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
     head_sha = head.stdout.strip()
 
     present = _git(infra, "cat-file", "-e", f"{sha}^{{commit}}")
-    if present is None or present.returncode != 0:
+    if present is None:
+        # ``_git``'s ``None`` means "git could not be asked", which is not an answer about the
+        # pin: the two outcomes below stay separate for exactly the reason ``_is_ancestor``
+        # documents. A NON-zero status keeps its existing meaning — git's own ``cat-file -e`` does
+        # not separate "no such object" (128) from "bad object", so that conflation is left
+        # alone; only ``None`` is removed from the drift class.
+        return PIN_GIT_ERROR, (
+            f"git could not be asked whether {infra} contains the pinned commit {sha[:12]} — "
+            "cannot verify (this is not drift: a git that cannot answer says nothing about the "
+            "checkout)"
+        )
+    if present.returncode != 0:
         return PIN_ABSENT, (
             f"{infra} does not contain the pinned commit {sha[:12]} — the checkout predates the "
             "pin, so anything resolved through it is older than what this box runs"
@@ -420,11 +463,21 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
 
     if head_sha == sha:
         return PIN_OK, f"{infra} is AT the pin {sha[:12]}"
-    contains = _git(infra, "merge-base", "--is-ancestor", sha, head_sha)
-    if contains is not None and contains.returncode == 0:
+    contains = _is_ancestor(infra, sha, head_sha)
+    if contains is None:
+        return PIN_GIT_ERROR, (
+            f"git could not answer whether the pin {sha[:12]} is an ancestor of {infra}'s HEAD "
+            f"{head_sha[:12]} — cannot verify (a git error is not a diverged checkout)"
+        )
+    if contains:
         return PIN_OK, f"{infra} ({head_sha[:12]}) carries the pin {sha[:12]}"
-    behind = _git(infra, "merge-base", "--is-ancestor", head_sha, sha)
-    if behind is not None and behind.returncode == 0:
+    behind = _is_ancestor(infra, head_sha, sha)
+    if behind is None:
+        return PIN_GIT_ERROR, (
+            f"git could not answer whether {infra}'s HEAD {head_sha[:12]} is an ancestor of the "
+            f"pin {sha[:12]} — cannot verify (a git error is not a diverged checkout)"
+        )
+    if behind:
         distance = _git(infra, "rev-list", "--count", f"{head_sha}..{sha}")
         count = (
             distance.stdout.strip() if distance is not None and distance.returncode == 0 else "?"
