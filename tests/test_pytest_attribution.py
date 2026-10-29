@@ -1184,9 +1184,9 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
             )
     # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
     # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
-    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
-    # plus `trackb.log`,
+    # `"$PYTEST_LOG"` since #10028, then `test-slow` (300) through that same
+    # variable (it was a `/tmp/pytest.log` literal until the run that reddened it),
+    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from

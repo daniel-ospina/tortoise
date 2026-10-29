@@ -233,6 +233,15 @@ class TestGuardAcceptsCleanLog:
             # `"$PYTEST_JUNIT_LF"`, so the pre-phase is excluded by the same
             # token that selects the gating run.
             and '--junitxml="$PYTEST_JUNIT"' in l
+            # ⛔ ...and THAT TOKEN IS NO LONGER UNIQUE TO THIS JOB: with the
+            # #10028 migration finished for `test-slow` (run 40832215261), the
+            # slow leg writes the same `--junitxml="$PYTEST_JUNIT"`, so the token
+            # now selects two invocations and the pin would compare the SLOW
+            # leg's command line — the same wrong-job shape it was written to
+            # catch. The fast gating run's own discriminator is the xdist
+            # expansion (`-n "$XDIST_WORKERS" --dist loadscope`); the slow leg
+            # runs single-process, so this keeps the selection at exactly one.
+            and '-n "$XDIST_WORKERS"' in l
         ]
         # A retarget here is INVISIBLE without these two floors: every pytest
         # invocation in this file carries `-r fEs`, and the retired literal still
