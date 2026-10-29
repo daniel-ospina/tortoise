@@ -1235,7 +1235,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13904`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
+# `tortoise/sdk.py:14024`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8971-8975``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1249,10 +1249,10 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12402", "sdk.py:12683", "sdk.py:2368", "edges.py:467",
+        "sdk.py:12401", "sdk.py:12682", "sdk.py:2367", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
-    r"SUPERSEDED and its file is gone": ("sdk.py:12197",),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
@@ -1520,7 +1520,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13904` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:14024` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
