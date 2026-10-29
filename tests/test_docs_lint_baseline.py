@@ -1536,29 +1536,50 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
     """
     changed_lint = _by_name("Markdownlint (changed files)")["run"]
     main_lint = _by_name("Markdownlint (main health, changed files)")["run"]
+    # #10265: the capture moved into `.github/scripts/docs-markdownlint.sh`, so the
+    # three properties are pinned THERE — against the SAME report paths the two
+    # steps hand it. The move does not weaken them:
+    #
+    #   * the REDIRECT is still the load-bearing part, and still merges stderr —
+    #     measured: cli2 prints its findings on stderr and the differ cross-checks
+    #     them against the `Summary:` count, so a split-stream "tidy-up" makes the
+    #     differ report "1 issue(s) but 0 parsed" instead of adjudicating the
+    #     finding;
+    #   * the producer must NOT run under errexit. cli2 exits 123 under xargs
+    #     whenever it finds issues, so `set -e` kills the step before the differ
+    #     runs — the pre-#7435 behaviour where every inherited finding reds the
+    #     check. In the script this is the absence of an errexit flag, which is
+    #     what the old `set +e` / `set -e` bracket used to prove;
+    #   * the report must still be PRINTED, or a baselined finding goes invisible
+    #     in CI while the required check stays green — the visibility half of "the
+    #     snapshot is a ceiling, not an amnesty".
+    producer = ROOT / ".github" / "scripts" / "docs-markdownlint.sh"
+    producer_text = producer.read_text(encoding="utf-8")
+    assert '>"$TMP_REPORT" 2>&1' in producer_text, (
+        "the linter's output must be REDIRECTED into the report the differ reads, "
+        "with stderr merged into it (#10265)"
+    )
+    assert 'cat "$OUTPUT"' in producer_text, (
+        "the published report must be printed: a known finding is otherwise "
+        "invisible while the required check stays green"
+    )
+    set_lines = [
+        line for line in producer_text.splitlines() if line.startswith("set ")
+    ]
+    assert set_lines, "the producer must state its own shell options"
+    for line in set_lines:
+        assert not any(
+            tok.startswith("-") and "e" in tok for tok in line.split()[1:]
+        ), (
+            f"the producer must not enable errexit ({line!r}): cli2 exits 123 "
+            "under xargs when it finds issues, and errexit would fail the step "
+            "before the differ ever adjudicates that report (#7435)"
+        )
     for lint, report in (
         (changed_lint, "mdlint-pr.txt"),
         (main_lint, "mdlint-mh.txt"),
     ):
-        # The REDIRECT is the load-bearing part: `cat "$RUNNER_TEMP/mdlint-*.txt"`
-        # also names the file, so a substring assertion stays green with the whole
-        # capture deleted. And the capture must be exempt from `-e` — GitHub's
-        # default `run:` shell is `bash -e`, cli2 exits 123 under xargs when it
-        # finds issues, so without the `set +e` wrapper the STEP fails and the
-        # differ never runs, restoring the pre-#7435 behaviour where every
-        # inherited finding reds the check. Both mutants survived the full suite
-        # (#7542 review round 9).
-        assert f'> "$RUNNER_TEMP/{report}" 2>&1' in lint, report
-        assert "set +e" in lint and "set -e" in lint, report
-        # ... and the wrapper must BRACKET the xargs, not merely appear somewhere.
-        assert "xargs" in lint[lint.index("set +e") :], report
-        # The differ reports a KNOWN finding as a COUNT only, so the raw report
-        # must also be PRINTED or a baselined finding goes invisible in CI while
-        # the required check stays green — the visibility half of "the snapshot
-        # is a ceiling, not an amnesty". Pin the `cat` that publishes it: a
-        # mutant deleting BOTH `cat` lines survived the full suite (#7542 review
-        # round 10), because the redirect assertion above only proves capture.
-        assert f'cat "$RUNNER_TEMP/{report}"' in lint, report
+        assert f'--output "$RUNNER_TEMP/{report}"' in lint, report
     # (No `assert ".rc" not in lint` here. No step writes a `.rc` file — the status
     # is captured in a shell variable — so that assert could not fail and only read
     # as if it pinned the property; a vacuous assert is worse than none. #7542

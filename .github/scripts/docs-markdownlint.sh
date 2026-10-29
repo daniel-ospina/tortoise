@@ -114,13 +114,21 @@ BIN="$PREFIX/node_modules/.bin/markdownlint-cli2"
 
 install_pinned_cli2() {
   local log="$TMP_ROOT/mdlint-cli2-install.log" rc
+  command -v npm >/dev/null 2>&1 || fail \
+    "npm is ABSENT on this runner, so ${CLI2_SPEC} cannot be installed" \
+    " — the linter did not run, and this is NOT a finding about the changed markdown"
   rm -rf "$PREFIX" && mkdir -p "$PREFIX"
   npm install --prefix "$PREFIX" --no-audit --no-fund --loglevel=error \
     "$CLI2_SPEC" >"$log" 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail \
-    "could not install ${CLI2_SPEC} into ${PREFIX} (npm exit ${rc}; tail: $(tail -c 400 "$log" | tr '\n' ' '))" \
+    "could not install ${CLI2_SPEC} into ${PREFIX} (npm exit ${rc}; $(install_tail "$log"))" \
     " — the linter is ABSENT on this runner, so no lint verdict exists and this is NOT a finding about the changed markdown"
+}
+
+install_tail() {
+  [ -s "$1" ] || { printf '(no installer output)'; return; }
+  tail -c 400 "$1" | tr '\n' ' '
 }
 
 # ── resolve the linter ───────────────────────────────────────────────────────
