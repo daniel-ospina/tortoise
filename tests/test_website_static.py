@@ -2703,10 +2703,11 @@ class TestARenderedCodeElementGetsAMonoFace:
         grows a subject whose diff selects no leg that runs it, so the regression it
         exists for merges GREEN and main goes red only on the next trunk run.
 
-        MEASURED at the head this landed (#10254 review P2): of the 23 files under
-        `ROOTS` that carry their own `<style>` block — the set this guard can decide
-        on — 22 already selected this surface and `apps/graph-viz/index.html` was the
-        only one that did not (`select([…]) -> surfaces=[], full=False`, guard ABSENT;
+        MEASURED at the head this landed (#10254 review P2), over the files this scan
+        actually reads (`_sources`, node_modules/dist pruned): 21 of the files under
+        `ROOTS` carry their own `<style>` block — the set this guard can decide on —
+        and 20 of those already selected this surface. `apps/graph-viz/index.html` was
+        the only one that did not (`select([…]) -> surfaces=[], full=False`, guard ABSENT;
         `apps/` is in `NON_PYTHON_PREFIXES` and matched no `SOURCE_PATTERNS` row, so
         the diff filtered to `changed == []` and took the docs-only tier-1 early
         return). That page renders no `<code>`/`<pre>` today, which is why it had to

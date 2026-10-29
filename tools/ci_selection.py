@@ -818,9 +818,9 @@ SOURCE_PATTERNS = {
                    # -> surfaces=[], full=False`, `test_website_static.py` ABSENT (a
                    # graph-viz-page-only diff filters to `changed == []` — `apps/` is
                    # in NON_PYTHON_PREFIXES and matched no row — and takes the
-                   # docs-only tier-1 early return). Of the 23 decidable subjects the
+                   # docs-only tier-1 early return). Of the 21 decidable subjects the
                    # guard scans at this head, this was the ONLY unwired one; the
-                   # other 22 already select this surface. Concrete path, not the
+                   # other 20 already select this surface. Concrete path, not the
                    # `apps/graph-viz/` directory: the same reasoning as the
                    # `package.json` entry above — a wholesale claim would pull the
                    # whole `core` set onto every source edit in that app.
