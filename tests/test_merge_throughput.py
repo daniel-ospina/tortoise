@@ -3899,7 +3899,14 @@ def test_docs_job_main_health_uses_a_safe_post_merge_gate():
     lint = next(
         s for s in steps if str(s.get("name", "")).startswith("Markdownlint (main health")
     )
-    assert "xargs -0" in lint["run"]
+    # #9708's sibling: the markdownlint consumer is a `run:` step invoking the
+    # producer we own too (a bare `npx` came back `markdownlint-cli2: not found`
+    # and redded this REQUIRED check for a measurement that never ran), so the
+    # "the list is DATA" contract is pinned on its ARGV. The producer still feeds
+    # the same NUL list to `xargs -0` — that assertion lives in
+    # tests/test_docs_markdownlint.py, where the invocation now is.
+    assert '--files-from "$RUNNER_TEMP/changed-md.nul"' in lint["run"], lint["run"]
+    assert ".github/scripts/docs-markdownlint.sh" in lint["run"]
     assert "${{ steps.changed_mh" not in lint["run"]
     link = next(
         s for s in steps if str(s.get("name", "")).startswith("Link check (main health")
@@ -4194,9 +4201,14 @@ def test_docs_job_pr_path_never_interpolates_filenames():
     lint = next(
         s for s in steps if str(s.get("name", "")) == "Markdownlint (changed files)"
     )
-    assert "xargs -0" in lint["run"], (
-        "markdownlint must consume the NUL list as ARGV, not as expanded text"
+    # #9708's sibling: the producer is `docs-markdownlint.sh`, which consumes the
+    # NUL list as ARGV (`xargs -0`) — the step hands it the FILE, never expanded
+    # text. The `xargs` assertion moved with the invocation, to
+    # tests/test_docs_markdownlint.py.
+    assert '--files-from "$RUNNER_TEMP/pr-md.nul"' in lint["run"], (
+        "markdownlint must consume the NUL list from a FILE, as ARGV, not as expanded text"
     )
+    assert ".github/scripts/docs-markdownlint.sh" in lint["run"]
     assert "steps.changed.outputs.files" not in lint["run"]
     assert "${{ steps.changed" not in lint["run"]
 
