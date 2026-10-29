@@ -2694,6 +2694,58 @@ class TestARenderedCodeElementGetsAMonoFace:
                         continue
                     yield Path(dirpath) / name
 
+    def test_every_page_it_can_decide_on_selects_this_guard(self):
+        """The REVERSE direction: a page this guard can DECIDE on must RUN it when changed.
+
+        Registration in `config/ci-surfaces.yml` only makes this file CLASSIFIED;
+        selection is what makes it RUN. Declaring `apps/` in `ROOTS` and stopping
+        there is exactly the silent-drop class `#1349/#3332/#3616` name: the guard
+        grows a subject whose diff selects no leg that runs it, so the regression it
+        exists for merges GREEN and main goes red only on the next trunk run.
+
+        MEASURED at the head this landed (#10254 review P2): of the 23 files under
+        `ROOTS` that carry their own `<style>` block — the set this guard can decide
+        on — 22 already selected this surface and `apps/graph-viz/index.html` was the
+        only one that did not (`select([…]) -> surfaces=[], full=False`, guard ABSENT;
+        `apps/` is in `NON_PYTHON_PREFIXES` and matched no `SOURCE_PATTERNS` row, so
+        the diff filtered to `changed == []` and took the docs-only tier-1 early
+        return). That page renders no `<code>`/`<pre>` today, which is why it had to
+        be derived rather than noticed.
+
+        The subject set is the own-`<style>` set, NOT the `<code>`-rendering set: a
+        page becomes decidable the moment it renders the element, so ratcheting only
+        the pages that render it today would leave the next one free to arrive
+        unguarded. Derived from what the scan actually reads, so it cannot rot.
+        """
+        from tools.ci_selection import load_manifest, select
+
+        repo = Path(__file__).resolve().parent.parent
+        manifest = load_manifest()
+        guard = Path(__file__).name
+        missing = []
+        decidable = 0
+        for path in sorted(self._sources(repo)):
+            text = path.read_text(errors="replace")
+            # same blanking order the guard uses: inert text is not a sheet
+            if not self.STYLE.search(self.COMMENT.sub(" ", self.INERT.sub(" ", text))):
+                continue
+            decidable += 1
+            rel = path.relative_to(repo).as_posix()
+            selection = select([rel], "pull_request", manifest)
+            if guard not in selection["test_files"]:
+                missing.append(f"{rel} (selected surfaces: {selection['surfaces'] or 'none'})")
+        assert decidable >= self.MIN_PAGES, (
+            f"only {decidable} page(s) carry their own <style> under "
+            f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
+        assert not missing, (
+            "these pages carry their own <style> block, so this guard would DECIDE on "
+            "them if they rendered `<code>`/`<pre>` — but editing one selects no leg "
+            "that runs this guard, so the Courier regression (#6870) would merge green "
+            "on exactly the diff that causes it. Add the path to "
+            "SOURCE_PATTERNS['onboarding'] in tools/ci_selection.py, naming a CONCRETE "
+            "path — select() matches with startswith and has no glob support:\n  "
+            + "\n  ".join(missing))
+
     def test_a_var_fallback_is_dead_text_when_the_token_is_defined(self):
         """The resolver's own cases, pinned so the guard cannot silently un-fix (#10254 review).
 
