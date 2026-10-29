@@ -27,13 +27,18 @@ The two epic artifacts named in ``_DOC_MOVE_POINTERS`` carried the *retired*
 premise in the present tense (“the record's ``DirectEdgeRepoint`` is a plain
 upsert”), which is the same doc-vs-consumer disagreement that produced this bug
 family. They are pinned inverted: the corrected pointer must be present AND the
-retired sentence must be absent.
+retired sentence must be absent — plus ``_NON_DERIVABLE_CLAIM``, the corrected
+statement of where an *unmoved* row sits, whose false predecessor (“the record
+holds those rels at neither endpoint”) is asserted ABSENT. That sentence was the
+#10244 review's P1: it inverted a true claim, and a lane scoping #9836 would
+have shipped the ``INSERT``-without-``DELETE`` fix the same file forbids.
 
 Class-B test doctrine:
   (1) *What value makes this test fail?*  Deleting or rewording any clause below
-      from §4.4 / the supersede row; a plan that stops emitting the two halves,
+      from §3.1 / the supersede row; a plan that stops emitting the two halves,
       the chain CTE, the terminal landing, or ``DO NOTHING``; or a doc that goes
-      back to claiming the record upserts in place.
+      back to claiming the record upserts in place, or that an unmoved
+      non-derivable rel sits at *neither* endpoint.
   (2) *Does the test reach it?*  Yes — the docs are read from the tree and the
       plan is emitted by the module the docs describe, not paraphrased here.
 
@@ -59,17 +64,30 @@ _DOC_MOVE_ANCHORS = {
 # Epic artifacts that asserted the retired premise (a plain upsert → the row
 # never leaves the superseded point). Each carries the corrected pointer, and
 # the retired sentence must be GONE — the inverted half is what makes this a
-# guard rather than a spelling check.
+# guard rather than a spelling check. ``points_at`` is the corrected CLOSURE
+# pointer; ``keeps_row_at`` is the corrected statement of where a row that is NOT
+# moved still sits (the #10244 review's P1), and ``_NON_DERIVABLE_CLAIM`` is its
+# false predecessor.
 _DOC_MOVE_POINTERS = {
     "docs/epics/2026-10-10-7879-postgres-record/04-projection.md": {
         "points_at": "CLOSED for the derivable set by #10191",
+        "keeps_row_at": "the record keeps the row at the pre-supersede point",
         "retired": "the record's `DirectEdgeRepoint` is a plain",
     },
     "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md": {
-        "points_at": "#10191 moves the derivable set",
+        "points_at": "CLOSED for the derivable set by #10191",
+        "keeps_row_at": "the record keeps the row at the pre-supersede point",
         "retired": "is a plain upsert (`record_projection.py`), so `relation` keeps the row",
     },
 }
+
+#: The #10244 review's P1, verbatim. It claimed a non-derivable rel sits at
+#: NEITHER endpoint after a supersede; measured, an addressable
+#: `wasDerivedFrom`/`aboutAction` is journaled as a `DirectEdgeCreated`
+#: (`RECORD_CARRIED_STRUCTURAL_RELS`) and 2b journals no repoint for it, so the
+#: row STAYS at the pre-supersede point. A doc asserting the opposite sends a
+#: lane scoping #9836 to add an INSERT at the successor without the DELETE.
+_NON_DERIVABLE_CLAIM = "at neither endpoint"
 
 
 def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",
@@ -93,7 +111,7 @@ def _line_with(path: str, anchor: str) -> str:
 
 
 def test_the_documented_record_side_move_is_the_move_the_record_emits():
-    """ONTOLOGY §4.4 and the INGEST supersede row describe the RECORD's half."""
+    """ONTOLOGY §3.1 and the INGEST supersede row describe the RECORD's half."""
     lines = {path: _line_with(path, anchor)
              for path, anchor in _DOC_MOVE_ANCHORS.items()}
 
@@ -117,8 +135,13 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
         # ... and it lands at the chain's TERMINAL row, not at `src`.
         assert "terminal" in line, (path, line)
         assert "succ WHERE next_id IS NULL" in insert, insert
-        # The successor's own live value wins (#9417 / §11.1) — never `DO UPDATE`.
-        assert "DO NOTHING" in line and "§11.1" in line, (path, line)
+        # The successor's own live value wins (#9417) — never `DO UPDATE`.
+        # CITED WITH ITS DOCUMENT: the bare `§11.1` resolved to INGEST's own
+        # "11.1 Derived liveness" and to nothing at all in ONTOLOGY (§11 there is
+        # Reputation), so a presence-only assert froze a pointer to the wrong
+        # section (#10244 review P2).
+        assert "DO NOTHING" in line and "`STORAGE-ARCHITECTURE.md` §11.1" in line, (path, line)
+        assert "#9417" in line, (path, line)
         assert insert.rstrip().endswith("DO NOTHING"), insert
         assert "DO UPDATE" not in insert, insert
         # #5509: a name held by two carriers is a refusal, not a pick.
@@ -141,6 +164,13 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
     assert "_src_is_terminal" in ontology, ontology
     for sql in (delete, insert):
         assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
+    # The linear-vs-cyclic qualifier must NAME its residual where that residual
+    # lives. The bare "residual (b) above" had no referent in ONTOLOGY at all, and
+    # at its likely intended home (04-projection) (b) is the CLOSED item while the
+    # cyclic divergence is the CODE's residual (c) — a dangling pointer that sent a
+    # reader to a closed residual (#10244 review P2).
+    assert "residual (b)" not in ontology, ontology
+    assert "cyclic" in ontology and "residual (c)" in ontology, ontology
 
 
 def test_the_epic_artifacts_no_longer_assert_the_retired_upsert_premise():
@@ -150,8 +180,16 @@ def test_the_epic_artifacts_no_longer_assert_the_retired_upsert_premise():
     #10191, and both were in ``docs/`` — so they reached a lane reading the epic
     as current state and never reached a pin. The assertion is inverted on
     purpose: restoring the retired sentence reds here.
+
+    The same inversion covers the P1 the #10244 review found: a *non-derivable*
+    rel is NOT at "neither endpoint" — it is journaled as a `DirectEdgeCreated`
+    and never moved, so the row stays at the pre-supersede point. Restoring that
+    false claim reds here too, which is the whole point: it is the claim a lane
+    scoping #9836 would act on.
     """
     for path, spec in _DOC_MOVE_POINTERS.items():
         text = (ROOT / path).read_text(encoding="utf-8")
         assert spec["points_at"] in text, (path, spec["points_at"])
+        assert spec["keeps_row_at"] in text, (path, spec["keeps_row_at"])
         assert spec["retired"] not in text, (path, spec["retired"])
+        assert _NON_DERIVABLE_CLAIM not in text, (path, _NON_DERIVABLE_CLAIM)

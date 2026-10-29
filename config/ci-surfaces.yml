@@ -6524,7 +6524,7 @@ tier1:
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
 - test_9399_search_path_claim_scope.py  # #9399: §13's `aboutObject` headline claim vs the scope of the grep it quotes (hermetic doc↔code pin, and the claim's own file list is what a docs-only edit falsifies fastest) — dual-registered with `core`
-- test_10191_record_move_doc_pin.py  # #10191/#10244: the record applies a 2b `DirectEdgeRepoint` as a MOVE — docs/ONTOLOGY.md §4.4 + the docs/INGEST_CONTRACT.md supersede row vs `_structural_repoint_statements` (hermetic doc↔code pin; a docs-only INGEST edit selects no surface and runs tier1 ONLY) — dual-registered with `core`
+- test_10191_record_move_doc_pin.py  # #10191/#10244: the record applies a 2b `DirectEdgeRepoint` as a MOVE — docs/ONTOLOGY.md §3.1 + the docs/INGEST_CONTRACT.md supersede row vs `_structural_repoint_statements` (hermetic doc↔code pin; a docs-only INGEST edit selects no surface and runs tier1 ONLY) — dual-registered with `core`
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py

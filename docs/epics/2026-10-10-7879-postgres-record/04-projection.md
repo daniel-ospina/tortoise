@@ -364,7 +364,10 @@ closed at both layers:
   > journal route loses them after a supersede; (b) **CLOSED for the derivable set by #10191** — the record now
   > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
   > `superseded_by` chain), so the row follows the edge; what stays open in **#9836** is the *non-derivable* half of
-  > (a) on the record route (no descriptor at all, so the record holds those rels at neither endpoint).
+  > (a) on the record route, and its shape differs by endpoint: 2b journals **no** descriptor for them, so nothing
+  > moves the row and the record keeps the row at the pre-supersede point while live moved the edge to the
+  > successor. The `:Source`-targeted shape is the only one that holds nothing at all, because the producer
+  > declines it at the mint (`_record_addressable`).
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →

@@ -499,11 +499,13 @@ shape: everything agrees live↔rebuild except the residuals below.
 
 - **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
   repoint: live has the edge at the successor, the journal rebuild has it nowhere.
-- **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191 moves the derivable set**:
+- **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**:
   the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
   `superseded_by` chain, `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
   remains open in **#9836** is the *non-derivable* family (`wasDerivedFrom`/`aboutAction`): 2b journals no
-  descriptor for them at all, so the record holds those rels at neither endpoint.
+  descriptor for them at all, so nothing moves the row and the record keeps the row at the pre-supersede point
+  (live moved it to the successor). Only the `:Source`-targeted shape holds nothing at all — the producer declines
+  it at the mint (`_record_addressable`).
   ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and
   it pre-dated #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried.
 
