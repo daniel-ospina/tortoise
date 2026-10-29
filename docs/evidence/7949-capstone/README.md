@@ -139,7 +139,7 @@ it), and `tortoise/extractor_v2.py:8288-8292` (the **VET** surface, as the S2.2 
 it). **They no longer resolve on `main`** at this head.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `8873-8879` here, not in the log. (The SYMBOL is what makes
+the `result["classify_later"]` block at `8961-8967` here, not in the log. (The SYMBOL is what makes
 this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
 `_BUNDLE_HISTORICAL`, deliberately — so a reader re-deriving it must land on the block the sentence
 names, not on the number alone.) That is deliberate: a scored log is a measurement record and the bundle's rule is
@@ -219,7 +219,9 @@ touching the probe or these tests**.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:8608-8612`, `:8873-8887`). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:8608-8612`), and the same two keys are built at the end of every pass
+whatever the flags say (`result["classify_later"]` `extractor_v2.py:8961-8967`, `result["vet"]`
+`extractor_v2.py:8971-8975`). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -262,8 +264,9 @@ cause used to read "the arm forced `TORTOISE_VET=1` … **so the pass RAN**", su
 proves the flag; a classify or vet block can legitimately carry `enabled: True, s2: {}` (an empty
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
-that whether it did work is not observable here; the `#9116` attribution (the surface is emitted
-unconditionally at `:8873`/`:8883` and dropped at `sdk.py:13671`) and the "where the fix must
+that whether it did work is not observable here; the `#9116` attribution (the surfaces are emitted
+unconditionally — `result["classify_later"]` `extractor_v2.py:8961-8967`, `result["vet"]`
+`extractor_v2.py:8971-8975` — and dropped at `sdk.py:13671`) and the "where the fix must
 target" line are unchanged.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -609,7 +612,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt that hides four steps)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:12843`; called at `:11880`) →
+`sdk._extract_session_v2` (`sdk.py:12843`; the call site at `sdk.py:11880`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:8484`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is

@@ -678,8 +678,10 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
 
     `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
     UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
-    is `{"enabled": False, "s2": {}, "union": {}}` (`:8509-8524`,
-    `:8873-8887`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    is `{"enabled": False, "s2": {}, "union": {}}` (`extractor_v2.py:8608-8612`),
+    and the same keys are built at the end of every pass
+    (`extractor_v2.py:8961-8967` / `extractor_v2.py:8971-8975`). An acceptance
+    test of "a non-empty dict" therefore takes an OFF
     block as the witness for "the S2.2 VET pass RAN" and prints
     `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
@@ -1192,8 +1194,14 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
 # continuation (the docs write `` `extractor_v2.py:8504` and `:8524` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
-# numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
-# `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
+# numbers — so the swept documents do not get to use the shorthand at all where a
+# leg needs to read it: `test_no_swept_line_hides_a_number_behind_its_file_name`
+# reds a line that names a file and then continues `:NNNN` (the `#7949` index row
+# and the README's OFF-block paragraph both did, and the sweep was green over 13 +
+# 1 numbers it never read). The README's bare `` `symbol` `:NNN` `` step table is
+# still owned by `test_7949_capstone_verdict_check.py`: its lines name no file, so
+# a bare number there is not a mis-resolved continuation and stays out of this
+# leg. `extractor_v2.py` was the first gap: its
 # 15 cites (`8288-8292`, `8278-8284`, `7928-7932`, `7912`, `7881`, `7781-7801`,
 # `7804`) matched no pattern at all, so they were neither resolved nor reported
 # `unmatched` — the leg stayed green over numbers it never read. The index row
@@ -1260,6 +1268,16 @@ _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
 
+# The SHORTHAND form: `:NNNN` with no file. It resolves against whatever file the
+# sentence named last, which is a reader's convention and NOT a leg's: the sweep
+# above matches `file.py:line` only, so a bare continuation beside a named file is
+# a number nothing checks. `test_no_swept_line_hides_a_number_behind_its_file_name`
+# is the leg that keeps the shorthand out of the swept documents — the shape it
+# reds on is the one PR #10199's review (ISSUE 2) found: the `#7949` row had its
+# FILE-prefixed cites re-derived and 13 bare continuations left pointing ~88 lines
+# into unrelated code, and the sweep reported the bundle clean over every one.
+_BUNDLE_BARE_CITE = re.compile(r"(?<![\w.]):(\d+)(?:-(\d+))?")
+
 # A paragraph that is ABOUT numbers which no longer resolve is not a live cite:
 # the README discloses the frozen log's stale set on purpose, and the supersession
 # history names the old stamps' cites. Each such paragraph says so in its own
@@ -1292,6 +1310,14 @@ _BUNDLE_RULES = (
     ("the call that writes the references edge", "sdk",
      ("proj.link_source_to_event(",),
      ("proj.link_source_to_event(",), "line", None),
+    # `_extract_session_v2` has TWO cites in the bundle: its `def` (the entry
+    # point) and the SDK line that CALLS it. One phrase cannot verify both — a
+    # `def` cite must land on the definition, a call-site cite on the call — so
+    # the call site is its own rule with its own phrase. Without it the call
+    # site's number was a bare `:NNNN`, which no leg read at all (PR #10199
+    # review, ISSUE 2).
+    ("the SDK call site that drives the extractor", "sdk",
+     ("the call site at",), ("_extract_session_v2(",), "line", None),
     ("the capture path's turn writer", "sdk",
      ("_TURN_WRITE_CYPHER",), ("_TURN_WRITE_CYPHER = (",), "line", None),
     ("the entry point", "sdk",
@@ -1322,6 +1348,23 @@ _BUNDLE_RULES = (
      ("classify_later = kind_classifier is not None",), "line", None),
     ("the vet flag, computed before the pass is reached", "extractor_v2",
      ("vet_enabled",), ("vet_enabled = (",), "line", None),
+    # The flag is NOT the gate: each `_run_vet_pass` sits behind a LIST test
+    # (`if vet_enabled and embed_list:` / `… and complete_list:`), which is the
+    # whole point of the row's claim (flag-on + empty list runs NOTHING). Its own
+    # rule, so a stale gate cannot pass as "the vet flag" — the two cites read
+    # almost the same in prose and verify completely different lines.
+    ("the VET pass is gated on the list, not on the flag", "extractor_v2",
+     ("gated on the LIST",), ("if vet_enabled and",), "line", None),
+    # The classify pass's own gates and its fail-open `except`, per surface: the
+    # row says a cause citing the VET symbols for S2.3 sends a reader to code that
+    # pass never runs, so THESE lines have to be the ones its cite resolves to.
+    ("the classify pass is gated on the flag and the list", "extractor_v2",
+     ("if classify_later and embed_list:", "if classify_later and complete_list:"),
+     ("if classify_later and",), "line", None),
+    ("the classify pass does work only when it has items", "extractor_v2",
+     ("if items:",), ("if items:",), "line", None),
+    ("the classify pass's fail-open except", "extractor_v2",
+     ("fail-open `except` at",), ("except Exception as e:",), "line", None),
     ("the vet pass's fail-open exception path", "extractor_v2",
      ("_run_vet_pass",),
      ("except Exception as e:", "return embed_list, {}, ["), "span",
@@ -1482,6 +1525,46 @@ def _bundle_sweep(docs, sources) -> dict:
             "failures": failures, "skipped": skipped}
 
 
+def _bundle_bare_continuations(docs) -> list[str]:
+    """Bare `:NNNN` continuations a swept line would have to resolve from context.
+
+    A line that has already NAMED a file and then writes another number as `:NNNN`
+    is the shape no leg can verify: `_BUNDLE_CITE` reads `file.py:line`, so the
+    continuation is skipped silently — the sweep reports the document clean over a
+    number it never read. Returns one entry per such number, so a caller can name
+    every one of them in a single RED.
+
+    Out of scope, deliberately (the same scope the sweep applies): a row of a
+    scoped document that does not name this bundle, and a `_BUNDLE_HISTORICAL`
+    paragraph, which is ABOUT numbers that no longer resolve and pins them as
+    frozen. A bare number on a line that names NO file is out of scope too: the
+    README's step table writes `symbol` `:NNN` per row under a convention pinned by
+    `test_7949_capstone_verdict_check.py`, so a bare number there resumes nothing.
+    """
+    offenders = []
+    for doc_name, doc_path in docs:
+        text = doc_path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        paragraphs = _paragraph_spans(text)
+        for match in _BUNDLE_BARE_CITE.finditer(text):
+            line_no = text.count("\n", 0, match.start()) + 1
+            if not _bundle_in_scope(doc_name, doc_lines[line_no - 1]):
+                continue
+            paragraph = next((s, e) for s, e in paragraphs
+                             if s <= match.start() < e)
+            if _bundle_historical(text[paragraph[0]:paragraph[1]]):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            named = [c for c in _BUNDLE_CITE.finditer(doc_lines[line_no - 1])
+                     if line_start + c.start() < match.start()]
+            if not named:
+                continue
+            offenders.append(
+                f"{doc_name}:{line_no} `{match.group(0)}` — the line already named "
+                f"`{named[-1].group(1)}.py:{named[-1].group(2)}`")
+    return offenders
+
+
 def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     """Every live `file.py:line` cite that names its file → the code it names there.
 
@@ -1489,9 +1572,13 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `extractor_v2.py`) across `README.md`, both probes, the E-row audit
     (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
     point, and the `docs/architecture/
-    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 50 cites at
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 60 cites at
     this head (`#10108` added the sixth document; the count is MEASURED, and it
-    moves with the documents, so re-read `checked` rather than trusting this line).
+    moves with the documents, so re-read `checked` rather than trusting this line;
+    it grew from 44 to 60 when PR #10199's review (ISSUE 2) found the `#7949`
+    index row and the README's OFF-block paragraph carrying their numbers as bare
+    `:NNNN` continuations, which this regex cannot read — those are now
+    `file.py:line` cites, so the leg verifies them instead of stepping over them).
 
     The architecture doc was the LAST unread one, and it hid a false PASS: its D3
     cite (`run_s2(...)` passing `edus=edus`) was re-derived onto `:7804` — a
@@ -1525,6 +1612,11 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
     `sdk.py:13282` to `12401` reds it, and before this leg nothing read that row.
+    The bare `:NNNN` half of the same row is the SIBLING leg
+    (`test_no_swept_line_hides_a_number_behind_its_file_name`): this sweep can only
+    read what names its file, so a continuation number is invisible to it — which
+    is exactly how 13 stale numbers on that row survived a commit whose title
+    claimed the cites had been re-derived.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
@@ -1616,3 +1708,37 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     assert owned, "no cite in docs/00_index.md is in scope — the index row is unwatched"
     assert all("#7949" in shipped_rows[shipped.count("\n", 0, m.start())]
                for m in owned)
+
+
+def test_no_swept_line_hides_a_number_behind_its_file_name():
+    """A `:NNNN` continuation beside a named file is a number NO leg reads.
+
+    PR #10199 review (ISSUE 2): commit `4b9997a94` is titled *"the bundle's
+    `sdk.py` cites are DERIVED where they are printed, re-derived where they are
+    typed"* and the FILE-prefixed cites were re-derived — while every bare
+    `:NNNN` continuation on the `#7949` index row was left pointing ~88 lines into
+    unrelated code, one of them making the row assert that a block is emitted
+    BEFORE the flag it exists to prove was computed. The sweep cannot see any of
+    them: `_BUNDLE_CITE` requires the file name, so the leg reported the bundle
+    clean over exactly the numbers the partial re-derivation left behind — a false
+    PASS, the same shape as the D3 cite (`:7804`) this pin was built to catch.
+
+    The repair is textual AND mechanical, which is why the guard is here: name the
+    file (a `file.py:line` cite the sweep resolves — what the index row, the
+    README and both probes now do) or drop the number. The scope is the sweep's
+    own (`_bundle_in_scope`, non-historical paragraphs) and a bare number on a
+    line that names NO file is left to the pin that owns the step table, so this
+    leg cannot be satisfied by deleting the whole shorthand everywhere.
+
+    Non-vacuity: measured at the pre-fix head, this reds with 17 entries — the
+    index row's 13, the README's `:8873-8887`, and the two `:11880` call-site
+    continuations. Putting any one of them back reds it again, and the message
+    names the line and the file it continued, so the repair is unambiguous.
+    """
+    offenders = _bundle_bare_continuations(_BUNDLE_DOCS)
+    assert not offenders, (
+        "these swept lines name a file and then write another number as a bare "
+        "`:NNNN` continuation, which no leg resolves — the sweep reports the "
+        "bundle clean over a number it never read. Name the file on the number "
+        "(so the rule table can verify it) or drop the number:\n  "
+        + "\n  ".join(offenders))
