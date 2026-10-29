@@ -245,10 +245,22 @@ def test_the_carrier_declares_no_NODE_statement_its_rows_are_its_own():
     assert rp._declared_mutations(carrier, org_id="o", graph_id="g") == [], (
         "the carrier's DECLARED effect must stay empty — the node half — because "
         "its rows come from `_turns_statements`, not from a node snapshot")
-    # `replay_plan` is the same statement set PLUS the journal-position row, so
-    # a `node_identity` occurrence there would be the node half reappearing.
-    plan = rp.replay_plan([carrier], org_id="o", graph_id="g")
-    assert plan, "the carrier planned nothing at all: its rows are missing"
+    # The node half is the EMPTY declaration above; the ROW half is the
+    # carrier's own statement set, and asserting it is PRESENT is what stops
+    # "declares nothing" from reading as "writes nothing at all". Both sides are
+    # `mutations_for` — the one function the live door (`write_live_record` →
+    # `replay`) and `replay_plan` both call.
+    # ⛔ NOT `assert replay_plan([carrier], …)`: `replay_plan` APPENDS the
+    # journal-position row for every record while `position=True` (the default,
+    # and this test passes no `position`), so the list is non-empty for ANY
+    # registered type — an assertion worded "its rows are missing" that cannot
+    # fail for that reason. A `node_identity`-absence assertion is not the
+    # substitute either: the turn rows legitimately need the identity parent
+    # (`_turns_statements` emits one before each upsert).
+    rows = _point_row_statements(carrier)
+    assert rows, (
+        "the carrier wrote no turn rows at all — the empty declaration above "
+        "would then be satisfied by a type that writes nothing")
 
 
 # ── §6 step 7 (#10067): the carrier WRITES the rows — the tier is its own ──
@@ -323,6 +335,15 @@ def test_the_carrier_writes_no_relation_row_for_a_turn():
     carrier = _carrier([_turn_snapshot(f"{SESSION}_t0")])
     assert carrier["contains_session"] == SESSION
     statements = rp.mutations_for(carrier, org_id="o", graph_id="g")
+    # ⛔ GUARD ASSERTION before the absence: pre-#10067 this same carrier
+    # projected `[]` here (it declares `NoRecordEffect`, and
+    # `_narrative_statements` declines a shape with no narrative field), so
+    # `any(… for st in [])` was False for the code the row write replaced — the
+    # assertion held while nothing was written at all.
+    rows = _point_row_statements(carrier)
+    assert rows, (
+        "the carrier produced no turn rows — the absence below would then be "
+        "vacuous, as it was while the row write did not exist")
     assert not any("public.relation" in st.sql for st in statements), (
         "the carrier planned a relation row for a turn that is not a node")
 
