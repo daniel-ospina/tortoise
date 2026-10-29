@@ -122,7 +122,9 @@ PIN_NOT_A_REPO = "not-a-repo"
 #: that is not one of its documented answers). Distinct from ``PIN_NOT_A_REPO``, which is a
 #: positive finding about the directory: git answered, and the answer was "this is not a repo
 #: root". Collapsing the two is what PR #10250 review ROUND 8 ISSUE 2 (P3) found: a hung or
-#: broken git was reported as DRIFT, with `git checkout <pin>` printed as the remedy.
+#: broken git was reported as DRIFT, with `git checkout <pin>` printed as the remedy. ROUND 13
+#: ISSUE 1 (P3) closed the last two sites that still did it — the ``rev-parse`` steps that folded
+#: a ``None`` into a local ``""`` and then returned ``PIN_NOT_A_REPO``.
 PIN_GIT_ERROR = "git-error"
 PIN_ABSENT = "pin-absent"
 PIN_BEHIND = "behind"
@@ -456,7 +458,20 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
     # ``--show-toplevel`` is the question that was actually being asked: is THIS directory the
     # root of the repository git is answering about?
     toplevel = _git(infra, "rev-parse", "--show-toplevel")
-    root = toplevel.stdout.strip() if toplevel is not None and toplevel.returncode == 0 else ""
+    if toplevel is None:
+        # ⛔ ``None`` is "git was ASKED and could not answer" (it could not be RUN, it timed out,
+        # or it answered in bytes this process cannot decode) — it is not an answer ABOUT
+        # ``infra``. Folding it into ``root = ""`` dropped it into ``PIN_NOT_A_REPO`` below, a
+        # POSITIVE finding — "your directory is not a git checkout" — printed on a box whose
+        # actual fault is a hung or missing git. That is the exact conflation ``PIN_GIT_ERROR``'s
+        # own docstring forbids, and the ``cat-file`` step already gets it right; this step did
+        # not (PR #10250 review ROUND 13 ISSUE 1, P3). The exit code is unchanged (both states are
+        # cannot-verify = 2); the verdict an operator reads is not.
+        return PIN_GIT_ERROR, (
+            f"git could not be asked whether {infra} is a git checkout — cannot verify "
+            "(a git that cannot answer says nothing about the directory)"
+        )
+    root = toplevel.stdout.strip() if toplevel.returncode == 0 else ""
     if not root or os.path.realpath(root) != os.path.realpath(infra):
         # ``realpath`` on both sides: ``infra`` was already ``resolve()``d, and a pinned tree is
         # materialised as a LINKED WORKTREE (``~/harness/<sha12>``), where ``--show-toplevel``
@@ -468,10 +483,18 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
         )
 
     head = _git(infra, "rev-parse", "--verify", "HEAD")
-    if head is None or head.returncode != 0:
+    if head is None:
+        # Same distinction, same reason as the step above: no answer is ``PIN_GIT_ERROR``, never a
+        # finding about the directory. (git-rev-parse(1): outside the answer it gives, a failure
+        # is a *fatal error* — so a returned status IS an answer; a non-return is not.)
+        return PIN_GIT_ERROR, (
+            f"git could not be asked to read {infra}'s HEAD — cannot verify (a git that cannot "
+            "answer says nothing about the checkout)"
+        )
+    if head.returncode != 0:
         return PIN_NOT_A_REPO, (
-            f"{infra} is not a git checkout (or git cannot read it), so it cannot be compared "
-            f"with the pin {sha[:12]} — cannot verify"
+            f"{infra} is a git checkout whose HEAD git cannot read (it answered so), so it "
+            f"cannot be compared with the pin {sha[:12]} — cannot verify"
         )
     head_sha = head.stdout.strip()
 

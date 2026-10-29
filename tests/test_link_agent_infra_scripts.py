@@ -1604,6 +1604,83 @@ class TestPinAgreement:
         state, detail = module.pin_state(git_infra.resolve(), pin)
         assert state == module.PIN_ABSENT, (state, detail)
 
+    def test_git_that_cannot_be_RUN_at_the_toplevel_step_is_cannot_verify(
+        self, git_infra: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The LAST site of ROUND 8 ISSUE 2's conflation (PR #10250 review ROUND 13 ISSUE 1).
+
+        ``_git`` returns ``None`` when git could not be RUN (``OSError``), timed out
+        (``GIT_TIMEOUT``), or answered in bytes this process cannot decode. The pre-fix
+        ``--show-toplevel`` step folded all three into ``root = ""`` and returned
+        ``PIN_NOT_A_REPO`` — the verdict *"<dir> is not a git checkout"*, a positive finding
+        ABOUT the directory, printed on a box whose real fault is a hung or missing git. The exit
+        code was right (both states are cannot-verify = 2); the verdict an operator acts on was
+        not.
+
+        IN PROCESS, for the same reason as its ``cat-file`` sibling: a shim cannot produce a spawn
+        failure, and ``pin_state``'s whole contract is the mapping from a git answer to a state.
+        Non-vacuity: on the pre-fix code this reds on ``state == PIN_GIT_ERROR`` AND on the
+        ``"is not a git checkout"`` negative, because the pre-fix verdict says exactly that.
+        """
+        module = load_tool_module()
+        pin = tmp_path / "pin"
+        pin.write_text("a" * 40 + "\n")
+        real_git = module._git
+
+        def git_cannot_be_asked(infra: Path, *args: str):
+            if args[:2] == ("rev-parse", "--show-toplevel"):
+                return None  # what `_git` returns for OSError / TimeoutExpired / bad bytes
+            return real_git(infra, *args)
+
+        monkeypatch.setattr(module, "_git", git_cannot_be_asked)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state == module.PIN_GIT_ERROR, (
+            f"a git that could not be asked whether the directory is a checkout was classified "
+            f"{state!r} instead of cannot-verify: {detail}"
+        )
+        assert "is not a git checkout" not in detail, (
+            f"a question git never answered was reported as a finding about the directory: {detail}"
+        )
+        assert "cannot verify" in detail, detail
+
+    def test_git_that_cannot_be_RUN_at_the_HEAD_step_is_cannot_verify(
+        self, git_infra: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The sibling of the ``--show-toplevel`` case, one step down (ROUND 13 ISSUE 1).
+
+        ``head is None`` (no answer) and ``head.returncode != 0`` (an answer: git could not read
+        HEAD) were one condition returning ``PIN_NOT_A_REPO``. Non-vacuity: the pre-fix code
+        returns ``PIN_NOT_A_REPO`` for the ``None`` case, so the ``state == PIN_GIT_ERROR``
+        assertion reds.
+        """
+        module = load_tool_module()
+        pin = tmp_path / "pin"
+        pin.write_text("a" * 40 + "\n")
+        real_git = module._git
+
+        def git_cannot_be_asked(infra: Path, *args: str):
+            if args[:3] == ("rev-parse", "--verify", "HEAD"):
+                return None
+            return real_git(infra, *args)
+
+        monkeypatch.setattr(module, "_git", git_cannot_be_asked)
+        state, detail = module.pin_state(git_infra.resolve(), pin)
+        assert state == module.PIN_GIT_ERROR, (state, detail)
+        assert "is not a git checkout" not in detail, detail
+        assert "cannot verify" in detail, detail
+
+        # And the sibling outcome is NOT swallowed: a git that ANSWERS "no HEAD" (an unborn
+        # branch in a fresh `git init`) is still a finding about the checkout, not a git error.
+        monkeypatch.setattr(module, "_git", real_git)
+        empty = tmp_path / "empty-repo"
+        empty.mkdir()
+        subprocess.run(
+            ["git", "-C", str(empty), "init", "-q", "-b", "main"],
+            check=True, capture_output=True,
+        )
+        state, detail = module.pin_state(empty.resolve(), pin)
+        assert state == module.PIN_NOT_A_REPO, (state, detail)
+
 
 
 class TestDefaultPinPathIsCallTime:
