@@ -211,15 +211,26 @@ neither "fixes" them nor reads the sentence above as flow-wide):
 are reconciled **by the token, never by a second cookie**. The return target is the only carrier that
 keeps that rule.
 
-**The `jti` store.** Single-use needs shared state, because the AS is multi-instance. Options, in order of
-preference: **(a)** a `consent_tickets` table in the existing D1 `SESSIONS` database (the minting side is
+**The `jti` store.** Single-use needs shared state, because the AS is multi-instance. Two options were
+compared: **(a)** a `consent_tickets` table in the existing D1 `SESSIONS` database (the minting side is
 already there and the BFF already bootstraps its own schema idempotently — `ensureSchema`,
 `ensureSchemaTokenColumns`), redeemed by the AS through a **server-to-server** call back to the session
-origin; or **(b)** a row in the control plane (a Supabase migration) consumed by the AS directly. **(a) is
-preferred:** the minting authority owns the nonce, so the AS never holds a second copy of the secret's
-state, and no new secret is needed for the redemption leg at all — the AS's redemption call to `app.*` is
-authenticated the same way every other AS→app.* call is. This is the one open *mechanism* choice in this
-spec, and it is deliberately recorded rather than assumed.
+origin; or **(b)** a row in the control plane (a Supabase migration) consumed by the AS directly.
+**(b) is DECIDED, and shipped** — `ControlPlaneJtiStore` (`tortoise/consent_token.py`) + migration
+`20261030000001_oauth_consent_tickets.sql`, §9 step 1. **Why (b) and not (a):** the AS already holds this
+seam *at the exact call site* — `hosted_api.py` passes its control-plane client (`cp`) into
+`issue_auth_code`, and the whole `oauth_clients`/`oauth_codes`/`oauth_*_tokens` family lives in that
+database — so (b) adds no new boundary, while (a) would add a new route on the session origin, a new
+server-to-server authentication for it, and a new failure domain on the consent path. (a)'s own argument
+(the minting authority owns the nonce) is real but does not survive that cost, because single-use is
+bounded at **redemption** — which is where a replay arrives — so only the AS writes and the minting side
+needs no write credential and no new secret at all.
+
+**Decision status:** this paragraph previously read "**(a) is preferred** … the one open *mechanism*
+choice in this spec … recorded rather than assumed". That was accurate while the choice was open; it is
+not any more, and this note is the relay rather than a reversal — no owner ruling was overridden, the
+comparison above is kept, and (a) is recorded as **not adopted** for the reason stated. A lane that
+finds (a) named first in git history should read this paragraph, not the earlier one.
 
 **Signing key.** `CONSENT_TOKEN_SECRET` — a **dedicated** secret, provisioned on both platforms and
 declared in `config/required-bindings.yml` so the deploy preflight fails closed until it exists. It must

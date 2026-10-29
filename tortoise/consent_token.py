@@ -585,10 +585,10 @@ class ControlPlaneJtiStore:
     register only bounds replay if every machine consults the SAME row store.
 
     WHY THE CONTROL PLANE AND NOT A THIRD MECHANISM
-    §2.3 prefers (a) a D1 table on the session origin redeemed over a server-to-server call;
-    it also allows (b) "a row in the control plane consumed by the AS directly", and calls
-    the choice "the one open mechanism choice in this spec" — recorded, not decided. (b) is
-    what this implements, for one reason: the AS **already holds this seam at the exact call
+    §2.3 compares (a) a D1 table on the session origin redeemed over a server-to-server call
+    against (b) "a row in the control plane consumed by the AS directly", and records (b) as
+    the DECIDED mechanism — this class is why it is no longer "the one open mechanism choice"
+    it read as while the choice was open. (b) was taken for one reason: the AS **already holds this seam at the exact call
     site** (`hosted_api.py` passes its `cp` into `issue_auth_code`, and the whole
     `oauth_clients`/`oauth_codes`/`oauth_*_tokens` family lives there). (a) would add a new
     route on the session origin, a new server-to-server authentication for it, and a new

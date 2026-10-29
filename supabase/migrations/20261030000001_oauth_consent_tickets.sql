@@ -10,10 +10,11 @@
 -- because the AS is multi-instance").
 --
 -- WHY *THIS* MECHANISM
--- §2.3 records two options and calls the choice "the one open mechanism choice in this
--- spec … deliberately recorded rather than assumed": (a) a `consent_tickets` table in the
--- session origin's D1 database, redeemed over a server-to-server call, or (b) "a row in the
--- control plane (a Supabase migration) consumed by the AS directly". This is (b).
+-- §2.3 compares (a) a `consent_tickets` table in the session origin's D1 database, redeemed
+-- over a server-to-server call, against (b) "a row in the control plane (a Supabase
+-- migration) consumed by the AS directly". This is (b), the DECIDED mechanism — §2.3 now
+-- records it as decided (#3524 §9 step 1); it read "the one open mechanism choice in this
+-- spec … deliberately recorded rather than assumed" only while the choice was open.
 --
 -- (b) is chosen because the seam already exists AT THE CALL SITE: `hosted_api.py` holds a
 -- control-plane client (`cp`) and passes it into `issue_auth_code`, and the entire OAuth

@@ -1485,6 +1485,78 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
     )
 
 
+def _section_23_jti_store(spec: str) -> str:
+    """§2.3's `jti`-store paragraph, located by its own subject, and asserted found.
+
+    Bounded by the next bold-led paragraph (`**Signing key.**`) rather than by line numbers, so a
+    reflow of the section cannot silently turn this guard into a no-op on an empty string.
+    """
+    start = spec.find("**The `jti` store.**")
+    assert start != -1, (
+        "§2.3 no longer opens a 'The `jti` store.' paragraph — this guard has lost its subject, "
+        "which is not the same thing as the defect it exists to catch"
+    )
+    end = spec.find("**Signing key.**", start)
+    assert end > start, (
+        "§2.3's `jti`-store paragraph is no longer followed by '**Signing key.**' — the section "
+        "has been restructured and this guard's bounds need re-deriving, not deleting"
+    )
+    return spec[start:end]
+
+
+def test_the_spec_records_the_jti_mechanism_as_DECIDED_not_open() -> None:
+    """§2.3 must record the mechanism that SHIPPED, because §9 points a reader at it.
+
+    The defect this pins (raised on this PR, and real at `e618904d3` before this fix): §2.3 kept
+    its PRE-decision form — "Options, in order of preference … **(a) is preferred** … This is the
+    one open *mechanism* choice in this spec, and it is deliberately recorded rather than
+    assumed" — while `ControlPlaneJtiStore` shipped option **(b)**, the migration that backs it
+    says so, and §9 step 1's row tells the reader "the mechanism choice is §2.3".
+
+    The cost is not cosmetic: (a)'s argument is architectural, so a lane reading §2.3 as written
+    builds option (a) — a SECOND single-use store for the same guarantee, with its own secret
+    surface — and nothing in the record says the choice was taken. The fix is a RELAY, not a
+    reversal: the (a)-vs-(b) comparison stays, and the historical "open" wording is allowed to
+    survive as a QUOTED history (that is the lineage the next reader needs to understand why the
+    paragraph changed). What must be true is that the section states the adopted option, names the
+    artifact that ships it, gives the reason, and no longer ASSERTS the choice is open.
+    """
+    section = _section_23_jti_store(SPEC.read_text())
+    flat = " ".join(section.split())
+
+    # The relay's concrete subject: the option that shipped, and the artifact that ships it.
+    assert "**(b) is DECIDED" in flat, (
+        "§2.3 does not record (b) as the DECIDED mechanism — §9 step 1 points a reader here for "
+        "the choice, so leaving it unstated is the stale-flag shape this guard exists for"
+    )
+    for artifact in ("ControlPlaneJtiStore", "20261030000001_oauth_consent_tickets.sql"):
+        assert artifact in flat, (
+            f"§2.3's decided record does not name {artifact!r}, so it claims a decision without "
+            "naming anything that carries it"
+        )
+    # The artifact the section names must EXIST — a decided record citing a missing migration is
+    # the same fiction as an anchor pointing at a deleted line.
+    assert (REPO / "supabase/migrations/20261030000001_oauth_consent_tickets.sql").is_file(), (
+        "§2.3 cites migration 20261030000001_oauth_consent_tickets.sql, which is not in the tree"
+    )
+    # …and the reason, because "decided" without a WHY is the state that gets re-litigated.
+    assert "Why (b) and not (a)" in flat, (
+        "§2.3 records the decision without its reason — the comparison has to stay readable, or "
+        "the next lane re-opens a choice that was taken for a stated reason"
+    )
+
+    # The pre-decision FRAMING must be gone: a preference ORDER is what made (a) look buildable.
+    assert "in order of preference" not in flat, (
+        "§2.3 still orders the two mechanisms by preference, which reads as 'not yet decided' "
+    )
+    # The open-claim SENTENCE must be gone. It is matched with its own opening, because the
+    # historical quotation of the phrase is deliberately kept (see the docstring) — deleting the
+    # lineage is not what this guard asks for.
+    assert "This is the one open" not in flat, (
+        "§2.3 still ASSERTS that the mechanism choice is open, while the code ships option (b)"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # §2 / §9 step 2 — the token arm on `POST /oauth/consent`, EXECUTED
 #
