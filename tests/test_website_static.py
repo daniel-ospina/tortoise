@@ -2412,7 +2412,15 @@ class TestARenderedCodeElementGetsAMonoFace:
        so `--mono: Georgia, serif` with `font-family: var(--mono, Menlo)` is REFUSED
        instead of being credited through fallback text CSS never substitutes
        (`var(--mono, …Menlo…)` ships 4x in
-       `website/apps/dashboard/src/index.css:583,753,919,996`).
+       `website/apps/dashboard/src/index.css:583,753,919,996`). A reference that
+       resolves to nothing invalidates the **whole** declaration at computed-value
+       time, and that signal is propagated out of the resolver's recursion instead of
+       being dropped as empty text, so `--mono: var(--nope)` plus
+       `font-family: Menlo, var(--mono)` is refused rather than credited through the
+       trailing face the browser never applies. The accepted face is `Menlo` alone,
+       because the sibling class measured `'SF Mono'` and `SFMono-Regular` as Times on
+       this repo's Chromium (`:1264-1273`) — crediting them re-blessed the Courier
+       defect on the one route the sibling guard cannot see.
     3. **A rule that styles the element only in context.** `.art-body pre code` — and
        `pre.anything code` — says nothing about an inline `<code>` in a paragraph, so
        that pairing is skipped; everything else is the cascade.
@@ -2460,10 +2468,6 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: a font-family-only scan, the lesson the sibling class already learned
     FAMILY = re.compile(r"(?:font-family|font)\s*:\s*([^;}]*)", re.IGNORECASE)
     VAR_DEF = re.compile(r"(--[\w-]+)\s*:\s*([^;}]*)")
-    #: NOT a `var(...)` regex: a fallback may itself carry `var()`, so the reference is
-    #: scanned to its balanced `)`. Truncating at the first `)` (a regex cannot count
-    #: parens) is how the guard credited a serif named only inside an unresolved
-    #: fallback — see `_substitute`
     #: the selector's LAST compound must be the element itself — `.code{}` is the big
     #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets.
     #: The element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
@@ -2474,7 +2478,16 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: Courier, which is the defect. The sibling guard requires Menlo by name for the
     #: same reason, and accepting the keyword let `var(--mono, monospace)` pass with
     #: `--mono` undefined or set to a serif.
-    MONO = ("menlo", "sfmono", "sf mono")
+    #: `Menlo` is the ONLY name here, and that is measured rather than assumed: the
+    #: sibling class records CDP `CSS.getPlatformFontsForNode` on this repo's Chromium
+    #: (`:1264-1273`) that `'SF Mono'` → Times and `SFMono-Regular` → Times while
+    #: `Menlo` → Menlo, and #6870's availability probe records `'SF Mono'` as not
+    #: exposed to web content. Crediting those two names made this guard GREEN over
+    #: `font-family: var(--mono, 'SF Mono', monospace)` — Courier-class, the exact
+    #: defect #6870 is about — on the `var()`-fallback route the sibling guard skips
+    #: (it ignores any value containing `var(--mono`), so nothing else caught it
+    #: (#10254 review, round 8).
+    MONO = ("menlo",)
 
     def _is_mono(self, value, defined, depth=0):
         """Does `value` name a mono face, once the page's own tokens are substituted?"""
@@ -2483,7 +2496,14 @@ class TestARenderedCodeElementGetsAMonoFace:
         # about what the element computes to. Reading the raw string first is how
         # `var(--mono, Menlo)` was credited while `--mono: Georgia, serif` — the face
         # Chrome actually used — went unread (PR #10254 review, round 3).
-        v = self._substitute(value, defined, depth).strip().lower()
+        substituted = self._substitute(value, defined, depth)
+        if substituted is None:
+            # invalid at computed-value time (css-variables-1 §2.2: a guaranteed-invalid
+            # value in a property value makes the property invalid at computed-value
+            # time). The declaration does not apply, the element inherits, and the UA
+            # `monospace` — Courier — wins. Never a face, whichever names it carried.
+            return False
+        v = substituted.strip().lower()
         if not v or v in ("inherit", "unset", "initial", "revert"):
             # inheriting is the failing case for an element with no author rule: the
             # UA `monospace` sheet would win. A parent that IS mono is out of scope.
@@ -2496,8 +2516,15 @@ class TestARenderedCodeElementGetsAMonoFace:
 
         `end` is the index of its closing `)`. The fallback is split at the first
         *top-level* comma, so `var(--mono, var(--brand, Menlo))` yields the fallback
-        `var(--brand, Menlo)` — whole, not truncated at the inner `)`. `None` for an
-        unbalanced reference, which is then left in the text and refused by the caller.
+        `var(--brand, Menlo)` — whole, not truncated at the inner `)`.
+
+        There is deliberately no `var(...)` regex here: parens cannot be counted by one,
+        and truncating at the first `)` is how an earlier version credited a serif named
+        only inside an unresolved fallback (#10254 review, round 6).
+
+        `None` for an unbalanced reference: that is a parse error in CSS, so the whole
+        declaration is dropped and no family in it applies — the caller refuses it
+        rather than reading the residue as text.
         """
         depth, i = 0, start + 3
         while i < len(text):
@@ -2548,6 +2575,12 @@ class TestARenderedCodeElementGetsAMonoFace:
         declaration invalid at computed-value time (CSS does not fall through to the
         next family in the list), so the element inherits and the guard goes RED. That
         is the safe direction: over-detection, never a false green.
+
+        Returns `None` for that invalid case rather than `""`, so the flag survives the
+        recursion. Returning empty *text* lost it one hop down — `--mono: var(--nope)`
+        with `font-family: Menlo, var(--mono)` came back as `Menlo,`, which reads as a
+        mono face although CSS invalidates the whole declaration and the element renders
+        Courier (#10254 review, round 8).
         """
         out, i, invalid = [], 0, False
         while i < len(value):
@@ -2557,11 +2590,11 @@ class TestARenderedCodeElementGetsAMonoFace:
                 continue
             ref = self._var_reference(value, i)
             if ref is None:
-                # unbalanced: not a reference the browser would accept, so its text is
-                # not a family either — refused below by the `var(` check
-                out.append(value[i])
-                i += 1
-                continue
+                # unbalanced `var(`: a parse error, so CSS drops the WHOLE declaration
+                # and no family written in it applies. Refuse rather than credit the
+                # residue's text (`Menlo, var(--mono` would otherwise read as mono).
+                invalid = True
+                break
             name, fallback, end = ref
             resolved = defined.get(name)
             chosen = resolved if resolved is not None else fallback
@@ -2570,11 +2603,15 @@ class TestARenderedCodeElementGetsAMonoFace:
                 i = end + 1
                 continue
             substituted = self._substitute(chosen, defined, depth + 1)
-            if "var(" in substituted.lower():
+            # `None` is the recursion's invalid signal — propagate it, do not append it
+            # as text, which is how the flag was lost one hop down. A leftover `var(`
+            # is the same refusal (an unresolved reference is not a face).
+            if substituted is None or "var(" in substituted.lower():
                 invalid = True
-            out.append(substituted)
+            else:
+                out.append(substituted)
             i = end + 1
-        return "" if invalid else "".join(out)
+        return None if invalid else "".join(out)
 
     def _elements_styled_mono(self, css):
         """The element names (`code`, `pre`) that some rule gives a mono family."""
@@ -2688,6 +2725,15 @@ class TestARenderedCodeElementGetsAMonoFace:
              "code{font-family:inherit}", False),
             ("bare `monospace` IS Courier on macOS Chrome — not a mono face here",
              "code{font-family:var(--mono, monospace)}", False),
+            # `'SF Mono'` and `SFMono-Regular` are measured as Times on macOS Chrome in
+            # this very file (`:1264-1273`, CDP on this repo's Chromium) and #6870
+            # records `'SF Mono'` as not exposed to web content. This route — a mono
+            # name in a `var()` fallback — is the one the sibling declaration guard
+            # cannot see, because it skips values containing `var(--mono`.
+            ("`'SF Mono'` in a fallback is Times, not mono — #6870's own measurement",
+             "code{font-family:var(--mono, 'SF Mono', 'Cascadia Code', monospace)}", False),
+            ("`SFMono-Regular` on its own is Times too",
+             "code{font-family:SFMono-Regular}", False),
         ]
         for why, css, expect in cases:
             got = "code" in self._elements_styled_mono(css)
@@ -2726,6 +2772,15 @@ class TestARenderedCodeElementGetsAMonoFace:
              "code{font-family:var(--mono), Menlo}", False),
             ("a token whose own value carries an unresolvable var() is guaranteed-invalid",
              ":root{--mono:Menlo,var(--nope)} code{font-family:var(--mono)}", False),
+            # the invalid signal has to survive the recursion: returning empty *text*
+            # appended `Menlo,` for the next family, so a declaration CSS invalidates
+            # whole read as a mono face (round 8's false green)
+            ("an invalid token voids the declaration around it — the trailing face is dead",
+             ":root{--mono:var(--nope)} code{font-family:Menlo, var(--mono)}", False),
+            ("the same, leading face first",
+             ":root{--mono:var(--nope)} code{font-family:var(--mono), Menlo}", False),
+            ("an unbalanced var( is a parse error, so no family in the value applies",
+             "code{font-family:Menlo, var(--mono}", False),
         ]
         for why, css, expect in cases:
             got = "code" in self._elements_styled_mono(css)
