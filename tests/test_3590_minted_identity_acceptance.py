@@ -1032,6 +1032,70 @@ def test_a_lifecycle_event_on_a_doubly_held_name_is_not_a_green_run(sdk):
             f"{oid}")
 
 
+def test_an_about_target_that_folds_cannot_mask_the_explicit_targets_miss(sdk):
+    """#3590 review, finding 1 (fail-OPEN): a folded ATTRIBUTION target must
+    not silence the identity miss of the record's OWN declared target.
+
+    ``_fold_object_status`` re-resolves the event's explicit ``object``
+    non-exemptly when it has no carrier — *"a fold that must MOVE an entity's
+    state can never take this exemption"* (``identity-decision.md``). That
+    re-resolve was also gated on ``not matched_any``, borrowed from the #2729
+    *report* rule ("a target missing while ANOTHER target folded is not a real
+    signal"). The borrowing inverts the meaning: when the branch is reached
+    ``object_id is None``, so ``_targets()`` never added the EXPLICIT target —
+    every row that can set ``matched_any`` comes from an ``about_entities``
+    target. So one registered attribution target folding was enough to skip
+    the miss, and the run went GREEN over a declared lifecycle fold that wrote
+    nothing for its own target.
+
+    FAILS IF: ``not matched_any`` is restored to the re-resolve gate
+    (measured at ``6365149a4``: the only record was the EXEMPT
+    ``unfolded-mention`` from ``_event_plain_merge`` and
+    ``refused_events(entries)`` was empty). The middle assertion is what keeps
+    this test's premise honest — if the attribution target ever stops folding,
+    ``matched_any`` would be False and the pre-fix code would refuse too, so
+    the test would pass for the wrong reason.
+    """
+    from tortoise.projection import _replay_write_scope
+    from tortoise.projection.nonfolded import (
+        SHAPE_UNREGISTERED_REFERENCE,
+        collect_non_folded,
+        refused_events,
+    )
+
+    client, _ = sdk
+    proj = client._get_proj()
+    # A registered Object of a kind `venture:disbursement` DECLARES — this is
+    # the attribution target that folds (`matched_any`).
+    tranche = client.create_entity("object", "Folded Tranche",
+                                   objectKind="venture:tranche",
+                                   _server_id="id-folded-tranche",
+                                   is_episodic=False)["node"]["id"]
+
+    with _replay_write_scope(), collect_non_folded() as entries:
+        proj.apply({"type": "EventRecorded", "eventId": "ev-life-masked",
+                    "event": {"eventId": "ev-life-masked",
+                              "eventKind": "venture:disbursement",
+                              # the fold's DECLARED target — nothing holds it
+                              "object": "Nothing Registered Anywhere",
+                              # the ATTRIBUTION target — registered, folds
+                              "aboutEntities": ["Folded Tranche"]}})
+
+    assert _status_of(proj, "Object", tranche) == "released", (
+        "the attribution target did not fold, so this fixture cannot exercise "
+        "the mask — `matched_any` stayed False and the assertion below would "
+        "pass on the pre-fix code for the wrong reason")
+
+    shapes = [e.shape for e in entries]
+    assert SHAPE_UNREGISTERED_REFERENCE in shapes, (
+        "a lifecycle event whose DECLARED target no entity holds was masked by "
+        "an attribution target that folded — the explicit target's non-exempt "
+        f"identity miss was never recorded: {shapes}")
+    assert refused_events(entries), (
+        "a state-moving fold miss was silenced by an unrelated folded target "
+        f"and the run stayed GREEN: {[str(e) for e in entries]}")
+
+
 def test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions(
         sdk, tmp_path: Path):
     """#3590 round-5 review P1-3: the legacy door's mention loss is recorded.

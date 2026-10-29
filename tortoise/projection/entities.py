@@ -4963,15 +4963,30 @@ class _EntityHandlers:
         # fold minted a name stub, so this arm was reachable and at least
         # wrote).
         #
-        # Gated three ways, because a refusal is a real cost:
+        # Gated two ways, because a refusal is a real cost:
         #   * `object_is_entity` — the `objectType='Document'` arm carries a
         #     :Source URL, not an entity name; resolving it would manufacture an
         #     `unregistered-reference` for a document on every such event;
         #   * `declared or builtin_status` — a kind that declares NO status fold
         #     has no state to move, and refusing there would turn every event
-        #     that merely mentions an unregistered object into a failed run;
-        #   * `not matched_any` — the #2729 rule above: a target missing while
-        #     ANOTHER target folded is not a real signal.
+        #     that merely mentions an unregistered object into a failed run.
+        #
+        # ⛔ `not matched_any` is deliberately NOT a gate here (#3590 review,
+        # finding 1 — fail-OPEN). The #2729 rule above is about the
+        # `status_fold_unapplied` REPORT for a kind mismatch, and it is
+        # per-target by construction; borrowing it for this re-resolve inverted
+        # its meaning. When this branch is reached `object_id is None`, so
+        # `_targets()` never added the EXPLICIT target — every row that could
+        # set `matched_any` came from an `about_entities` target. An ATTRIBUTION
+        # target that happened to fold therefore silenced the identity miss of
+        # the record's OWN declared target: no status write, no
+        # `status_fold_unapplied` (it never entered `targets`/`missed`), no
+        # non-exempt record (the only record left was `_event_plain_merge`'s
+        # EXEMPT `unfolded-mention`) — a state-moving fold that moved NOTHING
+        # behind a green run, i.e. exactly what the exemption's recorded bound
+        # forbids. Pinned by
+        # `tests/test_3590_minted_identity_acceptance.py::
+        # test_an_about_target_that_folds_cannot_mask_the_explicit_targets_miss`.
         #
         # ⛔ …and the miss is classified by WHY it missed (#3590 round-5 review
         # F2), because the two causes are different defects with different
@@ -4993,7 +5008,7 @@ class _EntityHandlers:
         #     `rebuild_all` refuses. Measured before this split: such a journal
         #     raised `NonFoldedEventsError` on replay while replaying cleanly on
         #     the tree that minted the ghost.
-        if (name and object_is_entity and not object_id and not matched_any
+        if (name and object_is_entity and not object_id
                 and (declared or builtin_status is not None)):
             # ⛔ The exemption is decided by the LIVE count, not by "any
             # holder exists" (#3590 review, finding 1 — fail-open).
