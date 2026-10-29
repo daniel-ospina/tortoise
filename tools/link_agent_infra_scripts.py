@@ -86,6 +86,9 @@ LINK_NAME = "scripts"
 #: It names the commit the box's controller RUNS, which is not necessarily the commit
 #: ``$AGENT_INFRA_PATH`` happens to be at (#10114 measured 23 commits of daylight between them).
 PIN_ENV = "HARNESS_PIN"
+#: The base ``harness-up`` substitutes for ``$HOME`` on a cell (``agent-infra/scripts/harness-up:548``,
+#: ``:682``). Honoured BEFORE ``Path.home()`` so this tool judges the record the controller reads.
+CELL_HOME_ENV = "CELL_HOME"
 #: LINE 1 of this record is the full sha and line 2 is an ISO timestamp — that is the shape the
 #: fleet's own writer produces (agent-infra ``scripts/cloud-cell-bringup.sh``), so a reader that
 #: needs the COMMIT must take line 1, exactly as every fleet reader does (``head -1``).
@@ -170,11 +173,26 @@ def resolve_infra(explicit: str | None) -> Path:
 def default_pin_path() -> Path:
     """Where this machine records its harness pin. A function, not a constant.
 
-    ``Path.home()`` is resolved at CALL time: every test here redirects ``HOME`` (and CI has
-    none), so a module-level constant would freeze the pin path of whichever machine imported
-    the module first — the class of bug where a check silently answers for the wrong box.
+    The base is ``${CELL_HOME:-$HOME}``, NOT ``Path.home()`` alone. That is the fleet's own
+    resolution, and it is load-bearing: ``harness-up`` — the reader this record exists to agree
+    with — computes ``PIN_SHA_FILE="${HARNESS_PIN:-${CELL_HOME}/.pi/agent/state/HARNESS-PIN}"``
+    (``agent-infra/scripts/harness-up:682``) after ``CELL_HOME="${CELL_HOME:-${HOME:-/tmp/cell-home}}"``
+    (``:548``), and ``cloud-cell-bringup.sh`` WRITES the record under ``$CELL_HOME``. On a cell the
+    two bases disagree, so honouring only ``HOME`` made this tool answer about a DIFFERENT pin
+    record than the controller runs — measured on the box this was written on, which carries both
+    records with different shas (``$HOME`` → ``dcb54375…``, ``$CELL_HOME`` → ``9a3cf06e…``). The
+    failure it produced was the one this module exists to prevent: ``HOME`` pointed at a directory
+    with no record read as ``no-pin`` → **exit 0**, a false PASS over a box that does record a
+    pin, while the same record named via ``--pin`` correctly said ``pin-absent`` → exit 1.
+
+    And it is a function, not a constant, because both bases are read at CALL time: every test
+    here redirects ``HOME``/``CELL_HOME`` (and CI has neither), so a module-level constant would
+    freeze the pin path of whichever machine imported the module first — the same class of bug,
+    one layer down. ``TestDefaultPinPathIsCallTime`` loads this module IN PROCESS and moves the
+    bases, which is the only shape that can distinguish a function from a frozen constant.
     """
-    return Path.home() / PIN_RELATIVE
+    base = os.environ.get(CELL_HOME_ENV) or Path.home()
+    return Path(base) / PIN_RELATIVE
 
 
 def resolve_pin(explicit: str | None) -> Path | None:
@@ -182,7 +200,7 @@ def resolve_pin(explicit: str | None) -> Path | None:
 
     ``--pin`` is AUTHORITATIVE (passed but missing is a caller error, reported by ``pin_state``
     as unreadable — never silently replaced by the default). Otherwise ``$HARNESS_PIN``, then
-    the box-wide record ``~/.pi/agent/state/HARNESS-PIN``. ``None`` means this machine records
+    the box-wide record ``${CELL_HOME:-$HOME}/.pi/agent/state/HARNESS-PIN``. ``None`` means this machine records
     no pin at all: a GitHub runner, a fresh dev box, or a clone of agent-infra that was never
     installed as a harness. That is an ANSWER ("unrecorded"), not a pass and not a failure.
     """
@@ -491,7 +509,8 @@ def main(argv: list[str] | None = None) -> int:
         "--pin",
         default=None,
         help=(
-            f"harness pin record (default: ${PIN_ENV}, then ~/{PIN_RELATIVE}); authoritative when "
+            f"harness pin record (default: ${PIN_ENV}, then "
+            f"${{{CELL_HOME_ENV}:-$HOME}}/{PIN_RELATIVE}); authoritative when "
             "passed"
         ),
     )

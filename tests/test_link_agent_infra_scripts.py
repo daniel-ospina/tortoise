@@ -731,10 +731,28 @@ class TestPinAgreement:
 
         Load-bearing: this machine HAS a ``HARNESS-PIN``, so a test that inherited it would
         compare a throwaway fixture against a real pin and pass or fail for the wrong reason.
+        ``CELL_HOME`` is cleared for the SAME reason and is the sharper instance of it: the base
+        ``default_pin_path()`` honours is ``${CELL_HOME:-$HOME}``, this fleet box sets
+        ``CELL_HOME``, and it carries a record that disagrees with ``$HOME``'s — so a fixture that
+        redirected only ``HOME`` would be compared against the REAL cell's pin and pass for the
+        wrong reason (or fail for one).
         """
-        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": ""}
+        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": "", "CELL_HOME": ""}
         env.update(extra)
         return env
+
+    def _cell_home(self, tmp_path: Path, pin: str | None = None) -> Path:
+        """A ``CELL_HOME`` with (or without) the pin record ``harness-up`` reads there.
+
+        Distinct from ``_home`` only in NAME — the path shape is identical, which is exactly why
+        the two bases are confusable and why the tool must pick the one the fleet picks.
+        """
+        cell = tmp_path / "cell-home"
+        state = cell / ".pi" / "agent" / "state"
+        state.mkdir(parents=True)
+        if pin is not None:
+            (state / "HARNESS-PIN").write_text(pin + "\n")
+        return cell
 
     def _pin_check(self, repo: Path, infra: Path, env: dict[str, str], *args: str):
         return run_tool(
@@ -860,6 +878,51 @@ class TestPinAgreement:
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
         assert "pin: no-pin" in result.stdout, result.stdout
         assert "no harness pin recorded" in result.stdout, result.stdout
+
+    def test_the_CELL_HOME_record_is_the_one_read(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The base ``harness-up`` resolves is ``${CELL_HOME:-$HOME}``, so this tool must too.
+
+        RED on the pre-fix tool: it read ``Path.home()`` alone, so a ``HOME`` holding no record
+        answered ``pin: no-pin`` → exit **0** over a box whose ``CELL_HOME`` DOES record a pin —
+        a false PASS whose remedy is nothing, for a checkout that may be arbitrary stale. The
+        verdict is asserted explicitly because ``no-pin`` also exits 0, so a bare
+        ``returncode == 0`` cannot tell the pass from the false pass.
+        """
+        pin = git_commit(git_infra, "the commit the cell's controller runs")
+        env = self._env(self._home(tmp_path), CELL_HOME=str(self._cell_home(tmp_path, pin)))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" not in result.stdout, (
+            f"the CELL_HOME record was ignored, so a box that records a pin read as unpinned: "
+            f"{result.stdout}"
+        )
+        assert "pin: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+    def test_a_CELL_HOME_drift_is_not_downgraded_to_no_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """The fail-OPEN shape specifically: drift must stay drift, not become a stated pass.
+
+        A pass that says "nothing records a pin here" over a ``CELL_HOME`` that records one is
+        worse than silence — it is an affirmative wrong answer, and it is the exact defect
+        #10114 exists to remove one layer up.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the cell's controller runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        env = self._env(self._home(tmp_path), CELL_HOME=str(self._cell_home(tmp_path, pin)))
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "no-pin" not in result.stdout, result.stdout
+        assert "BEHIND" in result.stdout, result.stdout
 
     def test_the_env_pin_is_honoured(self, repo: Path, git_infra: Path, tmp_path: Path) -> None:
         """``HARNESS_PIN`` is the harness's own variable name — not an invented one."""
@@ -1252,3 +1315,62 @@ class TestPinAgreement:
         assert "pin: ok" not in result.stdout, (
             f"the enclosing repository's HEAD was used as this directory's HEAD: {result.stdout!r}"
         )
+
+
+class TestDefaultPinPathIsCallTime:
+    """The pin path must be resolved at CALL time — the only shape a subprocess suite cannot see.
+
+    ``default_pin_path()``'s own docstring claims it is "a function, not a constant" so that a
+    module-level constant cannot freeze the pin path of whichever machine imported the module
+    first. Every other test here spawns a FRESH interpreter (``run_tool``/``run_wrapper`` →
+    ``subprocess``), and a fresh interpreter re-imports the module under its own redirected
+    ``HOME``/``CELL_HOME`` — so replacing the function body with a module-level constant passes
+    that entire suite unchanged. Measured (PR #10250 review): it did.
+
+    That gap is not cosmetic: ``tools/agent_infra_drift_check.py`` IMPORTS this module rather than
+    exec'ing it, so an import-time constant there is a check that answers for the wrong box for
+    the whole life of the process. This class loads the module IN PROCESS and moves the bases,
+    which is the only shape that distinguishes a function from a frozen constant.
+    """
+
+    @staticmethod
+    def _load():
+        """Import the tool as a MODULE (not as a subprocess), exactly as the drift gate does."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_lais_under_test", TOOL)
+        assert spec is not None and spec.loader is not None, f"cannot load {TOOL} as a module"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_home_is_read_at_call_time(self, tmp_path: Path, monkeypatch) -> None:
+        module = self._load()
+        monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home-a"))
+        first = module.default_pin_path()
+        monkeypatch.setenv("HOME", str(tmp_path / "home-b"))
+        second = module.default_pin_path()
+
+        assert first == tmp_path / "home-a" / module.PIN_RELATIVE, first
+        assert second == tmp_path / "home-b" / module.PIN_RELATIVE, (
+            f"the pin path did not follow HOME after import, so it was frozen at import time: "
+            f"{first} → {second}"
+        )
+
+    def test_cell_home_wins_over_home_at_call_time(self, tmp_path: Path, monkeypatch) -> None:
+        """``${CELL_HOME:-$HOME}`` — the base ``harness-up`` resolves, read per call."""
+        module = self._load()
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv(module.CELL_HOME_ENV, str(tmp_path / "cell-home"))
+        assert module.default_pin_path() == tmp_path / "cell-home" / module.PIN_RELATIVE
+
+        monkeypatch.setenv(module.CELL_HOME_ENV, "")
+        assert module.default_pin_path() == tmp_path / "home" / module.PIN_RELATIVE, (
+            "an EMPTY CELL_HOME must fall back to HOME, not resolve to a relative path"
+        )
+
+        monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
+        assert module.default_pin_path() == tmp_path / "home" / module.PIN_RELATIVE
