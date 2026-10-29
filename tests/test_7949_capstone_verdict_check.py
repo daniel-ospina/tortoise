@@ -1293,6 +1293,34 @@ def test_a_pass_without_a_payload_does_not_observe_s6():
     assert "S6" not in seen
 
 
+def test_a_degraded_search_is_not_s3():
+    """A spent budget with `degraded=True` is a search that RAISED, not S3.
+
+    `search_graph` increments `queries_run` BEFORE each attempt and, on the
+    first-query exception, returns `{"degraded": True, "reason": "S3 degraded: 
+    graph search failed (...)", "queries_run": q_run, ...}`
+    (`tortoise/extractor_v2.py:2662-2692`) — so the pair (queries_run > 0,
+    degraded=True) is exactly the shape of a search that failed. Scoring that
+    attempt as resolved let V5, the epic's ONLY closing gate, pass on a step
+    that never resolved, and every E-row measured on the run was then published
+    as valid. `README.md:204` records the rule ("a degraded search is not S3")
+    and the sibling probe already implements it (`capstone_measure.py:1366`).
+
+    Non-vacuity: the healthy arm is asserted FIRST, so deleting the S3 witness
+    outright cannot satisfy this pin.
+    """
+    assert "S3" in probe.observe_steps(_seam_receipt()), (
+        "the healthy receipt must still witness S3, or the arm below proves "
+        "nothing but an empty stage")
+    degraded = probe.observe_steps(_seam_receipt(search={
+        "mode": "docker", "degraded": True,
+        "reason": "S3 degraded: graph search failed (timeout)",
+        "queries_run": 1, "entities": [], "points": [], "events": []}))
+    assert "S3" not in degraded, (
+        "a degraded search was scored as S3 observed, so V5 can pass on a step "
+        f"that never resolved: {degraded.get('S3')}")
+
+
 def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypatch):
     """#9116: the refusal must be attributed to the surface, not to the pipeline.
 
@@ -1365,6 +1393,42 @@ def test_a_g5_refusal_on_a_seam_receipt_blames_the_pipeline_not_the_seam(
     # and the witness's own values are quoted, so the reader can act on it
     assert '"enabled": false' in reason, reason
     assert "step_witness" in reason, reason
+
+
+def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
+    """END TO END (#10214 review, P1): a degraded search cannot emit a table.
+
+    `queries_run > 0` with `degraded=True` reaches G5 exactly like a resolved
+    search did, and G2 cannot catch it (its `backend_is_searchable` is
+    env-derived and issues no query). Before this pin the run took the G6 branch
+    and wrote `status="COMPLETED"`, `reason="eight steps observed in one pass"`
+    — a capstone table published from a step that raised.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _seam_receipt(search={
+                "mode": "docker", "degraded": True,
+                "reason": "S3 degraded: graph search failed (timeout)",
+                "queries_run": 1, "entities": [], "points": [],
+                "events": []})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g5-degraded.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    record = cvc.extract_block(out.read_text())
+    assert code == 5, (code, record["run"])
+    assert record["run"]["status"] != "COMPLETED", record["run"]
+    assert "S3" in record["run"]["reason"], record["run"]["reason"]
 
 
 def test_a_completed_run_is_reachable_now_that_the_seam_landed(

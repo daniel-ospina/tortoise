@@ -325,11 +325,20 @@ def observe_steps(result: dict) -> dict[str, str]:
                                                  or classify.get("union")):
         seen["S2.3"] = ("a classify pass reported assignments "
                         "(step_witness['classify_later'])")
-    # S3: the search stage EXECUTED. `queries_run` is the budget it spent; 0 is
-    # the extractor's own skip answer (no/embedded backend), which the capstone
-    # refuses at G2 anyway — so on any run that reaches G5 a spent budget is the
-    # witness and a degraded attempt still ran.
-    if search.get("queries_run"):
+    # S3: the search stage RESOLVED, not merely attempted. `queries_run` is the
+    # budget it spent and `degraded` is the stage's own verdict on itself:
+    # `search_graph` increments the counter BEFORE each attempt and returns
+    # `degraded=True` with a `reason` on the FIRST-QUERY exception
+    # (`extractor_v2.py::search_graph`), so `queries_run > 0 and degraded` is
+    # exactly "the graph search raised" — a spent budget with nothing resolved.
+    # G2 cannot catch it (its `backend_is_searchable` is env-derived and issues
+    # no query), so counting a degraded attempt as S3 lets V5 — the epic's ONLY
+    # closing gate — pass on a step that never resolved, and every E-row is
+    # published as a valid measurement off that run. The README's S3 RESOLVE row
+    # records the rule ("a degraded search is not S3") and the sibling probe
+    # implements it in its own S3 arm (`capstone_measure.py`); this arm must
+    # state the same thing (#10214 review, P1).
+    if search.get("queries_run") and not search.get("degraded"):
         seen["S3"] = ("S3 searched the graph "
                       f"(step_witness['search']: queries_run="
                       f"{search.get('queries_run')}, degraded="
