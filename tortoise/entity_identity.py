@@ -422,8 +422,12 @@ def resolve_fold_name(g, label: str, name: str, *,
         "entity-identity: a journal record references %s %r by NAME and it "
         "resolves to %d live id-carrying holder(s) %s — NOT folding it. The "
         "projection never mints an id (a fold-time mint is not replay-"
-        "deterministic); the producer must register what it references "
-        "(#3590 D9).%s", label, name, len(ids), ids,
+        "deterministic), and D1 (RULED: a bare mention does not create an "
+        "entity) means NOTHING will register a mention on its behalf — this "
+        "reference drops its link and the miss is recorded%s. If the "
+        "attribution edge is wanted, register the target explicitly "
+        "(create_entity).%s", label, name, len(ids), ids,
+        " as the exempt unfolded-mention" if mention else " above",
         f" context={context}" if context else "")
     return None
 

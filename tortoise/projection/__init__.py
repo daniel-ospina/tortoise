@@ -8908,9 +8908,9 @@ def journal_object_established(events) -> JournalObjectEstablished:
     to the separately-carried ``supersede-target-deleted`` bound and must keep
     refusing here. So this reads the positive sources alone and never subtracts.
 
-    THREE name sources, and all three are required — each one is a route by
-    which a name reaches the Object MERGE key, so missing any of them would
-    exempt a supersede the journal COULD have addressed:
+    TWO name sources, and both are required — each one is a route by which a
+    name reaches the Object MERGE key, so missing either would exempt a
+    supersede the journal COULD have addressed:
 
     * ``ObjectRegistered`` — the obvious one.
     * an ``EntityMutated`` **state op** — the fold applies ``SET n += $state``,
@@ -8919,33 +8919,43 @@ def journal_object_established(events) -> JournalObjectEstablished:
       key"). Without it a rename-produced name looked unestablished,
       ``rebuild_all`` exempted a record ``rebuild()`` folded, and the supersede
       was silently lost (#10107 review P1).
-    * an ``EventRecorded`` **mention stub** — ``_event_plain_merge`` MERGEs an
-      Object by that name. It is not a *registration* (a mention does not
-      create an entity, #3590 D1), which is why it is counted here as an
-      ADDRESS rather than as an entity, and not reusing the sibling's carrier
-      model was a scope error (#10107 review P2): once such a stub was deleted,
-      a name-only supersede of it was exempted as "never established" while
-      ``main`` refused.
+
+    ⛔ A THIRD name source — an ``EventRecorded`` mention stub — was counted
+    here and is now DELETED by #3590 (`_event_plain_merge` no longer MERGEs an
+    Object by a mention's name; the fold never mints, D9), so an
+    ``EventRecorded`` establishes NO Object name and NO deterministic stub id.
+    Counting it would exempt a supersede of a carrier the journal never created,
+    against a graph that folds nothing — the fail-open this oracle exists to
+    keep closed. #10107 review P2 added it when it WAS a real address; the
+    source's removal is what retires it. The ``:Subject`` stub mint survives in
+    ``edges._mint_subject_stub`` and is a different label — it cannot reach an
+    Object MERGE key.
+
+    A pre-`#3590` journal DOES carry such stubs (the retired fold minted them),
+    so for those journals this oracle no longer counts an address the old graph
+    had. That is deliberate and bounded: the fold cannot recreate those
+    carriers, so a supersede of one is not addressable on replay either — the
+    loss is the retired-mint class carried by the `unfolded-mention` exemption,
+    not a missing registration.
 
     The ``ids`` half is the second limb of the same question: a record that
     carries an id the journal established IS addressable, even if the name it
     also carries is one nothing established (a collapsed-away carrier, #5285
     cycle-4 FIX 2) — so such a record must keep refusing rather than being
-    exempted on the name alone (#10107 review P1). Its THREE id sources mirror
-    the name sources for the same reason — each is a route by which the id
-    reaches a live node, so missing one exempts a supersede the journal COULD
-    have addressed:
+    exempted on the name alone (#10107 review P1). Its id sources mirror the
+    name sources for the same reason — each is a route by which the id reaches a
+    live node, so missing one exempts a supersede the journal COULD have
+    addressed:
 
     * ``ObjectRegistered``'s ``id``.
-    * an ``EventRecorded`` mention stub's DETERMINISTIC id —
-      ``_event_plain_merge`` writes it ``ON CREATE``, and a later registration
-      re-ids that node, so the stub id is addressable at the stub's own seq
-      (#10107 review P1).
-    * an ``EntityMutated`` state op's TARGET ``id`` — the record names an
-      Object the journal could address by id, so referring to that id is not
+    * an ``EntityMutated`` state op's TARGET ``id`` — the record names an Object
+      the journal could address by id, so referring to that id is not
       "established by nothing". Counting only the state-op NAME exempted a
-      supersede carrying the id of the very object the journal had just
-      mutated (#10107 review round 6).
+      supersede carrying the id of the very object the journal had just mutated
+      (#10107 review round 6).
+
+    ⛔ The ``EventRecorded`` mention-stub id is retired with the name source
+    above (same #3590 cause).
     """
     names: set[str] = set()
     ids: set[str] = set()

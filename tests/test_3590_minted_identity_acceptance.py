@@ -7,9 +7,14 @@ real graph rather than by eye — the issue's own acceptance list says
 *"asserted, not asserted-by-eye"*, and the 8-cycle bug classes in #3573 are
 exactly the shapes a by-eye check misses:
 
-1. **No id is derived from a name.** The pre-#3590 id was
-   ``obj-<sha26(name)>`` — a *function* of the mutable label, which is why a
-   rename minted a second entity.
+1. **No id is derived from a name** — at the ``create_entity`` door. The
+   pre-#3590 id was ``obj-<sha26(name)>`` — a *function* of the mutable label,
+   which is why a rename minted a second entity. ⛔ ONE bounded exception is
+   recorded at ``identity-decision.md`` (D1's home): the fold-side ``:Subject``
+   about-edge stub still mints ``id = name`` (``edges._mint_subject_stub``,
+   kept for journals already written, ``#8914``), so a ``create_entity`` that
+   resolves to such a stub adopts it — the pins below exercise the
+   create-first path, where no stub exists.
 2. **A re-mention of a live name is idempotent.** Two creates of one name are
    one entity (the id does not churn).
 3. **A rename is journaled on the stable id and survives replay**, and the old
@@ -95,13 +100,24 @@ def test_an_object_id_is_not_derived_from_its_name(sdk):
         "the id is still a function of the name — the pre-#3590 derivation "
         "survived (#3590 R1)")
     # …and it is not the name itself either: `MERGE (o {name}) ON CREATE SET
-    # o.id = $name` was the third spelling of name-as-identity the change
-    # retires (`projection/edges.py::_mint_subject_stub` did exactly that).
+    # o.id = $name` was a third spelling of name-as-identity. It survives in
+    # ONE place this door never reaches from here — the fold-side `:Subject`
+    # about-edge stub (`projection/edges.py::_mint_subject_stub`), kept for
+    # journals already written and bounded at `identity-decision.md` (#8914).
+    # This pin is the create-first path: no about-edge, so no stub.
     assert holders[0] != "Acme", holders
 
 
 def test_a_subject_id_is_not_derived_from_its_name(sdk):
-    """The ``:Subject`` twin of the same pin — both kinds were name-keyed."""
+    """The ``:Subject`` twin of the same pin — both kinds were name-keyed.
+
+    ⛔ The create-first path ONLY. The fold-side ``:Subject`` about-edge stub
+    (``edges._mint_subject_stub``) still mints ``id = name`` for journals
+    already written, and a create that resolves to such a stub ADOPTS it — so
+    this pin must not be read as "a Subject id can never be its name". That
+    bounded exception is recorded at ``identity-decision.md`` (D1's home) and
+    ends with ``#8914``.
+    """
     client, _ = sdk
     proj = client._get_proj()
     client.create_entity("subject", "Team Alpha", is_episodic=False)
