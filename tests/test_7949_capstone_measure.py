@@ -64,6 +64,53 @@ def _sdk_line_naming(code: str) -> int:
 _META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('\"stats\": out.get(\"stats\")')}"
 
 
+#: `extractor_v2.py` is the bundle's SECOND moving source, and a typed line in the
+#: pin re-stales on the same merge `sdk.py` does (#10010 review, P1: this file's
+#: `:8883-8887` sat 88 lines behind the tree after one `main` merge, and the legs it
+#: fed were red). So the extractor cites are read out of the tree too, by ANCHOR —
+#: the symbol whose line the cause must name, never the number.
+_EXTRACTOR = _REPO / "tortoise/extractor_v2.py"
+
+
+def _ext_line(anchor: str) -> int:
+    """The ONE line of `extractor_v2.py` that carries `anchor` — READ from the tree."""
+    hits = [n for n, line in enumerate(
+        _EXTRACTOR.read_text().splitlines(), 1) if anchor in line]
+    assert len(hits) == 1, (
+        f"`{anchor}` is on {len(hits)} lines of extractor_v2.py {hits} — the pin names one")
+    return hits[0]
+
+
+def _ext_span(anchor: str) -> str:
+    """`start-end` for the `}`-closed block `anchor` opens, in the probe's cite shape."""
+    lines = _EXTRACTOR.read_text().splitlines()
+    start = _ext_line(anchor)
+    end = next((n for n in range(start + 1, len(lines) + 1)
+                if lines[n - 1].strip() == "}"), None)
+    assert end is not None, f"no closing brace ends the block at extractor_v2.py:{start}"
+    return f"{start}-{end}"
+
+
+#: The emitted-surface / flag cites the causes print (block spans, not one line).
+_VET_SURFACE_CITE = f"tortoise/extractor_v2.py:{_ext_span('result["vet"] = {')}"
+_VET_FLAG_CITE = f"tortoise/extractor_v2.py:{_ext_line('vet_enabled = (')}"
+_CLASSIFY_FLAG_CITE = (
+    f"tortoise/extractor_v2.py:{_ext_line('classify_later = kind_classifier is not None')}")
+
+#: The turn writer's cite, read the same way (a `sdk.py` line the E3 line prints).
+_TURN_WRITER_CITE = f"tortoise/sdk.py:{_sdk_line_naming('_TURN_WRITE_CYPHER = (')}"
+
+#: Each pass's OWN lines, as the probe prints them. Checked in BOTH directions
+#: below — present in that pass's cause AND absent from the other's — because a
+#: list asserted ONLY for absence rots into strings no cause prints, i.e. an
+#: assertion that cannot fail (the vacuous-pin class).
+_VET_PASS_CITES = ("vet_enabled", "_run_vet_pass", "if vet_enabled",
+                   ":8592", ":8612", ":8680", ":8802", ":8478-8481")
+_CLASSIFY_PASS_CITES = ("classify_later", "if classify_later", ":8561", ":8586",
+                        ":8608-8611", ":8692", ":8695", ":8817", ":8827",
+                        ":8708", ":8838")
+
+
 def _load():
     spec = _ilu.spec_from_file_location("capstone_measure_pure", str(PROBE))
     assert spec and spec.loader
@@ -678,8 +725,8 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
 
     `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
     UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
-    is `{"enabled": False, "s2": {}, "union": {}}` (`:8509-8524`,
-    `:8873-8887`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    is `{"enabled": False, "s2": {}, "union": {}}` (`:8597-8612`,
+    `:8961-8975`). An acceptance test of "a non-empty dict" therefore takes an OFF
     block as the witness for "the S2.2 VET pass RAN" and prints
     `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
@@ -734,20 +781,20 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8504` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8508`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8524`); the
+    `extractor_v2.py:8592` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return at `:8596`, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`); the
     VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8592`, `if vet_enabled and complete_list:` `:8714`). So the flag-ON +
+    `:8680`, `if vet_enabled and complete_list:` `:8802`). So the flag-ON +
     empty-list session emits `enabled: True` with empty counters and no pass ran —
     and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8390-8393`).
+    its fail-open path, `:8478-8481`).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8473`, its gates are
-    `if classify_later and embed_list:` (`:8604`) around `if items:` (`:8607`) and
-    `if classify_later and complete_list:` (`:8729`) around `if items:` (`:8739`),
-    and its fail-open `except` sits at `:8620` / `:8750`. A cause templated for the
+    `classify_later` is computed at `:8561`, its gates are
+    `if classify_later and embed_list:` (`:8692`) around `if items:` (`:8695`) and
+    `if classify_later and complete_list:` (`:8817`) around `if items:` (`:8827`),
+    and its fail-open `except` sits at `:8708` / `:8838`. A cause templated for the
     surface NAME while citing the VET lines told a reader of the classify block
     that the VET pass's gate idled it — false: an idle classify block comes from no
     embed list or no classify ITEMS, and `embed_list` is only its first gate
@@ -782,27 +829,28 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8504" in vet_cause, vet_cause
-    assert ":8524" in vet_cause, vet_cause
+    assert _VET_FLAG_CITE in vet_cause, vet_cause
+    assert ":8612" in vet_cause, vet_cause
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
-    # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8473",
-                          ":8498", ":8520", ":8523", ":8604", ":8607",
-                          ":8729", ":8739", ":8620", ":8750"):
-        assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8473" in classify_cause, classify_cause
+    assert _CLASSIFY_FLAG_CITE in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8604" in classify_cause, classify_cause
-    assert ":8607" in classify_cause, classify_cause
+    assert ":8692" in classify_cause, classify_cause
+    assert ":8695" in classify_cause, classify_cause
     assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8729" in classify_cause, classify_cause
-    # … and NOT the VET pass's flag, pass function or gates
-    for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8504", ":8524", ":8592", ":8714", ":8390", ":8393"):
-        assert vet_cite not in classify_cause, (vet_cite, classify_cause)
+    assert ":8817" in classify_cause, classify_cause
+
+    # … and NEITHER cause borrows the other pass's lines. Asserted in BOTH
+    # directions: each token must be PRESENT in its own pass's cause, or the
+    # absence check is over a string no cause prints and can never fail.
+    for cite in _VET_PASS_CITES:
+        assert cite in vet_cause, (cite, vet_cause)
+        assert cite not in classify_cause, (cite, classify_cause)
+    for cite in _CLASSIFY_PASS_CITES:
+        assert cite in classify_cause, (cite, classify_cause)
+        assert cite not in vet_cause, (cite, vet_cause)
 
     # Different text, so neither cause can stand in for the other: a version
     # emitting the SAME sentence for both surfaces would satisfy every
@@ -855,8 +903,9 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8883-8887) and `result["classify_later"]` (:8873-8879). The
-    drop is the meta fold at `tortoise/sdk.py:13282` — **re-derived from the tree at
+    `result["vet"]` (`_VET_SURFACE_CITE`, read from the tree) and
+    `result["classify_later"]` (`:8961-8967`). The
+    drop is the meta fold at `tortoise/sdk.py:13510` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
@@ -882,7 +931,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
     assert _META_FOLD_CITE in cause, cause
-    assert "tortoise/extractor_v2.py:8883-8887" in cause, cause
+    assert _VET_SURFACE_CITE in cause, cause
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
@@ -938,7 +987,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2372",
+                     "BY CONSTRUCTION", _TURN_WRITER_CITE,
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "
