@@ -291,7 +291,9 @@ class TestAgentInfraCitations:
         citation is the QUOTED assignment, never the line it happened to sit on.
 
         SCOPE: the tool's own text, for agent-infra's script names only. A bare `:548` beside an
-        already-named script, and an in-repo path cited by line, are both out of scope.
+        already-named script, and an in-repo path cited by line, are both out of scope. This test
+        module is out of scope too, and deliberately: it QUOTES the pre-fix forms as history, so
+        scanning it would either self-fail or need so many exemptions that it guarded nothing.
         """
         text = TOOL.read_text()
         offenders = [
@@ -1596,7 +1598,10 @@ class TestDefaultPinPathIsCallTime:
     def test_the_third_term_is_the_one_harness_up_uses(self, tmp_path: Path, monkeypatch) -> None:
         """With ``HOME`` unset the controller falls back to ``/tmp/cell-home`` — so must this tool.
 
-        ``harness-up:548`` is ``CELL_HOME="${CELL_HOME:-${HOME:-/tmp/cell-home}}"``. Omitting the
+        ``harness-up``'s chain is ``CELL_HOME="${CELL_HOME:-}"`` followed by
+        ``[ -n "$CELL_HOME" ] || CELL_HOME="${HOME:-/tmp/cell-home}"`` (quoted by ASSIGNMENT — the
+        script is deployed per box and its line numbers do not survive a re-pin; see
+        ``TestAgentInfraCitations``). Omitting the
         last term does not fail loudly: ``Path.home()`` silently answers with the PASSWD entry
         (``/home/cmux`` on this fleet box) while the controller answers ``/tmp/cell-home``, so the
         tool judges a different file in exactly the environment (a bare service/container with no
