@@ -1103,7 +1103,8 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: that merely mentions the spelling cannot be counted as a site.
 #:
 #: ⛔ A LEG'S LOG MAY BE A PER-RUNNER PATH, NOT A `/tmp` LITERAL (2026-10-25). The
-#: `test` job writes through `$PYTEST_LOG` (= `${{ runner.temp }}/pytest.log`) because a
+#: `test` job (and, since the same collision reddened `test-slow (a)` on #10264,
+#: `test-slow` too) writes through `$PYTEST_LOG` (= `${{ runner.temp }}/pytest.log`) because a
 #: `/tmp/pytest.log` literal is SHARED between concurrent jobs on a self-hosted runner,
 #: which made the kill's own counts and tail describe another shard. The capture is the
 #: same capture (and owes the same reporter call), so the SITE is matched on either
@@ -1183,9 +1184,11 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
     # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
-    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
+    # `test`'s last-failed pre-phase (200), `test` (300) and (since the #7815
+    # collision reddened its own leg on #10264) `test-slow` (300) through the
+    # per-runner `"$PYTEST_LOG"` since #10028, then the two REMAINING
+    # `/tmp/pytest.log` literals `test-concurrency-falkor` (120) and
+    # `test-carve-out` (200) —
     # plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only

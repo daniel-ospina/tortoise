@@ -210,15 +210,18 @@ class TestGuardAcceptsCleanLog:
         text = workflow.read_text()
         fast_run = [
             l for l in text.splitlines()  # noqa: E741
-            # #10028: the duration must be matched in EITHER form. The gating
-            # run's watchdog is the per-shard expression
-            # `${{ matrix.watchdog_minutes }}m`, never a literal, so the old
-            # `\d+m` matched only the legs that hardcode a budget — which is the
-            # real reason this guard was green on the WRONG job: the retired
-            # `--junitxml=/tmp/junit.xml` literal selected `test-slow` (literal
-            # `40m`, literal path) instead of this job's gating run.
+            # #10028 / #10264: the gating run's watchdog is the per-shard
+            # EXPRESSION `${{ matrix.watchdog_minutes }}m` — the ONLY pytest
+            # invocation in this file that does not hardcode its budget. That
+            # expression (rather than a `\d+|expression` alternation) is what
+            # selects this job's run and NOT another leg's, which is the retarget
+            # this pin exists to catch: the retired `--junitxml=/tmp/junit.xml`
+            # literal selected `test-slow` (its own literal `40m`), and once
+            # #10264 moved `test-slow` onto the SAME per-job `"$PYTEST_JUNIT"`,
+            # the alternation selected it again — two matches, and the slow leg
+            # checked in place of the gating one.
             if re.search(
-                r"timeout -s INT -k 10 (?:\d+|\$\{\{\s*matrix\.watchdog_minutes\s*\}\})m", l)
+                r"timeout -s INT -k 10 \$\{\{\s*matrix\.watchdog_minutes\s*\}\}m", l)
             and "-m pytest" in l
             # #6142: the last-failed PRE-PHASE also matches the watchdog
             # pattern, but it writes its junit through `$PYTEST_JUNIT_LF` and is

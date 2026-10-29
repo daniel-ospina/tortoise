@@ -6306,23 +6306,56 @@ def test_live_required_job_runs_only_declared_live_tests():
 
 
 def test_test_slow_job_carries_junitxml_manifest_guard():
-    """cycle-7 P2-1 (int-1) + Task 9 Step 5: the test-slow legs flip to
+    """cycle-7 P2-1 (int-1) + Task 9 Step 5 + #10028: the test-slow legs flip to
     docker with the fast job's exact wiring — (a) the pytest invocation
-    carries --junitxml=/tmp/junit.xml -o junit_family=xunit1 AND -r fEs
+    carries --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 AND -r fEs
     (never the historical -rfE — pytest 9.1.1 replaces the report set on
     repeated -r flags, so a trailing -rfE would suppress the skip summary
     the guard depends on), (b) a manifest-generation step exists BEFORE the
     pytest step (echoing each leg's ${{ matrix.files }} to
     ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    /tmp/expected-nodeids.txt), and (c) a skip-guard step gated on rc==0 AND
-    non-empty $FILES runs tools/skip-guard.py with --manifest."""
+    "$PYTEST_MANIFEST"), and (c) a skip-guard step gated on rc==0 AND
+    non-empty $FILES runs tools/skip-guard.py with --manifest.
+
+    ⛔ AND (d) EVERY pytest artifact is the leg's OWN (#10028/#7815). The paths
+    used to be the host-global `/tmp/pytest.log`, `/tmp/junit.xml` and
+    `/tmp/expected-nodeids.txt`. On a shared self-hosted host `/tmp` is ONE
+    namespace: a concurrent job's `> /tmp/pytest.log` truncates this leg's log
+    under its open fd, which opens a NUL hole, makes the session summary
+    unattributable (`pytest-attribution.sh` prints `STALE session summary` / `leg
+    INCOMPLETE`), and leaves the skip-fail guard an absent junitxml to reconcile
+    — a REQUIRED red on a clash, not on a test. That is measured on PR #10264
+    (`test-slow (a)`, run 40823908715): 814 tests passed and its own log tail
+    carried ANOTHER runner install's session header
+    (`rootdir: /opt/gh-runner-x64/...` while the job ran in
+    `/opt/gh-runner-x64-2/...`). The `test` job was migrated in #10028;
+    `test-slow` grew five concurrent legs and was left on the literal.
+    """
     wf = _load_python_ci()
     steps = wf["jobs"]["test-slow"]["steps"]
     run = next(s for s in steps
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
-    assert "--junitxml=/tmp/junit.xml" in invocation
+    assert '--junitxml="$PYTEST_JUNIT"' in invocation
+    assert '> "$PYTEST_LOG"' in invocation
     assert "-o junit_family=xunit1" in invocation
+    # (d) the resolve step comes FIRST (it publishes $GITHUB_ENV, which only
+    # reaches SUBSEQUENT steps) and fails CLOSED on a missing RUNNER_TEMP — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
+    resolve = steps[0]
+    assert resolve.get("name", "").startswith("Resolve per-job pytest artifact paths")
+    assert "${RUNNER_TEMP:?" in resolve["run"], \
+        "the resolve step must REFUSE to fall back to the host-global /tmp"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"), ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'echo "{var}=$base/{leaf}"' in resolve["run"]
+    # ... and no part of THIS job may name the host-global artifact again. The
+    # literals are what the collision needs, so their absence is the property.
+    job_text = "\n".join(s.get("run", "") for s in steps)
+    for literal in ("/tmp/pytest.log", "/tmp/junit.xml", "/tmp/expected-nodeids.txt"):
+        assert literal not in job_text.replace("# " + literal, ""), (
+            f"{literal} is host-global: two concurrent jobs on a shared runner "
+            f"clobber it and red this leg on the clash (#10028, #7815)")
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
     cmdline = next(line for line in invocation.splitlines()
@@ -6339,6 +6372,12 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     mrun = manifest["run"]
     assert "pytest-files" in mrun
     assert "--collect-only" in mrun or "--emit-manifest" in mrun
+    # ⛔ THE GUARD MUST READ THE MANIFEST THE MANIFEST STEP WROTE — the PATH is not
+    # the contract, the PAIRING is (the fast job's pin says the same, #7815):
+    # asserting the literal would re-open the clobber, asserting the pairing keeps
+    # the guard honest once the path is per-runner.
+    assert '--output "$PYTEST_MANIFEST"' in mrun, \
+        "the manifest step and the skip-fail guard must share ONE path variable"
     # the slow legs' URI gate matches the fast job (full==true only)
     uri = next(s for s in steps
                if s.get("name", "").startswith("Compute docker URI"))
@@ -6348,7 +6387,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                  if s.get("name", "").startswith("Skip-fail guard"))
     grun = guard["run"]
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
-    assert "--manifest /tmp/expected-nodeids.txt" in grun
+    assert '--manifest "$PYTEST_MANIFEST"' in grun
+    assert '--junitxml="$PYTEST_JUNIT"' in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
     # #9539: read the DERIVED legs — the workflow holds no literal rows.
     leg_files = slow_leg_files(load_manifest())
