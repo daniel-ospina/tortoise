@@ -291,7 +291,7 @@ class ProvisionerRefused(ActionFailed):
     `verdict=fill-refused-by-provisioner` and exits 5 instead of a green timer over a box that
     cannot grow — the false PASS that a "a refusal is an answer, exit 0" reading created.
     ⛔ TWO KINDS OF REFUSAL ARRIVE HERE, AND THEY ARE NOT THE SAME FACT: `die()` in
-    `tools/install-ci-runner-x64.sh:164` exits 2 for EVERY guard arm, so this is either the
+    `tools/install-ci-runner-x64.sh:177` exits 2 for EVERY guard arm, so this is either the
     sizing disagreement (`cpu headroom` / `memory headroom` — the tool computed a count the
     callee's `COUNT*2 + 2 <= ncpu` / `COUNT*2 + 4 <= MemAvailable` guard rejects, open at #9672)
     or one of the callee's other arms (architecture, forks, disk, an unreadable measurement, gate
@@ -1265,7 +1265,7 @@ def converge(
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             # ⛔ THE INSTALLER'S `die` EXITS 2 FROM EVERY GUARD, NOT JUST THE SIZING ONE.
-            # `tools/install-ci-runner-x64.sh:164` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
+            # `tools/install-ci-runner-x64.sh:177` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
             # so the wrong arch, an unreadable fork cap, a FULL DISK, an unreadable core count and
             # an unreadable gate state all arrive here as rc=2 exactly like the cpu/memory arms do.
             # Only `cpu headroom` / `memory headroom` are the two-models disagreement (#9672), and

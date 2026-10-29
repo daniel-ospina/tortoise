@@ -1250,6 +1250,59 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
     )
 
 
+# ── 8b. the citations the runbook's map does NOT cover ──────────────────────────────────────
+def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_names():
+    """⛔ THE MAP PIN ABOVE COVERS ONE BULLET; THE REST OF THE TREE CITES THE INSTALLER TOO.
+
+    `tools/runner_autoscale.py`, `tests/test_runner_autoscale.py` and `MEMORY.md` all point at
+    installer lines by NUMBER and name the symbol in the same sentence (`die()`, `resolve_labels`,
+    the repair's whole-set relabel). Two reviews found those wrong — `:153` was `-h|--help` and
+    `:208` was `fallback_engaged()`, a DIFFERENT seam — while every pinned ref in the runbook still
+    landed, so nothing went red. Every installer edit above them shifts them again; that is exactly
+    the class this arm makes red instead of silent.
+
+    Non-vacuity: pointing either `die()` citation back at `:153` (the help flag) reds it, and so
+    does leaving the repair-range citation on the pre-PR `:241-256` (the tail of `resolve_labels`).
+    """
+    installer = INSTALLER.read_text().splitlines()
+
+    def land(file: str, n: int, expect: str) -> None:
+        assert 1 <= n <= len(installer), f"{file} cites :{n}, past EOF ({len(installer)} lines)"
+        line = installer[n - 1]
+        assert re.search(expect, line), (
+            f"{file} cites install-ci-runner-x64.sh:{n} but that line is {line.strip()!r}, not the "
+            "symbol the sentence names — re-derive the number"
+        )
+
+    # The citations in the two files, and the symbol the sentence around them names. The `:NNN`
+    # sometimes sits on the NEXT line (`install-ci-runner-x64.sh::resolve_labels` then ``:232``), so
+    # the window is two lines each side rather than the cited line alone.
+    known = {"die()": r"^die\(\)", "resolve_labels": r"^resolve_labels\(\)"}
+    for rel in ("tools/runner_autoscale.py", "tests/test_runner_autoscale.py"):
+        lines = (REPO_ROOT / rel).read_text().splitlines()
+        cited = 0
+        for i, line in enumerate(lines):
+            for m in re.finditer(r"install-ci-runner-x64\.sh:(\d+)", line):
+                window = "\n".join(lines[max(0, i - 2): i + 3])
+                named = [rx for key, rx in known.items() if key in window]
+                assert named, (
+                    f"{rel}:{i + 1} cites install-ci-runner-x64.sh:{m.group(1)} but names no symbol "
+                    f"this pin knows — add it to `known` rather than leaving the ref unchecked: "
+                    f"{line.strip()}"
+                )
+                n = int(m.group(1))
+                land(f"{rel}:{i + 1}", n,
+                     named[0] if len(named) == 1 else f"(?:{'|'.join(named)})")
+                cited += 1
+        assert cited, f"{rel} no longer cites an installer line — re-anchor this pin"
+
+    # `MEMORY.md` cites the REPAIR's range (the whole-set relabel that drops a version pin).
+    memory = (REPO_ROOT / "MEMORY.md").read_text()
+    repair = re.search(r"whole-set relabel \(`:(\d+)-\d+`\)", memory)
+    assert repair, "MEMORY.md no longer cites the repair's line range — re-anchor this pin"
+    land("MEMORY.md", int(repair.group(1)), r'^if \[ "\$MODE" = repair \]')
+
+
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
 def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path):
     """Copied one directory down, the module's own `REPO_ROOT` has no installer → it must go RED.
