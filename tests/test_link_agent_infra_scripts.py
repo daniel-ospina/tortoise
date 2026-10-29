@@ -54,6 +54,17 @@ _STALE_TRACKED_CLAIM = re.compile(
 _NOT_TRACKED = re.compile(
     r"\b(?:not|never|no\s+longer)\s+(?:\*\*)?tracked\b|\buntracked\b", re.I
 )
+#: An agent-infra script cited by its LINE NUMBER `<script>:<line>`. agent-infra is deployed and
+#: re-pinned on every box, so those numbers resolve to unrelated code within a push or two; only
+#: the QUOTED assignment is durable. PR #10250 review ROUND 10 ISSUE 2 (P3) measured the decay:
+#: `harness-up:548`/`:682` pointed at `hu_path_state` and a `REPO`/`REPO_SRC` comment, and
+#: `cloud-cell-bringup.sh:815` sat at 971 on the box's own pin. Scoped to agent-infra's script
+#: names — an in-repo path cited by line (`check-deploy-staleness.sh:47`) does not move.
+_AGENT_INFRA_LINE_CITATION = re.compile(
+    r"(?<![\w.-])(?:harness-up|harness-apply-pass|harness-refresh|harness-exec"
+    r"|cloud-cell-bringup(?:\.test)?|cloud-cell-supervisor|multi-repo-controller)"
+    r"(?:\.sh)?:\d+"
+)
 
 
 def run_tool(
@@ -259,6 +270,42 @@ class TestScriptsPointerIsNotTracked:
             + "\nReword to the machine-local shape — \"gitignored, not tracked; materialised "
             "from $AGENT_INFRA_PATH\" — because a stale claim is how the tracked blob gets "
             "re-derived and re-added."
+        )
+
+
+class TestAgentInfraCitations:
+    """A pointer into agent-infra must survive agent-infra moving."""
+
+    def test_no_agent_infra_script_is_cited_by_line_number(self) -> None:
+        """PR #10250 review ROUND 10 ISSUE 2 (P3): a citation that no longer resolves re-stales.
+
+        RED before the fix, measured in this file: `harness-up:548` and `:682` justified the
+        `CELL_HOME` precedence, and `cloud-cell-bringup.sh:815` the two-line record. On the box's
+        own pin those numbers land on `hu_path_state`, a `REPO`/`REPO_SRC` comment, and a printf
+        that had moved to 971 — i.e. the whole justification for `default_pin_path()` pointed at
+        code that says nothing of the kind.
+
+        The rule is the repo's own: a claim that outlives its fact gets re-derived as fact (see
+        `test_no_comment_still_claims_the_pointer_is_tracked`, the same class one file over).
+        agent-infra is a DEPLOYED corpus — every box carries a different pin — so the durable
+        citation is the QUOTED assignment, never the line it happened to sit on.
+
+        SCOPE: the tool's own text, for agent-infra's script names only. A bare `:548` beside an
+        already-named script, and an in-repo path cited by line, are both out of scope.
+        """
+        text = TOOL.read_text()
+        offenders = [
+            f"{TOOL.name}:{text.count(chr(10), 0, match.start()) + 1}: {match.group(0)}"
+            for match in _AGENT_INFRA_LINE_CITATION.finditer(text)
+        ]
+        assert not offenders, (
+            "these cite an agent-infra script by LINE NUMBER, which does not survive the corpus "
+            "being re-pinned on another box (`harness-up:548` resolved to `hu_path_state`, and "
+            "`cloud-cell-bringup.sh:815` to a printf that had moved to 971):\n  "
+            + "\n  ".join(offenders)
+            + "\nCite the script AND the quoted assignment it makes, e.g. "
+            + "`harness-up` and its "
+            + '`PIN_SHA_FILE="${HARNESS_PIN:-${CELL_HOME}/.pi/agent/state/HARNESS-PIN}"`.'
         )
 
 

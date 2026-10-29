@@ -87,10 +87,15 @@ LINK_NAME = "scripts"
 #: It names the commit the box's controller RUNS, which is not necessarily the commit
 #: ``$AGENT_INFRA_PATH`` happens to be at (#10114 measured 23 commits of daylight between them).
 PIN_ENV = "HARNESS_PIN"
-#: The base ``harness-up`` substitutes for ``$HOME`` on a cell (``agent-infra/scripts/harness-up:548``,
-#: ``:682``). Honoured BEFORE ``Path.home()`` so this tool judges the record the controller reads.
+#: The base ``harness-up`` substitutes for ``$HOME`` on a cell — its
+#: ``CELL_HOME="${CELL_HOME:-}"`` / ``[ -n "$CELL_HOME" ] || CELL_HOME="${HOME:-/tmp/cell-home}"``
+#: pair — and the record it then reads via ``PIN_SHA_FILE=…``. Cited by ASSIGNMENT, never by line
+#: number: agent-infra moves under it and its line numbers do not survive. PR #10250 review
+#: ROUND 10 ISSUE 2 (P3) found the previous ``:548``/``:682`` pointers resolving to unrelated code
+#: (``hu_path_state`` and a ``REPO``/``REPO_SRC`` comment) at the PR's own quoted pin.
+#: Honoured BEFORE ``Path.home()`` so this tool judges the record the controller reads.
 CELL_HOME_ENV = "CELL_HOME"
-#: ``harness-up:548``'s LAST term: ``CELL_HOME="${CELL_HOME:-${HOME:-/tmp/cell-home}}"``. It is not
+#: ``harness-up``'s LAST term: ``CELL_HOME="${HOME:-/tmp/cell-home}"``. It is not
 #: decoration — with ``HOME`` unset ``Path.home()`` falls back to the PASSWD entry (``/home/cmux``
 #: here) while the controller falls back to this path, so omitting it puts the tool back on the
 #: wrong record in exactly the environment (a bare service/container) where no one is watching.
@@ -229,10 +234,12 @@ def default_pin_path() -> Path:
     The base is ``${CELL_HOME:-$HOME}``, NOT ``Path.home()`` alone. That is the fleet's own
     resolution, and it is load-bearing: ``harness-up`` — the reader this record exists to agree
     with — computes ``PIN_SHA_FILE="${HARNESS_PIN:-${CELL_HOME}/.pi/agent/state/HARNESS-PIN}"``
-    (``agent-infra/scripts/harness-up:682``) after ``CELL_HOME="${CELL_HOME:-${HOME:-/tmp/cell-home}}"``
-    (``:548``), and ``cloud-cell-bringup.sh`` WRITES the record under ``$CELL_HOME``. On a cell the
-    two bases disagree, so honouring only ``HOME`` made this tool answer about a DIFFERENT pin
-    record than the controller runs — measured on the box this was written on, which carries both
+    after ``CELL_HOME="${CELL_HOME:-}"`` / ``[ -n "$CELL_HOME" ] ||
+    CELL_HOME="${HOME:-/tmp/cell-home}"`` — both in ``agent-infra/scripts/harness-up``, cited by
+    assignment because its line numbers move — and ``cloud-cell-bringup.sh`` WRITES the record
+    under ``$CELL_HOME``. On a cell the two bases disagree, so honouring only ``HOME`` made this
+    tool answer about a DIFFERENT pin record than the controller runs — measured on the box this
+    was written on, which carries both
     records with different shas (``$HOME`` → ``dcb54375…``, ``$CELL_HOME`` → ``9a3cf06e…``). The
     failure it produced was the one this module exists to prevent: ``HOME`` pointed at a directory
     with no record read as ``no-pin`` → **exit 0**, a false PASS over a box that does record a
@@ -313,10 +320,12 @@ def _pin_sha_line(pin: Path) -> str:
 
     ⛔ The whole-file read is what PR #10250 review ROUND 6 ISSUE 1 (P2, measured) found: the
     fleet's own writer emits TWO lines —
-    ``printf '%s\\n%s\\n' "$got" "$(date -u +%FT%TZ)"`` (agent-infra
-    ``scripts/cloud-cell-bringup.sh:815``) — and its own suite pins that as the format CONTRACT
-    (``cloud-cell-bringup.test.sh:1160-1167``: *"HARNESS-PIN line 1 is the FULL sha, so 'status'
-    can read it with head -1"* / *"line 2 is the timestamp"*). ``str.strip()`` removes only
+    ``printf '%s\\n%s\\n' "$got" "$(date -u +%FT%TZ)"`` in agent-infra's
+    ``scripts/cloud-cell-bringup.sh`` — and its own suite pins that as the format CONTRACT
+    (``cloud-cell-bringup.test.sh``: *"HARNESS-PIN line 1 is the FULL sha, so 'status'
+    can read it with head -1"* / *"line 2 is the timestamp"*; cited by assertion, not by line
+    number — ``:815``/``:1160-1167`` were both stale on the box's current pin, where the printf is
+    at 971 and the assertions at 1167/1171). ``str.strip()`` removes only
     LEADING/TRAILING whitespace, so the INTERIOR newline survived and the anchored
     ``PIN_SHA_RE`` could never match: a perfectly valid record was named as corrupt, ``--pin-check``
     could never return ok/behind/diverged on any box that script provisioned, and the ``--check``
