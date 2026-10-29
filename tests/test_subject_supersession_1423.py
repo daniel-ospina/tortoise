@@ -434,11 +434,23 @@ class TestStatusIsProjectionOwnedOnSubject:
         proj.rebuild_all(str(events), confirm_destructive=True)
         rebuilt = _subject_row(proj, "Team Alpha")
         assert live == rebuilt, (live, rebuilt)
-        (_status, by, _at), = live
         from tortoise.commit_ops import SUBJECT_TERMINAL_STATUSES
-        assert (live[0][0] or "") in SUBJECT_TERMINAL_STATUSES, (
+        # #3590: identity is the ID, so a superseded name and the incarnation a
+        # later EXPLICIT registration mints are TWO carriers of that name (the
+        # same shape `test_delete_then_recreate_…` pins). The single-carrier
+        # unpack below assumed name identity, which is what this PR retires.
+        # The guard's own claim is unchanged and is now asserted per carrier:
+        # the burial KEEPS its terminal status and is never resurrected.
+        terminal = [r for r in live if (r[0] or "") in SUBJECT_TERMINAL_STATUSES]
+        assert len(terminal) == 1, (
             f"a re-mention must not resurrect a superseded Subject: {live!r}")
-        assert by == "Team Beta"
+        assert terminal[0][1] == "Team Beta", terminal
+        live_rows = [r for r in live if r[0] == "live"]
+        assert len(live_rows) == 1, (
+            "the explicit re-registration must be a NEW incarnation born live "
+            f"(D1: the entity set grows only from an explicit registration "
+            f"that mints the id), not a mutation of the buried one: {live!r}")
+        assert live_rows[0][1] is None, live_rows
 
     def test_re_created_subject_is_born_live_not_status_less(self, env):
         """The ON CREATE half of the guard: a NEW incarnation (hard-deleted,
@@ -465,7 +477,7 @@ class TestConsistencyStatusLeg:
         graph = {("Subject", "sub-x"): {"name": "Team X",
                                         "status": graph_status}}
         mismatches, count, _excluded = _compare_entities(
-            journal, graph, {}, set(), set())
+            journal, graph, set(), set())
         return mismatches, count
 
     def test_a_buried_subject_status_is_a_divergence(self):
@@ -486,7 +498,7 @@ class TestConsistencyStatusLeg:
         mismatches, count, _excluded = _compare_entities(
             {("Subject", "sub-gone"): {"name": "Team Gone",
                                         "status": "live"}},
-            {}, {}, set(), set())
+            {}, set(), set())
         assert count == 1 and mismatches[0]["field"] == "presence"
 
 
