@@ -6192,8 +6192,10 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # is written in (*"This writer carries NO property on an about edge"*), so the
     # TRUE statement of the exemption red through `EXEMPT_COUNTED_MARKERS` (which
     # holds `re materializ` / `MAP form writer`). Measured at `3a20e63e9` by running
-    # this leg's own functions: both sentences below RED, and the last one shows the
-    # false red survives without any census-counted vocabulary at all.
+    # this leg's own functions: the first two sentences below RED, and the third is
+    # the WIDTH control for the same speech act — a `no <noun>` that is not a
+    # property noun is green BEFORE and AFTER the widening, so the new branch is
+    # the property vocabulary and not "any trailing `no`".
     object_negated_true_prose = (
         (
             "probe",
@@ -6205,9 +6207,10 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
             "`projection._rebuild_all_replay` re-materializes nothing on the "
             "rebuild pass, so it carries no property on an about edge.",
         ),
-        # … and the same conclusion reached by a bare object negation naming no
-        # property noun: `no recorded version read at all` is what §13 writes, and
-        # the widened window must not reach it.
+        # … and the WIDTH control, chosen because it is the sentence that must not
+        # move: `no recorded version read at all` is what §13 writes, its `no`-noun
+        # is outside `_PROPERTY_NOUN`, and it is GREEN at `3a20e63e9` as well as at
+        # this head — so a widening to a bare trailing `no` reds it here.
         (
             "probe",
             "`projection._rebuild_all_replay` carries no recorded version read at "
