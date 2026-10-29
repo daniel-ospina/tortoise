@@ -1395,6 +1395,51 @@ def test_a_g5_refusal_on_a_seam_receipt_blames_the_pipeline_not_the_seam(
     assert "step_witness" in reason, reason
 
 
+def test_a_g5_refusal_names_an_incomplete_seam_as_the_seam(
+        tmp_path, monkeypatch):
+    """The THIRD state (#10214 review, P3): present seam, MISSING block.
+
+    G5 split on "is there any ``step_witness``", so a seam that was present but
+    carried no block for a step fell into the PIPELINE arm — the refusal then
+    asserted the witness *"accounts for the missing step(s)"* and rendered
+    ``S2.2: {}``, publishing a defect in ``_capture_step_witness`` as the
+    extractor's own report. That is the misattribution the bundle's rule forbids;
+    the sibling probe keeps the three states apart (``capstone_measure._seam_cause``
+    names this one "present and INCOMPLETE, which is a defect in
+    _capture_step_witness").
+
+    Non-vacuity: on the pre-fix arm the reason says ``PIPELINE`` and quotes `{}`.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _IncompleteSeamSDK:
+        def capture_session(self, _turns, session_id=None):
+            receipt = _seam_receipt()
+            # the seam IS here — one of its blocks is not
+            del receipt["stats"]["step_witness"]["vet"]
+            return receipt
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _IncompleteSeamSDK)
+    out = tmp_path / "g5-incomplete.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "INCOMPLETE" in reason, reason
+    assert "_capture_step_witness" in reason, reason
+    assert "'vet' block" in reason, reason
+    assert "PIPELINE" not in reason, reason
+    # it must NOT claim the witness accounts for the step it does not carry
+    assert "accounts for the missing" not in reason, reason
+
+
 def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
     """END TO END (#10214 review, P1): a degraded search cannot emit a table.
 

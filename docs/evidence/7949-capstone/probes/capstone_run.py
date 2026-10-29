@@ -1000,13 +1000,17 @@ def main(argv: list[str] | None = None) -> int:
     observed = observe_steps(result)
     missing = [s for s in STEPS if s not in observed]
     if missing:
-        # TWO different findings, kept apart (#9116). A receipt with NO
-        # step_witness at all is the INSTRUMENT: the seam never delivered, so
-        # nothing down there is observable and the four steps that need it must
-        # NOT be read as "the pipeline skipped VET/classify/search/commit". A
-        # receipt WITH the seam is the pipeline's own answer: the stage ran (or
-        # was gated off) and the witness says which, so the step is unobserved
-        # for a reason the run itself reports.
+        # THREE findings, not two (#9116). A receipt with NO step_witness at
+        # all is the INSTRUMENT: the seam never delivered, so nothing down
+        # there is observable and the four steps that need it must NOT be read
+        # as "the pipeline skipped VET/classify/search/commit". A receipt whose
+        # seam is present but MISSING a block is a defect in the seam itself —
+        # `_capture_step_witness` — and must not be published as the pipeline's
+        # own report (`f"{s}: {}"`) while asserting it accounts for the step. A
+        # receipt WITH every block, where a stage still reports no work, is the
+        # pipeline's own answer: the stage ran (or was gated off) and the witness
+        # says which. `capstone_measure._seam_cause` keeps the same three states,
+        # so the two probes cannot grade one fact oppositely (#10214 review, P3).
         witness = (result.get("stats") or {}).get("step_witness")
         if not isinstance(witness, dict) or not witness:
             return refuse(
@@ -1017,6 +1021,19 @@ def main(argv: list[str] | None = None) -> int:
                 " receipt); extraction_mode="
                 f"{result.get('extraction_mode')!r}. This is an INSTRUMENT gap"
                 " and NOT the pipeline skipping those steps; §4.4 forbids a"
+                " table from a subset",
+                prereg_ok=True, code=5, corpus=corpus)
+        absent_blocks = [s for s in missing
+                         if STEP_WITNESS_BLOCK.get(s) not in witness]
+        if absent_blocks:
+            return refuse(
+                "steps not observed in the pass: " + ", ".join(missing)
+                + " — stats['step_witness'] IS present but carries no "
+                + ", ".join(f"{STEP_WITNESS_BLOCK[s]!r} block (for {s})"
+                             for s in absent_blocks)
+                + ": the seam is present and INCOMPLETE, which is a defect in"
+                " _capture_step_witness (tortoise/sdk.py), NOT the pipeline"
+                " skipping the step and not a missing surface; §4.4 forbids a"
                 " table from a subset",
                 prereg_ok=True, code=5, corpus=corpus)
         return refuse(
