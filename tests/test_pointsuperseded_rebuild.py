@@ -1631,11 +1631,22 @@ def test_rebuild_does_not_read_a_fold_as_the_delete_recreate(sup):
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj.rebuild_all(str(synth_dir), confirm_destructive=True)
     got = sdk.get_point(a) or {}
-    assert got.get("confidence") != 0.99, (
+    # ⛔ The existence assertion is not decoration: a rebuild that produced NO
+    # node makes `got` the empty dict, `got.get("confidence")` None, and
+    # `None != 0.99` TRUE — so the comparison below would pass on the exact
+    # reconstruction failure this pin exists to defend (a replay that drops the
+    # id instead of re-creating it). Measured: with the node deleted after the
+    # rebuild, the confidence assertion alone stayed green (#10010 review, P3).
+    assert got, (
+        "the rebuild lost Point a entirely, so the confidence comparison below "
+        "cannot distinguish 'the fold no longer consumes the delete' from 'this "
+        "rebuild produced nothing'")
+    assert got.get("confidence") == 0.1, (
         "the fold consumed the pending delete, so the rebuild's "
         "last_ann_drop_seq anchor moved onto a record that replaced nothing "
         "and a belief write from the DEAD incarnation folded onto the "
-        "re-created node")
+        "re-created node; the REAL re-create's payload states confidence 0.1, "
+        f"so anything else is the dead incarnation's write: {got!r}")
 
 
 # ══════════════════════════════════════════════════════════════════════
