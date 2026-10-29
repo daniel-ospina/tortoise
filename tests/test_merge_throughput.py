@@ -4210,7 +4210,7 @@ def test_docs_job_pr_path_never_interpolates_filenames():
         was satisfied by the ``sed -z`` two lines later, and a bare
         ``"|| true" in run`` by the ``grep -c . ... || true`` in the count
         line, so deleting ``-z`` or the tolerance from the ``git diff`` left
-        the whole suite green. Command continuations (``\``) are joined.
+        the whole suite green. Command continuations (``\\``) are joined.
         """
         code = [ln for ln in run.splitlines() if not ln.lstrip().startswith("#")]
         for i, ln in enumerate(code):
@@ -4273,7 +4273,7 @@ def test_docs_job_pr_path_never_interpolates_filenames():
         '  --files-from "$RUNNER_TEMP/pr-md.nul"\n'
     )
     for broken, why in (
-        ('xargs "$BIN" <"$FILES_FROM"\n', "not NUL-delimited"),
+        ('xargs "$BIN" <"$FILES_FROM"\n', "consumed NUL-delimited"),
         ('xargs -0 "$BIN" >"$TMP_REPORT" 2>&1\n', "must arrive on STDIN"),
     ):
         with pytest.raises(AssertionError, match=why):
