@@ -1258,6 +1258,81 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
     )
 
 
+def _capture_site_jobs(workflow: Path) -> list[tuple[str | None, str]]:
+    """``(job, capture target)`` for every log-capture site in ``workflow``.
+
+    The job is resolved from the file's own structure (the 2-space-indented job keys
+    under ``jobs:``), so a site added to a NEW job is attributed to that job without
+    the test naming it. A site above the first job key resolves to ``None`` — no
+    caller relies on that, it is only the honest answer for a stray capture.
+    """
+    text = workflow.read_text()
+    lines = text.splitlines()
+    job_starts: list[tuple[int, str]] = []
+    for job in (yaml.safe_load(text).get("jobs") or {}):
+        needle = f"  {job}:"
+        for i, line in enumerate(lines):
+            if line.rstrip() == needle:
+                job_starts.append((i, job))
+                break
+    job_starts.sort()
+    sites: list[tuple[str | None, str]] = []
+    for i, line in enumerate(lines):
+        target = capture_site(line)
+        if target is None:
+            continue
+        owner = None
+        for start, job in job_starts:
+            if start <= i:
+                owner = job
+        sites.append((owner, target))
+    return sites
+
+
+def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() -> None:
+    """The reporter's `NAMED RESIDUAL` header must describe the legs it still names.
+
+    The header is the artifact the next `/tmp` migration lane reads — `python-ci.yml`'s
+    own `test-slow` first step points a reader at it — and it sat SEVEN LINES above the
+    `⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS` paragraph that retires it (PR #10244
+    review, P3). It said *"every leg writes the SAME global path"*, which stopped being
+    true when #10028 migrated the fast matrix and the `test-slow` migration in this PR
+    completed the second job: 14 legs now write `${RUNNER_TEMP}/pytest.log`, and TWO
+    still write the host-global literal. A header claiming the retired premise teaches
+    the opposite of what the code does, in the exact sentence the next lane quotes.
+
+    The remaining legs are DERIVED from the workflows with `capture_site` (the same
+    reading the floor uses) and asserted to be NAMED by the header, so this cannot
+    drift the way the stated inventory did: migrating one more leg reds it on the
+    statement, not on a count.
+    """
+    header = SCRIPT.read_text()
+    # MUTATION PROOF for the second half below: the pre-fix text stated the premise the
+    # STATUS paragraph retires, so this assertion fails on the pre-fix file.
+    assert "every leg writes the SAME global path" not in header, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header still claims EVERY leg writes "
+        "the host-global path — #10028 migrated both matrix jobs, so the claim is false "
+        "and contradicts the STATUS paragraph seven lines below it"
+    )
+    residual = sorted(
+        job
+        for workflow in ATTRIBUTION_WORKFLOWS
+        for job, target in _capture_site_jobs(workflow)
+        if job is not None and target == "/tmp/pytest.log"
+    )
+    # The delivered state, not a bound: a further migration changes this list and must
+    # update the header's scope in the same change (that is the point of the pin).
+    assert residual == ["test-carve-out", "test-concurrency-falkor"], (
+        "the legs still writing a host-global /tmp/pytest.log changed — update the "
+        f"NAMED RESIDUAL scope in pytest-attribution.sh to match: {residual}"
+    )
+    for job in residual:
+        assert job in header, (
+            f"pytest-attribution.sh: `{job}` still writes the host-global "
+            "/tmp/pytest.log, so the NAMED RESIDUAL header must name it (#10280)"
+        )
+
+
 def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
     """Prose is not a capture site — a documented spelling must not inflate the floor.
 

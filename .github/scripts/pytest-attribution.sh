@@ -127,12 +127,14 @@ fi
 #     line after the summary and no second banner, because the file was rewritten
 #     underneath the leg.
 #
-# ⚠️ NAMED RESIDUAL, and the real fix: this reporter cannot always tell one session's
-# output from another's, because every leg writes the SAME global path
-# (`/tmp/pytest.log`) while the rc file next to it already moved to
+# ⚠️ NAMED RESIDUAL, and the real fix FOR THE TWO LEGS NAMED BELOW: this reporter
+# cannot always tell one session's output from another's while a leg writes a
+# HOST-GLOBAL path (`/tmp/pytest.log`) — the rc file next to it already moved to
 # `${RUNNER_TEMP:-/tmp}/pytest-rc`. A foreign writer that rewrites the file and stops
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
-# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}`.
+# leg's verdict. For those two legs the durable fix is a per-leg log path under
+# `${RUNNER_TEMP}` (#10280); both matrix jobs already pass one, so for them the
+# signals below are a backstop rather than the load-bearing defence.
 #
 # ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028). `python-ci.yml`'s
 # `test` job — the fast matrix, NINE legs, and the largest share of this failure —
