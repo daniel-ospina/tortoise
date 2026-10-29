@@ -1630,16 +1630,20 @@ _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
 #: `_ENTITY_CREATION` above, so adding a row here cannot leave the two folds
 #: disagreeing silently.
 _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
-#: Labels whose graph fold MERGEs the NODE by `name` (`_upsert_object` /
-#: `_upsert_subject`). A second registration of ONE name under a fresh id
-#: therefore COLLAPSES the node onto the LAST id, and a state op naming the
-#: collapsed-away id folds 0 rows there (`MATCH (n:$label {id:$rid})`). An
-#: id-keyed label (`Event`) never collapses, so it is absent. This is the
-#: DECLARATION for the name-resolution leg, the state-op guard below, and the
-#: emitted `name_keyed`/`identity` bounds —
-#: `journal_object_surviving_keys` is deliberately Object-only (it models
-#: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
-#: neither can share this constant without changing what it means.
+#: Labels that CARRY a `name` as a mutable natural key (R2), and so are the
+#: labels whose registrations the carrier index tracks by name. ⚠️ `name` is
+#: **not** their MERGE key: since #3590 `_upsert_object` / `_upsert_subject`
+#: MERGE on the record's own `id`, so a second registration of ONE name under a
+#: fresh id creates a SECOND node and NOTHING collapses. What the name still
+#: decides is whether a node is written AT ALL (the writers early-return on a
+#: name that fails `_writable_id`), which is why the carrier index is keyed on
+#: it and why `no_node_ids` is a name-keyed question. An id-keyed label with no
+#: such property (`Event`) is absent. This is the DECLARATION for the
+#: name-resolution leg, the state-op guard below, and the emitted
+#: `name_keyed`/`identity` bounds — `journal_object_surviving_keys` is
+#: deliberately Object-only (it models `_upsert_object` alone) and
+#: `_graph_entities` indexes EVERY label, so neither can share this constant
+#: without changing what it means.
 _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
 #: The labels whose ``status`` the COMPARISON decides. ``Event`` carries
@@ -1740,12 +1744,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # The seq of the last `status`-writing state op per entity, so the
     # trailing sweep honours `rebuild_all`'s #4743 ordering.
     last_status_seq: dict = {}
-    # #5285 (DEFECT 1): the ids CURRENTLY carrying each name-MERGE key, built
-    # as the walk proceeds. Since the graph MERGEs Object/Subject by NAME under
-    # the LAST registration's id, a state op folds there iff its id is a live
-    # carrier AT ITS OWN SEQ — the journal-END `surviving_ids` key set is the
-    # wrong question for an INLINE state op (an id that was the carrier early
-    # and collapsed away later genuinely folded at that earlier point). Keyed by
+    # #5285 (DEFECT 1): the ids CURRENTLY carrying each name, built as the walk
+    # proceeds. ⚠️ Since #3590 this is NOT a MERGE-collapse model — an id-keyed
+    # MERGE keeps every carrier — it is the SEQ-AWARE table the state-op guard
+    # consults, together with `no_node_ids` (a name failing `_writable_id`
+    # writes no node at all). A state op folds iff its id is a live carrier AT
+    # ITS OWN SEQ: the journal-END `surviving_ids` key set is the wrong question
+    # for an INLINE state op (an id that was the carrier early and was renamed
+    # or deleted away later genuinely folded at that earlier point). Keyed by
     # ``(label, name)`` because Object and Subject MERGE in SEPARATE spaces, so
     # a shared name must not alias one label's carrier onto the other. The value
     # is a SET, not a single id: a RENAME `SET`s the name property in place, so
@@ -1766,15 +1772,17 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # nothing populated either table and nothing could reach the arm. A
     # never-populated table is worse than an absent one: it reads as live
     # protection for the #10157/#5285 shapes while protecting nothing.
-    # #5285 cycle-6: the GRAPH's MERGE key per id — `_upsert_object` /
-    # `_upsert_subject` MERGE on `name` ALONE, and an empty name is skipped by
-    # `_writable_id` (no node is created), so `title` is NEVER a merge key. The
-    # display name below legitimately falls back to `title` for PARITY, but the
-    # carrier index must not: keying it on the display name let a title-only
+    # #5285 cycle-6: the NAME each id was registered under — since #3590 the
+    # writers MERGE on `id`, but they still early-return on a `name` that fails
+    # `_writable_id` (no node is created), and `title` is NEVER that name. So
+    # this table answers "which name gates this id's node, and is it a name the
+    # graph actually carries", never "what is this id's MERGE key". The display
+    # name below legitimately falls back to `title` for PARITY, but the carrier
+    # index must not: keying it on the display name let a title-only
     # registration EVICT the live carrier of the real node, and the state-op
     # guard then falsely refused `state-op-miss` a journal all three replay
-    # engines fold (review round 6, P1). An id with no merge key recorded here
-    # has no graph node this fold can model, so the guard stays fail-OPEN for it.
+    # engines fold (review round 6, P1). An id with no name recorded here has no
+    # graph node this fold can model, so the guard stays fail-OPEN for it.
     merge_key_by_id: dict[tuple[str, str], str] = {}
     # #5285 cycle-7: ids whose journal CREATION produced NO graph node at all,
     # because `_writable_id` skips an empty / non-writable MERGE key. The graph's
@@ -1905,10 +1913,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                       or default_status)
             if isinstance(status, str) and status and "status" not in rec:
                 rec["status"] = status
-            # #5285 cycle-6 (P1): the MERGE key is `name` ALONE — `title` is a
-            # DISPLAY fallback the graph never merges on, and an empty name
-            # creates no node at all. The carrier index must use the merge key,
-            # never the display name.
+            # #5285 cycle-6 (P1): `name` is the WRITE GATE — `title` is a
+            # DISPLAY fallback the writers never gate on, and an unwritable name
+            # creates no node at all (both `_upsert_*` early-return; the MERGE
+            # key itself is the `id` since #3590). The carrier index must use
+            # this gate key, never the display name.
             # #5285 cycle-8 (P2): the predicate is the GRAPH's own writability
             # check, not "a non-empty str". `_writable_id` is what
             # `_upsert_object` / `_upsert_subject` use, and it rejects a
@@ -1936,20 +1945,28 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     no_node_ids.discard((label, eid))
                     _live = carriers_by_name.setdefault(
                         (label, _merge_key), set())
-                    if len(_live) > 1:
-                        # The key ALREADY has >1 live carrier (a rename
-                        # collision). Since #3590 the graph keys on the
-                        # record's own `id` unconditionally — the #8864
-                        # name-carrier-count branch that used to decide this at
-                        # the MERGE site is gone — so NO carrier is re-id'd
-                        # and all of them survive. Keeping them all is
-                        # therefore both the graph's behaviour and the only
-                        # choice that cannot refuse a node the graph still
-                        # holds (fail OPEN, never closed).
-                        _live.add(eid)
-                    else:
-                        _live.clear()
-                        _live.add(eid)
+                    # #3590: NO COLLAPSE, on any carrier count. `_upsert_object`
+                    # / `_upsert_subject` MERGE on the record's OWN `id`
+                    # unconditionally, so a second registration of ONE name
+                    # under a fresh id creates a SECOND node and BOTH ids stay
+                    # live carriers of that name (D2: `name` is a mutable
+                    # natural key, not an identity) — whatever the count was
+                    # when this record arrived.
+                    #
+                    # This arm used to `clear()` the set first, for EVERY
+                    # count. That modelled the pre-#3590 graph, where the node
+                    # was MERGEed by `name` and re-id'd onto the LAST id, so
+                    # the earlier id really did stop existing. Under an
+                    # id-keyed MERGE the eviction is a modelling error in the
+                    # fail-CLOSED direction: the state-op guard below then
+                    # sees `eid` missing from the set of a name the graph folded
+                    # two live nodes under and records a NON-EXEMPT
+                    # `state-op-miss` — refusing a legal journal on all three
+                    # replay engines (`#9876` review P1,
+                    # `check-fail-closed-false-refusal`). Adding without
+                    # clearing is also the only choice that cannot refuse a node
+                    # the graph still holds.
+                    _live.add(eid)
                 elif (label, eid) not in merge_key_by_id:
                     # #5285 cycle-7: the graph writes NOTHING for this creation —
                     # no node exists for the id, so a state op on it is refused
@@ -2029,17 +2046,20 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                         )
                     continue
                 # #5285 (DEFECT 1): the graph fold MATCHes a state op by primary
-                # ID (`MATCH (n:$label {id:$rid}) SET n += $s`), but
-                # `_upsert_object`/`_upsert_subject` MERGE the NODE by NAME — so
-                # when ONE name is registered under two ids the node collapses
-                # onto the LAST id and a state op naming the collapsed-away id
-                # folds 0 rows there. `entities` still holds the collapsed-away
-                # id (the reference index is keyed by every id the journal ever
-                # saw), so the `rec is None` gate above does NOT catch it: this
-                # fold used to APPLY state the graph dropped, and
-                # `check_consistency` passed a journal all three replay engines
-                # refuse — the fail-open this lane exists to remove. Refuse with
-                # the SAME `state-op-miss` shape the malformed branch records.
+                # ID (`MATCH (n:$label {id:$rid}) SET n += $s`), so a state op
+                # whose id the graph does not hold folds 0 rows there while
+                # `entities` still holds that id (the reference index is keyed by
+                # every id the journal ever saw) — the `rec is None` gate above
+                # does NOT catch it. This fold used to APPLY state the graph
+                # dropped, and `check_consistency` passed a journal all three
+                # replay engines refuse — the fail-open this lane exists to
+                # remove. Refuse with the SAME `state-op-miss` shape the
+                # malformed branch records.
+                # ⚠️ The reachable cases are `no_node_ids` (checked next) and a
+                # carrier index that disagrees with itself, NOT a name collapse:
+                # since #3590 both writers are id-keyed, so one name registered
+                # under two ids keeps BOTH nodes (`carriers_by_name` adds, never
+                # evicts).
                 # SEQ-AWARE by construction: `carriers_by_name` is the carrier
                 # SET at THIS point in the walk, so an id that WAS the sole
                 # carrier before a later same-name registration still folds here
@@ -2047,8 +2067,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 # A name the fold never indexed stays fail-OPEN, exactly as
                 # `_object_target` falls through — an unmodelled shape must not
                 # become a false refusal. The guard fires only when the name IS
-                # indexed and this id is NOT among its live carriers (the
-                # collapsed-away case).
+                # indexed and this id is NOT among its live carriers — i.e. the
+                # carrier index contradicts itself, which the walk cannot
+                # produce; it is retained so a future edit that breaks that
+                # invariant fails closed with a recorded disposition instead of
+                # silently accepting a graph the fold does not model.
                 # #5285 cycle-7 (P1): an id whose CREATION produced no graph node
                 # (an empty / non-writable merge key) is a 0-row miss there, so
                 # the reference fold must refuse it too. This check sits BEFORE
@@ -2063,8 +2086,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                                 "entity"),
                     )
                     continue
-                # #5285 cycle-6 (P1): read the id's GRAPH merge key, never the
-                # display name — see `merge_key_by_id`. An id with no merge key
+                # #5285 cycle-6 (P1): read the id's NAME GATE, never the
+                # display name — see `merge_key_by_id`. An id with no name gate
                 # has no node this fold models, so the guard stays fail-open.
                 _carrier_name = (merge_key_by_id.get((label, eid))
                                  if label in _NAME_MERGE_LABELS else None)

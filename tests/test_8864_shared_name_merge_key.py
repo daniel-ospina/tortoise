@@ -219,6 +219,72 @@ class TestFoldSeam:
             sdk.close()
 
 
+    @pytest.mark.parametrize("label,creation", [
+        ("Object", "ObjectRegistered"),
+        ("Subject", "SubjectAdded"),
+    ])
+    def test_the_1_to_2_registration_keeps_both_carriers_in_the_ENTITY_fold(
+            self, tmp_path, label, creation):
+        """The 1→2 registration: NO collapse, so the earlier id still folds.
+
+        `_upsert_object` / `_upsert_subject` MERGE on the record's own `id`
+        (#3590), so `[Reg(A, name), Reg(B, name)]` leaves TWO live nodes under
+        one name. `_fold_journal_entities`' carrier arm used to `clear()` the
+        set on the SECOND registration (the pre-#3590 name-keyed MERGE re-id'd
+        the node onto the LAST id), which evicted `A` — and the state-op guard
+        then recorded a NON-EXEMPT `state-op-miss` for a state op the graph
+        folds, i.e. it refused a legal journal on every replay engine
+        (#9876 review P1, `check-fail-closed-false-refusal`).
+
+        Pinned against the REPLAYED GRAPH, never against the model alone: the
+        graph keeps both ids and folds the state op onto `A`.
+        """
+        import copy
+
+        from tortoise.consistency import _fold_journal_entities
+        from tortoise.projection.nonfolded import (
+            collect_non_folded,
+            refused_events,
+        )
+
+        first, second = f"{label[:3].lower()}-first", f"{label[:3].lower()}-second"
+        events = [
+            {"type": creation, "id": first, "name": "Acme"},
+            # The 1→2 transition: a fresh id under an ALREADY held name.
+            {"type": creation, "id": second, "name": "Acme"},
+            # A state op on the FIRST carrier — the node the old `clear()`
+            # evicted from the carrier set.
+            {"type": "EntityMutated", "label": label, "id": first,
+             "op": "restatus", "state": {"status": "archived"}},
+        ]
+
+        sdk = TortoiseSDK(str(tmp_path / "g.db"))
+        try:
+            proj = sdk._get_proj()
+            for rec in events:
+                proj.apply(rec)
+            graph_ids = sorted(_ids(_nodes(proj, label)))
+            graph_status = _by_id(proj, label, first, "status")
+        finally:
+            sdk.close()
+
+        assert graph_ids == sorted([first, second]), graph_ids
+        assert graph_status == [["archived"]], graph_status
+
+        with collect_non_folded() as entries:
+            entities, _deleted, _ambiguous = _fold_journal_entities(
+                copy.deepcopy(events))
+        assert [str(e) for e in refused_events(entries)] == [], (
+            "the ENTITY reference fold refused a journal the graph folds — it "
+            "collapsed one name onto its LAST id: "
+            f"{[str(e) for e in refused_events(entries)]}"
+        )
+        assert entities[(label, first)]["status"] == "archived", (
+            "the reference fold did not apply the state op the graph folded "
+            f"onto the FIRST carrier: {entities[(label, first)]}"
+        )
+
+
 class TestReplayModelsSeeTheMentionStubs:
     """The two Python models of the fold must count the SAME carriers as the graph.
 
