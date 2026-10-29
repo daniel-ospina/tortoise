@@ -3090,10 +3090,26 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # Count the bullets from the LIST ITSELF, scoped to the block the lead-in
     # introduces: a `- **…**` bullet elsewhere in the section is not a cause and
     # must not be able to red this.
-    _bound_list = section.partition("before you call the growth other traffic:")[
-        2
-    ].split("\n   ⛔", 1)[0]
-    _bound_bullets = re.findall(r"^   - \*\*(.+?)\*\*", _bound_list, re.M)
+    # ⛔ And read that list off `flat`, not the RAW section (#10083 review cycle 19,
+    # P3, measured). This was the one piece of the counting machinery that had not
+    # moved to the normalised copy, although its own sibling states the principle
+    # (`_c_msgs`: "read off `flat`, so a word-preserving refill cannot move it").
+    # Measured: changing ONLY the leading whitespace of the three bullets (3 → 4
+    # spaces, not one word touched) enumerated 0 and red with "the lead-in says
+    # THREE readings but the list enumerates 0" — a claim-preserving indentation
+    # edit accused of a defect it does not have, and the indent was ALSO part of
+    # the raw window marker (`"\n   ⛔"`), where an indent change silently WIDENS
+    # the window instead of failing. Indent is a rendering-level choice, not the
+    # claim (CommonMark 0.31.2 §5.2: a list item is `<1-4 spaces><marker>`, so the
+    # nesting indent below the marker is layout), and the claim this pin measures
+    # is "the lead-in's numeral equals the number of members". So the window and
+    # the bullet pattern both come from `flat`, where any indent is a single space
+    # and the count cannot move on a reflow or a re-indent.
+    _bound_list = flat.partition("before you call the growth other traffic:")[2]
+    _bound_list, _closed, _ = _bound_list.partition("⛔")
+    if not _closed:
+        _bound_list = _bound_list[:2500]
+    _bound_bullets = re.findall(r"- \*\*(.+?)\*\*", _bound_list)
     assert _lead_nums == {len(_bound_bullets)}, (
         f"the `no_tenant` bound's lead-in says {_lead_in.group(1)} readings but the "
         f"list enumerates {len(_bound_bullets)} ({_bound_bullets!r}) — the lead-in's "
@@ -3321,6 +3337,46 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "to remove, so a reader takes an exhaustive enumeration that is not "
         "exhaustive and skips a cause"
     )
+    # ⛔ ... and the two CROSS-REFERENCES that point AT (c) carry its count in words,
+    # and they were the last FREE-FLOATING numerals in this section (#10083 review
+    # cycle 19, P2, measured). The label's numeral is derived from its members
+    # (`_c_label` vs `_c_msgs`) and the bound's lead-in from its bullets
+    # (`_lead_nums` vs `_bound_bullets`), but nothing read `logs one of FOUR
+    # messages` (the bound's fault bullet) or `which matches all four` (the tail of
+    # (c) itself), so:
+    #   - relabelling (c) honestly to FIVE after adding a fifth reachable fault
+    #     message — a strictly IMPROVING widening, the very edit the fault-grep pin
+    #     above says it encourages — left both cross-references saying four, and
+    #     the operator reads the fifth fault line as "no fault" on a fail-and-fix
+    #     arm; and
+    #   - `FOUR` → `TWO` / `matches all four` → `matches three of them` stayed
+    #     GREEN with the members untouched, i.e. the numeral could go stale on its
+    #     own.
+    # The numeral is DERIVED from the same source the label is (`len(_c_msgs)`),
+    # never hard-coded, so an honest relabel keeps the three agreeing and stays
+    # GREEN — the agreement is the claim, and the wording around the numeral is
+    # not pinned beyond what identifies which set it counts.
+    _fault_refs = (
+        ("the ⚠️ `no_tenant` bound's fault bullet",
+         _bound_list, r"\bone of ([A-Za-z]+) messages\b"),
+        ("the tail of recipe 1's exclusion (c)",
+         _excl_c, r"\bwhich matches all ([A-Za-z]+)\b"),
+    )
+    for _where, _text, _num_re in _fault_refs:
+        _ref = re.search(_num_re, _text)
+        assert _ref and _ref.group(1).upper() in _NUMERALS, (
+            f"{_where} no longer states how many fault messages the fault grep "
+            "matches in a readable form (`one of N messages` / `which matches "
+            "all N`) — an unpinned count can go stale against the list it "
+            "points at and a real fault line reads as 'no fault'"
+        )
+        assert _NUMERALS[_ref.group(1).upper()] == len(_c_msgs), (
+            f"{_where} says {_ref.group(1).upper()} but recipe 1's exclusion (c) "
+            f"enumerates {len(_c_msgs)} ({_c_msgs!r}) — the cross-reference is "
+            "stale, so an operator grepping for the messages (c) names is told "
+            "the set is smaller than it is and a fault line the list names "
+            "reads as 'no fault'"
+        )
     # Deletion of any ONE member still reds on its own literal, independently of
     # the count above.
     _msgs = (r"could not resolve the record tenant for this request",
