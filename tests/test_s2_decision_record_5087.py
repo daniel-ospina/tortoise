@@ -19,6 +19,17 @@ THE DEFECT THIS PINS (two, both found at the 17th review round of PR #10072)
    forbade the class for LINE NUMBERS (*"Rows cite methods and assertions by NAME, never by
    line number"*); a row ordinal is a line number in disguise and moves the same way.
 
+3. **§5 cited the two classify passes by BARE line number** (*"`(:8608`, the S2 list, and
+   `:8740`, the post-S4 union)"*). Both landed on unrelated statements — `:8608` is
+   `"recovery": recovery_stats},` inside `extract_session_v2`'s **empty-conversation early
+   return** (the branch that returns before any classify pass can exist), and `:8740` is
+   `stats=stage_stats,` in the `run_s4(...)` call — while the two passes were at `:8700`
+   and `:8832`. A bare `:NNNN` is the one shape with **nothing authoritative to fall back
+   on**: it names no symbol, so a reader following it cannot tell a stale cite from a
+   correct one, and this one sent them to the no-conversation path. §8's preamble had
+   already claimed the record's guard *"reddens on either form"* while nothing checked
+   this one.
+
 WHAT THIS PINS
 --------------
 1. No blank line splits a table anywhere in the design record, unless the block below it
@@ -27,11 +38,18 @@ WHAT THIS PINS
 2. No row inside §8 — the section that holds the test table and the mutant census —
    cites a sibling by ordinal. Prose may say "row" in a sentence; a **row** may not point
    at another row by number.
+3. No line citation anywhere in the record is **bare** — a `:NNNN` with no symbol, file or
+   quoted identifier in front of it. The rule is the one `tests/test_extractor_v4_citation_rot.py`
+   states for the sibling document ("the symbol name is authoritative, the line number is a
+   convenience"; a citation whose symbol has merely MOVED passes and that is deliberate), so a
+   file-anchored `FILE:line` is out of scope here by that recorded tolerance — it is the bare
+   form, with no symbol at all, that cannot be checked by its reader.
 
 Non-vacuity: on the pre-fix document check 1 fails on the blank line inside §8's test
-table, and check 2 fails on the two `row 11` citations in the `_noul` mutant row. Both are
-re-verified below by running the same checkers over the pre-fix text, so a future edit that
-reintroduces either shape reddens here instead of merging green.
+table, check 2 fails on the two `row 11` citations in the `_noul` mutant row, and check 3
+fails on §5's `:8608`/`:8740` pair. All three are re-verified below by running the same
+checkers over the pre-fix text, so a future edit that reintroduces any of them reddens here
+instead of merging green.
 
 Static: one file read. No network, no DB, no graph, no model.
 """
@@ -53,6 +71,13 @@ _ORDINAL_CITATION = re.compile(r"\brows?\s+\d+\b", re.IGNORECASE)
 
 #: §8 is "The tests, and the mutants that redden them".
 _SECTION_8_HEADING = "## 8."
+
+#: A BARE line citation: `:8608` with nothing that names the cited thing in front of it.
+#: `EXTRACTOR-V4-ARCHITECTURE.md:823` and `foo.py:12` are anchored by a file name and are
+#: NOT this shape — their symbol is recoverable, which is the tolerance
+#: `tests/test_extractor_v4_citation_rot.py` documents. A clock time (`12:30`) is excluded
+#: by the same lookbehind, because the character before its colon is a digit.
+_BARE_LINE_CITATION = re.compile(r"(?<![A-Za-z0-9_.]):\d{2,4}\b")
 
 
 def _lines() -> list[str]:
@@ -112,6 +137,15 @@ def _ordinal_citations(lines: list[str]) -> list[tuple[int, str]]:
     ]
 
 
+def _bare_line_citations(lines: list[str]) -> list[tuple[int, str]]:
+    """1-based line numbers of every line carrying a `:NNNN` with no symbol in front of it."""
+    return [
+        (index + 1, line)
+        for index, line in enumerate(lines)
+        if _BARE_LINE_CITATION.search(line)
+    ]
+
+
 def test_no_table_in_the_design_record_is_split_by_a_blank_line():
     splits = _split_tables(_lines())
     assert not splits, (
@@ -134,7 +168,18 @@ def test_no_row_in_section_8_cites_a_sibling_by_ordinal():
     )
 
 
-def test_the_two_checkers_redden_on_the_pre_fix_record():
+def test_no_line_citation_in_the_design_record_is_bare():
+    offenders = _bare_line_citations(_lines())
+    assert not offenders, (
+        "a bare `:NNNN` names no symbol, so a reader has nothing authoritative to fall back on "
+        "and cannot tell a stale cite from a correct one — one such pair landed inside "
+        "`extract_session_v2`'s empty-conversation early return. Cite the symbol instead. "
+        f"Offending line(s) in {DOC.relative_to(ROOT)}: "
+        + "; ".join(f"line {lineno}: {line.strip()[:160]}" for lineno, line in offenders)
+    )
+
+
+def test_the_three_checkers_redden_on_the_pre_fix_record():
     """Non-vacuity: the checks fail on the shapes the #10072 review found, and pass on this head."""
     pre_fix_test_table_split = (
         "| test | what it proves |",
@@ -175,3 +220,25 @@ def test_the_two_checkers_redden_on_the_pre_fix_record():
             "## 9. What this does NOT close",
         ]
     ), "a row that points at a sibling by ordinal must be reported"
+
+    # §5 at the pre-fix head, verbatim — both cites bare, both on unrelated lines.
+    pre_fix_section_5 = (
+        "runs **two** classify passes on the same `KindClassifier` instance (`:8608`, the",
+        "S2 list, and `:8740`, the post-S4 union), so the S2.3 side also pays 2 ×",
+    )
+    assert [lineno for lineno, _ in _bare_line_citations(list(pre_fix_section_5))] == [1, 2], (
+        "a `:NNNN` with no symbol in front of it must be reported — this is the §5 pair the "
+        "19th review round found pointing into the empty-conversation early return"
+    )
+
+    # An ANCHORED cite is the tolerated form and must NOT be flagged: the file name is the
+    # symbol to fall back on, which is what `test_extractor_v4_citation_rot.py` documents.
+    assert _bare_line_citations(
+        [
+            "(`EXTRACTOR-V4-ARCHITECTURE.md:823`) implies once the rate this section",
+            "`tortoise/extractor_v2.py:8700` is the S2 classify pass, and 12:30 is a time",
+        ]
+    ) == [], (
+        "a file-anchored `FILE:line` carries a symbol to resolve against and is deliberately "
+        "tolerated; a clock time is not a citation at all"
+    )

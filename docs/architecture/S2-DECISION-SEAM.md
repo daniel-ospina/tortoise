@@ -223,9 +223,10 @@ a **classify pass** that reports `unavailable` (or a decider that raised) ends
 consultation for the remainder of that pass, and every remaining item takes the
 caller's declared kNN top-1 fallback, counted as `assigned_knn`. ⚠️ That latch is
 **per pass too** — it is reset on entry to `_adjudicate_batches`, and a session
-runs **two** classify passes on the same `KindClassifier` instance (`:8608`, the
-S2 list, and `:8740`, the post-S4 union), so the S2.3 side also pays 2 ×
-`TIMEOUT`. Says "per run" in an earlier revision of this paragraph, and that
+runs **two** classify passes on the same `KindClassifier` instance — once from
+`extract_session_v2`'s S2 pass over `_collect_classify_items(embed_list)`, and again
+from the post-S4 union pass over `_collect_classify_items(complete_list)` — so the
+S2.3 side also pays 2 × `TIMEOUT`. Says "per run" in an earlier revision of this paragraph, and that
 doubled-bound error was the thing round 10 fixed on the S2.2 side while leaving
 the S2.3 half unsaid. Without the latch a dead endpoint cost one `TIMEOUT` per
 batch — 125 of them ≈ 62 minutes on a 5,000-item tail, on the synchronous write
@@ -425,7 +426,10 @@ Mutation-checked (each restores byte-identically — verified with `diff`). Rows
 assertions by NAME — never by line number, and never by row **ordinal**. Both go stale the same way
 the moment a later commit inserts above them: one line-number citation went stale that way, and
 three rounds later every `row N` pointer had moved by three. `tests/test_s2_decision_record_5087.py`
-reddens on either form, so this is a rule with an enforcement behind it, not a hope.
+reddens on the ordinal form and on a **bare** `:NNNN` — one with no symbol in front of it, so
+nothing authoritative to fall back on; a file-anchored `FILE:line` is tolerated the way
+`tests/test_extractor_v4_citation_rot.py` documents — so this is a rule with an enforcement
+behind it, not a hope.
 
 | mutant | red |
 |---|---|
