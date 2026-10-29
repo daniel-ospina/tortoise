@@ -699,8 +699,10 @@ def test_the_workflow_annotations_carry_the_state_line_in_the_message():
     # every state the tool can report has an annotation branch
     assert 'verdict" = "PR-STARVED"' in wf
     assert 'verdict" = "PR-UNWITNESSED"' in wf
-    # ... including the sixth state this PR added: an arm that is dropped would
-    # otherwise leave every one of these assertions green (PR #10253 review, P3).
+    # ... including the arm `#10253` added. THIS PR did not add the state, so the
+    # assertion passes against the pre-PR workflow too: it is a FUTURE-regression
+    # guard, not evidence that this diff is covered (#10264 review P3 — the earlier
+    # comment claimed "the sixth state this PR added", which is false).
     assert 'verdict" = "PR-BACKLOGGED"' in wf
 
 
@@ -984,6 +986,55 @@ def test_a_reading_that_followed_a_trim_never_claims_the_invocation_trimmed_noth
     assert not any("Nothing was cancelled" in line for line in warnings)
     assert 'cancelled_count="$(python3 -c "import json; print(len(' in wf
     assert '[ "$cancelled_count" -gt 0 ]' in wf
+
+
+def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_nothing():
+    """PR #10264 review P2: the SAME invocation-scoped claim survived in PR-STARVED.
+
+    `PR-STARVED` is a legal POST-action verdict, not only a pre-action one. The
+    sequence below is DETERMINISTIC and needs no stub — it is exactly what the tool
+    sees before and after its own cancels at the default `keep=5`:
+
+      PRE  10 `finding-provenance` + 6 queued `pull_request` runs, none executing
+           -> FLOOD, and the governor trims the 5 oldest (ids 1000-1004).
+      POST the 5 KEPT candidates have started and so have LEFT the queued feed;
+           the offender is now 5 of 11 and the 6 PR runs dominate
+           -> `offender_queued < global_max` -> `PR-STARVED`, `trimmable == ()`,
+              while `cancelled` still names [1000-1004].
+
+    So the reason may not say "no run was trimmed": the same run page prints
+    `was CI: FLOOD(...) -> cleared 5 of 5` three steps above it. This is the same
+    class the PR fixes for `PR-BACKLOGGED`, one arm over — fixing only that arm left
+    the operator-facing alarm contradicting its own payload.
+    """
+    pre = flood_queued(10) + starving_pr_runs(6, age_seconds=9000)
+    post = flood_queued(5) + starving_pr_runs(6, age_seconds=9000)
+
+    flood = classify(pre)
+    assert flood.verdict == Q.FLOOD
+    assert [r.id for r in flood.trimmable] == [1000, 1001, 1002, 1003, 1004]
+
+    starved = classify(post)
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.trimmable == ()
+    joined = " ".join(starved.reasons)
+    # scoped to the READING; the invocation's own trims are named by `cancelled`
+    assert "no run is trimmed in this reading" in joined
+    assert "reported in 'cancelled', not here" in joined
+    assert "no run was trimmed" not in joined
+    # the clause above is named, and it is the dominance clause here — NOT
+    # "nothing can be blamed", which is false while a trim-safe offender is present
+    assert "another workflow holds more of the queue" in joined
+    assert "trim-safe offender present: True" in joined
+
+    # ... and BOTH no-action arms are payload-derived, sharing one lead
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    warnings = [line for line in wf.splitlines() if "::warning" in line]
+    assert warnings
+    assert not any("nothing the governor may cancel" in line for line in warnings)
+    assert not any("No trim-safe offender can be blamed" in line for line in warnings)
+    assert wf.count("${cancel_lead}") == 2
 
 
 def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():

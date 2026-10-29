@@ -236,12 +236,37 @@ jobs:
           # very same payload (#10264 review P3). Read it, and say what happened.
           cancelled_count="$(python3 -c "import json; print(len(json.load(open('/tmp/ci-queue-health.json')).get('cancelled') or []))" 2>/dev/null || echo 0)"
           cancelled_count="${cancelled_count:-0}"
+          # "Nothing was cancelled" is a claim about THIS INVOCATION, and a reading
+          # cannot support it: `classify_queue` is pure, and the tool cancels the
+          # PRE-action FLOOD candidates and then reports a POST-action re-read — so
+          # `cancelled` can be non-empty beside a no-action verdict in the very same
+          # payload (#10264 review P3). Read it, and say what happened.
+          #
+          # BOTH no-action arms need this, not just `PR-BACKLOGGED` (#10264 review
+          # P2): `PR-STARVED` is a legal POST-action verdict too. The pre-action
+          # FLOOD's kept candidates starting up LEAVES the queued feed, so the
+          # offender drops below the dominant share, the remaining `pull_request`
+          # runs dominate instead, and the re-read is `PR-STARVED` while `cancelled`
+          # still names the runs this invocation trimmed — the same run page then
+          # prints `cleared N of M` above a line claiming nothing was cancelled.
+          if [ "$cancelled_count" -gt 0 ]; then
+            cancel_lead="This reading came AFTER this run cancelled ${cancelled_count} pre-action FLOOD candidate(s) (see the transition line above)"
+          else
+            cancel_lead="This run cancelled nothing"
+          fi
           if [ "$rc" -eq 1 ]; then
             echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
           elif [ "$rc" -eq 2 ]; then
             echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
           elif [ "$verdict" = "PR-STARVED" ]; then
-            echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+            # The retired wording — "No trim-safe offender can be blamed, so there
+            # is nothing the governor may cancel" — was wrong twice on a REACHABLE
+            # reading: the payload can carry trims this run made, and PR-STARVED is
+            # also reached through `offender_queued < global_max`, where a trim-safe
+            # offender IS present and blameable in principle (the queue is merely
+            # PR-dominated). Name what the payload says; the reason line inside the
+            # tool names the clause that declined.
+            echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. ${cancel_lead}, and this state reaches no trim — its reason line names the clause that declined to act. The lever is capacity."
           elif [ "$verdict" = "PR-BACKLOGGED" ]; then
             # #10237 ask 3 — "the job must fail loudly rather than hang". A queue
             # that IS serving PR work while the backlog behind it waits past the
@@ -257,12 +282,9 @@ jobs:
             # asserted: `cancelled` non-empty in a PR-BACKLOGGED reading means this
             # run trimmed the pre-action flood, so claiming nothing was cancelled
             # here would contradict the transition line printed three steps above.
-            if [ "$cancelled_count" -gt 0 ]; then
-              cancel_note="This reading came AFTER this run cancelled ${cancelled_count} pre-action FLOOD candidate(s) (see the transition line above); the state itself reaches no trim."
-            else
-              cancel_note="This run cancelled nothing, and the state reaches no trim: it is reached only while a PR-event run is executing, and the governor's block sits below that clause, so the governor was never reached. Its candidates are a trim-safe offender's queued runs, never a queued PR run."
-            fi
-            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_note} The lever is capacity, not the governor."
+            # `cancel_lead` is that payload-derived clause, shared with the
+            # PR-STARVED arm for the same reason.
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires `pr_running > 0`, and the governor's block sits below that clause, so the governor was never reached. The lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
             echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
           fi
