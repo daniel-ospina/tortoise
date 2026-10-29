@@ -6279,8 +6279,14 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "exemption's own wording is then the only way out, and it is the record "
         "of why the row is exempt"
     )
+    # The pattern is a PLAIN raw string (no `f` prefix, single braces). As an
+    # f-string it carried a doubled `{{0,3}}` with no placeholder — `ruff` F541,
+    # which is what `agent-infra-ci / lint` fails on. The un-doubling is
+    # load-bearing, not tidy: with the `f` dropped and the braces left doubled,
+    # `{{0,3}}` reads as a literal `{`+`}` and the assertion below fails on this
+    # sentence — so the spelling is self-pinning.
     _bare_object_frame = re.compile(
-        rf"\A(?:\s*[\w'\u2019\-]+){{0,3}}\s+(?:nothing\b|no\s+\w+\b)", re.I
+        r"\A(?:\s*[\w'\u2019\-]+){0,3}\s+(?:nothing\b|no\s+\w+\b)", re.I
     )
     assert _bare_object_frame.match(_width_outside_low[_width_outside_marker.end():]), (
         "the width control above CANNOT FAIL: the tail it refuses matches the "
