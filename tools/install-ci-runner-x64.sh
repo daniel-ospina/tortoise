@@ -483,6 +483,23 @@ if [ "$MODE" = status ]; then
         if (s ~ /^\{/) { mapping(s); return }
         emit(s)
       }
+      # ⛔ THE KEY IS A NODE, NOT A SPELLING — AND A KEY THIS PASS OPENS NO BLOCK FOR IS REFUSED.
+      # The opener below read ONE spelling (`^runs-on[ \t]*:`), so a key written as a quoted scalar
+      # (single- or double-quoted `runs-on`) or in explicit-key form (`? runs-on` then `: x`) opened
+      # no block: `finish()` never ran, so NO `!` was emitted, `runs_on_unreadable` stayed 0, and the
+      # two "no verdict" arms could not fire (this repo always names a readable label) — the block
+      # printed a clean row set and exited 0 having never measured that label. That is the false
+      # PASS this block exists to prevent, and it is the one spelling a machine-formatted workflow
+      # produces. GitHub routes all of them the same way: YAML gives a plain, a single-quoted, a
+      # double-quoted and an explicit key the SAME mapping key (1.2.2 §7.4.2 / §8.2.2 — measured
+      # with PyYAML, all four resolve to `runs-on`, value included). So the two scalar spellings are
+      # READ, and every key-shaped line is COUNTED against the blocks opened, so the form this pass
+      # still cannot carry is refused rather than clearing them all — the same content-not-prefix
+      # rule `emit()` applies to a VALUE, applied to the KEY.
+      function keylike(s) {
+        return (s ~ /^["\047]?runs-on["\047]?[ \t]*:/ \
+             || s ~ /^\?[ \t]+["\047]?runs-on["\047]?[ \t]*$/)
+      }
       function finish() {
         if (!pend) return
         # ⛔ `bad > 0` FIRST: an unreadable MEMBER refuses the block even when a sibling parsed, and
@@ -503,7 +520,9 @@ if [ "$MODE" = status ]; then
         line = trim(line)
         if (line == "") next
         if (pend && ind <= pind) finish()
-        if (line ~ /^runs-on[ \t]*:/) {
+        if (keylike(line)) keyseen++
+        if (line ~ /^["\047]?runs-on["\047]?[ \t]*:/) {
+          opened++
           finish()
           rest = trim(substr(line, index(line, ":") + 1))
           pend = 1; pind = ind; got = 0; pgroup = 0; bad = 0; plabels = 0
@@ -527,7 +546,12 @@ if [ "$MODE" = status ]; then
           next
         }
       }
-      END { finish() }')"
+      END {
+        finish()
+        # One `!` per key-shaped line that opened no block: the count in the refusal message is the
+        # number of `runs-on` keys this pass could not read, not a boolean.
+        for (i = opened; i < keyseen; i++) print "!"
+      }')"
   # ⛔ A `runs-on:` THE EXTRACTION COULD NOT READ IS `exit 4`, NEVER A SILENT 0. The two exit-4 arms
   # below catch a read that produced NOTHING; they cannot catch one that is PARTIAL, which is what
   # an unrecognised spelling produces whenever any other workflow names a label. A matrix expression

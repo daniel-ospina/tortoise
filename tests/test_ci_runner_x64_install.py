@@ -1056,6 +1056,85 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
     )
 
 
+def test_label_coverage_reads_the_runs_on_key_in_every_yaml_spelling(tmp_path: Path):
+    """A QUOTED `runs-on` KEY is the same key, so it must be MEASURED — and the form still unread is refused.
+
+    The extractor opened a block on ONE spelling of the key (`^runs-on[ \\t]*:`), so a key written as
+    a quoted scalar opened no block: `finish()` never ran, NO `!` was printed, `runs_on_unreadable`
+    stayed 0, and the two "no verdict" arms could not fire (a readable sibling label always exists)
+    — so a workflow whose only `ubuntu-24.04` pin was `'runs-on': ubuntu-24.04` reported that label
+    NOWHERE, printed the other labels as covered, and exited 0. That is the all-PR-BLOCKED incident
+    reported as covered, in the direction this block forbids, and it is the spelling a
+    machine-formatted / `yq`-style workflow produces. YAML gives a plain, a single-quoted, a
+    double-quoted and an explicit key the SAME mapping key (measured with PyYAML: all four resolve
+    to `runs-on`, value included), so GitHub routes the job identically and the instrument may not
+    see them differently. The explicit-key form is instead COUNTED against the blocks opened, so a
+    spelling this pass still cannot carry refuses at 4 rather than clearing everything.
+
+    Mutation: restore `if (line ~ /^runs-on[ \\t]*:/)` -> both quoted cases exit 0 and print no
+    `ubuntu-24.04` row -> RED. Mutation: drop the `keyseen`/`opened` count -> the explicit-key case
+    exits 0 -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    quoted = {
+        "single-quoted key": "jobs:\n  a:\n    'runs-on': ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        "double-quoted key": 'jobs:\n  a:\n    "runs-on": ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n',
+    }
+    for i, (name, body) in enumerate(quoted.items()):
+        repo = _repo_with_workflows(tmp_path / f"quoted{i}", body)
+        r = _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+            cwd=repo,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode == 5, (
+            f"{name}: a quoted key IS the `runs-on` key, so the pin it carries must be measured — "
+            f"a zero answer the pool is asked to serve is 5, not {r.returncode}: {combined}"
+        )
+        assert "ubuntu-24.04 = 0 of 1" in combined, (
+            f"{name}: the quoted key was never measured, so the pin is reported NOWHERE — that is "
+            f"the incident state cleared at exit 0: {combined}"
+        )
+        assert set(re.findall(r"^\s+(?:⛔ )?(\S+) = \d+ of \d+", combined, re.MULTILINE)) == {
+            "ubuntu-latest",
+            "ubuntu-24.04",
+        }, f"{name}: a label row was printed for something that is not a label: {combined}"
+        # CONTROL — quoting must not tilt the verdict either way: the same fixture under the
+        # shipped default reports both readings (asked-and-gone vs never asked) and exits 0.
+        r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+        assert r.returncode == 0, (
+            f"{name}: the flag-off reading of the pin is a report, so 0 — not {r.returncode}: {r.stderr}"
+        )
+        assert "ubuntu-24.04 = 0 of 1" in r.stderr and "asked and gone" in r.stderr, (
+            f"{name}: the quoted key must reach the same measurement as the plain one: {r.stderr}"
+        )
+
+    # ⛔ THE FORM THE PASS STILL CANNOT CARRY IS REFUSED, NOT CLEARED. `? runs-on` / `: value` is
+    # valid YAML for the same mapping (measured), so it is a required leg the tool cannot see — and
+    # the count of key-shaped lines against the blocks opened turns it into the honest 4 instead of
+    # a 0 that measured every OTHER label and called the set covered.
+    explicit = _repo_with_workflows(
+        tmp_path / "explicit",
+        "jobs:\n  a:\n    ? runs-on\n    : ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    for flag in ("on", "off"):
+        r = _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL=flag),
+            cwd=explicit,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode == 4, (
+            f"an explicit-key `runs-on` opens no block, so the read is PARTIAL and has no verdict — "
+            f"that is 4 under CI_RUNNER_OS_LABEL={flag}, not {r.returncode}: {combined}"
+        )
+        assert "STATIC label set" in combined, f"flag={flag}: {combined}"
+        assert not re.search(r"= \d+ of \d+", combined), (
+            f"flag={flag}: a partial read must not verdict any label: {combined}"
+        )
+
+
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
 def test_dry_run_decides_nothing_and_calls_nothing(tmp_path: Path):
     """A plan is the operator's step: no token, no download, no registration, no label read."""
@@ -1725,8 +1804,19 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     but named nowhere, and its own comment still asserts the reverse).
     """
     wf_dir = REPO_ROOT / ".github" / "workflows"
+    # ⛔ THE PATTERN CARRIES EVERY YAML SPELLING OF THE KEY, or this pin cannot see the spelling the
+    # extractor used to miss: counting only `^    runs-on: ubuntu-24\.04$` reds when an EXISTING pin
+    # is re-spelled as a quoted key (total 9 -> 8), but `'runs-on': ubuntu-24.04` ADDED as a new pin
+    # leaves the count at 9 and the suite green — so the one counter-guard over this inventory was
+    # blind to exactly the spelling that made the extractor report the label NOWHERE.
     pinned = {
-        path.name: len(re.findall(r"^    runs-on: ubuntu-24\.04$", path.read_text(), re.MULTILINE))
+        path.name: len(
+            re.findall(
+                r'^    ["\']?runs-on[\']?[ \t]*:[ \t]*ubuntu-24\.04$',
+                path.read_text(),
+                re.MULTILINE,
+            )
+        )
         for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")])
     }
     pinned = {name: n for name, n in pinned.items() if n}
