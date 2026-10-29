@@ -1837,6 +1837,32 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not")
 
+    # (c) A cite the README attaches to a CODE quote — `` `if vet_enabled and
+    # embed_list:` (`:8680`) `` — must land on the line that code is on. These
+    # are BARE (no file name), so the bundle's own sweep — whose regex requires
+    # `(sdk|edges|extractor_v2).py:` — cannot see them, and they were the last
+    # live numbers in the rule paragraph that nothing re-checked: the #9116
+    # review found them a uniform +88 stale while the file-named cites beside
+    # them had been re-derived, in a bundle whose whole thesis is that a claim
+    # nothing re-checks rots silently. Every such pair in this document names
+    # `extractor_v2.py` code, so the resolver is that file.
+    #
+    # Non-vacuity: at the pre-fix head six of the eight pairs cited the
+    # pre-merge lines (`:8592` was the vet FLAG, `:8714` a blank line, `:8604` a
+    # `recovery_stats` line, `:8729` `s4_delta_empty = 0`, …), so each of those
+    # arms reds there and only the OFF-block pair (`:8612`) was already right.
+    code_pairs = re.findall(
+        r"`([^`]+)`\s*\(((?:`:[0-9-]+`)(?:\s*/\s*`:[0-9-]+`)*)\)", readme, re.S)
+    assert len(code_pairs) >= 8, (
+        f"the rule paragraph's code-quoted cites are gone: {code_pairs}")
+    for code, cites in code_pairs:
+        code = " ".join(code.split())
+        for lineno in re.findall(r":([0-9]+)", cites):
+            text = sources["extractor_v2"][int(lineno) - 1]
+            assert code in text, (
+                f"README cites `{code}` at extractor_v2.py:{lineno}, which reads "
+                f"{text.strip()!r} — the line moved and the cite did not")
+
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():
     """ONE head for the shipped measurement (#9089 review finding 3).
@@ -2552,6 +2578,31 @@ def test_a_row_that_blames_the_landed_pre_registration_says_it_landed():
             assert "#9075 LANDED (#9507)" in row["note"], (prereg_ok, row["note"])
 
 
+_PROBE_BARE_CITE = re.compile(r"``:(\d+)``")
+_PROBE_TICKED = re.compile(r"``([A-Za-z_][\w.]*)``")
+
+
+def _probe_step_cites(probe: str) -> list[tuple[str, str, str]]:
+    """``(symbol, line, raw cite)`` for each BARE step cite in the probe header.
+
+    The paragraph names a symbol and then its line, so a bare ``:NNNN`` names the
+    backticked token that sits nearest BEFORE it. The slice starts at the step
+    list (the entry-point cite above it is ``sdk.py``, pinned by the arm above —
+    its bare ``:NNNN`` call cite would otherwise be resolved against the wrong
+    file) and stops where the prose leaves the numbers behind.
+    """
+    start = probe.index("``extractor_v2.extract_session_v2``")
+    end = probe.index("The SYMBOL is", start)
+    region = probe[start:end]
+    found = []
+    for match in _PROBE_BARE_CITE.finditer(region):
+        ticks = list(_PROBE_TICKED.finditer(region[:match.start()]))
+        assert ticks, f"the bare cite {match.group(0)} names no symbol"
+        symbol = ticks[-1].group(1).split(".")[-1]
+        found.append((symbol, match.group(1), match.group(0)))
+    return found
+
+
 def test_the_probes_line_citations_resolve_too():
     """The README is pinned; the PROBE carried the same numbers with no pin at all.
 
@@ -2559,6 +2610,17 @@ def test_the_probes_line_citations_resolve_too():
     sites, and `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
     `README.md` — so a merge-up that moves `sdk.py` re-stales the probe silently, which is exactly
     how the earlier rounds went stale. Same check, other file.
+
+    #9116 review P1: the CALL SITE was the one that went stale anyway (`:11611` -> `:11834`), and
+    the eight BARE step cites had no pin of any kind — the sweep regex requires a file name, and
+    the header's own sentence claimed the README table made them self-detecting, which it did not
+    (the table had been re-derived and the header had not). Both are pinned below, and the header
+    now names the pin instead of a mechanism that did not exist.
+
+    Non-vacuity: at the pre-fix head the call cite reads a comment inside
+    `_extract_session_v2` (no `self._extract_session_v2(`), and all eight bare cites read
+    pre-merge lines — `:8507` the entry point's docstring prose, `:8540` an import, `:8625`
+    `for chunk in chunks:` — so every arm below reds there.
     """
     probe = PROBE.read_text()
     sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
@@ -2578,6 +2640,24 @@ def test_the_probes_line_citations_resolve_too():
     assert extractor[module_line - 1].lstrip().startswith("def extract_session_v2("), (
         f"probe cites the entry point at extractor_v2.py:{module_line}, which is "
         f"{extractor[module_line - 1].strip()!r}")
+
+    # The eight step CALL SITES, resolved by the symbol the same sentence names.
+    steps = _probe_step_cites(probe)
+    assert len(steps) == 8, (
+        f"the probe's header names {len(steps)} step cites, not eight: {steps} — the "
+        "paragraph moved; re-derive it, do not drop the pin")
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    table = "\n".join(ln for ln in readme.splitlines() if re.match(r"\|\s*S\d", ln))
+    for symbol, lineno, raw in steps:
+        text = extractor[int(lineno) - 1]
+        assert f"{symbol}(" in text, (
+            f"the probe cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
+            f"{text.strip()!r} — it is not the CALL SITE the header claims")
+        row = re.search(rf"`{re.escape(symbol)}`\s*`:(\d+)`", table)
+        assert row, f"the README step table no longer names `{symbol}`"
+        assert row.group(1) == lineno, (
+            f"the probe cites `{symbol}` at {raw}; the README step table says "
+            f":{row.group(1)} — the header and the table it points at disagree")
 
 
 # ── V7 across a multi-artifact table (the capstone's own rows) ────────────

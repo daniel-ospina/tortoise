@@ -16,22 +16,24 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:12797``, called at ``:11611``) →
+   (``sdk.py:12797``, called at ``:11834``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
-   ``_edus_from_conversation`` (S0, ``:8507``), ``run_s1`` (S1, ``:8540``),
-   ``run_s2`` (S2.1, ``:8564``), ``_run_vet_pass`` (S2.2, ``:8593``),
+   ``_edus_from_conversation`` (S0, ``:8595``), ``run_s1`` (S1, ``:8628``),
+   ``run_s2`` (S2.1, ``:8652``), ``_run_vet_pass`` (S2.2, ``:8681``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8609``), ``search_graph`` (S3, ``:8625``), ``run_s4`` (the gap filler,
-   ``:8646``), and ``execute_embed`` (S5+S6, ``:8845``). The SYMBOL is
-   authoritative and the line is a convenience — the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin (the eight bare step
-   cites are pinned only where the README's step table repeats the same
-   numbers, so tree drift shows up there), and no line here is claimed to be
-   self-detecting on its own. (No derivation head is named here on purpose: the
-   stamps such a sentence used to name re-staled the moment `main` moved, and a
-   claim that can only re-stale is not worth keeping.) So the capstone drives
-   the REAL entry point — it does not compose the step functions, which the
-   issue explicitly forbids.
+   ``:8697``), ``search_graph`` (S3, ``:8713``), ``run_s4`` (the gap filler,
+   ``:8734``), and ``execute_embed`` (S5+S6, ``:8933``). The SYMBOL is
+   authoritative and the line is a convenience — but a RESOLVED one: every cite
+   in this paragraph, FILE-NAMED and BARE alike, is resolved against the tree by
+   the bundle's own pin
+   (``tests/test_7949_capstone_verdict_check.py::test_the_probes_line_citations_resolve_too``
+   requires each symbol to sit on the line it is cited at AND cross-checks the
+   same numbers against the step table in ``README.md``, so tree drift reds
+   here instead of quietly re-staling this header). (No derivation head is
+   named here on purpose: the stamps such a sentence used to name re-staled the
+   moment `main` moved, and a claim that can only re-stale is not worth
+   keeping.) So the capstone drives the REAL entry point — it does not compose
+   the step functions, which the issue explicitly forbids.
 2. **``docs/evidence/7949-capstone/`` did not exist and still does not exist as
    a measured bundle** — this probe creates it, and the bundle ships with a
    REFUSED log rather than a green table (see below).

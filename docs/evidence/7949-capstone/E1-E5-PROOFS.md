@@ -192,8 +192,11 @@ scored log and the 6-of-8 row set record.
 the already-scored log contains can be certified GREEN, whatever the underlying
 numbers do — that is a limit of the measurement's stamp, not of the verdicts.
 The seam does not by itself move a row: a row moves only by RE-RUNNING
-`probes/capstone_measure.py` at a post-seam head, which is what turns those two
-rows into witnesses. Until such a re-run is committed, the epic's closing rule
+`probes/capstone_measure.py` at a post-seam head, and even that re-run moves only
+the rows whose own pass did work — S2.2's row moves on a re-run, while S2.3's
+row moves only once its classify pass carries a non-empty `s2`/`union` (on the
+measured corpus it is IDLE). A re-run is therefore necessary and not sufficient.
+Until such a re-run is committed, the epic's closing rule
 stays unsatisfiable on the committed evidence, ahead of every row's own blocker.
 
 ---

@@ -238,8 +238,9 @@ statement that the gate was open". It is not that: `enabled` is the FLAG, comput
 is reached. `vet_enabled` is computed at `extractor_v2.py:8592`, i.e. BEFORE the
 `if not edus:` early return (`:8596`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8592`), `if vet_enabled and
-complete_list:` (`:8714`). So a session with the flag ON and an empty list emits `enabled: True`
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8680`),
+`if vet_enabled and complete_list:` (`:8802`). So a session with the flag ON and an empty list
+emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
 `{}` on its fail-open path, `:8478-8481`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
@@ -251,10 +252,10 @@ to look.
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
-classify pass has its own flag (`classify_later`, `:8473`), its own early-return block
-(`:8520-8523`), its own gates — `if classify_later and embed_list:` (`:8604`) around `if items:`
-(`:8607`), and `if classify_later and complete_list:` (`:8729`) around `if items:` (`:8739`) — and its
-own fail-open `except` (`:8620` / `:8750`), so an idle classify block comes from no embed list **or
+classify pass has its own flag (`classify_later`, `:8561`), its own early-return block
+(`:8608-8611`), its own gates — `if classify_later and embed_list:` (`:8692`) around `if items:`
+(`:8695`), and `if classify_later and complete_list:` (`:8817`) around `if items:` (`:8827`) — and its
+own fail-open `except` (`:8708` / `:8838`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -650,11 +651,14 @@ probe was handed did not say so. The drop was one layer ABOVE the extractor — 
 **#9116 LANDED that seam** — `_capture_step_witness` (``tortoise/sdk.py``) copies each stage's own
 facts onto the existing ``stats`` key as ``stats["step_witness"]``: a sub-key of a key the receipt
 already carried, so no new receipt key and no change to the SDK/MCP surface. Both probes read it:
-`capstone_run.py`'s G5 now witnesses all eight from one pass, and `capstone_measure.py` looks for
+`capstone_run.py`'s G5 can now witness all eight from one pass, and `capstone_measure.py` looks for
 `vet`/`classify_later` in `stats['step_witness']` after the extractor's own top-level keys. The
 SCORED log in this bundle stays what it is — `capstone-measured-e0fc940b.log` was measured at
 `e0fc940b`, BEFORE the seam, and reports 6/8 with S2.2/S2.3 unobserved. A re-run at this head is
-what turns those two rows into witnesses; nothing here relabels a historical measurement.
+what turns **S2.2's** row into a witness; **S2.3's** row moves only once its classify pass carries a
+non-empty `s2`/`union`, and on the measured corpus it is IDLE (see the S2.3 row above) — so a re-run
+is necessary and NOT sufficient: G5 still refuses until every step is witnessed. Nothing here
+relabels a historical measurement.
 
 ⛔ The distinction the gate keeps, and why it is load-bearing: a receipt with **no**
 `step_witness` at all (a replay, a keyless capture, the M2 lane) is refused as the **INSTRUMENT**
