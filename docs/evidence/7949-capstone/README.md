@@ -83,15 +83,17 @@ uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
     --prereg "$(git rev-parse HEAD)"
 # G0 pre-registration e0fc940b5… READ (schema capstone-preregistration/v1)
 # G1 corpus sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc MATCHES the frozen pin
-# arm TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> (read back from os.environ)
+# arm TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset> (read back from os.environ)
 # → docs/evidence/7949-capstone/capstone-measured-e0fc940b.log
 ```
 
 ⛔ **The arm needs no exported flags, and that is a required property, not a convenience.**
 `probes/capstone_measure.py` FORCES `TORTOISE_VET=1` and `TORTOISE_CLASSIFY_LATER=1` in-process
 (restoring the previous values in a `finally`, exactly as `e1_e2_probe.run_arm` does), pins
-`TORTOISE_VALUE_GATE` unset — it also switches S2.2 on, so an ambient value would silently change
-the arm — and then **reads the values back out of `os.environ`**. The log's `arm:` line is that
+`TORTOISE_VALUE_GATE` **and** `TORTOISE_S2_DECISION_SEAM` unset — both also switch S2.2 on (the
+latter is #5087's arbiter, so `_vet_enabled()` is True and a billable call would run inside an arm
+declared OFF), so an ambient value would silently change
+ the arm — and then **reads the values back out of `os.environ`**. The log's `arm:` line is that
 read-back, never a typed literal, and a flag that does not read back as set REFUSES the run. The
 earlier stamp of this bundle printed `arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1` while setting
 neither: a re-run following a recipe that exported only `TORTOISE_DB_URI` measured the **OFF**
@@ -130,8 +132,8 @@ itself.
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
 a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
 stamp**, and **every rendered cite this bundle re-derives is listed here** — including the ones the E3
-rule and the S2.2/S2.3 cause strings render: `sdk.py:12402` (the meta fold), `sdk.py:12683` (the
-references-edge writer), `sdk.py:2368` (`_TURN_WRITE_CYPHER`), `edges.py:467`
+rule and the S2.2/S2.3 cause strings render: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
+references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
 re-derived by this bundle to `502`/`510`), `edges.py:2168-2192` (`link_source_to_event`),
 `tortoise/extractor_v2.py:8278-8285` (the **classify-later** surface, as the S2.3 cause string cites
@@ -139,7 +141,7 @@ it), and `tortoise/extractor_v2.py:8288-8292` (the **VET** surface, as the S2.2 
 it). **They no longer resolve on `main`** at this head.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `8873-8879` here, not in the log. (The SYMBOL is what makes
+the `result["classify_later"]` block at `8961-8967` here, not in the log. (The SYMBOL is what makes
 this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
 `_BUNDLE_HISTORICAL`, deliberately — so a reader re-deriving it must land on the block the sentence
 names, not on the number alone.) That is deliberate: a scored log is a measurement record and the bundle's rule is
@@ -470,7 +472,7 @@ anchor in one direction (so its `:Event 0/41` contradicted its own `references=7
 fixed both, but its envelope was stale: every `tortoise/sdk.py` line it cited (`:12196` for the meta
 fold, `:12477` for `link_source_to_event`, `:2306-2331` for `_TURN_WRITE_CYPHER`) had moved under
 it when `main` advanced, so the one instruction it carried for #9116 — "the fix targets
-`sdk.py:12197`" — pointed into unrelated code. `8a8bbcba2` fixed
+`sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` fixed
 the OFF-block witness hazard, but its rule accepted `enabled: true` on its own — and `enabled` is the
 FLAG, not activity (see "The eight steps" above), so a single flag-on/empty-list session could have
 made V5 pass on a step nobody observed; its derivation figure was also circular (`132/132`, a class
@@ -572,7 +574,8 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
 # NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
-# pins TORTOISE_VALUE_GATE unset, and prints the os.environ READ-BACK as its
+# pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM unset (both switch S2.2
+# on), and prints the os.environ READ-BACK as its
 # `arm:` line — check that line in the log it writes, not your shell.
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
