@@ -283,7 +283,20 @@ jobs:
             # here would contradict the transition line printed three steps above.
             # `cancel_lead` is that payload-derived clause, shared with the
             # PR-STARVED arm for the same reason.
-            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires `pr_running > 0`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
+            # ⛔ THE BACKTICKS ARE ESCAPED, and that is load-bearing: this string is
+            # DOUBLE-QUOTED, where a BARE backtick pair is still COMMAND
+            # SUBSTITUTION — bash runs the text between them and substitutes its
+            # stdout (bash manual §3.5.4: "the first backquote not preceded by a
+            # backslash terminates the command substitution"). Written unescaped,
+            # `pr_running > 0` rendered as "it requires , and the governor's block
+            # sits below that clause" — the bound this arm exists to name, gone from
+            # the alarm — executed a non-existent command into the step log, and
+            # created a stray file named `0` from the `> 0` redirect. `set -e` does
+            # not catch it (the substitution's status never reaches `echo`), so the
+            # step stays green (#10264 review P1, measured; the repo's own
+            # `::error::` diagnostics in ci-timing.yml escape the same way, and
+            # tests/test_ci_queue_health.py pins the class over EVERY annotation).
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires \`pr_running > 0\`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
             echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
           fi

@@ -68,6 +68,34 @@ def classify(queued, in_progress=(), **kwargs):
     return Q.classify_queue(queued, list(in_progress), NOW, **kwargs)
 
 
+def _rendered_annotation(line):
+    """What bash makes of a DOUBLE-QUOTED `echo` line's backticks.
+
+    Inside double quotes a backtick pair is still COMMAND SUBSTITUTION: bash
+    executes the text between them and replaces it with that command's stdout
+    (bash manual §3.5.4). The backslash-escaped form (backslash before a
+    backtick) is the only way to render a LITERAL backtick there — with the
+    old-style form, backslash keeps its literal meaning only before a dollar
+    sign, a backtick, or a backslash. So collapse the escaped pairs to a literal
+    backtick, then elide every remaining backtick span exactly as the shell
+    would; what is left is the message the operator reads (#10264 P1).
+    """
+    out, in_substitution, i = [], False, 0
+    while i < len(line):
+        char = line[i]
+        if char == "\\" and line[i + 1:i + 2] == "`":
+            if not in_substitution:
+                out.append("`")        # an ESCAPED backtick never terminates
+            i += 2
+            continue
+        if char == "`":
+            in_substitution = not in_substitution
+        elif not in_substitution:
+            out.append(char)
+        i += 1
+    return "".join(out)
+
+
 # ── the incident: one reporting workflow, no PR run executing ──────────────
 
 def test_the_9115_shape_is_a_flood_naming_the_offender():
@@ -1074,11 +1102,29 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
                "merely pr-dominated")
     assert control in flat                       # the strip DID make it contiguous
     assert control not in " ".join(wf.split()).lower()  # ... and only the strip does
-    # the annotation scan is restricted to REAL annotation lines, not every prose
-    # comment that merely mentions `::warning`
+    # THE ANNOTATION ITSELF must survive the SHELL, not just this text comparison.
+    # Every guard above is text-level, and no amount of normalisation interprets
+    # the shell — which is what let the P1 through: the `PR-BACKLOGGED` line wrote
+    # `it requires `pr_running > 0` …` inside DOUBLE quotes, so bash performed
+    # COMMAND SUBSTITUTION on it (bash manual §3.5.4: "the first backquote not
+    # preceded by a backslash terminates the command substitution"), rendering
+    # "it requires , and the governor's block sits below that clause", running a
+    # non-existent `pr_running`, and creating a stray file named `0` from the
+    # `> 0` redirect — green, because `set -e` never sees the substitution's
+    # status. `\`` is the only literal backtick in a double-quoted string, so any
+    # backtick left after removing the escaped pairs is EXECUTED. (#10264 review
+    # P1, measured in bash.)
     anns = [line for line in wf.splitlines()
-            if line.strip().startswith('echo "::warning::')]
-    assert anns
+            if line.strip().startswith('echo "::')]
+    # the exit-0/1 arms, so this scan cannot silently select nothing and pass
+    assert len(anns) >= 5, anns
+    assert [line for line in anns if "`" in line.replace("\\`", "")] == []
+    # ... and the arm that exists to name the CLAUSE ORDER must still name it once
+    # the shell has had its way with the line. Pinned on the RENDERED text, not the
+    # source text: the unescaped form contains `pr_running > 0` in the file and
+    # still loses it at runtime, which is exactly the shape that shipped.
+    backlogged = next(line for line in anns if "PR CI IS executing" in line)
+    assert "pr_running > 0" in _rendered_annotation(backlogged)
     assert wf.count("${cancel_lead}") == 2
 
 
