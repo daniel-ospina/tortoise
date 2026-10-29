@@ -366,8 +366,10 @@ closed at both layers:
   > `superseded_by` chain), so the row follows the edge; what stays open in **#9836** is the *non-derivable* half of
   > (a) on the record route, and its shape differs by endpoint: 2b journals **no** descriptor for them, so nothing
   > moves the row and the record keeps the row at the pre-supersede point while live moved the edge to the
-  > successor. The `:Source`-targeted shape is the only one that holds nothing at all, because the producer
-  > declines it at the mint (`_record_addressable`).
+  > successor. A shape the producer DECLINES at the mint (`_record_addressable`) holds nothing at all — no
+  > snapshot, no row — and the `:Source`-targeted edge is one of those, not the only one: the same gate also
+  > declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`), so a
+  > non-`:Source` edge of that shape lands nothing for the same reason.
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →

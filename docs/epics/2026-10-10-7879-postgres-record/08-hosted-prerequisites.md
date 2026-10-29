@@ -504,8 +504,9 @@ shape: everything agrees live↔rebuild except the residuals below.
   `superseded_by` chain, `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
   remains open in **#9836** is the *non-derivable* family (`wasDerivedFrom`/`aboutAction`): 2b journals no
   descriptor for them at all, so nothing moves the row and the record keeps the row at the pre-supersede point
-  (live moved it to the successor). Only the `:Source`-targeted shape holds nothing at all — the producer declines
-  it at the mint (`_record_addressable`).
+  (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
+  nothing at all, and the `:Source`-targeted shape is one of those rather than the only one: the same gate also
+  declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`).
   ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and
   it pre-dated #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried.
 
