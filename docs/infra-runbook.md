@@ -401,7 +401,7 @@ documented exception, not a silent one:
 |---|---|---|
 | `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
 | `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
-| ⚠️ `TYPESAFE_API_KEY` — **declared for documentation only; do NOT put it in `.env`** (legacy name: `JEV_API_KEY`) | the fleet's Jev callers — `agent-infra/scripts/turn-classify.py`, `ask-owner.py`, `lane-actions.py` (via `state/lane-verdict.py`); real endpoint `api.typesafe.ai` | ⛔ **the 0600 store `~/.pi/agent/jev-config.json` is the key's HOME — none of those callers reads this `.env`, and nothing in THIS repo reads the variable at all** (the one consumer that did was deleted by #8175). `.env.example` declares the NAME for documentation; the callers resolve `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the store. ⛔ **The deployed copy under `~/.pi/agent/scripts/` is a DERIVED artifact, not authored source:** `pi-bootstrap/setup.sh` copies `turn-classify.py`/`ask-owner.py`/`lane-actions.py` out of the agent-infra checkout, so running it from an **unmigrated** checkout silently reinstalls the lookalike caller — measured 2026-10-26 21:32, when an already-migrated trio was overwritten that way. The caller leg MERGED in agent-infra#2859 (`9205ab47a`) — a bootstrap from a checkout that predates it still reinstalls the lookalike caller, so fast-forward that checkout before running `pi-bootstrap/setup.sh` and assert EVERY caller with `grep -rn 'JEV_URL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py` — each carries its own constant, so one file's answer says nothing about the other two. ⛔ Until 2026-10-26 these callers billed against `jevtypesafeai.com`, a lookalike host that is NOT the vendor's API (tortoise#7864) |
+| ⚠️ `TYPESAFE_API_KEY` — **its HOME is the 0600 store, not `.env`; prefer the store** (legacy name: `JEV_API_KEY`) | the fleet's Jev callers — `agent-infra/scripts/turn-classify.py`, `ask-owner.py`, `lane-actions.py` (via `state/lane-verdict.py`); real endpoint `api.typesafe.ai` | ⛔ **the 0600 store `~/.pi/agent/jev-config.json` is the key's HOME — none of those callers reads this `.env`, and the ONLY in-repo reader is `tortoise/s2_decision_seam.py` (#5087, the S2.2/S2.3 typed-decision seam — internal, OFF unless `TORTOISE_S2_DECISION_SEAM` is set; it resolves `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the 0600 store → the repo-root `.env`, and posts to `api.typesafe.ai`)** — the one consumer that read it before was deleted by #8175. `.env.example` declares the NAME; the fleet callers resolve `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the store, and the seam additionally reads the repo-root `.env` as its LAST source — so a value there is inert for the fleet callers but IS used by an armed seam, and once `mcp_server._load_dotenv` exports it, it outranks the store for every child. ⛔ **The deployed copy under `~/.pi/agent/scripts/` is a DERIVED artifact, not authored source:** `pi-bootstrap/setup.sh` copies `turn-classify.py`/`ask-owner.py`/`lane-actions.py` out of the agent-infra checkout, so running it from an **unmigrated** checkout silently reinstalls the lookalike caller — measured 2026-10-26 21:32, when an already-migrated trio was overwritten that way. The caller leg MERGED in agent-infra#2859 (`9205ab47a`) — a bootstrap from a checkout that predates it still reinstalls the lookalike caller, so fast-forward that checkout before running `pi-bootstrap/setup.sh` and assert EVERY caller with `grep -rn 'JEV_URL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py` — each carries its own constant, so one file's answer says nothing about the other two. ⛔ Until 2026-10-26 these callers billed against `jevtypesafeai.com`, a lookalike host that is NOT the vendor's API (tortoise#7864) |
 | `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
 
 **Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;
@@ -3361,7 +3361,7 @@ text, so do not grep the 9090 listener for a counter name.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **TWO readings are not in this
+   `write_failed`), and this needs no auth. ⚠️ **THREE readings are not in this
    grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
    *different* prefix (`the record write was declined (no_durable_journal)`,
    `record_writer.py`), because it is the healthy M2 path and not a failure.
@@ -3374,6 +3374,32 @@ text, so do not grep the 9090 listener for a counter name.
    it repeats at most once per window, and it is exactly the line that item 2's
    `record_position_unproven` counter is counting — grepping only the
    `did not happen` prefix for it returns nothing.
+   (c) The tenant-RESOLUTION faults — four MESSAGES, none of which this grep
+   matches (`tortoise.hosted_api`'s fail-soft path, #5148):
+   `could not resolve the record tenant for this request`
+   (`_resolve_record_tenant`, the per-request lane),
+   `could not resolve the DEFAULT-graph record tenant for org …`
+   (`_bind_default_graph_record_tenant`, the seed / indexing lanes),
+   `graphs default-row read failed — the record tenant stays unnamed`
+   (`supabase_control.default_graph_id_for` — which swallows that exception and
+   returns `None`, so on a default-row read fault NEITHER of the two
+   `could not resolve` lines above is logged at all), and
+   `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
+   (`hosted_api._cp_offload`, the session/JWT lane) — which says what the SEAM
+   did, not what the resolver did, so read which of its two outcomes you have.
+   The pool REFUSED the submission, or the bound CANCELLED it before any worker
+   picked it up: the callable did not and will not run, so no resolver was
+   entered and none of the three lines above exists. A plain bound miss on a
+   submission a worker already PICKED UP is the opposite case: the seam abandons
+   only the await (`asyncio.wait_for` cancels the await, never the worker thread
+   — CPython #87185), so that worker still runs the resolver to completion and
+   one of the lines above CAN sit beside this warning. (The
+   discriminator is the message text, not the logger: the
+   SDK's `no_journal` line, from a *different module*, IS in the grep — see the
+   ⛔ paragraph below.) The refusal each fault then produces
+   (`the record write did not happen (no_tenant)`) IS in the grep, but that is
+   the growth, not the fault; read the faults with the `grep -E` in the ⚠️
+   `no_tenant` bound below, which matches all four.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed
@@ -3461,16 +3487,18 @@ So the bar has **two parts, and BOTH are required**:
    empty reading has more than one cause and does not say which; take the
    journaling capture above and read again before drawing a conclusion.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
-   documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
-   `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
+   documented #9264 `write_failed` refusals, and none at all for `no_tenant`
+   (the capture's OWN — see the ⚠️ bound below) / `malformed_dsn` /
+   `circuit_open`.** ⚠️ **That `write_failed` exemption is
    BOUNDED**: it covers only the #9264 `DatatypeMismatch` refusals that recipe 1
    actually shows, and only until the R2 migration above is applied — afterwards
    **every** `write_failed` is unexpected — and a new `journal_event` / `point` row must still appear.
    The R1-without-R2 state writes nothing and counts only `write_failed`, so it
    satisfies item 1's *any reason* clause and the exemption above — **a
    deployment that writes no row at all is not passing this bar, whatever the
-   reason breakdown says.** Those three are always a fail-and-fix:
-`no_tenant` = the request carried no tenant, **or** a tenant that was not a full
+   reason breakdown says.** None of those three is an exemption of its own —
+whether a `no_tenant` growth is the capture's OWN is decided by the ⚠️ bound
+below: `no_tenant` = the request carried no tenant, **or** a tenant that was not a full
 org/graph pair, `malformed_dsn` = the value failed `record_dsn()`'s own checks —
 it does **not start with** `postgresql://` / `postgres://`, or it names no host,
 or it carries raw whitespace (`record_backup.libpq_env` refuses the same
@@ -3485,30 +3513,98 @@ happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
-   `no_tenant` is ALSO the designed outcome where nothing names a graph at all —
-   but since #10046 (API keys since #10025) that is **no longer a credential
-   class**, so do NOT read it as one. What still emits it by design: the
-   self-host registry lane (`record_writer.record_tenant_for` returns `None` by
-   design — a graph-bound key that resolves through no control plane), and an
-   org with NO nameable active `kind='default'` row. (The onboarding-seed and
-   background-indexing runners are NOT one of those since #10047: they build
-   their own SDK and never see the request's credential, so
-   `hosted_api._bind_default_graph_record_tenant` supplies that row at their own
-   construction site.) On the hosted REST, MCP and OAuth lanes a `no_tenant`
-   from a `tt_`/`tk_` key, a session/JWT credential or an `oat_` token therefore
-   means the default row could not be named (missing, tombstoned, another org's,
-   unreadable) or the tenant read was lost — a **fail-and-fix**, not a designed
-   state (#9188/#9192, #10046).
+   `no_tenant` is ALSO the designed outcome for a credential that names no graph
+   **the record can key on**: the self-host registry lane
+   (`record_writer.record_tenant_for` returns `None` by design, #9188/#9192), not
+   a regression.
+   ⛔ A session/JWT credential and an OAuth `oat_` token are **NOT** one of those
+   sources, and since #10046 that class is gone — so do NOT read either as one.
+   `hosted_api._session_user_org` and `oauth.resolve_oauth_access_token` put the
+   org's active `kind='default'` row id on the credential as `default_graph_id`,
+   exactly as `resolve_api_key` does, and `record_tenant_for` names it. So on the
+   hosted REST, MCP and OAuth lanes a `no_tenant` from either means the default
+   row could not be NAMED (absent, tombstoned, another org's, unreadable) or the
+   tenant read was lost — a **fail-and-fix**, not a designed state (#10046).
+   ⚠️ An **org-wide API KEY is NOT one of those sources** since #10025:
+   `resolve_api_key` puts the org's active `kind='default'` row id on the
+   credential as `default_graph_id` and `record_tenant_for` names it, so an
+   org-wide key reaches `no_tenant` **only** when the control plane could name no
+   such row (absent, or the `default` sentinel) — **or** when the resolution
+   itself faults, since the fail-soft resolver below turns any exception into
+   `None`. Counting org-wide keys as designed residue would excuse real growth.
+   ⚠️ The **onboarding-seed and background-indexing runners are NOT one of
+   those sources either**, since #10087: they build their own SDK and never see
+   the request's credential, so they carry the org's DEFAULT-graph tenant from
+   their own construction site — bound by
+   `hosted_api._bind_default_graph_record_tenant` (#10047) from the SAME
+   `kind='default'` `public.graphs` row an org-wide key is named from. A
+   `no_tenant` from one of those lanes is therefore a control-plane fault (no
+   nameable default row), i.e. the same fail-and-fix as an org-wide key; listing
+   them as designed residue is the fail-open read this bound exists to close.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
-   deployment can grow `no_tenant` with nothing wrong. So make the capture
+   deployment can grow `no_tenant` with nothing wrong. ⛔ **That excuse covers
+   `no_tenant` and nothing else.** `circuit_open` reads a process-wide breaker
+   and `malformed_dsn` a process-wide setting, so a growth in either is a
+   statement about the PROCESS and not about which caller met it: other traffic
+   cannot excuse it, because that other traffic runs behind the SAME breaker and
+   the same DSN. Only `no_tenant` is per-credential, which is why it is the one
+   arm this bound qualifies. So make the capture
    **graph-bound** — a graph-bound **control-plane** credential cannot land in
-   `no_tenant` (the self-host registry lane above is a graph-bound key that
-   resolves through no control plane, so its writes are counted there by
-   design) — and treat `no_tenant` growth as the residual it then is: it is a
-   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
-   not appear. ⛔ **Do
-   not try to attribute that growth per request from the log.** The line an
+   `no_tenant` except when tenant resolution itself faults
+   (`hosted_api._resolve_record_tenant` is fail-soft, #5148: the fault is logged
+   as "could not resolve the record tenant" and that write then counts
+   `no_tenant`). The self-host registry lane above is the one graph-bound key
+   that resolves through no control plane, so its writes are counted there
+   **unless the process has declared the single-tenant pair** — see the #9192
+   cross-tenant note below for what that declaration may and may not cover.
+   Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
+   only when the capture ran **unbound**, when item 1's row did not appear, or
+   when the capture's credential was refused a tenant the record CAN key on.
+   That last arm has THREE readings, because it has three causes; read all THREE
+   before you call the growth other traffic:
+   - **A resolution FAULT** logs one of FOUR messages (recipe 1's exclusion (c)
+     above) — **recipe 1's grep does NOT match** (it greps
+     `the record write did not happen`) any of them, so read the faults with
+     `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed|default graphs? row NOT minted|control-plane offload 'default_graph_row' failed"`.
+   - **No nameable default row** (absent, inactive, or the `default` sentinel)
+     is also a refusal of a tenant the record CAN key on, so it is a
+     fail-and-fix as well — and on the seed / indexing lane it logs **NOTHING**
+     at all: `hosted_api._bind_default_graph_record_tenant` returns without a
+     word when `default_graph_id_for` yields no row, whose only other caller-side
+     trace is the mint failure. So an **empty read of that grep does not clear
+     this arm** — read the org's `kind='default'` `public.graphs` row itself
+     before calling the growth other traffic: its `status` must be `active`, and
+     its `id` must be a real `g_<hex>` (the `default` SENTINEL is a pre-#10025
+     id value, never a row NAME — the minted row is named `default`, so the name
+     tells you nothing here).
+   - **A resolution ABANDONED at the seam** is the third cause, and it is the one
+     the row reading above CANNOT clear. `hosted_api._cp_offload(... ,
+     op="default_graph_row", best_effort=True)` logs
+     `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
+     and then normalizes either return to no tenant, so the capture counts
+     `no_tenant` either way — but the warning names TWO outcomes, and only one of
+     them means the resolution did not happen, so read which one the log line
+     describes before you read the row. If the pool REFUSED the submission, or
+     the bound CANCELLED it before any worker picked it up, the resolution
+     **never ran**: no resolution line above exists, and the `kind='default'` row
+     the reading above inspects is **untouched and healthy** — it is `active` and
+     carries a real `g_<hex>` id — so that reading PASSES while the capture still
+     counts `no_tenant`. If it is a plain bound miss on a submission a worker
+     already PICKED UP, the opposite holds: the seam abandons only the await
+     (`asyncio.wait_for` cancels the await, never the worker thread — CPython
+     #87185), so that worker still runs the resolver to completion. A resolution
+     line above CAN therefore sit beside this warning — and this lane's resolver
+     is `default_graph_id_for_credential`, which **mints on a miss**, so the row
+     the reading above inspects may have been CREATED by the very resolution the
+     seam stopped waiting for. What makes both branches this cause, and what the
+     row reading cannot see, is that the tenant id is discarded at the caller
+     either way (`hosted_api` assigns `org["default_graph_id"]` only for a
+     `str`). `best_effort=True` is
+     there precisely so an offload hiccup does not 503, so this is expected
+     traffic on the session/JWT lane — and the growth is still the deployment's
+     (control-plane saturation, or a refused submission), never another tenant's.
+   ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
    malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
@@ -3517,7 +3613,7 @@ why the two recipes above are the verification and the deploy status is not.
    the exception text instead, and the SDK's `no_journal` line names the record
    type inside its exception text.)
    A bar that required per-request attribution would be unexecutable and would
-   red a healthy deployment on its default branch. The route is never
+   red a healthy deployment by default. The route is never
    `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
    forbids.
 
