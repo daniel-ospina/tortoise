@@ -14235,14 +14235,19 @@ class FalkorProjection(
                 # NOT a drop boundary (promote is same-node draft→live; it
                 # never clears outdated/CORRECTS, so seeding from it would
                 # silently drop a pre-promote invalidate fold).
+                # #10010 review P1: a FOLD re-emits an EXISTING id's
+                # snapshot and replaces nothing — it is not a recreate
+                # boundary, and it must not consume a pending delete (the
+                # next REAL creation owns that anchor). Same predicate as
+                # ``plan_point_restamp_folds``, so the sweep and the
+                # chronological pass cannot read one record two ways. Read
+                # ONCE and reused by ``is_recreate`` below: the fold must be
+                # excluded from EVERY recreate-shaped write in this block, or
+                # the two engines still read one record two ways (the #4042
+                # wipe and ``last_ann_drop_seq`` are recreate-shaped too).
+                _is_evidence_fold = record_is_evidence_fold(ev)
                 if t in ("PointAdded", "OperatorAdded"):
-                    # #10010 review P1: a FOLD re-emits an EXISTING id's
-                    # snapshot and replaces nothing — it is not a recreate
-                    # boundary, and it must not consume a pending delete (the
-                    # next REAL creation owns that anchor). Same predicate as
-                    # ``plan_point_restamp_folds``, so the sweep and the
-                    # chronological pass cannot read one record two ways.
-                    if record_is_evidence_fold(ev):
+                    if _is_evidence_fold:
                         pass
                     else:
                         last_recreate_seq[("Point", p["id"])] = seq
@@ -14257,7 +14262,18 @@ class FalkorProjection(
                 # possibly-Point) — a foreign-kind delete cannot advance the
                 # Point annotator boundary. #4042 reuses ``is_recreate`` below
                 # for the recreate wipe and its per-source anchors.
-                is_recreate = ("Point", p["id"]) in pending_deleted
+                # #10010 review P2: the FOLD exclusion applies here too. A fold
+                # materialises no incarnation, so it is not a delete→recreate
+                # boundary: consuming the pending delete here moved the
+                # belief/annotator drop anchor onto a record that replaced
+                # nothing (letting a dead incarnation's folds survive), and it
+                # ran the #4042 wipe on a record whose payload cannot restore
+                # ``content_hash``. ``plan_point_restamp_folds`` already skips
+                # the fold before its own ``pending_deleted.discard``; without
+                # this arm the sweep and this chronological pass disagreed —
+                # the exact drift that guard's comment claims is impossible.
+                is_recreate = (not _is_evidence_fold
+                               and ("Point", p["id"]) in pending_deleted)
                 if is_recreate:
                     last_ann_drop_seq[("Point", p["id"])] = seq
                     pending_deleted.discard(("Point", p["id"]))
