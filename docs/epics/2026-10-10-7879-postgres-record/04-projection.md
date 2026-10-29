@@ -361,9 +361,10 @@ closed at both layers:
   > creation is exempted from the 2b repoint delete-leg (which cleans pass-2's resurrection and cannot tell the
   > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
   > (a) `wasDerivedFrom`/`aboutAction` are moved live but not derivable, so 2b journals no repoint for them and the
-  > journal route loses them after a supersede; (b) the RECORD keeps EVERY moved structural rel at the
-  > pre-supersede point (a 2b descriptor carries `src=old_id` and the record's `DirectEdgeRepoint` is a plain
-  > upsert) — pre-dating this producer for `extractedFrom`/`EntityLinked`, newly visible for the rest — **#9836**.
+  > journal route loses them after a supersede; (b) **CLOSED for the derivable set by #10191** — the record now
+  > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
+  > `superseded_by` chain), so the row follows the edge; what stays open in **#9836** is the *non-derivable* half of
+  > (a) on the record route (no descriptor at all, so the record holds those rels at neither endpoint).
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →

@@ -2181,6 +2181,11 @@ def test_direct_edge_repoint_delete_only_deletes_rather_than_upserts():
 # ════════════════════════════════════════════════════════════════════════════
 # §4.4 pass-2b — a STRUCTURAL `DirectEdgeRepoint` is a MOVE (#9972 + #9973)
 # ════════════════════════════════════════════════════════════════════════════
+# The DOC half of this pin (ONTOLOGY §4.4 + the INGEST supersede row vs this
+# plan) lives in `tests/test_10191_record_move_doc_pin.py`: a
+# `docs/INGEST_CONTRACT.md`-only diff selects no surface and runs `tier1` only,
+# which does not include this file, so a pin inside this docker-lane module
+# would sleep on the exact edit it guards (#8474's shape).
 
 
 def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",
@@ -2310,82 +2315,6 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
     # existing successor row keeps its own value (#9417) — `DO UPDATE` would
     # overwrite it with the descriptor's absent attributes.
     assert insert.rstrip().endswith("DO NOTHING"), insert
-
-
-_DOC_MOVE_ANCHORS = {
-    "docs/ONTOLOGY.md": "applies a 2b descriptor as the same MOVE",
-    "docs/INGEST_CONTRACT.md": "applies the SAME descriptor as a MOVE",
-}
-
-
-def test_the_documented_record_side_move_is_the_move_the_record_emits():
-    """ONTOLOGY §4.4 and the supersede row describe the RECORD's half of the move.
-
-    #10191 landed that half and left both artifacts describing pass-2b only, so a
-    lane had to read `_structural_repoint_statements` to learn what the record
-    does with a 2b descriptor — and #10244 was spent re-deriving it. A doc is
-    only a fix if it stays true, so every clause below is asserted TWICE: the
-    artifact states it, and the emitted plan has the property it names. A
-    statement deleted from the doc, or a plan that stops doing it, reds here
-    instead of misinforming the next reader.
-    """
-    root = Path(__file__).resolve().parents[1]
-    lines: dict[str, str] = {}
-    for path, anchor in _DOC_MOVE_ANCHORS.items():
-        text = (root / path).read_text(encoding="utf-8")
-        at = text.find(anchor)
-        assert at != -1, (
-            f"{path} no longer says what the RECORD does with a 2b "
-            "`DirectEdgeRepoint` (#9972/#9973/#10191) — the gap #10244 closed")
-        # The WHOLE line the anchor sits on: the clauses are stated across it, in
-        # both directions from the anchor (a table row, or one blockquote line).
-        start = text.rfind("\n", 0, at) + 1
-        lines[path] = text[start:].split("\n", 1)[0]
-
-    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
-    assert len(statements) == 2, statements             # the move, in two halves
-    delete, insert = statements[0].sql, statements[1].sql
-    assert "DELETE FROM public.relation" in delete, delete   # first half
-    assert "INSERT INTO public.relation" in insert, insert   # second half
-    point_arm = rp._structural_target_resolution(
-        "o", "g", "Point", "aboutPoint", "N", "")[0]
-
-    for path, line in lines.items():
-        # A MOVE spelled out — remove at the superseded point, then create.
-        assert "MOVE" in line and "`DELETE`" in line and "INSERT" in line, (path, line)
-        # The destination is the record's OWN successor chain (Interface A: the
-        # journal alone is sufficient — the descriptor carries no successor).
-        assert "superseded_by" in line, (path, line)
-        assert "superseded_by" in delete and "WITH RECURSIVE succ" in delete, delete
-        assert "no successor field" in line, (path, line)
-        assert "new_id" not in delete + insert, (delete, insert)
-        # ... and it lands at the chain's TERMINAL row, not at `src`.
-        assert "terminal" in line, (path, line)
-        assert "succ WHERE next_id IS NULL" in insert, insert
-        # The successor's own live value wins (#9417 / §11.1) — never `DO UPDATE`.
-        assert "DO NOTHING" in line and "§11.1" in line, (path, line)
-        assert insert.rstrip().endswith("DO NOTHING"), insert
-        assert "DO UPDATE" not in insert, insert
-        # #5509: a name held by two carriers is a refusal, not a pick.
-        assert "#5509" in line, (path, line)
-        assert "HAVING count(*) = 1" in point_arm, point_arm
-
-    # The full resolution table is stated in the ontology, so it is pinned there:
-    # a Point has no `name` column and resolves by `props ->> 'name'` (the
-    # property the fold's `MATCH (x:Point {name:$key})` reads); `aboutDocument`
-    # additionally needs the kind test, which is load-bearing on this route.
-    ontology = lines["docs/ONTOLOGY.md"]
-    assert "props->>'name'" in ontology, ontology
-    assert "props ->> 'name'" in point_arm, point_arm
-    assert "document_kind IS NOT NULL" in ontology, ontology
-    source_arm = rp._structural_target_resolution(
-        "o", "g", "Source", "aboutDocument", "https://x", "")[0]
-    assert "document_kind IS NOT NULL" in source_arm, source_arm
-    # Both halves carry the `_src_is_terminal` gate (an id-reuse point that was
-    # re-created LIVE owns its edges; moving them clobbers a live point).
-    assert "_src_is_terminal" in ontology, ontology
-    for sql in (delete, insert):
-        assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
 
 
 def test_the_structural_move_reads_the_records_own_successor_chain():
