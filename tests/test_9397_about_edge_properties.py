@@ -3185,12 +3185,44 @@ def test_the_default_ingestion_path_reaches_the_binder():
         "`hosted_api`'s lane selection no longer answers m2/v2, so 'm2 is the "
         "opt-out and v2 the fall-through' is stale"
     )
-    assert "sdk._extract_session_llm" in hosted, (
-        "the m2 lane no longer dispatches `_extract_session_llm`"
+    # The DISPATCH must be pinned positionally — which callee sits in WHICH
+    # branch — not by substring. A `"sdk._extract_session_llm" in hosted` test
+    # is satisfied by the historical comment at `hosted_api.py:14929`
+    # (`# sdk._extract_session_llm/_extract_session_v2 (#822).`), so it passed
+    # on a swapped dispatch and on both sites removed — how that was measured is
+    # in the PR body. This is the #8601 regression the original `sdk.py` arm
+    # existed to catch, so it is re-derived here rather than dropped.
+    # The callee is passed, not invoked — `_run_capture_bounded(slot,
+    # sdk._extract_session_llm, …)` — so the reference is an `ast.Attribute`, not
+    # an `ast.Call`. Matching the reference is still positional (branch body vs
+    # branch orelse), which is what makes a swap visible.
+    def _mentions(node, callee: str) -> bool:
+        items = node if isinstance(node, list) else [node]
+        return any(
+            (isinstance(c, ast.Attribute) and c.attr == callee)
+            or (isinstance(c, ast.Name) and c.id == callee)
+            for root in items
+            for c in ast.walk(root)
+        )
+
+    dispatch = [
+        node
+        for node in ast.walk(htree)
+        if isinstance(node, ast.If)
+        and "TORTOISE_SESSION_EXTRACTOR" in ast.unparse(node.test)
+        and "m2" in ast.unparse(node.test)
+        and _mentions(node.body, "_extract_session_llm")
+    ]
+    assert dispatch, (
+        "the `m2` branch of the capture dispatch no longer calls "
+        "`_extract_session_llm` in `hosted_api.py` — the lane's own callee is "
+        "not pinned, which is exactly what a callee swap survives"
     )
-    assert "sdk._extract_session_v2" in hosted, (
-        "`_extract_session_v2` is no longer dispatched by the capture path — "
-        "the corrected evidence's 'default-ON, ingestion path' sentence is false"
+    node = dispatch[0]
+    assert _mentions(node.orelse, "_extract_session_v2"), (
+        "`_extract_session_v2` is no longer the FALL-THROUGH extractor of the "
+        "capture dispatch — the corrected evidence's 'default-ON, ingestion "
+        "path' sentence is false"
     )
 
 
