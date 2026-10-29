@@ -980,3 +980,95 @@ def test_consistency_gate_compares_the_transit(prov):
         tampered
     assert "sourceVersionTransit" not in tampered.get(
         "uncarried_journal_fields", []), tampered
+
+
+def test_consistency_gate_compares_the_folded_set(prov):
+    """#10010 review P3 — the #7704 fold's accumulated set is INSIDE the
+    content gate's compared surface, and the re-creation wipe is what keeps
+    that gate **green**.
+
+    ``extractedFromAll`` is a ``_POINT_HANDLED`` key, and the rationale that
+    stood in ``projection/__init__.py``'s wipe comment read that membership as
+    "``check_consistency`` cannot see it". That is false, and the difference
+    matters because it inverts what the wipe is FOR: ``_uncarried``'s
+    ``_POINT_HANDLED`` skip classifies keys the projection cannot HOLD for the
+    loss report and never reaches ``skip`` (``frozenset(uncarried.get(pid))``),
+    while ``_canonical_point_fields`` keeps every key that is not in
+    ``_NOT_COMPARED`` — and ``extractedFromAll`` is in neither exclusion table.
+    So without the wipe a re-creation inherits the dead incarnation's folded
+    set, the re-creation's ``PointAdded`` states none, and the gate reports
+    ``divergent_points[].fields == ['extractedFromAll']``: a NOISY break.
+
+    MUTATION: add ``extractedFromAll`` to ``_EXCLUSION_REASONS`` (which is
+    what the earlier comment claimed was already true) and the surface
+    assertion below reds — measured: ``1 failed``. The OTHER direction lives
+    next door:
+    ``test_provenance_extractedfrom_3263.py::test_a_re_creation_does_not_resurrect_the_folded_set``
+    reds when ``n.extractedFromAll = NULL`` is dropped from the re-creation
+    wipe. Together the two are what makes the wipe's stated purpose — the
+    checker stays GREEN on a re-creation — a fact rather than an assertion:
+    this test proves the key is COMPARED, and that pin proves the rebuild
+    would otherwise hand the dead set to a node whose new payload states none.
+    The sibling ``test_consistency_gate_compares_the_transit`` pins the same
+    shape for the #5256 carrier, the other ``_POINT_HANDLED`` property this PR
+    writes.
+    """
+    from tortoise.consistency import _compare_views, check_consistency
+
+    alpha, beta = ("https://doc.example/alpha", "https://doc.example/beta")
+
+    # The SURFACE, asserted without a graph (deterministic, no store): a
+    # one-sided ``extractedFromAll`` must be NAMED by the field comparison.
+    mismatches, divergent, _emb, excluded, one_sided = _compare_views(
+        {"p": {"id": "p", "name": "n"}},
+        {"p": {"id": "p", "name": "n", "extractedFromAll": [alpha]}})
+    assert [dp["fields"] for dp in mismatches] == [["extractedFromAll"]], (
+        "the folded set fell OUT of the compared surface — the wipe would then "
+        f"be silencing a break nothing can see: {mismatches!r}")
+    assert divergent == 1
+    assert "extractedFromAll" not in excluded
+    assert "extractedFromAll" not in one_sided, (
+        "a one-sided member of the fold's set must be REPORTED, not declared "
+        f"one-sided-by-design: {one_sided!r}")
+
+    # The END-TO-END half: a faithful rebuild of a folded claim is green and
+    # carries the set, so a tampered graph is the only way to red it.
+    sdk, events, log_path = prov
+    sdk.create_source(alpha, "document")
+    sdk.create_source(beta, "document")
+    content = "one claim, two sources — the fold's own case"
+    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+    proj = _rebuilt(sdk, events)
+
+    carried = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.extractedFromAll",
+        params={"id": pid}).result_set
+    assert carried and carried[0][0] is not None, \
+        "guard: the rebuilt node must CARRY the folded set"
+    assert sorted(carried[0][0]) == sorted([alpha, beta]), carried[0][0]
+
+    result = check_consistency(str(log_path), proj)
+    assert result["ok"], result
+    assert result["divergence"] is None, result
+    assert "extractedFromAll" not in result.get("excluded_fields", {}), \
+        "the folded set must NOT be excluded from the content comparison"
+    assert "extractedFromAll" not in result.get(
+        "uncarried_journal_fields", []), \
+        "the folded set must be CARRIED by the replay, not skipped as uncarried"
+
+    # Discriminating half: forge the folded set in place and require the gate
+    # to NAME it. This is the half the old comment said could not happen.
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.extractedFromAll=['https://forged']",
+        params={"id": pid})
+    tampered = check_consistency(str(log_path), _proj(sdk))
+    assert tampered["ok"] is False, tampered
+    named = {
+        field
+        for dp in tampered.get("divergent_points") or []
+        for field in (dp.get("fields") or [])
+    }
+    assert "extractedFromAll" in named, tampered
+    assert "extractedFromAll" not in tampered.get("excluded_fields", {}), tampered

@@ -14275,10 +14275,23 @@ class FalkorProjection(
                     # is exactly why it needs a wipe entry, as
                     # `embedding_verbatim` (#5004 r4), `sourceVersionTransit`
                     # (#5256), `tags` (#2897) and the four capture props
-                    # (#9350) each got one. `check_consistency` cannot see the
-                    # divergence (`_canonical_point_fields` skips every
-                    # `_POINT_HANDLED` key), so this is a silent parity break,
-                    # never a noisy one.
+                    # (#9350) each got one. `check_consistency` DOES compare
+                    # this key, so the wipe is what keeps the checker GREEN on
+                    # a re-creation rather than what silences an unseeable
+                    # break (#10010 review P3 — the earlier text here claimed
+                    # the opposite and was false). `_uncarried` does skip every
+                    # `_POINT_HANDLED` key, but that skip only classifies keys
+                    # the projection cannot HOLD for the loss report — it never
+                    # reaches `skip`, which is `frozenset(uncarried.get(pid))`
+                    # — and `_canonical_point_fields` keeps every key not in
+                    # `_NOT_COMPARED`, which `extractedFromAll` is not. Without
+                    # this entry the rebuilt node keeps the dead incarnation's
+                    # folded set, the re-creation's `PointAdded` states none,
+                    # and the gate reports `divergent_points[].fields ==
+                    # ['extractedFromAll']` — a NOISY break, not a silent one.
+                    # `tests/test_source_version_extractedfrom_5038.py::
+                    # test_consistency_gate_compares_the_folded_set` pins it on
+                    # both halves.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
