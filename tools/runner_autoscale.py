@@ -26,7 +26,9 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   re-ranks an existing runner -- with ONE exception, the ARM64 SPELLINGS of a version-pinned hosted
   label (`ARM64_VERSION_PINNED_LABEL`, e.g. `ubuntu-24.04-arm`), which re-registration DROPS, so an
   `-arm` pin attached out of band cannot survive the next RE-REGISTRATION (a repair that only
-  restarts a healthy runner never re-registers it).
+  restarts a healthy runner never re-registers it). ⛔ THE RULE IS ARCH-RELATIVE, in BOTH
+  directions (`_foreign_arch_version_pin`): on an arm64 box it is the BARE `ubuntu-<version>` that
+  names the other architecture, and that one is dropped.
 
   ⛔ THE BARE `ubuntu-<version>` IS PRESERVED, NOT DROPPED (corrected 2026-10-29, PR #10275
   review). Since the #6897 version-pin decision is SUSPENDED while hosted deadlocks,
