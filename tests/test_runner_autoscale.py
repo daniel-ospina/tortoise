@@ -1254,9 +1254,23 @@ def test_repo_slug_normalises_every_spelling():
     )
 
 
-def test_labels_follow_the_gate_and_never_claim_the_other_arch():
+def test_labels_follow_the_gate_and_never_claim_the_other_arch(monkeypatch):
     """Fallback not engaged ⇒ arch marker ONLY (baking `ubuntu-latest` makes the gate read
-    `local` forever); an x86 box never claims `self-hosted-arm64`."""
+    `local` forever); an x86 box never claims `self-hosted-arm64`.
+
+    ⛔ HERMETIC FOR THE OS-LABEL SEAM, because THIS PR is what made it matter: `resolve_labels`
+    calls `_os_labels`, which reads `CI_RUNNER_OS_LABEL` from the environment, and this test calls
+    it IN-PROCESS with no fixture — so on the box that opted into the mitigation (the spelling the
+    runbook's own registration recipe now tells operators to export) the first assertion reded with
+    `self-hosted-x64,ubuntu-24.04` != `self-hosted-x64`, and `=true` raised `Unmeasurable`. A red
+    for a reason unrelated to the code under test. The two neighbours that DO read the seam already
+    pop it; this one is pinned to the `off` DEFAULT — the state that protects #6897 — by removing
+    the variable entirely rather than setting it.
+
+    Mutation: delete the `delenv` -> `CI_RUNNER_OS_LABEL=on pytest …` reds at the first assertion.
+    """
+    for seam in ("CI_RUNNER_OS_LABEL", "CI_RUNNER_OS_NAME", "CI_RUNNER_OS_RELEASE"):
+        monkeypatch.delenv(seam, raising=False)
     assert RA.resolve_labels({}, "x86_64") == "self-hosted-x64"
     engaged = {
         "vm-2": RA.PoolEntry("vm-2", "online", False, ["self-hosted-arm64", "ubuntu-latest"])

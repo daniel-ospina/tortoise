@@ -136,6 +136,14 @@ starved by their not being answered here; `--status` reports them as measured
 > no red, no green, no merges at all. The short version, for the lane that reads this before tidying
 > it away: this departure is INTENTIONAL, it is recorded here and re-stated in `MEMORY.md`
 > (`[ci-runners]`), and the revert is `CI_RUNNER_OS_LABEL=off` plus `--repair-labels`.
+>
+> **⚠️ INTENTIONAL IS NOT SETTLED.** #6897's freshest owner record (`2026-10-29T04:49:36Z`) measures
+> this pool at **5.49×** hosted on `test-slow` with three watchdog kills and two `steps: 0` false
+> reds in one 8-hour window, and recommends taking the label off the pool again — 13 minutes BEFORE
+> the departure record on #9878 (`05:02:45Z`) that this marker is copied from, which does not answer
+> it. Both are quoted and reconciled in *The decision this forces* above. Do not read this marker as
+> a ruling that the suspension is right, and do not make it permanent: the default stays `off`, an
+> explicit operator flag turns it on, and clearing the flag reverts it.
 
 **Measured 2026-10-28**, in jobs completed by the runner that ran them: **one 60-minute window had 25
 on self-hosted and 1 on hosted**; a later 30-minute window completed 92 jobs (3.1 jobs/min) with the
@@ -149,19 +157,54 @@ includes every one of them, and a `needs:` job that never runs is never dispatch
 reported, and **every tortoise PR stayed `BLOCKED`** for the whole day: no red, no green, nothing to
 merge on. The gate was found queued **8 hours** on a run whose every other job had completed.
 
-**The decision this forces, stated as a decision.** Serving those legs from this pool costs what
-#6897 measured — the pool is ~2x slower, so a 20m watchdog leg can be KILLED here that hosted
-finished, i.e. a **red on healthy code**. Leaving them pinned costs a gate that is **never
+**The decision this forces, stated as a decision — and it is NOT closed.** Serving those legs from
+this pool costs a **red on healthy code**; leaving them pinned costs a gate that is **never
 dispatched**: no red, no green, and **no merges at all**. On 2026-10-28 the second cost was the one
-being paid, so the pool carries `ubuntu-24.04` as a temporary, explicitly-flagged mitigation — and the
-installer's default stays `off`, so a fresh box does not silently reverse #6897. Flipping the default
-is the one-line change if the owner prefers the other trade; reverting the pool is
-`CI_RUNNER_OS_LABEL=off` plus a label reset.
+being paid, so the live pool carries `ubuntu-24.04` as a temporary, explicitly-flagged mitigation —
+and the installer's default stays `off`, so a fresh box does not silently reverse #6897.
 
-⛔ **The mitigation is label-WIDE, and two of the legs it now makes servable are pinned for reasons
-that are NOT speed.** A label cannot be scoped to "the legs it starves": the moment the pool carries
-`ubuntu-24.04`, all **nine** `runs-on: ubuntu-24.04` jobs become eligible for it. Two of those pins
-exist to keep the job OFF the fleet, and neither is about the watchdog:
+⛔ **The measurement the departure is built on is FAVOURABLE, and the freshest owner record on
+#6897 is not.** "The pool is ~2x slower" above is the 2026-10-28 reading. Re-measured like for like
+on the same 365 nodeids (#6897, `daniel-ospina`, `2026-10-29T04:49:36Z`):
+
+| leg | nodeids | class | pytest wall | job wall | conclusion |
+| --- | --- | --- | --- | --- | --- |
+| `test-slow (a)` | 365 | **GitHub-hosted** | **246.5 s** | 6.08 min | success |
+| `test-slow (a)` | 365 | **pool** (`pi-runner-x64-1`) | **1352.5 s** — **5.49×** | 24.52 min | success |
+| `test-slow (e)` | 850 | GitHub-hosted | 331.9–354.1 s | 7.57–7.98 min | success |
+| `test-slow (e)` | 850 | pool | **killed at 2402 s, 375 of 850 nodeids done** | 41.48 min | **failure** |
+
+plus three verbatim watchdog kills in one 8-hour window (`WATCHDOG: pytest killed after 40m (335
+passed, 0 failed, 0 errored so far)` → `pytest exit code: 124`; `rc=137`; `41.27 min`) and two jobs
+that held a pool runner for 10–11 minutes and executed **zero steps** before failing — a false red
+of exactly the class #6897 was filed to remove. That comment closes: *"`test-slow` cannot be
+scheduled onto the pool"*, *"Recommendation: take `ubuntu-24.04` off the x64 pool again and keep the
+pin."*
+
+**Both records are the owner's — the measurement at `04:49:36Z` and the departure record on #9878 at
+`05:02:45Z`, which does not answer it — so this page states the open state instead of picking a
+side.** Three consequences a reader must not miss:
+
+- **The mitigation is TEMPORARY and reversible, and nothing in this change may entrench it.** The
+  installer's default is `off`; `CI_RUNNER_OS_LABEL` is a per-box choice an operator sets, never a
+  repo default; the capacity recipe below does not prescribe `on`; and the revert is one command
+  (`CI_RUNNER_OS_LABEL=off … --repair-labels`, below). A lane that reads this page as licence to
+  make the label permanent has misread it — that question belongs on #6897.
+- **For `test-slow` the mitigation buys nothing.** It does not make the leg dispatchable; it turns a
+  pending leg into a watchdog kill. What that leg needs is a budget matching the class (≥91 min
+  measured, against a 60 min job cap) or a move — #6897's open question, and not something a label
+  can fix.
+- **`workflow-lint` is the leg this actually rescues** — measured indistinguishable on the pool
+  (10–15 s, 5/5 success, against a 5 min cap) — and even that one is rescued at the Docker Hub quota
+  cost listed below.
+
+If the owner takes the recorded recommendation instead, the pool revert is
+`CI_RUNNER_OS_LABEL=off` plus `--repair-labels` — still one command.
+
+⛔ **The mitigation is label-WIDE, and SIX of the nine legs it now makes servable are pinned for
+reasons that are NOT speed.** A label cannot be scoped to "the legs it starves": the moment the pool
+carries `ubuntu-24.04`, all **nine** `runs-on: ubuntu-24.04` jobs become eligible for it. Six of
+those pins exist to keep the job OFF the fleet, and none is about the watchdog:
 
 - `.github/workflows/mirror-images.yml` — *"a hosted runner has its own egress IP, so these pulls
   cannot spend the quota the self-hosted fleet shares; running it on the fleet would spend the very
@@ -172,11 +215,23 @@ exist to keep the job OFF the fleet, and neither is about the watchdog:
   leg pulls `rhysd/actionlint` by a single literal reference, so on the pool it spends the fleet's
   shared anonymous Docker Hub quota — a rate-limit red on healthy code, a failure class the #6897
   analysis does not cover.
+- **The four fleet OBSERVERS** — `.github/workflows/availability-liveness.yml`,
+  `availability-watchdog.yml`, `ci-check-repair.yml`, `ci-queue-health.yml` — are pinned for a third
+  and distinct reason: **topology, not egress or quota**. A guard whose job is to report on a full
+  pool must not run ON that pool; they can sit in `actions/checkout` behind the very backlog they
+  measure and then die at their own `timeout-minutes` with the measuring step skipped. GitHub's
+  label matching is cumulative and unscoped (`github/docs`, *using self-hosted runners in a
+  workflow*: *"You can create custom labels and assign them to your self-hosted runners at any
+  time"*; *"These labels operate cumulatively"*), so a runner carrying `ubuntu-24.04` is eligible for
+  them with no other token required. During a hosted outage — the ONLY window in which the
+  mitigation is engaged — the instruments that exist to surface that outage become pool-eligible and
+  go quiet precisely when they matter. Their four in-file comment blocks asserted the invariant this
+  change reverses and were corrected in the same change.
 
-These are **accepted costs of the temporary mitigation, stated as costs**: cheap next to an
-undispatched required aggregate, and both revert with the mitigation. If the mitigation becomes
-permanent, the scoping fix is to put the starved required legs on a label the pool answers and leave
-`mirror-images` / `workflow-lint` on one only hosted answers.
+These are **accepted costs of the temporary mitigation, stated as costs**, and all six revert with
+it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
+label the pool answers and leave `mirror-images` / `workflow-lint` / the four observers on one only
+hosted answers.
 
 **The escape hatch, and the proof it works.** `ubuntu-24.04` is an **OS fact**, not a fallback label:
 `CI_RUNNER_OS_LABEL=on` (or `=auto`, which derives it from `/etc/os-release`) rides it on every label
@@ -184,13 +239,27 @@ arm, so `--fallback off` cannot drop it. The 8-hour-stuck gate **dispatched with
 label being added, on `pi-runner-cmux-x64-6`, and completed in 6 s.
 
 **Verify it — do not assume it.** `tools/install-ci-runner-x64.sh --status` now ends with a
-`label-coverage` block: it reads every `runs-on:` label out of the workflows and prints how many
-runners answer it, marking any zero-answer label `⛔ UNCOVERED` (exit `5` — a verdict, and it is
-bad) and any label only PART of the pool answers `⚠️ PARTIAL` — measured against the runners that
-COULD answer it (the x64 pool for a bare `ubuntu-<version>`, the arm64 pool for an `-arm` spelling),
-so a two-architecture pool is not misread as erosion. A zero-answer `ubuntu-latest` while the gate is
-NOT routing to the pool is a report, not a block: that is the healthy state, and `--status` stays
-green. Run it from the repo root. A fresh
+`label-coverage` block: it reads every `runs-on:` label out of the workflows and prints
+`<label> = <n> of <m> runner(s)` — `m` being the runners that COULD answer it (the x64 pool for a
+bare `ubuntu-<version>`, the arm64 pool for an `-arm` spelling, the whole pool otherwise), so a
+two-architecture pool is not misread as erosion. When `0 < n < m` the line also prints `⚠️ PARTIAL`.
+The EXIT is decided per CLASS, not "any zero-answer label":
+
+- a bare `ubuntu-<version>` with **no** answer is the incident state — the per-label line prints
+  `⛔ <label> = 0 of <m> self-hosted runner(s) answer it.`, and the block-level remedy then prints
+  `⛔ UNCOVERED label(s) above`, with exit `5` (a verdict, and it is bad);
+- `ubuntu-latest` at zero is a **report** (exit `0`): while the gate is not routing here, a pool
+  carrying no `ubuntu-latest` IS the healthy state;
+- an `-arm` spelling, `macos-*` / `windows-*`, and a **custom** label at zero are reports (`0`) too —
+  their hosted availability was never measured, so a zero there is not this block's verdict. A
+  custom label that merely starts `ubuntu-<digits>` (`ubuntu-2204-tools`) is NOT the bare-version
+  class: it is measured against the whole pool and reported, never verdicted.
+
+(The class is decided ONCE, in the same awk that computes the denominator, so the two cannot
+disagree — they used to, and a zero-carrier custom label exited `5` claiming every PR was blocked.)
+The read-nothing state is exit `4` and lives in the exit-code list below.
+
+Run it from the repo root. A fresh
 box, a re-provisioned pool, or a new workflow with a new `runs-on:` value all show up there instead
 of as an unexplained all-PR block — and so does the erosion below, **before** the last carrier of a
 label is replaced: `3 of 12 runners answer it` is the shape that reaches zero answers one fill at a
@@ -198,13 +267,23 @@ time with nothing red in between. One read is one `--paginate`d pool listing, so
 `per_page` cannot read as uncovered.
 
 **Adding capacity (the second half).** One runner instance = one concurrent job, so extra instances
-are the only lever on throughput besides trimming the matrix. ⛔ **There is ONE registration path and
-it is the installer** — `runner_autoscale.py` calls it "the one registration path" and refuses to
-improvise a second, divergent one; this section now obeys the same rule it does:
+are the only lever on throughput besides trimming the matrix. ⛔ **There is one path that ADDS a
+runner, and it is the installer** — `runner_autoscale.py` calls it "the one registration path" and
+refuses to improvise a second, divergent one. **Re-registering an EXISTING runner is a second path,
+and it does not go through the installer:** `tools/runner_autoscale.py::register()` invokes
+`config.sh --unattended … --labels <labels>` directly for every DEAD/ORPHANED re-registration. That
+is exactly why its label derivation (`resolve_labels` / `_os_labels`) is pinned against the
+installer's by `test_resolve_labels_matches_the_installer_on_every_os_label_arm`, and why neither
+side may grow a labelling rule the other does not have — the drift already happened once here,
+silently.
 
 ```bash
-# on the box: ensure slots 1..N exist, carrying the label set the contract requires
-CI_RUNNER_OS_LABEL=on tools/install-ci-runner-x64.sh --count <N>
+# on the box: ensure slots 1..N exist, carrying the label set the contract requires.
+# ⛔ CI_RUNNER_OS_LABEL is the BOX's existing choice, not part of the command: unset means `off`,
+# which is the #6897 pin intact. Export it only on a box that is already carrying the temporary
+# mitigation — the autoscaler's timer pins whatever the box was installed with (see the FILL leg
+# above), so a scheduled fill needs no help here.
+tools/install-ci-runner-x64.sh --count <N>
 ```
 
 ⛔ **NEVER hand-write a `config.sh --labels …` registration.** The 2026-10-28 mitigation was applied
@@ -300,15 +379,16 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:712` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:534` (arch refusal dies at `:539`) and `uninstall` `:587` ·
-  guards at `:534-584` (forks `:542`, disk `:562`, cpu/memory `:569` — `:582`, the memory guard,
-  is the last one) · sha256 pin + registration at `:723-733` (verify `:723`, token `:726`, one
-  argv `:731-732`, `config.sh` `:733`; the run at `:715` is the dry-run echo) · systemd
-  install/start at `:743-745` · label resolution at `:216-313` (`fallback_engaged` `:216`,
+- `--count N` → `tools/install-ci-runner-x64.sh:726` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:548` (arch refusal dies at `:553`) and `uninstall` `:601` ·
+  guards at `:548-598` (forks `:556`, disk `:576`, cpu/memory `:583` — `:596`, the memory guard,
+  is the last one) · sha256 pin + registration at `:737-747` (verify `:737`, token `:740`, one
+  argv `:745-746`, `config.sh` `:747`; the run at `:729` is the dry-run echo) · systemd
+  install/start at `:757-759` · label resolution at `:216-313` (`fallback_engaged` `:216`,
   `resolve_os_label` `:244`, `resolve_labels` `:276`, whose body ends at its `}` on `:313`) ·
-  `repair` `:474` · `--print-labels` `:507` · label-coverage at `:345-467` (the two "read
-  nothing" arms at `:450` and `:459`, the uncovered verdict at `:467`).
+  `repair` `:488` · `--print-labels` `:521` · label-coverage at `:331-481` (section separator at
+  `:331`, its `say` header at `:338`, the two "read nothing" arms at `:464` and `:473`, the
+  uncovered verdict at `:481`).
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:180-184`, the `case`
   through its `esac`): a `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op
   that reports success having deregistered nothing. `CI_RUNNER_OS_LABEL` is validated the same

@@ -371,19 +371,32 @@ if [ "$MODE" = status ]; then
     # `7 of 12` on the live pool would read as erosion when it is exactly correct. A bare version
     # label is measured against the x64 pool, an `-arm` spelling against the arm64 pool, and
     # anything else against the whole pool.
+    # ⛔ THE CLASS IS DECIDED ONCE, HERE, AND THE VERDICT BELOW READS IT. Two definitions of "a
+    # bare version pin" used to sit eight lines apart — the denominator matched
+    # `^ubuntu-[0-9][0-9.]*$` while the verdict used the `case` glob `ubuntu-[0-9]*`, which is
+    # looser by whatever suffix follows: `ubuntu-2204-tools` is NOT the class (its denominator is
+    # the whole pool) yet the verdict arm claimed it, so a zero-carrier CUSTOM label exited `5` and
+    # was told "python-ci-gate is never dispatched and every PR stays BLOCKED" — a false red from
+    # the one block that must not produce one, and the mirror of the boundary
+    # `tools/runner_autoscale.py:284-287` states ("a custom label that merely starts
+    # `ubuntu-<digits>` … is NOT in the class"). One predicate, two readers.
     counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" \
-      -v pool_total="$pool_total" '
+      -v fallbacklabel="$FALLBACK_LABEL" -v pool_total="$pool_total" '
       {k=split($2,a,","); hit=0; x64=0; arm=0
        for(i=1;i<=k;i++){ if(a[i]==want) hit=1; if(a[i]==x64label) x64=1; if(a[i]==armlabel) arm=1 }
        if (hit) n++; if (x64) nx64++; if (arm) narm++}
       END { total = pool_total + 0   # the MEASURED runner count, never the record count above
             denom = total
-            if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) denom = narm
-            else if (want ~ /^ubuntu-[0-9][0-9.]*$/) denom = nx64
+            cls = "other"
+            if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) { denom = narm; cls = "arm" }
+            else if (want == fallbacklabel) cls = "fallback"
+            else if (want ~ /^ubuntu-[0-9][0-9.]*$/) { denom = nx64; cls = "bare" }
             if (denom == 0) denom = total
-            printf "%d %d", n+0, denom+0 }')"
-    n="${counts% *}"
-    denom="${counts#* }"
+            printf "%d %d %s", n+0, denom+0, cls }')"
+    n="${counts%% *}"
+    rest="${counts#* }"
+    denom="${rest%% *}"
+    label_class="${rest#* }"
     if [ "$n" -eq 0 ]; then
       # ⛔ WHOSE PROBLEM IS A ZERO? Only a label this pool is ASKED to serve — and the three classes
       # answer differently, so the verdict is per-class rather than "any zero is the incident":
@@ -402,14 +415,15 @@ if [ "$MODE" = status ]; then
       # ⛔ REPORT THE MEASUREMENT, NOT A CAUSE: the line used to assert "only GitHub-hosted can
       # answer it, and hosted is not available here" for EVERY zero-answer label.
       say "  ⛔ $label = 0 of $denom self-hosted runner(s) answer it."
-      case "$label" in
-        *-arm)
+      # The class came from the awk above, so this arm and the DENOMINATOR cannot disagree.
+      case "$label_class" in
+        arm)
           say "     An ARM64 hosted spelling — not this pool's class on an x64 box (a false architecture claim). A report, not a block."
           ;;
-        "$FALLBACK_LABEL")
+        fallback)
           say "     GitHub-hosted serves $FALLBACK_LABEL while the gate is not routing it here — a report, not a block."
           ;;
-        ubuntu-[0-9]*)
+        bare)
           say "     A required leg naming it can then only be served by GitHub-hosted: python-ci-gate is never dispatched and every PR stays BLOCKED."
           uncovered=1
           ;;

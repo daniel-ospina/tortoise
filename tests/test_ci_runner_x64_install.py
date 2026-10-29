@@ -535,6 +535,47 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
     assert "report, not a block" in r.stderr, r.stderr
 
 
+def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digits(tmp_path: Path):
+    """A CUSTOM label is not the bare-version class — in the verdict OR the denominator.
+
+    The block held TWO definitions of "a bare `ubuntu-<version>` pin" eight lines apart: the
+    denominator matched `^ubuntu-[0-9][0-9.]*$` (so `ubuntu-2204-tools` was an ordinary custom
+    label counted against the whole pool) while the verdict arm used the `case` glob
+    `ubuntu-[0-9]*`, which matches anything after the digits. A zero-carrier custom label therefore
+    exited `5` and was told *"python-ci-gate is never dispatched and every PR stays BLOCKED"* — a
+    false red, and a false all-PRs-blocked claim, from the one instrument whose own comment says it
+    must never produce one. `tools/runner_autoscale.py:284-287` states the boundary the verdict arm
+    was missing ("a custom label that merely starts `ubuntu-<digits>` … is NOT in the class"), so
+    the two files disagreed about it.
+
+    Mutation: `case "$label" in ubuntu-[0-9]*)` -> this case exits 5 and names the gate -> RED.
+    Control: the bare pin in the same shape still exits 5, so the fix is not "never verdict".
+    """
+    pool = _stub_gh(tmp_path / "gh", "x1\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest")
+    custom = _repo_with_workflows(
+        tmp_path / "custom", "jobs:\n  a:\n    runs-on: ubuntu-2204-tools\n    steps: []\n"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}"), cwd=custom)
+    assert r.returncode == 0, (
+        f"a custom label with no carrier is a report, not the incident state: {r.stderr}"
+    )
+    # The denominator is the WHOLE pool for a custom label (not the x64 sub-pool), so the two
+    # arms of the block agreeing is visible in the printed line.
+    assert "ubuntu-2204-tools = 0 of 1 self-hosted runner(s)" in r.stderr, r.stderr
+    assert "every PR stays BLOCKED" not in r.stderr, (
+        f"a custom label must not be told it blocks every PR: {r.stderr}"
+    )
+    assert "⛔ UNCOVERED" not in r.stderr, r.stderr
+
+    # CONTROL — the class the verdict exists for. Same pool, same shape, bare pin at zero.
+    bare = _repo_with_workflows(
+        tmp_path / "bare", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}"), cwd=bare)
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "every PR stays BLOCKED" in r.stderr, r.stderr
+
+
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
 def test_dry_run_decides_nothing_and_calls_nothing(tmp_path: Path):
     """A plan is the operator's step: no token, no download, no registration, no label read."""
