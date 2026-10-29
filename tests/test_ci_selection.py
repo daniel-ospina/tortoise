@@ -6660,10 +6660,16 @@ def test_the_guard_decided_log_is_per_runner_on_every_pool_leg():
         "that excludes it (and its VM-private `/tmp/pytest.log`) must be revised with it")
     wf_text = (Path(__file__).resolve().parents[1]
                / ".github" / "workflows" / "python-ci.yml").read_text()
+    # A DENIAL must not red this. The point is the positive co-tenancy claim —
+    # "run CONCURRENTLY on one host and share ONE `/tmp`", the shape that shipped
+    # and was believed — so a line that names the leg AND the temp dir AND negates
+    # the claim is the correction, not the defect.
+    _NEGATIONS = ("not ", "NOT ", "n't", "never", "neither", "FALSE", "wrong")
     misattributed = [
         line.strip() for line in wf_text.splitlines()
         if "test-slow" in line and "/tmp" in line
         and ("share" in line.lower() or "concurrently" in line.lower())
+        and not any(neg in line for neg in _NEGATIONS)
     ]
     assert not misattributed, (
         "these workflow comments name `test-slow` as a co-tenant of a shared host `/tmp`, "
