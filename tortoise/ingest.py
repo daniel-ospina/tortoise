@@ -1030,6 +1030,36 @@ def main(argv=None):
                 if args.capture_metadata:
                     # #125 metadata-only: emit sessionCaptured Event with uses→Skill,
                     # SKIP LLM point extraction entirely
+                    #
+                    # ⛔ #3590 (D1) — REGISTER the Skill this event references,
+                    # BEFORE emitting it. The fold resolves an event's MENTIONS
+                    # (`uses[]`, `subject`, `object`) against a single LIVE
+                    # holder and otherwise drops the link
+                    # (`entity_identity.resolve_fold_name(..., mention=True)`);
+                    # it no longer MERGEs a stub whose id WAS the name, because
+                    # a fold-time mint is not replay-deterministic and a
+                    # name-derived id is the defect #3590 removes. So an
+                    # attribution edge exists only when the PRODUCER registers
+                    # its target — which is exactly the door D1 (RULED
+                    # 2026-10-26) names as the one that grows the entity set:
+                    # "the entity set grows only from an explicit registration
+                    # (ObjectRegistered / SubjectAdded) that mints the id; an
+                    # unresolvable mention drops its link, records the miss, and
+                    # mints nothing."
+                    # `add_object` is that registration and is idempotent on a
+                    # live name (#452 via `_registration_id`), so a re-run
+                    # resolves the same id instead of leaving a second carrier.
+                    # Without it #125's own acceptance assertion —
+                    # `sessionCaptured -[:uses]-> (:Object {objectKind:'skill'})`
+                    # (tests/test_ingest.py) — is a silent red: the edge the
+                    # capture exists to write never lands (measured on CI
+                    # run 40917794096, job 123637953240).
+                    # ⚠️ The `subject="pi-agent"` mention below is left
+                    # unregistered ON PURPOSE — it is the agent's own label, not
+                    # a referenced entity, and its dropped link is the bounded
+                    # exemption `entity_identity.resolve_fold_name` records
+                    # (naming this producer).
+                    api.add_object("tortoise-capture", "skill")
                     api.add_event(
                         event_id, "sessionCaptured",
                         subject="pi-agent",

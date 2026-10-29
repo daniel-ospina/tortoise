@@ -1425,16 +1425,25 @@ def test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions(
         sdk, tmp_path: Path):
     """#3590 round-5 review P1-3: the legacy door's mention loss is recorded.
 
-    Both event doors leave these names unregistered — ``EventAPI.add_event``
+    Both event doors register NOTHING themselves — ``EventAPI.add_event``
     has always done so, and since **D1 was RULED (2026-10-26: a bare mention
     does not create an entity)** the SDK's ``create_event`` does the same
     (``test_a_bare_mention_mints_nothing_and_drops_its_link``). ``add_event``
     has a LIVE in-repo caller: ``tortoise.ingest --capture-metadata`` writes
     ``sessionCaptured`` through it with ``subject="pi-agent"`` and
     ``uses=[{"name": "tortoise-capture", "kind": "skill"}]``. Neither name is
-    registered, so the fold resolves them against no live holder and the
-    ``performs`` / ``uses`` edges are never wired — pre-#3590 they existed,
+    registered by the DOOR, so the fold resolves them against no live holder and
+    the ``performs`` / ``uses`` edges are never wired — pre-#3590 they existed,
     because the retired fold MERGEed a stub whose id WAS the name.
+
+    ⛔ **The PRODUCER is a different surface, and there D1's remedy applies.**
+    A caller that WANTS an attribution edge registers the target explicitly
+    (``ObjectRegistered`` / ``SubjectAdded`` — D1's own words), and that is what
+    ``tortoise/ingest.py`` now does for its ``uses[]`` skill before emitting
+    (``api.add_object("tortoise-capture", "skill")``): #125 pins that edge, and
+    while the producer left it to the fold the pin was red (CI run 40917794096).
+    What the producer still loses, and this file records, is its
+    ``subject="pi-agent"`` mention.
 
     This is the acceptance pin for D1's SECOND OPTION, now the ruling:
     registering at ``add_event`` would take the minting arm at the door every
