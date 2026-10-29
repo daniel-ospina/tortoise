@@ -39,6 +39,8 @@ is where the "keep the row" decision lives.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 import tortoise.log as log_mod
@@ -364,6 +366,33 @@ def test_an_armed_capture_writes_NO_graph_event_for_its_turns(
     assert "SessionRecorded" not in str(served["events"]), (
         "poll_events announced the capture on the record-held lane — the "
         "rationale in record_projection.TURNS_RECORD_TYPE says it does not")
+
+
+def test_the_carrier_survives_an_unimportable_embeddings_seam(
+        armed_sdk, monkeypatch):
+    """#5148: a WRITE must not depend on an import — the armed lane included.
+
+    `_emit_event` guards this identical import and states the rule; the carrier
+    branch did not, and it runs LATE — the stale-turn removals are already
+    journaled by then — so an ImportError ended a capture that had already
+    mutated the record and reached NEITHER the carrier nor the trailing
+    `SessionRecorded`. Pre-fix this reds with the ImportError; post-fix the
+    capture completes, the carrier is journalled, and only the #5004
+    attestation is absent (the fail-soft shape `_capture_turn_embeddings`
+    already uses earlier on the same call path).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setattr("tortoise.record_writer.write_live_record",
+                        lambda *a, **k: None, raising=False)
+    # An import-HOOK failure, not a missing dep: the module exists, the import
+    # raises. `None` in `sys.modules` is exactly that shape.
+    monkeypatch.setitem(sys.modules, "tortoise.embeddings", None)
+    res = armed_sdk.capture_session(CONV, session_id=SESSION_ID)
+    assert res["ok"] is True
+    records = _records(_journal_of(armed_sdk))
+    assert [r for r in records if r["type"] == rp.TURNS_RECORD_TYPE], (
+        "the carrier never reached the journal — the capture ended on the "
+        "import, after the record had already been mutated")
 
 
 def test_the_GRAPH_held_lane_still_announces_its_turns(tmp_path, monkeypatch):
