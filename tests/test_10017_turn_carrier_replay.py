@@ -203,7 +203,7 @@ def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
     allowed = TURN_SNAPSHOT_KEYS | TURN_SNAPSHOT_BRANCH_KEYS
     for snapshot in carrier["turns"]:
         keys = frozenset(snapshot)
-        assert TURN_SNAPSHOT_KEYS <= keys, (
+        assert keys >= TURN_SNAPSHOT_KEYS, (
             "the carrier's snapshot drifted from the writer's payload — "
             f"missing={sorted(TURN_SNAPSHOT_KEYS - keys)}")
         assert keys <= allowed, (
@@ -255,7 +255,7 @@ def test_the_carrier_carries_the_ENCODED_identity_stamps(armed_sdk, monkeypatch)
         assert snapshot["embedding"], (
             "the injected vector did not ride the carrier — the identity "
             "assertion below would then be vacuous (no vector, no origin)")
-        assert TURN_SNAPSHOT_IDENTITY_KEYS <= keys, (
+        assert keys >= TURN_SNAPSHOT_IDENTITY_KEYS, (
             "the CARRIER journalled a vector with no origin — `stamp_journal_"
             "embedding(creating=True)` did not run on this lane, so a model "
             f"change is silent for turns (saw {sorted(keys)})")
