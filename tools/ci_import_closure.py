@@ -1701,6 +1701,10 @@ def pr_meta(repo: str, pr: int, cache: Path | None = None) -> dict:
     (pinned by `test_an_open_prs_head_is_never_cached`).
     """
     cached = cache / f"meta-{_slug(repo)}-{pr}.json" if cache is not None else None
+    if cached is not None:
+        # Same contract as `pr_ground_truth`: a cache directory that does not
+        # exist yet is created, not an OSError that takes the window down.
+        cache.mkdir(parents=True, exist_ok=True)
     if cached is not None and cached.exists():
         try:
             payload = json.loads(cached.read_text())
