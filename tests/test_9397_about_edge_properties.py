@@ -3159,27 +3159,38 @@ def test_the_default_ingestion_path_reaches_the_binder():
     # extractor selection. `m2` is the opt-out and v2 is the fall-through, so
     # flipping the default would falsify the corrected sentence while the call
     # above stayed in place — an unpinned half of a claim this leg advertises.
-    tree = ast.parse(sdk)
-    selected = [
+    #
+    # #4282 (2026-10-27): the selection used to live in `TortoiseSDK.commit_session`,
+    # which this change deleted. It survives, single-sourced, in
+    # `hosted_api._capture_lane()`, and the two lanes still dispatch to the two
+    # extractors there. Pinned against `sdk.py` it would now pass vacuously (an
+    # `assert selected` on a deleted function cannot be anything but absent), so
+    # the pin follows the code rather than being dropped.
+    hosted = (PKG / "hosted_api.py").read_text(encoding="utf-8")
+    htree = ast.parse(hosted)
+    lanes = [
         node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
+        for node in ast.walk(htree)
+        if isinstance(node, ast.IfExp)
         and "TORTOISE_SESSION_EXTRACTOR" in ast.unparse(node.test)
         and "m2" in ast.unparse(node.test)
     ]
-    assert selected, (
+    assert lanes, (
         "the `TORTOISE_SESSION_EXTRACTOR == 'm2'` selection is gone from "
-        "`sdk.py` — re-derive the corrected reach claim before deleting the "
-        "opt-out it describes"
+        "`hosted_api.py` too — re-derive the corrected reach claim before "
+        "deleting the opt-out it describes"
     )
-    node = selected[0]
-    assert "_extract_session_llm(" in ast.unparse(node.body), (
-        "the `m2` branch no longer selects `_extract_session_llm`, so 'm2 is "
-        "the opt-out' is stale"
+    lane = lanes[0]
+    assert "m2" in ast.unparse(lane.body) and "v2" in ast.unparse(lane.orelse), (
+        "`hosted_api`'s lane selection no longer answers m2/v2, so 'm2 is the "
+        "opt-out and v2 the fall-through' is stale"
     )
-    assert "_extract_session_v2(" in ast.unparse(node.orelse), (
-        "`_extract_session_v2` is no longer the FALL-THROUGH extractor — the "
-        "corrected evidence's 'default-ON, ingestion path' sentence is false"
+    assert "sdk._extract_session_llm" in hosted, (
+        "the m2 lane no longer dispatches `_extract_session_llm`"
+    )
+    assert "sdk._extract_session_v2" in hosted, (
+        "`_extract_session_v2` is no longer dispatched by the capture path — "
+        "the corrected evidence's 'default-ON, ingestion path' sentence is false"
     )
 
 

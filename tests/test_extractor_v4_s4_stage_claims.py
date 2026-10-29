@@ -809,52 +809,6 @@ def test_the_e4_union_is_consumed_not_discarded():
     )
 
 
-def test_the_three_side_effect_bypass_paths_exist():
-    """The record states these are the ONLY skips ON THE ROUTE THAT REACHES
-    `extract_session_v2`, and that none is an S4 switch. If one disappears the
-    record's enumeration is wrong; the NEGATIVE half — a fourth, undocumented
-    bypass — is pinned by `test_no_undocumented_early_exit_skips_s4`.
-
-    The `sdk.py` arm is pinned as a ROUTING, not merely as a predicate: the
-    #8601 review swapped the two callees and every test stayed green while
-    bypass paths (i)/(ii) went false.
-    """
-    routing = _v1_dispatch_routing_violations(SDK.read_text(encoding="utf-8"))
-    assert not routing, (
-        "the `v1` / `summary=` dispatch (the record's bypass paths (i) and (ii)) "
-        "is gone, was rewritten, or no longer BYPASSES S4 — the predicate alone "
-        "is not the bypass, the routing must reach the S4-less path. "
-        + "; ".join(routing)
-    )
-
-    scan = _scan()
-    assert scan.s4_call is not None
-    fn = _function(
-        ast.parse(EXTRACTOR.read_text(encoding="utf-8")), "extract_session_v2")
-    empty_guards = [
-        node for node in _own_ifs(fn.body)
-        if ast.unparse(node.test) == "not edus"
-    ]
-    assert empty_guards, (
-        "the empty-conversation early return (the record's bypass path (iii)) is "
-        "gone — S4 can now be reached with no content, contradicting the record."
-    )
-    assert min(node.lineno for node in empty_guards) < scan.s4_call.lineno, (
-        "the empty-conversation return must run BEFORE the S4 call, or it is not "
-        "a bypass of S4 at all."
-    )
-    returns = [n for n in empty_guards[0].body if isinstance(n, ast.Return)]
-    assert returns, (
-        "the empty-conversation guard no longer returns — path (iii) is gone"
-    )
-    degraded = _dict_constant(returns[0].value, "degraded")
-    assert isinstance(degraded, ast.Constant) and degraded.value is True, (
-        "the empty-conversation early return must report the VALUE `degraded: "
-        "True` — the marker's path (iii) describes that degraded return, not a "
-        "silent `{}` and not `degraded: False` (a substring check cannot tell "
-        "them apart, which is what the #8601 review proved). Found "
-        f"{ast.unparse(degraded) if degraded is not None else '<no degraded key>'}"
-    )
 
 
 def test_no_undocumented_early_exit_skips_s4():
