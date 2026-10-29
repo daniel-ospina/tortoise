@@ -41,9 +41,9 @@ prefix one: the expression may be the whole value (`${{ matrix.os }}`), one memb
 (`[self-hosted, "${{ matrix.arch }}"]`) or only PART of a label
 (`ubuntu-24.04-${{ matrix.arch }}`), and a token this parser cannot carry as one static label — a
 space-bearing scalar, or a YAML alias (`runs-on: *pool`) — is refused for the same reason: the
-`runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest` row was previously
-written as 83 against a measured 79, so treat both rows as a dated measurement and re-derive them
-rather than trusting the numbers.
+`runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest` row was
+previously written as 83 against a measured 79, so treat both rows as a dated measurement and
+re-derive them rather than trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
