@@ -209,8 +209,10 @@ though the receipt cannot witness them.
 exactly the instrumentation E4's row forbids, so the honest output is `UNOBSERVED` with its cause
 and file:line — and any table the probe emits records `steps_observed` **and**
 `steps_unobserved` so the count cannot be read as 8. ⚠️ **This is the `e0fc940b5` run's count.**
-`#9116`'s seam has since landed, so a re-run at a post-seam head witnesses both rows; the two
-scored rows above keep the count the run measured.
+`#9116`'s seam has since landed, so a re-run at a post-seam head can witness **S2.2**; **S2.3**
+moves only once its classify pass carries a non-empty `s2`/`union` — on the measured corpus that
+pass is IDLE (`enabled: true`, both counters empty), so a re-run there still reports S2.3
+unobserved and G5 still refuses. The two scored rows above keep the count the run measured.
 
 ⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
 `classify_later` surface in what the run actually holds (the receipt's top-level keys and its
@@ -219,8 +221,12 @@ a non-empty `s2` or `union`, with `enabled` not `false`. The FLAG alone is never
 below). When it is not a witness, the cause reports the number of keys it really inspected instead
 of quoting a remembered one. A step is never *assigned* unwitnessed, and every step ends up in
 exactly one of the two sets (a hole or an overlap refuses the run). So the epic's own GREEN gate —
-V5, all eight steps observed — stays reachable: landing `#9116` flips these two rows **without
-touching the probe or these tests**.
+V5, all eight steps observed — stays reachable: landing `#9116` makes both rows OBSERVABLE, and
+S2.2 then flips on a re-run at a post-seam head (S2.3 flips only once its pass does work, which
+the measured corpus' idle classify pass does not). It did **not** come for free and this bundle
+does not claim it did: the seam landed with this probe's observer rewritten (`observe_steps`
+reads `stats['step_witness']` instead of guessing at a surface the receipt never carried) and
+with the pin that certified the old unreachability replaced by the one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":

@@ -3905,8 +3905,14 @@ surfaces:
   # behind them — so every check here is one of the shapes that failure takes
   # (missing row, green on a nonexistent file, denominator from another corpus,
   # green evidence predating the thresholds, red row with no named cause). No
-  # DB, no network, no model: pure functions + `git cat-file`/`merge-base` on
-  # this repo. `core` is the home because `tools/capstone_verdict_check.py` is
+  # network and no model: pure functions + `git cat-file`/`merge-base` on this
+  # repo — plus ONE graph leg, `test_the_production_capture_path_puts_the_
+  # witness_on_the_receipt` (#9116), which drives the real `capture_session`
+  # over a `test_`-prefixed throwaway graph so it WRITES on whichever backend
+  # `TORTOISE_DB_URI` provides (and on the embedded lane when it is unset); it
+  # is written to hold on both, branching on the probe's own
+  # `backend_is_searchable()` rather than assuming a lane. `core` is the home
+  # because `tools/capstone_verdict_check.py` is
   # the artifact under test. A GATE-ONLY diff reaches it through
   # `tools/ci_selection.py`'s `CORE_ALSO` row for that tool, and a probe-only
   # diff through the BROAD `docs/evidence/7949-capstone/` bundle prefix
