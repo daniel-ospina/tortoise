@@ -168,6 +168,11 @@ fi
 
 # ── run, capture, and verify ────────────────────────────────────────────────
 # NUL-delimited ARGV via xargs — a filename is data, never shell text (#4449).
+# The list arrives on STDIN, not through `-a FILE`: `-a` is a GNU extension and
+# BSD/macOS xargs rejects it — measured, `xargs: invalid option -- a`, which reds
+# six of this producer's own tests on every macOS dev box while CI's
+# ubuntu-latest runners stay green. `-a FILE` is defined as "read the arguments
+# from FILE", so the stdin redirect is the same semantics and both agree.
 # The exit code is deliberately NOT the verdict: GNU xargs rewrites a child's
 # exit 1-125 to 123, so cli2's 1 (findings) and 2 (fatal) are indistinguishable
 # here. The REPORT is the evidence — the banner names the linter that ran, and
@@ -179,7 +184,7 @@ fi
 # `Summary:` count against the findings it parsed). Splitting the streams here —
 # the obvious-looking tidy-up — leaves the differ reporting "1 issue(s) but 0
 # parsed" and failing closed on a real finding, so `2>&1` is load-bearing.
-xargs -0 -a "$FILES_FROM" "$BIN" >"$TMP_REPORT" 2>&1
+xargs -0 "$BIN" >"$TMP_REPORT" 2>&1 <"$FILES_FROM"
 rc=$?
 
 report_tail() {

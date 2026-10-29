@@ -1568,12 +1568,22 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
     ]
     assert set_lines, "the producer must state its own shell options"
     for line in set_lines:
+        # BOTH spellings of errexit are refused. The flag form (`-e`, `-euo`) is
+        # what a lane writes by reflex; the LONG form (`set -o errexit`) is the
+        # same regression under a name this scan used to be blind to — measured:
+        # rewriting the producer's `set -uo pipefail` to `set -o errexit` passed
+        # this pin while genuinely enabling errexit, so cli2's 123 would abort
+        # the step before the report is verified and published, which is the
+        # pre-`#7435` behaviour the pin exists to prevent. A token CONTAINING
+        # `errexit` is the long spelling, so match the token, not a prefix.
         assert not any(
-            tok.startswith("-") and "e" in tok for tok in line.split()[1:]
+            (tok.startswith("-") and "e" in tok) or "errexit" in tok
+            for tok in line.split()[1:]
         ), (
             f"the producer must not enable errexit ({line!r}): cli2 exits 123 "
-            "under xargs when it finds issues, and errexit would fail the step "
-            "before the differ ever adjudicates that report (#7435)"
+            "under xargs when it finds issues, and errexit — `-e` or the long "
+            "`-o errexit` — would fail the step before the differ ever "
+            "adjudicates that report (#7435)"
         )
     for lint, report in (
         (changed_lint, "mdlint-pr.txt"),

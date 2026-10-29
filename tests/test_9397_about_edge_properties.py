@@ -96,16 +96,26 @@ its own leg. Gap 6 — a writer outside `tortoise/` — cannot be probed from
 inside the walk, so it is STATED and not pinned, and no test here claims to
 block every future absolute, because none can.
 
-`sdk.supersede_point` WAS one of these until `#9417`, which made its structural
-transfer carry the old edge's properties (`SET nr += $attrs`) — it is a counted
-MAP-form writer now. `projection._rebuild_all_replay` — which earlier revisions of
-this file recorded as a re-materializer — is NOT: Its `SET r += $attrs` is on the 2a-DIRECT leg,
-whose rows are discovered by `MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`,
-so `rtype` is provably `IMPL|NAND`. The about edge is transferred by a separate
+`sdk.supersede_point` WAS one of these until `#9417`. Its transfer to the
+successor runs on the 2a-DIRECT leg, whose rows are discovered by
+`MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`, so `rtype` is provably
+`IMPL|NAND`; the about edge is transferred by a separate
 `MERGE (new)-[nr:{rel}]->(t)` that **does** carry the old edge's properties
-(`SET nr += $attrs`, whitelisted to the `RelationUpsert.attrs` vocabulary), so
-since #9417 this writer DOES write `confidence` on an about edge and is no longer
-an exemption here. The REBUILD half is still bare — traced as #10139. `_rebuild_all_replay`
+(`SET nr += $attrs`, whitelisted to the `RelationUpsert.attrs` vocabulary). So
+since `#9417` that writer DOES write `confidence` on an about edge, and it is a
+counted MAP-form writer now rather than an exemption.
+
+⚠️ Every clause in that paragraph is about `supersede_point`. Earlier revisions
+of this file ran the two functions together in ONE sentence — *"… is NOT: Its
+`SET r += $attrs` is on the 2a-DIRECT leg … so since #9417 this writer DOES
+write `confidence` on an about edge and is no longer an exemption here"* — so
+the nearest antecedent carried the supersede mechanism onto
+`projection._rebuild_all_replay`, though none of it is that function's. That is
+the "sentence that says the opposite of the table beside it" defect this census
+exists to close, in the file that closes it. The replay's row is the declared
+FALSE POSITIVE in `NOT_AN_ABOUT_WRITER`, for the reason its own block below
+states.
+The REBUILD half is still bare — traced as #10139. `_rebuild_all_replay`
 carries TWO `SET r += $attrs` statements, and neither is protected the same way:
 the `DirectEdgeCreated` fold has TWO producers since `#9553` — `create_direct_edge`,
 whose `op_type` allowlist is `{IMPL, NAND}` so its descriptor can never name an
@@ -6676,10 +6686,41 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
 #: defect class this census exists to close, in the file that closes it.
 _REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN = 4
 
-#: A `<number word> review cycles` statement — the shape all three use. Plural on
+#: A `<number> review cycles` statement — the shape all three use. Plural on
 #: purpose: *"a third review cycle"* is a different claim (an ordinal about
 #: `#9403`) and is not what this count is about.
+#:
+#: ⛔ `\w+` matches DIGITS as well as words, so the READER is where both
+#: spellings are honoured — see `_review_cycle_counts`, which converts a digit
+#: token instead of skipping it. The word-only consumer this replaced dropped a
+#: DIGIT-stated count SILENTLY (`word not in words -> continue`), so the same
+#: count could be typed twice in two spellings with the leg green in one of
+#: them — the defect class this census exists to close, inside leg 33.
 _REVIEW_CYCLE_COUNT_STATEMENT = re.compile(r"(\w+)\s+review cycles\b")
+
+
+def _review_cycle_counts(source: str) -> list[tuple[int, str, int]]:
+    r"""Every review-cycle count statement in `source`, with its 1-based line.
+
+    The numeral is read in WORDS and in DIGITS. Digits are not a courtesy: `\w+`
+    matches them, and a consumer that only consulted the word table dropped the
+    digit spelling without saying so. A token that is NEITHER (`many review
+    cycles`) is not a numeral claim and is skipped — that skip is the only one.
+
+    Probe-checked by the leg that uses it, so a reader that stops seeing one of
+    the two spellings reds there instead of quietly pinning half the shapes.
+    """
+    words = {word: number for number, word in NUMBER_WORDS.items()}
+    out: list[tuple[int, str, int]] = []
+    for match in _REVIEW_CYCLE_COUNT_STATEMENT.finditer(source):
+        token = match.group(1).lower()
+        value = int(token) if token.isdigit() else words.get(token)
+        if value is None:
+            continue
+        out.append(
+            (source[: match.start()].count("\n") + 1, match.group(0), value)
+        )
+    return out
 
 #: The ledger's own statement of the same count, so the two artifacts are
 #: compared against each other rather than each against a typed literal twice.
@@ -6789,14 +6830,33 @@ def test_the_pin_index_states_the_9417_cycle_count_its_own_leg_does():
     source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
         encoding="utf-8"
     )
-    stated: list[tuple[int, str, int]] = []
-    for match in _REVIEW_CYCLE_COUNT_STATEMENT.finditer(source):
-        word = match.group(1).lower()
-        if word not in words:
-            continue
-        stated.append((source[: match.start()].count("\n") + 1, match.group(0), words[word]))
+    # ⛔ The reader is PROBED in BOTH spellings before it is trusted, because the
+    # word-only version of it was blind to digits and read as coverage. The
+    # probe sentences carry their numeral through a VARIABLE so the file-wide
+    # scan below does not count the probe itself as a statement about `#9417`.
+    digit_token = "5"
+    word_token = "four"
+    probed_digit = _review_cycle_counts(f"gauged: {digit_token} review cycles on a fix")
+    assert [value for _line, _text, value in probed_digit] == [5], (
+        "the cycle-count reader does not see a count stated in DIGITS, so it "
+        "pins only the word form and the same count can be typed twice — "
+        "measured: rewriting the count in leg 33's own block from its number "
+        f"word to digits left this leg green. Reader returned {probed_digit}"
+    )
+    probed_word = _review_cycle_counts(f"gauged: {word_token} review cycles on a fix")
+    assert [value for _line, _text, value in probed_word] == [4], (
+        "the cycle-count reader does not see a count stated as a NUMBER WORD, "
+        f"which is the spelling every statement in this file uses. Reader "
+        f"returned {probed_word}"
+    )
+    nonnumeral = "many"
+    assert not _review_cycle_counts(f"gauged: {nonnumeral} review cycles on a fix"), (
+        "the cycle-count reader treats a non-numeral token as a statement, so "
+        "prose such as 'many review cycles' would be read as a measured count"
+    )
+    stated = _review_cycle_counts(source)
     assert stated, (
-        "no `<number word> review cycles` statement found in this file — the "
+        "no `<number> review cycles` statement found in this file — the "
         "count this leg pins has moved or been reworded, so the leg would pass "
         "without measuring anything"
     )
