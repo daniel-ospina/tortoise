@@ -957,6 +957,95 @@ def test_suite_jobs_surface_the_tolerated_leak():
         f"(#7735 review F1): {missing}")
 
 
+# The pytest legs whose log is resolved PER JOB from `$RUNNER_TEMP`.
+#
+# `#10028` migrated `test`; `#10280` names this leg (and five others) as still
+# writing the host-global `/tmp/pytest.log`, which a co-tenant job on the same
+# self-hosted host truncates mid-run. It bit `test-concurrency-falkor` on run
+# 40884374618 (job 123539933295): its own `tail` and `pytest-attribution.sh` read
+# `tests/test_backfill_sources.py` / `tests/test_billing.py` — files that leg
+# never runs — and it reported "test leg INCOMPLETE — no pytest summary; failure
+# set unobservable".
+#
+# FROZEN LIST, not a repo-wide scan, for the reason `_LEAK_SURFACED_JOBS` gives:
+# "every pytest job" is a claim about process that a text scan cannot certify.
+# The five legs #10280 still owns are NOT here — this pin asserts only what is
+# actually migrated, so it cannot go green on a leg that was not fixed.
+_PYTEST_LOG_MIGRATED_JOBS = (
+    "python-ci.yml::test",
+    "python-ci.yml::test-concurrency-falkor",
+)
+
+# A host-global artifact path: `/tmp/pytest.log`, or any other bare `/tmp/...`
+# spelling. The runner's per-job temp dir is `$RUNNER_TEMP` / `${{ runner.temp }}`.
+_HOST_TMP_PATH_RE = re.compile(r"(?:^|[\s=]>'\"])(/tmp/[A-Za-z0-9._-]+)")
+
+
+def _code_lines(text: str) -> list[str]:
+    """Non-comment lines — a `#` mention of a path is prose, not a path.
+
+    Round 3 of the #7735 reviews showed a bare substring check certified a
+    comment that merely NAMED the artifact, so both pins here read code only.
+    """
+    return [ln for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def test_migrated_legs_read_their_OWN_pytest_log():
+    """#10280: a migrated leg must not touch the host-global `/tmp/pytest.log`.
+
+    Two halves, because either alone is satisfiable without fixing anything:
+
+    1. some step RESOLVES `PYTEST_LOG` from `$RUNNER_TEMP` and FAILS CLOSED on a
+       missing one (`${RUNNER_TEMP:?...}`) — a silent `/tmp` fallback is
+       indistinguishable from the bug;
+    2. no step's CODE names a host-global `/tmp/...` path at all.
+
+    Read by parsing the workflow, not by trusting the comment that describes it,
+    and it reds on the pre-#10280 text (half 2: five `/tmp/pytest.log` lines in
+    `test-concurrency-falkor`'s pytest step alone).
+    """
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    problems: list[str] = []
+    for entry in _PYTEST_LOG_MIGRATED_JOBS:
+        wf_name, job_name = entry.split("::", 1)
+        wf = yaml.load(
+            (root / ".github" / "workflows" / wf_name).read_text(),
+            Loader=_actions_yaml())
+        job = (wf.get("jobs") or {}).get(job_name)
+        if job is None:
+            problems.append(f"{entry} (no such job in {wf_name})")
+            continue
+        steps = job.get("steps") or []
+        # One step must both bound the path to `$RUNNER_TEMP`, failing closed on
+        # a missing one (`${RUNNER_TEMP:?...}`), and publish `PYTEST_LOG` from
+        # it. Checked per STEP, not per line — the delivered shape assigns
+        # `base="${RUNNER_TEMP:?…}"` on one line and `echo "PYTEST_LOG=$base/…"`
+        # on the next, so a same-line rule would false-reject it.
+        resolves = any(
+            "${RUNNER_TEMP:?" in body and "PYTEST_LOG=" in body
+            for body in (s.get("run") or "" for s in steps))
+        if not resolves:
+            problems.append(
+                f"{entry} (no step resolves PYTEST_LOG from $RUNNER_TEMP, failing "
+                "closed on a missing one)")
+        for s in steps:
+            body = s.get("run") or ""
+            named = sorted(set(_HOST_TMP_PATH_RE.findall("\n".join(_code_lines(body)))))
+            if named:
+                problems.append(
+                    f"{entry} step {s.get('name')!r} names host-global {named}")
+            path = ((s.get("with") or {}).get("path"))
+            if isinstance(path, str) and path.startswith("/tmp/"):
+                problems.append(
+                    f"{entry} step {s.get('name')!r} uploads from host-global {path}")
+    assert problems == [], (
+        "these legs still read or write the host-shared /tmp pytest artifact, so "
+        f"their verdict can be another job's (#10280): {problems}")
+
+
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])
 def test_a_non_enotempty_cleanup_failure_still_raises(tmp_path, err):
     #7735: the tolerance is scoped to the ONE race, not to rmtree in general.

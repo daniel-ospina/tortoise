@@ -2348,7 +2348,29 @@ jobs:
     # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair and
     # the health gate moved with it. The probe family is unchanged; the port is
     # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
+    #
+    # ⛔ PER-JOB PYTEST ARTIFACTS (first step, #10280). This leg was one of the
+    # six #10280 names as still writing host-global `/tmp` artifacts, and it bit
+    # on THIS job (run 40884374618, job 123539933295): the live-concurrency step
+    # wrote `/tmp/pytest.log`, a co-tenant job on the same self-hosted host
+    # truncated it mid-run, and this leg's own `tail` and `pytest-attribution.sh`
+    # then read `tests/test_backfill_sources.py` / `tests/test_billing.py` —
+    # files it never runs — so it reported "test leg INCOMPLETE — no pytest
+    # summary; failure set unobservable" and the rail could attribute nothing.
+    # The inverse direction is worse and equally reachable: the skip-fail guard
+    # below greps this file for its three nodeids, so a peer's log makes a leg
+    # that ran NOTHING look certified. `$GITHUB_ENV` only reaches SUBSEQUENT
+    # steps, hence first, and it FAILS CLOSED on a missing `RUNNER_TEMP` — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
     steps:
+      - name: Resolve per-job pytest artifact paths (#10280)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          {
+            echo "PYTEST_LOG=$base/pytest.log"
+          } >> "$GITHUB_ENV"
+          echo "pytest log for this job is $base/pytest.log (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2432,10 +2454,10 @@ jobs:
             tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor \
             tests/test_event_store.py::test_next_seq_ceiling_is_atomic_across_workers_live_falkor \
             tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes \
-            -v -rs --timeout=300 -p no:cacheprovider --maxfail=10 -rfE --durations=15 > /tmp/pytest.log 2>&1
+            -v -rs --timeout=300 -p no:cacheprovider --maxfail=10 -rfE --durations=15 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "==================== pytest summary (tail) ===================="
-          tail -n 120 /tmp/pytest.log
+          tail -n 120 "$PYTEST_LOG"
           # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
           # post-summary interpreter-exit noise fills it and pushes BOTH the
           # session summary and the `-r fEs` report above the cut, so the log
@@ -2443,7 +2465,7 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -2452,11 +2474,13 @@ jobs:
           # THIS job log, so without the nodeids it sees an unattributable
           # failure and refuses — a refusal, not a comparison (#4453).
           echo "==================== pytest failure nodeids ===================="
-          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+          grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
-          if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_next_seq_ceiling_is_atomic_across_workers_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' /tmp/pytest.log; then
+          # This grep is WHY the log must be this job's OWN (#10280): a peer's
+          # log would certify a leg that ran nothing.
+          if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_next_seq_ceiling_is_atomic_across_workers_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' "$PYTEST_LOG"; then
             echo "❌ live tests SKIPPED — the job would be green while testing nothing"
             rc=1
           fi
@@ -2490,7 +2514,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
-          path: /tmp/pytest.log
+          # #10280: the per-job path the first step resolved — never the host
+          # `/tmp`, which a co-tenant job truncates.
+          path: ${{ runner.temp }}/pytest.log
           if-no-files-found: ignore
       - name: Validate docker-compose.yml (ports + header edits)
         # T1 Step 6 ships with zero other verification — no workflow validates
