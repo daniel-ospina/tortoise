@@ -2816,6 +2816,17 @@ def _write_capture_turns(
             # `point` snapshot, which `_emit_event` strips it from
             # (`content_hash` is derived, and the replay recomputes it in
             # `_upsert_point_props`).
+            #
+            # ⚠️ GRAPH-HELD LANE ONLY. `id`/`kind`/`content_hash` are consumed by
+            # the `PointAdded` emission below (`_record["id"]`,
+            # `_record["kind"]`, `_record["content_hash"]`). The record-held
+            # lane emits the CARRIER, which takes `_record["point"]` alone
+            # (`turns=[…]`) — so on THAT lane these three keys are built and
+            # discarded. That is deliberate and harmless (they are cheap, and
+            # `public.point` refuses `content_hash` as a props member, so it
+            # could not ride the carrier's row anyway); it is stated here
+            # because the reverse reading — "the carrier journals a
+            # content_hash" — is a claim a future lane would cite as evidence.
             "kind": "event",
             "content_hash": turn_hashes[i],
             "point": _turn_snapshot,
@@ -8819,13 +8830,18 @@ class TortoiseSDK:
         writer (#5612), which would report a committed record as failed and
         invite a duplicate re-issue.
 
-        Two call styles supported:
+        Four call styles supported:
         1. ``_emit_event("PointAdded", {"id": ..., ...})``
            — #432: domain payload for the :GraphEvent store.
         2. ``_emit_event("PointAdded", point=point_dict)``
            — #548: full point snapshot for JSONL rebuild replay.
         3. ``_emit_event("PointRevised", id=pid, **props)``
            — #548: id + extra fields for JSONL.
+        4. ``_emit_event("TurnsRecorded", turns=[snapshot, ...])``
+           — #10017: the turn-record CARRIER, which carries neither *point*
+           nor *id*. It is the ONLY record of an armed capture's transcript,
+           so it is a first-class JSONL payload alongside *point* (see the
+           gate below), not an event with "nothing meaningful to log".
 
         **Graph event store (#432):** written when *type_* is in
         ``_GRAPH_EVENT_TYPES`` (11 registered types — PointAdded,
@@ -8837,9 +8853,11 @@ class TortoiseSDK:
         from ``point["id"]`` or *id* + *extra*.
 
         **JSONL event log (#548):** written when *point* is provided (cleaned
-        and appended as the ``"point"`` key) or *id* is provided. Events with
-        neither are skipped (nothing meaningful to log). The full point
-        snapshot is needed for ``rebuild_all`` replay.
+        and appended as the ``"point"`` key), *id* is provided, or ``turns`` is
+        provided (the #10017 carrier — appended as the ``"turns"`` key). Events
+        with NONE of the three are skipped (nothing meaningful to log). The full
+        point snapshot is needed for ``rebuild_all`` replay, and the carrier's
+        ``turns`` list is that same requirement for the record-held lane.
 
         *recorded_ts* (#5048, recorded from #4666): the RECORDED instant of the
         transition, minted ONCE by the caller when the same instant must also
