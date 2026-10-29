@@ -924,6 +924,37 @@ class TestPinAgreement:
         assert "no-pin" not in result.stdout, result.stdout
         assert "BEHIND" in result.stdout, result.stdout
 
+    def test_an_unexpandable_pin_path_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``~nosuchuser`` must be 2 (cannot verify), never 1 (drift) and never a traceback.
+
+        ``Path.expanduser()`` raises ``RuntimeError`` — not ``OSError``/``ValueError`` — so it
+        escaped ``main``'s ``ConfigError`` handler and the interpreter exited **1**: this tool's
+        DRIFT class, whose printed remedy is ``git fetch && git checkout`` for a pin path that
+        merely does not resolve. It also crashed ``tools/agent_infra_drift_check.py``, which
+        imports this module and wraps only ``ConfigError``.
+        """
+        env = self._env(self._home(tmp_path), HARNESS_PIN="~definitely-no-such-user-xyz/pin")
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (
+            "an unresolvable ~ in the pin path is 'cannot verify' (2) — rc="
+            f"{result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr, result.stderr
+        assert "Traceback" not in result.stdout, result.stdout
+
+    def test_the_explicit_pin_flag_also_survives_an_unexpandable_path(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``--pin`` takes the same ``_expand`` path — a caller-supplied ``~`` must not crash it."""
+        env = self._env(self._home(tmp_path))
+        result = self._pin_check(
+            repo, git_infra, env, "--pin", "~definitely-no-such-user-xyz/pin"
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr
+
     def test_the_env_pin_is_honoured(self, repo: Path, git_infra: Path, tmp_path: Path) -> None:
         """``HARNESS_PIN`` is the harness's own variable name — not an invented one."""
         base = subprocess.run(
@@ -1374,3 +1405,21 @@ class TestDefaultPinPathIsCallTime:
 
         monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
         assert module.default_pin_path() == tmp_path / "home" / module.PIN_RELATIVE
+
+
+    def test_the_third_term_is_the_one_harness_up_uses(self, tmp_path: Path, monkeypatch) -> None:
+        """With ``HOME`` unset the controller falls back to ``/tmp/cell-home`` — so must this tool.
+
+        ``harness-up:548`` is ``CELL_HOME="${CELL_HOME:-${HOME:-/tmp/cell-home}}"``. Omitting the
+        last term does not fail loudly: ``Path.home()`` silently answers with the PASSWD entry
+        (``/home/cmux`` on this fleet box) while the controller answers ``/tmp/cell-home``, so the
+        tool judges a different file in exactly the environment (a bare service/container with no
+        ``HOME``) where nobody is reading the output.
+        """
+        module = self._load()
+        monkeypatch.delenv(module.CELL_HOME_ENV, raising=False)
+        monkeypatch.delenv("HOME", raising=False)
+        assert module.default_pin_path() == Path(module.DEFAULT_CELL_HOME) / module.PIN_RELATIVE, (
+            "with HOME unset the base must be harness-up's own fallback, not Path.home()'s "
+            f"passwd lookup ({Path.home()})"
+        )

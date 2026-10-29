@@ -28,7 +28,7 @@ Exit codes
        explicit ``--infra`` was passed and has none (it is AUTHORITATIVE, never a first try)
 
 ``--pin-check`` answers a DIFFERENT question — is the checkout behind this pointer the tree this
-box is PINNED to (``$HARNESS_PIN`` / ``~/.pi/agent/state/HARNESS-PIN``)? It never touches the
+box is PINNED to (``$HARNESS_PIN`` / ``${CELL_HOME:-$HOME}/.pi/agent/state/HARNESS-PIN``)? It never touches the
 link: 0 = the checkout is at the pin or carries it, **or** this machine records no pin (said out
 loud, never silence); 1 = drift (behind / diverged / the pin commit is absent from the checkout);
 2 = cannot verify (the pin file is empty or unreadable, or the checkout is not a git repo).
@@ -89,6 +89,11 @@ PIN_ENV = "HARNESS_PIN"
 #: The base ``harness-up`` substitutes for ``$HOME`` on a cell (``agent-infra/scripts/harness-up:548``,
 #: ``:682``). Honoured BEFORE ``Path.home()`` so this tool judges the record the controller reads.
 CELL_HOME_ENV = "CELL_HOME"
+#: ``harness-up:548``'s LAST term: ``CELL_HOME="${CELL_HOME:-${HOME:-/tmp/cell-home}}"``. It is not
+#: decoration — with ``HOME`` unset ``Path.home()`` falls back to the PASSWD entry (``/home/cmux``
+#: here) while the controller falls back to this path, so omitting it puts the tool back on the
+#: wrong record in exactly the environment (a bare service/container) where no one is watching.
+DEFAULT_CELL_HOME = "/tmp/cell-home"
 #: LINE 1 of this record is the full sha and line 2 is an ISO timestamp — that is the shape the
 #: fleet's own writer produces (agent-infra ``scripts/cloud-cell-bringup.sh``), so a reader that
 #: needs the COMMIT must take line 1, exactly as every fleet reader does (``head -1``).
@@ -170,6 +175,28 @@ def resolve_infra(explicit: str | None) -> Path:
     )
 
 
+def _expand(raw: str) -> Path:
+    """``~``-expand a caller-supplied pin path WITHOUT letting ``RuntimeError`` escape.
+
+    ``Path.expanduser()`` raises ``RuntimeError("Could not determine home directory.")`` when
+    ``~user`` names an account that does not exist (measured, Python 3.12 — and it is a
+    ``RuntimeError``, NOT an ``OSError``/``ValueError``). It escaped ``main``'s ``ConfigError``
+    handler as a TRACEBACK and the interpreter exited **1** — this tool's DRIFT class, whose
+    printed remedy sends an operator to ``git fetch && git checkout`` for a pin path that simply
+    does not resolve. It also crashed ``tools/agent_infra_drift_check.py``, which imports this
+    module and wraps only ``ConfigError``. This is the same escape this module already closed for
+    ``UnicodeDecodeError`` in ``pin_state``.
+
+    An unresolvable ``~`` is an UNREADABLE path, not an absent one: returning it UNEXPANDED lets
+    ``lstat``/``pin_state`` classify it ``PIN_UNREADABLE`` → exit 2 ("cannot verify"), which is the
+    answer the docstring's contract promises.
+    """
+    try:
+        return Path(raw).expanduser()
+    except RuntimeError:
+        return Path(raw)
+
+
 def default_pin_path() -> Path:
     """Where this machine records its harness pin. A function, not a constant.
 
@@ -191,7 +218,11 @@ def default_pin_path() -> Path:
     one layer down. ``TestDefaultPinPathIsCallTime`` loads this module IN PROCESS and moves the
     bases, which is the only shape that can distinguish a function from a frozen constant.
     """
-    base = os.environ.get(CELL_HOME_ENV) or Path.home()
+    base = (
+        os.environ.get(CELL_HOME_ENV)
+        or os.environ.get("HOME")
+        or DEFAULT_CELL_HOME
+    )
     return Path(base) / PIN_RELATIVE
 
 
@@ -205,10 +236,10 @@ def resolve_pin(explicit: str | None) -> Path | None:
     installed as a harness. That is an ANSWER ("unrecorded"), not a pass and not a failure.
     """
     if explicit:
-        return Path(explicit).expanduser()
+        return _expand(explicit)
     env = os.environ.get(PIN_ENV)
     if env:
-        return Path(env).expanduser()
+        return _expand(env)
     default = default_pin_path()
     # ⛔ NOT ``default.exists()`` (PR #10250 review ROUND 6 ISSUE 2, P2 — both directions
     # MEASURED). ``Path.exists()`` re-raises every ``OSError`` except ``ENOENT``/``ENOTDIR``/
