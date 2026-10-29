@@ -384,8 +384,20 @@ def test_the_carrier_survives_an_unimportable_embeddings_seam(
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     monkeypatch.setattr("tortoise.record_writer.write_live_record",
                         lambda *a, **k: None, raising=False)
+    # ⛔ BUILD THE STORE BEFORE POISONING THE SEAM. `TortoiseSDK._get_proj()` is
+    # LAZY, and on a non-embedded lane `FalkorProjection.__init__` reads
+    # `EMBEDDING_DIM` from this very module
+    # (`projection/__init__.py::_ensure_vector_index_api`, inside the
+    # vector-index block the embedded lane short-circuits). Poisoning first
+    # therefore reds this leg in `_ensure_indexes` — the STORE's construction,
+    # not the carrier under test — which is exactly what CI's docker lane did
+    # while the embedded carve-out passed: a lane-dependent failure of the
+    # TEST, reported as a failure of the guard.
+    armed_sdk._get_proj()
     # An import-HOOK failure, not a missing dep: the module exists, the import
-    # raises. `None` in `sys.modules` is exactly that shape.
+    # raises. `None` in `sys.modules` is exactly that shape. Set from here on,
+    # it reaches the CARRIER's stamp import and nothing on the construction
+    # path.
     monkeypatch.setitem(sys.modules, "tortoise.embeddings", None)
     res = armed_sdk.capture_session(CONV, session_id=SESSION_ID)
     assert res["ok"] is True
