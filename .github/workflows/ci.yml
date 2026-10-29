@@ -1017,29 +1017,37 @@ jobs:
       - name: Markdownlint (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         run: |
-          # #9708's sibling: the producer is a script we own, not a bare `npx`.
-          # Measured 2026-10-29 on two heads of one PR (jobs 123221664099 and
-          # 123290265862, runners `pi-runner-cmux-x64-6` / `pi-runner-x64-7`):
-          # `npx --yes markdownlint-cli2@0.23.3` resolved through the
-          # PROCESS-SHARED `~/.npm/_npx` cache and came back
-          # `sh: 1: markdownlint-cli2: not found`, so this REQUIRED check redded
-          # with "the markdownlint report has no 'Linting:' line — it did not
-          # run" — an absent measurement charged to the PR's markdown.
-          #
-          # `.github/scripts/docs-markdownlint.sh` installs the PINNED cli2 into a
-          # JOB-SCOPED prefix, invokes it by ABSOLUTE path, and verifies the
-          # report it got (`Linting: N` present, `Summary:` present, N == the
-          # changed-set count) before the differ sees it. So a provisioning
-          # failure fails THIS step under its own name and publishes NO report.
+          # NUL-delimited ARGV via xargs — a filename is data, never shell text (#4449).
           #
           # cli2, not v1 (#2386): `markdownlint-cli` cannot parse the repo's
           # .markdownlint-cli2.jsonc and silently fell back to DEFAULTS, so MD013
           # (line-length 80) fired on the long prose lines the repo config turns
-          # off. #7435 is unchanged: findings are CAPTURED, not adjudicated — the
-          # differ below decides pass/fail, and the exit code is still not the
-          # verdict (GNU xargs rewrites a child's 1-125 to 123).
+          # off. This mirrors the main-health path above.
+          #
+          # #7435: the findings are CAPTURED here, not adjudicated. The step lints
+          # each changed file WHOLE, so pre-existing debt in a file a change merely
+          # touches used to red this required check (#5434: 9 findings in a file the
+          # PR authored, ~24 s to reproduce locally but a full CI cycle to discover;
+          # #7475: a link broken on main since the file existed). The snapshot differ
+          # below decides pass/fail — new findings still fail, known ones do not.
+          #
+          # The exit code is deliberately NOT the verdict: GNU xargs (this runner)
+          # rewrites a child's exit 1-125 to 123, so cli2's 1 (findings) and 2
+          # (fatal) are indistinguishable here. The differ decides from the report
+          # — `Linting: N` must equal the changed-set count, and the findings
+          # parsed must equal the Summary count.
+          #
+          # #10265: the invocation is a script we own, NOT `npx` — see its header
+          # for the measured `sh: 1: markdownlint-cli2: not found` on two
+          # different runner pools, where npx execs a shared `_npx` cache's bin
+          # through `sh` and a partial link there reds this REQUIRED check. The
+          # script installs the PINNED linter into a private prefix, invokes it by
+          # ABSOLUTE path, and refuses to publish a report the pinned banner did
+          # not produce — so an absent linter fails HERE, naming the linter,
+          # instead of surfacing in the differ as a finding about the diff.
           bash .github/scripts/docs-markdownlint.sh \
             --label "Markdownlint (changed files)" \
+            --cli2 markdownlint-cli2@0.23.3 \
             --files-from "$RUNNER_TEMP/pr-md.nul" \
             --output "$RUNNER_TEMP/mdlint-pr.txt"
       - name: Link check (changed files)
@@ -1164,13 +1172,17 @@ jobs:
       - name: Markdownlint (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         run: |
-          # Same producer as the PR path, same reasons (#9708's sibling — see its
-          # comment above for the measured `npx` provisioning failure and why the
-          # pinned install lives in the script instead of on the runner's PATH).
-          # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for prose).
-          # #7435: captured, not adjudicated — the differ below decides.
+          # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for prose);
+          # the PR path above is aligned with this invocation (#2386/#5476).
+          # NUL-delimited ARGV via xargs — a filename is data, never shell text.
+          # #7435: captured, not adjudicated — the differ below decides. The exit
+          # code is not the verdict (xargs rewrites it).
+          # #10265: the same producer as the PR path, same reasons — see the script
+          # header for the measured `npx` failure that reds this required check on
+          # a runner whose shared npm cache cannot exec its own bin.
           bash .github/scripts/docs-markdownlint.sh \
             --label "Markdownlint (main health, changed files)" \
+            --cli2 markdownlint-cli2@0.23.3 \
             --files-from "$RUNNER_TEMP/changed-md.nul" \
             --output "$RUNNER_TEMP/mdlint-mh.txt"
       - name: Link check (main health, changed files)

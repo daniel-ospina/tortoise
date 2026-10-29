@@ -55,9 +55,6 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 CI = REPO / ".github" / "workflows" / "ci.yml"
 CONFIG = REPO / ".markdownlint-cli2.jsonc"
-# #9708's sibling: the markdownlint PRODUCER — where the linter is resolved,
-# pinned and installed now, so the cli2/v1 and version-pin contracts live there.
-PRODUCER = REPO / ".github" / "scripts" / "docs-markdownlint.sh"
 
 DOCS_JOB = "docs"
 DETECT_STEP = "Get changed markdown files"
@@ -672,36 +669,18 @@ def test_detection_fails_closed_on_unresolvable_base(tmp_path: Path):
 
 
 def test_lint_step_uses_cli2_and_the_repo_config():
-    """cli2 reads `.markdownlint-cli2.jsonc`; v1 cli silently ignored it.
-
-    #9708's sibling: the step delegates to `.github/scripts/docs-markdownlint.sh`,
-    which is where the linter is resolved, pinned and installed now — so the
-    "cli2, not v1" and "pin the version" contracts are asserted against the
-    PRODUCER, and the step is separately pinned to name it. Both halves matter: a
-    step that inlined `npx` again would move the pin back onto an ambient cache
-    (the measured failure), and a producer nobody invokes is dead code.
-    """
-    step_body = _code(_step(LINT_STEP)["run"])
-    assert ".github/scripts/docs-markdownlint.sh" in step_body, (
-        "the lint step must delegate to the producer script (see the script's "
-        "header: a bare `npx` came back `markdownlint-cli2: not found` on two "
-        "runners, redding this REQUIRED check for a measurement that never ran)"
-    )
-    assert "npx" not in step_body, (
-        "the step must not invoke the linter through `npx` — that resolution goes "
-        "through a process-shared `~/.npm/_npx` cache, which is what failed"
-    )
-    run = PRODUCER.read_text(encoding="utf-8")
+    """cli2 reads `.markdownlint-cli2.jsonc`; v1 cli silently ignored it."""
+    run = _code(_step(LINT_STEP)["run"])
     assert "markdownlint-cli2" in run, (
-        "the producer must use markdownlint-cli2 (#2386): v1 markdownlint-cli "
+        "the lint step must use markdownlint-cli2 (#2386): v1 markdownlint-cli "
         "cannot parse the repo's JSONC config and falls back to defaults"
     )
     assert re.search(r"markdownlint-cli(?!2)", run) is None, (
-        "v1 `markdownlint-cli` is still invoked somewhere in the producer (#2386)"
+        "v1 `markdownlint-cli` is still invoked somewhere in the step (#2386)"
     )
-    assert re.search(r'MDLINT_VERSION="\d+\.\d+\.\d+"', run), (
-        "pin the cli2 version — a floating install would let the rule surface "
-        "drift under the required check (#2386)"
+    assert re.search(r"markdownlint-cli2@\d", run), (
+        "pin the cli2 version — a floating npx would let the rule surface drift "
+        "under the required check (#2386)"
     )
     assert CONFIG.is_file(), f"{CONFIG.name} is the config the linter reads"
     assert '"MD013": false' in CONFIG.read_text(encoding="utf-8"), (

@@ -3665,14 +3665,13 @@ surfaces:
   # the producer↔baseline-generator invocation contract. Same `core` home as its
   # two docs-lint siblings above.
   - test_docs_link_check.py
-  # #9708's sibling (measured 2026-10-29): the `docs` job's MARKDOWNLINT
-  # PRODUCER (`.github/scripts/docs-markdownlint.sh`) — the absent-linter and
-  # no-`Linting:`-line failures that redded the REQUIRED check while never
-  # running a linter, the judged-fewer-files gate, the version pin shared with
-  # `tools/docs_lint_baseline.py`, and the job-scoped install that replaced the
-  # process-shared `npx` cache. Same `core` home as its three docs-lint siblings
-  # above.
-  - test_docs_markdownlint.py
+  # #10265: the `docs` job's MARKDOWNLINT PRODUCER
+  # (`.github/scripts/docs-markdownlint.sh`) — the pinned linter is installed into a
+  # private prefix and invoked by ABSOLUTE path (never `npx`'s shared cache), and a
+  # report the pinned banner did not produce is refused, so an absent linter names
+  # itself instead of surfacing as a finding about the diff. Same `core` home as
+  # its three docs-lint siblings above.
+  - test_docs_markdownlint_producer.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -8893,7 +8892,6 @@ durations:
   test_docs_lint_baseline.py: 7.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.7
   test_docs_lint_gate.py: 2.0  # carried forward (not a full-file CI measurement) — (#5476: registered under core) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.8s) is a LOWER bound; kept 2.0
   test_docs_link_check.py: 8.7  # (#9708: registered under core) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
-  test_docs_markdownlint.py: 2.0  # unmeasured (#9708's sibling: registered under core) — enters at the flat #3400/#4221 default until a CI junit artifact carries its weight
   # #6137: register the fast pool's unmeasured files. Registering them is
   # what keeps `duration_coverage_issues` at 100% — the 43-file relocation
   # on its own takes it to 89.5% (624/697 of this head's fast pool), under

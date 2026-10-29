@@ -1,108 +1,88 @@
 #!/usr/bin/env bash
-# docs-markdownlint.sh — the `docs` job's MARKDOWNLINT PRODUCER, and the
-# verifier of its own artifact.
+# docs-markdownlint.sh — the `docs` job's MARKDOWNLINT producer, and the verifier
+# of its own artifact.
 #
-# WHY THIS IS A SCRIPT WE OWN (#9708's sibling; measured 2026-10-29)
+# WHY THIS IS A SCRIPT WE OWN (#10265; measured 2026-10-29T01:18Z, job 123190229185
+# on `gh-runner-x64-4`, and 2026-10-28T23:55Z, job 123140492354 on
+# `pi-runner-x64-4`)
 #
-# The step used to be one line:
+# The step used to be
 #
-#   xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3 \
+#   xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3
 #
-# ⛔ (that historical line is quoted, not run: `-a` and `-r` are GNU-only xargs
-#    flags and macOS's xargs rejects `-a` outright — see the invocation below.)
-#     > "$RUNNER_TEMP/mdlint-pr.txt" 2>&1
-#
-# and it produced this, twice, on two different runner instances and two
-# different heads of the same PR (job 123221664099 on `pi-runner-cmux-x64-6`,
-# 2026-10-29T04:49Z; job 123290265862 on `pi-runner-x64-7`, 07:45Z):
+# and on those runs the report it captured was
 #
 #   sh: 1: markdownlint-cli2: not found
-#   markdownlint exit=123 (informational — xargs rewrites it; ...)
+#   markdownlint exit=123 (informational — xargs rewrites it; the differ reads
+#                          the report)
 #   ##[error]docs-lint baseline: markdownlint report .../mdlint-pr.txt has no
 #            'Linting:' line — it did not run
-#   ##[error]Process completed with exit code 2.
 #
-# `docs` is a REQUIRED context, so that red blocks the merge — and it was not a
-# finding about the PR's markdown. It is the #9708 shape exactly: a producer
-# that failed was reported as a perverse verdict about the diff, at the step
-# that CONSUMES the artifact rather than the step that failed to make one.
+# `npx` itself ran, so node existed; what failed was npx's EXEC of the package. It
+# is not a registry problem: `npx --yes <pkg>@<ver>` reuses a shared `_npx` cache
+# keyed by the spec, and when that cached tree's `node_modules/.bin` link is
+# partial npx still believes it is installed and execs the bin through `sh`,
+# which cannot resolve it. So the REQUIRED `docs` check depended on the state of
+# a SHARED CACHE on whichever runner it was scheduled onto — measured on two
+# different pools in one day, and re-running was the only lever a lane had.
 #
-# WHY `npx` IS THE PROVISIONING DEFECT, NOT THE PIN
+# The differ fails CLOSED on that (correctly — no measurement is not a verdict),
+# but its annotation reads as a finding about the PR's markdown, which sent at
+# least one lane to the changed-file set first. Both halves are fixed here, the
+# same way `docs-link-check.sh` fixes them for lychee (#9708):
 #
-# `npx --yes <spec>` resolves through `~/.npm/_npx/<hash-of-spec>`, which is
-# **process-shared state keyed only by the package spec**. This repo runs its
-# jobs on a self-hosted pool with several runner instances on ONE machine, all
-# as the same user with the same `$HOME` (measured: both failures above ran with
-# `HOME=/home/cmux`, as `/opt/gh-runner-x64-6` and `/opt/gh-runner-x64-7`), so
-# every concurrent `docs` job on every open PR shares one cache directory for
-# this one spec — and npm writes that directory's `package.json`/lockfile BEFORE
-# it links `node_modules/.bin`, which is the only "already installed" test a
-# second process makes. A peer in that window makes `npx` exec a bin that does
-# not exist yet, and the `sh: 1: ...: not found` line above is what that looks
-# like from the step.
-#
-# (What is MEASURED: the two failure logs, and that the pinned package is present
-# and runs correctly from that cache on this machine today — so the pin, the
-# config and the population were never the problem. What is INFERRED: which
-# provisioning failure produced a given red. The fix below is deliberately
-# indifferent to that: a job-scoped install, invoked by ABSOLUTE path and
-# verified before use, either works or fails naming itself, whether the cause was
-# a cache race, a registry outage, or a dangling bin link.)
-#
-# So the contract here is the link-check producer's: install the PINNED linter
-# into a JOB-SCOPED prefix (`$RUNNER_TEMP`, never a shared cache, never an
-# ambient PATH), invoke it by absolute path, and VERIFY the artifact before the
-# differ sees it. A step that produces no report fails and NAMES ITSELF.
+#   1. **No shared cache, no ambient PATH.** The pinned version is installed into
+#      a PRIVATE prefix and invoked by ABSOLUTE path, so nothing another job did
+#      to a shared cache can decide whether this required check can measure.
+#   2. **The report proves WHICH linter produced it.** The run is verified
+#      against the banner (`markdownlint-cli2 v<pin>`) and the positive-evidence
+#      `Linting: N` line before it is published, so a producer that did not run
+#      fails HERE, naming the linter and saying plainly that it is not a finding
+#      about the diff.
 #
 # WHAT IS *NOT* CHANGED — #7435 (owner ruling, Option 1)
 #
-# Findings are still NOT this step's verdict: `tools/docs_lint_baseline.py check`
-# decides whether they are already in the committed snapshot. The snapshot is a
-# CEILING, not an amnesty. The exit code is still not the verdict either — GNU
-# `xargs` rewrites a child's 1-125 to 123, so cli2's 1 (issues) and 2 (fatal) are
-# indistinguishable here; the REPORT is the evidence, which is why this script
-# verifies the report instead of the exit status.
+# Findings are CAPTURED here, never adjudicated: this script exits 0 whenever the
+# linter RAN, whatever it found, and `tools/docs_lint_baseline.py check` decides
+# from the committed snapshot whether any finding is new. The snapshot is a
+# CEILING, not an amnesty.
+#
+# The population is NOT re-counted here either: `--markdownlint-expected-files`
+# is the caller's changed-set count and the differ owns that comparison. This
+# script only refuses to publish a report that no pinned linter produced.
 #
 # USAGE
 #
-#   docs-markdownlint.sh --files-from <NUL list> --output <report.txt>
-#                        [--label "<step identity for ::error:: lines>"]
-#
-# The list is NUL-DELIMITED because it is an ARGV list, not a text file: that is
-# the #4449 rule (a filename is data, never shell text), and `xargs -0` is how
-# this linter is invoked. The caller already produces it.
+#   docs-markdownlint.sh --cli2 <pkg>@<version> --files-from <nul list>
+#                        --output <report.txt> [--label <step identity>]
 #
 # EXIT
 #
-#   0  a report the differ can read was produced (whatever the linter found)
-#   1  the producer failed — the message names this step, the exit code and a
-#      stderr tail, and NO report is published
+#   0  a report was produced by the pinned linter (whatever it found)
+#   1  the producer failed — the message names THIS step and the linter
 #   2  usage
 #
 # ENV (test seams, deliberately few)
 #
-#   DOCS_MD_LINT_CLI             use exactly this binary (no install fallback)
-#   DOCS_MD_LINT_ALLOW_INSTALL   "0" = never install; absence must fail loudly
+#   DOCS_MARKDOWNLINT_BIN            use exactly this binary (no install fallback)
+#   DOCS_MARKDOWNLINT_ALLOW_INSTALL  "0" = never install; absence must fail loudly
 
 set -uo pipefail
 
-# Pinned to match `MARKDOWNLINT_PIN` in tools/docs_lint_baseline.py — the same
-# constant that pins the SNAPSHOT's producer, because a snapshot generated by a
-# different cli2 describes a different check. `tests/test_docs_markdownlint.py`
-# asserts the two agree.
-MDLINT_VERSION="0.23.3"
-
 LABEL="docs markdownlint"
+CLI2_SPEC=""
 FILES_FROM=""
 OUTPUT=""
 
 usage() {
-  echo "usage: $0 --files-from <nul list> --output <report.txt> [--label <name>]" >&2
+  echo "usage: $0 --cli2 <pkg>@<version> --files-from <list> --output <report>" \
+       "[--label <name>]" >&2
   exit 2
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --cli2)       [ "$#" -ge 2 ] || usage; CLI2_SPEC="$2"; shift 2 ;;
     --files-from) [ "$#" -ge 2 ] || usage; FILES_FROM="$2"; shift 2 ;;
     --output)     [ "$#" -ge 2 ] || usage; OUTPUT="$2"; shift 2 ;;
     --label)      [ "$#" -ge 2 ] || usage; LABEL="$2"; shift 2 ;;
@@ -110,8 +90,17 @@ while [ "$#" -gt 0 ]; do
     *)            usage ;;
   esac
 done
+[ -n "$CLI2_SPEC" ] || usage
 [ -n "$FILES_FROM" ] || usage
 [ -n "$OUTPUT" ] || usage
+
+# The pin is the package spec's version: the workflow states it once and this
+# script verifies the run against it, so a floating linter cannot drift the rule
+# surface under a required check (#2386).
+case "$CLI2_SPEC" in
+  *@[0-9]*) CLI2_PIN="${CLI2_SPEC##*@}" ;;
+  *) usage ;;
+esac
 
 # Every failure goes through here, so no path can fail without saying who it is.
 fail() {
@@ -120,133 +109,122 @@ fail() {
 }
 
 TMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-PREFIX="$TMP_ROOT/markdownlint-cli2"
-CLI="$PREFIX/node_modules/.bin/markdownlint-cli2"
+PREFIX="$TMP_ROOT/mdlint-cli2"
+BIN="$PREFIX/node_modules/.bin/markdownlint-cli2"
 
-# cli2 prints `markdownlint-cli2 v0.23.3 (markdownlint v0.41.1)` — TWO semvers on
-# one line, so the pin is read from its own `markdownlint-cli2 v` prefix rather
-# than "the first semver", which would be whichever one the greedy match reached
-# (measured: it returns 0.41.1, the bundled markdownlint's version). Probed from
-# `$TMP_ROOT` because this linter also treats its arguments as globs, and a probe
-# must not walk the repo.
-reports_pinned_version() {
-  local binary="$1" out version
-  [ -x "$binary" ] || return 1
-  out="$(cd "$TMP_ROOT" 2>/dev/null && "$binary" --version 2>&1)" || return 1
-  version="$(printf '%s\n' "$out" | head -n 1 \
-    | sed -n 's/.*markdownlint-cli2 v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')"
-  [ "$version" = "$MDLINT_VERSION" ]
+install_pinned_cli2() {
+  local log="$TMP_ROOT/mdlint-cli2-install.log" rc
+  command -v npm >/dev/null 2>&1 || fail \
+    "npm is ABSENT on this runner, so ${CLI2_SPEC} cannot be installed" \
+    " — the linter did not run, and this is NOT a finding about the changed markdown"
+  rm -rf "$PREFIX" && mkdir -p "$PREFIX"
+  npm install --prefix "$PREFIX" --no-audit --no-fund --loglevel=error \
+    "$CLI2_SPEC" >"$log" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail \
+    "could not install ${CLI2_SPEC} into ${PREFIX} (npm exit ${rc}; $(install_tail "$log"))" \
+    " — the linter is ABSENT on this runner, so no lint verdict exists and this is NOT a finding about the changed markdown"
 }
 
-install_pinned_markdownlint() {
-  local log rc attempt
-  command -v npm >/dev/null 2>&1 || fail \
-    "npm is not on PATH, so markdownlint-cli2 ${MDLINT_VERSION} cannot be installed — the markdown lint did not run (runner provisioning, not a finding about the diff)"
-  rm -rf "$PREFIX" && mkdir -p "$PREFIX" || fail "could not create ${PREFIX}"
-  log="$TMP_ROOT/markdownlint-install.log"
-  for attempt in 1 2; do
-    # `--prefix` puts node_modules under the JOB's temp dir: no shared cache, no
-    # peer's half-written install, and nothing left for a later job to inherit.
-    npm install --prefix "$PREFIX" --no-save --no-package-lock \
-      --no-audit --no-fund --loglevel error \
-      "markdownlint-cli2@${MDLINT_VERSION}" >"$log" 2>&1
-    rc=$?
-    reports_pinned_version "$CLI" && break
-    if [ "$attempt" -ge 2 ]; then
-      fail "could not provision markdownlint-cli2 ${MDLINT_VERSION} into ${PREFIX} (npm exit ${rc}) — the markdown lint did not run, and this is not a finding about the diff. Last lines: $(tail -c 600 "$log" 2>/dev/null | tr '\n' ' ')"
-    fi
-    sleep 3
-  done
-  echo "${LABEL}: provisioned markdownlint-cli2 ${MDLINT_VERSION} at ${CLI}"
+install_tail() {
+  [ -s "$1" ] || { printf '(no installer output)'; return; }
+  tail -c 400 "$1" | tr '\n' ' '
 }
 
 # ── resolve the linter ───────────────────────────────────────────────────────
-# A stale report from an earlier run must never survive a producer failure: if
+# A report from an earlier step/job must never survive a producer failure: if
 # this step fails and a consumer is (ever) allowed to run anyway, it must see NO
 # report rather than the previous one. Cleared BEFORE any early-exit path.
 TMP_REPORT="${OUTPUT}.tmp"
 rm -f "$TMP_REPORT" "$OUTPUT"
 
-# Never from PATH alone (#9708: an ambient PATH is not a contract), and never
-# from a shared install cache (above). Absolute job-scoped path, or a pinned
-# install of our own.
-if [ -n "${DOCS_MD_LINT_CLI:-}" ]; then
-  # An explicit override is a contract, not a hint: it must be usable, or we
+# Never from a shared cache, and never from an AMBIENT PATH: the private prefix
+# or nothing. A `markdownlint-cli2` that happens to be on PATH is a version this
+# check never asked for — resolving it would let another job's toolchain decide
+# what the required check measures (the #9708 lesson, one step over).
+if [ -n "${DOCS_MARKDOWNLINT_BIN:-}" ]; then
+  # An explicit override is a contract, not a hint: it must be executable, or we
   # fail rather than silently measuring with something else.
-  reports_pinned_version "$DOCS_MD_LINT_CLI" || fail \
-    "DOCS_MD_LINT_CLI=${DOCS_MD_LINT_CLI} is not an executable reporting markdownlint-cli2 ${MDLINT_VERSION}"
-  CLI="$DOCS_MD_LINT_CLI"
-elif reports_pinned_version "$CLI"; then
+  [ -x "$DOCS_MARKDOWNLINT_BIN" ] || fail \
+    "DOCS_MARKDOWNLINT_BIN=${DOCS_MARKDOWNLINT_BIN} is not an executable — the linter did not run"
+  BIN="$DOCS_MARKDOWNLINT_BIN"
+elif [ -x "$BIN" ]; then
   :
-elif [ "${DOCS_MD_LINT_ALLOW_INSTALL:-1}" = "0" ]; then
-  fail "markdownlint-cli2 ${MDLINT_VERSION} is not available in this job (not at ${CLI}) and installing is disabled — the markdown lint did not run"
+elif [ "${DOCS_MARKDOWNLINT_ALLOW_INSTALL:-1}" = "0" ]; then
+  fail "${CLI2_SPEC} is not available on this runner (nothing at ${BIN}) and installing is disabled — the lint did not run"
 else
-  install_pinned_markdownlint
+  install_pinned_cli2
+  [ -x "$BIN" ] || fail \
+    "installing ${CLI2_SPEC} produced no executable at ${BIN} — the lint did not run"
 fi
 
 # ── the population ──────────────────────────────────────────────────────────
-# A list with no entries would lint nothing and still report a verdict; the
-# differ's `Linting: N` == this count check is what makes that fail closed, and
-# counting HERE is what makes the failure name the producer.
-if [ ! -s "$FILES_FROM" ]; then
-  fail "the changed-file list ${FILES_FROM} is missing or empty — refusing to report a markdownlint verdict over nothing"
+# `markdownlint-cli2` with NO file arguments lints its config's globs (the whole
+# repo), so an empty list must never reach it: that would turn a docs-only check
+# into a full-repo lint. A list of BLANK lines is not a population either.
+if [ ! -f "$FILES_FROM" ] || ! grep -q '[^[:space:]]' "$FILES_FROM"; then
+  fail "the changed-file list ${FILES_FROM} is missing, empty or blank — refusing to run the linter over nothing"
 fi
-count="$(tr -cd '\0' < "$FILES_FROM" | wc -c | tr -d ' ')"
-[ "${count:-0}" -gt 0 ] || fail \
-  "the changed-file list ${FILES_FROM} lists no files — refusing to report a markdownlint verdict over nothing"
 
 # ── run, capture, and verify ────────────────────────────────────────────────
-# `2>&1` is deliberate, not sloppiness: cli2 writes its `Linting:`/`Summary:`
-# lines to stdout but every FINDING line to stderr, so a stdout-only report would
-# satisfy the differ's cardinality checks while carrying zero findings — a fail
-# OPEN. This is the same merge the previous one-liner made.
-# ⛔ PORTABLE INVOCATION, deliberately: `-a` and `-r` are GNU extensions that
-# BSD/Apple `xargs` does not have (measured on macOS: `xargs: invalid option --
-# a`, an empty report, and this script failing at "produced no report") — so the
-# input is a plain stdin REDIRECT, and `-r` is unnecessary because the population
-# was already proven non-empty above (`count -gt 0 || fail`). Six of this
-# producer's own tests shell this body out with the ambient `PATH`, so a GNU-only
-# flag here is a red local suite on every dev machine even though CI (GNU xargs)
-# stays green.
-xargs -0 "$CLI" <"$FILES_FROM" >"$TMP_REPORT" 2>&1
+# NUL-delimited ARGV via xargs — a filename is data, never shell text (#4449).
+# The list arrives on STDIN, not through `-a FILE`: `-a` is a GNU extension and
+# BSD/macOS xargs rejects it — measured, `xargs: invalid option -- a`, which reds
+# six of this producer's own tests on every macOS dev box while CI's
+# ubuntu-latest runners stay green. `-a FILE` is defined as "read the arguments
+# from FILE", so the stdin redirect is the same semantics and both agree.
+# The exit code is deliberately NOT the verdict: GNU xargs rewrites a child's
+# exit 1-125 to 123, so cli2's 1 (findings) and 2 (fatal) are indistinguishable
+# here. The REPORT is the evidence — the banner names the linter that ran, and
+# `Linting: N` is the positive evidence that it judged what it was handed.
+#
+# ⚠️ STDERR IS PART OF THE REPORT. Measured on the pinned linter: cli2 prints its
+# banner, `Linting:` and `Summary:` on STDOUT and its FINDINGS on STDERR, and
+# `tools/docs_lint_baseline.py` parses one merged document (it cross-checks the
+# `Summary:` count against the findings it parsed). Splitting the streams here —
+# the obvious-looking tidy-up — leaves the differ reporting "1 issue(s) but 0
+# parsed" and failing closed on a real finding, so `2>&1` is load-bearing.
+xargs -0 "$BIN" >"$TMP_REPORT" 2>&1 <"$FILES_FROM"
 rc=$?
 
-stderr_tail() {
+report_tail() {
   [ -s "$TMP_REPORT" ] || { echo "(empty)"; return; }
   head -c 600 "$TMP_REPORT" | tr '\n' ' '
 }
 
-# (1) Did it write anything at all?
+# (1) Did it write anything? A file that exists and is EMPTY is "no report",
+#     never "no findings".
 if [ ! -s "$TMP_REPORT" ]; then
   rm -f "$TMP_REPORT"
-  fail "markdownlint-cli2 produced no report: exit ${rc}, output: $(stderr_tail)"
+  fail "the linter produced no report: exit ${rc}" \
+    " — the lint did not run, and this is NOT a finding about the changed markdown"
 fi
 
-# (2) Is what it wrote a verdict this differ can read? These are the two positive
-#     evidence lines `tools/docs_lint_baseline.py` requires, checked HERE so a
-#     missing measurement is the producer's failure and not the diff's.
-linted="$(sed -n 's/^Linting: \([0-9][0-9]*\) files\{0,1\}$/\1/p' "$TMP_REPORT" | head -n 1)"
-if [ -z "$linted" ]; then
-  rm -f "$TMP_REPORT"
-  fail "markdownlint-cli2 wrote no 'Linting:' line — it did not run (exit ${rc}). Output: $(stderr_tail)"
-fi
-grep -qE '^Summary: [0-9]+ issues? in [0-9]+ files?$' "$TMP_REPORT" || {
-  rm -f "$TMP_REPORT"
-  fail "markdownlint-cli2 wrote no 'Summary:' line — it did not run (exit ${rc}). Output: $(stderr_tail)"
-}
+# (2) Did the PINNED linter produce it? cli2 prints its own identity on every
+#     run; `--version` is not a version flag for cli2 (it is parsed as a glob
+#     pattern — measured), so the banner is the only honest source.
+banner="$(head -n 1 "$TMP_REPORT" | tr -d '\r')"
+case "$banner" in
+  "markdownlint-cli2 v${CLI2_PIN} "*) : ;;
+  *)
+    rm -f "$TMP_REPORT"
+    fail "the report does not come from ${CLI2_SPEC}: first line is '${banner}'" \
+      " — the pinned linter did not run, so this is NOT a finding about the changed markdown"
+    ;;
+esac
 
-# (3) Did it judge the population it was given? cli2 expands each positional
-#     argument as a GLOBBY pattern, so a path it cannot treat literally is linted
-#     as a DIFFERENT file while `Linting: 1` still looks like one file judged.
-#     The caller's allowlist guards the spelling; this guards the outcome.
-if [ "$linted" -ne "$count" ]; then
+# (3) Is `Linting: N` present? It is the positive evidence that cli2 actually
+#     judged the files it was handed — the banner prints before a config error
+#     aborts the run, and the exit code cannot supply it (see above).
+if ! grep -qE '^Linting: [0-9]+ files?$' "$TMP_REPORT"; then
   rm -f "$TMP_REPORT"
-  fail "markdownlint-cli2 judged ${linted} of the ${count} changed files it was given — a linter that read fewer files than it was handed has not done its job (exit ${rc}). Output: $(stderr_tail)"
+  fail "the report has no 'Linting:' line (exit ${rc}; report tail: $(report_tail))" \
+    " — the lint did not run, and this is NOT a finding about the changed markdown"
 fi
 
 mv "$TMP_REPORT" "$OUTPUT" || fail "could not publish the report to ${OUTPUT}"
 
-echo "${LABEL}: markdownlint-cli2 ${MDLINT_VERSION} exit=${rc} linted=${linted} report=${OUTPUT} bytes=$(wc -c <"$OUTPUT" | tr -d ' ')"
+echo "${LABEL}: ${CLI2_SPEC} exit=${rc} (informational — xargs rewrites it; the differ reads the report) $(grep -E '^Linting: [0-9]+ files?$' "$OUTPUT" | head -n 1) report=${OUTPUT} bytes=$(wc -c <"$OUTPUT" | tr -d ' ')"
 # The differ reports a KNOWN finding as a count only, so the raw report is also
 # published into the log — the visibility half of "the snapshot is a ceiling".
 cat "$OUTPUT"

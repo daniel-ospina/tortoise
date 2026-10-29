@@ -51,7 +51,6 @@ CI = ROOT / ".github" / "workflows" / "ci.yml"
 BASELINE = ROOT / "config" / "docs-lint-baseline.json"
 # The `docs` job's link producer — a `run:` step we own since #9708.
 LINK_CHECK_SCRIPT = ROOT / ".github" / "scripts" / "docs-link-check.sh"
-MDLINT_SCRIPT = ROOT / ".github" / "scripts" / "docs-markdownlint.sh"
 
 MARKDOWNLINT_REPORT = """markdownlint-cli2 v0.23.3 (markdownlint v0.41.1)
 Finding: ./docs/x.md ./docs/y.md
@@ -1534,62 +1533,85 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
     would red the job and the snapshot would be dead weight — the exact churn
     #7435 exists to stop. No exit code is recorded: GNU xargs would hand the
     differ 123 for both "found issues" and "fatal error".
-
-    #9708's sibling: the markdownlint producer is `.github/scripts/
-    docs-markdownlint.sh` now, not a bare `npx` line in the step, because `npx`
-    resolved through a process-shared cache and returned `sh: 1:
-    markdownlint-cli2: not found` twice on 2026-10-29 — redding this REQUIRED
-    check as "the report has no 'Linting:' line", an absent measurement charged
-    to the PR's markdown. So the capture/visibility pins live in the PRODUCER,
-    and the steps are pinned to NAME it (a step that quietly inlined a linter
-    again would satisfy neither).
     """
-    producer = MDLINT_SCRIPT.read_text(encoding="utf-8")
-    for lint_name, report in (
-        ("Markdownlint (changed files)", "mdlint-pr.txt"),
-        ("Markdownlint (main health, changed files)", "mdlint-mh.txt"),
+    changed_lint = _by_name("Markdownlint (changed files)")["run"]
+    main_lint = _by_name("Markdownlint (main health, changed files)")["run"]
+    # #10265: the capture moved into `.github/scripts/docs-markdownlint.sh`, so the
+    # three properties are pinned THERE — against the SAME report paths the two
+    # steps hand it. The move does not weaken them:
+    #
+    #   * the REDIRECT is still the load-bearing part, and still merges stderr —
+    #     measured: cli2 prints its findings on stderr and the differ cross-checks
+    #     them against the `Summary:` count, so a split-stream "tidy-up" makes the
+    #     differ report "1 issue(s) but 0 parsed" instead of adjudicating the
+    #     finding;
+    #   * the producer must NOT run under errexit. cli2 exits 123 under xargs
+    #     whenever it finds issues, so `set -e` kills the step before the differ
+    #     runs — the pre-#7435 behaviour where every inherited finding reds the
+    #     check. In the script this is the absence of an errexit flag, which is
+    #     what the old `set +e` / `set -e` bracket used to prove;
+    #   * the report must still be PRINTED, or a baselined finding goes invisible
+    #     in CI while the required check stays green — the visibility half of "the
+    #     snapshot is a ceiling, not an amnesty".
+    producer = ROOT / ".github" / "scripts" / "docs-markdownlint.sh"
+    producer_text = producer.read_text(encoding="utf-8")
+    assert '>"$TMP_REPORT" 2>&1' in producer_text, (
+        "the linter's output must be REDIRECTED into the report the differ reads, "
+        "with stderr merged into it (#10265)"
+    )
+    assert 'cat "$OUTPUT"' in producer_text, (
+        "the published report must be printed: a known finding is otherwise "
+        "invisible while the required check stays green"
+    )
+    # ⛔ POSITION, not only spelling. This scan read COLUMN-0 `set ` lines, and the
+    # producer's functions are 2-space indented — so an indented `set -e` inside
+    # `install_pinned_cli2`, the branch a fresh `RUNNER_TEMP` takes on EVERY CI
+    # run, was invisible to it. Measured (`#10200` review): inserting `  set -e`
+    # there left this pin green, and in bash a `set -e` inside a function enables
+    # errexit for the rest of the shell, so cli2's 123 aborts the step before the
+    # report is verified — the pre-`#7435` behaviour, restored through a door this
+    # pin had left open. The separator is a SPACE or a TAB (`set\t-e`), so the
+    # token is matched, never the prefix.
+    set_line = re.compile(r"^[ \t]*set[ \t]")
+    set_lines = [
+        line for line in producer_text.splitlines() if set_line.match(line)
+    ]
+    assert set_lines, "the producer must state its own shell options"
+    # … and the FILTER — not just the regex — is what the indented `set -e`
+    # walked past, so the filter itself is probed in both indentations.
+    missed_indents = [
+        line for line in ("  set -euo pipefail", "\tset -e") if not set_line.match(line)
+    ]
+    assert not missed_indents, (
+        "the set-line scan does not see an INDENTED or TAB-separated `set` line, "
+        f"so an errexit enabled inside one of the producer's functions is "
+        f"invisible to this pin: {missed_indents!r}. The install branch runs on "
+        "every CI run, and a `set -e` in a function enables errexit for the "
+        "rest of the shell, so the report is never verified (#7435)"
+    )
+    for line in set_lines:
+        # BOTH spellings of errexit are refused. The flag form (`-e`, `-euo`) is
+        # what a lane writes by reflex; the LONG form (`set -o errexit`) is the
+        # same regression under a name this scan used to be blind to — measured:
+        # rewriting the producer's `set -uo pipefail` to `set -o errexit` passed
+        # this pin while genuinely enabling errexit, so cli2's 123 would abort
+        # the step before the report is verified and published, which is the
+        # pre-`#7435` behaviour the pin exists to prevent. A token CONTAINING
+        # `errexit` is the long spelling, so match the token, not a prefix.
+        assert not any(
+            (tok.startswith("-") and "e" in tok) or "errexit" in tok
+            for tok in line.split()[1:]
+        ), (
+            f"the producer must not enable errexit ({line!r}): cli2 exits 123 "
+            "under xargs when it finds issues, and errexit — `-e` or the long "
+            "`-o errexit` — would fail the step before the differ ever "
+            "adjudicates that report (#7435)"
+        )
+    for lint, report in (
+        (changed_lint, "mdlint-pr.txt"),
+        (main_lint, "mdlint-mh.txt"),
     ):
-        lint = _by_name(lint_name)["run"]
-        assert ".github/scripts/docs-markdownlint.sh" in lint, lint_name
-        assert f'--output "$RUNNER_TEMP/{report}"' in lint, lint_name
-        # The REDIRECT is the load-bearing part: `cat "$RUNNER_TEMP/mdlint-*.txt"`
-        # also names the file, so a substring assertion stays green with the whole
-        # capture deleted.
-        #
-        # `2>&1` is not tidiness, it is the difference between a report and a
-        # FAIL-OPEN one: cli2 writes `Linting:`/`Summary:` to stdout and every
-        # FINDING line to stderr (measured), so a stdout-only report satisfies
-        # every cardinality check while carrying zero findings.
-        assert 'xargs -0 "$CLI" <"$FILES_FROM"' in producer, (
-            "the invocation must be portable: `-a`/`-r` are GNU-only and macOS's "
-            "xargs rejects `-a` outright (measured), which reds six of "
-            "tests/test_docs_markdownlint.py on every dev machine"
-        )
-        assert '-r "$CLI"' not in producer, (
-            "`-r` is a GNU-only flag here and is unnecessary — the population is "
-            "already proven non-empty before the call"
-        )
-        assert '<"$FILES_FROM" >"$TMP_REPORT" 2>&1' in producer, (
-            "the producer must capture BOTH streams into the report"
-        )
-        # The capture must not be subject to `set -e`: cli2 exits 1 (under xargs,
-        # 123) when it finds issues, so an errexit shell would fail the step and
-        # the differ would never run — the pre-#7435 behaviour where every
-        # inherited finding reds the check.
-        assert "set -e" not in producer, (
-            "the producer must not run under errexit — the exit code is not the verdict"
-        )
-        # The differ reports a KNOWN finding as a COUNT only, so the raw report
-        # must also be PRINTED or a baselined finding goes invisible in CI while
-        # the required check stays green — the visibility half of "the snapshot
-        # is a ceiling, not an amnesty".
-        assert 'cat "$OUTPUT"' in producer, "the producer must publish the report into the log"
-        # The pin lives beside the resolution/install now; assert it THERE, or
-        # "pinned" would be a claim about nothing, and a snapshot taken with a
-        # different cli2 describes a different check.
-        assert f'MDLINT_VERSION="{dlb.MARKDOWNLINT_PIN.removeprefix("markdownlint-cli2@")}"' in producer, (
-            "the producer must pin the same cli2 the snapshot was generated with (#7435)"
-        )
+        assert f'--output "$RUNNER_TEMP/{report}"' in lint, report
     # (No `assert ".rc" not in lint` here. No step writes a `.rc` file — the status
     # is captured in a shell variable — so that assert could not fail and only read
     # as if it pinned the property; a vacuous assert is worse than none. #7542
