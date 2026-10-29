@@ -157,6 +157,72 @@ def test_dynamic_import_with_a_computed_name_is_unknown_not_dropped():
     assert scan.tainted
 
 
+def test_an_ALIASED_importlib_call_still_resolves_its_literal():
+    """P2 (#10143): `import importlib as X` binds the SAME module, so the call is
+    as static as the unaliased one — matching the root against the literal string
+    `"importlib"` dropped it into silence (no edge, no `UNKNOWN`).
+
+    This is not hypothetical: `tortoise/projection.py:16` is
+    `import importlib as _importlib` and `:23` is
+    `_importlib.import_module('tortoise.projection')`, the file's only edge.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "import importlib as _importlib\n"
+        "_importlib.import_module('tortoise.lazy')\n",
+    )
+    assert "tortoise.lazy" in {d.target for d in scan.deps}, (
+        "an aliased importlib call is the same call: its literal must resolve")
+    assert scan.unknown == []
+
+
+def test_an_ALIASED_from_import_of_the_import_family_still_resolves():
+    """The other aliasing shape: `from importlib import import_module as _im`.
+
+    `_im(...)` is an `ast.Name`, so the old Name arm — which matched only the
+    literal function names — did not fire either. Same hole, other spelling.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "from importlib import import_module as _im\n_im('tortoise.lazy')\n",
+    )
+    assert "tortoise.lazy" in {d.target for d in scan.deps}
+    assert scan.unknown == []
+
+
+def test_an_aliased_importlib_call_with_a_COMPUTED_name_is_unknown():
+    """The silence had a second face: a computed name must be `UNKNOWN`, and an
+    alias that matched nothing left the file reading as a complete empty closure
+    — the under-selecting direction the tool exists to rule out.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "import importlib as _importlib\nname = 'tortoise.' + 'lazy'\n"
+        "_importlib.import_module(name)\n",
+    )
+    assert [u.reason for u in scan.unknown] == [UNKNOWN_DYNAMIC_CALL]
+    assert scan.tainted
+
+
+def test_a_repo_module_that_defines_import_module_is_still_not_stdlib():
+    """PRECISION, pinned so the alias fix cannot trade one hole for another.
+
+    The alias sets are built from a real import of the stdlib `importlib`, so a
+    repo module's own `import_module` is not misread as the import machinery: no
+    edge, no `UNKNOWN`, exactly as before.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py", "tortoise/mine.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "from tortoise.mine import import_module as _mine\n_mine('tortoise.lazy')\n",
+    )
+    assert "tortoise.lazy" not in {d.target for d in scan.deps}
+    assert scan.unknown == []
+
+
 def test_getattr_on_an_in_repo_module_taints_but_on_a_third_party_one_does_not():
     """Taint must mean "may be MISSING a tortoise module" or it says nothing.
 
@@ -991,6 +1057,14 @@ def test_validate_exits_two_when_it_could_not_read_the_window(
     parenthetical — is what distinguishes "clean" from "I read nothing". Same
     defect as `test_ground_truth_records_an_artifact_that_carries_no_junit`, one
     layer up: there the dict lost the signal, here the exit code did.
+
+    ⚠️ ISOLATED, on purpose (#10143 P2). This stub used to omit `runs_seen` /
+    `test_legs_seen` and set `artifacts: 0`, so `unseen`, `unassessed` AND `unread`
+    each forced exit 2 on their own and the test certified nothing about the arm
+    its name pointed at. It now carries the healthy counts and an EMPTY
+    `artifact_errors`, so `unread` (`failed_jobs and not artifacts`) is the only
+    condition that can fire. The `errors` arm has its own isolated pin:
+    `test_validate_exits_two_when_ONE_artifact_was_unreadable`.
     """
     import argparse
 
@@ -1011,7 +1085,8 @@ def test_validate_exits_two_when_it_could_not_read_the_window(
     monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: {
         "failed_files": [], "failed_tests": [], "jobs": ["test (a)"],
         "job_failed_without_test_failure": [], "artifacts": 0,
-        "artifact_errors": ["run 1: no pytest-log-* artifact uploaded"],
+        "runs_seen": 3, "test_legs_seen": 3,
+        "artifact_errors": [],
         "junit_missing": [], "ground_truth_complete": False,
     })
 
@@ -1020,7 +1095,13 @@ def test_validate_exits_two_when_it_could_not_read_the_window(
         window=None, prs=[], import_time_only=False,
     )
     assert ci.cmd_validate(args) == 2, "an unread window must not exit 0"
-    assert "unreadable" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "uploaded no readable artifact" in out, (
+        "the `unread` arm must name itself; the unconditional `artifacts "
+        "unreadable: N` tally line is printed on EVERY run and cannot stand in "
+        "for it")
+    assert "artifacts unreadable: 0" in out, (
+        "this stub must not also trip the `errors` arm — that arm has its own pin")
 
 
 def test_validate_exits_two_on_an_empty_window(tmp_path, monkeypatch, capsys):
@@ -1372,6 +1453,32 @@ def _truth(**over):
     }
     base.update(over)
     return base
+
+
+def test_validate_exits_two_when_ONE_artifact_was_unreadable(monkeypatch, capsys,
+                                                             tmp_path):
+    """P2 (#10143): the `errors` arm of the certification gate was UNPINNED.
+
+    `errors` is the only arm that fires when a red leg WAS partly read
+    (`artifacts > 0`) and one artifact was unusable — the state §3.4 measures 16
+    times across 9 PRs, and the state the doc's headline "the window is PARTIAL
+    and `validate` exits 2" depends on. Everything else is healthy here
+    (`runs_seen`/`test_legs_seen` set, a `test*` leg present, the failure in
+    model), so exit 0 is the only other possible answer: delete `errors or` at
+    the gate and this test goes red, while the legacy stub — which also forced 2
+    through `unseen`/`unassessed`/`unread` — stayed green.
+    """
+    from tools import ci_import_closure as ci
+
+    rc = _stub_validate(monkeypatch, ci, _truth(
+        jobs=["test (a)"], artifacts=1,
+        artifact_errors=["run 1: pytest-log-test (a) uploaded no junit"],
+    ), cache=tmp_path)
+    out = capsys.readouterr().out
+    assert "PARTIAL" in out and "unreadable" in out
+    assert rc == 2, (
+        "a partly-read red leg can only UNDER-count misses, so the window is "
+        "PARTIAL — no other arm of the gate can catch it")
 
 
 def test_validate_exits_two_when_a_pr_yielded_no_check_run(monkeypatch, capsys,

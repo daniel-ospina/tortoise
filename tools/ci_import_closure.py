@@ -438,10 +438,23 @@ class Scanner:
         # never be a module — a real submodule then vanished with no edge and no
         # `UNKNOWN` (#10143 review P2).
         module_bindings: dict[str, str] = {}
+        # Local names that ARE the stdlib `importlib` module, and local names that
+        # ARE one of its dynamic-import functions (`from importlib import
+        # import_module as im`). `import importlib as _importlib` binds the SAME
+        # module under a different local name, so an aliased call is exactly as
+        # dynamic as `importlib.import_module(...)` — resolving the family by
+        # ROOT NAME alone dropped it with no edge and no `UNKNOWN` (#10143 P2).
+        # Populated ONLY from a real import of the stdlib
+        # `importlib`, so a repo module that happens to define `import_module`
+        # still is not misread as the stdlib one.
+        importlib_names: set[str] = {"importlib"}
+        importlib_attrs: dict[str, str] = {}
         for node, in_tc, in_fn in _imports_with_context(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     self._add_import(scan, alias.name, node.lineno, in_tc, in_fn)
+                    if alias.name == "importlib":
+                        importlib_names.add(alias.asname or "importlib")
                     bound = alias.asname or alias.name.split(".")[0]
                     if self.index.is_in_repo_root(alias.name):
                         # `import tortoise.x` binds the ROOT package; an alias
@@ -461,6 +474,10 @@ class Scanner:
                     continue
                 if base:
                     self._add_import(scan, base, node.lineno, in_tc, in_fn)
+                if base == "importlib":
+                    for alias in node.names:
+                        if alias.name in _DYNAMIC_IMPORT_ATTRS:
+                            importlib_attrs[alias.asname or alias.name] = alias.name
                 for alias in node.names:
                     if alias.name == "*":
                         continue
@@ -471,7 +488,8 @@ class Scanner:
                         if self.index.is_in_repo_root(sub):
                             module_bindings[alias.asname or alias.name] = sub
 
-        self._scan_dynamic(tree, scan, module_bindings, pkg_parts)
+        self._scan_dynamic(tree, scan, module_bindings, pkg_parts,
+                           importlib_names, importlib_attrs)
         # Dedupe edges: a module imported at module level AND inside a function
         # is one dependency; keep the strongest context (module-level, non-TC).
         scan.deps = _dedupe_deps(scan.deps)
@@ -504,6 +522,8 @@ class Scanner:
     def _scan_dynamic(
         self, tree: ast.AST, scan: FileScan, module_bindings: dict[str, str],
         pkg_parts: list[str],
+        importlib_names: set[str] | None = None,
+        importlib_attrs: dict[str, str] | None = None,
     ) -> None:
         """`importlib`-shaped and `getattr`-shaped dynamic access.
 
@@ -524,7 +544,7 @@ class Scanner:
         for node, in_tc, in_fn in _nodes_with_context(tree):
             if not isinstance(node, ast.Call):
                 continue
-            kind, name = _dynamic_callable(node.func)
+            kind, name = _dynamic_callable(node.func, importlib_names, importlib_attrs)
             if kind == "import":
                 self._scan_import_call(node, scan, pkg_parts, name, in_tc, in_fn)
             elif kind == "loader":
@@ -619,24 +639,46 @@ class Scanner:
         ))
 
 
-def _dynamic_callable(func: ast.expr) -> tuple[str, str]:
+def _dynamic_callable(
+    func: ast.expr,
+    importlib_names: set[str] | None = None,
+    importlib_attrs: dict[str, str] | None = None,
+) -> tuple[str, str]:
     """Classify a call target: `("import"|"loader"|"", name)`.
 
     `importlib.import_module(...)` is matched through its `importlib` ROOT, so a
     repo module that happens to define `import_module` is not misread as the
     stdlib one — while `from importlib import import_module` (a bare Name) still
     matches, the over-inclusive direction, which is the safe one.
+
+    AN ALIAS IS THE SAME MODULE. `importlib.import_module` is an ATTRIBUTE of the
+    module object, so `import importlib as _importlib` (and
+    `from importlib import import_module as _im`) binds the very same callable —
+    the module-level import statement binds a local NAME, it does not copy, and
+    nothing about the call becomes non-static. Matching the root by the literal
+    string `"importlib"` therefore under-counted a real alias into silence: no
+    edge, no `UNKNOWN`, and the file read as a complete empty closure (#10143
+    P2). `tortoise/projection.py:16,23` is that shape in the tree (`import
+    importlib as _importlib` → `_importlib.import_module('tortoise.projection')`).
+    The alias sets come from the caller's OWN imports of the stdlib `importlib`,
+    so precision is untouched: a repo module named `import_module` is still not
+    the stdlib one, because nothing imported `importlib` into that file.
     """
+    names = importlib_names if importlib_names is not None else {"importlib"}
+    attrs = importlib_attrs or {}
     if isinstance(func, ast.Name):
         if func.id in _DYNAMIC_IMPORT_ATTRS:
             return ("loader" if func.id in _LOADER_NAMES else "import"), func.id
+        target = attrs.get(func.id)
+        if target:
+            return ("loader" if target in _LOADER_NAMES else "import"), target
         return "", ""
     if not isinstance(func, ast.Attribute):
         return "", ""
     root = func
     while isinstance(root, ast.Attribute):
         root = root.value
-    if not (isinstance(root, ast.Name) and root.id == "importlib"):
+    if not (isinstance(root, ast.Name) and root.id in names):
         if func.attr in _LOADER_NAMES:
             return "loader", func.attr
         return "", ""

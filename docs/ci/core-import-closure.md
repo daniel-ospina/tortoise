@@ -22,7 +22,9 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (66 tests, incl. the harness mutation check)
+- Pins: `tests/test_ci_import_closure.py` (75 test functions / 77 collected, incl. the harness
+  mutation check — re-derive with `grep -c '^def test_' tests/test_ci_import_closure.py` and
+  `pytest --collect-only -q`; a count written here without that command is a snapshot, not a fact)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
   is **classification only**: a diff that changes *this instrument* and nothing else
   (`tools/ci_import_closure.py`-only) is a non-Python change — `tools/` is in
@@ -190,7 +192,7 @@ and its ceiling is the 15 % in §1.
 | re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.6 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
 | dynamic imports | constant argument **resolved**; computed argument → `UNKNOWN` with reason | `importlib.import_module("tortoise.x")` is still static information; only a computed name is a blind spot. |
 | `getattr(module, ...)` | in-repo module + literal attr → resolve (or no edge); computed attr → `UNKNOWN`; third-party module → **no taint** | the candidate is built from the binding's **dotted target**, never its local name: `from tortoise import projection` + `getattr(projection, "in_memory")` resolves `tortoise.projection.in_memory`, where a local-name candidate (`projection.in_memory`) is not a module at all and would drop a real submodule with neither an edge nor an `UNKNOWN`. Taint must mean "may be MISSING a `tortoise` module" or it says nothing: over-tainting marks the whole connected component and the signal collapses (measured: 89 % tainted before this rule, 19 % after). |
-| package/module name collision | **package wins** (CPython's `FileFinder` order) | `tortoise/projection/__init__.py` and `tortoise/projection.py` share a name; resolving to the module under-selected by 7 modules and is reported in `shadowed_modules`. |
+| package/module name collision | **package wins** (CPython's `FileFinder` order) | `tortoise/projection/__init__.py` and `tortoise/projection.py` share a name; resolving to the module **used to** under-select by 7 modules. On this tree it changes no closure's module count (measured: 634 core closures swap `tortoise/projection/__init__.py` for `tortoise/projection.py` and back, 0 net), so the pin for the precedence rule is the SYNTHETIC case in the test file, and the pair is still reported in `shadowed_modules` rather than discarded. |
 | unparseable / unresolvable | `UNKNOWN` + reason (`syntax`, `unresolved-name`, `dynamic-import-call`, `dynamic-module-attr`, `module-loader`) | reported, never dropped. |
 
 ### 3.3 Ground truth is the junit, not the job
