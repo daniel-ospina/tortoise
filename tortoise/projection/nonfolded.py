@@ -252,8 +252,13 @@ EXEMPT_SHAPES: dict[str, str] = {
         "bound is now about ADDRESSES, not about a name: the record must carry "
         "at least one address — a `name`, an `id`, or both — and the journal "
         "must have established NONE of the addresses it carries. NAME sources: "
-        "`ObjectRegistered`, an `EntityMutated` state op (a rename `SET`ting "
-        "the MERGE key), an `EventRecorded` mention stub. ID sources: a "
+        "`ObjectRegistered`, an `EntityMutated` state op's `SET`ting the merge "
+        "key — ⛔ ANY of `rename`/`restatus`/`revise`/`supersede`, NOT a rename "
+        "alone (`journal_object_established` reads `state.name` for every op in "
+        "`_ENTITY_MUTATION_STATE_OPS`; a rename-only illustration under-states "
+        "the source and reads as a `restatus`-carried name being exempt — the "
+        "FAIL-OPEN direction) — and an `EventRecorded` mention stub. "
+        "ID sources: a "
         "registration's id, a mention stub's DETERMINISTIC id, a state op's "
         "TARGET id. An address the journal DID establish is a real target, so "
         "that record keeps REFUSING — but ⛔ the cause is a DISJUNCTION, and "
@@ -522,6 +527,28 @@ _NO_ADDRESS_REMEDY = (
     # repair — the contradiction this split exists to end.
     f"— its repair is to {NO_ADDRESS_INSTRUCTION} and re-run."
 )
+#: The MISS shape's SECOND sentence (#10211 review round 8). "Reconcile the
+#: journal" is the right instruction for the *divergence* half of the miss
+#: shape, but it is WRONG for case (3) of the per-record receipt in
+#: ``projection.rebuild_all`` — a record whose carrier the journal HARD-DELETED
+#: under an ``id`` the record does not carry (it carries the NAME only). Nothing
+#: is out of order there and no creation is missing: the record simply cannot be
+#: recognised by the anchored delete bound, which reads only the record's own
+#: ``id``. The receipt already says so ("not to reconcile the journal", #10224),
+#: so leaving the run boundary prescribing reconcile would print two
+#: contradictory instructions for ONE record — the exact defect
+#: :func:`refusal_remedy` exists as the single home to remove, one level up.
+#: ⛔ SCOPED to the sub-case, not swapped in for the reconcile sentence: the
+#: miss shape also covers genuine divergences, which reconcile DOES repair. Both
+#: sentences therefore appear together rather than one displacing the other.
+MISS_NAME_ONLY_DELETED_INSTRUCTION = (
+    "If the record carries the target's NAME only and the journal hard-deleted "
+    "that target, carry the deleted target's id instead (#10224)."
+)
+_MISS_NAME_ONLY_DELETED_REMEDY = (
+    "For the conservative sub-case — a name-only record over a target the "
+    f"journal hard-deleted — {MISS_NAME_ONLY_DELETED_INSTRUCTION}"
+)
 
 
 def refusal_remedy(refused) -> str:
@@ -560,6 +587,11 @@ def refusal_remedy(refused) -> str:
     parts = []
     if shapes != {SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS}:
         parts.append(_RECONCILE_REMEDY)
+    if SHAPE_OBJECT_SUPERSEDED_MISS in shapes:
+        # #10211 review round 8: the miss shape has TWO causes and only one of
+        # them is reconciled. Emitting the reconcile sentence alone contradicts
+        # the per-record receipt's case (3) for the same record.
+        parts.append(_MISS_NAME_ONLY_DELETED_REMEDY)
     if SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS in shapes:
         parts.append(_NO_ADDRESS_REMEDY)
     return " ".join(parts)

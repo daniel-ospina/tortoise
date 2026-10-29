@@ -2588,6 +2588,85 @@ def test_refusal_remedy_is_empty_for_an_empty_set_and_splits_by_shape():
     assert "supply the target's name or id" in _mixed, _mixed
 
 
+def test_miss_remedy_does_not_contradict_the_per_record_hard_deleted_case():
+    """PIN `#10211` review round 8: the run boundary and the per-record receipt
+    must not prescribe OPPOSITE repairs for ONE record.
+
+    The `object-superseded-miss` shape has two causes. Case (3) of
+    `projection.rebuild_all`'s receipt is a NAME-only record over a target the
+    journal HARD-DELETED under an id the record does not carry: nothing is out
+    of order, no creation is missing, and the receipt says so explicitly —
+    "not to reconcile the journal" (`#10224`). `refusal_remedy` emitted the
+    reconcile sentence alone for that same shape, so an operator reading the
+    abort was told to do the one thing the record's own message forbade. That
+    is the class `refusal_remedy` exists as the single home to end.
+
+    FAILS IF: the miss arm drops `_MISS_NAME_ONLY_DELETED_REMEDY` (restoring the
+    contradiction), OR the reconcile sentence is REPLACED by it rather than
+    joined by it (a genuine divergence is still repaired by reconciling, and
+    dropping that limb would prescribe an incomplete remedy for it), OR the
+    sentence stops naming the deleted-target-id repair.
+    """
+    from tortoise.projection.nonfolded import (
+        MISS_NAME_ONLY_DELETED_INSTRUCTION,
+        SHAPE_OBJECT_SUPERSEDED_MISS,
+        NonFoldedEvent,
+        refusal_remedy,
+    )
+
+    _only_miss = refusal_remedy([NonFoldedEvent(SHAPE_OBJECT_SUPERSEDED_MISS)])
+    # BOTH halves: the divergence repair AND the conservative sub-case's repair.
+    assert "Reconcile the journal" in _only_miss, _only_miss
+    assert MISS_NAME_ONLY_DELETED_INSTRUCTION in _only_miss, _only_miss
+    # Scoped to the deleted-target-id repair, not a generic "look harder".
+    assert "deleted target's id" in MISS_NAME_ONLY_DELETED_INSTRUCTION
+    assert "#10224" in MISS_NAME_ONLY_DELETED_INSTRUCTION
+
+    # And the sentence must NOT leak on to a set that has no miss at all.
+    from tortoise.projection.nonfolded import SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS
+
+    _only_no_addr = refusal_remedy(
+        [NonFoldedEvent(SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS)])
+    assert MISS_NAME_ONLY_DELETED_INSTRUCTION not in _only_no_addr, _only_no_addr
+
+
+def test_exempt_shapes_names_every_state_op_that_can_carry_a_name():
+    """PIN `#10211` review round 8: the RECORD of the bound must not be narrower
+    than the bound, in the FAIL-OPEN direction.
+
+    `journal_object_established` counts `state.name` for EVERY op in
+    `_ENTITY_MUTATION_STATE_OPS` (`rename`, `restatus`, `revise`, `supersede`) —
+    pinned by `test_state_op_writing_a_name_other_than_rename_is_covered`. The
+    `EXEMPT_SHAPES` entry and `identity-decision.md` described that source as
+    "a rename", so a lane re-deriving the bound from the record would treat a
+    name carried by `restatus`/`revise`/`supersede` as UNestablished and exempt
+    a supersede that could have landed — the fail-open direction, and the exact
+    narrowing this PR fixed in the code and the `_sup_why` text.
+
+    FAILS IF: either record drifts back to a rename-only illustration.
+    """
+    from pathlib import Path
+
+    from tortoise.projection.nonfolded import EXEMPT_SHAPES, SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
+
+    _entry = EXEMPT_SHAPES[SHAPE_OBJECT_SUPERSEDED_UNREGISTERED]
+    assert "(a rename" not in _entry, (
+        "EXEMPT_SHAPES is back to a rename-only NAME source — the record is then "
+        "narrower than the predicate, which exempts a landable supersede")
+    for _op in ("rename", "restatus", "revise", "supersede"):
+        assert _op in _entry, (
+            f"EXEMPT_SHAPES must name `{_op}`, one of "
+            "_ENTITY_MUTATION_STATE_OPS — all four can SET the merge key")
+
+    _doc = (Path(__file__).resolve().parent.parent
+            / "docs/epics/2026-09-10-2835-capability-registry/identity-decision.md")
+    _text = _doc.read_text(encoding="utf-8")
+    assert "state op (a rename)" not in _text, (
+        "identity-decision.md is back to a rename-only NAME source")
+    assert "`restatus`" in _text, (
+        "identity-decision.md's Name-sources clause must name every state op")
+
+
 def test_journal_object_established_counts_every_address_and_separates_ids():
     """The oracle counts EVERY route that puts a name in the merge key, and
     keeps the established ids separately.
