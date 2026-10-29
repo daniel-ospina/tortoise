@@ -1744,6 +1744,20 @@ jobs:
     # `self-hosted,Linux,ARM64,self-hosted-arm64` plus, only while the fallback is
     # attached, `ubuntu-latest`) — the same pin, and the same reasoning, as
     # `workflow-lint` (#7867) and finding-provenance.
+    # ⛔ THE SENTENCE ABOVE IS MEASURED FALSE, and the consequence is not cosmetic
+    # (measured 2026-10-29 on run 40832215261, `gh api repos/…/actions/jobs/
+    # 123363936849`): `test-slow (b)` ran on `runner_name: pi-runner-x64-1`,
+    # `labels: ["ubuntu-24.04"]`, python under `/opt/gh-runner-x64/_work` — a
+    # SELF-HOSTED install whose label set includes `ubuntu-24.04`. So the label
+    # pin does NOT keep this leg off the pool, and the whole `ubuntu-24.04`-vs-
+    # `ubuntu-latest` distinction above rests on a claim that does not hold today;
+    # the pin is kept (changing the routing is a capacity decision, #6897) but it
+    # is not what protects this leg. What DOES: the per-job pytest artifacts
+    # resolved in the FIRST step of this job (#10028; measured on that same run,
+    # where a co-tenant truncated `/tmp/pytest.log` and a peer's manifest made
+    # this leg's guard report 1066 absent nodeids over a GREEN pytest run).
+    # A future reader must not conclude from this comment that this leg's temp
+    # dir is private: it is not, and #7815 records the two runs that prove it.
     # Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while
     # the fallback label is attached. During a real GitHub-hosted outage these two
     # legs WAIT for a hosted runner (the aggregate stays pending — "not answered
