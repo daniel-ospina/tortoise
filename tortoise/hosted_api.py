@@ -18765,6 +18765,15 @@ def _record_holds_turns() -> bool:
     empty answer then stands for turns the graph holds. The previous text claimed
     both sides asked one question; they do not.
 
+    ⚠️ And the DSN conjunct is itself two questions: a value that parses, and one
+    that is merely PRESENT. `record_dsn` RAISES `RecordWriteError` on a
+    wrong-scheme or hostless value (#9548), the writer treats that as "the record
+    does not hold these" (the graph then keeps the turns, #10067 review ISSUE 1),
+    and THIS predicate calls it unguarded — so on such a DSN the writer degrades
+    and this reader raises out of the endpoint. That divergence is the read side
+    of the same store-decision question, recorded on #10021 rather than absorbed
+    here (a quiet semantic change to a read path is not a review finding's scope).
+
     The conjuncts are named by their CODE, not by a line number: the earlier
     "`sdk.py:2652`'s two conjuncts" was wrong twice over by the time it was read
     — three conjuncts, at a different line (#10067 review).
@@ -18947,8 +18956,9 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # capture — `sdk.py`'s `merge_sets`), which is the count this endpoint
     # publishes as `turns` below.
     #
-    # `!=`, not `<`: the stale-turn sweep is gated on the write predicate
-    # (`sdk.py:2696`), so a re-capture after arming leaves the OLDER node set in
+    # `!=`, not `<`: the stale-turn sweep is gated on the SAME capability read
+    # the write uses (`_record_holds_turns` in `sdk._write_capture_turns`), so a
+    # re-capture after arming leaves the OLDER node set in
     # place, and that superset is as much "not this transcript" as a prefix is.
     #
     # `turn_count` is NOT collapsed to 0 when absent (`or 0`): KNOWN ZERO (a
@@ -18980,7 +18990,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     #     route cannot see it. That half belongs to #10021 (recorded there with
     #     code evidence); doing it here would be a second store-decision rewrite
     #     against that open branch;
-    #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so this `!=` assumes
+    #   * `turn_count` is a WINDOW LENGTH (`sdk._write_capture_turns` writes it
+    #     beside `turn_max_index = turn_offset + turn_count - 1`), so this `!=` assumes
     #     the offset-0 single-capture shape that is the only one wired today. A
     #     non-zero `turn_offset` append leaves `offset + turn_count` nodes and
     #     would make a COMPLETE copy refuse — revisit this line when an append

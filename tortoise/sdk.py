@@ -2683,6 +2683,7 @@ def _write_capture_turns(
     # deliberately NOT tested here — that half is #10021's ("the store is decided
     # by what the write did"), and the journal carrier it leaves behind is what
     # heals it on replay.
+    from tortoise.record_writer import RecordWriteError as _RecordWriteError
     from tortoise.record_writer import is_usable_tenant as _is_usable_tenant
     from tortoise.record_writer import record_dsn as _record_dsn
     from tortoise.record_writer import (
@@ -2698,11 +2699,30 @@ def _write_capture_turns(
     # in NEITHER store: the #10067 defect one conjunct further out. This is the
     # seam's OWN test, `getattr(log, "durable", True)`, so the two cannot drift
     # the way `record_tenant()`/`record_tenant_effective` did.
+    #
+    # ⛔ AND THE DSN TERM IS A *QUESTION*, NOT A MANDATE (#10067 review ISSUE 1).
+    # `record_dsn()` does not merely answer armed/unarmed: it RAISES
+    # `RecordWriteError` for a wrong-scheme value and for a right-scheme value
+    # with no host (the clipped `gh secret set` paste, #9548). The SEAM catches
+    # exactly that and answers `_refused("malformed_dsn", seq)` instead of
+    # raising — and this read runs AFTER the `:Session` MERGE has committed, so
+    # an uncaught raise here hands the caller an exception for a HALF-applied
+    # capture whose turns are in NEITHER store (the graph batch was never
+    # issued, no journal line was written): #10067's defect through another
+    # door, and #5148's rule broken from the other side. A DSN the record will
+    # refuse is not "the record holds these turns", so it answers the negative:
+    # the graph keeps them, and the seam still counts its own `malformed_dsn`
+    # refusal when the node-creating record reaches it. Caught NARROWLY — this
+    # is the one documented raise, not a blanket swallow.
     _log = sdk._get_event_log()
+    try:
+        _dsn_armed = _record_dsn() is not None
+    except _RecordWriteError:
+        _dsn_armed = False
     _record_holds_turns = (
         _log is not None
         and getattr(_log, "durable", True)
-        and _record_dsn() is not None
+        and _dsn_armed
         and _is_usable_tenant(
             _record_tenant_effective(sdk._record_tenant)))
     # The JOURNALLED shape follows the WRITE that actually happened, not the

@@ -867,3 +867,78 @@ def test_a_record_armed_capture_journals_the_carrier_and_replays_to_no_turn_node
             "the #10067 defect")
     finally:
         client.close()
+
+
+# ── §7b the PRODUCER on a MISCONFIGURED record (#10067 review ISSUE 1) ─────
+
+
+def test_a_MALFORMED_dsn_keeps_the_turns_in_the_GRAPH_instead_of_raising(
+        tmp_path, monkeypatch):
+    """§7b — the DSN term is a QUESTION; a raise here half-applies the capture.
+
+    `record_dsn()` does not merely answer armed/unarmed: it RAISES
+    `RecordWriteError` for a wrong-scheme value, and for a right-scheme value
+    with no host (the clipped `gh secret set` paste, #9548). The SEAM catches
+    exactly that and answers `_refused("malformed_dsn", seq)` — but the
+    capability read in `_write_capture_turns` did not, and it runs AFTER the
+    `:Session` MERGE has committed. So a misconfigured `TORTOISE_RECORD_DSN`
+    made the capture RAISE out of the writer with the graph turn batch never
+    issued and no journal line written: the turns in NEITHER store, and an
+    exception for a half-applied capture — #10067's defect through another door.
+
+    The correct degradation, pinned here: `_record_holds_turns` is FALSE, so the
+    graph keeps the turns and the journal records the node-creating shape it
+    always did, and the seam still counts its own `malformed_dsn` refusal (the
+    observable signal #9548 asks for). The value is asserted to be one
+    `record_dsn()` REFUSES, so this test cannot pass on an armed DSN.
+    """
+    monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # Right scheme, NO HOST — `libpq` would fill the host from `PGHOST` or a
+    # unix socket, which is why `record_dsn` refuses this shape itself (#9548).
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://user:pw@")
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10067")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10067")
+    from tortoise import monitoring
+    from tortoise.record_writer import RecordWriteError, record_dsn
+    from tortoise.sdk import TortoiseSDK
+
+    with pytest.raises(RecordWriteError):
+        record_dsn()
+
+    path = tmp_path / "cap" / "events.jsonl"
+    path.parent.mkdir(parents=True)
+    sdk = TortoiseSDK(db_path=str(tmp_path / "cap.db"),
+                      event_log_path=str(path))
+    before = monitoring.record_write_failure_counts().get("malformed_dsn", 0)
+    try:
+        # Pre-fix this RAISES `RecordWriteError` out of the capture.
+        _capture(sdk, TURNS)
+        ids = _node_ids(sdk._get_proj())
+    finally:
+        sdk.close()
+    after = monitoring.record_write_failure_counts().get("malformed_dsn", 0)
+    journal = _journal(path)
+
+    # (1) the JOURNALLED shape follows the write that HAPPENED: no carrier —
+    # the record would refuse the row it authorises — and one node-creating
+    # record per turn, the shape a graph-lane capture still writes.
+    assert not [r for r in journal if r.get("type") == rp.TURNS_RECORD_TYPE], (
+        "a DSN the record REFUSES still produced the record-only carrier, so "
+        "the turns it authorises have no reader at all")
+    turn_records = [r for r in journal if _is_turn(r)]
+    assert len(turn_records) == len(TURNS), (
+        f"the graph-lane fallback journalled {len(turn_records)} turn "
+        f"record(s) for {len(TURNS)} turns")
+
+    # (2) the turns really are GRAPH STATE — without this, "not in the record"
+    # is satisfied by the turns being nowhere, which is the defect itself.
+    assert SESSION in ids, f"no Session node, so the capture did not commit: {ids}"
+    assert {f"{SESSION}_t0", f"{SESSION}_t1"} <= ids, (
+        f"the fallback left the turns in neither store (ids={sorted(ids)})")
+
+    # (3) the refusal is still COUNTED at the seam (#9548's signal), so the
+    # misconfiguration is observable rather than silent.
+    assert after > before, (
+        f"the malformed DSN moved no `malformed_dsn` count ({before} → {after})")
