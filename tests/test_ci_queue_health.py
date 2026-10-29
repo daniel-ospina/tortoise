@@ -783,15 +783,21 @@ def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
 
     The bound is the CLAUSE ORDER, not the trim scope. `PR-BACKLOGGED` requires
     `pr_running > 0`, and the governor's block sits BELOW the `pr_running != 0`
-    clause, so it is unreachable from here and no trim was ever considered. The
-    governor's candidates are a trim-safe OFFENDER's queued runs in any case — a
-    queued PR run is never one — but this queue's leader MAY be a trim-safe
-    offender that the scope would license trims on (measured: the same queue with
-    no PR run executing is a FLOOD whose `trimmable` is non-empty), which is why
-    the reason line reports the leader as a FACT instead of asserting the queue is
-    made of PR work (the #9118 P2-2 class). A red run nobody can clear by acting
-    is not an alarm, it is noise, so the alarm is the state line and the
-    workflow's annotation.
+    clause, so it is unreachable from here and no trim was considered FOR THIS
+    READING. The governor's candidates are a trim-safe OFFENDER's queued runs in
+    any case — a queued PR run is never one — but a leader MAY be a trim-safe
+    offender that the scope would license trims on, which is why the reason line
+    reports the leader as a FACT instead of asserting the queue is made of PR work
+    (the #9118 P2-2 class). This test's own queue is NOT that shape: it holds 20
+    PR-event runs and no non-PR run at all, so with no PR run executing it is
+    `PR-STARVED` with `trimmable == ()` (pinned by
+    `test_a_starved_queue_is_starved_not_backlogged`). The measured trim-safe-leader
+    shape — the same queue with no PR run executing, a FLOOD whose governor trims 5
+    of 10 — is the fixture of
+    `test_the_no_action_clause_names_the_bound_that_actually_binds`, and that is
+    where the measurement belongs. A red run nobody can clear by acting is not an
+    alarm, it is noise, so the alarm is the state line and the workflow's
+    annotation.
     """
     health = classify(starving_pr_runs(20, age_seconds=9000),
                       in_progress=serving_pr_runs(1))
@@ -926,9 +932,58 @@ def test_the_no_action_clause_names_the_bound_that_actually_binds():
     assert health.trimmable == ()
     joined = " ".join(health.reasons)
     assert "the governor's block sits BELOW that clause" in joined
-    assert "no trim was ever considered" in joined
+    # scoped to the READING, never to the invocation: the same payload can carry
+    # cancellations this run made before this reading (`cancelled`), so an
+    # invocation-scoped "no trim was ever considered" contradicts the artifact.
+    assert "no run was trimmed for this reading" in joined
+    assert "the governor was never reached" in joined
+    assert "no trim was ever considered" not in joined
     # the scope is described as the candidate rule, never as the bound
     assert "its candidates are a trim-safe OFFENDER's queued runs" in joined
+
+
+def test_a_reading_that_followed_a_trim_never_claims_the_invocation_trimmed_nothing(
+        monkeypatch, capsys):
+    """PR #10264 review P3: the no-action claim is READING-scoped, not invocation-scoped.
+
+    `classify_queue` is pure, and `main()` cancels the PRE-action FLOOD candidates
+    and then reports a POST-action re-read. A runner slot freeing during the
+    cancellations is a race the tool already models (`flood_stands_after_action`),
+    and it is reachable: the reported reading can be `PR-BACKLOGGED` while the very
+    same JSON carries `"cancelled": [ids]`. So the reason may say *"no run was
+    trimmed FOR THIS READING"* and never *"no trim was ever considered"* — the
+    latter is an invocation claim the reading cannot support, and the workflow's
+    annotation must read `cancelled` from the payload instead of asserting it.
+    """
+    flood = classify(flood_queued(10) + starving_pr_runs(4, age_seconds=9000))
+    assert flood.verdict == Q.FLOOD and len(flood.trimmable) == 5
+    backlogged = classify(flood_queued(10) + starving_pr_runs(4, age_seconds=9000),
+                          in_progress=serving_pr_runs(1))
+    assert backlogged.verdict == Q.PR_BACKLOGGED and backlogged.trimmable == ()
+
+    monkeypatch.setattr(Q, "cancel_run", lambda repo, run_id: (True, "cancelled"))
+    monkeypatch.setattr(Q, "read_health", _readings(flood, backlogged))
+    assert Q.main(["--apply", "--json"]) == Q.EXIT_OK
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PR-BACKLOGGED"
+    assert payload["cancelled"] == [1000, 1001, 1002, 1003, 1004]
+    assert payload["cleared"] is True
+    # the artifact does not contradict itself: the reason is about the reading,
+    # and the trims it did make are named by `cancelled` beside it.
+    joined = " ".join(payload["reasons"])
+    assert "no run was trimmed for this reading" in joined
+    assert "no trim was ever considered" not in joined
+    assert "Nothing was cancelled" not in joined
+
+    # ... and the workflow's annotation is payload-derived for the same reason.
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    warnings = [line for line in wf.splitlines() if "::warning" in line]
+    assert warnings
+    assert not any("Nothing was cancelled" in line for line in warnings)
+    assert 'cancelled_count="$(python3 -c "import json; print(len(' in wf
+    assert '[ "$cancelled_count" -gt 0 ]' in wf
 
 
 def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():

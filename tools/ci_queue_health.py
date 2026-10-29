@@ -40,10 +40,17 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               ``CI: OK(queued=54, pr_running=2, pr_queued=32)`` with the oldest
               queued PR run at **527 minutes** — a clean bill of health printed
               for a repo whose REQUIRED ``python-ci-gate`` answers in hours. It has
-              no action available — the governor's WHOLE action surface is a
-              trim-safe OFFENDER's queued runs, and a queued PR run is never a
-              candidate — so it is WARNED about, never acted on, and exits 0 for
-              the same reason PR-STARVED does. Its reason line therefore reports
+              no action available — and the bound is the CLAUSE ORDER, not the trim
+              scope: the state requires ``pr_running > 0`` and the governor's block
+              sits BELOW that clause, so the governor is unreachable from here (the
+              scope does not bound it — a trim-safe OFFENDER leading this same queue
+              DOES license trims once no PR run is executing; a queued PR run is
+              never a candidate in any case) — so it is WARNED about, never acted
+              on, and exits 0 for the same reason PR-STARVED does. That no-action
+              claim is scoped to the READING: ``classify_queue`` is pure, and a run
+              that cancelled pre-action FLOOD candidates before this reading reports
+              them in ``cancelled`` (and in the workflow's transition line). Its
+              reason line therefore reports
               the queue's leader and that leader's trim-safety as FACTS, never as a
               claim about what the queue is made of (the #9118 P2-2 class: this
               clause is reachable with a trim-safe workflow holding the queue's
@@ -170,10 +177,14 @@ Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
      state line stays available in ``pre_action_state_line`` with ``cleared``
      naming the difference. ``PR-STARVED`` is also 0: the state is real and
      warned about, but no action is available (nothing trim-safe to blame).
-     ``PR-BACKLOGGED`` is 0 for exactly that reason — the only runs this tool may
-     cancel belong to a trim-safe OFFENDER, and a queued PR run is never a
-     candidate, so there is nothing to cancel, and the alarm is its state line
-     plus the workflow's annotation.
+     ``PR-BACKLOGGED`` is 0 for exactly that reason — the bound is the CLAUSE
+     ORDER: this state requires ``pr_running > 0`` and the governor's block sits
+     BELOW that clause, so the state reaches no cancellation at all (its
+     candidates are a trim-safe OFFENDER's queued runs, and a queued PR run is
+     never one), and the alarm is its state line plus the workflow's annotation.
+     A cancellation this invocation made BEFORE this reading is reported in
+     ``cancelled``/``pre_action_state_line``; the reading never speaks for the
+     invocation.
      ``PR-UNWITNESSED`` is 0 for the same reason — an action already happened
      before the verdict was reached, and the honest claim is "not witnessed",
      which is warned about rather than turned into a red run nobody can clear by
@@ -254,10 +265,12 @@ EXIT_UNMEASURABLE = 2
 #: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
 #: and no action can clear it, so it is announced (state line + `::warning`).
 #: PR-BACKLOGGED joins them for the same reason PR-STARVED did: its whole content
-#: is "a queued PR run waited N minutes", and the only runs this tool may cancel
-#: belong to a trim-safe OFFENDER — a queued PR run is never a candidate. A red
-#: run nobody can clear by acting is noise, not an alarm; the alarm is the state
-#: line plus the workflow annotation.
+#: is "a queued PR run waited N minutes", and the state reaches no cancellation —
+#: it requires `pr_running > 0`, and the governor's block sits BELOW that clause,
+#: so the CLAUSE ORDER is what bounds it (its candidates are a trim-safe OFFENDER's
+#: queued runs, and a queued PR run is never one). A red run nobody can clear by
+#: acting is noise, not an alarm; the alarm is the state line plus the workflow
+#: annotation.
 EXIT_FOR = {
     OK: EXIT_OK,
     FLOOD: EXIT_FLOOD,
@@ -716,7 +729,11 @@ def classify_queue(
         # the trim scope — because in this very shape the scope DOES license trims
         # (the same queue with no PR run executing is a FLOOD whose `trimmable` is
         # non-empty), and naming the scope as the bound would be a second false
-        # claim beside the one this clause exists to remove.
+        # claim beside the one this clause exists to remove. The claim is scoped to
+        # THIS READING (`classify_queue` is pure): the invocation may have cancelled
+        # pre-action FLOOD candidates before this reading was taken, and `main()`
+        # reports those in `cancelled` — so an invocation-scoped "nothing was
+        # cancelled" here would contradict the payload it is printed in.
         reasons.append(
             f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
             f"queued PR-event run has waited {backlogged_wait:.0f}s "
@@ -724,10 +741,12 @@ def classify_queue(
             f"checks cannot answer inside that wait. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
-            f"no run was trimmed: this state is reached only while a PR-event run "
-            f"is executing, and the governor's block sits BELOW that clause, so no "
-            f"trim was ever considered. In any case its candidates are a trim-safe "
-            f"OFFENDER's queued runs, and a queued PR run is never a candidate"
+            f"no run was trimmed for this reading: this state is reached only while "
+            f"a PR-event run is executing, and the governor's block sits BELOW that "
+            f"clause, so the governor was never reached. In any case its candidates "
+            f"are a trim-safe OFFENDER's queued runs, and a queued PR run is never a "
+            f"candidate (a cancellation this invocation made BEFORE this reading is "
+            f"reported in 'cancelled', not here)"
         )
         return health(PR_BACKLOGGED)
 
