@@ -83,9 +83,9 @@ __all__ = [
     "Turn",
     "TurnAnswer",
     "merge_turn_payloads",
+    "served_turn_count",
     "session_text",
     "session_turns",
-    "served_turn_count",
     "source_narrative",
     "source_session",
     "turn_payloads",
@@ -507,7 +507,7 @@ def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict]) -> list[dict]
     return [merged[turn_id] for turn_id in sorted(order, key=_order_key)]
 
 
-def served_turn_count(*, answer: "TurnAnswer | None", served: int,
+def served_turn_count(*, answer: TurnAnswer | None, served: int,
                       declared: int | None,
                       read_failed: bool = False) -> tuple[int | None, str]:
     """The ``turns`` a detail body may publish beside ``served`` rows — or why not.

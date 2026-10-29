@@ -735,24 +735,30 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
     `extractor_v2.py:8592` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8608`, whose surface is literally
+    `if not edus:` early return at `:8596`, whose surface is literally
     `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`); the
     VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8592`, `if vet_enabled and complete_list:` `:8714`). So the flag-ON +
+    `:8680`, `if vet_enabled and complete_list:` `:8802`). So the flag-ON +
     empty-list session emits `enabled: True` with empty counters and no pass ran —
     and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8390-8393`).
+    its fail-open path, `:8478-8481`).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8473`, its gates are
-    `if classify_later and embed_list:` (`:8604`) around `if items:` (`:8607`) and
-    `if classify_later and complete_list:` (`:8729`) around `if items:` (`:8739`),
-    and its fail-open `except` sits at `:8620` / `:8750`. A cause templated for the
+    `classify_later` is computed at `:8561`, its gates are
+    `if classify_later and embed_list:` (`:8692`) around `if items:` (`:8695`) and
+    `if classify_later and complete_list:` (`:8817`) around `if items:` (`:8827`),
+    and its fail-open `except` sits at `:8708` / `:8838`. A cause templated for the
     surface NAME while citing the VET lines told a reader of the classify block
     that the VET pass's gate idled it — false: an idle classify block comes from no
     embed list or no classify ITEMS, and `embed_list` is only its first gate
     (#9823 r4 P2). The assertions below are per step and mutually exclusive, so
     SWAPPING the two causes fails.
+
+    ⛔ EVERY NUMBER ABOVE IS RE-DERIVED AT THIS HEAD, not carried (#10021 review
+    P2). `tests/test_10017…`-style bundle sweeps cannot see them: they are runtime
+    strings in a probe, not cites in a doc. The preceding review found eleven of
+    them stale — a reader who followed one landed in a docstring or in unrelated
+    S2/S4 stats code.
 
     Accepting that block as a witness made S2.2/S2.3 WITNESSED (6/8 -> 8/8) from
     ONE such session, because `_witness_block` returns the first positive anywhere
@@ -783,25 +789,33 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
     assert "tortoise/extractor_v2.py:8592" in vet_cause, vet_cause
-    assert ":8524" in vet_cause, vet_cause
+    assert ":8612" in vet_cause, vet_cause
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
-    # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8473",
-                          ":8498", ":8520", ":8523", ":8604", ":8607",
-                          ":8729", ":8739", ":8620", ":8750"):
+    # … and NOT the classify pass's flag or gates. The numbers are the classify
+    # pass's CURRENT ones (`:8561`, `:8586`, the `:8608-8611` emit, the `:8692`
+    # / `:8695` and `:8817` / `:8827` gates, the `:8708` / `:8838` fail-opens),
+    # so this leg can still red if one pass's lines are templated over the
+    # other's name — a stale number here could never appear and would pin
+    # nothing.
+    for classify_cite in ("classify_later", "if classify_later", ":8561",
+                          ":8586", ":8608", ":8609", ":8610", ":8611",
+                          ":8692", ":8695", ":8817", ":8827", ":8708",
+                          ":8838"):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
     assert "tortoise/extractor_v2.py:8561" in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8604" in classify_cause, classify_cause
-    assert ":8607" in classify_cause, classify_cause
+    assert ":8692" in classify_cause, classify_cause
+    assert ":8695" in classify_cause, classify_cause
     assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8729" in classify_cause, classify_cause
-    # … and NOT the VET pass's flag, pass function or gates
+    assert ":8817" in classify_cause, classify_cause
+    # … and NOT the VET pass's flag, pass function or gates (the VET pass's
+    # current numbers: `:8592` flag, `:8612` emit, `:8680` / `:8802` gates,
+    # `:8478-8481` fail-open)
     for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8504", ":8524", ":8592", ":8714", ":8390", ":8393"):
+                     ":8592", ":8612", ":8680", ":8802", ":8478", ":8481"):
         assert vet_cite not in classify_cause, (vet_cite, classify_cause)
 
     # Different text, so neither cause can stand in for the other: a version

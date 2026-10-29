@@ -38555,7 +38555,15 @@ class TortoiseSDK:
         # the TAIL witness the record's own `turn_count` cannot be: `None` when
         # this session predates the mark, which makes the tail check abstain
         # (#10000 review P2).
-        _answer = self._record_turn_answer(
+        # ⛔ THE SECOND HALF OF THE ANSWER IS WHETHER THE READ FAILED (#10021
+        # review P2). `_record_turn_answer` returns `None` for three different
+        # states — no record tenant, a write-door refusal, and a read that
+        # RAISED — and only the last one leaves the body publishing one store's
+        # count over another store's list. Handing that state to
+        # `served_turn_count` as `read_failed` is what makes this door refuse
+        # where the hosted door refuses; without it the outage arm served
+        # `{"turns": N, "turn_points": []}` with a 200.
+        _answer, _read_failed = self._record_turn_answer(
             session_id,
             turn_max_index=sess[12] if isinstance(sess[12], int) else None)
         if _answer is not None and _answer.answered:
@@ -38616,8 +38624,19 @@ class TortoiseSDK:
         # The rule is ONE shared definition (`record_read.served_turn_count`),
         # applied here exactly as the hosted endpoint applies it, so the two
         # doors cannot disagree about one session (#3557's parity contract).
+        #
+        # ⛔ `read_failed` IS PART OF "APPLIED EXACTLY AS THE HOSTED DOOR"
+        # (#10021 review P2). The hosted door passes it
+        # (`hosted_api.py`, `read_failed=_record_read_failed`) and this door did
+        # not, so the SAME rule answered differently on the one state it exists
+        # for: on a record read that RAISED, `answer is None` + `read_failed`
+        # True is "consulted, could not be verified" (refuse unless the graph
+        # copy agrees with the session's count), while the default `False` reads
+        # it as "never consulted" (an unarmed deployment) and publishes the
+        # session's count over whatever the graph holds.
         served_turns, _turns_refusal = served_turn_count(
-            answer=_answer, served=len(turn_points), declared=sess[2])
+            answer=_answer, served=len(turn_points), declared=sess[2],
+            read_failed=_read_failed)
         if _turns_refusal:
             _logger.warning("session %s: %s", session_id, _turns_refusal)
             # An EXPLICIT error, never a shorter transcript served as complete:
@@ -38677,15 +38696,31 @@ class TortoiseSDK:
         }
 
     def _record_turn_answer(self, session_id: str, *,
-                            turn_max_index: int | None = None):
-        """This session's turns AS THE RECORD ANSWERS THEM, or ``None``.
+                            turn_max_index: int | None = None
+                            ) -> tuple[Any, bool]:
+        """``(this session's turns AS THE RECORD ANSWERS THEM, read_failed)``.
+
+        The first element is a `record_read.TurnAnswer` — or ``None`` — imported
+        inside this method because the record's read path is not on this
+        module's import surface.
 
         The SDK half of #10000's read switch: the hosted endpoint and this
         client are the two surfaces a customer reads a transcript from, and both
-        must consult the store the writer actually used. ``None`` means the
-        record was not consulted (it cannot hold the turns for this SDK's tenant,
-        or it could not be read) — the caller then serves the graph, which is
-        where the capture writer put them in exactly that case.
+        must consult the store the writer actually used. A ``None`` answer means
+        the caller then serves the graph, which is where the capture writer put
+        the turns in exactly that case.
+
+        ⛔ TWO RETURNED HALVES, because ``None`` ALONE CONFLATES TWO STATES
+        (#10021 review P2). "The record was not consulted" (no tenant, or the
+        write door refuses this capability — an unarmed deployment, where the
+        graph IS the store and its copy is the transcript) and "the record was
+        consulted and the read RAISED" (where the graph is a cache of unknown
+        agreement) are different facts about the same ``None``, and the caller
+        reconciles the body's two numbers against them differently: the first
+        has one store, the second must prove the copy complete. The flag is
+        passed to `record_read.served_turn_count` as ``read_failed`` — the arm
+        the hosted door already supplies — so the parity contract (#3557) holds
+        on the failure state too, not only on the success one.
 
         ⛔ IT ASKS THE RECORD'S CAPABILITY, NOT THIS PROCESS'S JOURNAL (#10000
         review P2). The question "is the record where this session's turns are"
@@ -38722,8 +38757,9 @@ class TortoiseSDK:
         tenant = self._record_tenant or record_tenant()
         if tenant is None:
             # No record tenant: the same SDK's capture is refused `no_tenant`
-            # and writes its turns to the graph, so the graph is the answer.
-            return None
+            # and writes its turns to the graph, so the graph is the answer. NOT
+            # a read failure — there is nothing to be unverifiable against.
+            return None, False
         # `durable=True` is this read door's statement about the WRITER's side:
         # whether the capturing process could journal is not observable here, and
         # the record's own answer is what decides. A refusal (unarmed, malformed
@@ -38739,19 +38775,24 @@ class TortoiseSDK:
         # bounded connect per read, and a failure is logged below.
         if live_write_refusal(durable=True, tenant=tenant,
                               consult_breaker=False) is not None:
-            return None
+            # Same shape as the no-tenant arm: the record is not this SDK's
+            # store here, so its absence is not an unverifiable read.
+            return None, False
         org_id, graph_id = tenant
         conn = None
         try:
             conn = open_record()
             return session_turns(conn, org_id=org_id, graph_id=graph_id,
                                  session_id=session_id,
-                                 turn_max_index=turn_max_index)
+                                 turn_max_index=turn_max_index), False
         except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
                 "session %s: the record turn read failed — serving the graph "
                 "copy for this read", session_id, exc_info=True)
-            return None
+            # ⛔ `True`, NOT a bare `None`: the record holds these turns and
+            # could not be asked, so the graph copy is a CACHE whose agreement
+            # with the session's count is the only evidence it is complete.
+            return None, True
         finally:
             if conn is not None:
                 with contextlib.suppress(Exception):

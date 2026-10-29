@@ -435,7 +435,7 @@ def test_a_partially_refused_capture_is_served_from_both_stores(
     # The door's private signature carries the tail witness; this leg pins the
     # UNION, so the stand-in accepts it and ignores it.
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
-                        lambda self, sid, **kw: landed_only)
+                        lambda self, sid, **kw: (landed_only, False))
     detail = sdk.get_session("split") or {}
     assert [t["id"] for t in detail.get("turn_points", [])] == [
         "split_t0", "split_t1"], (
@@ -494,8 +494,8 @@ def test_an_unreadable_prior_row_omits_the_field_rather_than_restamping(
     assert not (set(snapshot) & rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
         "a capture that could not read the prior row asserted its own "
         "created_at/status over the record's")
-    assert (rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS
-            == frozenset({"status", "createdAt"})), (
+    assert (frozenset({"status", "createdAt"})
+            == rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
         "the declared un-attestable pair no longer matches the writer's two "
         "omitted keys — the snapshot contract (and the carrier pin that reads "
         "it) would then describe a shape no capture produces")
@@ -582,7 +582,7 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
         turn_count=4, kind=record_read.TurnAnswer.PARTIAL,
         reason="the record states 4 turn(s) but holds only 2")
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
-                        lambda self, sid, **kw: short)
+                        lambda self, sid, **kw: (short, False))
     with pytest.raises(RecordUnavailable):
         sdk.get_session("sdk-short")
 
@@ -600,12 +600,76 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
             speaker="user") for i in range(4)),
         turn_count=2, kind=record_read.TurnAnswer.COMPLETE, reason="turn rows")
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
-                        lambda self, sid, **kw: whole)
+                        lambda self, sid, **kw: (whole, False))
     detail = sdk.get_session("sdk-append")
     assert len(detail["turn_points"]) == 4, detail["turn_points"]
     assert detail["turns"] == 4, (
         "the SDK published the WINDOW length above the transcript it serves: "
         f"turns={detail['turns']!r} over {len(detail['turn_points'])} rows")
+
+
+def test_the_sdk_door_does_not_serve_an_unverified_copy_on_a_record_outage(
+        sdk, monkeypatch):
+    """⛔ #10021 review P2: "not consulted" and "the read RAISED" are two facts.
+
+    `_record_turn_answer` answered a bare ``None`` for three different states, so
+    the SDK door could not tell an unarmed deployment (one store — the graph IS
+    the transcript, publish the session's own count) from an armed record it
+    could not reach (two stores, and the copy is a CACHE whose agreement is the
+    only evidence it is complete). `record_read.served_turn_count` HAS the arm
+    for that (`read_failed`) — the hosted door passes it and refuses there
+    (`tests/test_hosted_api.py::TestSessionDetail::test_detail_refuses_visibly_
+    when_the_record_cannot_answer`) — and this door called it without it, so on
+    the deployment shape this PR creates (armed + journaling ⇒ the turns are
+    record rows and the graph keeps no turn node) a raised read served
+    ``200 {"turns": N, "turn_points": []}``: the #8447 shape, one arm over from
+    the guard three lines above.
+
+    Pinned from BOTH ends, so the leg cannot be satisfied by refusing on every
+    outage: (a) the graph copy that AGREES with the session's count is still
+    served — the fail-soft direction is the transitional half of #10000 and must
+    survive; (b) a copy SHORTER than the count the session claims is refused
+    with the module's own error class.
+
+    Mutation: drop `read_failed=_read_failed` at the SDK call site → (b) stops
+    raising and serves `turns: 4` over the 2 rows the graph holds (measured: the
+    pre-fix tree serves `turns=4, turn_points=2 rows`, no error).
+    """
+    from tortoise.record_serve import RecordUnavailable
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    # Every write is REFUSED, so the capture keeps its turns in the graph: that
+    # is the copy the outage arm falls back to, on both sessions below.
+    monkeypatch.setattr("tortoise.record_writer.write_live_record",
+                        _RecordSeam(None))
+    _bind_tenant(sdk)
+    _capture(sdk, "outage-whole", [{"role": "user", "content": "a"},
+                                   {"role": "assistant", "content": "b"}])
+    _capture(sdk, "outage-short", [{"role": "user", "content": "c"},
+                                   {"role": "assistant", "content": "d"}])
+    proj = sdk._get_proj()
+    # The session CLAIMS four turns while the graph copy holds two — the split
+    # store the count rule exists to catch, now on the outage arm.
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) SET s.turn_count=4",
+        params={"sid": "outage-short"})
+
+    def _unreachable():
+        raise RuntimeError("record connect timed out")
+
+    monkeypatch.setattr("tortoise.record_serve.open_record", _unreachable)
+
+    # (a) the copy agrees with the session's count: served, with its own length.
+    detail = sdk.get_session("outage-whole") or {}
+    assert [t["id"] for t in detail["turn_points"]] == [
+        "outage-whole_t0", "outage-whole_t1"], (
+        "an outage stopped serving a graph copy that AGREES with the session's "
+        "own count — the fail-soft arm this change must keep")
+    assert detail["turns"] == 2, detail["turns"]
+
+    # (b) the copy cannot be proven complete: refused, never published as whole.
+    with pytest.raises(RecordUnavailable):
+        sdk.get_session("outage-short")
 
 
 def test_the_write_op_meter_counts_the_sessions_turns_not_turn_nodes(sdk):
@@ -1408,7 +1472,7 @@ def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
 
     def _door_answer(answer):
         monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
-                            lambda self, sid, **kw: answer)
+                            lambda self, sid, **kw: (answer, False))
         caplog.clear()
         with caplog.at_level(logging.DEBUG):
             detail = sdk.get_session("noacct") or {}
