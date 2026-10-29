@@ -1487,9 +1487,18 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     review-fix head the sweep is GREEN — `checked=50 failures=0` — because every
     live cite was re-derived there, on the near side of the `origin/main` merge
     that had moved `sdk.py` by 222 lines. (Before that re-derivation it was red
-    with the same 43 failures as `main`; see the paragraph below.) The RED COUNT is a
-    property of the base, not of the rule set, so it is stamped with the commit it
-    was measured at rather than asserted about `main`: 17 of the 44 cites red
+    with the same 43 failures as `main`; see the paragraph below.) ⛔ IT HAD TO BE
+    DONE A THIRD TIME, WHICH IS THE POINT: the #10021 commit that made the sweep's
+    bound come from the record added 119 lines to `sdk.py` ABOVE all three swept
+    sites, straight after that re-derivation, so the same three cites (the entry
+    point, the meta fold, the references-edge call) went stale again and the pin
+    — `core` and `tier1` — was red at the PR's own head. Re-derived here and
+    measured GREEN again: `checked=50 failures=0`, all 15 rules fired. The count
+    is a property of the DOCUMENT SET, and the numbers are a property of the
+    head; only the SYMBOL survives both, which is why the cites carry one. The
+    RED COUNT is a property of the base, not of the rule set, so it is stamped
+    with the commit it was measured at rather than asserted about `main`: 17 of
+    the 44 cites red
     across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
     for the call that writes the references edge, `11851` for the entry point — a
     supersession comment, an ORDER comment and a counters line instead of the
