@@ -38731,7 +38731,13 @@ class TortoiseSDK:
             # rows first, then the graph's for the ids it does not hold) — the
             # same rule the hosted door applies, from the ONE definition.
             turn_points = (
-                merge_turn_payloads(_answer, graph_points)
+                merge_turn_payloads(
+                    _answer, graph_points,
+                    # The residue filter: a row above the session's live
+                    # id-space end is not its transcript, and this is the door
+                    # that would otherwise SERVE it (#10021 review P3).
+                    turn_max_index=(sess[12] if isinstance(sess[12], int)
+                                    else None))
                 if _answer is not None else graph_points)
         # ⛔ THE TWO NUMBERS IN THIS BODY MUST NOT CONTRADICT EACH OTHER
         # (#10021 review P2). `turns` used to be the `:Session`'s `turn_count`

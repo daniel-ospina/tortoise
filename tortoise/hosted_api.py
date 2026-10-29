@@ -19018,7 +19018,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         # dropped the turns the writer's fallback had just rescued. The UNION is
         # served, from the same definition the SDK twin uses.
         turns.extend(
-            _record_read.merge_turn_payloads(_record_answer, graph_turns)
+            _record_read.merge_turn_payloads(
+                _record_answer, graph_turns,
+                # The residue filter (#10021 review P3): `_shortfall` reports
+                # rows above the live id-space end as NOT this session's
+                # transcript, and this is the call that would otherwise serve
+                # them anyway — the record's and the graph's alike.
+                turn_max_index=_turn_max_index)
             if _record_answer is not None else graph_turns)
 
     # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. On an

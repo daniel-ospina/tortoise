@@ -449,6 +449,15 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None,
         # LONGER served set when the record answered, so nothing downstream
         # would have questioned it either — this comparison is the only one that
         # can, and the datum is already in hand.
+        #
+        # ⛔ DETECTION IS NOT A GUARD (#10021 review P3). Reporting the residue
+        # as not-answered left the rows in `turns`, and `merge_turn_payloads`
+        # merged every one of them into the served body — a 4-row answer against
+        # a 1-turn session published `{"turns": 4, "turn_points": [4 rows]}`
+        # with only a WARNING to show for it. The same mark is handed to the
+        # merge, which DROPS the rows above it from either store: this arm is
+        # what tells a caller the record does not own them, and the merge is
+        # what stops them reaching a client.
         return (f"the record holds turn rows up to index {max(held)} while the "
                 f"session's turn ids reach only {turn_max_index} — rows the "
                 "session no longer owns, so this is not its transcript")
@@ -481,7 +490,8 @@ def turn_payloads(turns: Sequence[Turn]) -> list[dict]:
     return out
 
 
-def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict]) -> list[dict]:
+def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict],
+                        turn_max_index: int | None = None) -> list[dict]:
     """The record's rows AND the other store's, ONE turn each, in turn order.
 
     ⛔ WHY A MERGE AND NOT A CHOICE (#10000 review P0). The read's store
@@ -500,21 +510,60 @@ def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict]) -> list[dict]
     present in BOTH stores is the record's — the record is the store of record
     (§9.1/D1), and the two are the same turn.
 
+    ⛔ AND A ROW ABOVE THE SESSION'S LIVE ID-SPACE END IS NOT MERGED IN
+    (#10021 review P3). ``turn_max_index`` is the session's inclusive id-space
+    end, and a row above it is RESIDUE — a shorter re-capture whose surplus
+    sweep did not land (the record delete is journal-emitted and can be
+    refused). Before this filter the residue rows were DETECTED by
+    :func:`_shortfall` (the answer came back not-answered, at WARNING) and then
+    served ANYWAY: this merge added every ``answer.turns`` row, and
+    :func:`served_turn_count` deliberately tolerates ``served > expected`` when
+    the record answered, so a 4-row answer against a 1-turn session published
+    ``{"turns": 4, "turn_points": [4 rows]}`` and the only observable change
+    was the log line. A detector whose served body is unchanged is not a guard,
+    so the row is dropped here — from EITHER store, because where the residue
+    sits is not what makes it residue (the failed sweep leaves it in both).
+
+    Dropping is safe in the healthy direction: an APPEND writes
+    ``turn_max_index = turn_offset + count - 1`` (``sdk._write_session_and_turns``),
+    so no live turn can sit above the mark. ``turn_max_index=None`` (a session
+    captured before the mark existed) abstains and merges everything, exactly
+    as it did before this filter — degrade, never invent.
+
     This is the transition half of #10000, exactly like the graph fallback it
     extends: it disappears with the graph-side purge step. Until then it is what
     makes "no path leaves a turn in neither store" true of the READ as well as
     of the write.
     """
+    def _is_residue(payload: Any) -> bool:
+        """A row the session no longer owns — above its live id-space end.
+
+        Only for a row this module can PLACE: an id that does not carry an index
+        (`{session}_t{i}`) cannot be compared to the mark without inventing an
+        order, so it is kept (the same degradation the ordering below applies).
+        """
+        if turn_max_index is None or not isinstance(payload, dict):
+            return False
+        turn_id = payload.get("id")
+        if not isinstance(turn_id, str):
+            return False
+        match = re.search(r"_t([0-9]+)$", turn_id)
+        if match is None:
+            return False
+        return int(match.group(1)) > turn_max_index
+
     merged: dict[str, dict] = {}
     order: list[str] = []
     for payload in turn_payloads(answer.turns):
         turn_id = payload.get("id")
-        if isinstance(turn_id, str) and turn_id and turn_id not in merged:
+        if (isinstance(turn_id, str) and turn_id and turn_id not in merged
+                and not _is_residue(payload)):
             merged[turn_id] = payload
             order.append(turn_id)
     for payload in other:
         turn_id = payload.get("id") if isinstance(payload, dict) else None
-        if isinstance(turn_id, str) and turn_id and turn_id not in merged:
+        if (isinstance(turn_id, str) and turn_id and turn_id not in merged
+                and not _is_residue(payload)):
             merged[turn_id] = payload
             order.append(turn_id)
 

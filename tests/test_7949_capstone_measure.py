@@ -869,9 +869,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8883-8887) and `result["classify_later"]` (:8873-8879). The
-    drop is the meta fold at `tortoise/sdk.py:13904` — **re-derived from the tree at
-    this head, never from the other side of a merge.** Both this branch and `main`
+    `result["vet"]` and `result["classify_later"]` (the two
+    `result["<name>"] = {` blocks at the end of the pass). The
+    drop is the meta fold in `tortoise/sdk.py` — **the line is DERIVED from the
+    tree at this head, never typed here, never read from the other side of a
+    merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
     stale on the next merge and a merge that "takes the newer side" silently
@@ -1483,22 +1485,18 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `core_only=classify_later)`.
 
     Non-vacuity: re-staling a LIVE cite reds this test (measured: putting
-    `00_index.md`'s fold cite back to `12401` reds it). ⛔ At the #10021 second
-    review-fix head the sweep is GREEN — `checked=50 failures=0` — because every
-    live cite was re-derived there, on the near side of the `origin/main` merge
-    that had moved `sdk.py` by 222 lines. (Before that re-derivation it was red
-    with the same 43 failures as `main`; see the paragraph below.) ⛔ IT HAD TO BE
-    DONE A THIRD TIME, WHICH IS THE POINT: the #10021 commit that made the sweep's
-    bound come from the record added 119 lines to `sdk.py` ABOVE all three swept
-    sites, straight after that re-derivation, so the same three cites (the entry
-    point, the meta fold, the references-edge call) went stale again and the pin
-    — `core` and `tier1` — was red at the PR's own head. Re-derived here and
-    measured GREEN again: `checked=50 failures=0`, all 15 rules fired. The count
-    is a property of the DOCUMENT SET, and the numbers are a property of the
-    head; only the SYMBOL survives both, which is why the cites carry one. The
-    RED COUNT is a property of the base, not of the rule set, so it is stamped
-    with the commit it was measured at rather than asserted about `main`: 17 of
-    the 44 cites red
+    `00_index.md`'s fold cite back to `12401` reds it). ⛔ READ THE VERDICT FROM A
+    RUN — this paragraph states no pass/fail state on purpose. `checked` is
+    MEASURED and moves with the documents (`50` at this head), so it is named
+    with the head it was read at, not asserted forward. The failure count was
+    once asserted here (`failures=0` at `7f22644c2`) and the very next commit,
+    `b6ea01d34`, inserted ~119 lines into `sdk.py` above every live cite and
+    re-staled all 19 of them while this sentence still claimed green — a typed
+    count is the drift this paragraph is about, one layer up. The re-derivation
+    that followed is the stand-in for the claim, and the run is the only thing
+    entitled to answer it. The RED COUNT is a
+    property of the base, not of the rule set, so it is stamped with the commit it
+    was measured at rather than asserted about `main`: 17 of the 44 cites red
     across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
     for the call that writes the references edge, `11851` for the entry point — a
     supersession comment, an ORDER comment and a counters line instead of the
