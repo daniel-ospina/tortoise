@@ -2649,13 +2649,13 @@ def _write_capture_turns(
     # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
     # can neither duplicate a turn nor demote or re-stamp a stored one.
     # #10000: WHICH STORE holds the turns is a CAPABILITY question, never a
-    # policy flag. The turn records below are gated on a configured journal
-    # (`sdk._get_event_log()`), and the record is armed only with
-    # `TORTOISE_RECORD_DSN`; if either is absent the graph is the only store
-    # that can hold the turns, so this writer keeps both paths and selects by
-    # what is actually available. Removing the graph write unconditionally would
-    # write the transcript to NO store on an unarmed deployment — silent loss of
-    # the capture's whole point.
+    # policy flag. The turn records below are gated on a DURABLE journal (a
+    # `sdk._get_event_log()` that has not declared itself a scratch buffer), and
+    # the record is armed only with `TORTOISE_RECORD_DSN`; if either is absent
+    # the graph is the only store that can hold the turns, so this writer keeps
+    # both paths and selects by what is actually available. Removing the graph
+    # write unconditionally would write the transcript to NO store on an unarmed
+    # deployment — silent loss of the capture's whole point.
     #
     # #10067 ("capture records dropped"): the third conjunct is the TENANT, and
     # it is the difference between a capability and a guess. `write_live_record`
@@ -2688,8 +2688,20 @@ def _write_capture_turns(
     from tortoise.record_writer import (
         record_tenant_effective as _record_tenant_effective,
     )
+    # The journal conjunct is DURABILITY, not presence (#10067 review, the
+    # DURABILITY note on the conjunct list).
+    # `write_live_record` reads `durable` off the log and DECLINES a scratch
+    # buffer (`no_durable_journal`) before it looks at the DSN or the tenant —
+    # its rows could never be reproduced or healed by a replay, so nothing is
+    # written at all. Asking only `is not None` therefore answered "the record
+    # holds these" for a seam that was refusing every row, and the turns landed
+    # in NEITHER store: the #10067 defect one conjunct further out. This is the
+    # seam's OWN test, `getattr(log, "durable", True)`, so the two cannot drift
+    # the way `record_tenant()`/`record_tenant_effective` did.
+    _log = sdk._get_event_log()
     _record_holds_turns = (
-        sdk._get_event_log() is not None
+        _log is not None
+        and getattr(_log, "durable", True)
         and _record_dsn() is not None
         and _is_usable_tenant(
             _record_tenant_effective(sdk._record_tenant)))

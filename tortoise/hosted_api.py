@@ -18677,10 +18677,10 @@ def _record_unavailable() -> HTTPException:
     ⚠️ "JOURNALING" (and "TENANT") are load-bearing, and `_record_holds_turns`
     does NOT test either: that predicate asks only whether the DSN is set
     (``return _dsn() is not None``), while the WRITE side asks the same
-    capability question with THREE conjuncts — a configured journal, the DSN,
-    and a tenant it can NAME for the write (`tortoise/sdk.py`
-    `_write_capture_turns`, #10067) — because a turn record is gated on a
-    configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the write door
+    capability question with FOUR conjuncts — a configured journal, a journal
+    that declares itself DURABLE, the DSN, and a tenant it can NAME for the write
+    (`tortoise/sdk.py::_write_capture_turns`, #10067) — because a turn record is
+    gated on a durable journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the write door
     declines `no_durable_journal` and the GRAPH keeps the turns, so "the graph
     keeps only the counters" is a property of armed+journaling, not of arming
     alone. This refusal's own behaviour is unaffected there: the guard at the
@@ -18757,12 +18757,17 @@ def _record_holds_turns() -> bool:
     ⛔ IT DOES NOT ASK THE QUESTION THE CAPTURE WRITER ASKS, and the difference is
     live. Turns reach the record only through the capture's turn records (ONE
     `TurnsRecorded` carrier per capture since #10067; the per-turn `PointAdded`
-    records before it),
-    which need a configured journal AND the DSN — `sdk.py:2652`'s two conjuncts —
-    while this predicate tests the DSN ONLY. So on an armed-but-NOT-journaling
-    deployment the writer puts the turns in the GRAPH while this read still asks
-    the record, and the record's empty answer then stands for turns the graph
-    holds. The previous text claimed both sides asked one question; they do not.
+    records before it), which need FOUR things — a configured journal, a journal
+    that DECLARES itself durable, the DSN, and a tenant the write can name
+    (`tortoise/sdk.py::_write_capture_turns`) — while this predicate tests the
+    DSN ONLY. So on an armed-but-NOT-journaling deployment the writer puts the
+    turns in the GRAPH while this read still asks the record, and the record's
+    empty answer then stands for turns the graph holds. The previous text claimed
+    both sides asked one question; they do not.
+
+    The conjuncts are named by their CODE, not by a line number: the earlier
+    "`sdk.py:2652`'s two conjuncts" was wrong twice over by the time it was read
+    — three conjuncts, at a different line (#10067 review).
     """
     from tortoise.record_writer import record_dsn as _dsn
 

@@ -287,3 +287,55 @@ def test_a_tenant_CARRIED_on_the_sdk_arms_the_record_only_lane(sdk, monkeypatch)
         "a NODE-CREATING per-turn record was journalled on the record-only lane "
         "— the #10067 defect")
     assert seam.point_contents() == ["[user] a", "[assistant] b"]
+
+
+def test_a_SCRATCH_log_is_not_a_journal_so_the_turns_stay_in_the_graph(
+        sdk, monkeypatch, tmp_path):
+    """#10067 review — the journal conjunct is DURABILITY, not mere presence.
+
+    `write_live_record` asks two questions about the log before it asks anything
+    else: is there one at all, and does it declare itself a JOURNAL
+    (``durable``)? A scratch buffer answers the first `True` and the second
+    `False`, and the seam DECLINES it (`no_durable_journal`) on the recorded
+    ground that nothing could ever reproduce the row — `EventLog.scratch` exists
+    to mark exactly that lane. The capability read tested only presence, so a
+    scratch-backed capture skipped the graph write for a record that was
+    declining every row: the transcript in NEITHER store, the capture reporting
+    success. That is the #10067 defect one conjunct further out, and the
+    docstrings this PR edits already describe it in those words ("JOURNALING is
+    load-bearing … without it the write door declines `no_durable_journal` and
+    the GRAPH keeps the turns").
+
+    Both assertions are on a STORE: the graph has the turn nodes, and the record
+    seam was handed the node-creating records instead of a carrier.
+    """
+    from tortoise.log import EventLog
+
+    arm_record(monkeypatch)
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    # The SDK builds a durable `EventLog` for a configured path; a scratch buffer
+    # is the shape that answers "journal present" and "journal" differently.
+    sdk._event_log = EventLog.scratch(tmp_path / "scratch.jsonl")
+    assert sdk._get_event_log() is not None, (
+        "vacuity guard: the capability's journal conjunct must be answered True "
+        "by PRESENCE here, so the only thing refusing the record-only lane is "
+        "durability")
+    assert sdk._get_event_log().durable is False
+
+    proj = sdk._get_proj()
+    _capture(sdk, "scratch-log-session", [{"role": "user", "content": "a"},
+                                         {"role": "assistant", "content": "b"}])
+
+    assert sorted(sdk_mod._capture_turn_ids(proj, "scratch-log-session")) == [
+        "scratch-log-session_t0", "scratch-log-session_t1"], (
+        "a scratch log is not a journal, so no replay could ever restore a "
+        "record row from it — the graph is the only store that can hold these "
+        "turns, and it did not get them")
+    assert [r for r in seam.records
+            if r.get("type") == "TurnsRecorded"] == [], (
+        "a record carrier was journalled for a write the seam DECLINES "
+        "(`no_durable_journal`) — its rows would never exist")
+    assert seam.point_contents() == ["[user] a", "[assistant] b"], (
+        "the fallback must journal the NODE-CREATING record, because the graph "
+        "is the store that holds these turns")
