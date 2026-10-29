@@ -304,7 +304,7 @@ def test_a_linter_reporting_another_version_is_refused(name: str, tmp_path: Path
     proc, report = _run_step(name, tmp_path, cli=cli)
 
     assert proc.returncode != 0
-    assert f"is not an executable reporting markdownlint-cli2 0.23.3" in proc.stderr
+    assert "is not an executable reporting markdownlint-cli2 0.23.3" in proc.stderr
     assert not report.exists()
 
 
