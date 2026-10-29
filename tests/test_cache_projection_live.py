@@ -398,3 +398,82 @@ def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
         "resolve_entity_id resolved an id-only superseded name — the D2 "
         "refusal is bypassed on the second carrier"
     )
+
+
+def test_a_connector_tracked_object_rebuilds_to_the_status_the_live_fold_wrote():
+    """#10198's verification, measured on ONE engine against the LIVE writer.
+
+    The live writer is the real `_fold_object_status` (not a fixture constant),
+    so this compares the record-side fold with the fold it claims to reproduce:
+
+        live:   github.issue.open -> github.issue.closed -> status='completed'
+        rebuild from the record's event stream -> the SAME status
+
+    MEASURED before this change: the live node held `status='completed'` and the
+    rebuilt node carried NO `status` at all — which `live._terminal_excluded`
+    reads as LIVE (its documented legacy-node rule), so a closed work item came
+    back as CURRENT state and `reconciliation` reported a permanent
+    `field_mismatches` on `status`.
+    """
+    proj = _projection()
+    proj.g.query(
+        "MERGE (o:Object {id:$id}) SET o.name=$n, o.objectKind='issue'",
+        params={"id": "o-issue", "n": "issue-1"})
+    proj._fold_object_status("issue-1", "github.issue.open")
+    proj._fold_object_status("issue-1", "github.issue.closed")
+    live = _props(proj, "Object", "id", "o-issue")
+    assert live.get("status") == "completed", (
+        "the live fold did not write `completed` — the comparison below would "
+        "be vacuous")
+
+    view = cp.RecordView(
+        nodes=(cp.node_from_row("Object", {
+            "id": "o-issue", "name": "issue-1", "object_kind": "issue",
+            "props": {}}),),
+        lifecycle_events=(
+            cp.LifecycleEvent(seq=1, event_kind="github.issue.open",
+                              object_name="issue-1"),
+            cp.LifecycleEvent(seq=2, event_kind="github.issue.closed",
+                              object_name="issue-1"),
+        ),
+    )
+    # ── destroy the cache, then rebuild from the RECORD alone ──────────────
+    proj._wipe_all_nodes(confirm_destructive=True, operation="test-destroy")
+    proj.rebuild_from_record(view, confirm_destructive=True)
+    rebuilt = _props(proj, "Object", "id", "o-issue")
+    assert rebuilt.get("status") == live["status"] == "completed", (
+        "the rebuilt :Object does not carry the connector lifecycle status the "
+        "live graph held (#10198)")
+
+    # ── the same events WITHOUT the stream: the defect this closes ─────────
+    proj._wipe_all_nodes(confirm_destructive=True, operation="test-destroy")
+    proj.rebuild_from_record(
+        cp.RecordView(nodes=view.nodes), confirm_destructive=True)
+    assert "status" not in _props(proj, "Object", "id", "o-issue"), (
+        "this is the pre-#10198 shape and it must stay measurable: with no event "
+        "stream the record has no lifecycle signal and the cache must not "
+        "fabricate one — the row-level derivation only covers supersession")
+
+
+def test_a_superseded_work_item_is_not_resurrected_by_a_connector_event():
+    """The terminal guard, end to end on the rebuild path.
+
+    A dual-tracked work item superseded conversationally and later closed on
+    GitHub comes back `completed` without the guard — visible in
+    `recall_state`'s default view, which is the #2164/#3309 defect re-opened on
+    the record path.
+    """
+    proj = _projection()
+    view = cp.RecordView(
+        nodes=(cp.node_from_row("Object", {
+            "id": "o-dup", "name": "issue-9", "object_kind": "issue",
+            "superseded_by": "o-dup-v2", "props": {}}),),
+        lifecycle_events=(
+            cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
+                              object_name="issue-9"),
+        ),
+    )
+    proj.rebuild_from_record(view, confirm_destructive=True)
+    assert _props(proj, "Object", "id", "o-dup").get("status") == "superseded"
+    assert resolve_entity_id(proj.g, "Object", "issue-9") is None, (
+        "the rebuild resurrected a superseded Object as a live name holder")

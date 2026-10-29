@@ -180,7 +180,7 @@ remaining cold saves are small — most of these jobs install the same torch/emb
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
 SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
 watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
-`python3 tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
+`uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
 moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
@@ -324,7 +324,14 @@ same step with the same tail is the investigation.
 ## 6. What this does NOT do
 
 - **It does not bound queue wait.** §1. No `timeout-minutes` can. The lever there is capacity and
-  queue governance (`tools/ci_queue_health.py`, #9115).
+  queue governance (`tools/ci_queue_health.py`, #9115). That tool's `PR-BACKLOGGED` state is what
+  reports the wait itself: a queued PR run older than its wait budget while PR CI is *still*
+  executing is no longer `OK` (#10237 — it printed `CI: OK(queued=54, pr_running=2, pr_queued=32)`
+  with the oldest queued PR run at 527 minutes). The budget's default is derived from this
+  document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
+  measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
+  queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
+  `OK`: an unmeasured wait is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 28) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question.
