@@ -363,29 +363,34 @@ def resolve_fold_name(g, label: str, name: str, *,
       Taking the exemption there left a lifecycle event that folded nothing
       behind a green run.
 
-    Why the mention exemption exists at all: this repo's own journal writer
-    (``EventAPI.add_event``, and pre-#3590 journals generally) references names
-    it never registered, and the retired fold minted a stub for them. Without
-    the exemption every such journal becomes UN-REBUILDABLE — the durable copy
-    of the data can no longer be recovered from its journal (#3590 review P1).
-    The remedy for NEW journals is on the producer: register what you reference
-    before referencing it (D9) — the SDK's entity doors do exactly that.
+    Why the mention exemption exists at all: this repo's own journal writers
+    reference names they never registered, and the retired fold minted a stub for
+    them. Without the exemption every such journal becomes UN-REBUILDABLE — the
+    durable copy of the data can no longer be recovered from its journal (#3590
+    review P1).
 
-    ⚠️ **ONE live in-repo producer still does NOT, and it is named here so its
-    cost is recorded rather than silent:** ``tortoise.ingest --capture-metadata``
-    writes ``sessionCaptured`` through ``EventAPI.add_event`` with
-    ``subject="pi-agent"`` and ``uses=[{"name": "tortoise-capture", "kind":
-    "skill"}]`` (``tortoise/ingest.py``), registering NEITHER name — so both
-    attribution edges are dropped, on the live pass and on replay alike, and
-    recorded as exempt :data:`SHAPE_UNFOLDED_MENTION` (bounded and
-    reconstructible: the journal still replays, which is the whole point of the
-    exemption). Routing that door through the SDK's registration would decide
-    D1 — *may a bare mention CREATE an entity?*, still **OPEN** on #3590 — in the
-    minting direction, at the one door every legacy pipeline writes through, so
-    it is deliberately left to that ruling.
+    ⛔ **D1 is RULED (owner, 2026-10-26): a bare mention does not create an
+    entity.** So the remedy is NOT "the producer registers what it references" —
+    that was this docstring's earlier claim, and it is the minting arm D1
+    forbids. The ruling's own sentence: a name written inside a statement is a
+    mention, "never a creation, so the entity set grows only from an explicit
+    registration … that mints the id; an unresolvable mention drops its link,
+    records the miss, and mints nothing." The entity set is grown by
+    ``create_entity`` alone; a caller that wants the attribution edge registers
+    the target explicitly, and every unregistered mention is dropped here.
+
+    ⚠️ **TWO live in-repo producers do NOT register, and they are named here so
+    the cost is recorded rather than silent:** ``tortoise.ingest
+    --capture-metadata`` writes ``sessionCaptured`` through
+    ``EventAPI.add_event`` with ``subject="pi-agent"`` and
+    ``uses=[{"name": "tortoise-capture", "kind": "skill"}]``
+    (``tortoise/ingest.py``), and the SDK's own ``create_event`` door leaves the
+    same fields unregistered (D1). Both attribution edges are therefore dropped,
+    on the live pass and on replay alike, and recorded as exempt
+    :data:`SHAPE_UNFOLDED_MENTION` (bounded and reconstructible: the journal
+    still replays, which is the whole point of the exemption).
     ``tests/test_3590_minted_identity_acceptance.py::
-    test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions``
-    is the pin that must change when D1 is decided.
+    test_a_bare_mention_mints_nothing_and_drops_its_link`` is the pin.
     """
     holders = live_name_holder_ids(g, label, name)
     ids = [str(h) for h in holders if h]

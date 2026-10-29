@@ -140,15 +140,15 @@ def _mint_subject_stub(g, name: str) -> None:
       writer) and ``tests/test_cache_projection.py`` (the ``subjectKind`
       literal below).
 
-    What D9 actually asks of the LIVE path is kept, and it is upstream of this
-    helper: the SDK's Event door now REGISTERS the Subject it references through
-    the ordinary create door (``TortoiseSDK._register_referenced_entity``,
-    called from the ``create_entity(type='event')`` about* loop), so the stub a
-    NEW journal needs is a journaled ``SubjectAdded`` rather than a fold-side
-    invention — live writes it, replay folds it. This helper is then the shared
-    fallback for the records a producer never registered (an older journal, a
-    non-SDK writer) and the single create path live + replay still need to
-    agree on.
+    What D9 asks of the LIVE path is NOT here, and #3590 D1 (RULED 2026-10-26)
+    says it must not be: the SDK's Event door no longer registers the names its
+    record mentions (`subject` / `object` / `uses[]` / an unresolved `about*`
+    name), because "an unresolvable mention drops its link, records the miss, and
+    mints nothing". So for a name nothing registered, this helper IS the mint —
+    the fold-side creation #8914 filed as a bug — and it is kept only because
+    every `how:"name"` record already in a journal needs it to replay (the
+    shipped pins above). Moving it is #8914's work, on both passes at once; it is
+    not a producer duty the SDK door can discharge.
 
     #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
     after the wipe. Skip rather than raise.

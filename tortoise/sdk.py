@@ -36522,84 +36522,6 @@ class TortoiseSDK:
             if holders:
                 raise NameAlreadyHeld(label, new_name, holders, id_val)
 
-    def _register_referenced_entity(self, label: str, name, *,
-                                    as_subject_stub: bool = False) -> None:
-        """D9: REGISTER an entity a JOURNALED write references by name.
-
-        #3590 D9 puts the minting duty on the producer: a fold-time mint of an
-        OPAQUE id is not replay-deterministic, so the projection resolves names
-        against LIVE holders and the door that appends the journal record is the
-        door that must make the reference resolvable — this helper is that duty,
-        for an EventRecorded's mentions (`subject`, `object`, `uses[]`) and for
-        the `about*` links.
-
-        ``as_subject_stub=True`` (the `about*` cascade's Subject-stub fallback,
-        see the call site) registers with the IDENTITY THAT CONSTRUCTION OWNS
-        (``id == name``, ``subjectKind='other'``) instead of a freshly minted
-        id. It is not a licence to derive ids from names — it is the one
-        name-KEYED stub `_mint_subject_stub` MERGEs, so producing a SECOND,
-        differently-identified node here would fork every pre-existing journal's
-        endpoint from the node live writes (#8398). The mint is journaled as an
-        ordinary `SubjectAdded`, which is the part D9 asks for: a rebuild folds
-        it instead of re-inventing it.
-
-        Three guards live HERE rather than at each call site, because each is a
-        way a producer damages the journal or the write:
-
-        * **id-shaped values are never registered.** `_is_entity_id` is the same
-          predicate the fold uses to decide a value addresses a node; treating
-          an already-minted id as a NAME would mint a second entity *named* the
-          id, and journal it. It also means an `as_subject_stub` request whose
-          value is already an id is a no-op, never an id/name swap.
-        * **a name ANY carrier already holds is not registered.** `create_entity`
-          is the #452 idempotent re-mention, but it still APPENDS a registration
-          record, so calling it for an already-known name would grow the journal
-          by one line per mention. So the probe asks ``all_name_holder_ids`` and
-          not the LIVE set only (#3590 round-5 review F2): a name whose only
-          carriers are TERMINAL is already a registered entity — a different
-          incarnation (R5) — and this door is a MENTION. Registering it would
-          mint a NEW LIVE entity out of a mere reference, journal the mint, and
-          fold the attribution onto the ghost, which is both unbounded growth
-          over a capture loop and a resurrection of a superseded name (the next
-          ``create_entity("object", …)`` would resolve to the ghost). Whether a
-          bare mention should ever create an entity is D1 on #3590 — OPEN — so
-          this door does not adopt the stronger arm. A name held by TWO OR MORE
-          live entities is the legal same-name coexistence (#8864 / D2) — nothing
-          to register either, and the reference cascade addresses the whole
-          list.
-          ⚠️ The consequence on the state-moving use is the RECORDED one, not a
-          new hazard: an EventRecorded's EXPLICIT `object` naming a
-          terminal-only incarnation is not registered here, so the status fold
-          re-resolves it non-exemptly and its miss fails the run — the
-          `unfolded-mention` exemption's bound ("a fold that must MOVE an
-          entity's state can never take this exemption"). Pinned by
-          ``tests/test_3590_minted_identity_acceptance.py::test_a_lifecycle_event_on_an_unresolvable_object_is_not_a_green_run``.
-        * **`AmbiguousEntityName` is not an error here.** It is a CREATE-door
-          refusal (a create may not pick one carrier); a REFERENCE is not a
-          create, and the consumer (`resolve_about_link`, `resolve_fold_name`)
-          already handles N carriers. The probe above can also go stale between
-          the read and the create, so the refusal is caught rather than
-          propagated — an event that mentions a doubly-held name must not fail
-          to be written (#3590 review P2).
-        """
-        if not isinstance(name, str) or not name.strip():
-            return
-        if _is_entity_id(name):
-            return
-        from .entity_identity import AmbiguousEntityName, all_name_holder_ids
-        if all_name_holder_ids(self._get_proj().g, label, name):
-            return
-        try:
-            if as_subject_stub:
-                # The name-keyed about-edge stub: same node `_mint_subject_stub`
-                # MERGEs, written here so a `SubjectAdded` journals it.
-                self.create_entity(label.lower(), name, _server_id=name,
-                                   subjectKind="other")
-            else:
-                self.create_entity(label.lower(), name)
-        except AmbiguousEntityName:
-            return
-
     def _entity_identity_for(self, label: str, name: str, *,
                              explicit_id: str | None = None) -> str:
         """The id a create must write: the live holder's, or a freshly MINTED one.
@@ -37517,57 +37439,25 @@ class TortoiseSDK:
                     # the resolution; it is the producer duty for what the
                     # cascade could not answer, applied below.
                     _link, _internal = proj.resolve_about_link(_val)
-                    if (_link is not None and _internal is None
-                            and _link.get("target_label") == "Subject"):
-                        # The CASCADE FELL THROUGH TO THE SUBJECT STUB: nothing in
-                        # the graph held the name. The construction live has
-                        # always used for that is a name-KEYED `:Subject`
-                        # placeholder (`MERGE (s:Subject {name:$n}) ON CREATE SET
-                        # s.id=$n`), and #3590 D9 moves the mint DUTY to the
-                        # producer — THIS door, the one surface that can JOURNAL
-                        # the node. So register it here, under the ordinary
-                        # create door (a `SubjectAdded` line makes it
-                        # replayable), and hand the write its internal id.
-                        #
-                        # ⚠️ Register it with the STUB's OWN identity (id ==
-                        # name, subjectKind 'other'), NOT a freshly minted ULID:
-                        # that name-keyed construction is what the shipped graph
-                        # already holds for an about-edge stub, what
-                        # `_mint_subject_stub` mints (so live, the reopened
-                        # replay and any older journal converge on ONE node),
-                        # and what #8398's shipped pins assert as the wire
-                        # target. Minting an opaque id here would make this
-                        # door's stub a SECOND, different node from the one
-                        # every pre-existing journal names — the divergence
-                        # `derived == replay` must not have. The id is not
-                        # DERIVED at random from the name: it IS the MERGE key,
-                        # which is exactly why replay reproduces it byte for
-                        # byte.
-                        #
-                        # The link SHAPE is deliberately left as the fallback
-                        # returned it — `how:"id"` with the NAME as `targets`,
-                        # `target_label:"Subject"`, the name as `resolve_key` and
-                        # `mint_if_absent: True`. That is the shape
-                        # `test_the_record_journals_the_precise_link_form` and
-                        # `test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED`
-                        # pin, and replay re-finds the endpoint through
-                        # `resolve_structural_target`'s name match — the same
-                        # match live just answered. ⛔ Re-resolving here instead
-                        # would rewrite those fields to the minted id and change
-                        # the pinned record shape.
-                        #
-                        # `_internal` stays None on purpose: `wire_about_link`
-                        # resolves-or-mints the stub by the name the record
-                        # pins, so the live write and the replay write are ONE
-                        # construction rather than two reads that could
-                        # disagree.
-                        # ⛔ NOT `self.create_entity(...)` directly: a name held
-                        # by 2+ live entities is LEGAL (#8864 / D2) and
-                        # `_register_referenced_entity` owns that distinction,
-                        # the id-shape guard, the already-registered no-op probe
-                        # and the create-door refusal (#3590 review P2).
-                        self._register_referenced_entity(
-                            "Subject", _val, as_subject_stub=True)
+                    # ⛔ NO REGISTRATION HERE (#3590 D1, RULED 2026-10-26).
+                    # The cascade falling through to the Subject stub means the
+                    # name resolved to NO holder — i.e. the record MENTIONS a
+                    # name nobody registered. D1: a mention is the LINK, never a
+                    # creation, so "an unresolvable mention drops its link,
+                    # records the miss, and mints nothing". An earlier commit of
+                    # this branch registered the stub here (a `SubjectAdded` per
+                    # mention); that is the minting arm D1 forbids — it grows the
+                    # entity set and the journal out of prose.
+                    #
+                    # The link SHAPE stays exactly as the fallback returned it —
+                    # `how:"id"` with the NAME as `targets`,
+                    # `target_label:"Subject"`, the name as `resolve_key` and
+                    # `mint_if_absent: True` — and `_internal` stays None, so
+                    # `wire_about_link` resolves-or-mints the name-keyed stub by
+                    # the name the record pins, IDENTICALLY live and on replay.
+                    # That fold-side construction (`_mint_subject_stub`) is the
+                    # mint #8914 filed as a bug; it is open and out of scope
+                    # here, and moving it is that issue's work, not this door's.
                     if _link is not None:
                         about_links.append(_link)
                         _about_writes.append((_link, _internal))
@@ -37575,29 +37465,27 @@ class TortoiseSDK:
                     # an unresolvable HANDLE wires NO edge (#3586) — nothing to
                     # journal, but the door still has to report it.
                     _about_writes.append((_rel, _val))
-            # ── #3590 D9: the MENTIONS this record carries ───────────────
-            # The `about*` loop above registers its own targets; the record's
-            # OTHER entity references — `subject`, `object` and every `uses[]`
-            # name — were never registered by anyone, so the fold resolved them
-            # against no holder, dropped the `performs` / `produces` / `uses`
-            # edge, and (before the `unfolded-mention` exemption) made the
-            # journal un-rebuildable. Every in-repo producer of this record
-            # goes through THIS door — `EventAPI.add_event` is the exception and
-            # is named in the exemption's degraded guarantee — so registering
-            # them here is the D9 producer duty and it is what keeps a rebuilt
-            # graph's Event edges equal to the live ones.
-            # `objectType='Document'` means `object` is a :Source url (written
-            # by the document fold), NOT an entity: never register it.
-            self._register_referenced_entity("Subject", props.get("subject"))
-            if (props.get("objectType") or "") != "Document":
-                self._register_referenced_entity("Object", props.get("object"))
-            _uses = props.get("uses")
-            if isinstance(_uses, (str, dict)):
-                _uses = [_uses]
-            for _use in _uses or ():
-                _use_name = (_use.get("name")
-                             if isinstance(_use, dict) else _use)
-                self._register_referenced_entity("Object", _use_name)
+            # ── #3590 D1 (RULED): the MENTIONS this record carries ────────
+            # `subject`, `object` and every `uses[]` name are MENTIONS, and a
+            # mention does not create an entity: the entity set grows only from
+            # an explicit registration (`create_entity`) that mints the id. So
+            # this door mints NOTHING for them and journals nothing — the fold
+            # resolves each name against the graph's live holders and, where the
+            # record names something nobody registered, drops that one link and
+            # records it as the EXEMPT `unfolded-mention` (live and replay run
+            # the same resolver, so both drop the same link).
+            #
+            # ⛔ An earlier commit of this branch registered them here, calling
+            # it the "D9 producer duty". That was the minting arm D1 forbids, and
+            # it made `create_event(subject="X")` create X and append a
+            # `SubjectAdded` — the "non-referential mention promoted to a node"
+            # defect `docs/architecture/STORAGE-ARCHITECTURE.md` records.
+            # ⚠️ What a caller now sees: a name that was never registered wires
+            # NO `performs` / `produces` / `uses` edge. Register the entity
+            # explicitly (``create_entity``) when the edge is wanted — that is
+            # the same degrade ``EventAPI.add_event`` has always had, and it is
+            # written down in ``entity_identity.resolve_fold_name`` and in the
+            # `unfolded-mention` exemption.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
                 "eventStatus": "scheduled", **props}, "EventRecorded",
@@ -40451,8 +40339,7 @@ class TortoiseSDK:
                     # MERGE below journals nothing).
                     #
                     # #3590 review P1: `AmbiguousEntityName` is NOT an error
-                    # here, for the same reason `_register_referenced_entity`
-                    # catches it — a name held by two or more LIVE entities is
+                    # here — a name held by two or more LIVE entities is
                     # the legal same-name coexistence (D2/#8864), and this is a
                     # REFERENCE-wiring loop, not a create. Letting the create
                     # door's refusal escape aborted the whole write
