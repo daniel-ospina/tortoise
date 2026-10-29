@@ -2519,7 +2519,19 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # who stops at the definitions fails a healthy deployment on the ordinary
     # unbound traffic the ⚠️ bound excuses, the exact defect #10071 exists to
     # remove. Measured: the sentence could be reverted with every other pin green.
-    assert re.search(r"None of those three is an exemption of its own", flat), (
+    # ⛔ PIN THE CLAIM, NOT ONE IDIOM (#10083 review P2, measured): the positive
+    # half was a single literal phrasing, so the same ruling in another shape —
+    # `Those three are not exemptions in their own right` — red the suite with a
+    # message accusing the section of the absolute it had just kept (the F3 class
+    # this PR exists to remove). The POLARITY is what is load-bearing: the three
+    # reasons are NOT exempt on their own. Both idioms below state it; the
+    # `always` detector after them catches the contradictory absolute, which is
+    # the claim this pin actually measures.
+    assert re.search(
+        r"(?:None of those three is an exemption of its own"
+        r"|Those three are not exemptions? in their own right)",
+        flat,
+    ), (
         "the reason definitions still introduce the three as an unconditional "
         "fail-and-fix, contradicting the ⚠️ bound that qualifies `no_tenant`"
     )
@@ -2797,7 +2809,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # self-host registry lane above is a graph-bound key that resolves through no
     # control plane …`), which this PR's tighter bound rewrote.
     assert re.search(
-        r"The self-host registry lane above is the one graph-bound key that "
+        r"The self-host registry lane above is the (?:one|only) graph-bound key that "
         r"resolves through no control plane",
         flat,
     ), (
@@ -2990,6 +3002,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         r"row did not appear, or when the capture's credential was refused a "
         r"tenant the record CAN key on",
         flat,
+        re.I,
     ), (
         "the section gives no executable discriminator for `no_tenant` growth — "
         "an unbound capture makes the growth the capture's, a bound capture whose "
@@ -3118,7 +3131,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     assert re.search(
         r"\*\*No nameable default row\*\* \(absent[^)]*\) is also a refusal of a "
-        r"tenant the record CAN key on, so it is a fail-and-fix as well",
+        r"tenant the record CAN key on, so it (?:too )?is a fail-and-fix as well",
         flat,
     ), (
         "the no-nameable-row arm's VERDICT is unpinned — it must be a refusal of "
@@ -3140,7 +3153,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # arm, and an operator who reads BOTH as prescribed is left with the paragraph's
     # own verdict — "other traffic" — for a fail-and-fix state (#10083 review, P2).
     assert re.search(
-        r"\*\*A resolution ABANDONED at the seam\*\* is the third cause, and it is "
+        r"\*\*A resolution ABANDONED at the seam\*\* is (?:the [A-Za-z]+|a) "
+        r"cause, and it is "
         r"the one the row reading above CANNOT clear",
         flat,
     ), (
@@ -3164,13 +3178,56 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the abandoned-at-the-seam arm's VERDICT is unpinned — the growth must be "
         "the deployment's own fault, not another tenant's traffic"
     )
-    assert re.search(
-        r"normalizes either return to no tenant — so the resolution \*\*never ran\*\*",
-        flat,
+    # ⛔ `_cp_offload` has TWO outcomes and they differ in what the row reading
+    # above can SEE, so one consequence cannot cover both (#10083 review P2,
+    # measured — the last-cycle finding). `ControlPlaneOffloadError.refused` is
+    # `True` only for a refusal or a cancellation before any worker ran the
+    # callable (`monitoring.py:2317-2322`), where the callable did not and will
+    # not run; a plain BOUND MISS on a submission a worker already picked up is
+    # `refused=False`, `_cp_offload` returns `None` (`hosted_api.py:8734-8736`),
+    # and that worker runs the resolver to completion — `asyncio.wait_for`
+    # cancels the await, never the thread (CPython #87185). The pre-fix paragraph
+    # collapsed both into "the resolution never ran", which told an operator that
+    # one of the four fault lines (c) enumerates cannot coexist with the offload
+    # warning, and that the default row is untouched when this lane's resolver is
+    # `default_graph_id_for_credential`, which MINTS on a miss — so the row
+    # reading's PASS can be produced by the very resolution the seam stopped
+    # waiting for. Pin both branches; a single-branch claim reds here.
+    _seam = flat.partition("**A resolution ABANDONED at the seam**")[2]
+    _seam, _closed, _ = _seam.partition("⛔ **Do not try to attribute")
+    if not _closed:
+        _seam = _seam[:3000]
+    assert re.search(r"before any\s+worker\s+picked it up", _seam), (
+        "the abandoned-at-the-seam cause does not name the REFUSED / cancelled-\n"
+        "before-a-worker-ran branch, which is the only one where the callable\n"
+        "genuinely did not run (`ControlPlaneOffloadError.refused`)"
+    )
+    assert re.search(r"a worker\s+already PICKED UP", _seam) and re.search(
+        r"still runs\s+the resolver to completion", _seam
     ), (
-        "the section does not pin the mechanism that makes this cause distinct — "
-        "`_cp_offload` normalizes both `None` and `OFFLOAD_REFUSED` to no tenant, "
-        "so no resolver message is emitted at all"
+        "the section collapses a plain BOUND MISS into 'the resolution never ran'\n"
+        "— on a submission already picked up the worker still runs the resolver\n"
+        "to completion (`hosted_api.py:8734-8736`, CPython #87185), so a\n"
+        "resolution-fault line CAN coexist with the offload warning and an\n"
+        "operator told otherwise stops looking"
+    )
+    assert re.search(r"\*\*mints on a miss\*\*", _seam), (
+        "the section does not say the row reading can PASS because the abandoned\n"
+        "resolution CREATED the row — this lane's resolver is\n"
+        "`default_graph_id_for_credential`, which mints on a miss, so 'untouched\n"
+        "and healthy' is only true of the refused branch"
+    )
+    # ...and the false ABSOLUTE must not come back: a bound miss is the branch
+    # where the resolution DID run. The pre-fix wording paired an unconditional
+    # "wait bound expires" with "never ran" in ONE sentence, which is the defect
+    # this pin measures (it reds on that revert, not on a reword that keeps the
+    # two branches apart).
+    assert not re.search(
+        r"wait bound\s+expires[^.]{0,300}\*\*never ran\*\*", _seam, re.I
+    ), (
+        "the section again states that an EXPIRED WAIT BOUND means the resolution\n"
+        "never ran — it does not: the bound abandons only the await, and a worker\n"
+        "that picked the submission up runs it to completion (CPython #87185)"
     )
     # ⛔ And the REMEDY itself, not just its lead-in: "read the row" is the only
     # executable step for the silent arm, and it was unpinned (measured: replacing it
@@ -3181,7 +3238,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # value of the ID field (`record_tenant_for` refuses `default_graph_id ==
     # "default"`). Qualifying on the name would reject the healthy row.
     assert re.search(
-        r"read the org's `kind='default'` `public.graphs` row itself", flat
+        r"read the (?:org|organi[sz]ation)'s `kind='default'` `public.graphs` row "
+        r"itself", flat
     ), (
         "the silent arm's remedy is not named — the operator is left with the "
         "empty grep the paragraph above says does not clear it"
@@ -3229,7 +3287,8 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # absence of one draft's sentence (#10083 review, P3: the negative pin above
     # reds on a revert, not on a rewrite that makes the same false qualification).
     assert re.search(
-        r"the `default` SENTINEL is a pre-#10025\s+id value, never a row NAME", flat
+        r"the `default` SENTINEL is a pre-#10025\s+id value, (?:never|not) a row "
+        r"NAME", flat
     ), (
         "the remedy no longer says WHICH field the sentinel lives in — the minted "
         "`kind='default'` row IS named `default` and its id is a real `g_<hex>`, so "
@@ -3425,14 +3484,18 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "which is false — recipe 1 greps `the record write did not happen`"
     )
     assert re.search(
-        r"so on a default-row read fault neither of the other two is\s+logged at all",
+        r"so on a default-row read fault neither of the (?:other three|two\s+"
+        r"`could not resolve` lines(?: above)?)\s+is\s+logged at all",
         _excl_c,
         re.I,
     ), (
         "exclusion (c) drops the consequence that makes `graphs default-row read "
         "failed` special — `default_graph_id_for` swallows its exception, so on "
-        "that fault NEITHER hosted_api message is emitted and a grep of just "
-        "those two reads empty on a real fault"
+        "that fault NEITHER hosted_api `could not resolve` line is emitted and a "
+        "grep of just those two reads empty on a real fault. Either truthful form "
+        "is accepted: `the other three` (arithmetic against the (c) label) or the "
+        "named `two `could not resolve` lines`; the pre-fix `other two` over a "
+        "FOUR-message label is the self-contradiction this pin exists to catch"
     )
     assert re.search(
         r"\(`the record write did not happen \(no_tenant\)`\) IS in the grep", _excl_c
@@ -3600,7 +3663,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # so a fourth member of a list still labelled THREE was GREEN — both are the
     # self-contradiction class this section exists to remove.
     _excl_label = re.search(
-        r"(TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep", flat
+        r"(TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep", flat, re.I
     )
     assert _excl_label, (
         "recipe 1's exclusion list's exhaustive label is gone, so a reader takes "
@@ -3625,14 +3688,17 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # produces, and (b) is the `position_unproven` line item 2's own counter counts.
     # So derive the membership from the markers AND pin each member's own clause.
     _excl_list = re.split(
-        r"(?:TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep", flat, maxsplit=1
+        r"(?:TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep",
+        flat,
+        maxsplit=1,
+        flags=re.I,
     )[-1].partition("⛔ **`no_journal` and `seam_unimportable` ARE in it**")[0]
     _members = re.findall(r"\(([a-z])\) The ", _excl_list)
     assert _members == [chr(ord("a") + _i) for _i in range(len(_members))], (
         "recipe 1's exclusion list's member markers are not a run from (a) "
         f"({_members!r}) — a gap or a renumbering hides a member from the count"
     )
-    assert _NUMERALS[_excl_label.group(1)] == len(_members), (
+    assert _NUMERALS[_excl_label.group(1).upper()] == len(_members), (
         "recipe 1's exclusion list is labelled "
         f"{_excl_label.group(1)} readings but enumerates {len(_members)} "
         f"({_members!r}) — a label that says THREE over four members is the same "
@@ -3717,7 +3783,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # and they pin the CONFIG, not this prose, so without this the arm's remedy has
     # no stated boundary — and the only remaining "fix" for an unbound capture is
     # the #9192 hazard.
-    assert re.search(r"The route is never `TORTOISE_RECORD_SINGLE_TENANT`", flat), (
+    assert re.search(r"The route is never `TORTOISE_RECORD_SINGLE_TENANT`", flat, re.I), (
         "the section no longer rules out the cross-tenant route, so the one "
         "remaining way to 'fix' an unbound capture is the #9192 hazard it forbids"
     )

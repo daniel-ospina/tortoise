@@ -3382,12 +3382,18 @@ text, so do not grep the 9090 listener for a counter name.
    (`_bind_default_graph_record_tenant`, the seed / indexing lanes),
    `graphs default-row read failed — the record tenant stays unnamed`
    (`supabase_control.default_graph_id_for` — which swallows that exception and
-   returns `None`, so on a default-row read fault NEITHER of the other two is
-   logged at all), and
+   returns `None`, so on a default-row read fault NEITHER of the two
+   `could not resolve` lines above is logged at all), and
    `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
-   (`hosted_api._cp_offload`, the session/JWT lane) — where the resolution never
-   RAN at all: the offload REFUSED the submission or its wait bound expired, so
-   no resolver was entered and none of the three lines above exists. (The
+   (`hosted_api._cp_offload`, the session/JWT lane) — which says what the SEAM
+   did, not what the resolver did, so read which of its two outcomes you have.
+   The pool REFUSED the submission, or the bound CANCELLED it before any worker
+   picked it up: the callable did not and will not run, so no resolver was
+   entered and none of the three lines above exists. A plain bound miss on a
+   submission a worker already PICKED UP is the opposite case: the seam abandons
+   only the await (`asyncio.wait_for` cancels the await, never the worker thread
+   — CPython #87185), so that worker still runs the resolver to completion and
+   one of the lines above CAN sit beside this warning. (The
    discriminator is the message text, not the logger: the
    SDK's `no_journal` line, from a *different module*, IS in the grep — see the
    ⛔ paragraph below.) The refusal each fault then produces
@@ -3576,11 +3582,25 @@ why the two recipes above are the verification and the deploy status is not.
      the row reading above CANNOT clear. `hosted_api._cp_offload(... ,
      op="default_graph_row", best_effort=True)` logs
      `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
-     when the offload REFUSES the submission or its wait bound expires, and then
-     normalizes either return to no tenant — so the resolution **never ran**, and
-     the `kind='default'` row the reading above inspects is **untouched and
-     healthy**: it is `active` and carries a real `g_<hex>` id, so that reading
-     PASSES while the capture still counts `no_tenant`. `best_effort=True` is
+     and then normalizes either return to no tenant, so the capture counts
+     `no_tenant` either way — but the warning names TWO outcomes, and only one of
+     them means the resolution did not happen, so read which one the log line
+     describes before you read the row. If the pool REFUSED the submission, or
+     the bound CANCELLED it before any worker picked it up, the resolution
+     **never ran**: no resolution line above exists, and the `kind='default'` row
+     the reading above inspects is **untouched and healthy** — it is `active` and
+     carries a real `g_<hex>` id — so that reading PASSES while the capture still
+     counts `no_tenant`. If it is a plain bound miss on a submission a worker
+     already PICKED UP, the opposite holds: the seam abandons only the await
+     (`asyncio.wait_for` cancels the await, never the worker thread — CPython
+     #87185), so that worker still runs the resolver to completion. A resolution
+     line above CAN therefore sit beside this warning — and this lane's resolver
+     is `default_graph_id_for_credential`, which **mints on a miss**, so the row
+     the reading above inspects may have been CREATED by the very resolution the
+     seam stopped waiting for. What makes both branches this cause, and what the
+     row reading cannot see, is that the tenant id is discarded at the caller
+     either way (`hosted_api` assigns `org["default_graph_id"]` only for a
+     `str`). `best_effort=True` is
      there precisely so an offload hiccup does not 503, so this is expected
      traffic on the session/JWT lane — and the growth is still the deployment's
      (control-plane saturation, or a refused submission), never another tenant's.
