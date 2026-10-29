@@ -282,22 +282,22 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:703` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:525` (arch refusal dies at `:530`) and `uninstall` `:578` ·
-  guards at `:525-575` (forks `:533`, disk `:553`, cpu/memory `:560` — `:573`, the memory guard,
-  is the last one) · sha256 pin + registration at `:714-724` (verify `:714`, token `:717`, one
-  argv `:722-723`, `config.sh` `:724`; the run at `:706` is the dry-run echo) · systemd
-  install/start at `:734-736` · label resolution at `:216-313` (`fallback_engaged` `:216`,
+- `--count N` → `tools/install-ci-runner-x64.sh:705` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:527` (arch refusal dies at `:532`) and `uninstall` `:580` ·
+  guards at `:527-577` (forks `:535`, disk `:555`, cpu/memory `:562` — `:575`, the memory guard,
+  is the last one) · sha256 pin + registration at `:716-726` (verify `:716`, token `:719`, one
+  argv `:724-725`, `config.sh` `:726`; the run at `:708` is the dry-run echo) · systemd
+  install/start at `:736-738` · label resolution at `:216-313` (`fallback_engaged` `:216`,
   `resolve_os_label` `:244`, `resolve_labels` `:276`, whose body ends at its `}` on `:313`) ·
-  `repair` `:465` · `--print-labels` `:498` · label-coverage at `:338-458` (the two "read
-  nothing" arms at `:441` and `:450`, the uncovered verdict at `:458`).
+  `repair` `:467` · `--print-labels` `:500` · label-coverage at `:338-460` (the two "read
+  nothing" arms at `:443` and `:452`, the uncovered verdict at `:460`).
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:180-184`, the `case`
   through its `esac`): a `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op
   that reports success having deregistered nothing. `CI_RUNNER_OS_LABEL` is validated the same
   way and in the same place (`:239-242`), so a typo is refused in `--status` and `--uninstall`
   too — not only in the three modes that resolve labels.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:578-686`; the proof is `is_runner_install` at `:208`, which accepts `.runner` or
+  gone** (`:580-688`; the proof is `is_runner_install` at `:208`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -326,8 +326,8 @@ falls back.
   operator or a future `--status && …` guard, not a change any caller currently reads.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:525`, the `MODE = install`
-  block; the refusal itself dies at `:530`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:527`, the `MODE = install`
+  block; the refusal itself dies at `:532`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 

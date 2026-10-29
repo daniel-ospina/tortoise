@@ -344,13 +344,6 @@ if [ "$MODE" = status ]; then
   pool_tsv="$(gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[] | [.name, ([.labels[].name]|join(","))] | @tsv' 2>/dev/null)" || exit 3
   pool_total="$(printf '%s\n' "$pool_tsv" | grep -c . || true)"
   case "$pool_total" in ''|*[!0-9]*) pool_total=0 ;; esac
-  # Is the GATE routing `ubuntu-latest` here right now? Same predicate `fallback_engaged` reads,
-  # computed off the read already in hand. It decides whether a zero-answer `ubuntu-latest` is the
-  # fleet being blocked or just GitHub-hosted serving it (which is the normal, healthy state).
-  fallback_on="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v a="$ARM_POOL_LABEL" -v f="$FALLBACK_LABEL" '
-    {k=split($2,x,","); ha=0; hf=0
-     for(i=1;i<=k;i++){ if(x[i]==a) ha=1; if(x[i]==f) hf=1 }
-     if (ha && hf) c++} END{printf "%d", (c+0)>0 ? 1 : 0}')"
   uncovered=0
   labels_seen=0
   # ⛔ A WHOLE-LINE YAML COMMENT IS NOT A `runs-on:` LINE. Unanchored, `# legacy: runs-on: windows-2022`
@@ -384,30 +377,39 @@ if [ "$MODE" = status ]; then
             printf "%d %d", n+0, denom+0 }')"
     n="${counts% *}"
     denom="${counts#* }"
-    # ⛔ WHOSE PROBLEM IS A ZERO? Only a label this pool is ASKED to serve. `ubuntu-latest` is asked
-    # of the pool only while the gate is routing it here (`fallback_on`), so `ubuntu-latest = 0`
-    # with hosted healthy is a REPORT, not a block — treating it as a block would make `--status`
-    # permanently red in normal operation, i.e. the false red this instrument must not produce.
-    # A bare `ubuntu-<version>` IS the incident class (pinned on purpose, hosted unavailable). An
-    # `-arm` spelling, `macos-*`, `windows-*` and any custom label are not this pool's to serve and
-    # were never measured against hosted — report them, do not verdict them.
-    case "$label" in
-      *-arm)        pool_serves=0 ;;
-      "$FALLBACK_LABEL") pool_serves="$fallback_on" ;;
-      ubuntu-[0-9]*)     pool_serves=1 ;;
-      *)            pool_serves=0 ;;
-    esac
     if [ "$n" -eq 0 ]; then
-      # ⛔ REPORT THE MEASUREMENT, NOT A CAUSE. The line used to assert "only GitHub-hosted can
-      # answer it, and hosted is not available here" for EVERY zero-answer label — including the
-      # ones this pool can never serve and whose hosted availability was never measured.
+      # ⛔ WHOSE PROBLEM IS A ZERO? Only a label this pool is ASKED to serve — and the three classes
+      # answer differently, so the verdict is per-class rather than "any zero is the incident":
+      #
+      #  * a BARE `ubuntu-<version>` IS the incident class: pinned to GitHub-hosted on purpose,
+      #    hosted effectively unavailable here, so zero self-hosted answers = every PR blocked.
+      #  * `ubuntu-latest` at zero is the HEALTHY state, and it is self-proving: the gate attaches
+      #    that label to the ARM64 pool when it falls back, so a pool where NO runner carries it is
+      #    a pool the gate is not routing to. Verdicting it would make `--status` — and any
+      #    `--status && …` guard — permanently red in normal operation: the false red this
+      #    instrument must not produce. (This is why there is no "is the fallback engaged" read
+      #    here: it cannot be engaged while the label has no carrier.)
+      #  * an `-arm` spelling, `macos-*`, `windows-*` and custom labels are not this pool's to
+      #    serve; their hosted availability was never measured, so report and do not verdict.
+      #
+      # ⛔ REPORT THE MEASUREMENT, NOT A CAUSE: the line used to assert "only GitHub-hosted can
+      # answer it, and hosted is not available here" for EVERY zero-answer label.
       say "  ⛔ $label = 0 of $denom self-hosted runner(s) answer it."
-      if [ "$pool_serves" = 1 ]; then
-        say "     A required leg naming it can then only be served by GitHub-hosted: python-ci-gate is never dispatched and every PR stays BLOCKED."
-        uncovered=1
-      else
-        say "     This pool is not asked to serve it (the gate is not routing $FALLBACK_LABEL here, or the label is another architecture's / hosted-only class) — a report, not a block."
-      fi
+      case "$label" in
+        *-arm)
+          say "     An ARM64 hosted spelling — not this pool's class on an x64 box (a false architecture claim). A report, not a block."
+          ;;
+        "$FALLBACK_LABEL")
+          say "     GitHub-hosted serves $FALLBACK_LABEL while the gate is not routing it here — a report, not a block."
+          ;;
+        ubuntu-[0-9]*)
+          say "     A required leg naming it can then only be served by GitHub-hosted: python-ci-gate is never dispatched and every PR stays BLOCKED."
+          uncovered=1
+          ;;
+        *)
+          say "     Not a label this pool serves (hosted-only or custom), so its zero answer blocks nothing here — a report, not a block."
+          ;;
+      esac
     elif [ "$n" -lt "$denom" ]; then
       # ⛔ COVERED IS NOT THE SAME AS FULLY COVERED, and the difference is the whole erosion path:
       # the scheduled autoscaler ADDS runners, and a fill/repair pass that omits the label leaves
