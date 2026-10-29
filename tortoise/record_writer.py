@@ -482,19 +482,22 @@ class RecordWrite:
             return status_vocabulary.classify(configured=False, reached=False)
         if self.outcome is RecordWriteOutcome.REFUSED:
             # ARMED and nothing written. Only `circuit_open` is LITERALLY
-            # "configured, not reached" ⇒ `degraded`. The other four are near
+            # "configured, not reached" ⇒ `degraded`. The other five are near
             # misses, and NOTHING here has its own term: `write_failed` covers an
             # unreachable record AND a record that WAS reached and refused the
             # projection; `malformed_dsn` is a SET-UP defect (a value IS set and
             # is wrong, so not `unconfigured`, which is defined as no value at
-            # all); `no_tenant` is a deployment/caller gap; and
-            # `no_durable_journal` (the healthy M2 capture lane) never asks the
-            # store at all. So `degraded` — which `status_vocabulary` defines as
-            # "off by OUTAGE" — is the NEAREST of the four recorded terms for
-            # all five, not a measured outage for four of them. There is
-            # deliberately no fifth term ("do not add a fifth term… a condition
-            # the four do not cover is a contract change"), so `.status` alone
-            # cannot tell those apart: a consumer MUST read :attr:`refusal`
+            # all); `no_tenant` is a deployment/caller gap; `no_tenant_carried` is
+            # the same gap one arm over (a CARRIED tenant pair that was unusable);
+            # and `no_durable_journal` (the healthy M2 capture lane) never asks
+            # the store at all. So `degraded` — which `status_vocabulary` defines
+            # as "off by OUTAGE" — is the NEAREST of the four RECORDED terms for
+            # all six, not a measured outage for the other five. There is
+            # deliberately no fifth RECORDED term ("do not add a fifth term… a
+            # condition the four do not cover is a contract change") — the count
+            # above is the REFUSAL set, which is one longer than the recorded
+            # one — so `.status` alone cannot tell those apart: a consumer MUST
+            # read :attr:`refusal`
             # first (see :attr:`applied`, and the write-path paragraph in
             # `status_vocabulary`'s module docstring).
             # Never `available` either way — a refusal that reads as the healthy

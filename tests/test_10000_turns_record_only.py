@@ -1824,9 +1824,22 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     ``LIVE_WRITE_REFUSALS`` as the declaration it INDEXES rather than the
     authority it is not. Mutation: delete the ``no_tenant_carried`` bullet, or
     restore a typed count in place of the pointer — this reddens.
+
+    ⛔ #10021 review, SECOND round: the fix above inserted the corrected "six"
+    paragraph and LEFT the pre-fix "five" one eight lines below it, so the module
+    asserted two sizes for one closed set — and the needle below (`"one of
+    five"`) could not see the survivor, because it spelled it `"carries all
+    five"`. The counts are therefore DERIVED from the producer here, not compared
+    against one hard-coded needle: every spelled size in the map must equal the
+    set's real size, wherever the doc spells it. The same rule is applied to
+    ``RecordWrite.status``'s own enumeration, which the map names as
+    authoritative — it was one token short when this round started.
     """
+    import inspect
+    import re
+
     from tortoise import status_vocabulary
-    from tortoise.record_writer import LIVE_WRITE_REFUSALS
+    from tortoise.record_writer import LIVE_WRITE_REFUSALS, RecordWrite
 
     doc = status_vocabulary.__doc__ or ""
     # `unarmed` is not a `RecordWrite.refusal`: an unarmed call returns None
@@ -1845,11 +1858,33 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
         "the map must point at the set's declaration (`record_writer."
         "LIVE_WRITE_REFUSALS` + the attempt's `write_failed`) instead of being "
         "mistaken for it — a typed count in the map is what drifted")
-    assert "one of five" not in doc, (
-        "the refusal set is not five: `no_tenant_carried` made it six, and a "
-        "typed count here re-stales the moment the door grows another")
-    assert "one of six" in doc, (
-        "the map should state the set's size it was last checked against")
+    # The count is DERIVED, never typed here either: a hard-coded "six" in the
+    # pin would re-stale exactly the way the doc's did when the door grew.
+    _WORD = {4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    size = len(returned)
+    spelled = _WORD[size]
+    assert f"one of {spelled}" in doc, (
+        f"the map must state the set's size it was last checked against: the "
+        f"door returns {size} tokens ({sorted(returned)}), so it must read "
+        f"'one of {spelled}'")
+    # Every OTHER spelled size in the map is a contradiction of that one — this is
+    # the assertion the first round's needle missed (it spelled the survivor
+    # differently), and it is why the check is a set comparison rather than a
+    # list of literal needles.
+    for word in re.findall(r"(?:one of|all|NONE of the) ([a-z]+)", doc):
+        if word in _WORD.values():
+            assert word == spelled, (
+                f"`status_vocabulary` says the refusal set is '{spelled}' and "
+                f"also '{word}' — one closed set, two sizes, in the module that "
+                f"declares itself the vocabulary's ONE home")
     # The pointer is not decoration: the module that declares the set is alive
     # and still carries the token the map was missing.
     assert "no_tenant_carried" in LIVE_WRITE_REFUSALS
+    # ... and the SITE that map defers to (`RecordWrite.status`) is complete too:
+    # it enumerated five arms and omitted `no_tenant_carried`, so the map pointed
+    # a consumer at a document that was itself one token short.
+    status_src = inspect.getsource(RecordWrite.status.fget)
+    unwritten = [t for t in returned if t not in status_src]
+    assert not unwritten, (
+        f"`RecordWrite.status` is the authoritative enumeration (the map says "
+        f"so) and it does not name refusal={unwritten}")

@@ -105,11 +105,6 @@ So the write path carries all six as ``degraded`` — the NEAREST recorded term
 for "not available", and not a measured outage for four of them — and keeps the
 reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
 ``refusal`` before calling a refusal an outage, a set-up gap, or an error.
-
-So the write path carries all five as ``degraded`` — the NEAREST recorded term
-for "not available", and not a measured outage for four of them — and keeps the
-reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
-``refusal`` before calling a refusal an outage, a set-up gap, or an error.
 Recorded here for the same reason as the read-path dimension above — this
 module is the vocabulary's ONE home, and a mapping documented only at the call
 site is one that no reader of the published table will find. It adds no fifth
