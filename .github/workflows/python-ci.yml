@@ -1871,9 +1871,14 @@ jobs:
       # still the host-global `/tmp/pytest.log` / `/tmp/junit.xml` /
       # `/tmp/expected-nodeids.txt`. `.github/scripts/pytest-attribution.sh`
       # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
-      # paragraph records THIS job as migrated (2026-10-29) and names the two legs
-      # that still write the host-global literals — `test-concurrency-falkor` and
-      # `test-carve-out`, the deliberate residual carried by #10280.
+      # paragraph records THIS job as migrated (2026-10-29). The header's residual
+      # paragraph names the legs that still write the host-global literals —
+      # `test-concurrency-falkor`, `test-track-b`, `test-carve-out` and
+      # `test-d14-hosted-api` here, plus the warn-only `validate` job in
+      # `post-merge-validation.yml` — the deliberate residual carried by #10280. That
+      # list is DERIVED and pinned by
+      # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
+      # so read it there rather than trusting this comment's copy of it.
       #
       # MEASURED (run 40808264676, `test-slow (a)`): the leg's own manifest
       # declared **367** expected nodeids, its own run reported

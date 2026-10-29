@@ -1297,14 +1297,27 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     `⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS` paragraph that retires it (PR #10244
     review, P3). It said *"every leg writes the SAME global path"*, which stopped being
     true when #10028 migrated the fast matrix and the `test-slow` migration in this PR
-    completed the second job: 14 legs now write `${RUNNER_TEMP}/pytest.log`, and TWO
-    still write the host-global literal. A header claiming the retired premise teaches
+    completed the second job: 14 legs now write `${RUNNER_TEMP}/pytest.log`, while the
+    rest still write a host-global literal. A header claiming the retired premise teaches
     the opposite of what the code does, in the exact sentence the next lane quotes.
 
+    ⛔ The set is EVERY host-global capture target, not the `/tmp/pytest.log` spelling
+    (PR #10244 review, blocking): the first version of this pin filtered on that one
+    literal, so it derived two legs and stayed green while `test-track-b`
+    (`/tmp/trackb.log`), `test-d14-hosted-api` (`/tmp/pytest-d14.log`) and
+    `post-merge-validation.yml`'s `validate` (`/tmp/pmv-pytest.log`) — all of them named
+    on #10280 — were still un-migrated. A guard whose subject is preventing this drift
+    was itself spelling-dependent, i.e. fail-open, and its own failure message told the
+    next editor the two-element list was complete.
+
     The remaining legs are DERIVED from the workflows with `capture_site` (the same
-    reading the floor uses) and asserted to be NAMED by the header, so this cannot
-    drift the way the stated inventory did: migrating one more leg reds it on the
-    statement, not on a count.
+    reading the floor uses) and asserted to be NAMED by the header — and that the header
+    names no leg that has ALREADY migrated, since an over-wide residual sends the next
+    lane to redo finished work. Equality, in both directions, on the statement rather
+    than on a count. "Named" means named in the LIST block itself (bounded by
+    `The legs that still write` … `THIS LIST IS DERIVED`), not somewhere in the header's
+    prose: the paragraph below the list explains WHY `test-track-b` and `validate` are in
+    scope, and that explanation must not be able to stand in for a list entry.
     """
     header = SCRIPT.read_text()
     # MUTATION PROOF for the second half below: the pre-fix text stated the premise the
@@ -1314,23 +1327,67 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
         "the host-global path — #10028 migrated both matrix jobs, so the claim is false "
         "and contradicts the STATUS paragraph seven lines below it"
     )
-    residual = sorted(
-        job
+    sites = [
+        (job, target)
         for workflow in ATTRIBUTION_WORKFLOWS
         for job, target in _capture_site_jobs(workflow)
-        if job is not None and target == "/tmp/pytest.log"
-    )
-    # The delivered state, not a bound: a further migration changes this list and must
+        if job is not None
+    ]
+    # ANY host-global `/tmp/*.log`, NOT just the `/tmp/pytest.log` spelling: filtering on
+    # one literal is what let the four-leg residual read as a two-leg one.
+    residual = sorted({job for job, target in sites if target.startswith("/tmp/")})
+    migrated = {job for job, target in sites} - set(residual)
+    # The delivered state, not a bound: a further migration changes this set and must
     # update the header's scope in the same change (that is the point of the pin).
-    assert residual == ["test-carve-out", "test-concurrency-falkor"], (
-        "the legs still writing a host-global /tmp/pytest.log changed — update the "
+    assert residual == [
+        "test-carve-out",
+        "test-concurrency-falkor",
+        "test-d14-hosted-api",
+        "test-track-b",
+        "validate",
+    ], (
+        "the legs still writing a host-global /tmp/*.log changed — update the "
         f"NAMED RESIDUAL scope in pytest-attribution.sh to match: {residual}"
     )
-    for job in residual:
-        assert job in header, (
-            f"pytest-attribution.sh: `{job}` still writes the host-global "
-            "/tmp/pytest.log, so the NAMED RESIDUAL header must name it (#10280)"
-        )
+    # The header's residual LIST, bounded by its own delimiters: the `NAMED RESIDUAL`
+    # paragraph sits ABOVE the STATUS paragraph and the migrated jobs' names live in
+    # STATUS (`test`, `test-slow`), so a section spanning both would credit them as
+    # residuals. Both delimiters are asserted present rather than `index()`ed blind — a
+    # reflow that drops one must red here, not raise an unhelpful ValueError.
+    #
+    # ⛔ THE SECTION MUST END WHERE THE LIST ENDS, at the `THIS LIST IS DERIVED` block.
+    # The commentary BELOW the list also names `test-track-b` and `validate` in prose
+    # (why each is in scope), so a section that ran on to `So ownership is` let the LIST
+    # lose an entry while this pin stayed green — measured, by deleting three list
+    # entries: only `test-d14-hosted-api`, the one leg the prose does not repeat, was
+    # reported missing. That is the same fail-open the widened `/tmp/*.log` derivation
+    # above fixes, one layer in: the list is the map a migrating lane reads, and prose
+    # that explains WHY a leg is listed is not a substitute for listing it.
+    start_marker = "The legs that still write"
+    end_marker = "THIS LIST IS DERIVED"
+    assert start_marker in header and end_marker in header, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header lost its list delimiters "
+        f"({start_marker!r} / {end_marker!r}) — the residual scope pin cannot read the "
+        "statement it asserts"
+    )
+    section_start = header.index(start_marker)
+    section = header[section_start : header.index(end_marker, section_start)]
+
+    def _named(job: str) -> bool:
+        # Boundaries that exclude `-` as well: `test` is a substring of `test-slow` and of
+        # every hyphenated leg name, so `\b` alone would credit the wrong leg.
+        return re.search(rf"(?<![\w-]){re.escape(job)}(?![\w-])", section) is not None
+
+    unnamed = [job for job in residual if not _named(job)]
+    assert not unnamed, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header does not name every leg that "
+        f"still captures a host-global /tmp log — missing {unnamed} of {residual} (#10280)"
+    )
+    stale = sorted(job for job in migrated if _named(job))
+    assert not stale, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header still names legs that HAVE "
+        f"migrated to a per-runner path — drop {stale} from the residual scope (#10280)"
+    )
 
 
 def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
