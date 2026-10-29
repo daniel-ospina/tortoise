@@ -7,8 +7,9 @@ a ``docs/INGEST_CONTRACT.md``-only diff matches no ``SOURCE_PATTERNS`` entry
 (``docs/`` is in ``NON_PYTHON_PREFIXES``), so the selector returns
 ``surfaces: []`` and runs **tier1 only**. ``test_record_projection.py`` is
 registered under ``core`` alone, so the INGEST half of this pin *slept on the one
-edit it exists to catch* — the #8474 shape, recorded at
-``config/ci-surfaces.yml``:2049. ``docs/ONTOLOGY.md`` is an explicit selector
+edit it exists to catch* — the #8474 shape, whose ``test_8474_ontology_record.py``
+row in ``config/ci-surfaces.yml`` records the same split for the same reason.
+``docs/ONTOLOGY.md`` is an explicit selector
 entry, which is why that half fired while this one did not.
 
 WHAT THIS PINS. ``#10191`` landed the record-side half of a supersede's

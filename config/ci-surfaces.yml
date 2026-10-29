@@ -2498,10 +2498,11 @@ surfaces:
   # `docs/INGEST_CONTRACT.md`, matches NO `SOURCE_PATTERNS` entry (`docs/` is in
   # `NON_PYTHON_PREFIXES`), so an INGEST-only diff returns `surfaces: []` and runs
   # `tier1` ONLY — where this file was not registered, i.e. the pin slept on the
-  # exact edit it guards (the #8474 shape, `config/ci-surfaces.yml`:2049). Hence
-  # the dual registration: `core` (a record_projection/ONTOLOGY-selected change)
-  # AND `tier1` (every docs-only diff). DB-free and fixture-free by construction,
-  # so tier1's cost is a file read plus one plan emission.
+  # exact edit it guards. Same shape, and the same reason, as the #8474 row's
+  # `test_8474_ontology_record.py` split below. Hence the dual registration: `core`
+  # (a record_projection/ONTOLOGY-selected change) AND `tier1` (every docs-only
+  # diff). DB-free and fixture-free by construction, so tier1's cost is a file read
+  # plus one plan emission.
   - test_10191_record_move_doc_pin.py
   # #9187 (epic #7879, #9078's foundation child): the RECORD-WRITE SEAM — the one
   # production boundary that drives `record_projection.replay` on the caller's
