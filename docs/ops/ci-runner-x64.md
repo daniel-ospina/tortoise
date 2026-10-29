@@ -33,7 +33,7 @@ written as 83 against a measured 79, so treat both rows as a dated measurement a
 ⛔ **The `ubuntu-24.04` row is not "hosted only" and must not be read as one** (#10289). Measured
 2026-10-29 with `gh api repos/daniel-ospina/tortoise/actions/runners`:
 
-```
+```text
 self-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04   ×7   (cmux: pi-runner-cmux-x64-5..8,
                                                             pi-runner-x64-1, pi-runner-x64-2)
 self-hosted,Linux,ARM64,self-hosted-arm64            ×5   (pi-runner-vm-2..6)
