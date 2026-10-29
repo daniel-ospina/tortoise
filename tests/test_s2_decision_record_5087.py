@@ -580,3 +580,144 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
     assert all(recorded[version] != before for version, before in stale.items()), (
         "the pre-framing sizes are back in the table — the rows must be the FRAMED "
         f"payload's, not the carried-over figures: recorded {recorded}")
+
+
+# ── the framing's PROVENANCE must name a page that exists ─────────────────
+
+#: Every artifact that carries the untrusted-data framing's provenance. Three, and the
+#: reason the check is corpus-shaped: the same sentence moved between all three in one
+#: PR, so a guard watching one would have passed while the other two drifted.
+_FRAMING_ARTIFACTS = (SEAM_MODULE, DOC, CHANGELOG)
+
+#: The page that actually carries the note, as a path a reader can follow. The note lives
+#: in *Jev 1.13 jaggedness* → *Adversarial content*
+#: (`https://docs.typesafe.ai/model-jaggedness/jev-1.13`, HTTP 200, fetched 2026-10-29).
+_VENDOR_NOTE_PAGE = re.compile(r"model-jaggedness/jev-1\.13|Jev 1\.13 jaggedness")
+
+#: The page an earlier draft of this PR cited. It does not exist: `docs.typesafe.ai/
+#: troubleshooting` and `/troubleshooting.md` both return 404 (verified 2026-10-29) and no
+#: such entry appears in `https://docs.typesafe.ai/llms.txt`. A provenance pointing at a
+#: 404 is unfalsifiable by the reader it is written for — they cannot check the quote, so
+#: the citation reads as evidence while being nothing of the kind.
+_PHANTOM_PAGE = re.compile(r"Troubleshooting\s*(?:→|->|>)")
+
+#: The vendor's remedy, VERBATIM (`**Instead:** be explicit in the criteria. Test your
+#: integration thoroughly before deploying it to many users.`). The paraphrase this PR
+#: carried — "be explicit in the **trusted** fields" — is not in that page, and quoting a
+#: vendor for words they did not write is the failure the sibling `citation_rot` guard
+#: exists for.
+_VENDOR_REMEDY = "be explicit in the criteria"
+
+#: The paraphrase that must NOT be presented as the vendor's. It is a fair description of
+#: what this seam DOES; it is not what the page says, so it may not wear the quote marks.
+_REMEDY_PARAPHRASE = "be explicit in the trusted fields"
+
+#: The vendor scopes its note to `jev-1.13` ("Applies to `jev-1.13`. Last reviewed
+#: 2026-10-02") and says the edges may be fixed in later versions, while this seam sends
+#: the `jev-latest` alias (it resolved to `jev-1.14.0` at measurement). So asserting the
+#: exposure HOLDS at a concrete later version is a claim the cited page does not support —
+#: in the safe direction (it over-states the justification, not the risk), but still an
+#: unsourced claim inside a document whose whole job is honest provenance.
+_VERSION_OVERCLAIM = re.compile(
+    r"1\.\d+\.\d+\s+does not treat\s+`*state`*\s+as hostile", re.IGNORECASE)
+
+
+#: One-line-per-paragraph view of an artifact, for the phrase checks.
+#:
+#: Comment markers have to go FIRST: these artifacts are hard-wrapped `#:` comment blocks
+#: and markdown prose, so a naive `" ".join(text.split())` leaves the token `#:` sitting
+#: between the two halves of a quoted sentence that wrapped — `*"be #: explicit in the
+#: criteria"*` — and the check then reports a defect for a line wrap.
+_COMMENT_MARKER = re.compile(r"^\s*#:?\s*", re.MULTILINE)
+
+
+def _flatten(text: str) -> str:
+    return " ".join(_COMMENT_MARKER.sub("", text).split())
+
+
+def _provenance_gaps(text: str) -> list[str]:
+    """Every provenance defect in ``text``, named — so a failure says WHICH one.
+
+    Phrase checks read the flattened view (see :func:`_flatten`) because a wrapped quote is
+    still the verbatim quote. The regexes read the raw text, since each is scoped to a
+    single line.
+    """
+    gaps: list[str] = []
+    flat = _flatten(text)
+    if _PHANTOM_PAGE.search(text):
+        gaps.append("phantom-page: cites `Troubleshooting`, which 404s and is not in llms.txt")
+    if not _VENDOR_NOTE_PAGE.search(text):
+        gaps.append("unfollowable: names no page path or title a reader can reach")
+    if _VENDOR_REMEDY not in flat:
+        gaps.append(f"remedy-not-verbatim: the page says {_VENDOR_REMEDY!r}")
+    if _REMEDY_PARAPHRASE in flat:
+        gaps.append("remedy-put-in-the-vendors-mouth: 'trusted fields' is our wording, not theirs")
+    if _VERSION_OVERCLAIM.search(text):
+        gaps.append("version-overclaim: the note is scoped to jev-1.13, not a later release")
+    return gaps
+
+
+def test_the_framing_cites_a_vendor_page_that_exists_and_quotes_it_verbatim():
+    """The untrusted-data framing's provenance must be followable and accurate.
+
+    THE DEFECT THIS PINS (`tortoise#10077` / `#10117`). The clause's justification rests
+    entirely on one vendor sentence — *"State is data, and `jev-1.13` does not treat it as
+    hostile by default"* — and the PR cited it three times as coming from
+    *Troubleshooting → Adversarial content*. Three things were wrong, and none is
+    cosmetic:
+
+    1. **The page does not exist.** `docs.typesafe.ai/troubleshooting` returns 404 (and so
+       does `/troubleshooting.md`); the note is in *Jev 1.13 jaggedness* →
+       *Adversarial content*, `model-jaggedness/jev-1.13`. A reader handed the first path
+       cannot check the quote, which is exactly what a citation is for.
+    2. **The remedy was put in the vendor's mouth.** The page prescribes *"be explicit in
+       the criteria"*; the artifacts said the vendor prescribes "be explicit in the
+       **trusted** fields". We do put the clause in `instructions` — a deliberate and
+       defensible departure, since `criteria` is the structural option map / level list —
+       but a departure is not a quotation, and must not be written as one.
+    3. **The version was over-extended.** That note is scoped to `jev-1.13` and says the
+       edges may be fixed in later versions, while this seam sends the `jev-latest` alias
+       (→ `jev-1.14.0`). So "1.14.0 does not treat `state` as hostile" is unsupported by
+       the cited page.
+
+    The quote is verbatim and the exposure is real — this is a provenance guard, not a
+    retraction of the fix. What it refuses is a citation that cannot be followed, a quote
+    that was not said, and a scope the source does not grant.
+
+    Non-vacuity: the same checkers run over the **pre-fix** sentence of each artifact and
+    must red on the defect that artifact actually carried (all three cited the phantom
+    page; the module additionally carried the version overclaim). Static: three file
+    reads, no network — the fetched-at facts are recorded in the regexes' comments, and
+    the check is deliberately offline so it cannot flake on the vendor's uptime.
+    """
+    for artifact in _FRAMING_ARTIFACTS:
+        text = artifact.read_text(encoding="utf-8")
+        gap_list = _provenance_gaps(text)
+        assert gap_list == [], f"{artifact.name} carries a bad provenance: {gap_list}"
+
+    # ── non-vacuity: each pre-fix sentence reds on its own defect ──────────
+    pre_fix_seam = (
+        "#: bump is not bookkeeping — 1.14.0 does not treat ``state`` as hostile by\n"
+        "#: default (the vendor says so itself, ``docs.typesafe.ai`` → Troubleshooting →\n"
+        "#: *Adversarial content*), so an armed run before and after this clause is\n"
+        "#: answering a DIFFERENT question.\n"
+        "#:   *Adversarial content* note), with the remedy it prescribes: be explicit in\n"
+        "#:   the trusted fields rather than hoping the model separates them.\n")
+    pre_fix_gaps = _provenance_gaps(pre_fix_seam)
+    assert "phantom-page: cites `Troubleshooting`, which 404s and is not in llms.txt" in pre_fix_gaps
+    assert ("remedy-put-in-the-vendors-mouth: 'trusted fields' is our wording, not theirs"
+            in pre_fix_gaps)
+    assert any(g.startswith("version-overclaim") for g in pre_fix_gaps), pre_fix_gaps
+
+    pre_fix_record = (
+        "  hostile by default\"*, Troubleshooting → *Adversarial content*) and prescribes\n"
+        "  being explicit in the trusted fields;\n")
+    assert _PHANTOM_PAGE.search(pre_fix_record)
+
+    # …and a correct provenance passes every checker, so the guard cannot be satisfied by
+    # mangling the text in some other direction.
+    assert _provenance_gaps(
+        f"*Jev 1.13 jaggedness* → *Adversarial content* "
+        f"(https://docs.typesafe.ai/model-jaggedness/jev-1.13): "
+        f"the vendor prescribes, verbatim, *\"{_VENDOR_REMEDY}\"*."
+    ) == []
