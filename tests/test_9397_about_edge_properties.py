@@ -449,6 +449,14 @@ WHAT IS PINNED (one entry per test, in file order)
    cited a cycle 9 review four times, so the rounds that introduced the widest
    denial frames and `EXEMPT_COUNTED_PATTERNS` had no entry at all. NEWER than
    the ledger is the defect; older is the label convention, not a gap.
+40. `test_no_bare_line_citation_survives_in_this_files_record` — leg 37 banned a
+   bare `file.py:<N>` in ONE `#:` block, and the census's own record carried one
+   elsewhere anyway: the `MAP_WRITERS` block pointed the third write form at a
+   line ~800 from `relation_statement`, and two diagnostic messages repeated it,
+   so a lane auditing that row was sent to an unrelated branch. The ban now
+   covers every COMMENT in this file (test DATA is exempt, because legs carry
+   pre-fix spellings on purpose), and the one pointer the third row leans on may
+   carry no line number anywhere in the file.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -473,8 +481,10 @@ server.
 from __future__ import annotations
 
 import ast
+import io
 import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -673,10 +683,14 @@ RECORDED_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
 #: schema-driven and unreadable statically — `_SET_MAP` cannot read them, and
 #: inventing one would be the same guess this file exists to stop. ⚠️ One of
 #: them ALSO writes a name in the INLINE pattern-map form
-#: (`cache_projection.relation_statement` stamps `{idx:$idx}`,
-#: `cache_projection.py:717`), and that `idx` is read by the census's inline
-#: rule — so the documents' set is `confidence` (originated) plus `idx`
-#: (re-materialized), not one name.
+#: (`cache_projection.relation_statement` stamps `{idx:$idx}` in its own
+#: `MERGE` template), and that `idx` is read by the census's inline rule — so
+#: the documents' set is `confidence` (originated) plus `idx`
+#: (re-materialized), not one name. ⛔ The SYMBOL is the pointer, never a line
+#: number: the number this block carried landed ~800 lines from
+#: `relation_statement` and read as current, which is the defect class this
+#: census exists to close (see
+#: `test_no_bare_line_citation_survives_in_this_files_record`).
 MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     #: #9417: the structural transfer now CARRIES the old edge's properties
     #: (`SET nr += $attrs`, whitelisted to the RelationUpsert vocabulary), so an
@@ -1788,7 +1802,8 @@ def test_the_corrected_passages_name_the_property_bearing_class():
         assert f"`{SECOND_PROPERTY}`" in section, (
             f"{label} no longer names `{SECOND_PROPERTY}` — the record-layer "
             "projection stamps it inline on an allowlisted `aboutObject` edge "
-            "(`cache_projection.py:717`), so the measured set is `confidence` "
+            "(`cache_projection.relation_statement`), so the measured set is "
+            "`confidence` "
             "(originated) plus `idx` (re-materialized), not one name"
         )
     # The surviving true half must stay stated: the GENERIC writer sets nothing.
@@ -2326,7 +2341,8 @@ def _unqualified_line_citations(text: str) -> list[str]:
     Same rule as `_unqualified_edges_line_citations` below, generalised to every
     module rather than `projection/edges.py`: the `#9397` changelog entry uses a
     BARE line number as shorthand for "current", and the entry itself records
-    that this exact convention was wrong three times (`cache_projection.py:717`).
+    that this exact convention was wrong three times (three `cache_projection`
+    line citations, which is why this module's own record names SYMBOLS).
     """
     cite = re.compile(r"`[\w./-]+\.(?:py|sql):\d+`")
     qualifier = re.compile(r"at HEAD|at the pin\b|at the pinned revision", re.I)
@@ -2335,8 +2351,8 @@ def _unqualified_line_citations(text: str) -> list[str]:
     for i, m in enumerate(matches):
         # The window STOPS at the next citation. Measured: a neighbour's
         # `— at HEAD` inside a flat 120-character window qualified a bare
-        # citation beside it, so removing `(at HEAD)` from `security.py:85`
-        # while the next clause carried one stayed GREEN (vacuous pin).
+        # citation beside it, so removing `(at HEAD)` from the `security.py`
+        # citation while the next clause carried one stayed GREEN (vacuous pin).
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         # ... AND at the newline. Measured: a LATER bullet's "— at HEAD"
         # qualified a bare citation in an earlier line, because the window ran
@@ -2629,7 +2645,7 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
 def test_the_correction_changelog_qualifies_its_line_citations():
     """The `#9397` entry's own rule is that a `file:line` citation is qualified
     when the number is not true at the document's declared pin — the rule it
-    used to fix three `cache_projection.py:717` citations (`#9403` review, P2).
+    used to fix three `cache_projection` line citations (`#9403` review, P2).
 
     Three citations of the same class survived UNQUALIFIED in that same entry,
     and one of them is false at the pin both live documents declare
@@ -2653,7 +2669,7 @@ def test_the_correction_changelog_qualifies_its_line_citations():
         "**Third review-cycle correction",
     )
     # The rule must be able to MATCH the pre-fix spelling, or it protects nothing
-    # (the `STALE_CITATION_PROBE` lesson): `security.py:85` was bare.
+    # (the `STALE_CITATION_PROBE` lesson): the `security.py` citation was bare.
     probe = "(`security.py:85`), on a relation row the projection builds"
     assert _unqualified_line_citations(probe) == ["`security.py:85`"], (
         "the citation rule no longer matches the pre-fix spelling "
@@ -2665,7 +2681,7 @@ def test_the_correction_changelog_qualifies_its_line_citations():
         "qualifier:\n  "
         + "\n  ".join(unqualified)
         + "\n\nThe entry's own round-5 correction added `at HEAD` to three "
-        "`cache_projection.py:717` citations for exactly this reason: a bare "
+        "`cache_projection` line citations for exactly this reason: a bare "
         "number reads as current and lands somewhere else at the pin."
     )
 
@@ -2952,8 +2968,9 @@ def test_no_unrecorded_property_bearing_about_edge_writer():
     }, (
         "the census no longer reports `idx` (the INLINE pattern-map form) on "
         "the record-layer projection — `MERGE (src)-[r:{rel.rel_type} "
-        "{idx:$idx}]->(tgt) SET r += $props` (`cache_projection.py:717`) "
-        "writes a SECOND property name on an allowlisted `aboutObject` edge, "
+        "{idx:$idx}]->(tgt) SET r += $props` — stamped by "
+        "`cache_projection.relation_statement` — writes a SECOND property name "
+        "on an allowlisted `aboutObject` edge, "
         "which is why the documents state `confidence` + `idx`"
     )
     assert any(SECOND_PROPERTY in props for props in writers.values()), (
@@ -6872,4 +6889,130 @@ def test_the_ledger_records_every_review_cycle_the_record_cites():
         "have no ledger entry and a lane reading the ledger does not learn what "
         "the instrument now pins. Add the missing round(s) to "
         "`docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`"
+    )
+
+
+#: A COMMENT — this module's RECORD layer, as opposed to its test DATA. The
+#: distinction is load-bearing rather than convenient: several legs carry a
+#: PRE-FIX spelling as data (`_PIN_INDEX_PRE_FIX_PROBE`, the `security.py`
+#: line-citation probe) precisely to prove a matcher can still fire on it, so a
+#: blanket ban over the file would red on the probes that keep the rules honest.
+
+#: The pointer this round removed from the record, assembled from two literals so
+#: that THIS leg's own probe is not the last bare citation in the file — a
+#: file-wide ban otherwise eats its own probe and cannot be written down at all.
+_CACHE_PROJECTION_PRE_FIX_POINTER = "`cache_projection" ".py:717`"
+
+
+def _comment_lines(source: str) -> list[tuple[int, str]]:
+    """Every COMMENT in `source`, with the line number it starts on.
+
+    `tokenize` rather than a line regex: a probe STRING may begin with `#:`
+    (`_PRODUCER_EVIDENCE_START`, the pre-fix block below), and a line regex
+    would read test data as record prose — the exact confusion this leg exists
+    to keep apart.
+    """
+    return [
+        (token.start[0], token.string)
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT
+    ]
+
+
+def test_no_bare_line_citation_survives_in_this_files_record():
+    """This module's own RECORD must cite by SYMBOL, and until this leg the rule
+    was enforced over ONE block.
+
+    `test_the_producer_evidence_block_cites_the_emitters_by_symbol` (leg 37) made
+    the rule real for the `DIRECT_EDGE_CREATED_ATTR_GUARDS` evidence pointer, but
+    it scans a single slice, so every other `#:` block in a file of this size was
+    unscanned — and one of them carried the same defect. Measured at the
+    `#10200` review, cycle 12: the `MAP_WRITERS` block justified the census's
+    THIRD write form with a bare line number for `cache_projection`, which at
+    that head is `if section is None:` in the row-matching loop, ~800 lines from
+    the `{idx:$idx}` template the sentence quotes (`relation_statement`'s own
+    `MERGE`); two diagnostic messages repeated the same number, so a lane
+    auditing whether the `idx` row is still realised in code was sent to a
+    branch that has nothing to do with it and could only conclude the record was
+    stale — the `#9397` + `#10149` defect class, in the artifact that closes it.
+    *(The number itself is not restated here: a leg whose docstring carried it
+    would fail its own file-wide half, which is why the pre-fix spelling below
+    is assembled from two literals.)*
+
+    Two halves, because the record carried the number in two kinds of place:
+    every COMMENT in this module must cite by symbol — not only the `#:` blocks
+    leg 37 reads — and the one pointer the third row leans on (`cache_projection`)
+    may carry no line number anywhere in the file at all, which is the half that
+    reaches the assertion messages (where two of the three stale pointers lived)
+    and the docstrings.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+
+    #: The `MAP_WRITERS` justification block in its PRE-FIX shape — the only
+    #: honest way to prove the scan below can red at all.
+    probe = (
+        "#: them ALSO writes a name in the INLINE pattern-map form\n"
+        "#: (`cache_projection.relation_statement` stamps `{idx:$idx}`,\n"
+        f"#: {_CACHE_PROJECTION_PRE_FIX_POINTER}), and that `idx` is read by the\n"
+        "#: census's inline rule\n"
+    )
+    assert _BARE_LINE_CITATION.findall(probe) == [
+        _CACHE_PROJECTION_PRE_FIX_POINTER
+    ], (
+        "the citation rule no longer matches the pre-fix spelling "
+        f"{_CACHE_PROJECTION_PRE_FIX_POINTER!r}, so it cannot red on a "
+        "re-introduction"
+    )
+    probed = _comment_lines(probe)
+    assert [line for line, _text in probed] == [1, 2, 3, 4], (
+        "the comment scan does not see the pre-fix block's `#:` lines, so it "
+        f"would pass without measuring them: {probed}"
+    )
+    assert _BARE_LINE_CITATION.findall(probed[2][1]) == [
+        _CACHE_PROJECTION_PRE_FIX_POINTER
+    ], (
+        "the comment scan does not hand its lines to the citation matcher — the "
+        f"pre-fix citation sits on line 3 and it saw {probed[2][1]!r}"
+    )
+
+    record = _comment_lines(source)
+    assert any("This map is not bookkeeping" in text for _line, text in record), (
+        "the comment scan did not find this file's `DIRECT_EDGE_CREATED_ATTR_GUARDS` "
+        "evidence block, so it is measuring nothing — re-derive it against the "
+        "file's comment shape before trusting it"
+    )
+    numbered = [
+        (line, found)
+        for line, text in record
+        for found in _BARE_LINE_CITATION.findall(text)
+    ]
+    assert not numbered, (
+        "this module's COMMENTS cite line numbers as if they were current: "
+        f"{numbered}. Name the SYMBOL instead — this file's own rule is *\"the "
+        "SYMBOL is authoritative and no line number is asserted\"* (leg 6 "
+        "enforces it on the documents, leg 37 on the producer-evidence block), "
+        "and a number in the record is what a lane audits against the code when "
+        "the two disagree"
+    )
+
+    pointer = re.compile(r"`cache_projection\.py:\d+`")
+    assert pointer.findall(probe), (
+        "the file-wide pointer rule does not match the pre-fix spelling "
+        f"{_CACHE_PROJECTION_PRE_FIX_POINTER!r}, so it cannot red on a "
+        "re-introduction"
+    )
+    everywhere = [
+        (source[: match.start()].count("\n") + 1, match.group(0))
+        for match in pointer.finditer(source)
+    ]
+    assert not everywhere, (
+        "the census's third write form has exactly one pointer — "
+        f"`cache_projection.relation_statement` — and a line number for it "
+        f"survives at {everywhere}. The number is what rotted here: it named a "
+        "row-matching branch ~800 lines from the `{idx:$idx}` template, in the "
+        "RECORD and in two assertion messages, so a lane following it reads the "
+        "row as stale. Name the symbol; the record may not carry the number at "
+        "all"
     )
