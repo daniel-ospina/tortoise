@@ -2452,8 +2452,8 @@ class TestARenderedCodeElementGetsAMonoFace:
        `font-family: Menlo, var(--mono)` is refused rather than credited through the
        trailing face the browser never applies. The accepted face is `Menlo` alone,
        because the sibling class measured `'SF Mono'` and `SFMono-Regular` as Times on
-       this repo's Chromium (`:1264-1273`) — crediting them re-blessed the Courier
-       defect on the one route the sibling guard cannot see.
+       this repo's Chromium (`TestMonospaceStackRendersAsAMonoFace`, above) — crediting
+       them re-blessed the Courier defect on the one route the sibling guard cannot see.
     3. **A rule that styles the element only in context.** `.art-body pre code` — and
        `pre.anything code` — says nothing about an inline `<code>` in a paragraph, so
        that pairing is skipped; everything else is the cascade.
@@ -2472,9 +2472,13 @@ class TestARenderedCodeElementGetsAMonoFace:
     `.art-body{--mono:Menlo} code{font-family:var(--mono)}` is therefore credited here,
     while a browser computes the guaranteed-invalid value for a `code` outside
     `.art-body`, invalidates the whole declaration, and renders the inherited family.
-    Latent, not live — all nine subjects define `--mono` in `:root` (`404.html:17`,
-    `faq.html:24`, … `_lib.ts:1098`) — and keying `defined` by declaring selector would
-    mean modelling which ancestors an element has, i.e. the CSS parse this guard
+    Latent, not live — eight of the nine subjects define `--mono` in `:root`
+    (`404.html:17`, `faq.html:24`, … `_lib.ts:1098`) and the ninth,
+    `website/apps/dashboard/public/404.html`, resolves no `var()` at all: its `code{}`
+    rule names `ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace` directly
+    (`:41-42`), so there is no token for this limit to mis-resolve. Eight, not nine, at
+    this head (#10254 review, round 11). And keying `defined` by declaring selector
+    would mean modelling which ancestors an element has, i.e. the CSS parse this guard
     deliberately does not do. Pinned by
     `test_a_scoped_token_is_credited_and_that_is_a_documented_limit`, so closing it is a
     deliberate edit and never a silent change (#10254 review, round 9).
@@ -2522,6 +2526,10 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: a font-family-only scan, the lesson the sibling class already learned
     FAMILY = re.compile(r"(?:font-family|font)\s*:\s*([^;}]*)", re.IGNORECASE)
     VAR_DEF = re.compile(r"(--[\w-]+)\s*:\s*([^;}]*)")
+    #: the tokens a family VALUE asks for — the population the scoped-token limit below
+    #: applies to. Deliberately not `--mono`-only: the guard credits `var(--anything)`,
+    #: so `--code-font` declared on a scoped rule is the same hole under another name.
+    VAR_REF = re.compile(r"var\(\s*(--[\w-]+)", re.IGNORECASE)
     #: the selector's LAST compound must be the element itself — `.code{}` is the big
     #: "404" glyph, and `.art-body pre{font-family:inherit}` inherits rather than sets.
     #: The element may carry a class, id, attribute or pseudo — `code.inline{…}` styles
@@ -2533,8 +2541,9 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: same reason, and accepting the keyword let `var(--mono, monospace)` pass with
     #: `--mono` undefined or set to a serif.
     #: `Menlo` is the ONLY name here, and that is measured rather than assumed: the
-    #: sibling class records CDP `CSS.getPlatformFontsForNode` on this repo's Chromium
-    #: (`:1264-1273`) that `'SF Mono'` → Times and `SFMono-Regular` → Times while
+    #: sibling class (`TestMonospaceStackRendersAsAMonoFace`, above) records CDP
+    #: `CSS.getPlatformFontsForNode` on this repo's Chromium that `'SF Mono'` → Times
+    #: and `SFMono-Regular` → Times while
     #: `Menlo` → Menlo, and #6870's availability probe records `'SF Mono'` as not
     #: exposed to web content. Crediting those two names made this guard GREEN over
     #: `font-family: var(--mono, 'SF Mono', monospace)` — Courier-class, the exact
@@ -2892,7 +2901,8 @@ class TestARenderedCodeElementGetsAMonoFace:
             ("bare `monospace` IS Courier on macOS Chrome — not a mono face here",
              "code{font-family:var(--mono, monospace)}", False),
             # `'SF Mono'` and `SFMono-Regular` are measured as Times on macOS Chrome in
-            # this very file (`:1264-1273`, CDP on this repo's Chromium) and #6870
+            # this very file (`TestMonospaceStackRendersAsAMonoFace`, CDP on this repo's
+            # Chromium) and #6870
             # records `'SF Mono'` as not exposed to web content. This route — a mono
             # name in a `var()` fallback — is the one the sibling declaration guard
             # cannot see, because it skips values containing `var(--mono`.
@@ -2914,7 +2924,8 @@ class TestARenderedCodeElementGetsAMonoFace:
             ("a serif generic reached before the mono face",
              "code{font-family:serif, Menlo}", False),
             # …and the other direction, so the ordered rule cannot false-red what
-            # ships: `ui-monospace` is a generic Chrome DROPS (`:1264-1273`), so the
+            # ships: `ui-monospace` is a generic Chrome DROPS
+            # (`TestMonospaceStackRendersAsAMonoFace`), so the
             # real stack — which carries it first — still resolves to `Menlo`.
             ("the shipped stack: `ui-monospace` first is not a Courier attractor",
              "code{font-family:ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace}",
@@ -2944,10 +2955,14 @@ class TestARenderedCodeElementGetsAMonoFace:
         This is the opposite direction from the two residuals the class docstring
         states, which both fail RED. It stays a documented LIMIT because keying
         `defined` by declaring selector means modelling which ancestors an element has;
-        and it is latent today — all nine subjects define `--mono` in `:root`. The
-        assertion is written to RED the moment the limit is closed, so closing it is a
-        deliberate edit and this probe is deleted with the docstring bullet, rather than
-        the shape being re-derived as a finding for the fourth time.
+        and it is latent today — eight of the nine subjects define `--mono` in `:root`,
+        and the ninth (`website/apps/dashboard/public/404.html`) names the family list
+        directly in its `code{}` rule (`:41-42`) and resolves no `var()` at all, so this
+        limit has no token there to mis-resolve. Eight, not nine, at this head (#10254
+        review, round 11). The assertion is written to RED the moment the limit is
+        closed, so closing it is a deliberate edit and this probe is deleted with the
+        docstring bullet, rather than the shape being re-derived as a finding for the
+        fourth time.
         """
         probes = [
             # (why, css) — each is GREEN here; the CSS computes no mono face for `code`
@@ -2962,6 +2977,109 @@ class TestARenderedCodeElementGetsAMonoFace:
                 f"REFUSES a token whose declaring selector it cannot prove reaches the "
                 f"element. That is the fail-safe direction, so update the "
                 f"`WHAT IT DOES NOT PIN` bullet and delete this probe.\n  css: {css}")
+
+    #: selectors that reach EVERY element, so a token declared on one is not scoped:
+    #: `:root` is the html element (all elements inherit from it), `html` is itself, and
+    #: `*` matches everything. Only the third has real cascade caveats, and none of them
+    #: can leave an element without the token, which is what this ratchet asks.
+    DOCUMENT_WIDE_SELECTORS = {":root", "html", "*"}
+
+    @classmethod
+    def _scoped_family_tokens(cls, css):
+        """Tokens a family value asks for that are declared only on a SCOPED rule.
+
+        The documented fail-GREEN limit is `VAR_DEF` collecting a custom property from
+        any rule whatever its selector. It is a limit and not a bug because a token on
+        `:root` reaches every element (custom properties inherit, css-variables-1; MDN
+        `--*`: "custom properties are scoped to the element(s) they are declared on",
+        `Inherited: yes`), so the flat map and a browser agree on every page in this
+        tree. This helper is the mechanical form of that sentence: it returns
+        `[(token, declaring_selectors)]` for every token a `font-family`/`font` value
+        references whose declaring rules are NOT document-wide. Non-empty = the limit is
+        LIVE on that sheet, i.e. the class docstring's "latent, not live" no longer
+        holds and the flat map can credit a face the element never computes.
+        """
+        declared = {}
+        for selectors, body in cls.RULE.findall(css):
+            for name, _value in cls.VAR_DEF.findall(body):
+                declared.setdefault(name.strip().lower(), set()).update(
+                    s.strip() for s in selectors.split(",") if s.strip())
+        referenced = set()
+        for _selectors, body in cls.RULE.findall(css):
+            for family in cls.FAMILY.findall(body):
+                referenced.update(t.lower() for t in cls.VAR_REF.findall(family))
+        return [
+            (token, sorted(declared[token])) for token in sorted(referenced)
+            # a token declared nowhere is a different defect (the guard refuses it, fail
+            # closed), and it is not this one: there is no scope to be wrong about.
+            if token in declared and not declared[token] <= cls.DOCUMENT_WIDE_SELECTORS
+        ]
+
+    def test_the_scoped_token_limit_is_latent_on_every_page_it_decides_on(self):
+        """Every `var()` family on a page it DECIDES on resolves a document-wide token.
+
+        The class docstring justifies leaving the declaring-scope limit unmodelled with a
+        MEASURED claim — "latent, not live" — and that claim was wrong in the tree twice
+        while it was hand-written prose: round 10 and round 11 both re-measured "all nine
+        subjects define `--mono` in `:root`" as EIGHT of nine
+        (`website/apps/dashboard/public/404.html` names the family list directly and
+        resolves no `var()`, so the limit cannot be tripped there). A count in a comment
+        is not a guard; this is. It REDs the moment a page hands an element a family
+        through a token declared on a scoped selector, which is the day the limit stops
+        being latent — and the repair is then either moving the token to `:root` or
+        stating the limit as LIVE.
+        """
+        repo = Path(__file__).resolve().parent.parent
+        offenders, checked = [], 0
+        for path in self._sources(repo):
+            text = path.read_text(errors="replace")
+            if not self.RENDERS_CODE.search(text):
+                continue
+            css = "\n".join(self.STYLE.findall(
+                self.COMMENT.sub(" ", self.INERT.sub(" ", text))))
+            if not css.strip():
+                continue
+            checked += 1
+            for token, scopes in self._scoped_family_tokens(css):
+                offenders.append(
+                    f"{path.relative_to(repo)}: {token} declared on "
+                    f"{', '.join(scopes)} — a family value asks for it")
+        assert checked >= self.MIN_PAGES, (
+            f"only {checked} self-contained page(s) found under "
+            f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
+        assert not offenders, (
+            "the documented declaring-scope limit is no longer LATENT — these pages "
+            "feed a `code`/`pre` family through a token declared only on a scoped rule, "
+            "so the guard credits a face the browser never computes for the element "
+            "(custom properties inherit: a token on `.art-body` does not reach a "
+            "`<code>` outside it, so the reference is the guaranteed-invalid value and "
+            "the whole declaration is invalid at computed-value time):\n  "
+            + "\n  ".join(offenders)
+            + "\nMove the token to `:root` (or another document-wide selector), or "
+              "state the limit as LIVE in the class docstring and extend "
+              "`test_a_scoped_token_is_credited_and_that_is_a_documented_limit` — "
+              "closing it silently is the one thing this file forbids.")
+
+    def test_the_scoped_token_predicate_separates_the_three_shapes(self):
+        """Non-vacuity for the ratchet above: it must RED the scoped shape and only it.
+
+        Without this, `_scoped_family_tokens` returning `[]` on the real tree is
+        indistinguishable from a predicate that returns `[]` always — the failure mode
+        the sibling class records for a guard whose subject went missing.
+        """
+        assert self._scoped_family_tokens(
+            ":root{--mono:Menlo} code{font-family:var(--mono)}") == []
+        assert self._scoped_family_tokens(
+            "code{font-family:Menlo}") == []          # the ninth subject's shape
+        scoped = self._scoped_family_tokens(
+            ".art-body{--mono:Menlo} code{font-family:var(--mono)}")
+        assert scoped == [("--mono", [".art-body"])], (
+            "the ratchet above no longer recognises the documented limit's own shape — "
+            f"its clean verdict on the real tree means nothing. Got {scoped!r}")
+        # and the `var()`-under-another-name route, which the flat map covers equally
+        assert self._scoped_family_tokens(
+            "main{--code-font:Menlo} code{font-family:var(--code-font)}"
+        ) == [("--code-font", ["main"])]
 
     def test_a_nested_var_is_resolved_the_way_the_browser_resolves_it(self):
         """A `var()` inside a fallback, and an unresolvable reference in a list (#10254 r6).
