@@ -28,6 +28,17 @@
 #   runner's OWN host label (`labels_for`), so it strips `ubuntu-latest` and keeps `self-hosted-x64`
 #   — never stamping `self-hosted-arm64`. The label stays gate-following; see `--repair-labels`.
 #
+# OVERRIDES: the rule above — that an x64 runner carrying `ubuntu-latest` is a DEFECT to be
+#   stripped, and `--repair-labels` implementing it by PUTting exactly the COMPUTED set (a
+#   REPLACE) — assumed the ARM64 pool carries the fallback label. It does not: the five ARM64
+#   runners were STRIPPED of `ubuntu-latest` on the evidence in open owner-decision issue #6897
+#   (ARM boxes won `ubuntu-latest` jobs and died in "Set up job" on a codeload timeout, turning one
+#   shard per run into a FALSE RED). So NOTHING answers `ubuntu-latest` today, while the REQUIRED
+#   aggregate `python-ci-gate` still asks for it — and a repair that REPLACES the set strips the
+#   label from the one pool left. A repair therefore UNIONS the runner's current labels with the
+#   computed set: it can ADD `ubuntu-24.04` or the arch marker, and it can never REMOVE
+#   `ubuntu-latest`. ⛔ Restoring the label on ARM is NOT part of this — #6897 measured that wrong.
+#
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
 #   `self-hosted-arm64`, and never with `ubuntu-<version>`. Claiming another arch's label
@@ -40,8 +51,8 @@
 # USAGE
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # re-sync labels to the gate's state
-#   tools/install-ci-runner-x64.sh --status                   # remote view + local units
+#   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (never remove)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
@@ -54,10 +65,11 @@
 #   the same exit code as "the install broke".
 #     0  ok
 #     1  usage — bad flag, bad --count, bad sizing override. Nothing was attempted.
-#     2  GUARD refused — headroom / arch / undecidable fallback / a `--uninstall` target that is
-#        not provably a runner install. Nothing was downloaded, registered or removed; re-run
-#        with a smaller --count, on an x86_64 host, with an explicit --fallback, or with the
-#        right CI_RUNNER_BASE.
+#     2  GUARD refused — headroom / arch / undecidable fallback / an unreadable current label set
+#        (a repair refuses rather than PUT a set that could REPLACE labels the runner carries) / an
+#        `--uninstall` target that is not provably a runner install. Nothing was downloaded,
+#        registered or removed; re-run with a smaller --count, on an x86_64 host, with an explicit
+#        --fallback, or with the right CI_RUNNER_BASE.
 #     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh (a
 #        failed systemd unit removal, or a failed `config.sh remove`, included — that target is then
 #        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
@@ -71,6 +83,10 @@ set -uo pipefail
 usage() { awk '/^# USAGE/{p=1} /^set -uo pipefail$/{p=0} p' "$0" | sed 's/^# \{0,1\}//'; }
 
 REPO="${CI_RUNNER_REPO:-daniel-ospina/tortoise}"
+# The checkout this script lives in. `--status`'s label-coverage reads `.github/workflows` from
+# HERE, never from the caller's cwd — an operator runs this from anywhere.
+SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+REPO_ROOT_DIR="$(cd "$SELF_DIR/.." 2>/dev/null && pwd)"
 BASE="${CI_RUNNER_BASE:-/opt/gh-runner-x64}"
 NAME_PREFIX="${CI_RUNNER_NAME_PREFIX:-pi-runner-x64}"
 # Where `svc.sh install` writes the unit, and the ONE path this script stats to decide whether a
@@ -218,12 +234,98 @@ resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
   esac
 }
 
+# ── label algebra: the UNION a repair PUTs ─────────────────────────────────────
+# Host-derived labels GitHub OWNS. They come back in every runner's label list, they cannot be set
+# by hand (HTTP 422 `Cannot set labels that duplicate existing read-only labels`, measured
+# 2026-10-27), and they are not part of the custom set this script manages — so they are filtered
+# out of the PUT body. Dropping them is not a loss: GitHub re-derives them from the host.
+# ⛔ EXACT SPELLINGS ONLY, deliberately. Matching these case-insensitively (with `tr`) would also
+# swallow a CUSTOM label an operator created — e.g. a `linux` or `x64` of their own — and filtering
+# a label out of the PUT body IS a removal, which is the one thing this block must never do.
+# GitHub returns the reserved spellings below and refuses to have them re-set; nothing else is
+# touched.
+is_host_label() {
+  case "$1" in
+    self-hosted|Linux|macOS|Windows|X64|ARM64|ARM) return 0 ;;
+  esac
+  return 1
+}
+# Is $2 already in the comma-separated list $1? (`case`, not an array: bash 3.2 has no assoc arrays.)
+list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
+
+# ── label coverage: which `runs-on:` labels does the pool actually answer? ────
+# A `runs-on:` label that NO runner answers does not fail — it does not run. GitHub leaves the run
+# `pending` with ZERO materialised jobs, so there is no red check and no green one: the required
+# aggregate simply never appears and every PR is blocked with nothing to look at (measured
+# 2026-10-27 on `python-ci-gate`, the repo's ONLY required condition: runs 40898791192 and
+# 40901844458, status `pending`, jobs=0, the check absent from every PR head). This block exists so
+# that state is READ instead of inferred from a silent queue.
+#
+# ⚠️ A ZERO IS NOT ALWAYS A FAULT — a hosted label (`ubuntu-latest`, `ubuntu-24.04`) is normally
+# served by GitHub-hosted capacity, so 0 self-hosted answers is the healthy case on a hosted day.
+# It is still printed loudly, because when hosted capacity does not materialise the failure is
+# completely silent, and the operator's next question is exactly "who answers this label?".
+workflow_labels() { # the distinct `runs-on:` scalars the workflows use, one per line
+  local wf="$REPO_ROOT_DIR/.github/workflows"
+  [ -d "$wf" ] || return 1
+  grep -hE '^[[:space:]]*runs-on:' "$wf"/*.yml 2>/dev/null \
+    | sed -E 's/^[[:space:]]*runs-on:[[:space:]]*//; s/[[:space:]]+#.*$//' \
+    | tr -d '"' | tr -d "'" | tr -d ' ' \
+    | tr ',' '\n' | sed -E 's/^\[//; s/\]$//' \
+    | sed '/^$/d' | sort -u
+}
+
+label_coverage() { # $1 = the runner rows (name<TAB>status<TAB>busy=…<TAB>label,label,…)
+  local rows="$1" labels label pair on off n=0 zero="" wf="$REPO_ROOT_DIR/.github/workflows" unreadable
+  if ! labels="$(workflow_labels)" || [ -z "$labels" ]; then
+    say "label-coverage: cannot read a \`runs-on:\` label from $wf/*.yml — SKIPPED (this makes NO claim about any label)"
+    return 0
+  fi
+  # A `runs-on:` written as a YAML block list (`runs-on:` then `- a` lines) is not a scalar this
+  # reader can see. Say so instead of counting a surface it did not read — an unread label that
+  # silently reads as healthy is the failure this whole block exists to expose.
+  unreadable="$(grep -chE '^[[:space:]]*runs-on:[[:space:]]*(#.*)?$' "$wf"/*.yml 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')"
+  say "label-coverage — answering ONLINE self-hosted runners, per \`runs-on:\` label the workflows use:"
+  for label in $labels; do
+    # a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run time.
+    case "$label" in *'${{'*) continue ;; esac
+    n=$((n + 1))
+    pair="$(printf '%s\n' "$rows" | awk -F'\t' -v want="$label" '
+      NF >= 4 { k = split($4, a, ","); for (i = 1; i <= k; i++) if (a[i] == want) { if ($2 == "online") on++; else off++ } }
+      END { printf "%d %d", on + 0, off + 0 }')"
+    on="${pair%% *}"; off="${pair##* }"
+    say "  $label → $on online, $off offline"
+    if [ "$on" -eq 0 ]; then
+      zero="${zero:+$zero }$label"
+      say "     ⚠️  NO RUNNER ANSWERS '$label'. A job pinned to it then depends entirely on GitHub-hosted capacity — and when that does not materialise the run sits \`pending\` with ZERO jobs: no red, no green, the required check simply never appears (measured: python-ci-gate, runs 40898791192 / 40901844458)."
+    fi
+  done
+  if [ "$n" -eq 0 ]; then
+    # ⛔ AN EMPTY SURFACE IS NOT A GREEN ONE: when no label could be counted there is nothing to
+    # have answered, so the block says it read nothing rather than "every one is covered".
+    say "label-coverage: read NO \`runs-on:\` label — this makes NO claim about coverage"
+  elif [ -n "$zero" ]; then
+    say "label-coverage: $n label(s) read — NO online self-hosted answer for: $zero"
+  else
+    say "label-coverage: $n label(s) read — every one has an online self-hosted answer"
+  fi
+  if [ "${unreadable:-0}" -gt 0 ]; then
+    say "label-coverage: ${unreadable} \`runs-on:\` key(s) use the YAML BLOCK-LIST form, which this reader does not parse — they are NOT counted above"
+  fi
+}
+
+# The runner-row selector `--status` prints, and the label-coverage block counts from: name, status,
+# busy flag, and the label list. It is a VARIABLE on purpose — bash 3.2 cannot parse this jq program
+# written inline inside a `"$( … )"` capture (`unexpected EOF while looking for matching "`,
+# measured on 3.2.57); through a variable it is plain nested quoting and parses.
+RUNNER_ROWS_JQ='.runners[] | "\(.name)\t\(.status)\tbusy=\(.busy)\t\([.labels[].name]|join(","))"'
+
 # ── status ─────────────────────────────────────────────────────────────────────
 if [ "$MODE" = status ]; then
   need gh
-  gh api "repos/$REPO/actions/runners?per_page=100" \
-    --jq '.runners[] | "\(.name)\t\(.status)\tbusy=\(.busy)\t\([.labels[].name]|join(","))"' \
-    || exit 3
+  runners="$(gh api "repos/$REPO/actions/runners?per_page=100" --jq "$RUNNER_ROWS_JQ")" || exit 3
+  if [ -n "$runners" ]; then printf '%s\n' "$runners"; fi
+  label_coverage "$runners"
   for i in $(seq 1 "$COUNT"); do
     d="$(runner_dir "$i")"
     [ -f "$d/.runner" ] || continue
@@ -236,8 +338,20 @@ if [ "$MODE" = status ]; then
 fi
 
 # ── repair: re-apply the gate-following label set to already-registered runners ──
-# This is the documented repair when the pre-#2327 gate has relabelled these runners: it puts
-# back the arch marker and syncs the fallback label to the gate's state, without re-registering.
+# ⛔ A REPAIR UNIONS; IT CAN NEVER REMOVE A LABEL A WORKFLOW NEEDS. This block used to PUT exactly
+# the set `resolve_labels` computed, so every repair silently REPLACED the runner's labels. With
+# the ARM64 pool stripped of `ubuntu-latest` (#6897) `--fallback auto` now computes
+# `self-hosted-x64` alone — so a repair removed `ubuntu-latest` from the x64 pool, which is the
+# label the REQUIRED `python-ci-gate` aggregate is pinned to. The run then sat `pending` with ZERO
+# materialised jobs (no red, no green, every PR blocked), and a label restored by hand did not
+# survive the next repair (measured 2026-10-27: gone within ~25 minutes, twice).
+#
+# So: read the runner's CURRENT labels, union the computed set INTO them, and PUT THAT. The only
+# labels not sent are the host-derived ones GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`,
+# `X64`/`ARM64`/`ARM`) — the API refuses those anyway (HTTP 422 `Cannot set labels that duplicate existing
+# read-only labels`) — and they are PRINTED, never silently dropped. The before/after sets are
+# printed BEFORE the PUT, so a removal is visible in the output rather than inferred from a queue
+# that never moves.
 if [ "$MODE" = repair ]; then
   need gh
   resolve_labels
@@ -246,15 +360,50 @@ if [ "$MODE" = repair ]; then
     d="$(runner_dir "$i")"
     [ -f "$d/.runner" ] || { say "skip: $d is not configured"; continue; }
     agent="$(sed -n 's/.*"agentName": "\([^"]*\)".*/\1/p' "$d/.runner")"
-    id="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|.id" | head -1)"
+    # ONE read, so the id and the label set cannot disagree: `id<TAB>label,label,…`.
+    detail="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|\"\(.id)\t\([.labels[].name]|join(\",\"))\"" | head -1)"
+    id="$(printf '%s' "$detail" | cut -f1)"
+    current="$(printf '%s' "$detail" | cut -f2)"
     # An operation that was ATTEMPTED and failed is 3, never 1: the EXIT contract above reserves 1
     # for "usage — nothing was attempted", and a caller keying on it would read a failed relabel as a
     # bad flag (measured: `--repair-labels` against a `gh` that returns no id exited 1).
     case "$id" in ''|*[!0-9]*) say "WARNING: $agent not found in the repo's runners"; rc=3; continue ;; esac
-    body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$LABELS" | sed 's/,/","/g')")"
+    # ⛔ AN UNREADABLE LABEL SET IS A REFUSAL, NEVER "the computed set, then". Falling back to the
+    # computed set IS the replace this block exists to stop: on a failed read it would drop
+    # `ubuntu-latest` by the same silent route, with only the transport error to show for it.
+    if [ -z "$current" ]; then
+      die "cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds." 2
+    fi
+    after=""; host_skipped=""
+    for l in $(printf '%s' "$current" | tr ',' ' '); do
+      if is_host_label "$l"; then host_skipped="${host_skipped:+$host_skipped,}$l"; continue; fi
+      list_has "$after" "$l" || after="${after:+$after,}$l"
+    done
+    for l in $(printf '%s' "$LABELS" | tr ',' ' '); do
+      list_has "$after" "$l" || after="${after:+$after,}$l"
+    done
+    # DERIVED, never asserted: what the PUT would REMOVE. A union cannot remove anything, so a
+    # non-empty value here means this block regressed — printed BEFORE the PUT, which is the whole
+    # point (a removal must be visible in the output, not inferred from a job that never appears).
+    removed=""
+    for l in $(printf '%s' "$current" | tr ',' ' '); do
+      is_host_label "$l" && continue
+      list_has "$after" "$l" || removed="${removed:+$removed,}$l"
+    done
+    # A label outside GitHub's own charset would build a malformed JSON body; refuse rather than PUT
+    # one — and never skip it, because skipping a CURRENT label IS the removal this block forbids.
+    for l in $(printf '%s' "$after" | tr ',' ' '); do
+      case "$l" in *[!A-Za-z0-9._-]*) die "label '$l' on $agent is not a legal runner label (alphanumeric, '.', '_', '-') — refusing to build a request body from it. Nothing was changed for this runner." 2 ;; esac
+    done
+    [ -n "$after" ] || die "the union of $agent's current labels and the computed set ($LABELS) is EMPTY — refusing to PUT an empty label set, which would strip the runner. Nothing was changed for this runner." 2
+    say "labels for $agent (id $id):"
+    say "  before=[$current]"
+    say "  after =[$after]"
+    say "  host-owned, not sent=[$host_skipped] removed=[$removed]"
+    body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$after" | sed 's/,/","/g')")"
     if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
     if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then
-      say "relabelled $agent → $LABELS"
+      say "relabelled $agent → $after"
     else
       say "WARNING: relabel FAILED for $agent (id $id)"; rc=3
     fi

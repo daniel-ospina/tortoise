@@ -56,12 +56,25 @@ WHAT IS BEING PINNED
   9. The arch refusal is an **INSTALL** guard, in the code and in the runbook: `--uninstall` (like
      `--status`, `--repair-labels` and `--print-labels`) runs on a host of either architecture, so
      a runner can be decommissioned from the box it was installed on.
+  10. ⛔ **A REPAIR UNIONS; IT CAN NEVER REMOVE A LABEL A WORKFLOW NEEDS.** `--repair-labels` used
+     to PUT exactly the set `resolve_labels` computed — a REPLACE — so every extra label on a
+     runner was silently dropped. With the ARM64 pool stripped of `ubuntu-latest` (#6897) `auto`
+     computes `self-hosted-x64` alone, so the repair removed the label the REQUIRED
+     `python-ci-gate` aggregate is pinned to: the run sat `pending` with ZERO materialised jobs —
+     no red, no green, every PR blocked with nothing to look at (measured 2026-10-27: runs
+     40898791192 and 40901844458, `jobs=0`; a hand-restored label was gone within ~25 minutes,
+     twice). The repair now reads the runner's CURRENT labels and PUTs `current ∪ computed`, so it
+     can ADD a label and can never REMOVE one; the before/after sets and the derived removal list
+     are printed BEFORE the PUT. `--status` answers "who answers this `runs-on:` label" for the same
+     reason: the failure it reports produces no check to look at.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -174,20 +187,61 @@ def test_count_is_refused_when_it_would_starve_the_agent_lanes(tmp_path: Path):
 
 
 # ── 3. the fallback read (`auto`), against a stub gh ────────────────────────────────────────
-def _stub_gh(tmp_path: Path, stdout: str, rc: int = 0) -> Path:
-    """A `gh` that answers the runner-list query and nothing else, logging every call."""
+def _stub_gh(
+    tmp_path: Path,
+    stdout: str,
+    rc: int = 0,
+    *,
+    labels: str = "self-hosted,Linux,X64",
+    rows: str = "",
+) -> Path:
+    """A `gh` that answers all three reads the installer makes, and logs every call.
+
+    The three answers are dispatched on the jq expression, the only thing that distinguishes them:
+      * `busy=` → the `--status` runner rows (`rows`);
+      * `select(.name==` → the repair's `id<TAB>label,label,…` detail line (`labels`);
+      * anything else → the ARM64 pool's fallback count (`stdout`, the existing argument).
+    A `-X PUT` also records the request BODY it was fed on stdin, so a test can assert the exact
+    label set a repair would write — not a message about it. `labels` defaults to the read-only trio
+    GitHub itself returns for any runner, which is also what makes the union's host-label filter
+    observable rather than exercised on an impossible empty list.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     log = tmp_path / "gh-calls.log"
     gh = bin_dir / "gh"
+    detail = f"7\t{labels}"
     gh.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$*" >> {log}\n'
-        f"cat <<'EOF'\n{stdout}\nEOF\n"
+        "case \"$*\" in\n"
+        f"  *'-X PUT'*) printf 'PUT %s\\n' \"$(cat)\" >> {log} ;;\n"
+        "esac\n"
+        "case \"$*\" in\n"
+        f"  *'busy='*) printf '%s\\n' {shlex.quote(rows)} ;;\n"
+        f"  *'select(.name=='*) printf '%s\\n' {shlex.quote(detail)} ;;\n"
+        f"  *) printf '%s\\n' {shlex.quote(stdout)} ;;\n"
+        "esac\n"
         f"exit {rc}\n"
     )
     gh.chmod(0o755)
     return bin_dir
+
+
+def _put_body(stub_dir: Path) -> list[str]:
+    """The label list of the LAST `-X PUT …/labels` the stub `gh` was asked to make."""
+    log = (stub_dir / "gh-calls.log").read_text()
+    puts = re.findall(r"PUT (\{.*\})", log)
+    assert puts, f"no label PUT was attempted; the gh calls were:\n{log}"
+    return json.loads(puts[-1])["labels"]
+
+
+def _repair_runner(tmp_path: Path, *, pool: str, labels: str) -> tuple[Path, dict[str, str]]:
+    """An already-configured runner 1 whose CURRENT labels are `labels`, plus the stub env."""
+    stub = _stub_gh(tmp_path / "gh", pool, labels=labels)
+    (tmp_path / ".runner").write_text('{"agentName": "pi-runner-x64-1"}\n')
+    env = _env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
+    return tmp_path / "gh", env
 
 
 def test_auto_reads_the_pools_state_and_refuses_when_it_cannot(tmp_path: Path):
@@ -255,6 +309,170 @@ def test_repair_dry_run_plans_the_body_the_real_run_puts(tmp_path: Path):
     assert "self-hosted-x64,ubuntu-latest" in done.stderr, (
         f"the real run sends that same set: {done.stderr}"
     )
+
+
+# ── 3b. a repair UNIONS — it can never remove a label a workflow needs ───────────────────────
+def test_repair_on_a_runner_that_already_carries_the_label_keeps_it(tmp_path: Path):
+    """Case 1: a runner that already carries `ubuntu-latest` still carries it after a repair — along
+    with every other custom label it carries.
+
+    The pre-fix repair PUT exactly the computed set, so an already-correct runner was re-stamped
+    with whatever the resolver happened to compute and any label it did not compute was dropped.
+    `ubuntu-24.04` below is that witness: it is a label an operator attached on purpose (the
+    version-pinned hosted pin the slow legs need) and no resolver computes it — under a REPLACE it
+    disappears from the body, which is the whole defect in one line.
+    """
+    stub, env = _repair_runner(
+        tmp_path,
+        pool="1",
+        labels="self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04",
+    )
+
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    assert "ENGAGED" in r.stderr, r.stderr          # here the computed set DOES include the label
+    put = _put_body(stub)
+    assert "ubuntu-latest" in put, put
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "ubuntu-24.04"}, put
+    # the host-owned trio is read back on every runner and cannot be PUT (HTTP 422), so it is
+    # filtered out of the body — and PRINTED, not silently dropped
+    assert "host-owned, not sent=[self-hosted,Linux,X64]" in r.stderr, r.stderr
+    assert "removed=[]" in r.stderr, f"a union must remove nothing: {r.stderr}"
+
+
+def test_a_computed_set_that_omits_the_label_cannot_remove_it(tmp_path: Path):
+    """Case 2 (the negative case, and the one that blocked every PR).
+
+    The computed set OMITS `ubuntu-latest` (the ARM64 pool does not carry it — it was stripped on
+    the evidence in #6897 — so `--fallback auto` resolves to `self-hosted-x64` alone) and the label
+    on the runner STILL survives, unchanged, because the repair unions instead of replacing.
+
+    This is exactly the measured stall: the repair stripped the label from all 7 x64 runners, the
+    REQUIRED `python-ci-gate` aggregate (`runs-on: ubuntu-latest`) never got a runner, and the run
+    sat `pending` with ZERO materialised jobs — no red and no green on any PR head (runs
+    40898791192 / 40901844458). A label restored by hand through the API was gone within ~25
+    minutes, twice, because the next repair replaced the set again.
+
+    Non-vacuity: restore the replace (`body` built from `$LABELS`, or skip the `current` loop) and
+    the first assertion reds — `ubuntu-latest` is absent from the PUT.
+    """
+    stub, env = _repair_runner(
+        tmp_path,
+        pool="0",
+        labels="self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04",
+    )
+
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    computed = re.search(r"labels=([^\s]+)", r.stderr)
+    assert computed and computed.group(1) == "self-hosted-x64", (
+        f"this case is only meaningful while the computed set OMITS the label: {r.stderr}"
+    )
+    put = _put_body(stub)
+    assert "ubuntu-latest" in put, f"a repair must not be able to remove the required gate's label: {put}"
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "ubuntu-24.04"}, put
+    assert "removed=[]" in r.stderr, r.stderr
+    # the before/after sets are printed BEFORE the PUT, so a removal is visible, never inferred
+    assert "before=[self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04]" in r.stderr, r.stderr
+    assert "after =[self-hosted-x64,ubuntu-latest,ubuntu-24.04]" in r.stderr, r.stderr
+    before = re.search(r"before=\[(.*?)\]", r.stderr).group(1).split(",")
+    after = re.search(r"after =\[(.*?)\]", r.stderr).group(1).split(",")
+    assert set(before) - {"self-hosted", "Linux", "X64"} <= set(after), (
+        f"nothing a runner carried may disappear: {before} → {after}"
+    )
+
+
+def test_an_unreadable_label_set_is_refused_never_replaced(tmp_path: Path):
+    """A failed label READ must not degrade into the old REPLACE.
+
+    The tempting fallback — "the read failed, use the computed set" — is the exact defect behind a
+    different door: it drops `ubuntu-latest` on a transport error, with only the error to show for
+    it. So the repair refuses (exit 2, nothing written) and never reaches the PUT.
+    """
+    stub, env = _repair_runner(tmp_path, pool="0", labels="")
+
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 2, f"an unreadable label set must be a GUARD refusal: {r.returncode} {r.stderr}"
+    assert "REFUSED" in r.stderr and "cannot read the current labels" in r.stderr, r.stderr
+    assert not re.search(r"PUT \{", (stub / "gh-calls.log").read_text()), "nothing may be written"
+
+
+# ── 3c. `--status` answers "who answers this runs-on: label" ─────────────────────────────────
+def test_status_counts_answering_runners_per_runs_on_label(tmp_path: Path):
+    """The stalled gate produced NO check to look at, so the queue has to be READ, not inferred.
+
+    `--status` counts, per `runs-on:` label the workflows actually use, how many ONLINE self-hosted
+    runners answer it — and says so loudly when the answer is zero, because that is the state in
+    which a job sits `pending` with zero materialised jobs while every PR waits.
+    """
+    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest"
+    stub = _stub_gh(tmp_path / "carrying", "0", rows=carrying)
+    env = _env(
+        tmp_path,
+        PATH=f"{stub}:{os.environ['PATH']}",
+        CI_RUNNER_UNIT_DIR=str(tmp_path / "units"),
+    )
+    r = _run("--status", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    assert re.search(r"^\s+ubuntu-latest → 1 online, 0 offline$", r.stderr, re.M), r.stderr
+    assert re.search(r"^\s+ubuntu-24\.04 → 0 online, 0 offline$", r.stderr, re.M), r.stderr
+    assert "NO RUNNER ANSWERS 'ubuntu-24.04'" in r.stderr, r.stderr
+    assert "NO RUNNER ANSWERS 'ubuntu-latest'" not in r.stderr, r.stderr
+
+    # …and with nothing carrying the gate's label, it is named — the measured stall, made visible
+    stripped = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64"
+    stub2 = _stub_gh(tmp_path / "stripped", "0", rows=stripped)
+    r2 = _run(
+        "--status",
+        "--count",
+        "1",
+        env=_env(tmp_path, PATH=f"{stub2}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    )
+    assert r2.returncode == 0, r2.stderr
+    assert "NO RUNNER ANSWERS 'ubuntu-latest'" in r2.stderr, r2.stderr
+    assert "NO online self-hosted answer for: ubuntu-24.04 ubuntu-latest" in r2.stderr, r2.stderr
+
+    # ⛔ THE COUNT IS AN EXACT LABEL MATCH, and this row is why: `ubuntu-latest-extra` is a
+    # DIFFERENT label, so a substring/prefix comparison would report `ubuntu-latest → 1` and declare
+    # the required gate covered by a runner that cannot answer it — a false green on the one surface
+    # whose whole job is to be accountable for silence.
+    lookalike = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest-extra"
+    stub3 = _stub_gh(tmp_path / "lookalike", "0", rows=lookalike)
+    r3 = _run(
+        "--status",
+        "--count",
+        "1",
+        env=_env(tmp_path, PATH=f"{stub3}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    )
+    assert r3.returncode == 0, r3.stderr
+    assert re.search(r"^\s+ubuntu-latest → 0 online, 0 offline$", r3.stderr, re.M), r3.stderr
+    assert "NO RUNNER ANSWERS 'ubuntu-latest'" in r3.stderr, r3.stderr
+
+
+def test_label_coverage_makes_no_claim_when_it_cannot_read_the_workflows(tmp_path: Path):
+    """⚠️ AN UNREAD SURFACE MUST NOT READ AS COVERED.
+
+    The coverage block derives its label list from `.github/workflows` in the checkout the SCRIPT
+    lives in. Run from a tree without them (a copied installer, a packaged deploy) it must say it
+    read nothing — a "every label has an answer" over an empty surface is the same false-clean this
+    block exists to remove, one level down. It must also still exit 0: this is a report, not a gate.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    copied = tools / "install-ci-runner-x64.sh"
+    copied.write_text(Path(INSTALLER).read_text())
+
+    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest"
+    stub = _stub_gh(tmp_path / "pool", "0", rows=carrying)
+    r = subprocess.run(
+        [BASH, str(copied), "--status", "--count", "1"],
+        capture_output=True,
+        text=True,
+        env=_env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "SKIPPED (this makes NO claim about any label)" in r.stderr, r.stderr
+    assert "every one has an online self-hosted answer" not in r.stderr, r.stderr
 
 
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────

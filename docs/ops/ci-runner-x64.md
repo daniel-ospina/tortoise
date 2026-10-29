@@ -143,17 +143,35 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:479` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:301` (arch refusal dies at `:306`) and `uninstall` `:354` ·
-  guards at `:301-350` (forks `:309`, disk `:329`, cpu/memory `:336`) · sha256 pin + registration
-  at `:490-500` (verify `:490`, token `:493`, one argv `:498-499`, `config.sh` `:500`) · systemd
-  install/start at `:510-512` · label resolution at `:177-219` (`fallback_engaged` `:181`,
-  `resolve_labels` `:192`) · `repair` `:241` · `--print-labels` `:274`.
-- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
+- `--count N` → `tools/install-ci-runner-x64.sh:628` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:450` (arch refusal dies at `:455`) and `uninstall` `:503` ·
+  guards at `:450-501` (forks `:458`, disk `:478`, cpu/memory `:485`) · sha256 pin + registration
+  at `:639-649` (verify `:639`, token `:642`, one argv `:647-648`, `config.sh` `:649`) · systemd
+  install/start at `:659-661` · label resolution at `:193-235` (`fallback_engaged` `:197`,
+  `resolve_labels` `:208`) · the union's label algebra at `:237-254` and the repair that uses it,
+  `repair` `:355-411` · the label-coverage block `:256-322` (`label_coverage` `:278`) and the
+  `--status` block that calls it `:323-337` · `--print-labels` `:423`.
+- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:161-173`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
+- **`--repair-labels` UNIONS — it can ADD a label and can never REMOVE one** (`:355-411`). It reads
+  the runner's CURRENT labels and PUTs `current ∪ computed`, because the old body was the computed
+  set alone, i.e. a REPLACE: with the ARM64 pool stripped of `ubuntu-latest` (#6897) `--fallback
+  auto` computes `self-hosted-x64` alone, so a repair removed the label the REQUIRED
+  `python-ci-gate` aggregate is pinned to and the run sat `pending` with ZERO materialised jobs —
+  no red, no green, every PR blocked (measured 2026-10-27: runs 40898791192 / 40901844458, `jobs=0`;
+  a hand-restored label was gone within ~25 minutes, twice). Only the host-derived labels GitHub
+  owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM` — refused by the API with HTTP 422)
+  are left out of the body, and the before/after sets plus the derived `removed=[…]` list are
+  printed BEFORE the PUT, so a removal would be visible in the output instead of inferred from a
+  queue that never moves. An unreadable current label set is a REFUSAL (exit 2, nothing written) —
+  never "use the computed set", which is the same strip through a different door.
+- **`--status` answers "who answers this `runs-on:` label"** (`:256-322`): per label the workflows
+  use, it counts ONLINE self-hosted runners whose label set carries it, and prints a loud `NO RUNNER
+  ANSWERS '<label>'` when the count is zero. A label nobody answers does not fail — it does not run:
+  the run stays `pending` with zero jobs forever, so the queue has to be READ.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:353-462`; the proof is `is_runner_install` at `:173`, which accepts `.runner` or
+  gone** (`:503-611`; the proof is `is_runner_install` at `:189`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -165,16 +183,17 @@ falls back.
   registration and all**, and reported (exit 3): the unit would otherwise survive pointing at a
   deleted working directory, and a still-registered runner would lose the only local record that a
   retry — and `--status` — can read, so `--uninstall` reported a clean removal while exiting 0.
-- **Exit codes** (`:53-66`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
-  refused — headroom, arch, an undecidable fallback, or an uninstall target that is not provably
-  a runner, with nothing downloaded or registered, so re-run with a smaller `--count` · `3`
+- **Exit codes** (`:64-77`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
+  refused — headroom, arch, an undecidable fallback, an unreadable current label set on the repair
+  path, or an uninstall target that is not provably a runner, with nothing downloaded or registered,
+  so re-run with a smaller `--count` · `3`
   operation failed — download, sha256 verify, extract, token mint, `config.sh`, `svc.sh` (including
   a unit removal that failed, whose target directory is then left intact, or a deregistration that
   failed, likewise left intact), a tool missing from PATH, or a failed remote read.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:301`, the `MODE = install`
-  block; the refusal itself dies at `:306`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:450`, the `MODE = install`
+  block; the refusal itself dies at `:455`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
