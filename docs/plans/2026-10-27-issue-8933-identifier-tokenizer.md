@@ -89,6 +89,8 @@ The `<!-- research: v1 -->` comment ([issuecomment-6451906842](https://github.co
 | rebuild / replay (`rebuild_all` pass 1a → `_upsert_point_props`) | writes the journal payload | re-derives the same aliases from `content` — the backfill for existing records is a **replay**, not new code, and is idempotent by construction |
 | `tortoise/consistency.py::_canonical_point_fields` | applies the writer's `flatten_search_keys_prop` to the canonical view of BOTH sides | **strips the derived alias from BOTH sides** (`strip_identifier_aliases`). The first shape of this change derived it on the JOURNAL side only (`derive_identifier_aliases=False` for the graph view) to keep the graph side "the node's own content"; that is a false red, measured: the revise door never derived, so any content edit introducing an identifier made the reference view mint an alias the node could never hold — `ok=False`, `fields=['search_keys']`, action "replay the journal", which reproduces the same red. Deriving on the GRAPH side instead (the other direction) is a false PASS. The alias is a PURE function of `content`+`search_keys`, both of which are compared on their own, so it is not independent evidence: removing it is exact on both sides, and it makes `db_hash` alias-invariant, so a backfill that only ADDS aliases cannot move a recorded baseline (no `_PROJECTION_STATE_FORMAT` bump is owed) |
 | `search_engine.run_fts_query` | passes `build_or_query` output to `queryNodes` | unchanged — the alias/phrase arrive through the query string and the indexed text |
+| `tortoise/sdk.py::_warn_point_name_not_lexically_indexed` | tokenised the INDEXED text with the tokenizer's DEFAULT — the READ half | **the WRITE half** (`space_separated_identifiers=False`). Anything that asks "does the index hold this?" has to use the half that WROTE it, or the read-side composite (``sprint2024``, minted from the prose "sprint 2024 planning") counts as coverage no search can produce, and the #10122 advisory falls silent about a stored-but-unfindable name (measured: 0 advisories → 1, #10203 review round 12 P2). `name_tokens` stays on the READ side: the name is caller-typed and reaches the engine as a QUERY |
+| `tortoise/sdk.py::update_point`, explicit `search_keys=None` | on a content edit, `props.get(...)` could not tell an explicit `None` from an absent key, so the recomputed derived value REPLACED the caller's clear and the vocabulary it asked to drop survived on the node and in the FTS index | an explicit `search_keys=None` is **caller-owned CLEAR intent**: the gate is on the KEY, the null rides `SET n += $props` (removes the property) and rides `PointRevised`, exactly as pre-#8933. The replay fold has no clear clause, so live (cleared) and replay (re-derived) disagree here — the SAME #5046 caller-owned gap a caller-supplied LIST already has, neither widened nor narrowed, and identical to what `main` produced for this call |
 
 ## 7. Implementation steps
 
@@ -137,6 +139,34 @@ share the alias `foo1234` (the ruling's own concatenation rule; the adjacency PH
 them, the alias term does not, and widening the grammar is a separate measured step).
 
 ## 8. Rounds
+
+### Decision update — review round 12 (2026-10-29), the two open findings and what they cost
+
+Round 12 reported ISSUES 2, both in this change's own operator/edge surface rather than in the
+mechanism (which it verified clean). Both are fixed and pinned; nothing above was reversed.
+
+**F1 (P2, fail-open)** — the #10122 advisory tokenised the indexed text with the tokenizer's
+DEFAULT (the READ half). The index is written by the WRITE half, which refuses to mint a
+composite from a prose pair, so `content="sprint 2024 planning"` indexes `sprint`/`2024`/
+`planning` and never `sprint2024`, while the read side handed `sprint2024` to `indexed_tokens`. A
+Point named `sprint2024` over that content therefore intersected and the advisory fell SILENT
+about a name the engine cannot find — the exact case it exists to report. Fixed at the consumer
+(§6 row), measured 0 → 1 advisory. The pin carries an FTS POSITIVE CONTROL (the composite really
+is absent from the index), so the advisory is owed rather than assumed.
+
+**F2 (P3)** — `update_point(id, content=…, search_keys=None)` stopped clearing: the gate was
+`props.get("search_keys")`, which cannot distinguish an explicit `None` from an ABSENT key, so the
+derived value replaced the caller's clear, and `_derived_search_keys` came out `True`, stripping
+the clear from `PointRevised` as if it were derived. Measured pre-fix `'release deploy'` (the
+derivation rebuilt the vocabulary the caller dropped). The gate is now on the KEY.
+
+**The consequence, measured and recorded rather than discovered later:** honouring the clear makes
+the live node `None` and a replay re-derive `'release deploy'` (the revise fold has no clear
+clause). That is the #5046 CALLER-OWNED parity gap a caller-supplied list already has, and it is
+identical to what `main` produced for this call — pre-#8933 neither door touched `search_keys`, so
+live cleared and replay kept the creation's value. This therefore restores the pre-change shape
+rather than introducing an asymmetry, and the A4 vocabulary a caller clears stays cleared on the
+node, which is what the call asked for.
 
 **Rounds:** 1 (verifiers: 1, class: code)
 
