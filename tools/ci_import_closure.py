@@ -818,30 +818,57 @@ def _dedupe_deps(deps: list[Dep]) -> list[Dep]:
 # Closure
 # ---------------------------------------------------------------------------
 def merged_pr_numbers(repo: str, window: int) -> list[int]:
-    """The newest `window` MERGED PRs, from the REST API.
+    """The newest `window` MERGED PRs, ranked by MERGE time, from the REST API.
 
     ⛔ NOT `gh pr list --state merged`: measured on this repo it returned 24 PRs
     while #10102, #10103, #10104 and #10106 — all `state=closed, merged=true` —
     were absent from it, so the window would silently skip real merges.
     `/pulls?state=closed` with a `merged_at` filter is authoritative.
+
+    ⛔ AND NOT `sort=created` (#10143 review at `a746139ba`, finding 3). `/pulls`
+    has NO merge-time ordering — the documented values are `created` (the
+    DEFAULT), `updated`, `popularity` and `long-running` — and `sort=merged` is
+    not one of them: measured 2026-10-29 it returns the `created` order verbatim,
+    so the endpoint silently ignores an unknown value. Ranking by CREATION time
+    therefore dropped merges that happened AFTER entries the window contained
+    (measured: 11 of them, e.g. #10108 created 2026-10-26 and merged 2026-10-28,
+    a full day after several PRs inside the window) — the under-count direction
+    this harness exists to prevent, on the documented `--window 40` reproduce
+    path.
+
+    A merge IS an update, so `updated_at >= merged_at` for every merged PR: walk
+    `sort=updated` descending and rank the merged set by `merged_at`. Paging stops
+    once the newest `window` merges are known AND the page's oldest `updated_at`
+    is older than the oldest `merged_at` in that set — every later entry then has
+    `merged_at <= updated_at < cutoff` and cannot displace it. A page without
+    `updated_at` never stops the walk early (that would be the same silent
+    shortening by another name).
     """
-    out: list[int] = []
+    collected: list[tuple[str, int]] = []          # (merged_at, number)
+
+    def _ranked() -> list[tuple[str, int]]:
+        # Tie-break on the number so a same-second merge is DETERMINISTIC.
+        return sorted(collected, key=lambda t: (t[0], t[1]), reverse=True)
+
     page = 1
-    while len(out) < window and page <= 10:
+    while page <= 10:
         batch = _gh_json([
             "api",
-            f"repos/{repo}/pulls?state=closed&sort=created&direction=desc"
+            f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc"
             f"&per_page=100&page={page}",
         ])
         if not isinstance(batch, list) or not batch:
             break
         for pr in batch:
             if pr.get("merged_at"):
-                out.append(pr["number"])
-                if len(out) >= window:
-                    break
+                collected.append((pr["merged_at"], pr["number"]))
+        newest = _ranked()
+        oldest_updated = batch[-1].get("updated_at") or ""
+        if (len(newest) >= window and oldest_updated
+                and oldest_updated < newest[window - 1][0]):
+            break
         page += 1
-    return out
+    return [number for _, number in _ranked()[:window]]
 
 
 @dataclass
@@ -1209,15 +1236,15 @@ def _artifacts(repo: str, run_id: int) -> list[dict]:
 # So a leg has a CANDIDATE SET (most specific first) and the caller takes the
 # FIRST candidate present in the run's listing.
 ARTIFACT_NAME_OVERRIDES: dict[str, list[str]] = {
-    # `test-record-postgres` (`python-ci.yml:3584`) has NO `name:`, so its check
-    # run is the job id; `:3707` uploads the LITERAL `pytest-log-record-postgres`
-    # — the `test-` prefix is not in the artifact.
+    # `test-record-postgres` (`python-ci.yml:3733`) has NO `name:`, so
+    # its check run is the job id; `:3856` uploads the LITERAL
+    # `pytest-log-record-postgres` — the `test-` prefix is not in the artifact.
     "test-record-postgres": ["pytest-log-record-postgres"],
-    # Same shape: job `:3018` (no `name:`) uploads the literal at `:3178`.
+    # Same shape: job `:3167` (no `name:`) uploads the literal at `:3327`.
     "test-d14-hosted-api": ["pytest-log-d14-hosted-api"],
     # The BARE matrix name is shard 0, whose `name:` suffix is `''` while its
     # ARTIFACT label is `a` (`tools/ci_selection.py:3643-3652`; the upload at
-    # `python-ci.yml:3011` uses `matrix.label`). The check run therefore reads
+    # `python-ci.yml:3160` uses `matrix.label`). The check run therefore reads
     # `test-carve-out` while the artifact is `pytest-log-test-carve-out-a` — the
     # `-a` is not a guess, it is pinned against the selector itself by
     # `test_the_bare_carve_out_artifact_label_matches_the_selector`.
@@ -1274,16 +1301,22 @@ def artifact_names_for_job(job_name: str) -> list[str]:
 # `test-record-postgres` runs it on every PR, so a docs-only or `tools/`-only diff
 # took the tier-1 early return and the file fell outside `current_rel`.
 #
-# Derived is `(current - core) | derived_core`, so a file listed here stays
-# selected by BOTH sides: modelling the leg is what keeps the comparison honest,
-# and NOT modelling it would under-count misses one way or over-cover the other.
-# Source — `.github/workflows/python-ci.yml`:
+# `derived` is `((current - core) | derived_core) | <this set>`, so a file listed
+# here stays selected by BOTH sides: modelling the leg is what keeps the comparison
+# honest, and NOT modelling it would under-count misses one way or over-cover the
+# other. The second union is load-bearing and was missing until the review at
+# `a746139ba` (F2): all five files are `core` members, so without it the `- core`
+# subtraction re-opened the gap this list exists to close.
 #
-#   test-track-b         :2527-2531  `FILES="tests/test_ingest_safety.py"`,
-#                                     run with `-m track_b`
-#   test-record-postgres :3640-3644  four literals, run unconditionally
+# Source — `.github/workflows/python-ci.yml` (line numbers as of the `origin/main`
+# merge in #10143; grep the job name, the numbers move):
 #
-# ⚠️ `test-d14-hosted-api` (:3087) is `pytest tests/ -m embedded_only` — a MARKER
+#   test-track-b         :2568 job, `FILES="tests/test_ingest_safety.py"` at :2627,
+#                             run with `-m track_b`
+#   test-record-postgres :3733 job, the four literals at :3819-3822, run
+#                             unconditionally
+#
+# ⚠️ `test-d14-hosted-api` (:3167) is `pytest tests/ -m embedded_only` — a MARKER
 # over the whole tree, so its set is not a hand-list, and guessing WIDER is the
 # dangerous direction here (everything in `current` is also in `derived`, so
 # over-covering a leg would HIDE misses). It is deliberately NOT modelled: a
@@ -1991,13 +2024,29 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # `test-track-b` and `test-record-postgres` are not diff-gated at all, and
         # their junit is read as ground truth by `pr_ground_truth` — so a failure
         # from them used to land in `not_in_current`, the one branch that absolves
-        # the derivation. `derived` is `(current - core) | derived_core`, so adding
-        # them here keeps them selected by BOTH sides, which is the honest reading:
-        # the derived mapping does not remove those legs. A leg that cannot be
-        # modelled from a hand-list (`test-d14-hosted-api`'s marker selection) is
-        # NOT guessed at — see the `not_in_current` PARTIAL gate below.
-        current_rel |= {_tests_rel(p) for p in ALWAYS_ON_LEG_FILES
-                        if (REPO / p).is_file()}
+        # the derivation. A leg that cannot be modelled from a hand-list
+        # (`test-d14-hosted-api`'s marker selection) is NOT guessed at — see the
+        # `not_in_current` PARTIAL gate below.
+        #
+        # ⛔ AND THEY MUST BE IN `derived` TOO, not only in `current` (#10143
+        # review at `a746139ba`, F2). `base_rel = current_rel - core_rel` subtracts
+        # EVERY `core` member, and all five files here ARE `core` members, so
+        # adding them to `current_rel` alone re-added them to `current` while
+        # leaving them out of `base_rel` — they returned to `derived` only through
+        # `derived_core_selection`, i.e. only when their closure intersected the
+        # diff. On a docs-only or `tools/`-only diff `changed_modules` is empty, so
+        # an always-on leg's failure was scored `MISS[…no-closure-intersection]`
+        # and drove exit 1 — the comment claimed the opposite and the pin could not
+        # see it (its synthetic `core` excluded the file, so the subtraction never
+        # happened).
+        #
+        # The honest reading is the one the comment always stated: these legs run
+        # on EVERY PR, so no diff-based mapping can drop them, and a failure there
+        # is neither a derivation miss nor a hole in the model. `always_on_rel` is
+        # therefore unioned into BOTH sides below.
+        always_on_rel = {_tests_rel(p) for p in ALWAYS_ON_LEG_FILES
+                         if (REPO / p).is_file()}
+        current_rel |= always_on_rel
         # TWO derived mappings, because the difference between them IS the
         # finding: the naive one (drop every core file whose closure misses the
         # diff) and the one that keeps the provably non-Python-dependency files.
@@ -2006,7 +2055,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
                                             keep_empty_closures=False)
         safe_info = derived_core_selection(changed, core, closures, index,
                                            keep_empty_closures=True)
-        base_rel = current_rel - core_rel
+        # `always_on_rel` is unioned back in: the subtraction above is what removes
+        # a `core` member from `derived`, and an unconditional leg is not a member
+        # the derivation may remove (see the block that builds `always_on_rel`).
+        base_rel = (current_rel - core_rel) | always_on_rel
         naive = base_rel | {_tests_rel(p) for p in naive_info["selected"]}
         safe = base_rel | {_tests_rel(p) for p in safe_info["selected"]}
         failed_rel = {_tests_rel(f) for f in truth["failed_files"]}

@@ -1455,7 +1455,8 @@ def test_ground_truth_counts_the_check_runs_it_saw_and_caches_only_a_read_one(
 
 
 def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",),
-                   select_files=(), cache: Path | None = None):
+                   select_files=(), cache: Path | None = None,
+                   core=("tests/test_t.py",)):
     """Drive `cmd_validate` over one synthetic PR and return its exit code.
 
     `cache` is not decoration: `cmd_validate` runs
@@ -1463,12 +1464,18 @@ def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",)
     `CACHE_DIR = REPO/.ci-selection/closure-cache`, so a test that does not
     redirect it writes into the CHECKOUT — while declaring a `tmp_path` that
     reads as isolation. Pass `cache=tmp_path`.
+
+    `core` is not either: `derived` starts from `current_rel - core_rel`, so a
+    pin that leaves a file OUT of the synthetic `core` cannot exercise the
+    subtraction at all — which is how an always-on leg's file was certified as
+    "on both sides" while the shipped code dropped it (#10143 review at
+    `a746139ba`, F2). A pin about `core` membership must put the file IN `core`.
     """
     import argparse
 
     idx, scans, closures = _cli_world()
     data = {"scans": scans, "closures": closures,
-            "core": ["tests/test_t.py"]}
+            "core": list(core)}
     if cache is not None:
         monkeypatch.setattr(ci, "CACHE_DIR", cache)
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
@@ -1560,22 +1567,56 @@ def test_validate_exits_two_when_a_failure_falls_outside_the_modelled_selection(
 
 def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys,
                                                           tmp_path):
-    """P2: the always-on legs are unioned into today's selection.
+    """P2: the always-on legs are unioned into today's selection — AND into the
+    derived one, which is where the shipped code dropped them (F2 at `a746139ba`).
 
-    `test-record-postgres` runs four files on EVERY PR (`python-ci.yml:3640`),
-    and the harness reads its junit as ground truth. A docs-only or `tools/`-only
-    diff takes the tier-1 early return, so those files were outside
-    `current_rel` before — and `misses_for` called the failure `not_in_current`,
-    i.e. it blamed the existing selector for a test the selector DID run and left
-    the derivation unscored. Measured reachability: `test_9555_narrative_carrier`
-    is on `api` + `core` but NOT on `tier1`.
+    `test-record-postgres` runs four files on EVERY PR (`python-ci.yml:3733`, the
+    literals at `:3819-3822`), and the harness reads its junit as ground truth. A
+    docs-only or `tools/`-only diff takes the tier-1 early return, so those files
+    were outside `current_rel` before — and `misses_for` called the failure
+    `not_in_current`, i.e. it blamed the existing selector for a test the selector
+    DID run and left the derivation unscored. Measured reachability:
+    `test_9555_narrative_carrier` is on `api` + `core` but NOT on `tier1`.
+
+    ⛔ The synthetic world here is the REAL manifest's shape — the file IS a
+    `core` member WITH a closure of its own — because that is what made the first
+    version of this pin a false friend: `base_rel = current_rel - core_rel`
+    subtracts every `core` member, so with the file outside `core` (or absent from
+    `closures`, which `derived_core_selection` keeps) the subtraction never ran and
+    the pin certified behaviour that does not ship. Verified non-vacuous: with
+    `base_rel = current_rel - core_rel` restored this pin returns exit 1 and
+    prints `MISS[naive] pr#1 test_9555_narrative_carrier.py`.
     """
+    import argparse
+
     from tools import ci_import_closure as ci
-    assert "tests/test_9555_narrative_carrier.py" in ci.ALWAYS_ON_LEG_FILES
-    rc = _stub_validate(monkeypatch, ci, _truth(
-        failed_files=["tests/test_9555_narrative_carrier.py"],
+    always_on = "tests/test_9555_narrative_carrier.py"
+    assert always_on in ci.ALWAYS_ON_LEG_FILES
+    # A docs-only/workflow-only diff: `changed_modules` is empty, so nothing in
+    # the derivation can select the file — only the unconditional leg runs it.
+    changed = [".github/workflows/ci.yml"]
+    idx, scans, _closures = _cli_world()
+    scans = dict(scans)
+    scans[always_on] = _scan(idx, always_on, "import tortoise.base\n")
+    closures = compute_closures(scans, idx, ["tests/test_t.py", always_on])
+    data = {"scans": scans, "closures": closures,
+            "core": ["tests/test_t.py", always_on]}
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ci, "_selection_module",
+                        lambda: _stub_selection_module())
+    monkeypatch.setattr(ci, "merged_pr_numbers", lambda repo, window: [1])
+    monkeypatch.setattr(ci, "_gh_json", lambda argv: {"head": {"sha": "deadbeef"}})
+    monkeypatch.setattr(ci, "changed_files", lambda repo, pr, cache: changed)
+    monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: _truth(
+        failed_files=[always_on],
         jobs=["test-record-postgres"], artifacts=1,
-    ), cache=tmp_path)
+    ))
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[], import_time_only=False,
+    )
+    rc = ci.cmd_validate(args)
     out = capsys.readouterr().out
     assert "fall outside the modelled selection" not in out, (
         "an always-on leg's file is IN the model, so it must not read as a hole")
@@ -1584,10 +1625,69 @@ def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys,
         "scoring it `not_in_current` blamed the selector for the model's gap")
     assert rc != 2, (
         "a failure the harness can place must not turn the window PARTIAL")
-    # Both sides select it (it is in `current` and in `base = current - core`), so
-    # the derived mapping is scored as COVERING it — which is the honest result:
-    # the derivation narrows `core`, it does not remove an always-on leg.
-    assert rc == 0 and "MISS[" not in out
+    # Both sides select it: it is in `current`, and `(current - core) | always_on`
+    # keeps it in `derived` too — which is the honest result, because the
+    # derivation narrows `core`, it does not remove an unconditional leg.
+    assert rc == 0 and "MISS[" not in out, (
+        "a `core` always-on leg must stay in the DERIVED set too: subtracting it "
+        "with the rest of `core` scored an unconditional leg's failure as a "
+        "derivation miss (#10143 review at `a746139ba`, F2)")
+
+
+def test_the_window_ranks_by_merge_time_and_stops_once_the_cutoff_passes(
+    monkeypatch,
+):
+    """P3 at `a746139ba`: the window ranked by CREATION time.
+
+    `/pulls` has no merge-time ordering (`created` is the default, and
+    `sort=merged` is ignored — measured 2026-10-29 it returns the `created` order
+    verbatim), so `/pulls?state=closed&sort=created` + "keep the first `window`
+    merged" silently omits PRs that merged AFTER entries it contains: measured 11
+    of them, e.g. #10108 created 2026-10-26 and merged 2026-10-28. A merge IS an
+    update, so the walk now asks by `updated` and ranks the merged set by
+    `merged_at`, stopping once the page's oldest `updated_at` precedes the oldest
+    `merged_at` the window holds.
+
+    Page 1 here is creation-new/merge-old and page 2 is creation-old/merge-new, so
+    the two orders disagree: the old implementation returns [100, 101].
+    """
+    import re
+
+    from tools import ci_import_closure as ci
+
+    pages = {
+        1: [  # newest-CREATED, but merged early
+            {"number": 100, "merged_at": "2026-10-01T00:00:00Z",
+             "updated_at": "2026-10-05T00:00:00Z"},
+            {"number": 101, "merged_at": "2026-10-02T00:00:00Z",
+             "updated_at": "2026-10-06T00:00:00Z"},
+        ],
+        2: [  # older-created, but these merged LAST
+            {"number": 102, "merged_at": "2026-10-09T00:00:00Z",
+             "updated_at": "2026-10-09T00:00:00Z"},
+            {"number": 103, "merged_at": "2026-10-08T00:00:00Z",
+             "updated_at": "2026-10-08T00:00:00Z"},
+            {"number": 104, "merged_at": "2026-10-07T00:00:00Z",
+             "updated_at": "2026-10-07T00:00:00Z"},
+        ],
+    }
+    asked: list[tuple[int, bool]] = []
+
+    def fake_gh(argv):
+        url = argv[1]
+        asked.append((int(re.search(r"&page=(\d+)", url).group(1)),
+                      "sort=updated" in url))
+        return pages.get(asked[-1][0], [])
+
+    monkeypatch.setattr(ci, "_gh_json", fake_gh)
+    assert ci.merged_pr_numbers("o/r", 2) == [102, 103], (
+        "the window is the newest MERGED PRs — creation order is not merge order")
+    assert [page for page, _ in asked] == [1, 2], (
+        "paging must stop once the newest two merges cannot be displaced: page "
+        "3 is unreachable and asking for it is a wasted round trip")
+    assert all(by_update for _, by_update in asked), (
+        "`/pulls` has no merge-time sort, so the only order a merge MOVES is "
+        "`updated` — asking by `created` is the defect this pin is about")
 
 
 # ---------------------------------------------------------------------------
