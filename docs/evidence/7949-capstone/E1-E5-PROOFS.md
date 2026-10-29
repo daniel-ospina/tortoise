@@ -177,7 +177,7 @@ The only entry point the capstone may drive is `TortoiseSDK.capture_session`. It
 receipt folds the extractor's `stats` and `error_census` and nothing else —
 `tortoise/sdk.py:13671` is the fold (`"stats": out.get("stats") or {}`) — while the
 extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8961`) and
-`result["vet"]` (`:8883`) on a surface the receipt never carries. `#9116` is open and
+`result["vet"]` (`:8971`) on a surface the receipt never carries. `#9116` is open and
 still true at this head.
 
 ⇒ **S2.2 and S2.3 are unobservable through the capstone's own entry point**, so any
