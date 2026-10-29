@@ -555,6 +555,13 @@ approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
+# ⚠️ `counts` is DERIVED by `render`, and `cut_at_commit` above is the provenance of
+# the ORIGINAL cut — the two no longer describe the same snapshot: #4282 deleted 26
+# dead public SDK methods at `45eefb26c`, so `sdk_public_methods` is 124 here while
+# `d05370918` held 150. Re-cutting is the durable fix and is deliberately NOT done
+# here: `cut` is owner-gated per this tool's own docstring ("ask Daniel FIRST, before
+# the re-cut") because it re-derives every row from the declaration. Until then, read
+# the count as "at this head" and the sha as "when the rows were cut".
 counts:
   tools: 81
   sdk_public_methods: 124

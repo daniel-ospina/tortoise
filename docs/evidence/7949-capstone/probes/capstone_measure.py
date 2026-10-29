@@ -740,8 +740,8 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
         if not hasattr(sdk, "capture_session"):
             raise SystemExit(
                 f"capstone-measure: REFUSED — `TortoiseSDK.capture_session` was "
-                f"deleted by #4282 (owner ruling 2026-10-27) and was "
-                f"`_extract_session_v2`'s only in-process caller, so session "
+                f"deleted by #4282 (owner ruling 2026-10-27) and was the SDK's "
+                f"only in-process caller of `_extract_session_v2`, so session "
                 f"{sid} cannot be captured: the measurement lane needs a "
                 f"surviving door. REFUSED is neither a pass nor a fail, per the "
                 f"pre-registration.")

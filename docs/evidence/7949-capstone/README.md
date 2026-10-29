@@ -613,8 +613,12 @@ The pipeline's OWN path WAS `TortoiseSDK.capture_session` →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:8396`), which calls, in one pass.
 
 ⛔ **`TortoiseSDK.capture_session` was deleted by #4282** (2026-10-27 owner ruling), and it
-was `_extract_session_v2`'s ONLY caller: the cite above names the private helper's `def`
-line, and there is deliberately no call-site cite because there is no call site. The
+was the SDK's ONLY caller of `_extract_session_v2`: the cite above names the private
+helper's `def` line, and there is deliberately no `sdk.py` call-site cite because
+`tortoise/sdk.py` no longer holds one. ⚠️ The SDK was not the helper's only caller in
+the tree — `hosted_api._capture_session_impl` still calls it
+(`tortoise/hosted_api.py:15288`, on the capture executor) — so this is a claim about
+the SDK surface, and the pins that enforce it scan `sdk.py`. The
 probe's `capture_session` write leg is gone with it — see `runner.py`'s note. The rest of
 this section (the eight step call sites) is unaffected: it cites `extractor_v2.py`.
 

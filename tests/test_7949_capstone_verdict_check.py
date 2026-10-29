@@ -1559,6 +1559,9 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     sources = {
         "sdk": (_REPO / "tortoise/sdk.py").read_text().splitlines(),
         "extractor_v2": (_REPO / "tortoise/extractor_v2.py").read_text().splitlines(),
+        # The SURVIVING caller lives here, and the README's claim is only true
+        # with its scope — so the scan covers the file the scope names (#4282).
+        "hosted_api": (_REPO / "tortoise/hosted_api.py").read_text().splitlines(),
     }
 
     # (a) The entry-point cite. Until #4282 this was TWO cites — the def and the call
@@ -1574,18 +1577,36 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
         f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
     assert not re.search(r"`sdk\.py:\d+`; called at `:\d+`", readme), (
-        "the README cites a CALL SITE for _extract_session_v2 again; its only caller "
-        "(`capture_session`) was deleted by #4282, so such a cite names a line that "
-        "does not call it any more")
-    assert "ONLY caller" in readme, (
-        "the README no longer says `capture_session` was _extract_session_v2's only "
-        "caller — that sentence is what makes the single cite honest")
+        "the README cites a CALL SITE for _extract_session_v2 again; the SDK's only "
+        "caller (`capture_session`) was deleted by #4282, so such a cite names a line "
+        "that does not call it any more")
+    assert "SDK's ONLY caller" in readme, (
+        "the README no longer says `capture_session` was the SDK's only caller of "
+        "_extract_session_v2 — that sentence is what makes the single cite honest, "
+        "and its SCOPE is what makes it true: the hosted handler still calls the "
+        "helper, so an unscoped 'ONLY caller' would be a false claim")
     callers = [n for n, line in enumerate(sources["sdk"], 1)
                if "self._extract_session_v2(" in line]
     assert not callers, (
-        f"_extract_session_v2 has a call site again (sdk.py:{callers}) — the README's "
-        f"'ONLY caller … was deleted' claim is now false, and the call-site cite must "
-        f"be re-derived")
+        f"_extract_session_v2 has a call site in sdk.py again ({callers}) — the "
+        f"README's 'SDK's ONLY caller … was deleted' claim is now false, and the "
+        f"call-site cite must be re-derived")
+    # ⛔ The scoped claim is only true while the SURVIVING caller is where the README
+    # says it is. Pinning only the absence made the instrument narrower than the
+    # sentence: `sdk.py` was scanned, the tree was not, and the hosted handler's
+    # `sdk._extract_session_v2(` call site — the reason the claim needs a scope at
+    # all — was unread.
+    assert "hosted_api.py:15288" in readme, (
+        "the README no longer names the surviving call site of _extract_session_v2 "
+        "(`tortoise/hosted_api.py:15288`) — re-derive it from the tree, do not drop "
+        "the note: without it 'the SDK's ONLY caller' reads as 'the only caller'")
+    hosted = sources.get("hosted_api") or []
+    hosted_callers = [n for n, line in enumerate(hosted, 1)
+                      if "sdk._extract_session_v2" in line]
+    assert hosted_callers, (
+        "the hosted capture handler no longer calls sdk._extract_session_v2 — the "
+        "README's 'the hosted handler still reaches it' note and the cite at "
+        "hosted_api.py:15288 must be re-derived together")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -2350,15 +2371,16 @@ def test_the_probes_line_citations_resolve_too():
     assert sdk[def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"probe cites the def at sdk.py:{def_line}, which is {sdk[def_line - 1].strip()!r}")
     assert not re.search(r"``sdk\.py:\d+``, called at ``:\d+``", probe), (
-        "the probe cites a CALL SITE for _extract_session_v2 again; its only caller "
-        "was deleted by #4282")
-    assert "only" in probe and "caller" in probe, (
-        "the probe no longer says the deleted `capture_session` was the only caller — "
-        "that sentence is what makes the single cite honest")
+        "the probe cites a CALL SITE for _extract_session_v2 again; the SDK's only "
+        "caller was deleted by #4282")
+    assert "SDK's" in probe and "only" in probe and "caller" in probe, (
+        "the probe no longer says the deleted `capture_session` was the SDK's only "
+        "caller — the SCOPE is what makes the sentence true (the hosted handler "
+        "still calls the helper), and it is what makes the single cite honest")
     callers = [n for n, line in enumerate(sdk, 1) if "self._extract_session_v2(" in line]
     assert not callers, (
-        f"_extract_session_v2 has a call site again (sdk.py:{callers}) — re-derive the "
-        f"call-site cite instead of leaving the probe stale")
+        f"_extract_session_v2 has a call site in sdk.py again ({callers}) — re-derive "
+        f"the call-site cite instead of leaving the probe stale")
 
     module_cite = re.search(r"``extractor_v2\.py:(\d+)``", probe)
     assert module_cite, "the probe's extractor_v2 entry cite is gone"

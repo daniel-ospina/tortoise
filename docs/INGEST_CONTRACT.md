@@ -591,7 +591,8 @@ the MCP tool is tracked as a follow-up so the system-wide default matches the in
   tools when they ship.
 
   **Capture-surface exception (W5 Phase C, #2104):** the session-capture
-  write path (`POST /v1/sessions` + `sdk.capture_session`) auto-promotes
+  write path (`POST /v1/sessions`; its `sdk.capture_session` half was deleted by
+  #4282 and the hosted handler carries the whole rule) auto-promotes
   ITS extracted claim points and their capture operators draft→live as part
   of the EP-on-ingest contract (the ingested session is memory, not a
   pending-review draft — §2.5 measured-good; E2E-5). Scope is strictly the
@@ -635,7 +636,7 @@ live AND the operator itself has been promoted out of draft** — endpoint
 promotion alone does NOT activate a draft operator (see the §11 interim-
 route caveat; zombie-operator auto-resolution ships with the #785 promote
 tools). "Promote a second endpoint and the operator activates" is the
-#785-era post-resolution statement; pre-#785 the operator's OWN promotion
+the #785-era post-resolution statement; pre-#785 the operator's OWN promotion
 is the second required conjunct. Promote a second endpoint and the operator activates; until then it
 cannot propagate belief. This is the derived-liveness rule (A9's selector
 predicate for operator nodes).

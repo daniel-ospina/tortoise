@@ -1607,3 +1607,17 @@ which is the same GUARD (the same test) whose other arm moved §13's issue map o
 `CORRECTED 20xx-xx-xx` stamps (`_CHANGE_NARRATION`, a different regex) on 2026-10-15.
 
 **2026-10-27 — `#9417`.** `sdk.supersede_point` stopped being a declared false positive: its structural transfer now carries the old edge's properties (`ON CREATE SET nr += $attrs`), so an `about*` edge keeps the binder's `confidence`. **Review round 2 corrected the form:** a bare `SET nr += $attrs` overwrites per key, so on the COMMON restatement path — where the successor already holds its own binding to the same subject — the RETIRED point's value replaced the successor's live one (measured 0.91 -> 0.42, unrecoverable: the repoint descriptor carries no `attrs`). `ON CREATE` states the precedence the pre-`#9417` bare `MERGE` already had: the successor's own value wins. The dead `source_version` whitelist entry went with it — the graph writes the anchor as `sourceVersion` (`projection/edges.py:504`), so the entry could never match and only implied a carry that never happened. The census composition is therefore **2 originating + 4 re-materializing** (6 writers: 3 NAMED + 3 MAP) with **one** declared false positive (`projection._rebuild_all_replay`). The REBUILD half is still bare — `#10139`.
+
+**2026-10-28 — `#4282`.** §13's read-site table lost **row 36**, `sdk.py::TortoiseSDK.traverse`. That
+method was one of the 26 dead public SDK methods `#4282` deleted outright (owner ruling 2026-10-27,
+comment `6451763530`), so the row's symbol stopped resolving and the guard reds on it by design — the
+table's rule is that the SYMBOL is authoritative. It is retired rather than re-pointed because the
+row's REASON was the door: what made it a call-time reader was that `traverse` took the relationship
+type from a CALLER ARGUMENT, and the surviving door (the multi-hop traverse) fills the type slot
+itself and walks **every** relationship type — an all-edge read, already enumerated as row 22
+(`navigation.py::_hop_query`). Every derived figure in §13 moved with it: read sites 40 → **39**,
+customer-callable 19 → **18**, distinct doors 22 → **21** (SDK doors 8 → **7**; MCP 10 and REST 4
+unchanged), cell occurrences 31 → **30**. The prose in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states the
+same figures, so it moved too — four `NINETEEN`s, a `TWENTY-TWO`, the list-closing marker and the
+`other FIFTEEN sites` enumeration (now fourteen). Row numbers elsewhere (27, 29-32, 39, 40) are cited
+by number in both documents, so the gap at 36 is left as a gap rather than renumbering the tail.

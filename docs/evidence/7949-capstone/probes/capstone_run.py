@@ -904,8 +904,10 @@ def main(argv: list[str] | None = None) -> int:
     if not hasattr(sdk, "capture_session"):
         return refuse(
             "the entry point this capstone drives — `TortoiseSDK.capture_session` "
-            "— was DELETED by #4282 and was `_extract_session_v2`'s only caller, "
-            "so no in-process door runs the eight steps in one pass: G4 is "
+            "— was DELETED by #4282 and was the SDK's only caller of "
+            "`_extract_session_v2`, so no SDK door runs the eight steps in one pass "
+            "(the hosted handler reaches the same helper, but it is a server route, "
+            "not an SDK entry point): G4 is "
             "UNREACHABLE. That is an INSTRUMENT gap, not a verdict on the "
             "pipeline; re-deriving this table needs a surviving door.",
             prereg_ok=True, code=4, corpus=corpus)

@@ -239,8 +239,8 @@ def main() -> int:
                              "content": _trend_text(999, i, args.turn_chars)}
                             for i in range(min(args.turns, 6))]
             # ⛔ #4282 (owner ruling 2026-10-27) deleted the public capture lane
-            # this census drives: ``TortoiseSDK.capture_session`` was
-            # ``_extract_session_v2``'s only in-process caller. The census is
+            # this census drives: ``TortoiseSDK.capture_session`` was the SDK's
+            # only in-process caller of ``_extract_session_v2``. The census is
             # ONE block of this probe — the turn-store byte measurement below is
             # the probe's subject and does not depend on it — so the block is
             # reported as UNAVAILABLE rather than aborting the run, and no row
