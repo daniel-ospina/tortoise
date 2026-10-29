@@ -367,11 +367,54 @@ def test_governor_never_trims_an_issue_body_gate_run():
                for reason in health.reasons)
 
 
+def test_the_seam_is_whether_the_reading_reaches_the_governor():
+    """PR #10264 review P3: this seam was stated as the OFFENDER, and it is false both ways.
+
+    The seam test above used to say FLOOD and PR-STARVED *"differ only in whether a
+    trim-safe offender exists"* — the very sentence this PR retires from the tool's
+    reason lines, and the belief that produced the wrong bound in `0fbcde5`. Prose
+    was the one surface no guard covered, so it survived the sweep: the code moved
+    away from it and the suite stayed green. Each direction below is DERIVED from
+    `classify` rather than transcribed, so the sentence reds here the day the code
+    and the prose part company again.
+    """
+    # (1) FLOOD when NO trim-safe offender exists anywhere in the queue: the leader is
+    # a workflow outside TRIM_SAFE, so there is nothing to blame and nothing to trim.
+    no_offender = classify(flood_queued(12, name="publish-selfhost", event="push")
+                           + starving_pr_runs(1))
+    assert no_offender.verdict == Q.FLOOD
+    assert no_offender.trimmable == ()
+    # (2) PR-STARVED when a trim-safe offender IS present — merely below the dominance
+    # floor, with the PR runs above it. `trimmable` is empty because the reading never
+    # reached the governor, NOT because there was no offender to act on.
+    starved = classify(flood_queued(5, start=1005)
+                       + starving_pr_runs(6, age_seconds=9000))
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.trimmable == ()
+    assert "trim-safe offender present: True" in " ".join(starved.reasons)
+    # both witness the SAME wait, which is why offender existence cannot be the seam ...
+    assert no_offender.oldest_pr_queued_age_seconds is not None
+    assert starved.oldest_pr_queued_age_seconds is not None
+    # ... and the docstring that defines the seam must name the discriminator that
+    # survives, not the one that does not. Flattened, so an honest reflow is not red.
+    seam = " ".join(
+        (test_the_starvation_seam_is_the_two_measured_verdicts_only.__doc__ or "").split()
+    ).lower()
+    assert "whether this reading reaches the governor" in seam
+    assert "differ only in whether a trim-safe offender exists" not in seam
+
+
 def test_the_starvation_seam_is_the_two_measured_verdicts_only():
     """`starves_pr` is the ONE vocabulary the two instruments share (#9118).
 
     FLOOD and PR-STARVED both witness a queued PR run past the age floor with
-    nothing executing; they differ only in whether a trim-safe offender exists.
+    nothing executing; they differ only in whether THIS READING reaches the
+    governor — FLOOD's offender is trim-safe and IS trimmed, while a PR-STARVED
+    reading is declined ABOVE the governor and trims nothing. The OFFENDER is not
+    the seam in either direction: a FLOOD can carry no trim-safe offender at all,
+    and a PR-STARVED reading can have one present (below the dominance floor, or
+    dominated by PR work) — which is why "no offender to blame" is NOT what bounds
+    it. Both are derived in `test_the_seam_is_whether_the_reading_reaches_the_governor`.
     OK, UNKNOWN and PR-UNWITNESSED do not witness it, and must never be threaded
     into `ci_check_repair` as starvation.
     """
