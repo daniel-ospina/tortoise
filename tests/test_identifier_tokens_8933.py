@@ -227,12 +227,20 @@ class TestRoundTrip:
         assert got_listed.split() == ["release", "deploy", expected], got_listed
         assert untouched == ["release", "deploy"], untouched
 
-    @pytest.mark.parametrize("typed", ["ERR-4032", "ERR 4032", "err4032",
-                                       "Err_4032", "err4032"])
+    @pytest.mark.parametrize("typed", ["ERR-4032", "ERR 4032", "ERR\t4032",
+                                       "err4032", "Err_4032", "err4032"])
     def test_however_the_person_typed_it_meets_at_one_token(self, typed):
         """The ruling's requirement: "it matches however the person typed it —
         dashes, spaces, or none". A no-separator spelling needs no normalising
-        at all: it is already a single index token."""
+        at all: it is already a single index token.
+
+        ``ERR\\t4032`` is in this table because TAB is a whitespace spelling a
+        person (and a paste out of a table) really produces, and the read-side
+        extractor already admits it (``_SPACED_PAIR_RE``'s ``[ \\t]+``).
+        #10203 review round 11 (P2): the ONE normaliser's separator class had
+        no TAB, so the extractor yielded the span and the normaliser refused it
+        — a candidate extracted and then silently thrown away.
+        """
         tokens = tokenize_sparse_query(typed)
         assert "err4032" in tokens, tokens
 
@@ -375,6 +383,42 @@ class TestRawRetrieval:
         than a diff.
         """
         assert build_or_query(query) == today
+
+    @pytest.mark.parametrize("sep", [" ", "\t"])
+    def test_a_TAB_separated_pair_is_the_VERBATIM_space_one(self, sep):
+        """#10203 review round 11 (P2): the extractor/normaliser TAB drift.
+
+        ``_SPACED_PAIR_RE`` admits ``[ \\t]+`` on purpose (a code pasted out of
+        a table or a spreadsheet is tab-separated), but ``_IDENTIFIER_SEP_RE`` —
+        the ONE normaliser's separator class — had no tab. So
+        ``_identifier_segments("invoice\\t2024")`` returned ONE segment,
+        ``identifier_alias`` bailed at ``len(segments) < 2``, and the span the
+        extractor had just produced was discarded: no alias, no phrase.
+
+        The defect that produced is the #8933 defect itself, re-entering through
+        the one whitespace spelling the read side exists to accept —
+        ``deploy invoice<TAB>2024`` and ``deploy invoice<TAB>2023`` both became
+        the OR union ``invoice|deploy``, i.e. two codes one digit apart were ONE
+        query (pre-fix, measured).
+
+        (1) Fails on the pre-fix code: the ``\t`` case yields no alias/phrase
+            and the two years produce identical query bytes; the ``sep=" "``
+            case passes, which is the point — TAB must be the same spelling.
+        (2) Reachable: pasting a code with a tab is the shape ``[ \\t]+`` exists
+            for, and no other test covers a tab.
+        """
+        pair = f"deploy invoice{sep}2024"
+        other = f"deploy invoice{sep}2023"
+        assert identifier_aliases(pair) == ["invoice2024"], pair
+        assert identifier_phrase_terms(pair) == ['"invoice 2024"'], pair
+        assert "invoice2024" in build_or_query(pair).split("|")
+        assert build_or_query(pair) != build_or_query(other), (
+            "two codes one digit apart collapsed to the same query through a "
+            f"{sep!r} separator")
+        # The WRITE side is unchanged by this: a document whose prose carries
+        # the pair in either whitespace spelling still mints no index alias.
+        assert identifier_aliases(
+            f"sprint{sep}2024 planning", space_separated=False) == [], sep
 
     def test_the_identifier_tail_is_BOUNDED(self):
         """The OR budget must stay a bound. `max_terms` + the expansion tail is

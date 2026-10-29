@@ -117,7 +117,21 @@ _IDENTIFIER_SPAN_RE = re.compile(
 #: form. This is a NORMALISER rule, not a DETECTION rule: what counts as a
 #: candidate span is decided by the extractors below (and the write side is the
 #: conservative half — see :func:`identifier_aliases`).
-_IDENTIFIER_SEP_RE = re.compile(r"[-_ ]")
+#:
+#: A TAB counts too, and for a structural reason: **this class must split on
+#: every whitespace ``_SPACED_PAIR_RE`` admits** (``[ \t]+``). #10203 review
+#: round 11 (P2) found the two had drifted — the extractor accepted ``[ \t]+``
+#: while this class had no tab — so ``_identifier_segments("ERR\t4032")``
+#: returned ONE segment, :func:`identifier_alias` bailed at
+#: ``len(segments) < 2``, and the extractor's own candidate was silently thrown
+#: away. The measured consequence: ``deploy invoice<TAB>2024`` produced the OR
+#: union ``invoice|deploy``, i.e. the IDENTICAL query for 2024 and 2023 — the
+#: #8933 defect (two codes one digit apart are one query) re-entering through
+#: the one whitespace spelling the read side's regex exists to accept, and the
+#: shape a code pasted out of a table or a spreadsheet actually has. The
+#: extractor's separator alphabet and this set must not drift again: widen the
+#: extractor, and widen this with it.
+_IDENTIFIER_SEP_RE = re.compile(r"[-_ \t]")
 
 #: READ-SIDE-ONLY extraction of the space-typed shape: a letters token, one or
 #: more spaces, then one or more all-digit code segments of at least two digits
@@ -130,6 +144,14 @@ _IDENTIFIER_SEP_RE = re.compile(r"[-_ ]")
 #: (``is 27:12`` is prose, not a code), and the digit run may not be the HEAD of a
 #: longer punctuated span (``date 2024-01-15`` is a DATE — its ``2024`` is
 #: followed by ``-``, so that span keeps the #2070 numeric-noise treatment).
+#:
+#: ``[ \t]+`` admits a TAB after the letters segment, because a code pasted out
+#: of a table or a spreadsheet is tab-separated and the index splits on
+#: non-alphanumerics anyway (TAB is a separator to it exactly as SPACE is).
+#: **Whatever this regex admits, :data:`_IDENTIFIER_SEP_RE` MUST split on** —
+#: an extractor that yields a span the normaliser cannot divide produces no
+#: alias and no phrase, i.e. the candidate is silently discarded. #10203 review
+#: round 11 (P2) found exactly that drift (``[ \t]+`` here, ``[-_ ]`` there).
 #:
 #: #10203 review round 7 (F3): the guard was ``[-_]`` only, so a TIME or a
 #: DECIMAL minted an alias and an adjacency phrase — ``meeting 27:12`` gave
