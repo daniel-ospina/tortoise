@@ -208,8 +208,8 @@ falls back.
      this pool. Preserving it would un-pin `test-slow` / `workflow-lint` / `finding-provenance` /
      `mirror-images` onto a bare box whose `PATH` lacks their tools — the measured 2026-10-24
      failures (exit 127, `gh: command not found`). `ubuntu-latest` is NOT in the class (no version)
-     and is always kept, as is a custom label that merely starts `ubuntu-<digits>
-     (`ubuntu-2204-tools`).
+     and is always kept, as is a custom label that merely starts `ubuntu-<digits>` (the boundary
+     case is `ubuntu-2204-tools`).
      ⛔ **THIS CARVE-OUT IS THE `off` STATE OF A FLAG, NOT AN UNCONDITIONAL DROP.** It drops the pin
      only when `CI_RUNNER_OS_LABEL` is `off`/unset (the default, and the pre-departure invariant);
      under `on|auto` — the live pool's own state — the pin joins the union and is printed as
