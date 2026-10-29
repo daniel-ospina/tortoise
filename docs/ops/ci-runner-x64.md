@@ -213,12 +213,13 @@ those pins exist to keep the job OFF the fleet, and none is about the watchdog:
 - `.github/workflows/mirror-images.yml` — *"a hosted runner has its own egress IP, so these pulls
   cannot spend the quota the self-hosted fleet shares; running it on the fleet would spend the very
   quota it exists to stop spending."* The pool paying this cost gets **no** deadlock relief in
-  return: `mirror-images` is a nightly cron/`workflow_dispatch` job, starved by nothing.
-- `.github/workflows/python-ci.yml` (`workflow-lint`) — its comment reasons that
-  *"`ubuntu-24.04` is claimed by no self-hosted runner"*, which this mitigation makes **false**. The
-  leg pulls `rhysd/actionlint` by a single literal reference, so on the pool it spends the fleet's
-  shared anonymous Docker Hub quota — a rate-limit red on healthy code, a failure class the #6897
-  analysis does not cover.
+  return: `mirror-images` is a nightly cron/`workflow_dispatch` job, starved by nothing. Its
+  in-file comment asserted that guarantee as current and was corrected in the same change.
+- `.github/workflows/python-ci.yml` (`workflow-lint`) — its comment used to reason that
+  *"`ubuntu-24.04` is claimed by no self-hosted runner"*, which this mitigation makes **false**;
+  it was corrected in the same change. The leg pulls `rhysd/actionlint` by a single literal
+  reference, so on the pool it spends the fleet's shared anonymous Docker Hub quota — a rate-limit
+  red on healthy code, a failure class the #6897 analysis does not cover.
 - **The four fleet OBSERVERS** — `.github/workflows/availability-liveness.yml`,
   `availability-watchdog.yml`, `ci-check-repair.yml`, `ci-queue-health.yml` — are pinned for a third
   and distinct reason: **topology, not egress or quota**. A guard whose job is to report on a full

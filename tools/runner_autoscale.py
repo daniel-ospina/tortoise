@@ -682,8 +682,16 @@ def _os_labels(machine: str) -> str:
     `CI_RUNNER_OS_LABEL` into the timer's own env, so a scheduled pass reads the operator's opt-in
     without a second config surface. An unknown value REFUSES instead of defaulting to `off` — the
     installer refuses it too, and a silent `off` would drop the label while looking like restraint.
+
+    ⛔ A SET-BUT-EMPTY VALUE IS `off`, NOT A REFUSAL. Both surfaces this claims to mirror read the
+    empty value as UNSET: `install-ci-runner-x64.sh` uses `case "${CI_RUNNER_OS_LABEL:-off}"` and
+    `install-runner-autoscale-schedule.sh` uses `OS_LABEL_MODE="${CI_RUNNER_OS_LABEL:-off}"`. This
+    function used `os.environ.get(..., "off")`, where the default applies only when the KEY IS
+    ABSENT — so `CI_RUNNER_OS_LABEL=` (an empty export, which is what `export X=$SOME_UNSET_VAR`
+    produces) made the installer proceed as `off` while this raised `Unmeasurable`, on the
+    unattended path where nothing else says why. `or "off"` is the `:-off` spelling.
     """
-    mode = os.environ.get("CI_RUNNER_OS_LABEL", "off")
+    mode = os.environ.get("CI_RUNNER_OS_LABEL") or "off"
     if mode == "off":
         return ""
     if mode not in ("on", "auto"):

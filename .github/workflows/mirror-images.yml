@@ -18,7 +18,8 @@ name: mirror-images
 # is empty until this workflow has run at least once), so this mirror being empty
 # or late degrades the fix — it never breaks the build. The workflow-lint leg of
 # python-ci.yml is deliberately NOT a consumer: it is pinned to a hosted label
-# and pulls its actionlint image literally, so it never shared the fleet's quota.
+# and pulls its actionlint image literally, so it does not share the fleet's
+# quota BY DESIGN (it can, however, become pool-eligible — see below).
 # Being a `workflow_dispatch` job, this file is only dispatchable once it is on
 # the default branch, which is why the fallbacks matter: they keep CI working
 # between the merge and the first mirror run.
@@ -26,6 +27,17 @@ name: mirror-images
 # The job runs on a GITHUB-HOSTED runner on purpose: a hosted runner has its own
 # egress IP, so these pulls cannot spend the quota the self-hosted fleet shares —
 # running it on the fleet would spend the very quota it exists to stop spending.
+#
+# `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice, but NOT — any more —
+# because the pool cannot answer it. Since the 2026-10-29 mitigation (#6897
+# suspended; docs/ops/ci-runner-x64.md, "the label contract") the x64 pool CAN
+# carry `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`, so while the
+# mitigation is engaged this job is POOL-ELIGIBLE and its pulls CAN spend the
+# very quota it exists to protect. That cost is accepted as part of the
+# temporary mitigation and recorded in the runbook; if the mitigation becomes
+# permanent, this job's `runs-on` must move to a label only GitHub-hosted
+# answers. Re-measure rather than trusting this text:
+# `gh api repos/<owner>/<repo>/actions/runners`.
 # It removes the fleet's anonymous Docker Hub traffic for the pinned references;
 # the Docker Hub upstream stays as the final fallback, deliberately.
 on:

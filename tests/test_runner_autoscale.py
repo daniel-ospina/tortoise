@@ -1279,7 +1279,13 @@ def test_labels_follow_the_gate_and_never_claim_the_other_arch(monkeypatch):
     assert RA.resolve_labels({}, "aarch64") == "self-hosted-arm64"
 
 
-@pytest.mark.parametrize("mode", ["off", "on", "auto"])
+# ⛔ `""` IS A MODE, NOT A SKIP: a set-but-empty `CI_RUNNER_OS_LABEL` is `off` on both surfaces
+# (`${CI_RUNNER_OS_LABEL:-off}` in the installer and the schedule renderer, `or "off"` here), and
+# this parameterisation could not see it while the derivation used `os.environ.get(k, "off")` —
+# where the default applies only when the key is ABSENT, so the empty export aborted the pass on
+# the unattended path while the installer proceeded as `off`. Mutation: restore
+# `os.environ.get("CI_RUNNER_OS_LABEL", "off")` -> the `""` arm raises `Unmeasurable` -> RED.
+@pytest.mark.parametrize("mode", ["off", "on", "auto", ""])
 @pytest.mark.parametrize(
     "host,release_marker",
     [("Linux", "24.04"), ("Linux", "22.04"), ("Darwin", None)],
