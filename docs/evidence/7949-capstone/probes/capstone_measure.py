@@ -183,8 +183,11 @@ ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 #: A flag the arm PINS OFF so the measured population is a function of THIS file,
 #: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
 #: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
-#: would silently change the arm between two runs of the same probe.
-ARM_OFF = ("TORTOISE_VALUE_GATE",)
+#: would silently change the arm between two runs of the same probe — and
+#: ``TORTOISE_S2_DECISION_SEAM`` (#5087) is a THIRD switch for S2.2 (it arms the
+#: arbiter, so ``_vet_enabled`` is True), which would arm a network call and a
+#: spend inside an arm this file declares OFF.
+ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
