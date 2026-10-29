@@ -1236,13 +1236,49 @@ def _derive_real_pid_macos(socket_path: str) -> int | None:
     return None
 
 
-def _cmdline(pid: int) -> str:
+def _cmdline_or_none(pid: int) -> str | None:
+    """The argv of ``pid``, or **None** when it could not be READ.
+
+    ``_cmdline`` collapses two different facts into the same ``""``: "ps could
+    not be run / timed out" and "the pid is not there". For its original
+    callers that is fine (an unreadable argv classifies as not-ours, and the
+    sweep is bounded by other controls), but the ATTRIBUTABLE read
+    (``own_live_server_count``) feeds a NUMBER into a gate that compares it
+    against a LATER read (#10255 review A): a failed read there under-reads
+    ``own_left`` and the gate then reds a green run with a "this run's own
+    servers grew" leak claim derived from a probe that never measured anything.
+
+    That read is now BATCHED (one ``ps`` for the whole pid set, #10255 review
+    B — see :func:`_batch_cmdlines_or_none`), so it does not come through here;
+    the distinction below is kept because ``_cmdline``'s ``""``-for-both
+    collapse is exactly what the batched reader must not repeat.
+
+    So the distinction is made here, once, from ps's own exit status:
+
+      - rc 0 → the argv (possibly empty; a zombie has none)
+      - rc 1 → **no pid matched** — a COMPLETED measurement of "it is gone"
+        (measured on procps-ng 4.0.4: ``ps -p 999999`` → rc 1; the procps man
+        page documents no exit-status contract, so this is measured, not
+        assumed). Recorded as ``""`` — the pid died between the count and this
+        read, which the gate's own parser also treats as "not a server".
+      - rc > 1, a timeout, or an OSError → **None**: unreadable, never "empty".
+    """
     cached = _PROC_INFO_CACHE.get(pid)
     if cached is not None:
         return cached["cmdline"]
-    text = _run_text(
-        ["ps", "-ww", "-o", "command=", "-p", str(pid)], timeout=2)
-    return text if text is not None else ""
+    try:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if getattr(out, "returncode", 0) > 1:
+        return None
+    return _stdout_text(out)
+
+
+def _cmdline(pid: int) -> str:
+    return _cmdline_or_none(pid) or ""
 
 
 def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
@@ -1619,17 +1655,44 @@ _UNIXSOCKET_LONG_RE = re.compile(r"--unixsocket\s+(\S+)")
 _PROC_INFO_CACHE: dict[int, dict] = {}
 
 
-def _batch_process_info(pids: list[int]) -> dict[int, dict]:
-    """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}."""
+def _batch_process_info_or_none(pids: list[int]) -> dict[int, dict] | None:
+    """One ps call for all pids: {pid: {...}}, or **None** when ps failed.
+
+    The `{}`-on-failure contract of :func:`_batch_process_info` cannot answer
+    "did I measure?" — a timed-out / missing / erroring ``ps`` and a process
+    table with nothing to report are the same value to a caller that only gets
+    a dict. That distinction matters to a caller which feeds a NUMBER into a
+    gate (#10255 review B: ``own_live_server_count``), because a failed read
+    that reports "none" under-reads the bound the gate compares against.
+
+    Two facts are separated here, from ``ps``'s own exit status (measured on
+    procps-ng 4.0.4, which documents no exit-status contract):
+
+      - rc 0 → the rows of the pids that still exist (a pid that exited between
+        the caller's count and this read is simply absent from the result)
+      - rc 1 → **no pid in the list matched**: a COMPLETED measurement of an
+        empty population, i.e. ``{}`` — every counted process is gone
+      - rc > 1, a timeout, a missing ``ps`` → **None**: unmeasured, never "none"
+
+    An empty ``pids`` list is ``{}`` too: there is nothing to measure and
+    nothing to fail.
+    """
     if not pids:
         return {}
-    text = _run_text(
-        ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
-         "-p", ",".join(str(p) for p in pids)],
-        timeout=10, env={**os.environ, "LC_ALL": "C"},
-    )
+    try:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
+             "-p", ",".join(str(p) for p in pids)],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if getattr(out, "returncode", 0) > 1:
+        return None  # the probe itself failed: unmeasured, NOT "nothing there"
+    text = _stdout_text(out)
     if text is None:
-        return {}
+        return None
     result: dict[int, dict] = {}
     for line in text.splitlines():
         parts = line.strip().split(None, 8)
@@ -1654,6 +1717,31 @@ def _batch_process_info(pids: list[int]) -> dict[int, dict]:
             "cmdline": parts[8] if len(parts) > 8 else "",
         }
     return result
+
+
+def _batch_process_info(pids: list[int]) -> dict[int, dict]:
+    """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}.
+
+    ``{}`` on failure — the historical contract its callers are written to
+    (they fall back to a live probe). A caller that must report an UNMEASURED
+    residue uses :func:`_batch_process_info_or_none` instead.
+    """
+    return _batch_process_info_or_none(pids) or {}
+
+
+def _batch_cmdlines_or_none(pids: list[int]) -> dict[int, str] | None:
+    """The argv of every pid that still exists, in ONE ``ps`` call.
+
+    Or **None** when the call failed, so the whole attribution is unmeasured
+    rather than partially read. A pid absent from the result matched no process
+    (``ps`` exits 1 only when NO pid in the list matched, so a partially-gone
+    list still exits 0) — it exited between the caller's count and this read,
+    and it is therefore not one of our servers.
+    """
+    info = _batch_process_info_or_none(pids)
+    if info is None:
+        return None
+    return {pid: (rec.get("cmdline") or "") for pid, rec in info.items()}
 
 
 def _pgrep_redis_servers() -> list[int]:
@@ -3568,10 +3656,20 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 # `reaped + exited + left >= before`; before #6984 the identity omitted
 # `exited`, so it read a server that shut itself down as a broken sweep and
 # refused green runs (before=28, reaped=16, left=11, pytest rc 0).
-_HYGIENE_REPORT_FIELDS = ("reaped", "exited", "cleared", "left", "before")
+#
+# #1005 (epic #1647 E2E-7): `own_left` is the post-sweep count of live servers
+# attributable to THIS RUN — those whose argv carries a socket path under one of
+# the run's own session temp roots. `left` is a HOST-WIDE pgrep: on a shared
+# runner it also counts servers started by other concurrent jobs, and under
+# `pytest -n` by other workers, so it is not a population this run owns. The CI
+# gate compares `own_left` against the servers IT can attribute to the same
+# roots; that pair is the same population at two moments, which `COUNT <= left`
+# never was (it produced 9-vs-8 and 22-vs-14 false reds on passing runs).
+_HYGIENE_REPORT_FIELDS = (
+    "reaped", "exited", "cleared", "left", "before", "own_left")
 
 
-def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
+def _hygiene_report(reaped, cleared, left, before, exited, own_left) -> dict:
     """Build the session-end hygiene report the CI orphan gate consumes (#4740).
 
     ``cleared`` is the sweep's OWN outcome (see :func:`sweep_until_cleared`),
@@ -3586,6 +3684,10 @@ def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
     sweep. Derived as a complement it would be a tautology; it is measured at
     the dead-pid branch in :func:`reap` precisely so the identity stays
     falsifiable.
+    ``own_left`` (#1005) is the count of live servers attributable to THIS RUN
+    at the same post-sweep seam as ``left`` — see :func:`own_live_server_count`.
+    `None` means the attribution could not be measured (no run roots, or the
+    probe failed), never a plausible 0.
     Keeping the construction out of ``_sweep`` also leaves no local report
     literal there for a dead branch or a subscript store to bypass (the
     round-5 pin's hole).
@@ -3596,6 +3698,7 @@ def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
         "cleared": cleared,
         "left": left,
         "before": before,
+        "own_left": own_left,
     }
     return {f: values[f] for f in _HYGIENE_REPORT_FIELDS}
 
@@ -3662,12 +3765,105 @@ def live_embedded_server_count() -> int | None:
     residue rather than read a timeout/missing-pgrep as "nothing left". This
     is a module-level function, not a closure in `tests/conftest.py`, so it is
     unit-testable by monkeypatching `_pgrep_redis_servers_or_none`.
+
+    ⚠️ This is a HOST-WIDE count (#1005): on a shared runner it also counts the
+    servers of every other concurrent job, and under `pytest -n` those of every
+    other worker. It is a measurement of the PROCESS TABLE, not of this run's
+    residue — use :func:`own_live_server_count` for the attributable number.
     """
     probe = _pgrep_redis_servers_or_none()
     return None if probe is None else len(probe)
 
 
-def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> dict:
+def own_live_server_count(roots, probe=None, cmdlines_of=None) -> int | None:
+    """Live embedded servers attributable to THIS RUN, or None if unmeasured.
+
+    #1005 (epic #1647 E2E-7): the CI orphan gate used to compare its own
+    host-wide `pgrep` count against the sweep's host-wide `left`, and red when
+    the counter read HIGHER. That comparison is not a population this run owns:
+    `left` is a snapshot taken inside one pytest process, the counter runs
+    later from the runner shell, and in between any OTHER process on the host —
+    a concurrent CI job on the same self-hosted runner, or a sibling
+    ``pytest -n`` worker — can start servers. Both directions of the real false
+    reds are that shape: 9 counted against left=8, and 22 against left=14, both
+    on runs whose tests passed.
+
+    Attribution is by SOCKET PATH, not ancestry: a redislite server daemonizes,
+    so its parent is gone, but its argv always carries the socket path (or the
+    config file that names it) inside the session temp root it was started
+    from. ``roots`` is therefore the run's own session-root set, and a server is
+    ours iff its argv contains one of those roots as a path prefix. Servers
+    started by another run live under a DIFFERENT root and can never be
+    mistaken for ours — which is exactly the distinction the gate needs before
+    it may call a residue a leak.
+
+    Returns None (never 0) when there is no attribution key, when the probe
+    failed, or when the argv read itself failed — an unmeasured residue must not
+    read as "nothing left".
+
+    That last clause is load-bearing and, until #10255's review, was not
+    implemented (#10255 review A): ``_cmdline`` maps an unreadable argv to
+    ``""``, so "I could not read this process's argv" and "this argv names no
+    root of ours" were the same value and a failed read counted as a confident
+    0. The two directions that costs are exactly the ones this module exists to
+    separate: an UNDER-read ``own_left`` lets the gate red a green run with a
+    "your own servers grew" claim (``own_now`` is read later, from the runner
+    shell, usually on a quieter host), and both reads failing reads as
+    ``0 == 0`` → PASS.
+
+    The argv read is ONE batched ``ps`` for the whole pid set (#10255 review B),
+    not one ``ps`` per pid. ``probe`` is HOST-WIDE — it has no root filter, so
+    its pid set contains every other job's and every sibling worker's servers —
+    and the per-sweep cache does not cover them (``discover()`` clears
+    ``_PROC_INFO_CACHE`` in its ``finally`` and only this sweep's candidates are
+    re-populated), so the per-pid version paid a fresh 2 s-bounded subprocess
+    for every live server on the host, in EVERY pytest teardown, under
+    ``pytest -n`` once per worker — the exact cost ``_batch_process_info``
+    exists to avoid (#1005 perf).
+
+    Batching is also what makes "unmeasured" a single deterministic outcome. A
+    per-pid read made it N independent chances: one FOREIGN server's 2 s
+    timeout nulled our own measurement, and ``own_left: null`` with
+    ``own_now > 0`` is a RED — so another process's slow ``ps`` could red a run
+    that leaked nothing, one layer below the false red this module removes. Now
+    one call either reads the table or fails.
+
+    The two facts stay distinct, from ``ps``'s own exit status (see
+    :func:`_batch_cmdlines_or_none`): a pid ABSENT from the batched result
+    matched no process — it exited between the count and this read, so it is
+    simply not one of ours — while a FAILED call (rc > 1, a timeout, a missing
+    ``ps``) returns None for the whole measurement.
+    """
+    prefixes: list[str] = []
+    for root in roots or ():
+        if isinstance(root, str) and root.strip():
+            prefixes.append(root.rstrip("/") + "/")
+    if not prefixes:
+        return None  # no attribution key: unmeasured, NOT zero
+    probe = _pgrep_redis_servers_or_none if probe is None else probe
+    cmdlines_of = (_batch_cmdlines_or_none if cmdlines_of is None
+                   else cmdlines_of)
+    pids = probe()
+    if pids is None:
+        return None
+    if not pids:
+        return 0  # a completed measurement of "no live embedded server"
+    argvs = cmdlines_of(list(pids))
+    if argvs is None:
+        # The argv read itself failed: unmeasured, never 0.
+        return None
+    count = 0
+    for pid in pids:
+        # Absent from the batched result = the pid exited between the count and
+        # this read (ps rc 1 for it), i.e. no process, so no server of ours.
+        args = argvs.get(pid) or ""
+        if any(prefix in args for prefix in prefixes):
+            count += 1
+    return count
+
+
+def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
+                           own_probe=None) -> dict:
     """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
 
     Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
@@ -3680,11 +3876,19 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     threaded from the same call — the natural exits the sweep observed — and
     is what keeps the gate's identity from reading a self-shutdown as a
     broken sweep.
+
+    ``own_probe`` (#1005) is called ONCE, immediately after the post-sweep
+    `left` reading, and supplies `own_left` — the count of live servers this RUN
+    owns, as opposed to the host-wide `left`. Same seam, same instant, different
+    population: that is what lets the gate compare like with like. Absent
+    (`None`) means the report cannot attribute, which the gate treats as
+    unmeasured rather than as zero.
     """
     before = probe()
     reaped, cleared, exited = sweep_until_cleared(run_one, deadline, clock)
     left = probe()
-    return _hygiene_report(reaped, cleared, left, before, exited)
+    own_left = own_probe() if own_probe is not None else None
+    return _hygiene_report(reaped, cleared, left, before, exited, own_left)
 
 
 def _zero_client_state_read() -> dict:
