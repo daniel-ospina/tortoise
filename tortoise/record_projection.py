@@ -1944,12 +1944,23 @@ def _delete_statements(
     put in the record, verified row-for-row by `tools/turn_parity_census.py`
     BEFORE the delete is allowed. Deleting them would destroy the transcript the
     purge exists to preserve — and it would happen immediately, not only on a
-    later replay, because `_emit_event` feeds every appended record straight to
-    `record_writer.write_records`. The demote is also what keeps the two
-    REBUILD routes agreeing: leave the row at its `graph` default and
-    `rebuild_from_record` re-creates the node the journal rebuild correctly
-    omits (`cache_projection.read_record_view`'s tier predicate is the other
-    half).
+    later replay, because `_emit_event` hands every appended record straight to
+    `record_writer.write_live_record` (the ONE production record door —
+    `write_records` is the batch/replay door, not this path). The demote is also
+    what keeps the two REBUILD routes agreeing: leave the row at its `graph`
+    default and `rebuild_from_record` re-creates the node the journal rebuild
+    correctly omits (`cache_projection.read_record_view`'s tier predicate is the
+    other half).
+
+    **OVERRIDES:** #10017 R1's recorded record-side mechanism (an
+    identity-then-row `DELETE`, `record_projection.py`'s `_delete_statements`
+    tier-less arm) — a tier-scoped removal's RECORD effect is a TIER DEMOTE
+    (`UPDATE public.point SET cache_tier = 'record_only'`) instead. R1's
+    premise, that journaling the removal "needs **no new mechanism**", holds on
+    the GRAPH fold (still a hard `DETACH DELETE`, unchanged) and is wrong on the
+    record fold, where it would delete the very rows the purge's census just
+    verified. Recorded on the issue (#10017) as well, which is the artifact the
+    lane that builds the gated purge tool reads first.
 
     ``record_only`` is the only value a DELETE may carry: `graph` would name a
     tier the row is not being left in, and the column exists only on
