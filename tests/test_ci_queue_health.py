@@ -914,7 +914,7 @@ def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
     reports the leader as a FACT instead of asserting the queue is made of PR work
     (the #9118 P2-2 class). This test's own queue is NOT that shape: it holds 20
     PR-event runs and no non-PR run at all, so with no PR run executing it is
-    `PR-STARVED` with `trimmable == ()` (pinned by
+    `PR-STARVED` with `trimmable == ()` (both halves pinned by
     `test_a_starved_queue_is_starved_not_backlogged`). The measured trim-safe-leader
     shape — the same queue with no PR run executing, a FLOOD whose governor trims 5
     of 10 — is the fixture of
@@ -958,6 +958,12 @@ def test_a_starved_queue_is_starved_not_backlogged():
     health = classify(starving_pr_runs(20, age_seconds=9000))
     assert health.verdict == Q.PR_STARVED
     assert not any("PR-BACKLOGGED" in r for r in health.reasons)
+    # The sibling half of the citation the backlogged test's docstring makes
+    # (#10264 review, non-blocking): this queue holds no non-PR run, so the
+    # classifier reaches `no_flood()` and there is nothing to trim. Asserted
+    # here so the docstring's `trimmable == ()` claim is pinned by the test it
+    # names, not merely by the PR-BACKLOGGED arm of the test that cites it.
+    assert health.trimmable == ()
 
 
 def test_a_truncated_feed_still_reports_a_witnessed_backlog():
