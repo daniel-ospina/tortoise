@@ -36,8 +36,19 @@
 #   shard per run into a FALSE RED). So NOTHING answers `ubuntu-latest` today, while the REQUIRED
 #   aggregate `python-ci-gate` still asks for it — and a repair that REPLACES the set strips the
 #   label from the one pool left. A repair therefore UNIONS the runner's current labels with the
-#   computed set: it can ADD `ubuntu-24.04` or the arch marker, and it can never REMOVE
-#   `ubuntu-latest`. ⛔ Restoring the label on ARM is NOT part of this — #6897 measured that wrong.
+#   computed set, so it can never REMOVE `ubuntu-latest` or any custom label a workflow targets.
+#   ⛔ Restoring the label on ARM is NOT part of this — #6897 measured that wrong.
+#
+#   ⛔ THE UNION IS NOT UNCONDITIONAL, and the two exceptions are NOT the fallback label's. A
+#   literal union would also make BOTH defects below permanent, and each is a false PASS rather
+#   than a queue delay: (a) a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …) —
+#   the label a leg pins to ESCAPE this pool, so keeping it un-pins `test-slow` / `workflow-lint` /
+#   `finding-provenance` / `mirror-images` onto a bare box whose PATH lacks their tools (measured
+#   2026-10-24: exit 127, `gh: command not found`); (b) a FOREIGN ARCH MARKER (`self-hosted-arm64`
+#   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. Both are dropped by the
+#   repair and PRINTED, never silently skipped, and the drop mirrors
+#   `tools/runner_autoscale.py::_preserve_labels`, which drops exactly those two classes too.
+#   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
@@ -52,7 +63,7 @@
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
 #   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (never remove)
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin + a foreign arch marker)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
@@ -252,6 +263,29 @@ is_host_label() {
 }
 # Is $2 already in the comma-separated list $1? (`case`, not an array: bash 3.2 has no assoc arrays.)
 list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
+# Is $1 an ARCH/POOL marker that is NOT this box's (`self-hosted-*` other than `$ARCH_LABEL`)?
+# It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
+# `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
+# keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
+# `:42-46`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too.
+is_foreign_arch_label() {
+  case "$1" in
+    "$ARCH_LABEL") return 1 ;;
+    self-hosted-*) return 0 ;;
+  esac
+  return 1
+}
+# Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class, and the
+# same shape, as `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two
+# writers, so the two must not disagree. The pool claims `ubuntu-latest` and NEVER an
+# `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:61`): that label is precisely what a leg pins to
+# escape this pool. `ubuntu-latest` is NOT in the class (no version), and neither is a custom label
+# that merely starts with one (`ubuntu-2204-tools` — see the boundary test in
+# `tests/test_runner_autoscale.py`), which is why the match is anchored on both ends.
+is_version_pinned_hosted_label() {
+  printf '%s' "$1" | grep -qiE '^ubuntu-[0-9]+(\.[0-9]+)*(-arm)?$'
+}
 
 # ── label coverage: which `runs-on:` labels does the pool actually answer? ────
 # A `runs-on:` label that NO runner answers does not fail — it does not run. GitHub leaves the run
@@ -265,26 +299,61 @@ list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
 # served by GitHub-hosted capacity, so 0 self-hosted answers is the healthy case on a hosted day.
 # It is still printed loudly, because when hosted capacity does not materialise the failure is
 # completely silent, and the operator's next question is exactly "who answers this label?".
-workflow_labels() { # the distinct `runs-on:` scalars the workflows use, one per line
-  local wf="$REPO_ROOT_DIR/.github/workflows"
+# ── the workflow files this reader may read ─────────────────────────────────
+# GitHub accepts BOTH `.yml` and `.yaml`. Globbing only `*.yml` silently dropped a `.yaml`
+# workflow, so the coverage block below printed "every one has an online self-hosted answer" over a
+# file it never read — the same false-clean one level down that this whole block exists to expose.
+# ⛔ EXISTING FILES ONLY, and that is not cosmetic: `set -o pipefail` is on (`:77`) and a glob that
+# matches nothing is passed through LITERALLY, so handing `…/*.yaml` to grep makes grep exit 2 on a
+# missing path and the whole read report "cannot read" on a tree that HAS workflows (measured while
+# fixing this: every label-coverage arm went SKIPPED). One path per line; empty when there are none.
+workflow_files() {
+  local wf="$REPO_ROOT_DIR/.github/workflows" f
   [ -d "$wf" ] || return 1
-  grep -hE '^[[:space:]]*runs-on:' "$wf"/*.yml 2>/dev/null \
+  for f in "$wf"/*.yml "$wf"/*.yaml; do
+    if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+  done
+}
+
+workflow_labels() { # the distinct `runs-on:` scalars the workflows use, one per line
+  local files f
+  files="$(workflow_files)" || return 1
+  [ -n "$files" ] || return 1
+  # `|| true`: a file with no `runs-on:` line makes grep exit 1, and under pipefail that would fail
+  # the whole read instead of contributing nothing.
+  while IFS= read -r f; do
+    grep -hE '^[[:space:]]*runs-on:' "$f" 2>/dev/null || true
+  done <<<"$files" \
     | sed -E 's/^[[:space:]]*runs-on:[[:space:]]*//; s/[[:space:]]+#.*$//' \
     | tr -d '"' | tr -d "'" | tr -d ' ' \
     | tr ',' '\n' | sed -E 's/^\[//; s/\]$//' \
     | sed '/^$/d' | sort -u
 }
 
+# How many `runs-on:` keys are written as a YAML BLOCK LIST (`runs-on:` then `- a` lines) — a shape
+# this scalar reader cannot see, counted so the report can SAY so instead of reading as complete.
+unreadable_runs_on_keys() {
+  local files f n=0 c
+  files="$(workflow_files)" || { printf '0'; return 0; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    c="$(grep -cE '^[[:space:]]*runs-on:[[:space:]]*(#.*)?$' "$f" 2>/dev/null || true)"
+    case "$c" in ''|*[!0-9]*) c=0 ;; esac
+    n=$((n + c))
+  done <<<"$files"
+  printf '%d' "$n"
+}
+
 label_coverage() { # $1 = the runner rows (name<TAB>status<TAB>busy=…<TAB>label,label,…)
   local rows="$1" labels label pair on off n=0 zero="" wf="$REPO_ROOT_DIR/.github/workflows" unreadable
   if ! labels="$(workflow_labels)" || [ -z "$labels" ]; then
-    say "label-coverage: cannot read a \`runs-on:\` label from $wf/*.yml — SKIPPED (this makes NO claim about any label)"
+    say "label-coverage: cannot read a \`runs-on:\` label from $wf/*.yml or $wf/*.yaml — SKIPPED (this makes NO claim about any label)"
     return 0
   fi
   # A `runs-on:` written as a YAML block list (`runs-on:` then `- a` lines) is not a scalar this
   # reader can see. Say so instead of counting a surface it did not read — an unread label that
   # silently reads as healthy is the failure this whole block exists to expose.
-  unreadable="$(grep -chE '^[[:space:]]*runs-on:[[:space:]]*(#.*)?$' "$wf"/*.yml 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')"
+  unreadable="$(unreadable_runs_on_keys)"
   say "label-coverage — answering ONLINE self-hosted runners, per \`runs-on:\` label the workflows use:"
   for label in $labels; do
     # a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run time.
@@ -346,12 +415,15 @@ fi
 # materialised jobs (no red, no green, every PR blocked), and a label restored by hand did not
 # survive the next repair (measured 2026-10-27: gone within ~25 minutes, twice).
 #
-# So: read the runner's CURRENT labels, union the computed set INTO them, and PUT THAT. The only
-# labels not sent are the host-derived ones GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`,
-# `X64`/`ARM64`/`ARM`) — the API refuses those anyway (HTTP 422 `Cannot set labels that duplicate existing
-# read-only labels`) — and they are PRINTED, never silently dropped. The before/after sets are
-# printed BEFORE the PUT, so a removal is visible in the output rather than inferred from a queue
-# that never moves.
+# So: read the runner's CURRENT labels, union the computed set INTO them, and PUT THAT. Two classes
+# are NOT carried into the union — a VERSION-PINNED HOSTED label (`ubuntu-<version>`, which a leg
+# pins to escape this pool) and a FOREIGN ARCH MARKER (`self-hosted-*` other than this box's) —
+# because keeping either makes a false PASS permanent; both are PRINTED on the `— not kept=` line.
+# The host-derived labels GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM`)
+# are not sent either: the API refuses them (HTTP 422 `Cannot set labels that duplicate existing
+# read-only labels`), and they are PRINTED, never silently dropped. The before/after sets and the
+# derived `removed=` list are printed BEFORE the PUT, so a removal is visible in the output rather
+# than inferred from a queue that never moves.
 if [ "$MODE" = repair ]; then
   need gh
   resolve_labels
@@ -374,17 +446,23 @@ if [ "$MODE" = repair ]; then
     if [ -z "$current" ]; then
       die "cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds." 2
     fi
-    after=""; host_skipped=""
+    after=""; host_skipped=""; arch_dropped=""; pinned_dropped=""
     for l in $(printf '%s' "$current" | tr ',' ' '); do
       if is_host_label "$l"; then host_skipped="${host_skipped:+$host_skipped,}$l"; continue; fi
+      # ⛔ THE TWO NAMED CARVE-OUTS (see the header). Dropping them is a REMOVAL, so each is
+      # PRINTED — a union that silently kept a false arch claim or a version pin is the defect this
+      # loop's own `removed=` line exists to expose.
+      if is_foreign_arch_label "$l"; then arch_dropped="${arch_dropped:+$arch_dropped,}$l"; continue; fi
+      if is_version_pinned_hosted_label "$l"; then pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"; continue; fi
       list_has "$after" "$l" || after="${after:+$after,}$l"
     done
     for l in $(printf '%s' "$LABELS" | tr ',' ' '); do
       list_has "$after" "$l" || after="${after:+$after,}$l"
     done
-    # DERIVED, never asserted: what the PUT would REMOVE. A union cannot remove anything, so a
-    # non-empty value here means this block regressed — printed BEFORE the PUT, which is the whole
-    # point (a removal must be visible in the output, not inferred from a job that never appears).
+    # DERIVED, never asserted: what the PUT would REMOVE, computed from the two sets alone. A union
+    # removes nothing EXCEPT the two carved-out classes above, so a value here must be one of those
+    # and nothing else — printed BEFORE the PUT, which is the whole point (a removal must be visible
+    # in the output, not inferred from a job that never appears).
     removed=""
     for l in $(printf '%s' "$current" | tr ',' ' '); do
       is_host_label "$l" && continue
@@ -399,7 +477,8 @@ if [ "$MODE" = repair ]; then
     say "labels for $agent (id $id):"
     say "  before=[$current]"
     say "  after =[$after]"
-    say "  host-owned, not sent=[$host_skipped] removed=[$removed]"
+    say "  host-owned, not sent=[$host_skipped] alien-arch, not kept=[$arch_dropped] version-pinned, not kept=[$pinned_dropped]"
+    say "  removed=[$removed]"
     body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$after" | sed 's/,/","/g')")"
     if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
     if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then

@@ -64,9 +64,19 @@ WHAT IS BEING PINNED
      no red, no green, every PR blocked with nothing to look at (measured 2026-10-27: runs
      40898791192 and 40901844458, `jobs=0`; a hand-restored label was gone within ~25 minutes,
      twice). The repair now reads the runner's CURRENT labels and PUTs `current ∪ computed`, so it
-     can ADD a label and can never REMOVE one; the before/after sets and the derived removal list
-     are printed BEFORE the PUT. `--status` answers "who answers this `runs-on:` label" for the same
-     reason: the failure it reports produces no check to look at.
+     can ADD a label and can never REMOVE one a workflow targets — EXCEPT the two named carve-outs
+     the union would otherwise make permanent, each a false PASS rather than a queue delay:
+     a VERSION-PINNED HOSTED label (`ubuntu-<version>`, the label a leg pins to ESCAPE this pool)
+     and a FOREIGN ARCH MARKER (`self-hosted-*` other than this box's, the pre-#2327 stamp a repair
+     is supposed to heal). Both are printed, and the derived `removed=[…]` list must name exactly
+     them and nothing else; `ubuntu-latest` and a genuine custom label always survive.
+     `--status` answers "who answers this `runs-on:` label" for the same reason: the failure it
+     reports produces no check to look at.
+  11. ⛔ **AN UNREAD WORKFLOW MUST NOT READ AS COVERED.** GitHub accepts `.yml` and `.yaml`, and the
+     coverage reader globbed only `*.yml` — so a `.yaml` workflow was dropped silently while the
+     block printed "every one has an online self-hosted answer". There are 0 `.yaml` workflows
+     today, which is exactly why nothing caught it: the block's own contract is that an unread
+     label never reads as healthy, one level down.
 """
 
 from __future__ import annotations
@@ -312,20 +322,31 @@ def test_repair_dry_run_plans_the_body_the_real_run_puts(tmp_path: Path):
 
 
 # ── 3b. a repair UNIONS — it can never remove a label a workflow needs ───────────────────────
+#: The pool label set a repair must get RIGHT in both directions, shared by every arm below so the
+#: arms cannot drift into exercising different sets. Same spelling as
+#: `tests/test_runner_autoscale.py::POOL_LABELS_WITH_VERSION_PINS` — ONE invariant, two writers
+#: (`--repair-labels` and `_preserve_labels`), so the two must drop and keep the same labels.
+POOL_LABELS = (
+    "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,ubuntu-24.04-arm,"
+    "gpu,ubuntu-2204-tools"
+)
+
+
 def test_repair_on_a_runner_that_already_carries_the_label_keeps_it(tmp_path: Path):
     """Case 1: a runner that already carries `ubuntu-latest` still carries it after a repair — along
-    with every other custom label it carries.
+    with every genuine CUSTOM label it carries.
 
     The pre-fix repair PUT exactly the computed set, so an already-correct runner was re-stamped
     with whatever the resolver happened to compute and any label it did not compute was dropped.
-    `ubuntu-24.04` below is that witness: it is a label an operator attached on purpose (the
-    version-pinned hosted pin the slow legs need) and no resolver computes it — under a REPLACE it
-    disappears from the body, which is the whole defect in one line.
+    `gpu` below is that witness: a custom label no resolver computes — under a REPLACE it disappears
+    from the body, which is the whole defect in one line. `ubuntu-2204-tools` is the boundary
+    witness: it merely STARTS `ubuntu-<digits>` and is not a hosted label, so the version-pin
+    carve-out (the next arm) must not eat it.
     """
     stub, env = _repair_runner(
         tmp_path,
         pool="1",
-        labels="self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04",
+        labels="self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,gpu,ubuntu-2204-tools",
     )
 
     r = _run("--repair-labels", "--count", "1", env=env)
@@ -333,11 +354,85 @@ def test_repair_on_a_runner_that_already_carries_the_label_keeps_it(tmp_path: Pa
     assert "ENGAGED" in r.stderr, r.stderr          # here the computed set DOES include the label
     put = _put_body(stub)
     assert "ubuntu-latest" in put, put
-    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "ubuntu-24.04"}, put
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "gpu", "ubuntu-2204-tools"}, put
     # the host-owned trio is read back on every runner and cannot be PUT (HTTP 422), so it is
     # filtered out of the body — and PRINTED, not silently dropped
     assert "host-owned, not sent=[self-hosted,Linux,X64]" in r.stderr, r.stderr
-    assert "removed=[]" in r.stderr, f"a union must remove nothing: {r.stderr}"
+    assert "removed=[]" in r.stderr, f"a union must remove nothing here: {r.stderr}"
+
+
+def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path: Path):
+    """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
+
+    A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:61` — "these runners
+    deliberately **do not** claim any `ubuntu-<version>` label" — and `:65-66`, an out-of-band
+    attachment "cannot survive a re-registration or `tools/install-ci-runner-x64.sh
+    --repair-labels`". `tools/runner_autoscale.py::_preserve_labels` already drops the family
+    (`VERSION_PINNED_HOSTED_LABEL`), so a union that kept it would leave the two writers with
+    OPPOSITE policies for the same label set, both green.
+
+    Why it matters — the label is what a leg pins to ESCAPE this pool: `test-slow`, `workflow-lint`,
+    `finding-provenance` and `mirror-images` name it because they need the hosted image's PATH and
+    a fresh egress IP. A runner serving it is not a queue delay, it is a FALSE PASS on a bare box
+    (measured 2026-10-24: 38 of 39 `finding-provenance` failures on `pi-runner-vm-*`, exit 127,
+    `gh: command not found` — `tests/test_runner_tool_contract.py:5-12`).
+
+    ⛔ `ubuntu-24.04-arm` is the same class, not a near-miss: GitHub publishes it as a hosted label,
+    so a job naming it escapes this pool exactly as a bare pin does. `ubuntu-latest` is NOT in the
+    class (it carries no version) and is always kept.
+
+    Non-vacuity: with the carve-out removed (the plain union at the previous head) both pins appear
+    in the PUT and the set assertion reds.
+    """
+    stub, env = _repair_runner(tmp_path, pool="1", labels=POOL_LABELS)
+
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    put = _put_body(stub)
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "gpu", "ubuntu-2204-tools"}, (
+        "a repair must never hand this pool a version-pinned HOSTED label: every job pinned to it "
+        f"is then served by the pool it pinned to escape: {put}"
+    )
+    assert "ubuntu-24.04" not in put and "ubuntu-24.04-arm" not in put, put
+    # the removal is PRINTED (a silent drop is the same defect wearing the other mask)…
+    assert "version-pinned, not kept=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, r.stderr
+    # …and the derived removal list agrees, so nothing else is being removed behind the carve-out
+    assert "removed=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, r.stderr
+    assert "alien-arch, not kept=[]" in r.stderr, r.stderr
+
+
+def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Path):
+    """⛔ THE UNION'S NAMED CARVE-OUT (b): a `self-hosted-*` marker that is NOT this box's is DROPPED.
+
+    `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
+    labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:258-263`) — and the runbook still sells
+    `--repair-labels` as the manual heal that "re-applies this arch's marker" (`:275-276`). Keeping
+    the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
+    artifact: a false PASS, not a queue delay (this file's own header).
+    `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
+    any `self-hosted-*`, for exactly this reason.
+
+    Non-vacuity: with the carve-out removed (the plain union at the previous head) `self-hosted-arm64`
+    is in the PUT and `removed=[]` claims nothing was dropped.
+    """
+    stub, env = _repair_runner(
+        tmp_path,
+        pool="0",
+        labels="self-hosted,Linux,X64,self-hosted-x64,self-hosted-arm64,ubuntu-latest",
+    )
+
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    put = _put_body(stub)
+    assert "self-hosted-arm64" not in put, (
+        f"an x86 runner must never advertise the arm64 pool: {put}"
+    )
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest"}, put
+    assert "alien-arch, not kept=[self-hosted-arm64]" in r.stderr, r.stderr
+    assert "removed=[self-hosted-arm64]" in r.stderr, r.stderr
+    assert "version-pinned, not kept=[]" in r.stderr, r.stderr
 
 
 def test_a_computed_set_that_omits_the_label_cannot_remove_it(tmp_path: Path):
@@ -356,11 +451,7 @@ def test_a_computed_set_that_omits_the_label_cannot_remove_it(tmp_path: Path):
     Non-vacuity: restore the replace (`body` built from `$LABELS`, or skip the `current` loop) and
     the first assertion reds — `ubuntu-latest` is absent from the PUT.
     """
-    stub, env = _repair_runner(
-        tmp_path,
-        pool="0",
-        labels="self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04",
-    )
+    stub, env = _repair_runner(tmp_path, pool="0", labels=POOL_LABELS)
 
     r = _run("--repair-labels", "--count", "1", env=env)
     assert r.returncode == 0, r.stderr
@@ -370,15 +461,25 @@ def test_a_computed_set_that_omits_the_label_cannot_remove_it(tmp_path: Path):
     )
     put = _put_body(stub)
     assert "ubuntu-latest" in put, f"a repair must not be able to remove the required gate's label: {put}"
-    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "ubuntu-24.04"}, put
-    assert "removed=[]" in r.stderr, r.stderr
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "gpu", "ubuntu-2204-tools"}, put
     # the before/after sets are printed BEFORE the PUT, so a removal is visible, never inferred
-    assert "before=[self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04]" in r.stderr, r.stderr
-    assert "after =[self-hosted-x64,ubuntu-latest,ubuntu-24.04]" in r.stderr, r.stderr
+    assert (
+        "before=[self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,ubuntu-24.04,ubuntu-24.04-arm,gpu,ubuntu-2204-tools]"
+        in r.stderr
+    ), r.stderr
+    assert "after =[self-hosted-x64,ubuntu-latest,gpu,ubuntu-2204-tools]" in r.stderr, r.stderr
     before = re.search(r"before=\[(.*?)\]", r.stderr).group(1).split(",")
     after = re.search(r"after =\[(.*?)\]", r.stderr).group(1).split(",")
-    assert set(before) - {"self-hosted", "Linux", "X64"} <= set(after), (
-        f"nothing a runner carried may disappear: {before} → {after}"
+    # ⛔ Every label a runner carried survives EXCEPT the two carved-out classes — a version pin and
+    # a foreign arch marker may go (that is the point), nothing else may.
+    carved_out = {
+        lab for lab in before if re.fullmatch(r"ubuntu-[0-9]+(?:\.[0-9]+)*(?:-arm)?", lab, re.IGNORECASE)
+    }
+    assert set(before) - {"self-hosted", "Linux", "X64"} - carved_out <= set(after), (
+        f"no label outside the two named carve-outs may disappear: {before} → {after}"
+    )
+    assert "removed=[]" not in r.stderr, (
+        f"the derivation must REPORT the carved-out removals rather than claim a clean union: {r.stderr}"
     )
 
 
@@ -430,7 +531,16 @@ def test_status_counts_answering_runners_per_runs_on_label(tmp_path: Path):
     )
     assert r2.returncode == 0, r2.stderr
     assert "NO RUNNER ANSWERS 'ubuntu-latest'" in r2.stderr, r2.stderr
-    assert "NO online self-hosted answer for: ubuntu-24.04 ubuntu-latest" in r2.stderr, r2.stderr
+    # ⛔ LABEL-SCOPED, not byte-for-byte. The summary names EVERY `runs-on:` label with zero
+    # answers, derived from all ~40 workflow files — so asserting its exact text made this
+    # INSTALLER test red whenever an unrelated workflow added a label (`macos-14`, a new hosted
+    # pin). Assert that the labels this arm is about are NAMED, and nothing about the rest.
+    summary = re.search(r"NO online self-hosted answer for: (.*)$", r2.stderr, re.M)
+    assert summary, r2.stderr
+    named = set(summary.group(1).split())
+    assert {"ubuntu-latest", "ubuntu-24.04"} <= named, (
+        f"the summary must name each uncovered label; got {named}: {r2.stderr}"
+    )
 
     # ⛔ THE COUNT IS AN EXACT LABEL MATCH, and this row is why: `ubuntu-latest-extra` is a
     # DIFFERENT label, so a substring/prefix comparison would report `ubuntu-latest → 1` and declare
@@ -472,6 +582,42 @@ def test_label_coverage_makes_no_claim_when_it_cannot_read_the_workflows(tmp_pat
     )
     assert r.returncode == 0, r.stderr
     assert "SKIPPED (this makes NO claim about any label)" in r.stderr, r.stderr
+    assert "every one has an online self-hosted answer" not in r.stderr, r.stderr
+
+
+def test_label_coverage_reads_yaml_workflows_too(tmp_path: Path):
+    """⛔ A `.yaml` WORKFLOW MUST NOT READ AS COVERED.
+
+    GitHub accepts both `.yml` and `.yaml`, and the reader globbed only `*.yml` — so a `.yaml`
+    workflow's `runs-on:` was dropped while the block still printed "every one has an online
+    self-hosted answer". The repo has 0 `.yaml` workflows today, which is exactly why nothing caught
+    it: the block's own contract (`:259-262`) is that an unread label must never read as healthy.
+
+    Non-vacuity: with the glob reverted to `*.yml` the `macos-14` row never appears and the summary
+    claims full coverage off a surface it did not read.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    copied = tools / "install-ci-runner-x64.sh"
+    copied.write_text(Path(INSTALLER).read_text())
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "legacy.yaml").write_text("jobs:\n  m:\n    runs-on: macos-14\n")
+    (wf / "plain.yml").write_text("jobs:\n  p:\n    runs-on: ubuntu-latest\n")
+
+    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest"
+    stub = _stub_gh(tmp_path / "pool", "0", rows=carrying)
+    r = subprocess.run(
+        [BASH, str(copied), "--status", "--count", "1"],
+        capture_output=True,
+        text=True,
+        env=_env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    )
+    assert r.returncode == 0, r.stderr
+    assert re.search(r"^\s+macos-14 → 0 online, 0 offline$", r.stderr, re.M), (
+        f"a `.yaml` workflow's `runs-on:` must be READ, not silently dropped: {r.stderr}"
+    )
+    assert "NO RUNNER ANSWERS 'macos-14'" in r.stderr, r.stderr
     assert "every one has an online self-hosted answer" not in r.stderr, r.stderr
 
 

@@ -63,7 +63,12 @@ the arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`, `ubuntu-22.04-arm
 `ubuntu-26.04-arm`), which `_preserve_labels` drops too — the installer cannot emit one, and
 `tools/runner_autoscale.py::_preserve_labels` DROPS rather than preserves one on re-registration,
 so an out-of-band attachment cannot survive a re-registration or
-`tools/install-ci-runner-x64.sh --repair-labels`. That is NOT the same as "cannot become
+`tools/install-ci-runner-x64.sh --repair-labels`. ⛔ For `--repair-labels` that is a DELIBERATE,
+NAMED carve-out from the union it otherwise performs, not a side effect of the union: keeping the
+pin would make it permanent, so the repair drops the whole family and prints
+`version-pinned, not kept=[…]` (see "TWO NAMED CARVE-OUTS" below). That paragraph and
+`tests/test_ci_runner_x64_install.py` must move together — a union edited back to a literal one
+turns this sentence into a false claim. That is NOT the same as "cannot become
 permanent": `scripts/ci_runner_gate.sh` treats any non-auto label as `extra` (`:222`) and re-emits
 it in its whole-set `PUT` body on every fallback transition (`:232`), and a runner nobody
 re-registers keeps whatever label it was given — so re-measure.
@@ -143,35 +148,51 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:628` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:450` (arch refusal dies at `:455`) and `uninstall` `:503` ·
-  guards at `:450-501` (forks `:458`, disk `:478`, cpu/memory `:485`) · sha256 pin + registration
-  at `:639-649` (verify `:639`, token `:642`, one argv `:647-648`, `config.sh` `:649`) · systemd
-  install/start at `:659-661` · label resolution at `:193-235` (`fallback_engaged` `:197`,
-  `resolve_labels` `:208`) · the union's label algebra at `:237-254` and the repair that uses it,
-  `repair` `:355-411` · the label-coverage block `:256-322` (`label_coverage` `:278`) and the
-  `--status` block that calls it `:323-337` · `--print-labels` `:423`.
-- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:161-173`): a
+- `--count N` → `tools/install-ci-runner-x64.sh:707` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:529` (arch refusal dies at `:534`) and `uninstall` `:582` ·
+  guards at `:529-580` (forks `:537`, disk `:557`, cpu/memory `:564`) · sha256 pin + registration
+  at `:718-728` (verify `:718`, token `:721`, one argv `:726-727`, `config.sh` `:728`) · systemd
+  install/start at `:738-740` · label resolution at `:204-246` (`fallback_engaged` `:208`,
+  `resolve_labels` `:219`) · the union's label algebra at `:248-289` and the repair that uses it,
+  `repair` `:427-492` · the label-coverage block `:290-389` (`label_coverage` `:347`) and the
+  `--status` block that calls it `:392-407` · `--print-labels` `:502`.
+- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:167-184`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
-- **`--repair-labels` UNIONS — it can ADD a label and can never REMOVE one** (`:355-411`). It reads
-  the runner's CURRENT labels and PUTs `current ∪ computed`, because the old body was the computed
-  set alone, i.e. a REPLACE: with the ARM64 pool stripped of `ubuntu-latest` (#6897) `--fallback
-  auto` computes `self-hosted-x64` alone, so a repair removed the label the REQUIRED
-  `python-ci-gate` aggregate is pinned to and the run sat `pending` with ZERO materialised jobs —
-  no red, no green, every PR blocked (measured 2026-10-27: runs 40898791192 / 40901844458, `jobs=0`;
-  a hand-restored label was gone within ~25 minutes, twice). Only the host-derived labels GitHub
-  owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM` — refused by the API with HTTP 422)
-  are left out of the body, and the before/after sets plus the derived `removed=[…]` list are
-  printed BEFORE the PUT, so a removal would be visible in the output instead of inferred from a
+- **`--repair-labels` UNIONS — it can ADD a label and can never REMOVE one a workflow targets**
+  (`:427-492`). It reads the runner's CURRENT labels and PUTs `current ∪ computed`, because the old
+  body was the computed set alone, i.e. a REPLACE: with the ARM64 pool stripped of `ubuntu-latest`
+  (#6897) `--fallback auto` computes `self-hosted-x64` alone, so a repair removed the label the
+  REQUIRED `python-ci-gate` aggregate is pinned to and the run sat `pending` with ZERO materialised
+  jobs — no red, no green, every PR blocked (measured 2026-10-27: runs 40898791192 / 40901844458,
+  `jobs=0`; a hand-restored label was gone within ~25 minutes, twice). Only the host-derived labels
+  GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM` — refused by the API with
+  HTTP 422) are left out of the body, and the before/after sets plus the derived `removed=[…]` list
+  are printed BEFORE the PUT, so a removal would be visible in the output instead of inferred from a
   queue that never moves. An unreadable current label set is a REFUSAL (exit 2, nothing written) —
   never "use the computed set", which is the same strip through a different door.
-- **`--status` answers "who answers this `runs-on:` label"** (`:256-322`): per label the workflows
+- **⚠️ TWO NAMED CARVE-OUTS from that union, and neither is the fallback label** (`:272-288`). Both
+  classes are DROPPED (and printed as `alien-arch, not kept=[…]` / `version-pinned, not kept=[…]`),
+  because keeping either makes a false PASS permanent, and both are exactly what
+  `tools/runner_autoscale.py::_preserve_labels` drops on re-registration — one invariant, two
+  writers, so the two must not disagree:
+  1. **`ubuntu-<version>`** (`ubuntu-24.04`, `ubuntu-22.04-arm`, …): the label a leg pins to ESCAPE
+     this pool. Preserving it would un-pin `test-slow` / `workflow-lint` / `finding-provenance` /
+     `mirror-images` onto a bare box whose `PATH` lacks their tools — the measured 2026-10-24
+     failures (exit 127, `gh: command not found`). `ubuntu-latest` is NOT in the class (no version)
+     and is always kept, as is a custom label that merely starts `ubuntu-<digits>
+     (`ubuntu-2204-tools`).
+  2. **A foreign arch marker** (`self-hosted-*` other than `self-hosted-x64`): the pre-#2327 stamp
+     this repair is supposed to HEAL. Keeping `self-hosted-arm64` on an x86 box makes an
+     arch-specific job routable to it and produces a wrong artifact.
+- **`--status` answers "who answers this `runs-on:` label"** (`:290-389`): per label the workflows
   use, it counts ONLINE self-hosted runners whose label set carries it, and prints a loud `NO RUNNER
   ANSWERS '<label>'` when the count is zero. A label nobody answers does not fail — it does not run:
-  the run stays `pending` with zero jobs forever, so the queue has to be READ.
+  the run stays `pending` with zero jobs forever, so the queue has to be READ. The label list is read
+  from BOTH `.github/workflows/*.yml` and `*.yaml` (`:310`): a `.yaml` workflow dropped by the reader
+  would let the block claim full coverage over a file it never read.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:503-611`; the proof is `is_runner_install` at `:189`, which accepts `.runner` or
+  gone** (`:582-690`; the proof is `is_runner_install` at `:200`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -183,7 +204,7 @@ falls back.
   registration and all**, and reported (exit 3): the unit would otherwise survive pointing at a
   deleted working directory, and a still-registered runner would lose the only local record that a
   retry — and `--status` — can read, so `--uninstall` reported a clean removal while exiting 0.
-- **Exit codes** (`:64-77`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
+- **Exit codes** (`:75-87`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
   refused — headroom, arch, an undecidable fallback, an unreadable current label set on the repair
   path, or an uninstall target that is not provably a runner, with nothing downloaded or registered,
   so re-run with a smaller `--count` · `3`
@@ -192,8 +213,8 @@ falls back.
   failed, likewise left intact), a tool missing from PATH, or a failed remote read.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:450`, the `MODE = install`
-  block; the refusal itself dies at `:455`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:529`, the `MODE = install`
+  block; the refusal itself dies at `:534`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
@@ -274,6 +295,16 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    `{self-hosted-x64}` (plus any custom label that runner already carried, which the gate never
    removes — `labels_for` `:218-233`). `tools/install-ci-runner-x64.sh --repair-labels` re-applies this arch's
    marker and syncs the fallback label to the gate's state by hand, with no re-registration.
+
+   ⛔ **WHAT THE UNION DOES AND DOES NOT BUY, stated plainly so the next stall is not read as
+   closed.** The repair hardening fixed the *manual* and *provisioner-adjacent* path only: a repair
+   can no longer strip `ubuntu-latest`, and nothing else in this repo calls `--repair-labels`
+   (`tools/runner_autoscale.py:944` invokes the installer as `--count … --fallback auto`, never
+   `--repair-labels`, and its own `_preserve_labels` already kept the label). It does NOT stop the
+   remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
+   tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
+   label can still disappear within one tick after a hand repair — the gate-side removal is its own
+   follow-up, and re-measuring (`--status`, then `gh api …/runners`) is still the way to know.
 2. **The pool is still the slower class for long legs.** These runners are not pinned off the
    fast matrix (`test (a)…(i)`), so a 20m watchdog leg can still be killed here if this box
    turns out slower than hosted under load. That is the #6897 measurement, unchanged; the
