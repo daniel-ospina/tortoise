@@ -2494,9 +2494,18 @@ class TestARenderedCodeElementGetsAMonoFace:
     `font-family: var(--mono, var(--brand, Menlo))` as mono (#10254 review, round 6).
     """
 
-    #: the trees this guard scans. `apps/` yields no self-contained page today, but it
-    #: is a declared subject: dropping it must be a deliberate edit, not a silent
-    #: narrowing (see `_sources`).
+    #: the trees this guard scans. `apps/` is NOT an empty declaration: it contributes
+    #: 2 of the `MIN_DECIDABLE` subjects today — `apps/graph-viz/index.html` (a page
+    #: that carries its own `<style>` and renders no `<code>`/`<pre>` YET) and
+    #: `apps/graph-viz/src/components/ontology/HierarchyChart.tsx` (own `<style>`, not a
+    #: page) — while the only `apps/` file that DOES render the element,
+    #: `apps/graph-viz/src/components/ontology/OntologyView.tsx`, carries no own sheet,
+    #: so it is not decidable here. MEASURED 2026-10-29 (#10254 review, round 12): the
+    #: earlier wording ("`apps/` yields no self-contained page today") was stale — the
+    #: top-level `apps/` root already carries sheets, and dropping it takes the ratchet
+    #: to 19 < `MIN_DECIDABLE`. So removing it must be a deliberate edit that moves the
+    #: floor too, never a silent narrowing (see `_sources`); each root's contribution is
+    #: pinned by `test_every_page_it_can_decide_on_selects_this_guard`.
     ROOTS = ("website", "apps")
     #: measured 2026-10-28 at this tree: 9 self-contained pages carry `<code>`/`<pre>`
     #: (faq, privacy, 404, self-hosted, security, docs, license,
@@ -2847,6 +2856,11 @@ class TestARenderedCodeElementGetsAMonoFace:
         guard = Path(__file__).name
         missing = []
         decidable = 0
+        # per-root census: a root that contributes ZERO is the shape the `ROOTS`
+        # comment used to (wrongly) describe for `apps/`, and it is the shape that
+        # makes a declared root decorative rather than a subject set (#10254 review,
+        # round 12).
+        by_root = {root: 0 for root in self.ROOTS}
         for path in sorted(self._sources(repo)):
             text = path.read_text(errors="replace")
             # same blanking order the guard uses: inert text is not a sheet
@@ -2854,12 +2868,23 @@ class TestARenderedCodeElementGetsAMonoFace:
                 continue
             decidable += 1
             rel = path.relative_to(repo).as_posix()
+            by_root[Path(rel).parts[0]] += 1
             selection = select([rel], "pull_request", manifest)
             if guard not in selection["test_files"]:
                 missing.append(f"{rel} (selected surfaces: {selection['surfaces'] or 'none'})")
         assert decidable >= self.MIN_DECIDABLE, (
             f"only {decidable} page(s) carry their own <style> under "
             f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
+        # Every DECLARED root must actually contribute subjects. `apps/` carries 2 of
+        # the 21 today (`apps/graph-viz/index.html`, `HierarchyChart.tsx`), which is the
+        # fact the `ROOTS` comment states; if that ever drops to 0 the root is
+        # decorative and the comment is stale again — move the floor and the comment
+        # together instead of letting this assert be the only record (#10254 round 12).
+        assert all(count for count in by_root.values()), (
+            "a declared root carries no own-<style> subject: "
+            f"{by_root!r} over ROOTS={'/'.join(self.ROOTS)} — dropping or emptying a "
+            "root narrows the scan; if the narrowing is intended, move MIN_DECIDABLE "
+            "and the ROOTS comment in the same edit")
         assert not missing, (
             "these pages carry their own <style> block, so this guard would DECIDE on "
             "them if they rendered `<code>`/`<pre>` — but editing one selects no leg "
