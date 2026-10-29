@@ -967,13 +967,27 @@ def test_suite_jobs_surface_the_tolerated_leak():
 # never runs — and it reported "test leg INCOMPLETE — no pytest summary; failure
 # set unobservable".
 #
+# `test-slow` is the second of those legs (this PR). Its own measured red is the
+# VERDICT-ARTIFACT shape rather than the log shape: run 40921262252, job
+# 123636659746 exited pytest with **0** (`814 passed, 3 skipped`) and still
+# redded in `Skip-fail guard` with `850 expected nodeid(s) absent from the
+# junitxml testcases`, because `/tmp/expected-nodeids.txt` held a co-tenant's
+# manifest (its `… and 800 more` list is `tests/test_capture_session.py` and
+# `tests/test_3311_multilabel_status_vocab.py`, which this leg never runs) while
+# `/tmp/junit.xml` held this leg's. Both runner installs are registrations on
+# ONE host, and the leg's uploaded log carries the same sharing independently: a
+# foreign session header (`-- /opt/gh-runner-x64/…`) in its first 5 KB against
+# this job's own `pythonLocation: /opt/gh-runner-x64-2/…`, and a 62 KB NUL hole
+# where its progress lines used to be.
+#
 # FROZEN LIST, not a repo-wide scan, for the reason `_LEAK_SURFACED_JOBS` gives:
 # "every pytest job" is a claim about process that a text scan cannot certify.
-# The five legs #10280 still owns are NOT here — this pin asserts only what is
+# The legs #10280 still owns are NOT here — this pin asserts only what is
 # actually migrated, so it cannot go green on a leg that was not fixed.
 _PYTEST_LOG_MIGRATED_JOBS = (
     "python-ci.yml::test",
     "python-ci.yml::test-concurrency-falkor",
+    "python-ci.yml::test-slow",
 )
 
 # A host-global artifact path: `/tmp/pytest.log`, or any other bare `/tmp/...`
