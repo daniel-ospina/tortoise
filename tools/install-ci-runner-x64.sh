@@ -82,8 +82,8 @@
 #     5  label-coverage WAS read and found a required label this pool is ASKED to serve with NO
 #        self-hosted answer — the erosion state: the operator opted in, and the label is not there.
 #        A zero-answer label this pool is NOT asked to serve (`CI_RUNNER_OS_LABEL=off`, the shipped
-#        default, or `auto` declining) is a REPORT, not a verdict — that is #6897's pin applied
-#        correctly. 0 does not mean "covered": read the report.
+#        default, or `auto` declining) is a REPORT, not a verdict: #6897's pin applied correctly OR
+#        erosion to zero — one shell cannot tell them apart. 0 does not mean "covered".
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line

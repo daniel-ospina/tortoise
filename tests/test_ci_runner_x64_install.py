@@ -478,8 +478,9 @@ def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_pat
     # The incident state: a REQUIRED label the pool IS ASKED to serve and nobody answers. A verdict,
     # and it is bad -> 5. ⛔ `CI_RUNNER_OS_LABEL=on` IS PART OF THE FIXTURE: `--status` reads the
     # operator's intent (the same `resolve_os_label` the install path uses) before it verdicts a bare
-    # pin, because with the flag at its shipped default `off` a zero-answer `ubuntu-24.04` is #6897's
-    # pin applied correctly — see the flag-off control below.
+    # pin, because with the flag at its shipped default `off` a zero-answer `ubuntu-24.04` cannot be
+    # NAMED — it is the pin OR erosion to zero, and one shell cannot tell them apart. See the
+    # flag-off control below.
     uncovered = _repo_with_workflows(tmp_path / "u", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n")
     r = _run(
         "--status",
@@ -685,7 +686,7 @@ def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digit
 
     # CONTROL — the class the verdict exists for. Same pool, same shape, bare pin at zero — with the
     # pool ASKED to serve it (`CI_RUNNER_OS_LABEL=on`); with the flag off the same fixture is a
-    # report, because a zero answer there is #6897's pin applied correctly.
+    # report, because a zero answer cannot be told apart from the pin applied correctly.
     bare = _repo_with_workflows(
         tmp_path / "bare", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
     )
@@ -1510,6 +1511,34 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     assert "not answered" in span and "WAIT for a hosted runner" in span, (
         f"the runbook's python-ci.yml span :{lo}-{hi} does not record the reason it names "
         f"(pending-not-answered instead of a false red): {span!r}"
+    )
+
+
+# ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
+def test_memory_ci_runners_exit_contract_is_intent_gated():
+    """`MEMORY.md` is the shortcut file an agent reads MID-CODE, so its exit contract must match.
+
+    This PR edits the `[ci-runners]` line, and it stated the OLD contract: *"`0` exits 5, a partial
+    pool prints ⚠️ PARTIAL"*. At this head a zero-answer bare pin exits `5` only when the invoking
+    shell sets `CI_RUNNER_OS_LABEL=on|auto`; under the shipped default it reports both readings and
+    exits `0`. A reader keying on that line took a bare `--status` returning `0` as "no zero-answer
+    label" — the fail-open direction, in the one file that is read without the runbook open. The
+    doc's exit list was updated for the intent read; this line was not.
+
+    Mutation: restore the unqualified phrasing -> RED. The assertion is the QUALIFIER's presence,
+    not the whole sentence, so the line can be rewritten without re-pinning prose.
+    """
+    text = (REPO_ROOT / "MEMORY.md").read_text()
+    m = re.search(r"^\[ci-runners\]:.*$", text, re.MULTILINE)
+    assert m is not None, "MEMORY.md lost its `[ci-runners]` line — re-anchor this pin"
+    line = m.group(0)
+    assert "exits 5" in line, (
+        "the `[ci-runners]` line no longer states the exit contract at all — re-anchor this pin "
+        "rather than deleting it"
+    )
+    assert "exits 5 ONLY when" in line and "reports BOTH readings" in line, (
+        "MEMORY.md's `[ci-runners]` line states the exit-5 contract WITHOUT the intent gate — a "
+        f"bare `--status` exiting 0 then reads as 'no zero-answer label': {line!r}"
     )
 
 
