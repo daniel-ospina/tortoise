@@ -1915,3 +1915,68 @@ def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path
     assert r.returncode != 0, f"a missing installer must FAIL, not pass or skip: {r.stdout}{r.stderr}"
     assert "skipped" not in r.stdout, f"a missing installer must never be a skip: {r.stdout}"
     assert "installer not found" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+# ── 8f. the `CI_RUNNER_OS_LABEL` writers: one reader, ZERO writers, said plainly ────────────
+def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
+    """⛔ THREE ARTIFACTS ASSERTED A WRITER THAT DOES NOT EXIST — AND THE FLEET IS THE COST.
+
+    `CI_RUNNER_OS_LABEL` guards the version-pin carve-out: `on|auto` KEEPS `ubuntu-24.04`,
+    `off`/unset DROPS it. Three places described the live pool as `on|auto` — the runbook's
+    "the live pool's own state", its section preamble's "BOTH writers read it", and the installer
+    header's "cannot revert an APPLIED owner departure with no switch involved". Measured at the
+    head this pin was written: `git grep -n CI_RUNNER_OS_LABEL` finds ONE reader (this installer's
+    repair `case`) and ZERO writers — the install-side emitter is open PR #10275 — so an unset flag
+    resolves to `off` and a plain `--repair-labels` on the live pool (7 of 7 x64 runners carrying
+    `ubuntu-24.04` on 2026-10-29) performs #6897's recorded revert. An operator who read the old
+    sentences would run it believing the pin was protected.
+
+    Two-way over the two artifacts a lane or an operator reads (the runbook and the installer
+    header): a claim that a second writer exists FAILS, and the corrective disclosure must be
+    PRESENT — so deleting the paragraph instead of restating it reds too. The whitespace is
+    normalised before the match: these are wrapped prose, and `installer`-style wrapping must not
+    decide whether a claim is visible.
+
+    Non-vacuity (measured): with the pre-fix wording restored, "BOTH writers read it", "the live
+    pool's own state" and "cannot revert an APPLIED owner departure with no switch involved" each
+    red on their own.
+    """
+    def flat(text: str) -> str:
+        return re.sub(r"\s+", " ", text)
+
+    runbook = flat((REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text())
+    installer = flat(INSTALLER.read_text())
+
+    forbidden = {
+        "BOTH writers read it": "the tree has ONE reader (this repair) and nothing writes the flag",
+        "the live pool's own state": "nothing exports the flag, so unset is the state to assume",
+        "the live fleet is opted in": "the pins were attached WITHOUT the switch",
+        "cannot revert an APPLIED owner departure with no switch involved": (
+            "unset IS `off`, so a plain repair IS #6897's recorded revert"
+        ),
+    }
+    for artifact, text in (("docs/ops/ci-runner-x64.md", runbook), ("tools/install-ci-runner-x64.sh", installer)):
+        for claim, why in forbidden.items():
+            assert claim not in text, (
+                f"{artifact} claims {claim!r} about `CI_RUNNER_OS_LABEL`, but {why} — a repair run "
+                "with the flag unset DROPS the version pin, so that sentence would send an operator "
+                "to a heal that reverts an applied owner departure believing it was protected"
+            )
+
+    required = {
+        "tools/install-ci-runner-x64.sh": (
+            installer,
+            ("and nothing WRITES it", "Export `CI_RUNNER_OS_LABEL=on` to KEEP one"),
+        ),
+        "docs/ops/ci-runner-x64.md": (
+            runbook,
+            ("and nothing WRITES it", "has ONE reader in this tree (this repair) and NO writer"),
+        ),
+    }
+    for artifact, (text, fragments) in required.items():
+        for fragment in fragments:
+            assert fragment in text, (
+                f"{artifact} no longer states {fragment!r} — the flag has one reader and zero "
+                "writers in this tree (the install-side emitter is open PR #10275), and that is the "
+                "fact an operator needs before running the repair"
+            )

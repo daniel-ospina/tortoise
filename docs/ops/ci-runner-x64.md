@@ -59,15 +59,15 @@ of truth for when the pool serves CI. What changes is only *which architecture* 
 fallback — which the decision never specified. The separate decision that pins legs to
 `ubuntu-<version>` (the pool is ~2x slower and killed `test-slow` at its watchdog, #6897/#7867)
 is untouched BY DEFAULT: these runners deliberately **do not** claim any `ubuntu-<version>` label
-unless the box is OPTED IN, and the live fleet is opted in — measure it, do not read it off this
-sentence: on 2026-10-29 all 7 x64 runners carried `ubuntu-24.04`, which is the departure #6897's
-`OVERRIDES:` marker records and measures as APPLIED, with its revert path
-`CI_RUNNER_OS_LABEL=off` + `--repair-labels` (see *the box's own choice* below). Absent that
-opt-in the class is the pin nothing here creates: the installer emits one only under
-`CI_RUNNER_OS_LABEL=on|auto` (#10275 adds it), the arm64 spellings GitHub also publishes
+unless the box is OPTED IN — and the live pins were attached WITHOUT that switch (nothing in this
+tree writes it yet; #10275 ships the writer): unset is the state to assume. Measure it, do not read
+it off this sentence: on 2026-10-29 all 7 x64 runners carried `ubuntu-24.04` — the departure #6897's
+`OVERRIDES:` marker records and measures as APPLIED. Its revert is `CI_RUNNER_OS_LABEL=off` + `--repair-labels`,
+and unset IS `off`, so a plain repair IS that revert; export `CI_RUNNER_OS_LABEL=on` to keep a pin
+(see *the box's own choice* below). Otherwise the class is the pin nothing here creates: the
+installer emits one only under `CI_RUNNER_OS_LABEL=on|auto` (#10275 adds it), the arm64 spellings
 (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`, `ubuntu-26.04-arm`) are never emitted, and
-`tools/runner_autoscale.py::_preserve_labels` DROPS rather than preserves one on re-registration,
-so an out-of-band attachment cannot survive a re-registration or
+`tools/runner_autoscale.py::_preserve_labels` DROPS one on re-registration, so an out-of-band attachment cannot survive a re-registration or
 `tools/install-ci-runner-x64.sh --repair-labels`. ⛔ For `--repair-labels` that is a DELIBERATE,
 NAMED carve-out from the union it otherwise performs, not a side effect of the union: keeping the
 pin would make it permanent, so the repair drops the whole family — unless the box is opted in,
@@ -211,12 +211,12 @@ falls back.
      and is always kept, as is a custom label that merely starts `ubuntu-<digits>` (the boundary
      case is `ubuntu-2204-tools`).
      ⛔ **THIS CARVE-OUT IS THE `off` STATE OF A FLAG, NOT AN UNCONDITIONAL DROP.** It drops the pin
-     only when `CI_RUNNER_OS_LABEL` is `off`/unset (the default, and the pre-departure invariant);
-     under `on|auto` — the live pool's own state — the pin joins the union and is printed as
-     `version-pinned, kept=[…]`. That is the difference between "a repair keeps this pool's contract"
-     and "a manual heal silently reverts an APPLIED owner departure": #6897's marker records the
-     revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`, so a repair that dropped the pin
-     whatever the flag said would reach that revert with no switch involved.
+     when `CI_RUNNER_OS_LABEL` is `off`/unset and KEEPS it under `on|auto` (printed
+     `version-pinned, kept=[…]`). ⛔ WHICH STATE THE LIVE POOL IS IN CANNOT BE READ OFF THIS PAGE:
+     the flag has ONE reader in this tree (this repair) and NO writer — the install-side writer ships
+     with #10275, still open — so nothing exports it there, unset resolves to `off`, and a plain
+     `--repair-labels` performs #6897's recorded revert. Export `CI_RUNNER_OS_LABEL=on` to keep the
+     pin; the removal is printed as `version-pinned, not kept=[…]` / `removed=[…]` before the PUT.
   2. **A foreign arch marker** (`self-hosted-*` other than `self-hosted-x64`): the pre-#2327 stamp
      this repair is supposed to HEAL. Keeping `self-hosted-arm64` on an x86 box makes an
      arch-specific job routable to it and produces a wrong artifact.
@@ -363,10 +363,12 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
 
 ## The box's own choice: `CI_RUNNER_OS_LABEL`
 
-One flag decides whether a box claims a version-pinned hosted label (`ubuntu-24.04`), and BOTH
-writers read it: the installer's registration path (its own contract, #10275) and the repair's
-version-pin carve-out (`tools/install-ci-runner-x64.sh`, the repair block). Same name, same three
-values, so the two cannot disagree about what this box is supposed to carry.
+One flag decides whether a box claims a version-pinned hosted label (`ubuntu-24.04`). **ONE writer
+reads it in this tree — the repair's version-pin carve-out (`tools/install-ci-runner-x64.sh`, the
+repair block) — and nothing WRITES it:** the install-side emitter is open PR #10275's half, so until
+that lands the flag is unset on every box here and every row below that says `off`/unset is the live
+one. When #10275 lands both writers read the same three values and cannot disagree about what the box
+is supposed to carry.
 
 | `CI_RUNNER_OS_LABEL` | the box claims `ubuntu-24.04` | `--repair-labels` on a runner that carries it |
 | --- | --- | --- |
@@ -376,10 +378,13 @@ values, so the two cannot disagree about what this box is supposed to carry.
 | anything else | treated as `off` | DROPS it, and says the value was not understood |
 
 - **Why the repair has to read it.** #6897's `OVERRIDES:` marker suspends the version-pin invariant
-  and records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. A repair that
-  dropped the pin regardless of the flag would perform that revert with no switch involved — the
-  next manual heal would undo an APPLIED departure (measured 2026-10-29: 7 of 7 x64 runners carry
-  `ubuntu-24.04`) while printing a warning about a label the box had been asked to claim.
+  and records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. The repair honours
+  that switch, and the honest consequence is that an UNSET flag IS `off`: nothing exports it yet
+  (#10275), so the next manual heal on the live pool — measured 2026-10-29, 7 of 7 x64 runners
+  carrying `ubuntu-24.04` — performs that revert unless the operator exports
+  `CI_RUNNER_OS_LABEL=on` first. It is a PRINTED removal (`version-pinned, not kept=[…]`,
+  `removed=[…]`, both before the PUT), never a silent one; and a repair that ignored the flag would
+  make the recorded revert path unreachable instead.
 - **What it does not do.** It does not ADD the pin: the computed set never carries an `ubuntu-<version>`
   at this head, so `on` can only PRESERVE one that is already attached (and, once #10275 lands, the
   computed set carries it and the union keeps it — the two agree either way). Restoring a pin that
@@ -391,5 +396,6 @@ values, so the two cannot disagree about what this box is supposed to carry.
   two lanes' edits on the same paragraphs for no behavioural gain. What THIS page changes is only
   the repair path's half of the same flag.
 - **Re-measure, never assume.** The state is per-box and the fleet has moved twice in two days:
-  `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/runner-autoscale.service` (the systemd path), then
+  `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/runner-autoscale.service` (the systemd path — an
+  empty answer is the expected one today, since nothing in this tree writes the flag), then
   `gh api repos/<owner>/<repo>/actions/runners --jq '.runners[]|select(.name|startswith("pi-runner-x64"))|{name,labels:[.labels[].name]}'`.

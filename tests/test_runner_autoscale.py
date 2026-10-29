@@ -847,6 +847,48 @@ def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
     )
 
 
+def test_a_custom_host_shaped_label_survives_re_registration_exactly_as_the_repair_keeps_it(env):
+    """⛔ ONE INVARIANT, TWO WRITERS — SO THEY MUST COMPARE A LABEL THE SAME WAY.
+
+    `--repair-labels` matches the host-derived names EXACTLY (`is_host_label` in
+    `tools/install-ci-runner-x64.sh`: `self-hosted|Linux|macOS|Windows|X64|ARM64|ARM`), so an
+    operator's own `linux` or `x64` custom label is KEPT — filtering a label out of that PUT body
+    IS a removal, the one thing that block must never do. This writer compared case-INSENSITIVELY,
+    so the same label was silently DELETED from `--labels` on the next re-registration: a label one
+    writer keeps and the other removes, which is exactly what the shared `POOL_LABELS` fixture's
+    "one invariant, two writers" comment says cannot happen.
+
+    GitHub returns the reserved spellings (`Linux`, `X64`, …) and refuses to have them re-set, so
+    an exact-case compare loses nothing from the class — the host trio below is still dropped.
+
+    Non-vacuity: with the lower-cased compare restored (`x.lower() not in host_derived`) both
+    custom labels disappear from `--labels` and this arm reds.
+    """
+    e = env(
+        pool=[
+            (
+                "r1",
+                "offline",
+                False,
+                "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,linux,x64",
+            )
+        ],
+        installs=[("gh-runner-x64-1", "r1")],
+        systemctl_rc=1,
+    )
+    e.record()
+    cfg = e.config()
+    kept = set(cfg.split("--labels ")[1].split(" ")[0].split(","))
+    assert kept == {"self-hosted-x64", "ubuntu-latest", "linux", "x64"}, (
+        "a re-registration keeps a CUSTOM label the repair keeps too — a case-folded host match "
+        "drops the operator's own `linux`/`x64` here while `--repair-labels` preserves it, and a "
+        f"label one writer deletes is not a shared invariant: {cfg}"
+    )
+    assert "Linux" not in kept and "X64" not in kept, (
+        "the host-derived spellings cannot be set by hand and must stay out of `--labels`: " + cfg
+    )
+
+
 def test_another_repos_listener_still_counts_against_the_boxes_ceiling(env):
     """A foreign listener occupies the box, so it counts in `live` — no over-fill.
 
@@ -1536,7 +1578,7 @@ MUTATIONS = {
         wrong=lambda r: "gpu" not in r.get("_config", ""),
     ),
     "other-arch-marker-preserved": dict(
-        old='and not x.lower().startswith("self-hosted-")',
+        old='and not x.startswith("self-hosted-")',
         new="and True",
         kwargs=dict(
             pool=[("r1", "offline", False, "self-hosted,ARM64,self-hosted-arm64,gpu")],
