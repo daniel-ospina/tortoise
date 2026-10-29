@@ -782,26 +782,26 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8592" in vet_cause, vet_cause
-    assert ":8612" in vet_cause, vet_cause
+    assert "tortoise/extractor_v2.py:8596" in vet_cause, vet_cause
+    assert ":8616" in vet_cause, vet_cause
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
     # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8561",
-                          ":8586", ":8608", ":8611", ":8692", ":8695",
-                          ":8817", ":8827", ":8708", ":8838"):
+    for classify_cite in ("classify_later", "if classify_later", ":8565",
+                          ":8590", ":8612", ":8615", ":8696", ":8699",
+                          ":8821", ":8831", ":8712", ":8842"):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8561" in classify_cause, classify_cause
+    assert "tortoise/extractor_v2.py:8565" in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8692" in classify_cause, classify_cause
-    assert ":8695" in classify_cause, classify_cause
+    assert ":8696" in classify_cause, classify_cause
+    assert ":8699" in classify_cause, classify_cause
     assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8817" in classify_cause, classify_cause
+    assert ":8821" in classify_cause, classify_cause
     # … and NOT the VET pass's flag, pass function or gates
     for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8592", ":8612", ":8680", ":8802", ":8478", ":8481"):
+                     ":8596", ":8616", ":8684", ":8806", ":8478", ":8481"):
         assert vet_cite not in classify_cause, (vet_cite, classify_cause)
 
     # Different text, so neither cause can stand in for the other: a version
@@ -882,7 +882,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
     assert _META_FOLD_CITE in cause, cause
-    assert "tortoise/extractor_v2.py:8971-8975" in cause, cause
+    assert "tortoise/extractor_v2.py:8975-8979" in cause, cause
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
