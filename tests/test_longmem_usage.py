@@ -351,8 +351,17 @@ def test_unknown_only_usage_logs_loud_warning(caplog):
     usage.set_question_key("q1")  # record above was keyless — check overhead
     oh = c.drain_overhead()
     assert oh["total"]["calls"] == 1
+    # #8486 F1 (review): the bucket records PRICEABILITY, not the provider's raw
+    # "a block came back" flag. A block whose keys the sanitizer drops has
+    # UNKNOWN tokens, so the ceiling must not re-price it as a known $0.00 on
+    # a resume or in the report (that flag is what `_price_lane` reads). The
+    # row is not dropped: it is disclosed as unmetered via
+    # `calls_without_tokens` (costing's key for "the token count this
+    # measurement cannot see").
     assert oh["by_stage"]["reader"]["openrouter"]["m"][
-        "usage_present"] is True
+        "usage_present"] is False
+    assert oh["by_stage"]["reader"]["openrouter"]["m"][
+        "calls_without_tokens"] == 1
     assert "prompt_tokens" in oh["by_stage"]["reader"]["openrouter"]["m"]
 
 

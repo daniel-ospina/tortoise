@@ -7214,17 +7214,26 @@ def test_a_usage_block_with_no_known_keys_is_unknown_spend_not_zero():
         usd, priced, breakdown = spend_guard.spend()
         assert priced is False, "unknown tokens were priced as a known $0"
         assert usd == 0.0
-        assert breakdown["unpriced"][0]["reason"] == "unknown_model" or (
-            breakdown["unpriced"][0]["reason"] == "usage_present_false")
+        # the model IS priced — the row is unpriced because its TOKENS are
+        # unknown, which is a different operator remedy than "add a price row"
+        assert breakdown["unpriced"][0]["reason"] == "usage_present_false"
         with pytest.raises(spend_guard.HardStopExceeded) as ei:
             spend_guard.check("reader for q1")
         assert ei.value.reason == "unpriced_spend"
+        # …and the bucket PERSISTS the unpriced truth (this is what the resume
+        # path and the report read), with the row disclosed as unmetered
+        # rather than silently dropped
+        saved = lme_usage.get_collector().overhead_payload(
+            checkpoint_form=True)["__preflight__"]["reader"]["deepseek"][
+                "deepseek-flash"]
+        assert saved["usage_present"] is False
+        assert saved["calls_without_tokens"] == 1
     finally:
         spend_guard.reset()
         lme_usage.get_collector().reset()
 
 
-def test_preflight_ping_is_checked_before_it_spends(monkeypatch):
+def test_preflight_ping_is_checked_before_it_spends():
     """#8486 F1 (review). A preflight ping is a REAL billed completion, and the
     arm site states the ceiling is in force "before the first paid call (the
     preflight pings included)". It was not: only ``arm()``'s eager unpriced
@@ -7293,3 +7302,47 @@ def test_a_preflight_hard_stop_exits_on_the_spend_code_not_a_traceback(
                           str(tmp_path / "state.json")])
     assert ei.value.code == run_mod.HARD_STOP_EXIT
     assert not out.exists()
+
+
+def test_resume_cannot_reprice_an_unknown_token_lane_as_a_priced_zero():
+    """#8486 F1 (review). The RESUME path is the ceiling's own recovery route
+    (hard stop → raise the ceiling → re-run the same command), and it re-prices
+    the checkpoint's persisted buckets through ``seed``/``seed_payload``. If
+    the persisted bucket kept the provider's raw "a usage block came back" flag
+    while carrying no priced tokens, the resumed guard read the lane as
+    ``priced: true`` at ``$0.00`` — so the run reports a green ceiling over
+    spend it cannot see, and the operator is charged for the same unbudgeted
+    lane again after every resume.
+
+    RED before the fix: ``seed_payload`` forwarded ``usage_present=True``
+    verbatim, ``_price_lane`` priced 0 tokens at a known rate, and ``check()``
+    PASSED on a lane that is unknown spend."""
+    unknown_bucket = {"prompt_tokens": 0, "completion_tokens": 0,
+                     "prompt_cache_hit_tokens": 0,
+                     "prompt_cache_miss_tokens": 0, "total_tokens": 0,
+                     "calls": 1, "usage_present": True}
+    payload = {"__preflight__": {"reader": {"deepseek": {
+        "deepseek-flash": unknown_bucket}}}}
+    spend_guard.reset()
+    try:
+        spend_guard.arm(10.0)
+        spend_guard.seed_payload(payload)
+        usd, priced, _ = spend_guard.spend()
+        assert usd == 0.0
+        assert priced is False, "resume re-priced unknown tokens as $0.00"
+        with pytest.raises(spend_guard.HardStopExceeded) as ei:
+            spend_guard.check("reader for q2")
+        assert ei.value.reason == "unpriced_spend"
+
+        # …and a NORMAL priced bucket still seeds and stays priced
+        spend_guard.reset()
+        spend_guard.arm(10.0)
+        spend_guard.seed_payload({"q1": {"reader": {"deepseek": {
+            "deepseek-flash": {**_overhead_lane("q1")["q1"]["reader"][
+                "deepseek"]["deepseek-flash"]}}}}})
+        usd2, priced2, _ = spend_guard.spend()
+        assert priced2 is True
+        assert usd2 == pytest.approx(0.0535085, abs=1e-6)
+        spend_guard.check("reader for q2")
+    finally:
+        spend_guard.reset()

@@ -126,30 +126,15 @@ PRICING_MAP: dict[str, dict[str, dict]] = {
                        "the Flash price — measured #8486 pilot 2026-10-25"),
             "verified_on": "2026-10-25", "estimated": True,
             "note": ("ALIAS, not a vendor-published row: rates copied from "
-                     "the v4-flash row above. This row is NOT the one that "
-                     "reproduces the measured pilot — at THIS table's cache "
+                     "the v4-flash row above. This row does NOT reproduce "
+                     "the pilot's reconciled spend — at THIS table's cache "
                      "rate (0.028/1M) the pilot envelope (437,253 prompt / "
                      "60,928 cache-hit / 2,330 completion) prices to "
-                     "$0.055044; the measured $0.0535085 is the 0.0028 "
-                     "cache rate the DIRECT lane row carries")},
-        # The BARE id — the spelling the openrouter lane actually RECORDS
-        # (the meter's model id is the adapter's ``id``, and
-        # ``OpenRouterModel`` stores the spec's model part verbatim, exactly
-        # as the gpt-4o row below documents). Without this row
-        # ``lookup_rate("openrouter", "deepseek-flash")`` returned None, and
-        # an ARMED ceiling then REFUSED the run at ``arm()``
-        # (``UnpricedModelRefused``) — so the very lane this entry exists for
-        # could not start. Same rates as the slash-prefixed row it mirrors.
-        "deepseek-flash": {
-            "prompt_per_1m": 0.14, "completion_per_1m": 0.28,
-            "cache_read_per_1m": 0.028,
-            "source": ("openrouter lane, bare-id alias of "
-                       "deepseek/deepseek-flash (the id the lane records)"),
-            "verified_on": "2026-10-25", "estimated": True,
-            "note": ("ALIAS of the row above — same rate, same caveat: at "
-                     "this table's cache rate the measured pilot prices to "
-                     "$0.055044, and the $0.0535085 reproduction belongs "
-                     "to the direct lane's 0.0028 cache rate")},
+                     "$0.055044, while the $0.0535085 recomputed for the "
+                     "pilot (whose reconciled key-usage delta was $0.0620) "
+                     "is the 0.0028 cache rate the DIRECT lane row carries. "
+                     "The BARE id the lane records resolves here through "
+                     "_BARE_ALIASES below")},
         "gpt-4o-2024-08-06": {
             "prompt_per_1m": 2.625, "completion_per_1m": 10.5,
             "cache_read_per_1m": None,
@@ -222,6 +207,29 @@ _PROVIDER_NORMALIZATION = {
     "deepseek": "deepseek",
 }
 
+#: ``(provider, bare model id) -> the table key that prices it``.
+#:
+#: #8486 F1 (review): a lane RECORDS the model id the adapter was built with,
+#: and the openrouter adapter stores the spec's model part verbatim — so the
+#: lane records the BARE id while the map keys the vendor-prefixed one.
+#: ``_bare_model`` only rewrites a PREFIXED id DOWN, so a bare recorded id could
+#: never reach its own row: ``lookup_rate("openrouter", "deepseek-flash")``
+#: returned None, and an ARMED ceiling (the default) refused the whole run at
+#: ``arm()`` with a message telling the operator to add a price entry that
+#: already existed.
+#:
+#: Declared HERE, next to the map, rather than as hand-copied rows: an alias
+#: shares the row's rates by construction, so the two spellings cannot drift
+#: apart or disagree about provenance. Every entry must name a row that exists
+#: in its table (pinned by
+#: ``tests/test_longmem_costing.py::test_every_declared_bare_alias_resolves_to_a_real_row``).
+_BARE_ALIASES: dict[tuple[str, str], str] = {
+    ("openrouter", "deepseek-flash"): "deepseek/deepseek-flash",
+    ("openrouter", "deepseek-v4-flash"): "deepseek/deepseek-v4-flash",
+    ("openrouter", "deepseek-v4-pro"): "deepseek/deepseek-v4-pro",
+    ("openrouter", "deepseek-chat"): "deepseek/deepseek-chat",
+}
+
 _CACHE_KEY = "prompt_cache_hit_tokens"
 _MISS_KEY = "prompt_cache_miss_tokens"
 
@@ -235,7 +243,7 @@ def _bare_model(model: str) -> str:
 
 
 def lookup_rate(provider: str | None, model: str) -> dict | None:
-    """Exact (provider, model) → bare-model → None (unpriced)."""
+    """Exact (provider, model) → declared bare alias → bare-model → None."""
     prov = _normalize_provider(provider)
     table = PRICING_MAP.get(prov)
     if not table:
@@ -245,6 +253,10 @@ def lookup_rate(provider: str | None, model: str) -> dict | None:
         bare = _bare_model(model)
         if bare != model:
             entry = table.get(bare)
+    if entry is None:
+        alias = _BARE_ALIASES.get((prov, model))
+        if alias is not None:
+            entry = table.get(alias)
     return entry
 
 

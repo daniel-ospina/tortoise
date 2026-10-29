@@ -255,10 +255,23 @@ def seed(envelope: dict | None) -> None:
                 # ``tokens`` double-counted it (the +1 below AND the bucket's
                 # own count), which is a reporting defect only — the ceiling
                 # prices tokens, never calls.
+                tokens = {k: bucket[k] for k in _BUCKET_KEYS
+                          if k in bucket and k != "calls"}
+                # #8486 F1 (review): the resume path is the ceiling's OWN
+                # recovery route, so it must not re-open the hole the live
+                # path closes. A persisted bucket carrying no priced tokens
+                # while claiming a usage block is UNKNOWN spend (nothing real
+                # reports 0 prompt AND 0 completion tokens), and pricing it
+                # would let a resumed run report ``priced: true`` over a lane
+                # it cannot see. Buckets written before this fix carry the raw
+                # flag, so the predicate is applied HERE too, not only at
+                # ingest.
+                priced_inputs_known = bool(tokens.get("prompt_tokens")
+                                           or tokens.get("completion_tokens"))
                 observe(stage=stage, provider=provider, model_id=model,
-                        tokens={k: bucket[k] for k in _BUCKET_KEYS
-                                if k in bucket and k != "calls"},
-                        usage_present=bucket.get("usage_present", True),
+                        tokens=tokens,
+                        usage_present=(bucket.get("usage_present", True)
+                                       and priced_inputs_known),
                         calls=bucket.get("calls", 1))
 
 

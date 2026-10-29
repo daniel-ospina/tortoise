@@ -263,6 +263,24 @@ class UsageCollector:
         qid = _QUESTION_KEY.get() or NO_KEY
         key = (stage, provider if provider is not None else "unknown",
                model_id)
+        # #8486 F1 (review): are the PRICED tokens KNOWN? ``usage_present`` is
+        # the provider's "a usage block came back" flag; a block whose keys the
+        # sanitizer does not recognise yields ``{}`` (``_sanitize_usage`` warns
+        # loudly), and that row must never read as a priced $0.00 — unknown
+        # spend is never zero. Only prompt/completion tokens produce a price,
+        # so a row carrying neither is UNKNOWN.
+        #
+        # The flag is decided ONCE, here, and written into the BUCKET — not
+        # only passed to the guard — because the bucket is what PERSISTS:
+        # ``overhead_payload`` → checkpoint → ``seed``/``seed_payload`` on
+        # resume, and ``_price_lane`` for the report. Carrying the raw provider
+        # fact in the bucket re-prices the same row as a known $0.00 on the
+        # resume path (the ceiling's own recovery route) — the identical defect
+        # one layer down. The row stays DISCLOSED as unmetered via
+        # ``calls_without_tokens`` (costing's own key for "the token count this
+        # measurement cannot see"), so nothing is silently dropped.
+        priced_inputs_known = ("prompt_tokens" in sanitized
+                               or "completion_tokens" in sanitized)
         with self._lock:
             bucket = self._rows.setdefault(qid, {}).setdefault(key, {
                 "prompt_tokens": 0, "completion_tokens": 0,
@@ -275,27 +293,22 @@ class UsageCollector:
             bucket["calls_without_usage"] = (
                 bucket.get("calls_without_usage", 0)
                 + (0 if usage_present else 1))
+            bucket["calls_without_tokens"] = (
+                bucket.get("calls_without_tokens", 0)
+                + (0 if (not usage_present or priced_inputs_known) else 1))
             bucket["usage_present"] = (
-                bucket["usage_present"] and usage_present)
+                bucket["usage_present"] and usage_present
+                and priced_inputs_known)
             for k, v in sanitized.items():
                 bucket[k] = bucket.get(k, 0) + v
-        # #8486 F1: the SAME row feeds the hard-stop ceiling's run total. It
-        # is fed here (not by a snapshot read) because a drained question's
-        # rows leave this collector for its outcome — a snapshot would forget
-        # spend the run already paid for, and the ceiling would creep upward
-        # with every completed question. ``observe`` re-prices from these raw
-        # tokens through PRICING_MAP; it never reads the ``cost.usd`` meter.
-        # #8486 F1 (review): the guard must be told whether the PRICED tokens
-        # are KNOWN. ``usage_present`` is the provider's "a usage block came
-        # back" flag; a block whose keys the sanitizer does not recognise
-        # yields ``{}`` (``_sanitize_usage`` warns), and feeding that as
-        # present would price the row at $0.00 as a *priced* lane — unknown
-        # spend read as zero, the exact failure the guard exists to refuse.
-        # Only a row carrying a priced input (prompt or completion tokens)
-        # is priceable; anything else is UNKNOWN and REFUSED. The bucket's own
-        # ``usage_present`` stays the raw provider fact (disclosure only).
-        priced_inputs_known = ("prompt_tokens" in sanitized
-                               or "completion_tokens" in sanitized)
+        # #8486 F1 (review): the SAME row feeds the hard-stop ceiling's run
+        # total. It is fed here (not by a snapshot read) because a drained
+        # question's rows leave this collector for its outcome — a snapshot
+        # would forget spend the run already paid for, and the ceiling would
+        # creep upward with every completed question. ``observe`` re-prices
+        # from these raw tokens through PRICING_MAP; it never reads the
+        # ``cost.usd`` meter. It is fed the bucket's priceability flag, so the
+        # live guard and the persisted/reported bucket agree by construction.
         spend_guard.observe(stage=stage, provider=provider,
                             model_id=model_id, tokens=sanitized,
                             usage_present=(usage_present
