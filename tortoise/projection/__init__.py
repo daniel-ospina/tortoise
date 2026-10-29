@@ -15281,18 +15281,21 @@ class FalkorProjection(
                 logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
 
         # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
-        # creation events (see the branch above). Warn on 0-row folds — a
-        # fold that matched nothing during rebuild means the journal claims
-        # a supersession whose Object never re-existed. Since #2194,
-        # capture-created Objects ARE journaled as ObjectRegistered when the
-        # capture SDK is built with an event_log_path, so the residual
-        # 0-row sources are: pre-#2194 journals (no backfill), an
-        # unjournaled capture SDK / legacy raw producers (they apply without
-        # journaling), and delete races (a deleted Object's registration
-        # line — deletes leave no tombstone). The fold is idempotent — a
-        # superseded Object that is later re-created by a future event is
-        # caught on the NEXT rebuild, but this rebuild's graph is honest
-        # about what it could not fold.
+        # creation events (see the branch above). A 0-row fold is CLASSIFIED
+        # here, never assumed to be a miss (#10204): a record carrying an
+        # address the journal established NONE of is the EXEMPT `unregistered`
+        # shape, and one carrying no address at all is the REFUSED
+        # (fail-closed) `no-address` shape. The miss arm below is therefore
+        # reached only by a record carrying an address the journal DID
+        # establish, and its causes are enumerated AT that arm, which is their
+        # one home (#10211 review rounds 4-5). ⚠️ They are NOT this comment's
+        # former list — "pre-#2194 journal / unjournaled capture SDK / delete
+        # race" described the OLD miss population, which now classifies as
+        # `unregistered` and never reaches the arm; a lane reading top-down
+        # must not take the retired population as the arm's direction. The fold
+        # is idempotent — a superseded Object later re-created by a future
+        # event is caught on the NEXT rebuild, but this rebuild's graph is
+        # honest about what it could not fold.
         for seq, ev in supersede_folds:
             # #2242: replay folds run under the DEFAULT cas=False (blind) —
             # byte-identical to pre-CAS. The live-path CAS must not leak
@@ -15303,8 +15306,13 @@ class FalkorProjection(
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0:
                 # #3585 (R8): a supersede whose target the journal HARD-DELETED
-                # is the named exemption (the fold is deferred past the delete);
-                # any other 0-row miss is refused and fails the run.
+                # is ONE named exemption (the fold is deferred past the delete);
+                # #10204 adds the second — `unregistered`, a record whose
+                # carried addresses the journal established none of. Every
+                # OTHER shape reaching here (`no-address`, and a genuine `miss`)
+                # is refused and fails the run (#10211 review round 7: this
+                # comment still described the pre-amendment, deletion-only
+                # exemption set).
                 _sup_shape = classify_terminalizer_miss(
                     "ObjectSuperseded",
                     target_deleted=_hard_deleted_any(
