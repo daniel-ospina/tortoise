@@ -5155,8 +5155,14 @@ class _EntityHandlers:
             # different id and `rebuild != live`), and an id derived from the
             # name is the very defect this change removes. So the name resolves
             # to the single LIVE holder and otherwise stays unwired with a
-            # fail-closed record — the producer registers what it references
-            # (D9), and the SDK door does that for `about*`/`subject`.
+            # fail-closed record.
+            # ⛔ It is NOT discharged upstream: since #3590 D1 (RULED
+            # 2026-10-26) a bare mention does not create an entity and NO door
+            # registers `about*`/`subject`/`object`/`uses[]` on a mention's
+            # behalf, so this resolve-only arm is where the link is dropped and
+            # the miss is recorded — never "the producer registers what it
+            # references" (``entity_identity``'s D1 note retires that claim;
+            # #9876 review P2).
             from tortoise.entity_identity import resolve_fold_name
             stub_id = resolve_fold_name(self.g, "Subject", subj,
                                         context="EventRecorded.subject",
@@ -5417,7 +5423,9 @@ class _EntityHandlers:
             # reference must not be simultaneously refused and broadcast.
             # Unresolved (`_performer_id is None`) ⇒ nothing is wired, and the
             # resolver's own non-fold record already names the miss (D9: the
-            # producer registers what it references; the fold never mints).
+            # fold never mints; and since D1 — RULED 2026-10-26 — no door
+            # registers a mention either, so nothing discharges it upstream;
+            # #9876 review P2).
             self.g.query(
                 "MATCH (s:Subject {id: $sid}), (e:Event {eventId: $eid}) "
                 "MERGE (s)-[:participatesIn]->(e)",

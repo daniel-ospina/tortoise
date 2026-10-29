@@ -25,6 +25,15 @@ def node_id(source, label: str, name: str, *, prop: str = "name") -> str:
     needs "the" entity of a name is asserting single-holder coexistence, and a
     silent pick would hide exactly the duplicate-carrier bug these tests exist
     to catch.
+
+    ⛔ The count is of HOLDERS (matched rows), never of truthy ids (#9876 review
+    P2). An id-less legacy/hosted stub holder (``MERGE (o:Object {name:$n})``
+    mints those) contributes a row whose value is ``None``; filtering it out
+    would make one id-carrying plus one id-less live carrier — the mixed D2
+    shape — pass as "one entity", which is the same fail-open this PR removed
+    at ``resolve_or_mint``, ``resolve_fold_name`` and
+    ``_refuse_ambiguous_rename`` (see ``entity_identity.live_name_holder_ids``:
+    "filtering the ``None`` out would silently pick one").
     """
     g = getattr(source, "g", None)
     if g is None:
@@ -33,11 +42,15 @@ def node_id(source, label: str, name: str, *, prop: str = "name") -> str:
     rows = g.query(
         f"MATCH (n:{label} {{{prop}:$name}}) RETURN n.id",
         params={"name": name}).result_set
-    ids = [r[0] for r in rows if r[0]]
-    assert len(ids) == 1, (
+    holder_ids = [r[0] for r in rows]
+    assert len(holder_ids) == 1, (
         f"expected exactly one {label} carrying {prop}={name!r}, found "
-        f"{len(ids)} id-carrying holder(s) {ids} — {len(rows)} row(s) total")
-    return ids[0]
+        f"{len(holder_ids)} live holder(s) {holder_ids}")
+    assert holder_ids[0], (
+        f"the single {label} carrying {prop}={name!r} has no id — an id-less "
+        f"legacy/hosted stub holder is not addressable, so there is no id to "
+        f"return {holder_ids}")
+    return holder_ids[0]
 
 
 def node_ids(source, label: str, name: str, *, prop: str = "name") -> list:

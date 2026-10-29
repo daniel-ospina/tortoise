@@ -1640,3 +1640,49 @@ def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
         client.update_entity("id-noop-mover", name="Dup")
     assert _name_ids(proj, "Object", "Mover") == ["id-noop-mover"], (
         "a refused rename still moved the name")
+
+
+def test_the_node_id_helper_counts_holders_not_truthy_ids(sdk):
+    """#9876 review P2: ``tests/_node_ids.node_id`` counted TRUTHY ids.
+
+    ``ids = [r[0] for r in rows if r[0]]`` then ``assert len(ids) == 1``. The
+    query is row-per-holder and an id-less LIVE legacy/hosted stub holder
+    (``MERGE (o:Object {name:$n})`` mints those) contributes a row whose value
+    is ``None`` — so for one id-carrying **plus** one id-less live carrier, the
+    filter dropped the second holder and the helper returned "the" id as if the
+    name were singly held. That is verbatim the *"count holders, not truthy
+    ids"* defect this PR fixed at ``resolve_or_mint``, ``resolve_fold_name`` and
+    ``_refuse_ambiguous_rename``; in a TEST HELPER it makes every future pin
+    that asserts single-holder coexistence pass on the duplicate-carrier graph
+    it exists to catch.
+
+    FAILS IF: ``if r[0]`` is restored (row 1: the mixed shape returns an id
+    instead of raising) or the lone-id-less arm is dropped (row 2 returns
+    ``None`` instead of raising).
+    """
+    from _node_ids import node_id
+
+    client, _ = sdk
+    proj = client._get_proj()
+
+    # 1. the mixed D2 shape: one addressable + one id-less LIVE carrier.
+    held = client.create_entity("object", "Held", objectKind="core:strategy",
+                                is_episodic=False)["node"]["id"]
+    proj.g.query("CREATE (o:Object {name:$n}) SET o.objectKind='core:strategy'",
+                 params={"n": "Held"})
+    assert sorted(_name_ids(proj, "Object", "Held"), key=str) == sorted(
+        [held, None], key=str), "fixture did not build the mixed holder shape"
+    with pytest.raises(AssertionError) as mixed:
+        node_id(proj, "Object", "Held")
+    assert "2 live holder(s)" in str(mixed.value), str(mixed.value)
+
+    # 2. a LONE id-less holder: one holder, but nothing addressable to return.
+    proj.g.query("CREATE (o:Object {name:$n})", params={"n": "Bare"})
+    with pytest.raises(AssertionError) as bare:
+        node_id(proj, "Object", "Bare")
+    assert "has no id" in str(bare.value), str(bare.value)
+
+    # 3. …and the guard is not a blanket block: a singly-held addressable name
+    #    still resolves, so the fix narrows the helper by the failure cases.
+    solo = client.create_entity("object", "Solo", is_episodic=False)["node"]["id"]
+    assert node_id(proj, "Object", "Solo") == solo

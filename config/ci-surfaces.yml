@@ -7254,14 +7254,19 @@ carve_out:
 - test_cli_extraction.py
 # #3590 round-5 review F3: the minted-identity acceptance pins. The `sdk`
 # fixture builds `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH and
-# four of its nine tests drive `rebuild_all(...)` against that store, so the
-# load-bearing reason is the REDIRECT, not a skip: under a URI-set lane
+# its tests drive `rebuild_all(...)` against that store, so the load-bearing
+# reason is the REDIRECT, not a skip: under a URI-set lane
 # `tortoise/projection/__init__.py::_caller_test_stem` resolves the nearest
 # `test_*` frame to this module, finds it exemption-free, and DISCARDS the path
 # — connecting the construction to the server, where the `rebuild == live`
 # property this file exists to prove is not the property being measured (and
 # #5084's cross-lane pollution class applies). Same shape and same disposition
-# as the #9451/#9350/#3644 rows above. Registered in all three homes —
+# as the #9451/#9350/#3644 rows above. ⛔ NO test count is stated here on purpose
+# (#9876 review P3): the file is re-derived at every revision — an earlier
+# revision of this sentence quoted "four of its nine" while the file held 32
+# tests. `pytest --collect-only` is the authority; a comment is not. (The
+# sibling registration in `tests/_embedded.TEST_NO_REDIRECT_STEMS` carries the
+# same policy; a count in either home drifts.) Registered in all three homes —
 # `carve_out:` here, `tests/_embedded.TEST_NO_REDIRECT_STEMS`, and the
 # declaration in `tests/test_markers.py::test_no_redirect_stems_registry_exact`
 # — because a stem in only one or two of them is the silent hole those pins
