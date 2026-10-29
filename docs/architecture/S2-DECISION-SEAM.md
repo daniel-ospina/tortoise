@@ -181,10 +181,9 @@ Each is a **recorded decision**, not an omission:
   structural — for a `choice` it IS the closed option map, so a sentence there would
   enter the option set the answer is validated against; for a `score` it IS the 2–10
   level list, and the request 400s if it is not — while `instructions` is the trusted
-  free-text field where a sentence belongs. The prohibition is the fleet's own deleted
-  guard
-  from `_decide_chunk` (`#8175`); and the element binding is `#10176`'s requirement
-  stated in-band. **It rides in `instructions`, never in a `state` element**: a rule
+  free-text field where a sentence belongs. The prohibition is the fleet's own
+  deleted guard from `_decide_chunk` (`#8175`); and the element binding is
+  `#10176`'s requirement stated in-band. **It rides in `instructions`, never in a `state` element**: a rule
   placed inside the untrusted block is a rule that block can countermand. What is
   *not* claimed is that the clause makes injection impossible — on this vendor the
   model still judges the text, and the bounded directions stay as they were (the
