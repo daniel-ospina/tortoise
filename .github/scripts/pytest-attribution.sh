@@ -127,21 +127,37 @@ fi
 #     line after the summary and no second banner, because the file was rewritten
 #     underneath the leg.
 #
-# ⚠️ NAMED RESIDUAL, and the real fix: this reporter cannot always tell one session's
-# output from another's, because every leg writes the SAME global path
-# (`/tmp/pytest.log`) while the rc file next to it already moved to
+# ⚠️ NAMED RESIDUAL, and where the real fix landed: this reporter cannot always tell
+# one session's output from another's when they share the global path
+# (`/tmp/pytest.log`), which is why the rc file next to it already moved to
 # `${RUNNER_TEMP:-/tmp}/pytest-rc`. A foreign writer that rewrites the file and stops
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
-# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}`.
+# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}` — now
+# APPLIED to every leg that shares a host `/tmp` (see STATUS below).
 #
-# ⚠️ STATUS: PARTIALLY APPLIED (2026-10-25). `python-ci.yml`'s `test` job — the fast
-# matrix, NINE legs, and the largest share of this failure — now passes
-# `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and therefore
-# per-job, since a runner runs one job at a time). For THAT job signals (1)-(3) are
-# now a backstop against a test that shells out to pytest, not the load-bearing
-# defence against a co-tenant. The other legs still write `/tmp/...` literals and
-# still need the same change; the three signals below keep the KILL path — the one
-# that produced the "timeout flakes" — from being fooled until they get it.
+# ⚠️ STATUS: APPLIED for every leg that shares a host `/tmp` (2026-10-29). What the
+# report used to say:
+#   `python-ci.yml`'s `test` job — the fast matrix, NINE legs, and the largest share
+#   of this failure — passes `--log "$PYTEST_LOG"` (`${{ runner.temp }}/pytest.log`,
+#   per-runner and therefore per-job, since a runner runs one job at a time).
+#   The other legs still wrote `/tmp/...` literals and still needed the same change.
+# They no longer do. `test-concurrency-falkor`, `test-carve-out` and `test-track-b`
+# now pass `${RUNNER_TEMP:-/tmp}/pytest.log` (and `/trackb.log` for track-b)
+# themselves — writer, `tail`, this reporter, the `grep -c` counters, the skip-guard's
+# argument and the upload `path:` — so signals (1)-(3) below are a backstop against a
+# test that SHELLS OUT to pytest, not the load-bearing defence against a co-tenant,
+# in every pool job this file reports on.
+#
+# ⛔ `test-slow` still writes the bare `/tmp/pytest.log` literal and must NOT be
+# "fixed" for that reason: it is pinned to the HOSTED `ubuntu-24.04` label, whose
+# `/tmp` is the job's own VM, so it has no co-tenant to be fooled by. (It was named
+# as one for months; that claim was wrong and is corrected in `python-ci.yml`,
+# `tests/test_ci_selection.py` and `tests/test_ci_guard_invocation.py`.)
+# ⚠️ The remaining host-global leg is `test-d14-hosted-api` (`/tmp/pytest-d14.log`,
+# `/tmp/junit-d14.xml`), named at the site as a `⚠️ NAMED RESIDUAL`. Its log basename
+# is unique to that job, so it cannot be clobbered by a co-tenant — only by a stale
+# file from a previous job on the same host, which is a different (and narrower)
+# failure mode than the one this reporter was written for.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:
 #

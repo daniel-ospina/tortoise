@@ -1112,11 +1112,19 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 _TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
 #: The per-runner indirection a hardened job writes through, as it appears in a `tail`.
 _RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
+#: A log path under the PER-RUNNER temp dir rather than the host-global `/tmp`. Same
+#: capture, same reporter debt — the site must be counted either way, or hardening a
+#: path emits the false "a leg was dropped" signal this floor exists to raise for a
+#: REAL loss. (`test-concurrency-falkor`, `test-carve-out` and `test-track-b` spell it
+#: `${RUNNER_TEMP:-/tmp}/…` in both writer and reader since #7815; the quotation marks
+#: are part of the spelling because the shell form is quoted.)
+_RUNNER_TEMP_SITE_RE = re.compile(r"^\"?\$\{RUNNER_TEMP[^}]*\}/[^\s\"|]+\.log\"?$")
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
 #: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
 #: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
 #: is not end-anchored — which is why comment lines are filtered out before matching.
-_TEE_SITE_RE = re.compile(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)")
+_TEE_SITE_RE = re.compile(
+    r"\|\s*tee\s+(\"?\$\{RUNNER_TEMP[^}]*\}/[^\s\"|]+\.log\"?|/tmp/[^\s|]+\.log)")
 
 
 def capture_site(line: str) -> str | None:
@@ -1140,6 +1148,12 @@ def capture_site(line: str) -> str | None:
     if match is None:
         return None
     target = match.group(1)
+    if _RUNNER_TEMP_SITE_RE.match(target):
+        # A per-runner path: the leg still owes the reporter a call, and the
+        # window assertion below compares this same token (the call is spelled
+        # `--log "${RUNNER_TEMP:-/tmp}/pytest.log"`), so the pairing is checked
+        # exactly as it is for a `/tmp` literal.
+        return target
     if target == _RUNNER_TEMP_LOG:
         # A per-runner path: the leg still owes the reporter a call, and the
         # window assertion below compares this same token (the call is
@@ -1182,13 +1196,16 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
-    # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
+    # The measured inventory is 8. Five `pytest.log`-named tails in python-ci.yml:
     # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
-    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
-    # plus `trackb.log`,
-    # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
-    # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
+    # `"$PYTEST_LOG"` since #10028; then `test-slow` (300, a `/tmp` literal because
+    # that leg is on the HOSTED pin, where `/tmp` is the job's own VM),
+    # `test-concurrency-falkor` (120) and `test-carve-out` (200), the last two through
+    # `${RUNNER_TEMP:-/tmp}/pytest.log` since #7815. Plus `trackb.log`, whose name does
+    # not contain "pytest"; plus `pmv-pytest.log` in post-merge-validation.yml; plus
+    # `pytest-d14.log`, written through `| tee`. The path spelling is deliberately NOT
+    # part of what counts — hardening a path must not read as losing a leg.
+    # The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
     # under this check while it stayed green (it took two losses to red it). Counting
     # the `tee` site as well makes the inventory 8, so this floor has zero slack NOW,
