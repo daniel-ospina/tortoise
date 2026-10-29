@@ -602,12 +602,12 @@ def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anythin
     # The DEFAULT is `off`: this installer must not flip the #6897 pin by itself on a 24.04 box.
     res = _run(sb, "--dry-run")
     assert res.returncode == 0, (res.stdout, res.stderr)
-    assert f"<key>CI_RUNNER_OS_LABEL</key><string>off</string>" in res.stdout, res.stdout
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>off</string>" in res.stdout, res.stdout
 
     # …and the operator's choice at install time is what gets pinned.
     res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
     assert res.returncode == 0, (res.stdout, res.stderr)
-    assert f"<key>CI_RUNNER_OS_LABEL</key><string>on</string>" in res.stdout, res.stdout
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>on</string>" in res.stdout, res.stdout
 
     # A typo is REFUSED here rather than pinned into a unit nothing re-reads.
     res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="true"))

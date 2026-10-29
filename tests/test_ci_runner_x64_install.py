@@ -298,6 +298,20 @@ def test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it(tmp_path: Path):
     default = _run("--print-labels", "--fallback", "off", env=_env(tmp_path))
     assert "ubuntu-24.04" not in default.stdout, default.stdout
 
+    # ⛔ AND THE DEFAULT IS THE ONE WITH THE VARIABLE ABSENT — not merely the one where it says
+    # `off`. `_env` now sets `CI_RUNNER_OS_LABEL=off` explicitly (the suite is hermetic), so without
+    # this case the suite could only prove that `off` behaves, and a flip of the DEFAULT would pass
+    # every assertion here. This is the #6897 pin itself: a fresh box must claim nothing.
+    unset = _env(tmp_path)
+    unset.pop("CI_RUNNER_OS_LABEL", None)
+    for args in (("--print-labels", "--fallback", "off"), ("--print-labels", "--fallback", "on")):
+        r = _run(*args, env=unset)
+        assert r.returncode == 0, r.stderr
+        assert "ubuntu-24.04" not in r.stdout, (
+            f"the DEFAULT flipped: a box with no CI_RUNNER_OS_LABEL exported claimed the "
+            f"version-pinned label ({args}): {r.stdout}"
+        )
+
 
 def test_auto_claims_the_os_label_only_when_the_host_reports_that_release(tmp_path: Path):
     """`auto` derives the label from the HOST, and SAYS SO when it declines.
