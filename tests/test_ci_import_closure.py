@@ -207,6 +207,23 @@ def test_an_aliased_importlib_call_with_a_COMPUTED_name_is_unknown():
     assert scan.tainted
 
 
+def test_importlib_dunder_import_is_the_import_family_too():
+    """`importlib.__import__('tortoise.lazy')` was dropped by the ATTRIBUTE arm.
+
+    The bare-Name arm matched every name in `_DYNAMIC_IMPORT_ATTRS`, but the
+    attribute arm listed three of the four by hand and omitted `__import__` — so
+    `importlib.__import__('tortoise.lazy')` produced no edge and no `UNKNOWN`,
+    the same silence the aliased-root finding was about, one line away.
+    """
+    idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
+    scan = _scan(
+        idx, "tests/test_a.py",
+        "import importlib\nimportlib.__import__('tortoise.lazy')\n",
+    )
+    assert "tortoise.lazy" in {d.target for d in scan.deps}
+    assert scan.unknown == []
+
+
 def test_a_repo_module_that_defines_import_module_is_still_not_stdlib():
     """PRECISION, pinned so the alias fix cannot trade one hole for another.
 

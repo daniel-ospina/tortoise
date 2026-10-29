@@ -684,7 +684,13 @@ def _dynamic_callable(
         return "", ""
     if func.attr in _LOADER_NAMES:
         return "loader", func.attr
-    if func.attr in {"import_module", "run_module", "load_module"}:
+    if func.attr in _DYNAMIC_IMPORT_ATTRS:
+        # The SAME set the bare-Name arm above uses. `importlib.__import__('x')`
+        # is an import-family attribute exactly as `import_module` is, and the
+        # hand-written three-name tuple that used to sit here dropped it — one
+        # more silent hole in a function whose contract is that nothing is
+        # dropped. Root is still `importlib` (or a recorded alias), so precision
+        # is unchanged.
         return "import", func.attr
     return "", ""
 
