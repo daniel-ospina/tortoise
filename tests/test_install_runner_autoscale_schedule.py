@@ -717,8 +717,8 @@ def test_no_unquoted_heredoc_body_in_this_installer_can_run_a_command_substituti
     # read as "clean". The file renders four schedules: the interpreter probe, the systemd
     # service, the systemd timer and the launchd plist.
     assert len(bodies) >= 4, (
-        "the heredoc scanner found only %d unquoted bodies — it is no longer reading this file, "
-        "so a clean verdict would be vacuous" % len(bodies)
+        f"the heredoc scanner found only {len(bodies)} unquoted bodies — it is no longer "
+        "reading this file, so a clean verdict would be vacuous"
     )
     assert any("Environment=CI_RUNNER_OS_LABEL" in line for _, body in bodies for line in body), (
         "the systemd service body was not among the scanned bodies — the incident's own site must "
@@ -734,7 +734,7 @@ def test_no_unquoted_heredoc_body_in_this_installer_can_run_a_command_substituti
     assert not offenders, (
         "backtick(s) inside an UNQUOTED heredoc body — bash runs each one as a command "
         "substitution at render time (see the RESOLVED ONCE block at the top of this installer). "
-        "Use plain quotes instead. Offending lines (file line, text): %r" % (offenders,)
+        f"Use plain quotes instead. Offending lines (file line, text): {offenders!r}"
     )
 
 
