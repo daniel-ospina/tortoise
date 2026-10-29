@@ -110,6 +110,79 @@ def test_the_step_no_longer_depends_on_a_shared_npx_cache(name: str):
     )
 
 
+#: The invocation form the producer must not return to. `xargs -a FILE` is a GNU
+#: EXTENSION — BSD/macOS `xargs` rejects it (`xargs: invalid option -- a`,
+#: measured) — so the producer cannot run on a macOS dev box at all. Assembled
+#: from two literals so that a file-wide text ban on the rejected spelling, if
+#: one is ever added, does not eat its own probe.
+_PRE_FIX_ARGV = "xargs -0 -a \"$FILES_FROM\"" + ' "$BIN" >"$TMP_REPORT" 2>&1'
+
+
+def _argv_problems(line: str) -> list[str]:
+    """What is wrong with `line` as the producer's argument transport.
+
+    The check is TEXTUAL on purpose, and that is the whole point: the failure it
+    prevents is OS-DEPENDENT — GNU `xargs` accepts `-a`, and every `runs-on:` in
+    this repo's workflows is `ubuntu*` (86 of 86), so CI cannot see the
+    regression and no executable test can reproduce it there. A form assertion
+    is the only guard that holds on every runner.
+    """
+    problems: list[str] = []
+    if "-a" in line.split():
+        problems.append(
+            "the list is passed with `-a FILE`, a GNU extension that BSD/macOS "
+            "`xargs` rejects outright (`xargs: invalid option -- a`), so the "
+            "producer cannot run on the platform this repo's dev boxes use"
+        )
+    if '<"$FILES_FROM"' not in line:
+        problems.append(
+            'the list does not arrive on STDIN (`<"$FILES_FROM"`), which is the '
+            "portable equivalent of `-a FILE`"
+        )
+    return problems
+
+
+def test_the_argument_list_arrives_on_stdin_not_through_a_gnu_only_flag():
+    """The list reaches the pinned linter by a PORTABLE transport.
+
+    `xargs -0 -a "$FILES_FROM"` was the shipped form until `#10200` measured it
+    on macOS: `xargs: invalid option -- a`, six of this module's own tests red,
+    and the REQUIRED `docs` job's producer simply did not run on any BSD box.
+    GNU accepts `-a`, and every runner this repo uses is GNU, so CI reported
+    16/16 green throughout — which is exactly why the guard has to be an
+    assertion on the FORM rather than a test that executes it.
+
+    Measured both directions (`#10200` review): with a GNU-compatible `xargs`
+    shim on `PATH`, reverting the producer to `-a` left all 16 tests green and
+    nothing else in the tree pinned the transport.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    invocations = [
+        line for line in text.splitlines() if "xargs" in line and '"$BIN"' in line
+    ]
+    assert len(invocations) == 1, (
+        "expected exactly ONE line to hand the argument list to the pinned "
+        f"binary; found {len(invocations)}: {invocations!r}. A second transport "
+        "is a second definition of how the list reaches the linter"
+    )
+    found = _argv_problems(invocations[0])
+    assert not found, (
+        f"the producer's argument transport is not portable: {found}. "
+        f"Got: {invocations[0]!r}"
+    )
+    # … and the check must FIRE on the form it replaced, or it pins nothing.
+    assert _argv_problems(_PRE_FIX_ARGV), (
+        "the portability check does not fire on `xargs -a FILE` — the exact form "
+        "that reds six of this module's own tests on macOS and that was the "
+        "shipped invocation before `#10200`"
+    )
+    # … and must NOT fire on the portable form, so a check that reds everything
+    # cannot pass for coverage.
+    assert not _argv_problems(
+        'xargs -0 "$BIN" >"$TMP_REPORT" 2>&1 <"$FILES_FROM"'
+    ), "the portability check reds the portable form it exists to require"
+
+
 # ── execution: the producer's own artifact ───────────────────────────────────
 
 

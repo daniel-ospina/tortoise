@@ -1563,10 +1563,32 @@ def test_linters_capture_output_instead_of_deciding_the_verdict():
         "the published report must be printed: a known finding is otherwise "
         "invisible while the required check stays green"
     )
+    # ⛔ POSITION, not only spelling. This scan read COLUMN-0 `set ` lines, and the
+    # producer's functions are 2-space indented — so an indented `set -e` inside
+    # `install_pinned_cli2`, the branch a fresh `RUNNER_TEMP` takes on EVERY CI
+    # run, was invisible to it. Measured (`#10200` review): inserting `  set -e`
+    # there left this pin green, and in bash a `set -e` inside a function enables
+    # errexit for the rest of the shell, so cli2's 123 aborts the step before the
+    # report is verified — the pre-`#7435` behaviour, restored through a door this
+    # pin had left open. The separator is a SPACE or a TAB (`set\t-e`), so the
+    # token is matched, never the prefix.
+    set_line = re.compile(r"^[ \t]*set[ \t]")
     set_lines = [
-        line for line in producer_text.splitlines() if line.startswith("set ")
+        line for line in producer_text.splitlines() if set_line.match(line)
     ]
     assert set_lines, "the producer must state its own shell options"
+    # … and the FILTER — not just the regex — is what the indented `set -e`
+    # walked past, so the filter itself is probed in both indentations.
+    missed_indents = [
+        line for line in ("  set -euo pipefail", "\tset -e") if not set_line.match(line)
+    ]
+    assert not missed_indents, (
+        "the set-line scan does not see an INDENTED or TAB-separated `set` line, "
+        f"so an errexit enabled inside one of the producer's functions is "
+        f"invisible to this pin: {missed_indents!r}. The install branch runs on "
+        "every CI run, and a `set -e` in a function enables errexit for the "
+        "rest of the shell, so the report is never verified (#7435)"
+    )
     for line in set_lines:
         # BOTH spellings of errexit are refused. The flag form (`-e`, `-euo`) is
         # what a lane writes by reflex; the LONG form (`set -o errexit`) is the

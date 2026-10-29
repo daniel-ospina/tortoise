@@ -6110,6 +6110,46 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "re-derive the table and every numeral derived from it) — a denial "
         "about history must say so (`before`/`until #9417`)"
     )
+    # ⛔ The MODULE DOCSTRING is this file's own statement of what it reads and
+    # what it does not, and the defect class lives IN it: `904c13141` fixed by
+    # hand a paragraph that attached `supersede_point`'s mechanism to
+    # `_rebuild_all_replay`, and NOTHING pinned it — restored verbatim, the suite
+    # stayed 40/40 green (`#10200` review). The corrected documents are scoped to
+    # `CORRECTED_SECTIONS`; this file's own record is scoped to ITSELF, which is
+    # the same rule the comment layer got in round 11 and the assertion messages
+    # got through that round's file-wide half.
+    docstring_offenders = _denied_verdicts([("module docstring", __doc__ or "")])
+    assert not docstring_offenders, (
+        "this module's own docstring contradicts a census table:\n  "
+        + "\n  ".join(docstring_offenders)
+        + "\nThe docstring is the census's statement of what it reads, so a "
+        "denial there is the same defect as one in a corrected passage"
+    )
+    # … and the docstring half must FIRE on the paragraph `904c13141` deleted, or
+    # the assertion above is decoration. The pre-hand-fix sentence is kept here
+    # verbatim (`2355c2e7f`, the head before it), which is this file's own
+    # convention for a probe that must not stop matching.
+    pre_hand_fix = (
+        "`projection._rebuild_all_replay` — which earlier revisions of this "
+        "file recorded as a re-materializer — is NOT: Its `SET r += $attrs` is "
+        "on the 2a-DIRECT leg, whose rows are discovered by "
+        "`MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`, so `rtype` is "
+        "provably `IMPL|NAND`. The about edge is transferred by a separate "
+        "`MERGE (new)-[nr:{rel}]->(t)` that **does** carry the old edge's "
+        "properties (`SET nr += $attrs`, whitelisted to the "
+        "`RelationUpsert.attrs` vocabulary), so since #9417 this writer DOES "
+        "write `confidence` on an about edge and is no longer an exemption "
+        "here."
+    )
+    assert any(
+        "_rebuild_all_replay" in item
+        for item in _denied_verdicts([("module docstring", pre_hand_fix)])
+    ), (
+        "the docstring half cannot see the paragraph `904c13141` deleted — the "
+        "sentence that carried `supersede_point`'s mechanism onto "
+        "`_rebuild_all_replay` — so the hand fix it made is unpinned and the "
+        "next editor can restore it green"
+    )
 
 
 def _declared_false_positive_counts(
@@ -6859,6 +6899,32 @@ def test_the_pin_index_states_the_9417_cycle_count_its_own_leg_does():
         "no `<number> review cycles` statement found in this file — the "
         "count this leg pins has moved or been reworded, so the leg would pass "
         "without measuring anything"
+    )
+    # ⛔ CARDINALITY, because this leg's own docstring claims it: *"Three
+    # statements are compared, not one pair"* and *"Silence is not agreement — a
+    # passage that stops stating the count entirely reds rather than passing
+    # unmeasured"*. Asserting only that `stated` is NON-EMPTY pins nothing about a
+    # passage that falls silent: measured (`#10200` review), deleting the count
+    # from the PIN-INDEX statement — the artifact whose stale `five` opened this
+    # whole class — left this leg GREEN while the docstring promised a red.
+    expected_statements = 3
+    assert len(stated) == expected_statements, (
+        f"this file states the `#9417` review-cycle count in {len(stated)} "
+        f"place(s), not {expected_statements} — the pin index that introduces "
+        "leg 33, the `#10149` block below it, and leg 33's own docstring. A "
+        "passage that stops stating it has silently left the record, and 'one "
+        "value, stated once' does not make silence agreement. Found: "
+        + repr([(line, text) for line, text, _v in stated])
+    )
+    # … and the count must DECREMENT when one statement falls silent, or the
+    # cardinality above cannot notice one going. Removing only the FIRST
+    # occurrence is what makes this a probe of the READER rather than of
+    # `str.replace` — the two pin-index spellings share a matched text.
+    thinner = source.replace(stated[0][1], "the", 1)
+    assert len(_review_cycle_counts(thinner)) == len(stated) - 1, (
+        "removing one cycle-count statement does not decrement the reader's "
+        "output, so the cardinality assertion above cannot notice a passage "
+        "that has stopped stating the count"
     )
     disagreeing = [
         f"module line {line} says {text!r} = {value}"
