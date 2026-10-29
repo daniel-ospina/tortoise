@@ -227,10 +227,11 @@ of quoting a remembered one. A step is never *assigned* unwitnessed, and every s
 exactly one of the two sets (a hole or an overlap refuses the run). So the epic's own GREEN gate —
 V5, all eight steps observed — stays reachable: `#9116`'s seam makes both rows OBSERVABLE (each
 step's own block is on the receipt), and S2.2 then flips on a re-run at a post-seam head (S2.3
-flips only once its pass does work, which the measured corpus' idle classify pass does not). It did **not** come for free and this bundle
-does not claim it did: the seam landed with this probe's observer rewritten (`observe_steps`
-reads `stats['step_witness']` instead of guessing at a surface the receipt never carried) and
-with the pin that certified the old unreachability replaced by the one that pins the wiring.
+flips only once its pass does work, which the measured corpus' idle classify pass does not). It
+did **not** come for free and this bundle does not claim it did: the seam landed with this probe's
+observer rewritten (`observe_steps` reads `stats['step_witness']` instead of guessing at a surface
+the receipt never carried) and with the pin that certified the old unreachability replaced by the
+one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
