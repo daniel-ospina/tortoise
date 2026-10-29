@@ -76,9 +76,9 @@
 #        tool missing from PATH, or a failed remote read (`--status`).
 #     4  label-coverage could not read the workflows, so it has NO verdict — run `--status` from
 #        the repo root. An empty read is not a clean bill of health, and neither is a PARTIAL one:
-#        a `runs-on:` whose labels are not a static label set (a `${{ matrix.os }}` expression in
-#        the value OR in any single member of a list, or a spelling this parser does not
-#        understand) is refused rather than cleared.
+#        a `runs-on:` whose labels are not a static label set (a `${{ … }}` expression in the value,
+#        in a member, or INSIDE one — `ubuntu-24.04-${{ matrix.arch }}` — or a spelling this parser
+#        cannot carry as one label: a space-bearing token, a YAML alias) is refused, never cleared.
 #     5  label-coverage WAS read and found a required label this pool is ASKED to serve with NO
 #        self-hosted answer — the erosion state: the operator opted in, and the label is not there.
 #        A zero-answer label this pool is NOT asked to serve (`CI_RUNNER_OS_LABEL=off`, the shipped
@@ -439,10 +439,20 @@ if [ "$MODE" = status ]; then
       function emit(t,   v) {
         v = unq(t)
         if (v == "") return
-        # ⛔ `bad++`, NOT a silent `return`: an expression is not a label this pass can read, so the
-        # BLOCK has no static label set and must reach the exit-4 arm. Dropping it let a parseable
-        # sibling (`self-hosted`) answer for the whole block.
-        if (v ~ /^\$/) { bad++; return }
+        # ⛔ `bad++`, NOT a silent `return`: a value that is not a static label is not one this pass
+        # can read, so the BLOCK has no static label set and must reach the exit-4 arm. Dropping it
+        # let a parseable sibling (`self-hosted`) answer for the whole block.
+        # ⛔ AND THE TEST IS CONTENT, NOT PREFIX. `ubuntu-24.04-${{ matrix.arch }}` is the ordinary
+        # way a required leg gets parameterised, and a prefix test (`/^\$/`) printed it as a literal
+        # label name — so the block had a readable label set, no `!` was emitted, and the one
+        # instrument meant to surface the all-PR-BLOCKED state exited 0 over it. `${{` ANYWHERE is
+        # the predicate a comparable applies (actionlint `ast.go` `ContainsExpression` is
+        # `strings.Index(s, "${{")`, not a prefix test) and what the EXIT contract in this file
+        # promises. Whitespace and a YAML alias (`*pool`) are refused for the same reason — no
+        # static label set — and because neither survives the unquoted `for label in
+        # $coverage_labels` below: it word-splits, so a space-bearing token would be printed as
+        # several FABRICATED labels instead of refused as one unreadable block.
+        if (v ~ /\$\{\{/ || v ~ /[ \t]/ || v ~ /^[*&]/) { bad++; return }
         print v; got++
       }
       function flowlist(s,   n, i, a) {

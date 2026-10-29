@@ -901,6 +901,9 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
 
     Mutation: `if (v ~ /^\$/) return` -> no `bad++` -> every fixture below exits 0/5, never 4 -> RED.
     Mutation: `finish()` back to `got == 0 && !pgroup` -> the `group:`/`labels:` fixture clears -> RED.
+    Mutation: the refusal back to a PREFIX test (`/^\$/`) -> the four CONTENT fixtures below (an
+    expression INSIDE a label, a YAML alias, a space-bearing scalar) are emitted as literal labels,
+    no `!` is printed, and `--status` exits 0 with fabricated `= 0 of N … a report` rows -> RED.
     Control: a `group:` with genuinely NO `labels:` key stays a report — there is no label to check,
     which is a real read (pinned by the case above).
     """
@@ -922,6 +925,34 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
         ),
         "inline mapping with an expression": (
             "jobs:\n  a:\n    runs-on: {group: pool, labels: \"${{ matrix.os }}\"}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # ⛔ THE EXPRESSION **INSIDE** THE LABEL, NOT AS THE WHOLE VALUE. A prefix test (`/^\$/`)
+        # emitted these as literal label names — so the block HAD a static label set, no `!` was
+        # printed, and the one instrument meant to surface the all-PR-BLOCKED state exited 0. This
+        # is the ordinary way a required leg gets parameterised (GitHub documents expressions in
+        # `labels:`), and actionlint declines to verdict a value containing `${{` ANYWHERE
+        # (`ast.go` `ContainsExpression` = `strings.Index(s, "${{")`, not a prefix test).
+        "expression inside a scalar label": (
+            "jobs:\n  a:\n    runs-on: ubuntu-24.04-${{ matrix.arch }}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "expression inside a list member": (
+            "jobs:\n  a:\n    runs-on: [self-hosted-x64, \"ubuntu-24.04-${{ matrix.arch }}\"]\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # A YAML ALIAS is a reference to a sequence elsewhere, not a label: every token here used to
+        # be emitted as a label named `*pool`.
+        "yaml alias": (
+            "x-pool: &pool [self-hosted-x64, ubuntu-24.04]\n"
+            "jobs:\n  a:\n    runs-on: *pool\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # ⛔ WHITESPACE INSIDE A TOKEN is refused because `coverage_labels` is consumed by an
+        # UNQUOTED `for label in $coverage_labels`, which word-splits — so one unreadable token
+        # printed several FABRICATED labels (one row per fragment, exit 0).
+        "space-bearing scalar": (
+            "jobs:\n  a:\n    runs-on: self-hosted-x64 ubuntu-24.04\n"
             "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
         ),
     }
@@ -976,6 +1007,35 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
     )
     assert "ubuntu-24.04 = 0 of" not in r.stderr, (
         f"a partial read must not verdict any label, but a per-label verdict line was printed: {r.stderr}"
+    )
+
+    # ⛔ AND THE FABRICATION ITSELF MUST BE GONE, not merely out-voted. The content fixtures above
+    # prove the refusal; this proves WHY it matters — the exit-4 arm is what stands between an
+    # unreadable token and the unquoted `for label in $coverage_labels`, which word-splits. Measured
+    # on the pre-fix program, one `[self-hosted-x64, "ubuntu-24.04-${{ matrix.arch }}"]` printed
+    # THREE fabricated rows (`ubuntu-24.04-${{`, `matrix.arch`, `}}`) as "custom labels, a report,
+    # not a block" and exited 0 — with `CI_RUNNER_OS_LABEL=on`, since no fragment matches the pin.
+    fabricated = _repo_with_workflows(
+        tmp_path / "fabricated",
+        "jobs:\n  a:\n    runs-on: [self-hosted-x64, \"ubuntu-24.04-${{ matrix.arch }}\"]\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=fabricated,
+    )
+    assert r.returncode == 4, (
+        "a `runs-on` whose label set is not static has NO verdict — the pool's coverage of the "
+        f"labels it could read is not a verdict either, so this must be 4, not {r.returncode}: {r.stderr}"
+    )
+    combined = r.stdout + r.stderr
+    assert "${{" not in combined, (
+        f"an expression reached the output as if it were a label name: {combined}"
+    )
+    assert not re.search(r"= \d+ of \d+", combined), (
+        "a per-label `= N of M` row was printed for a block with no static label set — that is the "
+        f"fabrication the unquoted `for label in $coverage_labels` produces: {combined}"
     )
 
 
