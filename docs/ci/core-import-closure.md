@@ -170,11 +170,11 @@ no readable artifact — and every one of those is recorded rather than scored a
 | naive | **13** | 4 (#10151, #10144, #10134, #10104) | 488 |
 | keep-non-python | **13** | 4 (#10151, #10144, #10134, #10104) | 606 |
 
-**A single miss means the derivation is not safe. There are 13**, under BOTH mappings — the empty
--closure refinement changes no file in this window (see the class table: the class it repairs has no
-scored instance here, because #10070's failing run was unreadable — §3.4 — so its one historical win
-cannot be re-scored). They fall in two classes, and only one of them is an analysis limitation that
-better parsing would fix:
+**A single miss means the derivation is not safe. There are 13**, under BOTH mappings — the
+empty-closure refinement changes no file in this window (see the class table: the class it repairs has
+no scored instance here, because #10070's failing run was unreadable — §3.4 — so its one historical
+win cannot be re-scored). They fall in three classes, and only one of them is an analysis limitation
+that better parsing would fix:
 
 | class | count | what it is |
 |---|---|---|
