@@ -1947,3 +1947,123 @@ def test_a_decorator_and_a_default_are_import_time_edges():
     assert {(d.target, d.in_function) for d in defaulted.deps} == {
         ("tortoise.base", False), ("tortoise.other", True)}, (
         "the default is import-time; only the BODY is function-local")
+
+
+def test_a_dynamic_import_in_a_type_checking_guard_test_is_not_dropped():
+    """P3: the guard's TEST is evaluated at runtime — it must be walked.
+
+    `_nodes_with_context` pushed the guard's body and `orelse` and then
+    `continue`d, so `node.test` never entered the walk — and `_scan_dynamic`
+    walks the same generator, so a dynamic import inside a guard's test expression
+    was invisible to BOTH walkers: no edge, no `UNKNOWN`, in a function whose
+    stated contract is "anything the analysis CANNOT resolve is reported as
+    `UNKNOWN` … and never dropped". This is the aliased-`importlib` hole one code
+    path away.
+
+    Both operators are pinned, because they fail for DIFFERENT reasons and only
+    together prove the walk: the `or` form is also a real runtime import (it must
+    not be tagged type-only at all), while the `and` form is still a type-only
+    guard whose TEST must nevertheless be read.
+    """
+    idx = _index("tortoise/lazy.py")
+    disjunction = _scan(
+        idx, "tests/test_a.py",
+        "import importlib\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING or importlib.import_module('tortoise.lazy'):\n"
+        "    pass\n",
+    )
+    deps = {d.target: d for d in disjunction.deps}
+    assert "tortoise.lazy" in deps, (
+        "a dynamic import in a guard's test expression was silently dropped — "
+        "no edge and no UNKNOWN")
+    assert deps["tortoise.lazy"].type_checking is False, (
+        "with a runtime operand the `or` may be true at runtime, so the import "
+        "is a runtime dependency — `--exclude-type-checking` would delete it")
+
+    conjunction = _scan(
+        idx, "tests/test_b.py",
+        "import importlib\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING and importlib.import_module('tortoise.lazy'):\n"
+        "    pass\n",
+    )
+    assert "tortoise.lazy" in {d.target for d in conjunction.deps}, (
+        "the guard is type-only, but its TEST is still code the walker must read "
+        "— pushing only body/orelse dropped it")
+
+
+def test_a_disjunction_with_a_runtime_operand_is_not_a_type_only_guard():
+    """P3: `if TYPE_CHECKING or <runtime term>:` is NOT a type-only block.
+
+    `_is_type_checking_guard` walked the test for the NAME, so any expression
+    that merely contained `TYPE_CHECKING` classified its body as type-only — and
+    `--exclude-type-checking` then DELETED a body of genuinely runtime edges. That
+    is the same under-selection the `if not TYPE_CHECKING:` fix removed, one
+    operator over. What decides the polarity is the OPERATOR, not a name
+    occurring anywhere in the test: an `and` chain containing the guard is
+    false-always at runtime (type-only, whatever the other operands are), an `or`
+    chain is not unless EVERY operand is, and an expression that only mentions the
+    name (a call, a comparison) decides nothing — so it is not tagged.
+    """
+    idx = _index("tortoise/lazy.py")
+
+    def kind(src: str) -> bool:
+        scan = _scan(idx, "tests/test_a.py", src)
+        deps = {d.target: d for d in scan.deps}
+        return deps["tortoise.lazy"].type_checking
+
+    body = "    from tortoise.lazy import thing\n"
+    # `or` with a runtime operand: the body CAN run at runtime → runtime edge.
+    assert kind("from typing import TYPE_CHECKING\nimport os\n"
+                "if TYPE_CHECKING or os.environ.get('X'):\n" + body) is False
+    # `and`: false-always at runtime → still type-only (precision counter-pin).
+    assert kind("from typing import TYPE_CHECKING\nimport os\n"
+                "if TYPE_CHECKING and os.environ.get('X'):\n" + body) is True
+    # a bare `or` of two guards is still false-always at runtime.
+    assert kind("from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING or TYPE_CHECKING:\n" + body) is True
+    # merely MENTIONING the name decides nothing about runtime truth.
+    assert kind("from typing import TYPE_CHECKING\n"
+                "if bool(TYPE_CHECKING):\n" + body) is False
+
+
+def test_the_truth_cache_shape_is_pinned_to_its_version(monkeypatch, tmp_path):
+    """P3: the version constant must move when the EXTRACTION's shape moves.
+
+    `GROUND_TRUTH_VERSION`'s own comment states the invariant — "a truth written
+    by an older extractor is a CACHED TRUNCATION, and `pr_ground_truth`
+    short-circuits on `cached.exists()`" — and three commits changed the ground
+    truth's extraction while the constant stayed at 3. The pin is the COUPLING, not
+    the number: the shape `pr_ground_truth` writes is recorded per version, so
+    adding or removing a truth key without a bump FAILS, and bumping without
+    recording the new shape fails too. (The version is also in the cache FILENAME,
+    which is what makes a bump invalidate every existing file at once.)
+    """
+    import json
+
+    from tools import ci_import_closure as module
+
+    shape_by_version = {
+        4: frozenset({
+            "failed_files", "failed_tests", "jobs",
+            "job_failed_without_test_failure", "artifacts",
+            "runs_seen", "test_legs_seen", "artifact_errors",
+        }),
+    }
+    assert module.GROUND_TRUTH_VERSION in shape_by_version, (
+        "the version moved without recording the shape it writes — record the "
+        f"new key set for v{module.GROUND_TRUTH_VERSION} here")
+    _fake_ground_truth(
+        monkeypatch, module,
+        junit=_junit('<testcase classname="tests.test_a" name="t1" '
+                     'file="tests/test_a.py" line="1"/>'),
+        listing_names=["pytest-log-test-a"])
+    module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    cached = _truth_cache(tmp_path, "deadbeef")
+    assert cached.exists(), (
+        "a fully-read truth must be cached, or this pin asserts nothing")
+    written = json.loads(cached.read_text())
+    assert set(written) == shape_by_version[module.GROUND_TRUTH_VERSION], (
+        "the ground truth's SHAPE changed — bump GROUND_TRUTH_VERSION and record "
+        "the new key set, or every warm cache answers with the old rules forever")

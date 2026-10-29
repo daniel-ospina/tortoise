@@ -129,7 +129,18 @@ CACHE_DIR = REPO / ".ci-selection" / "closure-cache"
 # #10143 review P2 (v2 → v3): the truth gained `runs_seen` / `test_legs_seen` and
 # the sibling-leg masking check, so a v2 file cannot answer "did I see any ground
 # truth at all". Nothing reads a v2 file now.
-GROUND_TRUTH_VERSION = 3
+# #10143 review P3 (v3 → v4): the EXTRACTION changed twice without a bump — the
+# per-run leg scoping + the `executed`/zero-testcase gate (a red leg with an
+# empty junit is now unread, not clean) and the candidate artifact names +
+# `junit-<label>.xml` member matching (`ARTIFACT_NAME_OVERRIDES`,
+# `_is_junit_member`). A v3 file was written by the reader that reported three
+# workflow legs' own artifacts as absent and could not open `junit-d14.xml` at
+# all, so a warm v3 cache re-answers the OLD question forever — which is exactly
+# why the re-derivation of §3 must not be allowed to short-circuit on one.
+# `test_the_truth_cache_shape_is_pinned_to_its_version` pins the coupling: the
+# shape the truth writes is recorded per version, so a shape change without a
+# bump fails, and a bump without a recorded shape fails too.
+GROUND_TRUTH_VERSION = 4
 
 # The package whose modules a closure REPORTS. Other in-repo roots (`tests/`,
 # `battery/`, `tools/`) are indexed and TRAVERSED — a test that imports
@@ -347,13 +358,42 @@ def _is_type_checking_guard(expr: ast.expr) -> bool:
     DELETED a genuinely runtime edge. That is the same axis inversion the
     `_dedupe_deps` fix removed: a reader must never drop the other axis's edges.
     """
+    return _is_type_only_test(expr)
+
+
+def _is_type_only_test(expr: ast.expr) -> bool:
+    """Is this test expression TYPE-CHECKING-ONLY (never true at runtime)?
+
+    ⛔ NOT `any(TypeError name in the test)` (#10143 review P3). `ast.walk` accepted
+    ANY expression that merely CONTAINED the name, so `if TYPE_CHECKING or
+    <runtime term>:` tagged its body type-only — and `--exclude-type-checking`
+    then deleted a body of runtime edges, the same under-selection the `not` arm
+    above was fixed for. The question is what the expression is FALSE-ALWAYS at
+    runtime, which is a property of the OPERATOR, not of a name occurring in it:
+
+    * a bare `TYPE_CHECKING` name/attribute: false at runtime → type-only;
+    * `A and B`: false as soon as ANY operand is type-only (so the suite cannot
+      run at runtime — `TYPE_CHECKING and x` is type-only, whatever `x` is);
+    * `A or B`: false at runtime only if EVERY operand is type-only — one
+      runtime operand and the body DOES execute;
+    * `not X`: never type-only (the negated guard is the runtime idiom);
+    * anything else (a call, a comparison, a subscript that merely mentions the
+      name): NOT type-only. Over-tagging drops real edges under
+      `--exclude-type-checking`; under-tagging only over-selects, which is the
+      safe direction for a selector.
+    """
+    if isinstance(expr, ast.Name):
+        return expr.id == "TYPE_CHECKING"
+    if isinstance(expr, ast.Attribute):
+        return expr.attr == "TYPE_CHECKING"
     if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
         return False
-    for node in ast.walk(expr):
-        if isinstance(node, ast.Name) and node.id == "TYPE_CHECKING":
-            return True
-        if isinstance(node, ast.Attribute) and node.attr == "TYPE_CHECKING":
-            return True
+    if isinstance(expr, ast.BoolOp):
+        if isinstance(expr.op, ast.And):
+            return any(_is_type_only_test(v) for v in expr.values)
+        if isinstance(expr.op, ast.Or):
+            return bool(expr.values) and all(
+                _is_type_only_test(v) for v in expr.values)
     return False
 
 
@@ -377,6 +417,16 @@ def _nodes_with_context(tree: ast.AST):
         node, in_tc, in_fn = stack.pop()
         yield node, in_tc, in_fn
         if isinstance(node, ast.If) and _is_type_checking_guard(node.test):
+            # ⛔ THE TEST ITSELF IS RUNTIME CODE (#10143 review P3). `continue`
+            # here dropped `node.test` from the walk entirely, and `_scan_dynamic`
+            # walks this same generator — so an `if TYPE_CHECKING or
+            # importlib.import_module('tortoise.lazy'):` guard hid a real
+            # dynamic import with NO edge and NO `UNKNOWN`, in a function whose
+            # contract is "anything the analysis CANNOT resolve is reported as
+            # `UNKNOWN` … and never dropped". The test is evaluated in the
+            # ENCLOSING context (module level at import time, function-local
+            # inside a body), never type-only, so it inherits `in_tc`/`in_fn`.
+            stack.append((node.test, in_tc, in_fn))
             for child in node.body:
                 stack.append((child, True, in_fn))
             for child in node.orelse:
