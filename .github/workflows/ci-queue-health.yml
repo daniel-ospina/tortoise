@@ -283,7 +283,7 @@ jobs:
             # here would contradict the transition line printed three steps above.
             # `cancel_lead` is that payload-derived clause, shared with the
             # PR-STARVED arm for the same reason.
-            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires `pr_running > 0`, and the governor's block sits below that clause, so the governor was never reached. The lever is capacity, not the governor."
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires `pr_running > 0`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
             echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
           fi

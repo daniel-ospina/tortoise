@@ -87,14 +87,19 @@ def test_a_deep_queue_of_pr_work_is_not_a_flood_but_it_is_not_OK_either():
     `OK` BEFORE the `pr_running`/age clauses ran, so this exact shape — 20 PR-event
     runs queued, oldest waiting 20 min, `pr_running = 0` — was reported as
     `CI: OK(queued=26, ...)` with a green workflow. That is "PR CI is not running",
-    the state #9115 was filed for. The governor still must not act (there is no
-    trim-safe offender to blame), so it is its own state, warned about, exit 0.
+    the state #9115 was filed for. The governor must not act — and NOT because
+    nothing is blameable: this queue DOES carry a trim-safe offender (6
+    `finding-provenance` runs, 1 excess over `keep=5`), and the same share with no
+    PR work would be a FLOOD that trims it. What declines is the
+    `offender_queued < global_max` clause — the queue is dominated by PR work — so
+    the governor is never reached. It is its own state, warned about, exit 0.
     """
     queued = starving_pr_runs(20) + flood_queued(6)
     health = classify(queued)
     assert health.verdict == Q.PR_STARVED
     assert health.verdict != Q.FLOOD
-    assert health.trimmable == ()          # nothing trim-safe to blame -> no action
+    assert health.trimmable == ()          # the dominance clause declined, NOT "nothing to blame"
+    assert any("trim-safe offender present: True" in reason for reason in health.reasons)
     assert any("dominated by PR work" in reason for reason in health.reasons)
     assert health.state_line == (
         "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
@@ -709,7 +714,8 @@ def test_the_workflow_annotations_carry_the_state_line_in_the_message():
 # ── PR-STARVED through the CLI ────────────────────────────────────────────
 
 def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
-    """Measured, warned about, and NOT red: there is nothing the governor may cancel."""
+    """Measured, warned about, and NOT red: the dominance clause declines, so the
+    governor is never reached — which is not the same as nothing being blameable."""
     starved = classify(starving_pr_runs(20) + flood_queued(6))
     assert starved.verdict == Q.PR_STARVED
     monkeypatch.setattr(Q, "read_health", lambda *a, **k: starved)
@@ -938,7 +944,12 @@ def test_the_no_action_clause_names_the_bound_that_actually_binds():
     # cancellations this run made before this reading (`cancelled`), so an
     # invocation-scoped "no trim was ever considered" contradicts the artifact.
     assert "no run was trimmed for this reading" in joined
-    assert "the governor was never reached" in joined
+    # ⛔ "the governor was never reached" would be an INVOCATION claim, and one the
+    # payload can contradict: when this run cancelled pre-action FLOOD candidates
+    # the governor WAS reached, in the pre-action read. Scope it to the reading
+    # (#10264 review P3).
+    assert "this reading reaches no governor block" in joined
+    assert "the governor was never reached" not in joined
     assert "no trim was ever considered" not in joined
     # the scope is described as the candidate rule, never as the bound
     assert "its candidates are a trim-safe OFFENDER's queued runs" in joined
@@ -1037,22 +1048,32 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
     # ... and BOTH no-action arms are payload-derived, sharing one lead
     wf = (Path(__file__).resolve().parents[1]
           / ".github/workflows/ci-queue-health.yml").read_text()
-    # ⛔ COMMENT-STRIPPED AND NORMALISED, over the WHOLE FILE — not per line, and
-    # not just the `echo` lines. Two ways a naive guard goes inert here (#10264
-    # review P2 — the first version of this guard was INERT for both):
+    # ⛔ COMMENT-STRIPPED, NORMALISED **AND LOWERCASED**, over the WHOLE FILE — not
+    # per line, and not just the `echo` lines. Three ways a naive guard goes inert
+    # here (#10264 reviews P2/P3 — every one of these was measured):
     #   1. it scanned only `::warning` lines, but the retired claim also lived in
     #      the file's own HEADER prose;
     #   2. `" ".join(wf.split())` alone is NOT enough, because a claim wrapped
     #      across two comment lines keeps the continuation's `#`, so it normalises
     #      to "nothing the # governor may cancel". Stripping each line's LEADING
-    #      `# ` first is what makes the phrase contiguous again.
-    flat = " ".join(line.lstrip("# ").strip() for line in wf.splitlines())
+    #      `# ` first is what makes the phrase contiguous again;
+    #   3. exact-case patterns miss a claim restored SENTENCE-INITIALLY —
+    #      "Nothing the governor may cancel." is the most likely reintroduction and
+    #      matched none of them, so everything is lowercased.
+    flat = " ".join(line.lstrip("# ").strip()
+                    for line in wf.splitlines()).lower()
     assert "nothing the governor may cancel" not in flat
-    assert "No trim-safe offender can be blamed" not in flat
+    assert "no trim-safe offender can be blamed" not in flat
     assert "no trim-safe offender to blame" not in flat
-    # the scan is not vacuous: it DOES see the live PR-STARVED claim, which is
-    # what proves the pattern and the normalisation actually reach the text
-    assert "this state reaches no trim" in flat
+    # THE CONTROL — and it must be a phrase that lives ONLY in comment prose AND
+    # WRAPS across a line break. A phrase that also appears in an un-commented
+    # `echo` line proves nothing: it stays findable with the `# `-strip removed, so
+    # a regression of step 2 (the mechanism this guard exists to protect) would
+    # pass unnoticed. Hence the second half of the control.
+    control = ("a trim-safe offender can be present when the queue is "
+               "merely pr-dominated")
+    assert control in flat                       # the strip DID make it contiguous
+    assert control not in " ".join(wf.split()).lower()  # ... and only the strip does
     # the annotation scan is restricted to REAL annotation lines, not every prose
     # comment that merely mentions `::warning`
     anns = [line for line in wf.splitlines()

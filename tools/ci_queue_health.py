@@ -296,11 +296,14 @@ DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0
 
 #: The verdicts that name a MEASURED PR starvation: PR work has a queued run that
 #: has waited past the age floor and nothing of it is executing. They differ only
-#: in whether an action is available (FLOOD has a trim-safe offender, PR-STARVED
-#: does not), which is NOT a difference in what the per-PR report is looking at,
-#: so both — and only these two — are threaded into `ci_check_repair`. A verdict
-#: that is NOT in this set (OK, UNKNOWN, PR-UNWITNESSED) must never produce a
-#: per-PR STARVED claim: each of those leaves starvation unmeasured or disproved.
+#: in whether an action is available (FLOOD's offender is trim-safe and IS trimmed;
+#: PR-STARVED's reading reaches no trim — a trim-safe offender MAY still be present,
+#: merely below the dominance floor or dominated by PR work — so "no offender to
+#: blame" is NOT what bounds it), which is NOT a difference in what the per-PR
+#: report is looking at, so both — and only these two — are threaded into
+#: `ci_check_repair`. A verdict that is NOT in this set (OK, UNKNOWN,
+#: PR-UNWITNESSED) must never produce a per-PR STARVED claim: each of those leaves
+#: starvation unmeasured or disproved.
 STARVING_VERDICTS = frozenset({FLOOD, PR_STARVED})
 #: (PR-BACKLOGGED is deliberately NOT a member — see `QueueHealth.starves_pr`.)
 
@@ -748,7 +751,7 @@ def classify_queue(
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
             f"no run was trimmed for this reading: this state is reached only while "
             f"a PR-event run is executing, and the governor's block sits BELOW that "
-            f"clause, so the governor was never reached. In any case its candidates "
+            f"clause, so this reading reaches no governor block. In any case its candidates "
             f"are a trim-safe OFFENDER's queued runs, and a queued PR run is never a "
             f"candidate (a cancellation this invocation made BEFORE this reading is "
             f"reported in 'cancelled', not here)"
