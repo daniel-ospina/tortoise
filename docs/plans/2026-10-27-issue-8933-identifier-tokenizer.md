@@ -208,7 +208,14 @@ node, which is what the call asked for.
   (a backfill cannot move `db_hash`, while a payload-owned key still moves it).
 - R8 **The derived alias replaces a stored retrieval vocabulary** →
   `TestWritePathLive::test_an_empty_search_keys_list_does_not_replace_the_stored_vocabulary`
-  (the E3 `search_keys: []` default keeps the node's own keys and gains the alias).
+  (the E3 `search_keys: []` default keeps the node's own keys and gains the alias),
+  `::test_an_ARRAY_valued_node_does_not_abort_the_alias_write` (the ADD door keeps an
+  array-valued node's tokens *and* flattens it to the indexable string) and
+  `::test_a_content_edit_on_an_ARRAY_valued_node_keeps_its_vocabulary` (the REVISE door
+  does the same, both directions — an edit that introduces an identifier keeps the tokens
+  and gains the alias, an edit that removes one keeps the tokens and drops only the alias).
+  The risk is a property of the *invariant*, not of one door: round 9 found it live on the
+  revise door because only the ADD door was pinned.
 
 **Threat classes:** (not adversarial) — no gate/enforcement code in this diff.
 
