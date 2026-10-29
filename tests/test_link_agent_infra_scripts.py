@@ -1506,3 +1506,131 @@ class TestEmptyAndUnresolvableArguments:
         )
         assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
         assert "Traceback" not in result.stderr, result.stderr
+
+    def test_the_drift_gate_does_not_materialise_before_its_own_caller_error(
+        self, tmp_path: Path
+    ) -> None:
+        """``--infra ''`` must not write the pointer and then report a config error.
+
+        ``tools/agent_infra_drift_check.py`` is the tool's only automated consumer, and it built
+        the child argv with a TRUTHINESS test — so an empty ``--infra`` was DROPPED, ``link_main``
+        fell through to ``$AGENT_INFRA_PATH`` and materialised ``scripts/``, and the caller error
+        arrived afterwards. Measured on a fresh repo: it ended up with
+        ``scripts -> $AGENT_INFRA_PATH/scripts`` from an invocation that only printed a config
+        error, i.e. a silent working-tree mutation behind an exit code that says nothing happened.
+        """
+        fresh = tmp_path / "fresh"
+        fresh.mkdir()
+        infra = tmp_path / "infra"
+        (infra / "scripts").mkdir(parents=True)
+        env = {**os.environ, "AGENT_INFRA_PATH": str(infra), "HARNESS_PIN": "", "CELL_HOME": ""}
+
+        result = run_wrapper("--repo", str(fresh), "--infra", "", env=env)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert not os.path.lexists(fresh / "scripts"), (
+            "the wrapper materialised the pointer from $AGENT_INFRA_PATH before reporting the "
+            "empty-argument error — an errored invocation must not mutate the tree"
+        )
+
+    def test_the_drift_gate_survives_an_unexpandable_infra(self, tmp_path: Path) -> None:
+        """The wrapper IMPORTS this module, so the tool's ``main``-level catch-all never runs.
+
+        That is why ``_expand``'s guard is load-bearing and why the subprocess tests alone could
+        not pin it: with the guard removed, seven of them stayed green because ``main``'s
+        catch-all absorbed the ``RuntimeError``. Measured through the wrapper: traceback at
+        ``pathlib.expanduser`` and **rc=1** (the drift class) without the guard, rc=2 with it.
+        """
+        infra = tmp_path / "infra"
+        (infra / "scripts").mkdir(parents=True)
+        result = run_wrapper(
+            "--repo", str(tmp_path), "--infra", "~definitely-no-such-user-xyz/ai",
+            env={**os.environ, "HARNESS_PIN": "", "CELL_HOME": ""},
+        )
+        assert result.returncode == 2, (
+            f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr, result.stderr
+
+
+class TestAnAbsentPinIsDriftNotCannotVerify:
+    """The #10114 core case must stay exit **1**, and this class exists because it nearly did not.
+
+    A review round proposed mapping every non-zero ``git`` status to "cannot verify" on the
+    reasoning that git reserves ``>1`` for errors. Measured, that reasoning does not hold for
+    ``cat-file -e``: a pin sha that is legitimately ABSENT from a healthy checkout exits **128**,
+    exactly like a broken object DB — git does not offer a 1-for-absence there the way
+    ``merge-base --is-ancestor`` offers 1-for-no. Applying the proposal would have turned every
+    stale checkout in the fleet from drift (1) into cannot-verify (2), i.e. removed the very
+    verdict #10114 was filed to produce, while still looking like a fail-closed improvement.
+    """
+
+    def test_a_pin_from_another_repository_is_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """A pin commit the checkout does not have = "predates the pin", exit 1 — never exit 2."""
+        other = tmp_path / "other-repo"
+        other.mkdir()
+        subprocess.run(["git", "-C", str(other), "init", "-q", "-b", "main"], check=True, capture_output=True)
+        absent_pin = git_commit(other, "a commit that lives only in another repository")
+
+        state = subprocess.run(
+            ["git", "-C", str(git_infra), "cat-file", "-e", f"{absent_pin}^{{commit}}"],
+            capture_output=True,
+        )
+        assert state.returncode == 128, (
+            "the fixture is only meaningful if git really reports 128 for an absent object — "
+            f"got {state.returncode}"
+        )
+
+        state = self._pin_check_against(repo, git_infra, tmp_path, absent_pin)
+        assert state.returncode == 1, (
+            "an absent pin commit is DRIFT (1) in a readable checkout, not cannot-verify (2) — "
+            f"rc={state.returncode}, stdout={state.stdout!r}, stderr={state.stderr!r}"
+        )
+        assert "predates the pin" in state.stdout, state.stdout
+
+    def test_a_git_that_cannot_answer_the_ancestry_question_is_cannot_verify(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``merge-base --is-ancestor`` DOES define 1-for-no — so ``128`` there is an error (2).
+
+        The asymmetry with the test above is the point: 128 from ``cat-file -e`` is the ordinary
+        absent-pin answer, while 128 from ``--is-ancestor`` (after the pin object was already
+        proven PRESENT) is a git that could not answer. Reading the second as "have DIVERGED"
+        printed a ``git checkout`` remedy for a repository git never managed to inspect.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "a commit after the pin")  # so HEAD != pin and ancestry is asked
+
+        shim_dir = tmp_path / "shim"
+        shim_dir.mkdir()
+        real_git = shutil.which("git")
+        assert real_git, "git must be on PATH for this test"
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            f'for a in "$@"; do [ "$a" = merge-base ] && {{ echo "fatal: simulated" >&2; exit 128; }}; done\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        shim.chmod(0o755)
+
+        state = self._pin_check_against(
+            repo, git_infra, tmp_path, pin, env={"PATH": f"{shim_dir}:/usr/bin:/bin"}
+        )
+        assert state.returncode == 2, (
+            "a git that cannot answer the ancestry question is cannot-verify (2), never DIVERGED "
+            f"(1) — rc={state.returncode}, stdout={state.stdout!r}, stderr={state.stderr!r}"
+        )
+        assert "DIVERGED" not in state.stdout, state.stdout
+
+    def _pin_check_against(self, repo: Path, infra: Path, tmp_path: Path, pin: str, env=None):
+        home = tmp_path / "pinhome"
+        state = home / ".pi" / "agent" / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "HARNESS-PIN").write_text(pin + "\n")
+        base = {**os.environ, "HOME": str(home), "HARNESS_PIN": "", "CELL_HOME": ""}
+        if env:
+            base.update(env)
+        return run_tool(
+            "--pin-check", "--repo", str(repo), "--infra", str(infra), env=base
+        )

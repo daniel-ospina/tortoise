@@ -97,8 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     #    FACT to weigh after the checker runs — do not turn it into an early return, or a
     #    broken setup would skip the check entirely (the "no result" red is the defect this
     #    wrapper exists to remove).
+    # ⛔ ``is not None``, never truthiness: with ``args.infra == ""`` a truthiness test DROPS the
+    # flag, so ``link_main`` silently takes $AGENT_INFRA_PATH and MATERIALISES ``scripts/`` — the
+    # caller error then arrives from the ``resolve_infra`` call below, AFTER the working tree was
+    # already mutated (measured: a fresh repo ended up with ``scripts -> $AGENT_INFRA_PATH/scripts``
+    # from an invocation that only reported a config error). Passing it through lets the tool raise
+    # its own ConfigError before anything is written.
     link_rc = link_main(
-        ["--quiet", "--repo", str(repo)] + (["--infra", args.infra] if args.infra else [])
+        ["--quiet", "--repo", str(repo)] + (["--infra", args.infra] if args.infra is not None else [])
     )
 
     try:
