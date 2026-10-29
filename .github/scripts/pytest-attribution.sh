@@ -134,14 +134,23 @@ fi
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
 # leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}`.
 #
-# ⚠️ STATUS: PARTIALLY APPLIED (2026-10-25). `python-ci.yml`'s `test` job — the fast
-# matrix, NINE legs, and the largest share of this failure — now passes
-# `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and therefore
-# per-job, since a runner runs one job at a time). For THAT job signals (1)-(3) are
-# now a backstop against a test that shells out to pytest, not the load-bearing
-# defence against a co-tenant. The other legs still write `/tmp/...` literals and
-# still need the same change; the three signals below keep the KILL path — the one
-# that produced the "timeout flakes" — from being fooled until they get it.
+# ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028). `python-ci.yml`'s
+# `test` job — the fast matrix, NINE legs, and the largest share of this failure —
+# passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and
+# therefore per-job, since a runner runs one job at a time), and `test-slow`'s FIVE
+# legs now pass it too. That second half was a measured false red, not a tidy-up:
+# run 40808264676's `test-slow (a)` printed its own `365 passed, 2 skipped` (= its
+# manifest's 367 expected nodeids) AND its own `pytest exit code: 0` banner, and the
+# job still concluded `failure`, because a sibling's `> /tmp/pytest.log` truncated
+# the file between the leg's `tail` and this reporter's read. For those two jobs
+# signals (1)-(3) are a backstop against a test that shells out to pytest, not the
+# load-bearing defence against a co-tenant.
+#
+# TWO legs still write `/tmp/...` literals and still need the same change:
+# `test-concurrency-falkor` and `test-carve-out` — the deliberate residual named on
+# #10280, which carries the rest of the migration. For THOSE the three signals below
+# stay load-bearing, and they keep the KILL path — the one that produced the
+# "timeout flakes" — from being fooled until those two get it.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:
 #

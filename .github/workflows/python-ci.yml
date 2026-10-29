@@ -1870,8 +1870,10 @@ jobs:
       # but the three artifacts the VERDICT and the guards are read from were
       # still the host-global `/tmp/pytest.log` / `/tmp/junit.xml` /
       # `/tmp/expected-nodeids.txt`. `.github/scripts/pytest-attribution.sh`
-      # names that exact residue in its own "NAMED RESIDUAL" header ("The other
-      # legs still write `/tmp/...` literals and still need the same change").
+      # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
+      # paragraph records THIS job as migrated (2026-10-29) and names the two legs
+      # that still write the host-global literals — `test-concurrency-falkor` and
+      # `test-carve-out`, the deliberate residual carried by #10280.
       #
       # MEASURED (run 40808264676, `test-slow (a)`): the leg's own manifest
       # declared **367** expected nodeids, its own run reported
