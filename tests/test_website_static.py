@@ -2982,7 +2982,7 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: `:root` is the html element (all elements inherit from it), `html` is itself, and
     #: `*` matches everything. Only the third has real cascade caveats, and none of them
     #: can leave an element without the token, which is what this ratchet asks.
-    DOCUMENT_WIDE_SELECTORS = {":root", "html", "*"}
+    DOCUMENT_WIDE_SELECTORS = frozenset({":root", "html", "*"})
 
     @classmethod
     def _scoped_family_tokens(cls, css):
