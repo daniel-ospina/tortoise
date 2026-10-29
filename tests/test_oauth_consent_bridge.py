@@ -1563,6 +1563,74 @@ def test_the_spec_records_the_jti_mechanism_as_DECIDED_not_open() -> None:
     )
 
 
+def _section_still_open(spec: str) -> str:
+    """The doc's `## Still open` list, located by its own heading, and asserted found.
+
+    This is the ONE list a lane scopes against first, which is why a stale entry there costs more
+    than the same stale entry anywhere else: it is read as the work inventory. Bounded by the next
+    `## ` heading (or EOF) rather than by line numbers, so a reflow cannot turn the guard below
+    into a no-op on an empty string.
+    """
+    start = spec.find("## Still open")
+    assert start != -1, (
+        "the spec no longer has a '## Still open' section — this guard has lost its subject, which "
+        "is not the same thing as the defect it exists to catch"
+    )
+    end = spec.find("\n## ", start + 1)
+    return spec[start:] if end == -1 else spec[start:end]
+
+
+def test_the_still_open_list_does_not_reopen_the_DECIDED_jti_mechanism() -> None:
+    """`## Still open` must not list the `jti` mechanism as unchosen after §2.3 decided it.
+
+    The defect this pins (raised on this PR at `3f1d32ec0`): §2.3 records **(b) is DECIDED, and
+    shipped** and §9 step 1's row is DELIVERED, while `## Still open` still carried
+
+        - **The `jti` store mechanism** (§2.3) — preferred shape recorded; not chosen by an owner.
+
+    On `origin/main` that bullet was TRUE (§2.3 there presents the choice as open) — this PR's own
+    edits are what made it false, and the relay landed in §2.3/§9 and missed the one list a
+    scoping lane reads first. The cost is the same one that motivated the §2.3 relay: a lane that
+    trusts the open-items list re-opens a shipped mechanism choice and builds a SECOND single-use
+    store for the same guarantee.
+
+    Deleting the whole section is NOT an acceptable way to satisfy this: the section's other
+    entries are real open items (`#8218`, `#3529`), so the found-assert and the positive arm below
+    keep the guard anchored to a section that still says something.
+
+    Measured non-vacuity: with the bullet re-inserted verbatim and nothing else changed, this test
+    FAILS on the open-claim arm; it passes only once the bullet is gone.
+    """
+    section = _section_still_open(SPEC.read_text())
+    flat = " ".join(section.split())
+
+    # The section must still be a live inventory — otherwise "no jti claim here" is satisfied by
+    # emptying it, and the guard would pass on a doc that lost its open-items list entirely.
+    assert "#8218" in flat, (
+        "`## Still open` no longer names #8218 (attested client identity) — if the section was "
+        "emptied to satisfy this guard, the open items were lost rather than relayed"
+    )
+
+    # The bullet's own subject, and its own open-claim wording. Both are matched so a re-worded
+    # restatement (`the jti mechanism is still open` / `not chosen by an owner`) cannot slip past.
+    assert "`jti` store mechanism" not in flat, (
+        "`## Still open` still lists the `jti` store mechanism — §2.3 records (b) as DECIDED and "
+        "`ControlPlaneJtiStore` ships it, so a lane scoping from this list builds the second "
+        "single-use store the §2.3 relay exists to prevent"
+    )
+    assert "not chosen by an owner" not in flat, (
+        "`## Still open` still ASSERTS that a mechanism choice is unchosen — the only mechanism "
+        "choice in this spec (§2.3) is decided and shipped"
+    )
+
+    # …and the cross-check that makes the pair a contradiction guard rather than two independent
+    # string checks: the section §2.3 lives in must still read as DECIDED.
+    assert "**(b) is DECIDED" in " ".join(_section_23_jti_store(SPEC.read_text()).split()), (
+        "§2.3 no longer reads as DECIDED, so the relay has moved back — this guard's premise is "
+        "gone, not satisfied"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # §2 / §9 step 2 — the token arm on `POST /oauth/consent`, EXECUTED
 #

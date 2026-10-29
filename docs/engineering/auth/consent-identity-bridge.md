@@ -235,8 +235,9 @@ finds (a) named first in git history should read this paragraph, not the earlier
 **OVERRIDES:** §2.3's earlier "(a) is preferred" ordering — a D1 `consent_tickets` table on the
 session origin, redeemed over a server-to-server call — because the control plane is the seam the AS
 already holds at the redemption call site (`cp` is passed into `issue_auth_code`), so (b) adds no new
-route, no server-to-server authentication and no new failure domain on the consent path; recorded
-on issue #3524 and shipped in `20261030000001`.
+route, no server-to-server authentication and no new failure domain on the consent path; relayed to
+[issue #3524 (decision comment)](https://github.com/daniel-ospina/tortoise/issues/3524#issuecomment-6502978789)
+— where the step table named the step but never the mechanism — and shipped in `20261030000001`.
 
 **Signing key.** `CONSENT_TOKEN_SECRET` — a **dedicated** secret, provisioned on both platforms and
 declared in `config/required-bindings.yml` so the deploy preflight fails closed until it exists. It must
@@ -481,7 +482,6 @@ old cookie is the "strictly worse than not starting" state.
   `SCOPE.md` lists the class as **OPEN** and requires both mitigations together; (ii) is specified here, (i)
   is filed and unbuilt. **The consent screen can still be made to say "Claude" by anyone who registers that
   name.**
-- **The `jti` store mechanism** (§2.3) — preferred shape recorded; not chosen by an owner.
 - **#3529** — 4 of the 7 declared threat classes still have no test. The consent token's own surface is
   no longer one of them: as of §9 step 2 it exists and carries its adversarial rows
   (`tests/test_oauth_consent_bridge.py`), so the remaining count is the 7 declared classes only.
