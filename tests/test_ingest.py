@@ -981,7 +981,12 @@ if __name__ == "__main__":
 @_live_db
 def test_capture_metadata_creates_document_no_points():
     """#125: --capture-metadata creates Document + sessionCaptured Event,
-    ZERO Points, and does NOT block a later full extraction (no begin_ingest)."""
+    ZERO Points, and does NOT block a later full extraction (no begin_ingest).
+
+    #3590: the `uses=[{"name": "tortoise-capture", "kind": "skill"}]` the
+    capture emits is a MENTION, so no Skill Object is minted for it and no
+    `uses` edge is wired (D1/D9) — asserted below as ZERO, which is RED on the
+    pre-#3590 tree."""
     import json  # noqa: F401
     uri = _live_uri(f"test_ingest125_{os.urandom(4).hex()}")
     db = uri  # live DB URI
@@ -1024,11 +1029,28 @@ def test_capture_metadata_creates_document_no_points():
             "WHERE s.sessionId = 's1' RETURN count(e)"
         ).result_set
         assert ev[0][0] >= 1, ev
+        # ⛔ #3590 D1 (owner-RULED 2026-10-26): a bare mention does not create
+        # an entity. `uses=[{"name": "tortoise-capture", "kind": "skill"}]`
+        # is a MENTION — `EventAPI.add_event` registers nothing (the SDK event
+        # door does, this one does not; the cost is recorded at
+        # `entity_identity.resolve_fold_name`), and the fold never mints one
+        # (D9). So there is NO `:Object {objectKind:'skill'}` and no `uses`
+        # edge, and asserting the count is ZERO is the pin: this assertion is
+        # RED on the pre-#3590 tree, where the fold MERGEd a name-keyed stub
+        # for the mention and wired the edge.
         uses = proj.g.query(
-            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:uses]->(o:Object {objectKind:'skill'}) "
+            "MATCH (o:Object {objectKind:'skill'}) "
             "RETURN count(o)"
         ).result_set
-        assert uses[0][0] >= 1, uses
+        assert uses[0][0] == 0, (
+            f"a `uses[]` mention minted a Skill Object (D1 forbids it): {uses}")
+        edges = proj.g.query(
+            "MATCH (:Event {eventKind:'sessionCaptured'})-[:uses]->(o:Object) "
+            "RETURN count(o)"
+        ).result_set
+        assert edges[0][0] == 0, (
+            f"a `uses[]` mention wired an edge to an entity nothing registered "
+            f"(D1/D9 — the link is dropped and recorded, not invented): {edges}")
         # ZERO Points extracted
         pts = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
         assert pts[0][0] == 0, f"Points extracted during capture: {pts[0][0]}"
