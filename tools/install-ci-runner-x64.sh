@@ -26,7 +26,10 @@
 #   `current_mode` read `local`, so on a healthy GitHub-hosted day the gate runs `fallback_off`.
 #   Since `agent-infra#2327` (PR #2338) that is harmless here: each body is derived from the
 #   runner's OWN host label (`labels_for`), so it strips `ubuntu-latest` and keeps `self-hosted-x64`
-#   — never stamping `self-hosted-arm64`. The label stays gate-following; see `--repair-labels`.
+#   — never stamping `self-hosted-arm64`. The label stays gate-following, but ONLY the gate can
+#   DETACH it: `--repair-labels` can add it back and can never take it away, so an explicit
+#   `--fallback off` on the repair path is REFUSED rather than accepted and then ignored (see the
+#   repair block below, and the EXIT contract).
 #
 # OVERRIDES: the rule above — that an x64 runner carrying `ubuntu-latest` is a DEFECT to be
 #   stripped, and `--repair-labels` implementing it by PUTting exactly the COMPUTED set (a
@@ -38,6 +41,12 @@
 #   label from the one pool left. A repair therefore UNIONS the runner's current labels with the
 #   computed set, so it can never REMOVE `ubuntu-latest` or any custom label a workflow targets.
 #   ⛔ Restoring the label on ARM is NOT part of this — #6897 measured that wrong.
+#   ⛔ AND A UNION CANNOT DETACH, so `--repair-labels --fallback off` is REFUSED (exit 2, before any
+#   read or PUT) instead of being accepted and then doing nothing to `ubuntu-latest`: on a healthy
+#   hosted day the gate's state IS `off`, and the pre-refusal path printed `removed=[]`, said
+#   `relabelled …`, and exited 0 while the label it was asked to detach stayed attached. Detaching
+#   is the gate's writer (`fallback_off`, agent-infra) and, by hand, the per-label verb
+#   `DELETE repos/$REPO/actions/runners/<id>/labels/ubuntu-latest`.
 #
 #   ⛔ THE UNION IS NOT UNCONDITIONAL, and the two exceptions are NOT the fallback label's. A
 #   literal union would also make BOTH defects below permanent, and each is a false PASS rather
@@ -63,7 +72,7 @@
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
 #   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin + a foreign arch marker)
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin + a foreign arch marker; refuses --fallback off — it cannot DETACH)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
@@ -76,15 +85,19 @@
 #   the same exit code as "the install broke".
 #     0  ok
 #     1  usage — bad flag, bad --count, bad sizing override. Nothing was attempted.
-#     2  GUARD refused — headroom / arch / undecidable fallback / an unreadable current label set
-#        (a repair refuses rather than PUT a set that could REPLACE labels the runner carries) / an
-#        `--uninstall` target that is not provably a runner install. Nothing was downloaded,
-#        registered or removed; re-run with a smaller --count, on an x86_64 host, with an explicit
-#        --fallback, or with the right CI_RUNNER_BASE.
+#     2  GUARD refused — headroom / arch / undecidable fallback / `--repair-labels --fallback off`
+#        (a repair only UNIONS, so it cannot DETACH the fallback label) / an `--uninstall` target
+#        that is not provably a runner install. Nothing was downloaded, registered or removed;
+#        re-run with a smaller --count, on an x86_64 host, with --fallback auto|on, or with the
+#        right CI_RUNNER_BASE.
 #     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh (a
 #        failed systemd unit removal, or a failed `config.sh remove`, included — that target is then
 #        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
-#        tool missing from PATH, or a failed remote read (`--status`).
+#        tool missing from PATH, a failed remote read (`--status`), or a PER-RUNNER refusal inside
+#        the repair loop (an unreadable label set, an illegal label, an empty union): that runner is
+#        skipped and the rest of the batch still runs, because an earlier runner may ALREADY have
+#        been relabelled and exit 2 promises "nothing was changed".
+#        (`--repair-labels` against a `gh` that returns no id is 3 for the same reason.)
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -425,6 +438,15 @@ fi
 # derived `removed=` list are printed BEFORE the PUT, so a removal is visible in the output rather
 # than inferred from a queue that never moves.
 if [ "$MODE" = repair ]; then
+  # ⛔ AN EXPLICIT `--fallback off` IS REFUSED, NOT ACCEPTED-AND-IGNORED. The union never subtracts,
+  # so this invocation cannot do the one thing it asks for: it used to print `removed=[]`, say
+  # `relabelled … → self-hosted-x64,ubuntu-latest` and exit 0 while the label stayed attached. The
+  # refusal is BEFORE any read and any PUT (exit 2 is the honest code: nothing was changed), and it
+  # names the path that CAN detach. `auto` already covers the operator's real intent — on a healthy
+  # hosted day it computes `self-hosted-x64` alone and the union simply keeps what is there.
+  if [ "$FALLBACK" = off ]; then
+    die "--repair-labels only UNIONS: it cannot DETACH $FALLBACK_LABEL, so --fallback off would be accepted and then do nothing to it. Use --fallback auto (a repair follows the gate by ADDING), or detach the label on purpose: gh api -X DELETE repos/$REPO/actions/runners/<id>/labels/$FALLBACK_LABEL" 2
+  fi
   need gh
   resolve_labels
   rc=0
@@ -443,8 +465,13 @@ if [ "$MODE" = repair ]; then
     # ⛔ AN UNREADABLE LABEL SET IS A REFUSAL, NEVER "the computed set, then". Falling back to the
     # computed set IS the replace this block exists to stop: on a failed read it would drop
     # `ubuntu-latest` by the same silent route, with only the transport error to show for it.
+    # ⛔ AND IT REFUSES **THIS RUNNER**, NOT THE BATCH: a `die` here exits the whole script, so with
+    # `--count 2` runner 1's PUT could already have succeeded when runner 2 hit this guard and the
+    # caller would receive exit 2 = "Nothing was downloaded, registered or removed" for a run that
+    # relabelled a runner. The pre-fix loop met the analogous per-runner condition with
+    # `say WARNING; rc=3; continue`, and the three guards inside this loop keep that contract.
     if [ -z "$current" ]; then
-      die "cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds." 2
+      say "WARNING: cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds."; rc=3; continue
     fi
     after=""; host_skipped=""; arch_dropped=""; pinned_dropped=""
     for l in $(printf '%s' "$current" | tr ',' ' '); do
@@ -470,10 +497,16 @@ if [ "$MODE" = repair ]; then
     done
     # A label outside GitHub's own charset would build a malformed JSON body; refuse rather than PUT
     # one — and never skip it, because skipping a CURRENT label IS the removal this block forbids.
+    illegal=""
     for l in $(printf '%s' "$after" | tr ',' ' '); do
-      case "$l" in *[!A-Za-z0-9._-]*) die "label '$l' on $agent is not a legal runner label (alphanumeric, '.', '_', '-') — refusing to build a request body from it. Nothing was changed for this runner." 2 ;; esac
+      case "$l" in *[!A-Za-z0-9._-]*) illegal="$l" ;; esac
     done
-    [ -n "$after" ] || die "the union of $agent's current labels and the computed set ($LABELS) is EMPTY — refusing to PUT an empty label set, which would strip the runner. Nothing was changed for this runner." 2
+    if [ -n "$illegal" ]; then
+      say "WARNING: label '$illegal' on $agent is not a legal runner label (alphanumeric, '.', '_', '-') — refusing to build a request body from it. Nothing was changed for this runner."; rc=3; continue
+    fi
+    if [ -z "$after" ]; then
+      say "WARNING: the union of $agent's current labels and the computed set ($LABELS) is EMPTY — refusing to PUT an empty label set, which would strip the runner. Nothing was changed for this runner."; rc=3; continue
+    fi
     say "labels for $agent (id $id):"
     say "  before=[$current]"
     say "  after =[$after]"
