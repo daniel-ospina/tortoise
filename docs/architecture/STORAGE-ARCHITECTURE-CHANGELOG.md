@@ -1607,3 +1607,33 @@ which is the same GUARD (the same test) whose other arm moved §13's issue map o
 `CORRECTED 20xx-xx-xx` stamps (`_CHANGE_NARRATION`, a different regex) on 2026-10-15.
 
 **2026-10-27 — `#9417`.** `sdk.supersede_point` stopped being a declared false positive: its structural transfer now carries the old edge's properties (`ON CREATE SET nr += $attrs`), so an `about*` edge keeps the binder's `confidence`. **Review round 2 corrected the form:** a bare `SET nr += $attrs` overwrites per key, so on the COMMON restatement path — where the successor already holds its own binding to the same subject — the RETIRED point's value replaced the successor's live one (measured 0.91 -> 0.42, unrecoverable: the repoint descriptor carries no `attrs`). `ON CREATE` states the precedence the pre-`#9417` bare `MERGE` already had: the successor's own value wins. The dead `source_version` whitelist entry went with it — the graph writes the anchor as `sourceVersion` (`projection/edges.py:504`), so the entry could never match and only implied a carry that never happened. The census composition is therefore **2 originating + 4 re-materializing** (6 writers: 3 NAMED + 3 MAP) with **one** declared false positive (`projection._rebuild_all_replay`). The REBUILD half is still bare — `#10139`.
+
+## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-29)
+
+The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
+store holds a capture's turns, and where the record holds them the graph keeps no turn node. What
+moved here is the paragraph that said **where that rule stood** — the `✅ … has landed (#10067)`
+stamp, the "instead of" / "stops re-creating" narration, the named residuals' issue state, and the
+pointer at a `log.py` note deferring the torn-tail classification to step 7. Issue state and the
+narrative of what changed belong in this file (#8542); §9.1 states the rule they settled on.
+
+What the design document now says in that place, as design: the carrier states its turn rows itself
+(`_turns_statements`, one `public.point` row per snapshot at `cache_tier = 'record_only'`, the tier
+from the record TYPE's declaration and never from a payload), its graph fold is nothing
+(`_NO_PROJECTION_FOLD`) so a `rebuild()` replay cannot re-create turns the graph does not hold, and
+the three consequences (a) the `:GraphEvent` feed keeps every row via payload-only emissions, (b) the
+stale-turn sweep keeps the `PointRetracted` subscriber row paired with its `EntityMutated` op=delete
+(`#3300`), (c) a tenant that cannot be NAMED takes nothing. The two residuals — a record write refused
+after the decision (`#10021`), and a torn carrier tail (`#10017`) — are stated as design gaps with
+their owners, without their issue state.
+
+Why it left: the class guard
+(`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
+is red on this PR's own head with both lines named — `STORAGE-ARCHITECTURE.md:525` on the delivery
+arm (`has landed`) and `:527` on an issue-state word adjacent to a `#NNN` (`still OPEN`) — which is
+required CI, so the PR cannot merge while the design document narrates delivery.
+
+The evidence for the design statements themselves lives in the PR and in the producer's own pin
+(`tests/test_10017_record_carrier.py` §7): a record-armed capture journals one carrier and no
+per-turn `PointAdded`, its plan writes both turn rows at `record_only`, and `recover_from_log` over
+that journal materialises the `:Session` and no turn node.

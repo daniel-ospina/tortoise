@@ -225,11 +225,13 @@ def test_the_carrier_is_declared_wherever_a_journal_type_is():
     assert rp.TURNS_RECORD_TYPE in _NO_POINT_FOLD
 
 
-def test_the_carrier_declares_no_record_statement_at_all():
+def test_the_carrier_declares_no_NODE_statement_its_rows_are_its_own():
     """`NoRecordEffect` is a decision with a reason — and since step 7 it is
     about the NODE, not about the rows.
 
-    The declared effect stays a deliberate no-op because §9.1's record home for
+    Named for what it asserts: the carrier DECLARES no effect, yet it does write
+    rows — through `_turns_statements`, its own column statement. The declared
+    effect stays a deliberate no-op because §9.1's record home for
     the turns is `public.point`, reached by the carrier's OWN column statement
     (`record_projection._turns_statements`, #10067) and never by a
     one-node-snapshot-per-record path: the carrier holds a LIST of turns, so a
