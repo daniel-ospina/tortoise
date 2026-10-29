@@ -1699,10 +1699,25 @@ def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     # decision/claim regex so the past-cut claim is the only candidate for the
     # claims patterns (the per-turn cap would otherwise eat it — #721).
     lead = "I believe the root cause is known. "
-    pad = "plain filler text without triggers. "
+    # The filler carries NO sentence break ON PURPOSE. The extractor emits one
+    # candidate per sentence and every candidate costs a point write (and, on
+    # the dense lane, an embedding), so the previous "plain filler text without
+    # triggers. " x 145 shape minted **138 points** for a test that inspects two
+    # of them — measured 11.3 s wall on the keyword-only local lane vs 4.5 s for
+    # the shape below, and on the CI pool runners that multiplier put this test
+    # on the 300 s per-test budget, where it tripped it: test-slow (c) and (e)
+    # both red with "Failed: Timeout (>300.0s) from pytest-timeout" (#10010 CI
+    # run 40861737614), and the same nodeid times out on `main` (run 40796571501).
+    # One period-free filler crosses the same 5000-char cap with **2** candidate
+    # points and every assertion below is unchanged — so keep it period-free.
+    pad = "plain filler text without triggers "
     assert not re.search(r"(?:let'?s|we will|we should|I will|I'm going to|decided|decision|I think|I believe|my understanding is|the problem is|the key insight|evidence suggests|data shows|we found that|this means|plan is|next steps?:|action item:)", pad, re.I)
-    before = lead + pad * 145  # past the cap, see the assert below
+    before = lead + pad * ((5000 + 200) // len(pad) + 1)  # past the cap, see the assert below
     assert len(before) > 5000
+    assert "." not in pad, (
+        "the filler must stay a SINGLE sentence — a period splits it into one "
+        "candidate per repetition and puts this test back on the 300 s budget"
+    )
     past_cut = "evidence suggests the fix landed."
     content = before + past_cut
     res = sdk.capture_session([{"role": "user", "content": content}])
