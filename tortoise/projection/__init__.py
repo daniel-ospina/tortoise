@@ -16573,6 +16573,7 @@ class FalkorProjection(
             from .edges import (
                 DERIVABLE_STRUCTURAL_RELS,
                 STRUCTURAL_REL_LABELS,
+                STRUCTURAL_TRANSFER_ATTRS,
                 resolve_structural_target,
             )
 
@@ -17058,12 +17059,52 @@ class FalkorProjection(
                             continue
                         # Two-step MERGE on the resolved node identity — collapses
                         # duplicate creates to one edge (about* / extractedFrom
-                        # are MERGE-created live). Structural 2b transfers are
-                        # bare: NO attr SET, no direction/confidence/weight.
+                        # are MERGE-created live).
+                        # ⛔ #10139: the descriptor CARRIES the transferred edge's
+                        # attributes, so the replay applies them instead of
+                        # re-creating the edge bare. Before this, `confidence` on
+                        # an `about*` edge survived a supersede LIVE (#9417's
+                        # carry) and was dropped by the very next `rebuild_all` —
+                        # a `live != rebuild` divergence on a data-bearing
+                        # property, which is the class #9553 polices.
+                        #
+                        # ⛔ `ON CREATE SET`, NOT a bare `SET` — the SAME form and
+                        # the SAME precedence as #9417's live transfer ("the
+                        # successor's own live value WINS"). It is not merely
+                        # mirroring: at this point in the replay the successor's
+                        # own binding has ALREADY been re-materialized WITH its
+                        # confidence by the `EntityLinked` trailing sweep above
+                        # (`fold_deferred_entity_links` runs before pass-2b), so an
+                        # unconditional `SET nr += $attrs` would overwrite it with
+                        # the retired point's value — reproducing live's measured
+                        # 0.91→0.42 regression on the replay side. `ON CREATE`
+                        # populates only an edge this leg created, which is exactly
+                        # the case live created too.
+                        #
+                        # ⚠️ The payload is read through the SAME vocabulary the
+                        # emitter whitelisted with (`STRUCTURAL_TRANSFER_ATTRS`,
+                        # `edges.py`) — never `properties(r)` raw, and never a
+                        # second copy of the tuple.
+                        # ⚠️ RESIDUAL, named: two descriptors that resolve to the
+                        # SAME successor edge (a chain X→Y→Z where X's and Y's
+                        # descriptors both land on Z) apply in journal order, so
+                        # the later one wins on a key both carry. Live's chain is
+                        # consistent with that — each later transfer carries the
+                        # value live holds at that moment — and no producer emits
+                        # the divergent order, so this is stated, not closed.
+                        _carry = ""
+                        _params = {"sid": src_f, "tid": resolved["internal"]}
+                        _transfer_attrs = {
+                            k: ev[k] for k in STRUCTURAL_TRANSFER_ATTRS
+                            if k in ev
+                        }
+                        if _transfer_attrs:
+                            _carry = " ON CREATE SET nr += $attrs"
+                            _params["attrs"] = _transfer_attrs
                         self.g.query(
                             f"MATCH (s:Point {{id:$sid}}), (t) WHERE ID(t) = $tid "
-                            f"MERGE (s)-[:{etype}]->(t)",
-                            params={"sid": src_f, "tid": resolved["internal"]})
+                            f"MERGE (s)-[nr:{etype}]->(t){_carry}",
+                            params=_params)
                         continue
 
                     if (not isinstance(src, str) or not isinstance(tgt, str)

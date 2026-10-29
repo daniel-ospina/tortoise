@@ -49,6 +49,30 @@ DERIVABLE_STRUCTURAL_RELS = frozenset({
     'aboutDocument', 'extractedFrom',
 })
 
+#: The per-edge attributes a supersede's structural (2b) transfer CARRIES, and
+#: therefore the set its ``DirectEdgeRepoint`` descriptor must journal (#10139).
+#:
+#: ONE definition, imported by BOTH halves so they cannot drift: the live
+#: transfer in ``sdk.supersede_point`` (which whitelists what it copies onto the
+#: successor edge) and the pass-2b replay branch in ``projection/__init__.py``
+#: (which re-applies the journaled payload). Two copies of this tuple is the
+#: defect class the surrounding constants exist to remove — the same reason
+#: ``DERIVABLE_STRUCTURAL_RELS``/``STRUCTURAL_REL_LABELS`` live here.
+#:
+#: ⛔ ``source_version`` is deliberately NOT a member, on either side. It is the
+#: RECORD column name (``RelationUpsert.attrs``), while the graph writes this
+#: anchor as ``sourceVersion`` (``_anchor_on_create`` below) — nothing writes
+#: ``r.source_version``, so the entry could never match and would only imply a
+#: carry that never happens. It is also the one key the record contract forbids
+#: re-applying on a re-link ("a re-link must not ADVANCE a recorded version").
+#: ⚠️ CONSEQUENCE, stated rather than implied: ``extractedFrom``'s
+#: ``sourceVersion`` anchor is dropped by a supersede transfer AND by its
+#: replay. That is a separate, pre-existing loss; this vocabulary does not own
+#: it and must not appear to.
+STRUCTURAL_TRANSFER_ATTRS: tuple[str, ...] = (
+    'direction', 'confidence', 'weight', 'label', 'batch_id',
+)
+
 # rel -> entity label of the structural TARGET (label-scoped resolution). The
 # source side of a supersede transfer is always a Point. Public — sdk.py's 2b
 # emission and the projection replay both import it (no duplicate key map).

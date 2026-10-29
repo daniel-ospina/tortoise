@@ -16789,7 +16789,12 @@ class TortoiseSDK:
         # own the A10 raw-edge family). The journal carries the target's LOGICAL
         # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
         # never the FalkorDB internal ID (internal ids die at rebuild).
-        from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
+        from .projection.edges import (
+            DERIVABLE_STRUCTURAL_RELS,
+            STRUCTURAL_REL_LABELS,
+            STRUCTURAL_TRANSFER_ATTRS,
+            stub_key,
+        )
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
         # Successor internal node ids — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
@@ -16856,13 +16861,17 @@ class TortoiseSDK:
                 # record contract forbids re-applying on a re-link ("a re-link must
                 # not ADVANCE a recorded version", `record_projection.py:2061-2068`).
                 # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
-                # STILL dropped on transfer. That is the pre-existing loss #10139
-                # owns (the rebuild half is bare there too); stating it here rather
-                # than letting the word "never" above imply otherwise.
+                # STILL dropped on transfer — a separate, pre-existing loss this
+                # vocabulary does not own. Stated here rather than letting the
+                # word "never" above imply otherwise.
+                # ⛔ ONE vocabulary, imported: `STRUCTURAL_TRANSFER_ATTRS`
+                # (`projection/edges.py`) is the SAME tuple the pass-2b replay
+                # branch reads a descriptor's payload through (#10139), so the
+                # live carry and the rebuilt carry cannot disagree about which
+                # keys a supersede moves.
                 edge_props = {
                     k: v for k, v in (row[4] or {}).items()
-                    if k in ("direction", "confidence", "weight", "label",
-                             "batch_id")
+                    if k in STRUCTURAL_TRANSFER_ATTRS
                 }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
@@ -16910,12 +16919,30 @@ class TortoiseSDK:
                         # gets a target-key suffix — multi-target same-rel id
                         # hygiene (2a-DIRECT's id base is
                         # f"{old_id}->{new_id}:{rtype}").
+                        # #10139: the descriptor carries the edge's
+                        # ATTRIBUTES too, not only its topology. Without them the
+                        # replay can only re-MERGE a BARE edge, so the property
+                        # #9417's live transfer carries (`confidence` from the
+                        # subject binder) survived a supersede and was dropped by
+                        # the next `rebuild_all` — a `live != rebuild` divergence
+                        # on a data-bearing property. FLAT keys, exactly as the
+                        # 2a-DIRECT descriptor above spreads them and exactly as
+                        # `record_projection._relation_coordinates`' consumer reads
+                        # an attribute payload (`{k: payload[k] for k in
+                        # rel.attrs}` — flat, by NAME); a nested `attrs` map would
+                        # be a third shape nothing in the tree reads.
+                        # ⛔ Emitted ONLY when the old edge actually had one of the
+                        # vocabulary's keys: the replay must be able to tell "no
+                        # attributes to carry" from "carry an empty map", and an
+                        # empty map is not writable by FalkorDB (the projection
+                        # degrades it to null with a `#7369` warning).
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:{target_key}",
                             src=old_id, tgt=target_key,
                             target_label=target_label,
                             edge_type=rel,
+                            **edge_props,
                         )
                 # Create new edge: new point → same target (MERGE = idempotent,
                 # no dupes).
