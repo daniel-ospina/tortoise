@@ -1198,8 +1198,10 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
             )
     # The measured inventory is 8. Five `pytest.log`-named tails in python-ci.yml:
     # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028; then `test-slow` (300, a `/tmp` literal because
-    # that leg is on the HOSTED pin, where `/tmp` is the job's own VM),
+    # `"$PYTEST_LOG"` since #10028; then `test-slow` (300), which writes through
+    # `${RUNNER_TEMP:-/tmp}/pytest.log` since #7815/#10289 — its version-pinned
+    # `ubuntu-24.04` label is NOT a hosted guarantee (the self-hosted pool
+    # advertises it too), so a `/tmp` literal there is the same co-tenancy hazard;
     # `test-concurrency-falkor` (120) and `test-carve-out` (200), the last two through
     # `${RUNNER_TEMP:-/tmp}/pytest.log` since #7815. Plus `trackb.log`, whose name does
     # not contain "pytest"; plus `pmv-pytest.log` in post-merge-validation.yml; plus

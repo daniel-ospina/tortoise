@@ -2010,19 +2010,20 @@ jobs:
         # `matrix.files` expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
         # construction the run step builds) -> ${RUNNER_TEMP}/expected-nodeids.txt.
-        # ⛔ `${RUNNER_TEMP}` and not the host-global `/tmp` literal (#7815).
-        # NOT because THIS job contends for a host temp dir — it does not:
-        # `test-slow` is pinned to the HOSTED label `ubuntu-24.04` (see
-        # `runs-on:` above and #7867's version-pin comment), so the temp dir it
-        # writes is its own VM's and no peer can clobber it. The per-runner
-        # spelling is here so the artifact path is ONE construction across every
-        # leg, and the legs that really do contend — `test`,
-        # `test-concurrency-falkor`, `test-track-b`, `test-carve-out`, all on the
-        # `ubuntu-latest` self-hosted pool — cannot be told a different story by
-        # the sibling they are meant to imitate. Naming `test-slow` as a
-        # co-tenant (as this comment did) is FALSE and is the reason #7815's
-        # mechanism was mis-read: a hosted leg's temp dir is private, the pool
-        # legs' is not.
+        # ⛔ `${RUNNER_TEMP}` and not the host-global `/tmp` literal (#7815),
+        # for THIS job as much as for any other.
+        # The carve-out that used to sit here — a hosted `ubuntu-24.04` pin, so
+        # a private temp dir — rested on a routing fact that is FALSE. #10289
+        # measures it directly (`gh api repos/<o>/<r>/actions/runners`): the
+        # self-hosted x86_64 pool advertises `ubuntu-24.04`, the same label this
+        # pin asks for. This matrix's own shards are the second measurement: on
+        # run 40861737614, `test-slow (a)` ran on `pi-runner-x64-2`, `(c)` on
+        # `pi-runner-cmux-x64-8`, `(d)` on `pi-runner-cmux-x64-5` and `(e)` on
+        # `pi-runner-x64-1` — four shards of this ONE job, CONCURRENT, every one
+        # reporting `Machine name: 'cmux'`, i.e. one host and one `/tmp` — while
+        # `(b)` of the same matrix ran on a genuinely hosted runner. So the label
+        # is not a topology fact and cannot license a host-global path; a reason
+        # that claims otherwise is exactly what the next lane copies.
         run: |
           FILES=""
           # #2148 tier-2 (slow_run == true, full == false): run only the
@@ -2062,9 +2063,12 @@ jobs:
         # Per-test --timeout=300: these files have tests/setups that
         # legitimately take >90s; 300s still caps any hang.
         # #964: liveness heartbeat — see the fast job's run step. pytest
-        # output is buffered to /tmp/pytest.log for the guaranteed tail, so
-        # the job log was silent for 30-50 min; the loop below prints
-        # progress to the live job log every 5 min.
+        # output is buffered to `${RUNNER_TEMP:-/tmp}/pytest.log` for the
+        # guaranteed tail, so the job log was silent for 30-50 min; the loop
+        # below prints progress to the live job log every 5 min. Per-runner, not
+        # a `/tmp` literal: this job's own shards can run concurrently on ONE
+        # self-hosted host (the manifest step's block above carries the
+        # measurement) — #7815/#10289.
         run: |
           set +e
           # #9539: this leg's DERIVED duration-balanced file list — the
@@ -2105,8 +2109,8 @@ jobs:
           # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
               sleep 300
-              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
-              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              p=$(grep -c ' PASSED' "${RUNNER_TEMP:-/tmp}/pytest.log" 2>/dev/null || true)
+              f=$(grep -c ' FAILED' "${RUNNER_TEMP:-/tmp}/pytest.log" 2>/dev/null || true)
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
@@ -2137,13 +2141,13 @@ jobs:
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
-          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" -o junit_family=xunit1 > "${RUNNER_TEMP:-/tmp}/pytest.log" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
-          tail -n 300 /tmp/pytest.log
+          tail -n 300 "${RUNNER_TEMP:-/tmp}/pytest.log"
           # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
           # post-summary interpreter-exit noise fills it and pushes BOTH the
           # session summary and the `-r fEs` report above the cut, so the log
@@ -2151,7 +2155,7 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest.log" --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -2160,15 +2164,15 @@ jobs:
           # THIS job log, so without the nodeids it sees an unattributable
           # failure and refuses — a refusal, not a comparison (#4453).
           echo "==================== pytest failure nodeids ===================="
-          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+          grep -E '^(FAILED|ERROR) ' "${RUNNER_TEMP:-/tmp}/pytest.log" || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
           # so the banner never printed on the real kill path).
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
-            passed=$(grep -c ' PASSED' /tmp/pytest.log)
-            failed=$(grep -c ' FAILED' /tmp/pytest.log)
-            errored=$(grep -c ' ERROR' /tmp/pytest.log)
+            passed=$(grep -c ' PASSED' "${RUNNER_TEMP:-/tmp}/pytest.log")
+            failed=$(grep -c ' FAILED' "${RUNNER_TEMP:-/tmp}/pytest.log")
+            errored=$(grep -c ' ERROR' "${RUNNER_TEMP:-/tmp}/pytest.log")
             echo "==================== WATCHDOG: pytest killed after 40m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
@@ -2199,9 +2203,9 @@ jobs:
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" --manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
+              python3 tools/skip-guard.py "${RUNNER_TEMP:-/tmp}/pytest.log" --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" --manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
             else
-              python3 tools/skip-guard.py /tmp/pytest.log
+              python3 tools/skip-guard.py "${RUNNER_TEMP:-/tmp}/pytest.log"
             fi
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
@@ -2210,7 +2214,7 @@ jobs:
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (measured on the fast job's flags — 0
-        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # occurrences in `${RUNNER_TEMP:-/tmp}/pytest.log`, 0 in the junit one), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
         # so a future xdist admission cannot truncate a peer's record wholesale
@@ -2322,7 +2326,7 @@ jobs:
         with:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
           path: |
-            /tmp/pytest.log
+            ${{ runner.temp }}/pytest.log
             ${{ runner.temp }}/junit.xml
             ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
@@ -2647,19 +2651,21 @@ jobs:
         # ⛔ EVERY ARTIFACT THIS JOB'S GUARD RECONCILES OR DECIDES ON IS
         # PER-RUNNER (#7815/#10028), never a host-global `/tmp` name.
         #
-        # The co-tenants are the jobs on the `ubuntu-latest` SELF-HOSTED POOL:
+        # The co-tenants are every leg that can land on the SELF-HOSTED pool:
         # `test` (matrix), `test-concurrency-falkor`, `test-track-b`,
-        # `test-carve-out` and `test-d14-hosted-api`. `scripts/ci_runner_gate.sh`
-        # re-attaches that label, several runner INSTALLS on one host share ONE
-        # `/tmp`, and those jobs run CONCURRENTLY. Measured on run 40798901821,
-        # three of them wrote `/tmp/expected-nodeids.txt` inside the same 10
-        # minutes, and this 4-nodeid run reconciled against a PEER's manifest +
-        # `junit.xml` and redded with "1428 expected nodeids absent" belonging to
-        # no test it ran.
-        # ⛔ `test-slow` is NOT a co-tenant and must not be named as one: it is
-        # pinned to the HOSTED `ubuntu-24.04` label, so its `/tmp` is its own VM.
-        # Stating otherwise is a wrong REASON for a right answer, which is what
-        # the next lane copies.
+        # `test-carve-out`, `test-d14-hosted-api` — and `test-slow`, which this
+        # block used to exclude. `scripts/ci_runner_gate.sh` re-attaches
+        # `ubuntu-latest`, several runner INSTALLS on one host share ONE `/tmp`,
+        # and those jobs run CONCURRENTLY. Measured on run 40798901821, three of
+        # them wrote `/tmp/expected-nodeids.txt` inside the same 10 minutes, and
+        # this 4-nodeid run reconciled against a PEER's manifest + `junit.xml`
+        # and redded with "1428 expected nodeids absent" belonging to no test it
+        # ran.
+        # ⛔ `test-slow` is IN that set: its `ubuntu-24.04` pin does not keep it
+        # off the pool — the pool advertises that label (#10289), and on run
+        # 40861737614 four of its five shards ran concurrently on `Machine name:
+        # 'cmux'` while the fifth ran hosted. Excluding it on the strength of the
+        # label was a wrong REASON, which is what the next lane copies.
         # `${RUNNER_TEMP}` is `<runner_install>/_work/_temp`, and a self-hosted
         # runner executes ONE job at a time, so it is per-JOB unique on a shared
         # host. The log is an artifact the guard DECIDES on (the bare arm below

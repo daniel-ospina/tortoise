@@ -6335,11 +6335,14 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     # test it ran. `${RUNNER_TEMP}` is `<runner_install>/_work/_temp`, and a
     # self-hosted runner executes ONE job at a time — per-JOB unique on a shared
     # host. Asserting the pinned literal instead would re-open the clobber.
-    # ⛔ `test-slow` is NOT one of those legs — it is pinned to the HOSTED
-    # `ubuntu-24.04` label, so its `/tmp` is its own VM. It spells the path this
-    # way so ONE construction serves every leg; naming it as a co-tenant (as this
-    # comment did) is a FALSE reason for a right answer, and it is exactly what
-    # the next lane copies.
+    # ⛔ `test-slow` IS one of those legs, and this comment used to say it could
+    # not be: the `ubuntu-24.04` pin does not keep it off the pool — the
+    # self-hosted x86_64 runners advertise that label (#10289), and on run
+    # 40861737614 four of its five shards ran CONCURRENTLY on one host
+    # (`Machine name: 'cmux'`) while the fifth ran on a hosted runner. It spells
+    # the path this way because ONE construction must serve every leg; a
+    # co-tenancy argument resting on the label was a wrong REASON for that right
+    # answer, which is exactly what the next lane copies.
     assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in invocation
     assert "-o junit_family=xunit1" in invocation
     # the pytest command line itself (the comment block may mention the
@@ -6573,10 +6576,10 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
         "the carve-out matrix must come from the selector's carve_matrix output"
     assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in run["run"], \
         ("#7815: the carve-out legs share a host `/tmp` with the `test` matrix, "
-         "`test-concurrency-falkor` and `test-track-b` (all on the `ubuntu-latest` "
-         "self-hosted pool) — NOT with `test-slow`, which is pinned to the hosted "
-         "`ubuntu-24.04` label — so the junitxml they reconcile against must be "
-         "per-runner, never the host-global /tmp literal")
+         "`test-concurrency-falkor`, `test-track-b` and `test-slow` (the pool "
+         "serves both `ubuntu-latest` and the version-pinned `ubuntu-24.04` — "
+         "#10289) so the junitxml they reconcile against must be per-runner, "
+         "never the host-global /tmp literal")
 
 
 
@@ -6584,8 +6587,8 @@ def test_the_guard_decided_log_is_per_runner_on_every_pool_leg():
     """#7815: the pytest LOG is a guard-decided artifact and moves with the rest.
 
     `expected-nodeids.txt` and `junit.xml` moved to `${RUNNER_TEMP}` because
-    three jobs on one self-hosted host share ONE `/tmp` (#10028). The log was
-    left behind by that change in the two legs that WRITE it on the pool, and in
+    several jobs on one self-hosted host share ONE `/tmp` (#10028). The log was
+    left behind by that change in the legs that WRITE it on the pool, and in
     `test-carve-out` it is not cosmetic: when `pytest-files` is empty the
     skip-guard is invoked with the log ALONE, so the log IS its observed set —
     a peer's clean log hides this leg's availability skip (fail-open) and a
@@ -6593,41 +6596,49 @@ def test_the_guard_decided_log_is_per_runner_on_every_pool_leg():
     per-runner path, in every leg that shares the host `/tmp`.
 
     It also pins the REASON, because a right answer stated with the wrong reason
-    is what the next lane copies: `test-slow` does NOT share that `/tmp` (it is
-    pinned to the hosted `ubuntu-24.04` label, whose `/tmp` is the job's own
-    VM), so claiming it as a co-tenant — as the workflow, `test_ci_selection.py`
-    and `test_ci_guard_invocation.py` all did — teaches a false fact about the
-    runner topology.
+    is what the next lane copies. The wrong reason was shipped once: `test-slow`
+    was excluded from this set on the argument that its version-pinned
+    `ubuntu-24.04` label guarantees a hosted VM with a private `/tmp`. #10289
+    measures the opposite — the self-hosted x86_64 pool advertises
+    `ubuntu-24.04` — and run 40861737614 shows it: four of `test-slow`'s five
+    shards ran CONCURRENTLY on `Machine name: 'cmux'` while the fifth ran on a
+    genuinely hosted runner. So `test-slow` is one of the legs this pin holds,
+    and no workflow line may claim its temp dir is private again.
+
+    The accepted spelling is a SET, not a literal: hardening the leg to a
+    `PYTEST_LOG` resolved once from `RUNNER_TEMP` (the shape #10264 gives it)
+    must not read as "this leg dropped out of the pin" — the same tolerance
+    `tests/test_pytest_attribution.py::capture_site` already carries, for the
+    same reason.
     """
     wf = _load_python_ci()
     jobs = wf["jobs"]
     #: the legs that WRITE the log this pin is about, and whether the leg also
-    #: runs a skip-guard over it. (`test-slow` writes `pytest.log` too, on the
-    #: hosted pin, so it is not listed — and its own log is correctly VM-private.
-    #: `test-concurrency-falkor` carries no guard of its own; it is the CLOBBERER,
-    #: so it is pinned as a writer only.)
+    #: runs a skip-guard over it. `test-concurrency-falkor` carries no guard of
+    #: its own; it is the CLOBBERER, so it is pinned as a writer only.
     legs = {
-        "test-concurrency-falkor": ("pytest.log", False),
-        "test-carve-out": ("pytest.log", True),
-        "test-track-b": ("trackb.log", True),
+        "test-concurrency-falkor": ("pytest.log", False, ("${RUNNER_TEMP:-/tmp}/pytest.log",)),
+        "test-carve-out": ("pytest.log", True, ("${RUNNER_TEMP:-/tmp}/pytest.log",)),
+        "test-track-b": ("trackb.log", True, ("${RUNNER_TEMP:-/tmp}/trackb.log",)),
+        "test-slow": ("pytest.log", True,
+                      ("${RUNNER_TEMP:-/tmp}/pytest.log", "$PYTEST_LOG")),
     }
     offenders: list[str] = []
-    for job_name, (log, has_guard) in legs.items():
-        want = "${RUNNER_TEMP:-/tmp}/" + log
+    for job_name, (log, has_guard, wants) in legs.items():
         bodies = [(s.get("name") or "?", s.get("run") or "")
                   for s in jobs[job_name]["steps"]]
-        if not any(want in body for _name, body in bodies):
-            offenders.append(f"{job_name}: no step writes `{want}`")
+        if not any(w in body for w in wants for _name, body in bodies):
+            offenders.append(f"{job_name}: no step writes one of {list(wants)}")
         for name, body in bodies:
             for line in body.splitlines():
                 # the host-global form, in any spelling: bare, quoted or as an
-                # upload `path:` (the `${RUNNER_TEMP:-/tmp}` form is the pin).
+                # upload `path:` (a per-runner spelling is the pin).
                 # COMMENT lines are skipped — naming the old path in prose is how
                 # the reason travels with the fix; what must not survive is an
                 # EXECUTABLE host-global path.
                 if line.lstrip().startswith("#"):
                     continue
-                if f"/tmp/{log}" in line and want not in line:
+                if f"/tmp/{log}" in line and not any(w in line for w in wants):
                     offenders.append(
                         f"{job_name}/{name}: host-global `/tmp/{log}` here: {line.strip()!r}")
         if not has_guard:
@@ -6639,41 +6650,65 @@ def test_the_guard_decided_log_is_per_runner_on_every_pool_leg():
                   and log in (s.get("run") or "")]
         if not guards:
             offenders.append(f"{job_name}: no skip-guard step over the log found to pin")
-        elif not any(want in s["run"] for s in guards):
+        elif not any(w in s["run"] for w in wants for s in guards):
             offenders.append(
                 f"{job_name}: the skip-guard step reads a different log than the run step "
-                f"writes (`{want}` absent) — a writer-only change leaves the guard on the "
-                "host-global path, which is the artifact it DECIDES on")
+                f"writes (one of {list(wants)} absent) — a writer-only change leaves the guard "
+                "on the host-global path, which is the artifact it DECIDES on")
     assert not offenders, (
         "#7815: these pool legs still share a host-global pytest log with their concurrent "
         f"peers: {offenders}. Use `${{RUNNER_TEMP:-/tmp}}/<name>` in the writer, in every "
         "reader (tail, pytest-attribution.sh, the grep counters, the skip-guard argument) and "
         "`${{ runner.temp }}/<name>` in the upload `path:`")
 
-    # ⛔ THE REASON. `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the
-    # self-hosted pool, and that is what makes the pool legs share `/tmp`. A leg
-    # pinned to a VERSIONED hosted label is not in that set.
+    # ⛔ THE REASON, now stated as measured rather than as inferred from a label.
+    # `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the pool, but
+    # that is not the only way a leg reaches it: the pool also advertises the
+    # VERSION-PINNED label (#10289), so no `runs-on:` value licenses a
+    # host-global path.
     runs_on = str(jobs["test-slow"]["runs-on"])
     assert "ubuntu-latest" not in runs_on, (
         "`test-slow` is now on `ubuntu-latest`, which `scripts/ci_runner_gate.sh` re-attaches "
-        "to the self-hosted pool — it DOES share a host `/tmp` after all, and every comment "
-        "that excludes it (and its VM-private `/tmp/pytest.log`) must be revised with it")
+        "to the self-hosted pool — that is the class that cannot finish this leg inside its "
+        "40m watchdog (#7867), so the version pin must stay")
     wf_text = (Path(__file__).resolve().parents[1]
                / ".github" / "workflows" / "python-ci.yml").read_text()
-    # A DENIAL must not red this. The point is the positive co-tenancy claim —
-    # "run CONCURRENTLY on one host and share ONE `/tmp`", the shape that shipped
-    # and was believed — so a line that names the leg AND the temp dir AND negates
-    # the claim is the correction, not the defect.
-    _NEGATIONS = ("not ", "NOT ", "n't", "never", "neither", "FALSE", "wrong")
+    # What must not survive is the POSITIVE claim that this leg's temp dir is
+    # private ("its own VM", "VM-private", "hosted … so no peer can clobber it").
+    # The claim is checked per COMMENT BLOCK, not per line: the shape that shipped
+    # straddled a line break (`… pinned to the HOSTED` / `` `ubuntu-24.04` label,
+    # so its `/tmp` is its own VM``), so a line-wise matcher read it as clean.
+    # Job-id spellings are removed first, or `test-d14-hosted-api` in a `needs:`
+    # list would read as a hostedness claim about THIS leg.
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in wf_text.splitlines():
+        if line.lstrip().startswith("#"):
+            current.append(line)
+        elif current:
+            blocks.append("\n".join(current))
+            current = []
+    if current:
+        blocks.append("\n".join(current))
+    #: The claim, in the three shapes it has actually been written in. Narrow on
+    #: purpose: a broad "hosted" match reds on the measured correction itself and
+    #: on the pre-existing rationale block above `runs-on:` (which discusses
+    #: hosted-vs-pool wall clock, a different subject).
+    _PRIVATE_TMP = re.compile(r"its own VM|own VM's|VM-?private|private `/tmp`")
     misattributed = [
-        line.strip() for line in wf_text.splitlines()
-        if "test-slow" in line and "/tmp" in line
-        and ("share" in line.lower() or "concurrently" in line.lower())
-        and not any(neg in line for neg in _NEGATIONS)
+        block.strip() for block in blocks
+        if "test-slow" in block and _PRIVATE_TMP.search(block)
     ]
     assert not misattributed, (
-        "these workflow comments name `test-slow` as a co-tenant of a shared host `/tmp`, "
-        f"which it is not (hosted `{runs_on}` pin): {misattributed}")
+        "these workflow comments still claim `test-slow`'s temp dir is private because of its "
+        "`runs-on:` label — the pool advertises that label too (#10289), measured on run "
+        f"40861737614 (four shards on one host): {misattributed}")
+    # ...and the REASON travels with the code: the correction must cite the
+    # measurement, or the next editor re-derives the wrong premise from the label.
+    assert "#10289" in wf_text, (
+        "the workflow no longer cites #10289 where it explains why `test-slow`'s artifacts "
+        "are per-runner — the label-as-topology premise is what this pin exists to stop")
+
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
 # The `concurrency:` group is per-PR with `cancel-in-progress: true`, so a
@@ -7191,10 +7226,18 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
 
     The budget cannot absorb that class: 2x the leg would be >=79m against a
     40m budget built at the `WATCHDOG_HEADROOM` floor, past both
-    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
-    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
-    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
-    same pin and the same reasoning as `workflow-lint` (#7867).
+    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg stays on the
+    VERSION-PINNED label (`ubuntu-<version>`), the same pin and the same
+    reasoning as `workflow-lint` (#7867).
+
+    ⛔ The pin is a LABEL preference, not a topology guarantee, and the
+    difference is load-bearing: the pool was recorded as never claiming
+    `ubuntu-<version>`, and that record is stale — #10289 measures the
+    self-hosted x86_64 runners advertising `ubuntu-24.04`, so this leg can be
+    pool-served after all. Nothing about the /tmp isolation may be inferred from
+    this label; that inference is exactly what #10289 had to correct, and
+    `test_the_guard_decided_log_is_per_runner_on_every_pool_leg` holds the
+    artifact side of it.
 
     A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
     rather than relying on a comment nobody re-reads."""
@@ -7204,12 +7247,14 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
         "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
         "budget and is killed at the watchdog (measured: 39.6 min of test time, "
-        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
+        "rc=137, job 42.1m). Pin a version-pinned label (`ubuntu-24.04`).")
     assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
-        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
-        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
-        f"self-hosted pool whenever the fallback is attached, and a label the "
-        f"pool claims puts this leg back on the class that cannot finish it.")
+        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED "
+        f"`ubuntu-<version>` label: `ubuntu-latest` is re-attached to the "
+        f"self-hosted pool by the fallback gate, and that class cannot finish "
+        f"this leg inside its watchdog (#7867). The label is a PREFERENCE, not a "
+        f"topology guarantee — #10289 measures the pool advertising "
+        f"`ubuntu-24.04` too — so do not infer a private `/tmp` from it.")
 
     if not SCRIPTS_LINK.is_dir():
         # The machine-local `scripts` pointer is ABSENT or does not resolve, which is

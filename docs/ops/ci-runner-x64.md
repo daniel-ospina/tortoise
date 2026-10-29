@@ -23,12 +23,28 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
 | `ubuntu-latest` | 75 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
-| `ubuntu-24.04` | 9 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`, and the four fleet observers `availability-liveness:check`, `availability-watchdog:probe`, `ci-check-repair:repair`, `ci-queue-health:queue-health`) |
+| `ubuntu-24.04` | 9 | **GitHub-hosted AND, since it was registered there, the self-hosted x86_64 pool** — `test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`, and the four fleet observers `availability-liveness:check`, `availability-watchdog:probe`, `ci-check-repair:repair`, `ci-queue-health:queue-health` |
 
 Counts are JOBS (not files), measured 2026-10-27 at `a97a6b1` + the four-observer pin. Only `runs-on:`
 lines that name a single `ubuntu-*` label are counted; the `ubuntu-latest` row was previously
 written as 83 against a measured 79, so treat both rows as a dated measurement and re-derive them
 (`yaml.safe_load` each workflow, count each job's `runs-on`) rather than trusting the numbers.
+
+⛔ **The `ubuntu-24.04` row is not "hosted only" and must not be read as one** (#10289). Measured
+2026-10-29 with `gh api repos/daniel-ospina/tortoise/actions/runners`:
+
+```
+self-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04   ×7   (cmux: pi-runner-cmux-x64-5..8,
+                                                            pi-runner-x64-1, pi-runner-x64-2)
+self-hosted,Linux,ARM64,self-hosted-arm64            ×5   (pi-runner-vm-2..6)
+```
+
+So `ubuntu-<version>` is a **custom label like `ubuntu-latest`**, and a `runs-on: ubuntu-24.04`
+job can be served by the local pool. Job logs confirm it end to end: on run `40861737614` four of
+`test-slow`'s five shards reported `Runner name: 'pi-runner-x64-*'` / `'pi-runner-cmux-x64-*'` with
+`Machine name: 'cmux'` while the fifth ran on a GitHub-hosted runner. Consequence for anything
+pinned to a versioned label: **no artifact path may be a host-global `/tmp` name on the strength
+of the pin** — see `#7815`/`#10028` and `test-slow`'s own per-runner `pytest.log`.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
