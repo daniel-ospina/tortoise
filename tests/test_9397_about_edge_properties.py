@@ -6192,10 +6192,16 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # is written in (*"This writer carries NO property on an about edge"*), so the
     # TRUE statement of the exemption red through `EXEMPT_COUNTED_MARKERS` (which
     # holds `re materializ` / `MAP form writer`). Measured at `3a20e63e9` by running
-    # this leg's own functions: the first two sentences below RED, and the third is
-    # the WIDTH control for the same speech act — a `no <noun>` that is not a
-    # property noun is green BEFORE and AFTER the widening, so the new branch is
-    # the property vocabulary and not "any trailing `no`".
+    # this leg's own functions: the first two sentences below RED there and stay
+    # green now.
+    # ⛔ The third is TRUE prose that must stay green — and it is NOT this leg's
+    # WIDTH control, which is what it used to be labelled (`#10200` review, cycle
+    # 14). It names the exemption but carries NO counted marker, and on an EXEMPT
+    # row both hit sources guard with `not _marker_itself_negated(...)`, so the
+    # frame is a SUPPRESSION only there — nothing reaches it on this sentence and
+    # the sentence is green at EVERY width of it, measured at `fac4728cb` with the
+    # frame as written AND with it widened to a bare `no \w+`. The width is
+    # asserted against the frame itself, below, where it is actually consulted.
     object_negated_true_prose = (
         (
             "probe",
@@ -6207,10 +6213,11 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
             "`projection._rebuild_all_replay` re-materializes nothing on the "
             "rebuild pass, so it carries no property on an about edge.",
         ),
-        # … and the WIDTH control, chosen because it is the sentence that must not
-        # move: `no recorded version read at all` is what §13 writes, its `no`-noun
-        # is outside `_PROPERTY_NOUN`, and it is GREEN at `3a20e63e9` as well as at
-        # this head — so a widening to a bare trailing `no` reds it here.
+        # … and §13's own `no recorded version read at all`: TRUE prose naming the
+        # exemption and negating something that is NOT a property, which the frame
+        # must stay out of. ⚠️ A TRUE-prose pin, NOT a width control — a widening
+        # of the frame cannot red it (see the probe's own note above), so the
+        # width is asserted on the frame itself in the leg below.
         (
             "probe",
             "`projection._rebuild_all_replay` carries no recorded version read at "
@@ -6227,6 +6234,112 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "read as an ASSERTED class, so TRUE prose reds — and it is the exemption's "
         "OWN stated wording, so an editor's only way out is to delete the record "
         "of why the row is exempt: " + repr(object_negated_reds)
+    )
+    # ⛔ THE WIDTH, asserted WHERE IT IS CONSULTED (`#10200` review, cycle 14).
+    # The entry above carried a WIDTH-control label it could not earn: on the
+    # EXEMPT branch the frame is a SUPPRESSION only (both hit sources guard with
+    # `not _marker_itself_negated(...)`), so for a sentence like this one a
+    # widening can never RED anything — and an EXEMPT-row sentence carrying no
+    # counted marker never reaches the frame at all.
+    # A control that cannot fire is the exact class this file exists to stop — a
+    # written assurance that something is measured when nothing is — so the width
+    # is pinned on `_PROPERTY_OBJECT_NEGATION_AFTER_RE` against a marker's OWN
+    # tail, in BOTH directions, and the negative half is proved able to fail by
+    # running that same tail through the bare-object widening a later lane would
+    # otherwise adopt unmeasured.
+    _width_inside = _flat(
+        "`projection._rebuild_all_replay` re-materializes no property on an "
+        "about edge."
+    )
+    _width_inside_low = _width_inside.lower()
+    _width_inside_marker = re.search(r"re materializ", _width_inside_low)
+    assert _width_inside_marker is not None, (
+        "the width control's own class marker is gone, so it measures nothing: "
+        + repr(_width_inside)
+    )
+    assert _object_negation_after(_width_inside_low, _width_inside_marker), (
+        "the object-negation frame no longer reads `no property` behind a class "
+        "marker, so the width control below is measuring a frame that reads "
+        "nothing at all and its negative half is vacuous"
+    )
+    _width_outside = _flat(
+        "`projection._rebuild_all_replay` re-materializes no recorded version "
+        "read at all."
+    )
+    _width_outside_low = _width_outside.lower()
+    _width_outside_marker = re.search(r"re materializ", _width_outside_low)
+    assert _width_outside_marker is not None, (
+        "the width control's own class marker is gone, so it measures nothing: "
+        + repr(_width_outside)
+    )
+    assert not _object_negation_after(_width_outside_low, _width_outside_marker), (
+        "the object-negation frame reads a `no <noun>` whose noun is OUTSIDE "
+        "`_PROPERTY_NOUN`, so its width is `any trailing no` and TRUE prose that "
+        "negates something other than a property is read as a denial — the "
+        "exemption's own wording is then the only way out, and it is the record "
+        "of why the row is exempt"
+    )
+    _bare_object_frame = re.compile(
+        rf"\A(?:\s*[\w'\u2019\-]+){{0,3}}\s+(?:nothing\b|no\s+\w+\b)", re.I
+    )
+    assert _bare_object_frame.match(_width_outside_low[_width_outside_marker.end():]), (
+        "the width control above CANNOT FAIL: the tail it refuses matches the "
+        "bare-object widening no better than the frame as written, so it pins "
+        "the width in neither direction and a later lane that widens "
+        "`_PROPERTY_OBJECT_NEGATION_AFTER_RE` is told a control will catch it "
+        "when nothing will"
+    )
+    # … and the LEDGER must state the count this leg MEASURES, because the two
+    # records in this head contradicted each other: round 12's changelog entry
+    # claimed `three` TRUE-prose sentences red at `3a20e63e9` while this probe's
+    # own comment, written one commit later, said the third is green there too.
+    # The changelog was the false one — `3a20e63e9` carries no `re-materializes
+    # nothing` probe at all (these sentences are `a6a241eb0`'s), and the third has
+    # no marker — so `two` is the measured count. The count is DERIVED here (an
+    # entry is a live control when it carries a marker the EXEMPT branch would
+    # itself count) so a new entry has to update the ledger rather than quietly
+    # falsify it (`#10200` review, cycle 14).
+    _live_object_negation_probes = [
+        sentence
+        for _label, sentence in object_negated_true_prose
+        if any(
+            marker.lower() in _flat(sentence).lower()
+            for marker in EXEMPT_COUNTED_MARKERS
+        )
+    ]
+    _count_words = ("one", "two", "three", "four", "five", "six")
+    assert 1 <= len(_live_object_negation_probes) <= len(_count_words), (
+        "the live object-negation probes outgrew this pin's vocabulary "
+        f"({len(_live_object_negation_probes)}) — extend `_count_words` rather "
+        "than dropping the ledger check"
+    )
+    _measured_count_word = _count_words[len(_live_object_negation_probes) - 1]
+    _ledger = _doc(STORAGE_CHANGELOG)
+    _engine_entry_start = _ledger.find("`#10149` review round 12 (cycle 13)")
+    assert _engine_entry_start >= 0, (
+        "the round-12 (cycle 13) entry of `STORAGE-ARCHITECTURE-CHANGELOG.md` is "
+        "gone — the count this leg pins moved with it, so it is UNMEASURED now"
+    )
+    _cycle14_start = _ledger.find(
+        "`#10149` review round 13 (cycle 14)", _engine_entry_start
+    )
+    _engine_entry = _flat(
+        _ledger[
+            _engine_entry_start
+            : _cycle14_start if _cycle14_start > 0 else len(_ledger)
+        ]
+    )
+    _ledger_counts = [
+        word
+        for word in _count_words
+        if f"{word} TRUE prose sentences" in _engine_entry
+    ]
+    assert _ledger_counts == [_measured_count_word], (
+        "the cycle-13 changelog entry's count of probe 25's non-vacuous sentences "
+        f"is FALSE: {len(_live_object_negation_probes)} of them carry a marker "
+        "the EXEMPT branch counts and can therefore red, and the ledger says "
+        f"{_ledger_counts!r} — a reader is told a control exists that does not. "
+        "Entry: " + repr(_engine_entry[:400])
     )
     # … and the mirror, which is what the same widening must not cost: an object
     # negation about a COUNTED writer DENIES its class, so it must red. At
