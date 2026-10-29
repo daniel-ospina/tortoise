@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (84 test functions / 86 collected, incl. the harness
+- Pins: `tests/test_ci_import_closure.py` (86 test functions / 88 collected, incl. the harness
   mutation check — re-derive with `grep -c '^def test_' tests/test_ci_import_closure.py` and
   `pytest --collect-only -q`; a count written here without that command is a snapshot, not a fact)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
@@ -240,10 +240,11 @@ intersects nothing, so the failure is scored `no-closure-intersection` — i.e. 
 derivation is SAFE. A failure whose file neither key can attribute blocks the cache and makes the
 window PARTIAL.
 
-The ground-truth caches are keyed by **repo and sha** (and by repo and PR for the diff): `--repo` is
-a first-class flag, PR numbers collide across repos, and a fork shares the commit sha — so a sha-only
-key let one repo's truth be paired with another's diff, a state that can only HIDE a miss and
-records no error.
+The ground-truth caches are keyed by **repo and head sha** — the ground truth by
+`truth-v<N>-<repo>-<sha>.json`, the diff list by `files-<repo>-<sha>.json`, the merged PR's metadata
+by `meta-<repo>-<pr>.json` (merged only: see §5): `--repo` is a first-class flag, PR numbers collide
+across repos, and a fork shares the commit sha — so a sha-only key let one repo's truth be paired
+with another's diff, a state that can only HIDE a miss and records no error.
 
 ### 3.4 Every way "I did not read this" could have read as "nothing failed"
 
@@ -310,9 +311,13 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_ci_import_closure.py -q
 ```
 
 `validate` needs `gh` (auth) the first time; it caches every junit artifact, its per-PR ground
-truth, and the PR's diff list under `.ci-selection/closure-cache/` (gitignored), so re-runs are
-offline and instant. The ground truth is keyed by the head **sha** and the diff list by the same
-sha — never by the PR number, which names a stream of different trees (§3.4). It
+truth, the PR's diff list and a **merged** PR's metadata under `.ci-selection/closure-cache/`
+(gitignored), so a re-run of an explicit `--prs` window is offline. Two reads are deliberately left
+uncached because they describe something LIVE: the window listing itself (`--window` has to see
+merges that happened since, so it is re-paged), and an **open** PR's head — which moves on every
+push, so a lane validating its own PR always re-reads it (§3.4). The ground truth is keyed by the
+head **sha** and the diff list by the same sha — never by the PR number, which names a stream of
+different trees (§3.4). It
 exits **2** when the window is partial — an artifact it could not read, an unparseable or missing
 `junit.xml`, a red leg whose artifact listing was **empty** (artifacts expire after 90 days by
 default, and deleting a run deletes its artifacts, so "nothing uploaded" is an ordinary state, not
@@ -347,7 +352,8 @@ here is a ratio over that count.
 
    Doing (a) or (b) makes this measurement worth re-running; nothing in `ci-surfaces.yml` needs to
    move first. The measurement is cheap to repeat (`tools/ci_import_closure.py`, ~30 s) and the
-   harness is cached and offline on a re-run.
+   harness caches every artifact, ground truth, diff list and merged PR's metadata, so a `--prs`
+   re-run is offline.
 
 **What would flip this verdict** (stated so it can be falsified rather than believed): median
 closure ≤ ~20 % of `tortoise/**`, no single module in more than half the closures, **and** zero

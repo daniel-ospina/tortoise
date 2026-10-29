@@ -542,10 +542,10 @@ def test_artifact_names_cover_the_three_legs_whose_upload_is_not_the_job_name():
     the step's `with: name:` evaluates to, which `upload-artifact` documents as an
     arbitrary user label.
     """
-    # python-ci.yml:3584 has no `name:`; :3707 uploads the LITERAL — no `test-`.
+    # python-ci.yml:3733 has no `name:`; :3856 uploads the LITERAL — no `test-`.
     assert "pytest-log-record-postgres" in artifact_names_for_job(
         "test-record-postgres")
-    # same shape: job :3018 (no `name:`), literal upload at :3178.
+    # same shape: job :3167 (no `name:`), literal upload at :3327.
     assert "pytest-log-d14-hosted-api" in artifact_names_for_job(
         "test-d14-hosted-api")
     # bare matrix name = shard 0: `name:` suffix '' but artifact label 'a'.
@@ -555,7 +555,7 @@ def test_artifact_names_cover_the_three_legs_whose_upload_is_not_the_job_name():
 def test_the_bare_carve_out_artifact_label_matches_the_selector():
     """The `-a` above is NOT a guess about shard 0 — it is read off the selector.
 
-    `python-ci.yml:3011` names the upload with `matrix.label`, while the job's
+    `python-ci.yml:3160` names the upload with `matrix.label`, while the job's
     display name uses `matrix.suffix`; `carve_shard_entries` sets `suffix=''` and
     `label='a'` for shard 0. Pin the two together, so a future re-labelling of
     shard 0 breaks HERE (one line) instead of silently mis-naming three legs.
@@ -2276,3 +2276,86 @@ def test_the_truth_cache_shape_is_pinned_to_its_version(monkeypatch, tmp_path):
     assert set(written) == shape_by_version[module.GROUND_TRUTH_VERSION], (
         "the ground truth's SHAPE changed — bump GROUND_TRUTH_VERSION and record "
         "the new key set, or every warm cache answers with the old rules forever")
+
+
+# ---------------------------------------------------------------------------
+# #10143 review at head `de2ce5fc9`, D3: the doc promised "re-runs are offline
+# and instant" at four sites, and the row loop broke the promise with one
+# UNCACHED `gh api` call per PR — made BEFORE either cache was consulted. On a
+# warm window that is still N network calls plus auth; with `gh` unavailable the
+# first PR raises and the whole window dies with a traceback, after the caller
+# was told the run was cached. The fix caches a MERGED PR's metadata (its head
+# sha is immutable) and deliberately never caches an OPEN PR's (its head moves).
+# ---------------------------------------------------------------------------
+def test_validate_does_not_re_read_a_merged_prs_head(monkeypatch, tmp_path):
+    """The offline promise, pinned at the CONSUMER — `cmd_validate` twice.
+
+    Fails on the pre-fix code with the first assertion: `_gh_json` was called
+    once per PR per run, so the second `cmd_validate` re-fetched the head (2
+    calls). A helper-only pin would have missed that, which is the lesson this
+    PR has had to learn three times — a correct cache protects nothing if the
+    call site does not use it.
+    """
+    import argparse
+
+    from tools import ci_import_closure as ci
+
+    idx, scans, closures = _cli_world()
+    data = {"scans": scans, "closures": closures, "core": ["tests/test_t.py"]}
+    calls: list[list[str]] = []
+
+    def _gh(argv):
+        calls.append(argv)
+        return {"number": 7, "merged_at": "2026-10-28T11:00:00Z", "state": "closed",
+                "head": {"sha": "deadbeef"}, "updated_at": "2026-10-28T11:00:00Z"}
+
+    monkeypatch.setattr(ci, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
+    monkeypatch.setattr(ci, "_selection_module",
+                        lambda: _stub_selection_module([]))
+    monkeypatch.setattr(ci, "_gh_json", _gh)
+    monkeypatch.setattr(ci, "changed_files",
+                        lambda repo, pr, cache, head_sha=None: [])
+    monkeypatch.setattr(ci, "pr_ground_truth", lambda repo, sha, cache: _truth())
+    args = argparse.Namespace(
+        json="", exclude_type_checking=False, repo="o/r",
+        window=None, prs=[7], import_time_only=False,
+    )
+
+    ci.cmd_validate(args)
+    assert len(calls) == 1, (
+        "the first run reads the PR's head exactly once; a second call here "
+        "means the cache dir is not the one being written")
+
+    def _boom(argv):
+        raise AssertionError(f"network call on a warm re-run: {argv}")
+
+    monkeypatch.setattr(ci, "_gh_json", _boom)
+    ci.cmd_validate(args)   # must not reach the network at all — that is the claim
+
+
+def test_an_open_prs_head_is_never_cached(monkeypatch, tmp_path):
+    """The cache must never freeze a head that MOVES.
+
+    Guarding the D3 fix itself: caching by PR number alone would be the
+    diff-cache defect one level in — a PR number names a stream of trees (§3.3),
+    so a lane validating its own open PR would score the head it pushed two
+    commits ago and read the result as this one. Only a MERGED PR (immutable
+    head) is written. This pin passes both before and after the fix by design:
+    it exists so a later "optimisation" that caches every PR is caught here.
+    """
+    from tools import ci_import_closure as ci
+
+    heads = ["aaaa", "bbbb"]
+
+    def _gh(argv):
+        return {"number": 7, "merged_at": None, "state": "open",
+                "head": {"sha": heads.pop(0)}}
+
+    monkeypatch.setattr(ci, "_gh_json", _gh)
+    assert ci.pr_meta("o/r", 7, tmp_path)["head"]["sha"] == "aaaa"
+    assert ci.pr_meta("o/r", 7, tmp_path)["head"]["sha"] == "bbbb", (
+        "an OPEN PR's head was served from the cache — the head moved, so the "
+        "second call must re-read it")
+    assert list(tmp_path.iterdir()) == [], (
+        "an open PR's metadata was written under a key that cannot describe it")

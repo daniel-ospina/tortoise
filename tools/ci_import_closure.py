@@ -76,8 +76,12 @@ WHY junit AND NOT "the job was red"
     testcase is a missed test.
 
     ⛔ NO NETWORK IN `closure`. Only `validate` calls `gh`, and it caches every
-    artifact under `.ci-selection/closure-cache/` (gitignored) so a re-run is
-    offline.
+    artifact, every per-PR ground truth, every diff list and every MERGED PR's
+    metadata under `.ci-selection/closure-cache/` (gitignored), so a re-run of an
+    explicit `--prs` window is offline. Two reads are deliberately NOT cached
+    because they describe a LIVE thing: the window listing itself
+    (`merged_pr_numbers` — a re-paged window must see merges that happened since)
+    and an OPEN PR's head, which moves on every push (#10143 review P3).
 
 Usage:
     uv run python tools/ci_import_closure.py                    # summary table
@@ -1460,8 +1464,10 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
     Returns `{"failed_files": [...], "failed_tests": [...], "jobs": [...],
     "job_failed_without_test_failure": [...], "artifacts": N,
     "runs_seen": N, "test_legs_seen": N, "artifact_errors": [...]}`. Cached per
-    head sha, so a second run of a window is offline and instant — the
-    measurement has to be reproducible.
+    head sha, so a second run of a merged window is offline and instant — the
+    measurement has to be reproducible. (The two reads that are deliberately not
+    cached — the window listing and an OPEN PR's head — are named in `pr_meta`;
+    #10143 review P3.)
 
     `runs_seen` / `test_legs_seen` exist because "I read nothing" and "nothing
     failed" are otherwise byte-identical (#10143 review P2): a head sha whose
@@ -1672,6 +1678,47 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         # re-reading it.
         cached.write_text(json.dumps(result, indent=1))
     return result
+
+
+def pr_meta(repo: str, pr: int, cache: Path | None = None) -> dict:
+    """One PR's metadata, cached ONLY once the PR is MERGED.
+
+    ⛔ THE PROSE SAYS RE-RUNS ARE OFFLINE, AND THE ROW LOOP BROKE IT (#10143
+    review P3). `cmd_validate` fetched `repos/<repo>/pulls/<pr>` for EVERY PR in
+    the window before either cache was consulted — one uncached `gh api` call per
+    PR, and `gh api` has no local cache — so a warm window still needed network
+    and auth, and with `gh` unavailable `_run_gh` raised on the FIRST PR, killing
+    the whole window with a traceback after the caller was told the run was
+    cached.
+
+    ⛔ CACHING IT BY PR NUMBER ALONE WOULD BE THE WORSE BUG, and it is the same
+    one `changed_files` was just fixed for: a PR number names a STREAM of
+    different trees (§3.3). So the key names the PR only while the answer cannot
+    change — a MERGED PR's head sha is immutable, which is exactly the documented
+    `validate --window 40` path and the `--prs <list>` reproduce path §3
+    publishes. An OPEN PR is never written to the cache: its head moves on every
+    push, and a lane validating its own PR must re-read the head it is validating
+    (pinned by `test_an_open_prs_head_is_never_cached`).
+    """
+    cached = cache / f"meta-{_slug(repo)}-{pr}.json" if cache is not None else None
+    if cached is not None and cached.exists():
+        try:
+            payload = json.loads(cached.read_text())
+        except (OSError, ValueError):
+            payload = None
+        # A cached object with no `merged_at` cannot be trusted to describe a
+        # settled head, so it is re-read rather than served (fail OPEN on the
+        # FETCH, never on the ANSWER: an open PR is simply re-fetched).
+        if isinstance(payload, dict) and payload.get("merged_at"):
+            return payload
+    meta = _gh_json(["api", f"repos/{repo}/pulls/{pr}"])
+    if not isinstance(meta, dict):
+        raise RuntimeError(
+            f"gh api repos/{repo}/pulls/{pr} answered "
+            f"{type(meta).__name__}, not an object — the head sha cannot be read")
+    if cached is not None and meta.get("merged_at"):
+        cached.write_text(json.dumps(meta, indent=1))
+    return meta
 
 
 def changed_files(repo: str, pr: int, cache: Path | None = None,
@@ -2011,7 +2058,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     total_naive = 0
     total_safe = 0
     for pr in prs:
-        meta = _gh_json(["api", f"repos/{args.repo}/pulls/{pr}"])
+        meta = pr_meta(args.repo, pr, CACHE_DIR)
         sha = meta["head"]["sha"]
         # ⛔ THE DIFF IS FETCHED FOR THE HEAD ITS TRUTH IS KEYED ON. Cached by PR
         # alone, an earlier run's list (head A) was scored against this head's
