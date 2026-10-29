@@ -57,7 +57,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8961-8967`` and
 ``result["vet"]`` at ``:8971-8975``); they are dropped at the meta fold,
-``tortoise/sdk.py:13593`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:13611`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -129,6 +129,46 @@ E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
 CORPUS_DIR = "tests/eval/write_path"
 
+#: The meta fold's cite, in the exact shape the causes below print it, READ out of
+#: `sdk.py` on every run instead of typed.
+#:
+#: A line cite is the one number in this bundle no reader can keep true by hand:
+#: any commit that inserts a line above the fold moves it, and this branch alone
+#: has now moved it twice (its own docstring insert in `sdk.py`, and `main`'s
+#: `#9964`). Typed here, the cause re-stales SILENTLY — the shipped cause named
+#: `:13593` for a fold that had moved to `:13611`, and
+#: `tests/test_7949_capstone_measure.py::test_the_unobserved_cause_counts_the_keys_it_
+#: actually_inspected` compares it against a line it READS from the tree, so the
+#: pair reds CI on a merge that touched nothing either side owns. Measured on this
+#: branch: `#7949` red at `7cc798216` for exactly this. The symbol is authoritative
+#: and the line is a convenience (the bundle's own cite convention), so deriving it
+#: is the same answer Sphinx gives (`py:obj` resolves to a symbol, not a line).
+#:
+#: ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot be
+#: resolved to exactly ONE line is not a number this run may print (the `arm:`
+#: read-back rule, applied to a cite).
+META_FOLD_CODE = '"stats": out.get("stats")'
+
+
+def _meta_fold_cite() -> str:
+    """`tortoise/sdk.py:<n>` for the line carrying `META_FOLD_CODE` — read, not typed."""
+    source = ROOT / "tortoise/sdk.py"
+    if not source.exists():
+        raise RuntimeError(
+            f"cannot resolve the meta fold's cite: {source} is not in this checkout, "
+            "and a cause that names no real line is worse than no cite (#9116)")
+    hits = [n for n, line in enumerate(
+        source.read_text().splitlines(), 1) if META_FOLD_CODE in line]
+    if len(hits) != 1:
+        raise RuntimeError(
+            f"the meta fold's cite is ambiguous: {META_FOLD_CODE!r} is on {len(hits)} "
+            f"lines of sdk.py {hits} — the cause names ONE line, so this run refuses "
+            "rather than pick (#9116)")
+    return f"tortoise/sdk.py:{hits[0]}"
+
+
+META_FOLD_CITE = _meta_fold_cite()
+
 SCHEMA = "capstone-verdict-v1"
 BEGIN = "=== CAPSTONE-VERDICT-BEGIN ==="
 END = "=== CAPSTONE-VERDICT-END ==="
@@ -148,7 +188,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13874`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13892`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +203,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13874 "
+    "the capture path at tortoise/sdk.py:13892 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -1291,14 +1331,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8971-8975. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13593 (\"stats\": out.get(\"stats\") "
+            f"the meta fold {META_FOLD_CITE} (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13593 is the line its fix "
+            f"#9116 is the seam, and {META_FOLD_CITE} is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1326,12 +1366,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8961-8967. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13593 "
+            f"is DROPPED at the same meta fold, {META_FOLD_CITE} "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13593 is the line its fix must target")
+            f"{META_FOLD_CITE} is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
